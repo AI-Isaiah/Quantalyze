@@ -1,6 +1,7 @@
 "use client";
 
 import { displayStrategyName } from "@/lib/strategy-display";
+import { isDiscoveryVisible } from "@/lib/visibility";
 import type { CandidateRow } from "@/components/admin/AllocatorMatchQueue";
 
 export function ShortlistCard({
@@ -41,7 +42,12 @@ export function ShortlistCard({
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <p className="text-small font-semibold text-text-primary truncate">
-            {displayStrategyName(candidate.strategies)}
+            {/* D-17: the admin gate (`isAdminUser`) admits this row; discovery
+                visibility (`isDiscoveryVisible`, null viewer id) decides whether
+                its name is printed. */}
+            {displayStrategyName(candidate.strategies, {
+              visible: isDiscoveryVisible(candidate.strategies ?? {}, null),
+            })}
           </p>
           {candidate.reasons[0] && (
             <p className="mt-1 text-caption text-text-secondary line-clamp-2">

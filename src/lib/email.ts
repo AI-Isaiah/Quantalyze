@@ -685,7 +685,7 @@ export async function notifyUserSignupApproved(
         return {
           path: "/allocations",
           cta: "Open your allocation workspace",
-          intent: "browse exchange-verified strategies and build a portfolio",
+          intent: "browse exchange-verified strategies and build an allocation",
         };
       case "manager":
         return {
@@ -817,9 +817,10 @@ export async function notifyFounderIntroRequest(
 
 /**
  * Sent to the allocator after they click "Request intro" on a strategy detail
- * page. Includes the manager identity block when the strategy is in the
- * institutional disclosure tier. Exploratory-tier strategies get a redacted
- * version that only confirms the codename — the manager's identity is disclosed
+ * page. Prints the `strategy.name` it is given (the intro route passes the raw
+ * name, D-09). Includes the manager identity block when the strategy is in the
+ * institutional disclosure tier. Exploratory-tier strategies get a one-line note
+ * in its place — only the manager's identity is withheld, and it is disclosed
  * only if / when the manager accepts the introduction.
  */
 export async function notifyAllocatorOfIntroRequest(
@@ -990,7 +991,7 @@ export async function sendAlertDigest(
     subject,
     `
     <div style="font-family:'DM Sans',sans-serif;max-width:600px;margin:0 auto;">
-      <h2 style="color:#1A1A2E;font-size:20px;margin-bottom:8px;">Portfolio Alerts</h2>
+      <h2 style="color:#1A1A2E;font-size:20px;margin-bottom:8px;">Allocation alerts</h2>
       <p style="color:#4A5568;margin-bottom:16px;">
         The following alerts triggered for <strong>${safePortfolio}</strong>:
       </p>

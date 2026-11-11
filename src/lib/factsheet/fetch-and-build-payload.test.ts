@@ -1667,3 +1667,52 @@ describe("194 plan 04 - stored figures and the figure record through fetchAndBui
     expect(gateAnnualized(payload!.figureRecord!)).toBe("withheld");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 201 D-09 / D-17 - the payload's strategy name comes from the resolver,
+// and the builder stays lane-agnostic (no lane or viewer parameter).
+// ---------------------------------------------------------------------------
+
+describe("Phase 201 D-09, D-17 - payload.strategyName through the resolver", () => {
+  const named = (name: string | null, codename: string | null, status = "published") => ({
+    ...single({ daily_returns: points(30) }),
+    name,
+    codename,
+    status,
+  });
+  // `withTokenBearer` in src/app/factsheet-share/[token]/page.tsx is identity: it adds no
+  // filter, so the token lane can build an unpublished strategy for its holder.
+  const tokenBearer = <Q,>(q: Q): Q => q;
+
+  it("TOKEN LANE, pinned to HEAD: an unpublished strategy shared by token still reads under its name", async () => {
+    // D-17: nothing changes for a strategy that is not visible in discovery. At HEAD the token
+    // lane printed `name ?? codename`, so the name keeps leading; a resolver that treated this
+    // row as not visible would print the codename "SD-1" and fail here.
+    seed(named("Shared Draft", "SD-1", "draft"));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, tokenBearer);
+    expect(payload?.strategyName).toBe("Shared Draft");
+  });
+
+  it("a name wins over the codename", async () => {
+    seed(named("Fibonacci Ghost", "Ghost-7"));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.strategyName).toBe("Fibonacci Ghost");
+  });
+
+  it("a whitespace-only name falls through to the codename (a blank name names nothing)", async () => {
+    seed(named("   ", "Ghost-7"));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.strategyName).toBe("Ghost-7");
+  });
+
+  it("neither a name nor a codename gives Strategy # plus the first 8 characters of the id", async () => {
+    seed(named(null, null));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.strategyName).toBe(`Strategy #${STRATEGY_ID.slice(0, 8)}`);
+  });
+
+  it("the builder takes no lane or viewer parameter (SL-1: every lane produces the same bytes)", () => {
+    expect(fetchAndBuildPayload.length).toBeLessThanOrEqual(2);
+    expect(fetchAndBuildPayloadWithReason.length).toBeLessThanOrEqual(2);
+  });
+});

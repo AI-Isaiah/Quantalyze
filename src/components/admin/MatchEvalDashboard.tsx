@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { ScopedBanner } from "@/components/ui/ScopedBanner";
 import { venueOutageMessage } from "@/components/admin/match/venueOutageCopy";
 import { matchMissReasonLabel } from "@/lib/display-labels";
+import { formatDay } from "@/lib/utils";
 
 interface WeeklyRow {
   week_start: string;
@@ -239,8 +240,8 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
             <tbody>
               {metrics.weekly.map((w) => (
                 <tr key={w.week_start} className="border-b border-border">
-                  <td className="py-2 text-small font-mono text-text-primary">
-                    {w.week_start}
+                  <td className="py-2 text-small font-mono text-text-primary whitespace-nowrap">
+                    {formatDay(w.week_start)}
                   </td>
                   <td className="py-2 text-small text-right font-mono tabular-nums text-text-primary">
                     {w.intros}
@@ -266,7 +267,7 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
           </h2>
           <p className="text-caption text-text-muted mb-3">
             These are intros you shipped where the strategy wasn&apos;t in the
-            top-3 of the most recent batch. Use this list to tune preferences or
+            top-3 of the most recent batch. Use this list to tune the mandate or
             retrain the engine over time.
           </p>
           <table className="w-full">
@@ -295,8 +296,8 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
                   key={`${m.allocator_id}-${m.strategy_id}-${m.created_at}`}
                   className="border-b border-border"
                 >
-                  <td className="py-2 text-caption font-mono text-text-muted">
-                    {new Date(m.created_at).toLocaleDateString()}
+                  <td className="py-2 text-caption font-mono text-text-muted whitespace-nowrap">
+                    {formatDay(m.created_at)}
                   </td>
                   <td className="py-2 text-caption text-text-secondary">
                     {m.allocator_name}

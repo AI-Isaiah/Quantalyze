@@ -196,7 +196,7 @@ describe("hiding dust never moves a figure", () => {
     const before = screen.getByTestId("positions-book-equity").textContent;
     fireEvent.click(screen.getByRole("button", { name: /Show \d small positions?/ }));
     expect(screen.getByTestId("positions-book-equity").textContent).toBe(before);
-    expect(before).toBe("Book equity $40,542");
+    expect(before).toBe("Allocation equity $40,542");
   });
 });
 

@@ -128,6 +128,7 @@ vi.mock("./components/AddAllocationFlow", () => ({
 import { AllocationsTabs } from "./AllocationsTabs";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { EMPTY_EXPOSURE, type ExposureSectionData } from "./lib/exposure-props";
+import { termDefinition } from "@/lib/glossary";
 
 // --- Stub props -------------------------------------------------------------
 
@@ -291,17 +292,36 @@ describe("AllocationsTabs — Phase 170 item (a) narrow header strip", () => {
 
   // WHY: JOURNEY-03 / axe aria-required-children. Re-nesting the tabs under
   // a scroll wrapper is a critical violation; the scroller IS the tablist.
-  it("[JOURNEY-03] the tablist's direct children are the role=tab buttons", () => {
+  // Phase 201 plan 34 (F-04, F-08, U-27): the Scenario tab is wrapped by the Form B
+  // Tooltip, so that one tab sits two role-less spans below the tablist. axe 4.14
+  // `getOwnedRoles` looks through an owned element with no role, no global aria-*
+  // attribute and no focusability, so the contract is: the strip is the only tablist,
+  // every tab is reached through spans that carry none of those, and the tabs without
+  // a term stay direct children.
+  it("[JOURNEY-03] every role=tab button is owned by the tablist through role-less, attribute-less wrappers", () => {
     setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
     const tablist = screen.getByRole("tablist", { name: "Allocation surfaces" });
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.length).toBeGreaterThan(0);
+    expect(tabs.length).toBe(3);
     for (const tab of tabs) {
-      expect(tab.parentElement).toBe(tablist);
+      let node = tab.parentElement;
+      while (node && node !== tablist) {
+        expect(node.tagName, `${tab.textContent} wrapper`).toBe("SPAN");
+        expect(node.getAttribute("role")).toBeNull();
+        expect(node.hasAttribute("tabindex")).toBe(false);
+        expect(node.getAttributeNames().filter((n) => n.startsWith("aria-"))).toEqual([]);
+        node = node.parentElement;
+      }
+      expect(node, `${tab.textContent} is not inside the tablist`).toBe(tablist);
     }
-    for (const child of Array.from(tablist.children)) {
-      expect(child.getAttribute("role")).toBe("tab");
+    // Only the Scenario tab carries a term, so only it has wrappers.
+    expect(screen.getByRole("tab", { name: "Overview" }).parentElement).toBe(tablist);
+    expect(screen.getByRole("tab", { name: "Holdings" }).parentElement).toBe(tablist);
+    // Nothing in the tablist but tabs and their wrappers: no stray role on a child.
+    for (const el of Array.from(tablist.querySelectorAll("[role]"))) {
+      expect(el.getAttribute("role")).toBe("tab");
     }
   });
 
@@ -1667,5 +1687,73 @@ describe("AllocationsTabs — Phase 198 D-02 three tabs and legacy tab aliases",
         expect(breadcrumbs(warnSpy)).toHaveLength(0);
       });
     }
+  });
+});
+
+// Phase 201 plan 34 (F-04, F-08, U-27): the Scenario tab is a control, so the `scenario` term is
+// explained by Form B: a Tooltip around the existing tab, with the registry text. The arms fail when
+// the Tooltip goes (no bubble), when the bubble's id is not on the tab itself, when the visible label
+// changes, when a focusable or Form A child appears inside the tab, when another tab picks up a
+// bubble, and when ArrowRight / ArrowLeft stop reaching a tab through the wrapper.
+describe("AllocationsTabs: the Scenario tab explains scenario (Form B)", () => {
+  beforeEach(() => {
+    resetRouterMocks();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  it("focusing the Scenario tab shows the registry definition after 150 ms and the tab describes itself by it", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const tab = screen.getByRole("tab", { name: "Scenario" });
+    fireEvent.focus(tab);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    const bubble = screen.getByRole("tooltip");
+    expect(bubble.textContent).toBe(termDefinition("scenario"));
+    expect(tab).toHaveAttribute("aria-describedby", bubble.id);
+  });
+
+  it("the tab stays one control: text is exactly Scenario, no focusable descendant, no Form A span", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const tab = screen.getByRole("tab", { name: "Scenario" });
+    expect(tab.textContent).toBe("Scenario");
+    expect(tab.querySelector("[tabindex], a, button, [data-term]")).toBeNull();
+    expect(tab.closest("[data-term]")).toBeNull();
+  });
+
+  it("no other tab carries a definition", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    for (const name of ["Overview", "Holdings"]) {
+      fireEvent.focus(screen.getByRole("tab", { name }));
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    }
+  });
+
+  it("ArrowRight and ArrowLeft still move focus across all three tabs, through the wrapper", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const overview = screen.getByRole("tab", { name: "Overview" });
+    const holdings = screen.getByRole("tab", { name: "Holdings" });
+    const scenario = screen.getByRole("tab", { name: "Scenario" });
+    overview.focus();
+    fireEvent.keyDown(overview, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(holdings);
+    fireEvent.keyDown(holdings, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(scenario);
+    fireEvent.keyDown(scenario, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(holdings);
+    fireEvent.keyDown(holdings, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(overview);
   });
 });

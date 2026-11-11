@@ -18,6 +18,10 @@ import { NextRequest } from "next/server";
  *         Cache-Control, supabase.strategies query NEVER fires
  *   T11 — audit-2026-05-07 round-2 P1947: every response shape carries
  *         `Cache-Control: private, no-store` (200 / 429 / 403)
+ *   T12 — Phase 201 / D-09, D-17: the label is the REAL name for a row the
+ *         caller can see in discovery (published, or their own), and the
+ *         codename / `Strategy #<id>` for anything else. Replaces the audit
+ *         C-0112 tier rule (founder decision 2026-11-10, "Real name everywhere").
  *
  * The supabase mock now also drives `from('profiles')` so withAllocatorAuth's
  * role lookup can be exercised end-to-end without mocking the helper itself.
@@ -214,14 +218,15 @@ describe("GET /api/strategies/browse", () => {
     expect(body.error).toBe("Unauthorized");
   });
 
-  it("T2 — 200 + body has strategies array with required fields (institutional tier preserves real name)", async () => {
-    // Audit C-0112 — institutional rows are the only tier permitted to
-    // surface the real `strategies.name`. Pin that path here.
+  it("T2 — 200 + body has strategies array with required fields (a published row carries its real name AND its codename)", async () => {
+    // Phase 201 / D-17 — a row visible in discovery is labelled by its real
+    // name; the codename stays on the wire for search.
     STATE.strategyRows = [
       {
         id: "11111111-1111-4111-8111-111111111111",
         name: "Alpha Quant",
         codename: "AQ",
+        status: "published",
         disclosure_tier: "institutional",
         markets: ["crypto"],
         strategy_types: ["mean-reversion"],
@@ -235,7 +240,7 @@ describe("GET /api/strategies/browse", () => {
     expect(body.strategies).toHaveLength(1);
     expect(body.strategies[0]).toMatchObject({
       id: "11111111-1111-4111-8111-111111111111",
-      name: "AQ",
+      name: "Alpha Quant",
       codename: "AQ",
       markets: ["crypto"],
       strategy_types: ["mean-reversion"],
@@ -276,6 +281,7 @@ describe("GET /api/strategies/browse", () => {
         id: "11111111-1111-4111-8111-111111111111",
         name: "My Draft",
         codename: null,
+        status: "published",
         disclosure_tier: "institutional",
         markets: ["crypto"],
         strategy_types: ["systematic"],
@@ -284,6 +290,7 @@ describe("GET /api/strategies/browse", () => {
         id: "22222222-2222-4222-8222-222222222222",
         name: "Someone Published",
         codename: null,
+        status: "published",
         disclosure_tier: "institutional",
         markets: ["equity"],
         strategy_types: ["long-short"],
@@ -324,16 +331,16 @@ describe("GET /api/strategies/browse", () => {
   });
 
   it("T4 — orders by name ascending (alphabetical) — UI doesn't re-sort", async () => {
-    // Audit C-0112 — institutional + no-codename rows are the only path
-    // that round-trips the real strategies.name to the response. Pin the
-    // alphabetical-order contract on that path so the assertion is
-    // meaningful (exploratory-tier rows would collapse to synthetic
-    // `Strategy #<id>` labels and stop testing the order contract).
+    // Published rows carry their real name (D-17), so the labels returned are
+    // the alphabetical names themselves and the order assertion is meaningful.
+    // A row that is not visible would collapse to a `Strategy #<id>` label and
+    // stop testing the order contract.
     STATE.strategyRows = [
       {
         id: "11111111-1111-4111-8111-111111111111",
         name: "Alpha",
         codename: null,
+        status: "published",
         disclosure_tier: "institutional",
         markets: [],
         strategy_types: [],
@@ -342,6 +349,7 @@ describe("GET /api/strategies/browse", () => {
         id: "22222222-2222-4222-8222-222222222222",
         name: "Bravo",
         codename: null,
+        status: "published",
         disclosure_tier: "institutional",
         markets: [],
         strategy_types: [],
@@ -542,22 +550,21 @@ describe("GET /api/strategies/browse", () => {
   });
 
   // ============================================================
-  // T12 — audit-2026-05-07 C-0112: codename+name pair leak
+  // T12 — Phase 201 / D-09, D-17: the label follows the VIEWER'S visibility.
   //
-  // Before this fix the route projected the raw strategies.name column
-  // for EVERY row, regardless of disclosure_tier. Because the drawer
-  // searches case-insensitively over both `name` and `codename`, a
-  // caller who knows a real strategy name (e.g. from a SEC filing, a
-  // Twitter mention, the manager's own bio) could query the drawer and
-  // see which codename it maps to — defeating pseudonymity for the
-  // entire verified catalog. The fix replaces the response `name` with
-  // `displayStrategyName(...)`, which surfaces the real name ONLY when
-  // `disclosure_tier === 'institutional'`.
+  // Audit C-0112 used to project `displayStrategyName(...)` by disclosure tier so
+  // a drawer search for a known real name could not map back to a codename. The
+  // founder decided on 2026-11-10 ("Real name everywhere") that a strategy the
+  // viewer can see in discovery is named; the name is already public on anonymous
+  // `/browse`. What stays: a strategy the viewer cannot see is NEVER named
+  // (197 D-02), and `codename` stays on the wire for search (D-17, no API change).
   // ============================================================
-  it("T12a — exploratory tier + codename present → response name === codename (real name suppressed)", async () => {
+  it("T12a — a published exploratory row from another owner returns its REAL name, and keeps its codename on the wire", async () => {
     STATE.strategyRows = [
       {
         id: "33333333-3333-4333-8333-333333333333",
+        user_id: "22222222-2222-4222-8222-222222222222", // not the caller
+        status: "published",
         name: "Renaissance Medallion",
         codename: "Sigma-7",
         disclosure_tier: "exploratory",
@@ -570,22 +577,100 @@ describe("GET /api/strategies/browse", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.strategies).toHaveLength(1);
-    // The pseudonymity contract: the response label is the codename, NOT
-    // the real strategy name. A drawer search for "Renaissance" must NOT
-    // find this row, because the row never carries the string
-    // "Renaissance" anywhere on the wire.
+    // D-09: the label is the real name.
+    expect(body.strategies[0].name).toBe("Renaissance Medallion");
+    // D-17: no API change. The codename is still emitted, so a drawer search
+    // for it still finds the row.
+    expect(body.strategies[0]).toHaveProperty("codename", "Sigma-7");
+  });
+
+  it("T12a-draft — a NON-OWN row whose status is draft is never named: the label is its codename (the route's own guard, beyond RLS and the predicate)", async () => {
+    // RLS and the owner-inclusive predicate keep such a row out of the result,
+    // so the mock models a dropped predicate (a service-role swap): the
+    // per-row guard must still withhold the name.
+    STATE.strategyRows = [
+      {
+        id: "33333333-3333-4333-8333-333333333333",
+        user_id: "22222222-2222-4222-8222-222222222222",
+        status: "draft",
+        name: "Renaissance Medallion",
+        codename: "Sigma-7",
+        disclosure_tier: "exploratory",
+        markets: ["crypto"],
+        strategy_types: ["systematic"],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.strategies[0].name).toBe("Sigma-7");
-    expect(body.strategies[0].codename).toBe("Sigma-7");
     expect(JSON.stringify(body)).not.toContain("Renaissance");
     expect(JSON.stringify(body)).not.toContain("Medallion");
   });
 
-  it("T12b — exploratory tier + no codename → response name === 'Strategy #<id-prefix>' (real name suppressed)", async () => {
+  it("T12b — a non-visible row with no codename is labelled 'Strategy #<id-prefix>' (real name suppressed), institutional tier included", async () => {
     STATE.strategyRows = [
       {
         id: "44444444-4444-4444-8444-444444444444",
+        user_id: "22222222-2222-4222-8222-222222222222",
+        status: "pending_review",
         name: "Bridgewater Pure Alpha",
         codename: null,
+        disclosure_tier: "exploratory",
+        markets: ["fx"],
+        strategy_types: ["macro"],
+      },
+      {
+        // 197 D-02: an unpublished strategy is never named, whatever its tier.
+        id: "45454545-4545-4545-8545-454545454545",
+        user_id: "22222222-2222-4222-8222-222222222222",
+        status: "draft",
+        name: "Two Sigma Hidden Sleeve",
+        codename: null,
+        disclosure_tier: "institutional",
+        markets: ["equity"],
+        strategy_types: ["long-short"],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies[0].name).toBe("Strategy #44444444");
+    expect(body.strategies[1].name).toBe("Strategy #45454545");
+    expect(JSON.stringify(body)).not.toContain("Bridgewater");
+    expect(JSON.stringify(body)).not.toContain("Two Sigma Hidden");
+  });
+
+  it("T12c — a published row prints its real name even when it also has a codename; a blank name falls back to the codename", async () => {
+    STATE.strategyRows = [
+      {
+        id: "55555555-5555-4555-8555-555555555555",
+        user_id: "22222222-2222-4222-8222-222222222222",
+        status: "published",
+        name: "Two Sigma Equity Long-Short",
+        codename: null,
+        disclosure_tier: "institutional",
+        markets: ["equity"],
+        strategy_types: ["long-short"],
+      },
+      {
+        id: "66666666-6666-4666-8666-666666666666",
+        user_id: "22222222-2222-4222-8222-222222222222",
+        status: "published",
+        name: "Citadel Wellington",
+        codename: "Wellington-1",
+        disclosure_tier: "institutional",
+        markets: ["multi"],
+        strategy_types: ["multi-strategy"],
+      },
+      {
+        id: "67676767-6767-4676-8676-676767676767",
+        user_id: "22222222-2222-4222-8222-222222222222",
+        status: "published",
+        name: "   ",
+        codename: "Blank-1",
         disclosure_tier: "exploratory",
         markets: ["fx"],
         strategy_types: ["macro"],
@@ -595,56 +680,22 @@ describe("GET /api/strategies/browse", () => {
     const res = await GET(makeRequest());
     expect(res.status).toBe(200);
     const body = await res.json();
-    // No codename on an exploratory row → fall back to the synthetic
-    // `Strategy #<id-prefix>` label rather than leaking the real name.
-    expect(body.strategies[0].name).toBe("Strategy #44444444");
-    expect(JSON.stringify(body)).not.toContain("Bridgewater");
-    expect(JSON.stringify(body)).not.toContain("Pure Alpha");
-  });
-
-  it("T12c — institutional tier → real strategies.name surfaces ONLY when codename is absent", async () => {
-    // Institutional managers have opted into open identity, so the real
-    // name is the legitimate label. But `displayStrategyName` still
-    // prefers codename when one is set — pin both cases.
-    STATE.strategyRows = [
-      {
-        id: "55555555-5555-4555-8555-555555555555",
-        name: "Two Sigma Equity Long-Short",
-        codename: null,
-        disclosure_tier: "institutional",
-        markets: ["equity"],
-        strategy_types: ["long-short"],
-      },
-      {
-        id: "66666666-6666-4666-8666-666666666666",
-        name: "Citadel Wellington",
-        codename: "Wellington-1",
-        disclosure_tier: "institutional",
-        markets: ["multi"],
-        strategy_types: ["multi-strategy"],
-      },
-    ];
-    const { GET } = await import("./route");
-    const res = await GET(makeRequest());
-    expect(res.status).toBe(200);
-    const body = await res.json();
     expect(body.strategies[0].name).toBe("Two Sigma Equity Long-Short");
-    // Codename still wins on institutional rows so the UI renders a
-    // single canonical label.
-    expect(body.strategies[1].name).toBe("Wellington-1");
+    // D-09: the name now wins over the codename, which stays on the wire.
+    expect(body.strategies[1].name).toBe("Citadel Wellington");
     expect(body.strategies[1].codename).toBe("Wellington-1");
+    expect(body.strategies[2].name).toBe("Blank-1");
   });
 
-  it("T12d — missing/null disclosure_tier defaults to exploratory (fail-closed)", async () => {
-    // Legacy rows or partial-import rows may have a NULL
-    // disclosure_tier. The route MUST treat those as exploratory, not
-    // accidentally elevate them to institutional and leak the name.
+  it("T12d — a row with no status or owner facts is not named (fails closed, tier irrelevant)", async () => {
+    // A partial-import row, or a future select list that drops `status`: the
+    // missing column can only WITHHOLD a name, never reveal one.
     STATE.strategyRows = [
       {
         id: "77777777-7777-4777-8777-777777777777",
         name: "Legacy Hedge Fund 2007",
         codename: null,
-        // disclosure_tier intentionally omitted
+        // status, user_id and disclosure_tier intentionally omitted
         markets: ["equity"],
         strategy_types: ["long-short"],
       },
@@ -669,20 +720,22 @@ describe("GET /api/strategies/browse", () => {
     expect(cols).toContain("disclosure_tier");
     expect(cols).toContain("codename");
     expect(cols).toContain("name");
+    // D-17: the visibility fact is decided from these two columns.
+    expect(cols).toContain("status");
+    expect(cols).toContain("user_id");
   });
 
-  it("T12f (CONTRIB-03) — the caller's OWN non-institutional row shows its REAL name; another owner's stays pseudonymised", async () => {
-    // Browse became owner-inclusive, so an allocator's OWN not-yet-published
-    // contribution now appears in the drawer. Running it through
-    // displayStrategyName would collapse the fresh (exploratory) name they just
-    // typed to `Strategy #<id>` — over-redacting it from its own author. The
-    // owner-row branch surfaces the real name for own rows ONLY; everyone else's
-    // non-institutional rows stay pseudonymised (the T12 pseudonymity contract).
+  it("T12f (CONTRIB-03) — the caller's OWN draft row shows its REAL name; another owner's non-visible row stays on its codename", async () => {
+    // Browse is owner-inclusive, so an allocator's OWN not-yet-published
+    // contribution appears in the drawer. It is visible to its author
+    // (`isDiscoveryVisible`), so the name they just typed shows. Another
+    // owner's row that is NOT visible never reveals its name.
     const SESSION_ID = "00000000-0000-0000-0000-000000000001"; // STATE.authUser.id
     STATE.strategyRows = [
       {
         id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         user_id: SESSION_ID, // the caller's OWN contribution
+        status: "draft",
         name: "My Alpha Sleeve",
         codename: null,
         disclosure_tier: "exploratory",
@@ -692,6 +745,7 @@ describe("GET /api/strategies/browse", () => {
       {
         id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         user_id: "22222222-2222-4222-8222-222222222222", // a DIFFERENT owner
+        status: "draft", // not visible to the caller
         name: "Someone Elses Secret Book",
         codename: "Zephyr-9",
         disclosure_tier: "exploratory",
@@ -704,11 +758,10 @@ describe("GET /api/strategies/browse", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.strategies).toHaveLength(2);
-    // Own row: real name surfaces (fails today — displayStrategyName redacts it
-    // to `Strategy #aaaaaaaa`).
+    // Own row: real name surfaces.
     expect(body.strategies[0].name).toBe("My Alpha Sleeve");
-    // Another owner's non-institutional row stays pseudonymised to its codename;
-    // the real name never crosses the wire.
+    // Another owner's non-visible row stays on its codename; the real name
+    // never crosses the wire.
     expect(body.strategies[1].name).toBe("Zephyr-9");
     expect(JSON.stringify(body)).not.toContain("Someone Elses Secret Book");
     // Defence-in-depth: the co-fetched user_id is read only for the comparison,
@@ -897,21 +950,19 @@ describe("GET /api/strategies/browse", () => {
   });
 
   // ============================================================
-  // T-29-05/06/07 — Phase 29 / UNIFY-03: merged-catalog leak +
-  // pseudonymity (the LOCKED exit gate)
+  // T-29-05/06/07 — Phase 29 / UNIFY-03: merged-catalog leak (the LOCKED exit
+  // gate), re-read for Phase 201 / D-17.
   //
-  // The browse route now ALSO surfaces is_example=true rows in the
-  // SAME response as verified strategies. The merge MUST NOT widen the
-  // leak surface: example rows are just published rows that ALSO carry
-  // the flag, so (a) the published predicate stays enforced (an
-  // unpublished / cross-tenant row never reaches the response even with
-  // is_example in play), and (b) displayStrategyName still suppresses
-  // the raw name on example rows. RESEARCH Pitfall 2 warns this test
-  // goes VACUOUS if it only asserts example rows appear — so it asserts
-  // ABSENCE (whole-payload sweep, mirroring T12a) WITH a positive
-  // control proving the absence assertion can fail.
+  // The browse route surfaces is_example=true rows in the SAME response as
+  // verified strategies. The merge MUST NOT widen the leak surface: example rows
+  // are just published rows that ALSO carry the flag, so (a) the published
+  // predicate stays enforced, and (b) the example flag does not change what the
+  // viewer may see NAMED: a published example row carries its real name, a NON
+  // visible one never does. RESEARCH Pitfall 2 warns the absence assertion goes
+  // VACUOUS if it only asserts example rows appear, so the control test below
+  // proves the absence assertion can fail.
   // ============================================================
-  it("T29-merge — example + verified rows surface together; raw example name is suppressed (pseudonymity survives the merge)", async () => {
+  it("T29-merge — example + verified rows surface together; a published example row is named, a non-visible one is not (D-17)", async () => {
     // An exploratory-tier EXAMPLE row carrying a real (leak-worthy) name
     // and a codename, alongside a published VERIFIED row. The harness
     // models RLS the way the route receives data: rows the published
@@ -922,8 +973,10 @@ describe("GET /api/strategies/browse", () => {
     // observed status filter / select list) PLUS the positive control.
     STATE.strategyRows = [
       {
-        // EXAMPLE row — real name must NEVER reach the wire.
+        // EXAMPLE row, published: visible in discovery, so it carries its name.
         id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        user_id: "22222222-2222-4222-8222-222222222222",
+        status: "published",
         name: "Renaissance Medallion",
         codename: "Sigma-7",
         disclosure_tier: "exploratory",
@@ -932,14 +985,28 @@ describe("GET /api/strategies/browse", () => {
         is_example: true,
       },
       {
-        // VERIFIED row — institutional, real name is the legitimate label.
+        // VERIFIED row — published institutional.
         id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        user_id: "22222222-2222-4222-8222-222222222222",
+        status: "published",
         name: "Two Sigma Equity",
         codename: null,
         disclosure_tier: "institutional",
         markets: ["equity"],
         strategy_types: ["long-short"],
         is_example: false,
+      },
+      {
+        // NON-VISIBLE example row (a dropped predicate): never named.
+        id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        user_id: "22222222-2222-4222-8222-222222222222",
+        status: "draft",
+        name: "Hidden Example Book",
+        codename: "Hidden-3",
+        disclosure_tier: "exploratory",
+        markets: ["fx"],
+        strategy_types: ["macro"],
+        is_example: true,
       },
     ];
     const { GET } = await import("./route");
@@ -948,7 +1015,7 @@ describe("GET /api/strategies/browse", () => {
     const body = await res.json();
 
     // Both halves of the catalog are in the SAME response.
-    expect(body.strategies).toHaveLength(2);
+    expect(body.strategies).toHaveLength(3);
 
     // (a) The published leg of the owner-inclusive predicate is STILL
     //     enforced even with is_example co-fetched — a stray
@@ -979,27 +1046,32 @@ describe("GET /api/strategies/browse", () => {
     expect(example.is_example).toBe(true);
     expect(verified.is_example).toBe(false);
 
-    // (d) Pseudonymity on the example row: the response label is the
-    //     codename, NOT the raw strategy name. Mirrors T12a verbatim.
-    expect(example.name).toBe("Sigma-7");
-    expect(JSON.stringify(body)).not.toContain("Renaissance");
-    expect(JSON.stringify(body)).not.toContain("Medallion");
+    // (d) D-17 on the example rows: a published example row is named, and a
+    //     non-visible one is labelled by its codename, its name absent from the
+    //     whole payload.
+    expect(example.name).toBe("Renaissance Medallion");
+    const hiddenExample = body.strategies.find(
+      (s: { id: string }) => s.id === "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    );
+    expect(hiddenExample.name).toBe("Hidden-3");
+    expect(JSON.stringify(body)).not.toContain("Hidden Example Book");
 
-    // Verified institutional row keeps its real (legitimate) label.
+    // Verified institutional row keeps its real label.
     expect(verified.name).toBe("Two Sigma Equity");
   });
 
-  it("T29-merge-control (non-vacuity) — the raw example name IS in the source row but ABSENT from the response", async () => {
-    // POSITIVE CONTROL: this proves the absence assertion above can FAIL.
-    // The raw name "Renaissance Medallion" is present in the seeded source
-    // row's `name` field (the route DOES receive it from the DB), yet it
-    // must be absent from the whole serialized response — because
-    // displayStrategyName suppresses it. If a future regression emitted the
-    // raw `name` (skipping displayStrategyName), this test FAILS loudly.
+  it("T29-merge-control (non-vacuity) — the raw name of a NON-VISIBLE example row IS in the source row but ABSENT from the response", async () => {
+    // POSITIVE CONTROL: this proves the absence assertion can FAIL. The raw name
+    // is present in the seeded source row (the route DOES receive it), yet it
+    // must be absent from the whole serialized response because the row is not
+    // visible to the caller. If a regression printed the raw `name` regardless of
+    // visibility, this test FAILS loudly.
     const RAW_EXAMPLE_NAME = "Renaissance Medallion";
     STATE.strategyRows = [
       {
         id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        user_id: "22222222-2222-4222-8222-222222222222",
+        status: "draft",
         name: RAW_EXAMPLE_NAME,
         codename: "Sigma-7",
         disclosure_tier: "exploratory",

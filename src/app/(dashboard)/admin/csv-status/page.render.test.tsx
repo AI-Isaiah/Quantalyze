@@ -103,3 +103,19 @@ describe("/admin/csv-status — labels (D-01)", () => {
     expect(document.body.textContent).not.toContain("flow_type");
   });
 });
+
+/**
+ * Phase 201 plan 20 (D-11, U-13) - the Submitted stamp has a time of day, so it prints through
+ * `formatDayTime` in a cell that cannot wrap. WHY: a wrapped stamp splits the date from its time
+ * in a six-column table, and a locale-formatted one reads differently on every machine.
+ */
+describe("/admin/csv-status - dates (D-11)", () => {
+  it("prints the submitted stamp as 'Oct 20, 2026, 12:00 UTC' in a nowrap cell", async () => {
+    state.rows = [row({})];
+    await renderPage();
+
+    const tableRow = screen.getByText("Alpha").closest("tr") as HTMLElement;
+    const stamp = within(tableRow).getByText("Oct 20, 2026, 12:00 UTC");
+    expect(stamp.className).toContain("whitespace-nowrap");
+  });
+});

@@ -1,7 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { withPublishedOnly, withPublishedOrOwner } from "./visibility";
+import {
+  isDiscoveryVisible,
+  withPublishedOnly,
+  withPublishedOrOwner,
+} from "./visibility";
 
 describe("withPublishedOnly", () => {
   it("appends .eq('status','published') and returns the SAME builder (chain preserved)", () => {
@@ -251,5 +255,46 @@ describe("B10 visibility sweep — by-construction enforcement", () => {
         `${rel} no longer contains the raw predicate — drop it from SANCTIONED`,
       ).toBe(true);
     }
+  });
+});
+
+// Phase 201 / D-17 — the ROW form of the discovery predicate. The two query
+// helpers above decide which rows a read RETURNS; this decides, for a row that
+// is already in hand (service-role reads, the browse route's own guard), whether
+// the viewer may see it NAMED. A strategy that is not visible in discovery must
+// never print its real name (197 D-02).
+describe("isDiscoveryVisible (D-17: the row form of withPublishedOrOwner)", () => {
+  it("a published row is visible to any viewer, signed in or not", () => {
+    expect(isDiscoveryVisible({ status: "published", user_id: "u2" }, "u1")).toBe(true);
+    expect(isDiscoveryVisible({ status: "published", user_id: "u2" }, null)).toBe(true);
+    expect(isDiscoveryVisible({ status: "published", user_id: null }, undefined)).toBe(true);
+  });
+
+  it("the viewer's own not-yet-published row is visible to the viewer", () => {
+    expect(isDiscoveryVisible({ status: "draft", user_id: "u1" }, "u1")).toBe(true);
+    expect(isDiscoveryVisible({ status: "pending_review", user_id: "u1" }, "u1")).toBe(true);
+  });
+
+  it("another owner's unpublished row is NOT visible (the case that must never be named)", () => {
+    expect(isDiscoveryVisible({ status: "draft", user_id: "u2" }, "u1")).toBe(false);
+    expect(isDiscoveryVisible({ status: "private", user_id: "u2" }, "u1")).toBe(false);
+    expect(isDiscoveryVisible({ status: "archived", user_id: "u2" }, "u1")).toBe(false);
+  });
+
+  it("an unpublished row with no owner is not visible to a null viewer", () => {
+    expect(isDiscoveryVisible({ status: "pending_review", user_id: null }, null)).toBe(false);
+  });
+
+  it("fails CLOSED when the facts are missing: no status and no owner match is not visible", () => {
+    // A query that forgot to select status/user_id must read as "not visible",
+    // never as visible: the missing column cannot widen disclosure.
+    expect(isDiscoveryVisible({}, "u1")).toBe(false);
+    expect(isDiscoveryVisible({ status: null, user_id: null }, null)).toBe(false);
+  });
+
+  it("a null or undefined viewer never matches an owner by accident (null === null)", () => {
+    expect(isDiscoveryVisible({ status: "draft", user_id: null }, null)).toBe(false);
+    expect(isDiscoveryVisible({ status: "draft", user_id: undefined }, undefined)).toBe(false);
+    expect(isDiscoveryVisible({ status: "draft", user_id: "" }, "")).toBe(false);
   });
 });

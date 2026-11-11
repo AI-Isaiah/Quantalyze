@@ -21,6 +21,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { sendBridgeIntro } from "@/lib/bridge/send-intro";
+import { Term } from "@/components/ui/Term";
 import {
   BREACH_REASON_EMPTY_LABEL,
   breachReasonLabel,
@@ -305,7 +306,7 @@ export function BridgeDrawer({
       <div
         ref={drawerRef}
         role="dialog"
-        aria-label="Bridge review"
+        aria-label="Replacement review"
         aria-modal="true"
         style={{
           position: "fixed",
@@ -354,7 +355,7 @@ export function BridgeDrawer({
                   textTransform: "uppercase",
                 }}
               >
-                Mandate gates failed
+                <Term k="mandate">Mandate</Term> gates failed
               </div>
               {flaggedHoldings.length === 0 ? (
                 <div className="mt-2 text-sm text-text-secondary">

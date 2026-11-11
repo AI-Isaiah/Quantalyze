@@ -41,8 +41,10 @@ const MTM_LEN = 150; // deliberately LONGER than cash → exercises the widened 
 /**
  * A real cash payload (100 synthetic 2020 daily returns) plus a synthetic MTM
  * bundle whose date axis is LONGER (150) and carries UNIQUE, cash-distinct label
- * strings ("M000".."M149") so a window edge label unambiguously reveals which
- * axis the brush is reading, and which index it resolved to.
+ * days (MTM from 2031-01-01, smoothed from 2032-01-01, each one day apart) so a
+ * window edge label unambiguously reveals which axis the brush is reading, and
+ * which index it resolved to. They are real ISO days because the brush prints
+ * its edges through `formatDay` (SC-3), which reads a non-date as "—".
  */
 function cashPayload(): FactsheetPayload {
   const dailyReturns = Array.from({ length: CASH_LEN }).map((_, i) => {
@@ -66,9 +68,14 @@ function cashPayload(): FactsheetPayload {
   return payload;
 }
 
+/** The ISO day `i` days after the UTC-midnight instant `baseMs`. */
+function isoDayAfter(baseMs: number, i: number): string {
+  return new Date(baseMs + i * 86_400_000).toISOString().slice(0, 10);
+}
+
 function makePayloadWithMtmBundle(): FactsheetPayload {
   const payload = cashPayload();
-  const mtmDates = Array.from({ length: MTM_LEN }).map((_, i) => `M${String(i).padStart(3, "0")}`);
+  const mtmDates = Array.from({ length: MTM_LEN }).map((_, i) => isoDayAfter(Date.UTC(2031, 0, 1), i));
   const mtmEquity = Array.from({ length: MTM_LEN }).map((_, i) => 1 + i * 0.01);
   return {
     ...payload,
@@ -89,7 +96,7 @@ function makePayloadWithMtmBundle(): FactsheetPayload {
 const SMTM_LEN = 150;
 function makePayloadWithSmoothedBundle(): FactsheetPayload {
   const payload = cashPayload();
-  const smDates = Array.from({ length: SMTM_LEN }).map((_, i) => `S${String(i).padStart(3, "0")}`);
+  const smDates = Array.from({ length: SMTM_LEN }).map((_, i) => isoDayAfter(Date.UTC(2032, 0, 1), i));
   const smEquity = Array.from({ length: SMTM_LEN }).map((_, i) => 1 + i * 0.01);
   return {
     ...payload,
@@ -136,14 +143,14 @@ function renderBrush(
 }
 
 /**
- * The brush header renders "{startDate} → {endDate}" in a dedicated `.normal-case`
- * span. Scope to that span so the sparkline's year-tick <text> labels (which also
- * carry the "M###" axis strings) never pollute the match.
+ * The brush header renders "{formatDay(start)} – {formatDay(end)}" in a dedicated
+ * `.normal-case` span. Scope to that span so the sparkline's year-tick <text>
+ * labels never pollute the match.
  */
 function edgeLabels(container: HTMLElement): { start: string; end: string } {
   const span = container.querySelector(".normal-case");
   const text = span?.textContent ?? "";
-  const m = /^(\S+)\s*→\s*(\S+)$/.exec(text.trim());
+  const m = /^(.+?) – (.+)$/.exec(text.trim());
   if (!m) throw new Error(`no brush edge labels found in: ${text}`);
   return { start: m[1], end: m[2] };
 }
@@ -156,32 +163,30 @@ describe("[F2] MasterBrush follows the active basis", () => {
   it("cash labels the window with CASH dates (byte-identity / SC-4)", () => {
     const { container } = renderBrush("cash_settlement");
     const { start, end } = edgeLabels(container);
-    // Cash axis → 2020 dates on both edges, never an "M###" MTM label.
-    expect(start.startsWith("2020")).toBe(true);
-    expect(end.startsWith("2020")).toBe(true);
-    expect(start.startsWith("M")).toBe(false);
-    expect(end.startsWith("M")).toBe(false);
+    // Cash axis → 2020 dates on both edges, never a 2031 MTM day.
+    expect(start).toBe("Jan 1, 2020");
+    expect(end).toBe("Apr 16, 2020");
   });
 
   it("mark_to_market labels the window with MTM dates, NOT cash (neuter → cash → RED)", () => {
     const { container } = renderBrush("mark_to_market");
     const { start } = edgeLabels(container);
-    // Under MTM the start edge reads the bundle's own axis ("M000"), never the
+    // Under MTM the start edge reads the bundle's own axis (2031-01-01), never the
     // cash 2020 date. This is the line that reddens if MasterBrush reverts to
     // usePayload() (it would label the window with cash dates under MTM).
-    expect(start).toBe("M000");
-    expect(start.startsWith("2020")).toBe(false);
+    expect(start).toBe("Jan 1, 2031");
+    expect(start).not.toContain("2020");
   });
 
   it("widened clamp: an MTM index past the cash length is REACHABLE (neuter clamp → RED)", async () => {
     // Drive the window end to the LAST MTM index (149), which is past the cash
-    // length (99). With the widened setXRange clamp this resolves to "M149"; the
-    // old cash-sized clamp clips it to 99 → "M099" (the permanently-unreachable
-    // bug).
+    // length (99). With the widened setXRange clamp this resolves to index 149
+    // (May 30, 2031); the old cash-sized clamp clips it to 99 (Apr 10, 2031),
+    // the permanently-unreachable bug.
     const { container } = renderBrush("mark_to_market", { drive: [0, MTM_LEN - 1] });
     await waitFor(() => {
       const { end } = edgeLabels(container);
-      expect(end).toBe(`M${String(MTM_LEN - 1).padStart(3, "0")}`);
+      expect(end).toBe("May 30, 2031");
     });
   });
 
@@ -202,7 +207,7 @@ describe("[F2] MasterBrush follows the active basis", () => {
     // The flagship options shape: a smoothed bundle LONGER than cash, NO MTM bundle.
     // Drive the window end to the LAST smoothed index (149), past the cash length
     // (99). With the third max() term (seriesByBasis.smoothed_mtm.dates.length) this
-    // resolves to "S149"; without it the cash-sized clamp clips to "S099" (the
+    // resolves to index 149 (May 29, 2032); without it the cash-sized clamp clips to 99 (Apr 9, 2032) (the
     // permanently-unreachable recent-days bug the F2.3 comment documents).
     const { container } = renderBrush("smoothed_mtm", {
       payload: makePayloadWithSmoothedBundle(),
@@ -210,7 +215,7 @@ describe("[F2] MasterBrush follows the active basis", () => {
     });
     await waitFor(() => {
       const { end } = edgeLabels(container);
-      expect(end).toBe(`S${String(SMTM_LEN - 1).padStart(3, "0")}`);
+      expect(end).toBe("May 29, 2032");
     });
   });
 });

@@ -9,6 +9,7 @@ import {
   type OutcomesWidgetData,
 } from "../lib/widget-data";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
+import { formatDay } from "@/lib/utils";
 import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import { computeOutcomeKPIs, type OutcomeKPIs } from "@/lib/outcomes-kpi";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
@@ -22,7 +23,7 @@ import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
  * Phase 5 Outcomes Dashboard widget — SINGLE-FILE per Voice-D1 (2026-04-19).
  *
  * Phase 09.1 Plan 10 (D-06): restyled to the designer outcomes.jsx shape:
- *   - Header: "Bridge outcomes" h3 (serif) + "Feedback loop" badge + View all
+ *   - Header: "Replacement outcomes" h3 (serif) + "Feedback loop" badge + View all
  *   - 3-KPI strip: Hit rate (90d) / Avg realized α (90d) / Total outcomes
  *   - Delta table: From / Size / Recorded / Δ30 / Δ90 / Δ180
  *   - Row-expand: 3 window cards (30d/90d/180d) with progress bars
@@ -76,19 +77,10 @@ function addDaysISO(iso: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+// U-15 / D-11: the one UI date. `formatDay` reads UTC fields and returns "—" for an
+// empty or malformed string (M-0189), so a bad row never leaks "Invalid Date".
 function formatDate(iso: string): string {
-  const d = new Date(iso + "T00:00:00Z");
-  // M-0189: a malformed/empty date string yields an Invalid Date whose
-  // toLocaleDateString prints "Invalid Date". The schema guarantees the field
-  // is a string but not a valid date string — guard so a bad row reads "—"
-  // rather than leaking "Invalid Date" into the timeline.
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "UTC",
-  });
+  return formatDay(iso);
 }
 
 function sliceToWindow(
@@ -135,14 +127,14 @@ export function formatDelta(
 
 /**
  * Phase 09.1 Plan 10 — designer header (outcomes.jsx:18-32).
- * h3 "Bridge outcomes" (serif) + "Feedback loop" badge + "View all" button.
+ * h3 "Replacement outcomes" (serif) + "Feedback loop" badge + "View all" button.
  */
 function WidgetHeader({ pendingCount }: { pendingCount: number }) {
   return (
     <div className="flex items-start justify-between border-b border-[var(--color-border)] px-4 py-2.5">
       <div>
         <h3 className="m-0 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-text-primary">
-          Bridge outcomes
+          Replacement outcomes
           <span
             className="inline-flex items-center rounded-sm px-1.5 py-0.5 text-fixed-9 font-mono font-medium uppercase tracking-wider"
             style={{
@@ -157,7 +149,7 @@ function WidgetHeader({ pendingCount }: { pendingCount: number }) {
           className="mt-0.5 text-fixed-12"
           style={{ color: "var(--color-text-muted)" }}
         >
-          Realized delta from Bridge-driven reallocations
+          Realized delta from reallocations made on a replacement suggestion
           {pendingCount > 0 ? ` — ${pendingCount} pending cycle` : ""}
         </div>
       </div>
@@ -850,7 +842,7 @@ function OutcomesWidgetInner({
   //                is materially more informative than the primitive's
   //                generic 2-line skeleton; replacing would degrade UX.
   //   - empty    → SKIPPED. The existing empty state mounts WidgetHeader
-  //                ('Bridge outcomes' h3 + 'Feedback loop' badge) above
+  //                ('Replacement outcomes' h3 + 'Feedback loop' badge) above
   //                the empty body; the primitive's centered Card cannot
   //                surface the header above it without manufacturing new
   //                wrapper structure. Preserved verbatim.
@@ -880,7 +872,7 @@ function OutcomesWidgetInner({
             className="text-sm font-medium"
             style={{ color: "var(--color-text-muted)" }}
           >
-            Your Bridge outcomes will appear here after you act on one
+            Your replacement outcomes will appear here after you act on a suggestion
           </p>
           <a
             href="/holdings"

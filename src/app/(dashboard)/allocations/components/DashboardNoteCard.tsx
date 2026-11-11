@@ -72,7 +72,7 @@ export function DashboardNoteCard(props: DashboardNoteCardProps) {
         value={content}
         onChange={(e) => setContent(e.target.value)}
         onBlur={handleBlur}
-        placeholder="Add a private note about your allocation book — markdown supported. Visible only to you."
+        placeholder="Add a private note about your allocation — markdown supported. Visible only to you."
         rows={6}
         className="w-full resize-none rounded border border-border p-2 text-body leading-[1.6] focus:border-focus focus:outline-none"
       />

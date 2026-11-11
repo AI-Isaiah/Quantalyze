@@ -67,6 +67,8 @@ import { LeverageContext, LeverageProvider, useLeverage } from "./leverage-conte
  */
 import { FACTSHEET_MAX_LEVERAGE } from "@/lib/leverage";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
+import { Term, PlainTerms } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
@@ -146,6 +148,7 @@ function PanelSkeleton({ h }: { h: number }) {
   );
 }
 import { venueLabel as venueDisplayName } from "@/lib/display-labels";
+import { formatDay } from "@/lib/utils";
 import { resolvePalette, paletteToCssVars } from "./palette";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { CHART_CONFIGS, applyChartUnit } from "./chart-configs";
@@ -515,7 +518,7 @@ export function FactsheetBody({
   const { key: cmpKey } = useActiveComparator();
   const hasComparator = cmpKey !== "none";
   const showSignatures = signaturesSectionRenders(payload, hasComparator);
-  return (
+  const tree = (
     // Phase 90 (FS-03): BasisProvider wraps the tree so useBasis() resolves in
     // KpiStrip + ControlBar. It renders children only (no DOM) → transparent to
     // the GUARD-02 byte-identity gate; basis is ephemeral (GUARD-04).
@@ -624,6 +627,9 @@ export function FactsheetBody({
     </UsdViewLeverageHold>
     </LeverageProvider>
   );
+  // Phase 201 plan 09 (D-20, U-03): the tearsheet mounts this body with `printView`; every Term
+  // below renders as its plain label there (no dotted underline, no tab stop, no bubble on paper).
+  return printView ? <PlainTerms>{tree}</PlainTerms> : tree;
 }
 
 /**
@@ -856,6 +862,7 @@ function FactsheetSections({
         <CollapsibleSection
           id="factsheet-signatures"
           title="Returns Signatures"
+          term="returns_signature"
           subtitle="event studies — heavy compute, defaults open"
           storageKey={`factsheet-collapse:${payload.strategyId}:signatures`}
           defaultOpen
@@ -1220,7 +1227,7 @@ function PerformanceCharts({ variant = "all" }: { variant?: PerformanceVariant }
       )}
       {variant === "all" && volMatchedNoVol && (
         <NotEnoughDataPanel
-          title="Volatility Matched — Not available"
+          title={<><Term k="volatility_matched">Volatility Matched</Term> — Not available</>}
           body="The strategy or the comparator has no measurable volatility on this basis, so there is no scale to match the comparator to. This panel will appear once both do."
         />
       )}
@@ -1230,7 +1237,7 @@ function PerformanceCharts({ variant = "all" }: { variant?: PerformanceVariant }
 
 const ROLL_LABEL_RE = /\((6mo|30d|90d)\)/i;
 
-function NotEnoughDataPanel({ title, body }: { title: string; body: string }) {
+function NotEnoughDataPanel({ title, body }: { title: ReactNode; body: string }) {
   return (
     <section className="border border-border bg-surface-subtle px-4 py-3">
       <h3 className="text-caption font-semibold uppercase tracking-[0.18em] text-text-primary">
@@ -2152,14 +2159,14 @@ function KpiStrip({
         ann_vol: pct(gv(hb?.ann_vol), 1),
       }
     : null;
-  const items: Array<{ label: string; value: string; tone?: "positive" | "negative"; unitLabel?: boolean; bench?: string }> = [
+  const items: Array<{ label: string; value: string; tone?: "positive" | "negative"; unitLabel?: boolean; bench?: string; term?: TermKey }> = [
     { label: withUnit("Cum. Return", returnsUnit), value: formatSignedPercent(m.cum_ret, 1), tone: percentTone(m.cum_ret, 1), unitLabel, bench: benchLines?.cum_ret },
-    { label: withUnit("CAGR", returnsUnit), value: formatSignedPercent(gv(m.cagr), 1), tone: percentTone(gv(m.cagr), 1), unitLabel, bench: benchLines?.cagr },
-    { label: "Sharpe", value: num(gv(m.sharpe)), bench: benchLines?.sharpe },
-    { label: "Sortino", value: num(gv(m.sortino)), bench: benchLines?.sortino },
-    { label: "Calmar", value: num(gv(m.calmar)), bench: benchLines?.calmar },
-    { label: "Max DD", value: formatUnsignedPercent(m.max_dd, 1), tone: percentTone(m.max_dd, 1) === "negative" ? "negative" : undefined, bench: benchLines?.max_dd },
-    { label: "Ann. Vol", value: pct(gv(m.ann_vol), 1), bench: benchLines?.ann_vol },
+    { label: withUnit("CAGR", returnsUnit), value: formatSignedPercent(gv(m.cagr), 1), tone: percentTone(gv(m.cagr), 1), unitLabel, bench: benchLines?.cagr, term: "cagr" },
+    { label: "Sharpe", value: num(gv(m.sharpe)), bench: benchLines?.sharpe, term: "sharpe" },
+    { label: "Sortino", value: num(gv(m.sortino)), bench: benchLines?.sortino, term: "sortino" },
+    { label: "Calmar", value: num(gv(m.calmar)), bench: benchLines?.calmar, term: "calmar" },
+    { label: "Max DD", value: formatUnsignedPercent(m.max_dd, 1), tone: percentTone(m.max_dd, 1) === "negative" ? "negative" : undefined, bench: benchLines?.max_dd, term: "max_drawdown" },
+    { label: "Ann. Vol", value: pct(gv(m.ann_vol), 1), bench: benchLines?.ann_vol, term: "volatility" },
   ];
   // Hoisted from the α/IR block below: the flat-leg line under the strip is shown only
   // when those cells show the joint, so it reads the same predicate.
@@ -2193,11 +2200,13 @@ function KpiStrip({
       label: `α vs ${cn}`,
       value: shown ? formatSignedPercent(shown.alpha, 1) : "—",
       tone: shown ? percentTone(shown.alpha, 1) : undefined,
+      term: "alpha",
     });
     items.push({
       label: `IR vs ${cn}`,
       value: shown ? formatRatio(shown.info_ratio, 2) : "—",
       tone: shown ? ratioTone(shown.info_ratio, 2) : undefined,
+      term: "information_ratio",
     });
   }
   // Phase 164.6.6.3.3 (D-01, D-03, UI-SPEC 1.3 S1): the note under the strip says which
@@ -2363,7 +2372,11 @@ function KpiStrip({
               }${it.label.startsWith("α") ? " first-letter:normal-case" : ""}`}
               style={{ color: "var(--color-text-muted)" }}
             >
-              {it.label}
+              {/* Phase 201 plan 09 (D-03): the Term sits INSIDE the original <p>, which keeps
+                  its test id and first-letter class; the whole label is the trigger, so a
+                  unit label ("CAGR in BTC") and a glyph label ("α vs BTC") stay one text node
+                  to every locator that reads them. */}
+              {it.term ? <Term k={it.term}>{it.label}</Term> : it.label}
             </p>
             {/* UIFIX-03 (117-03): the VALUE cell renders extreme/high-leverage
                 magnitudes IN FULL — a truncated number reads as a different
@@ -3401,7 +3414,7 @@ function FactsheetFooter({
   // GUARD-02 (43-02) pins the default-false equality permanently.
   scenarioMode?: boolean;
 }) {
-  const stamp = `QSF · ${payload.strategyId.slice(0, 8).toUpperCase()} · ${isoToYmd(payload.computedAt)}`;
+  const stamp = `QSF · ${payload.strategyId.slice(0, 8).toUpperCase()} · ${formatDay(payload.computedAt)}`; // F-11: the one date helper
   return (
     <footer className="mt-16 border-t border-text pt-6 flex flex-wrap items-start justify-between gap-6">
       <p className="max-w-3xl text-micro italic leading-relaxed text-text-muted">
@@ -3427,12 +3440,3 @@ function FactsheetFooter({
 // pct / num are imported from "./format" at the top of this file (the strip's five toned cells use display-sign).
 // (IMPORTANT-1/FINDING-8 — b06-codereview/silentfailure): removed private
 // copies to ensure a single implementation is tested by audit-c20.test.ts.
-
-function isoToYmd(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}.${m}.${day}`;
-}

@@ -69,8 +69,9 @@ function avgRhoCell(scenario: ComputedMetrics, live: ComputedMetrics): HTMLEleme
   const { getByText } = render(
     <KpiStrip mode="scenario" scenarioMetrics={scenario} liveMetrics={live} metrics={live} analytics={{}} />,
   );
-  // The KpiPanel cell holding the "Avg |ρ|" label.
-  return getByText("Avg |ρ|").parentElement as HTMLElement;
+  // The KpiPanel cell holding the "Avg |ρ|" label. The label is a Term (201-12 D-03), so the text
+  // sits in a span inside the label div: climb to that div, then to the cell.
+  return getByText("Avg |ρ|").closest("div")!.parentElement as HTMLElement;
 }
 
 describe("KpiStrip Avg |ρ| states its pair coverage (SFH-R2-M3)", () => {

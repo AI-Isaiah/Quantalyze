@@ -128,7 +128,7 @@ describe("/admin/compute-jobs — labels (D-01)", () => {
     expect(row.textContent).not.toMatch(/sync_trades|failed_retry|transient|binance/);
   });
 
-  it("falls back to Unnamed strategy, Unnamed portfolio, and an em dash for the target", async () => {
+  it("falls back to Unnamed strategy, Unnamed allocation, and an em dash for the target", async () => {
     state.jobs = [
       job({
         id: "00000000-0000-4000-8000-00000000000a",
@@ -145,11 +145,22 @@ describe("/admin/compute-jobs — labels (D-01)", () => {
     await renderPage();
 
     expect(within(rowOf("Trade sync")).getByText("Unnamed strategy")).toBeTruthy();
-    const portfolioRow = within(rowOf("Composite stitch"));
-    expect(portfolioRow.getByText("Unnamed portfolio")).toBeTruthy();
+    const allocationRow = within(rowOf("Composite stitch"));
+    expect(allocationRow.getByText("Unnamed allocation")).toBeTruthy();
+    expect(allocationRow.queryByText("Unnamed portfolio")).toBeNull();
     const noTarget = rowOf("Allocator equity derivation");
     // Target is the third cell; the em dash there is the "no target" answer.
     expect(within(noTarget).getAllByRole("cell")[2].textContent).toBe("—");
+  });
+
+  // Phase 201 plan 20 (D-11, U-13): the updated stamp has a time of day, so it prints through
+  // `formatDayTime` (one instant, one string, UTC named) and sits in a cell that cannot wrap.
+  it("prints the updated stamp as 'Oct 20, 2026, 12:00 UTC' in a nowrap cell", async () => {
+    state.jobs = [job({})];
+    await renderPage();
+
+    const stamp = within(rowOf("Trade sync")).getByText("Oct 20, 2026, 12:00 UTC");
+    expect(stamp.className).toContain("whitespace-nowrap");
   });
 
   it("renders a null error kind as the bare excerpt, with no prefix and no leading colon", async () => {

@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, useCallback, type ReactNode } from "react";
+import { useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import { Button } from "@/components/ui/Button";
+import { Term } from "@/components/ui/Term";
+import { termLabel, type TermKey } from "@/lib/glossary";
 // M-0514: SortKey/SortDir/ViewMode now live in the lib-layer SoT
 // `@/lib/discovery-types` so `@/lib/discovery-prefs` no longer type-imports from
 // this "use client" component. Re-exported below for back-compat with existing
@@ -209,16 +211,36 @@ function CheckboxGroup({
 
 function RangeInput({
   label,
+  term,
   range,
   onChange,
 }: {
   label: string;
+  /**
+   * The registry key the label names (D-02). Only the term's own words are wrapped in a `Term`;
+   * the unit that follows ("CAGR %") stays plain text.
+   */
+  term?: TermKey;
   range: RangeFilter;
   onChange: (range: RangeFilter) => void;
 }) {
+  const own = term ? termLabel(term) : "";
   return (
     <div className="flex items-center gap-2">
-      <span className="text-sm text-text-secondary w-28 shrink-0">{label}</span>
+      <span className="text-sm text-text-secondary w-28 shrink-0">
+        {term ? (
+          label.startsWith(own) ? (
+            <>
+              <Term k={term}>{own}</Term>
+              {label.slice(own.length)}
+            </>
+          ) : (
+            <Term k={term}>{label}</Term>
+          )
+        ) : (
+          label
+        )}
+      </span>
       <input
         type="number"
         placeholder="From"
@@ -297,10 +319,37 @@ export function StrategyFilters({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [draft, setDraft] = useState<AdvancedFilters>(advancedFilters);
 
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+
   const openFilters = useCallback(() => {
+    // The shared Button takes no ref, so remember the opener the way
+    // CustomizeDrawer does and hand focus back to it on close (D-12).
+    previouslyFocusedRef.current =
+      (document.activeElement as HTMLElement | null) ?? null;
     setDraft(advancedFilters);
     setFiltersOpen(true);
   }, [advancedFilters]);
+
+  const closeFilters = useCallback(() => {
+    setFiltersOpen(false);
+    const prev = previouslyFocusedRef.current;
+    if (prev?.isConnected) prev.focus?.();
+  }, []);
+
+  // Escape closes the panel and discards the unapplied draft (D-12, Phase 201).
+  // Same idiom as CustomizeDrawer (F9 M-0061): skip an Escape a nested control
+  // already handled, claim the ones we act on so one keypress closes one layer.
+  useEffect(() => {
+    if (!filtersOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (e.defaultPrevented) return;
+      e.preventDefault();
+      closeFilters();
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [filtersOpen, closeFilters]);
 
   const applyFilters = useCallback(() => {
     onAdvancedFiltersChange(draft);
@@ -437,15 +486,16 @@ export function StrategyFilters({
         <div className="fixed inset-0 z-50 flex justify-end">
           {/* Backdrop */}
           <div
+            data-testid="filters-backdrop"
             className="absolute inset-0 bg-black/40"
-            onClick={() => setFiltersOpen(false)}
+            onClick={closeFilters}
           />
           {/* Panel */}
           <div className="relative z-10 w-full max-w-md bg-surface border-l border-border shadow-elevated overflow-y-auto">
             <div className="sticky top-0 bg-surface border-b border-border px-6 py-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-text-primary">All Filters</h2>
               <button
-                onClick={() => setFiltersOpen(false)}
+                onClick={closeFilters}
                 className="text-text-muted hover:text-text-primary transition-colors"
                 aria-label="Close"
               >
@@ -545,21 +595,25 @@ export function StrategyFilters({
                   />
                   <RangeInput
                     label="CAGR %"
+                    term="cagr"
                     range={draft.cagr}
                     onChange={(cagr) => setDraft({ ...draft, cagr })}
                   />
                   <RangeInput
                     label="Max DD %"
+                    term="max_drawdown"
                     range={draft.maxDrawdown}
                     onChange={(maxDrawdown) => setDraft({ ...draft, maxDrawdown })}
                   />
                   <RangeInput
                     label="Volatility %"
+                    term="volatility"
                     range={draft.volatility}
                     onChange={(volatility) => setDraft({ ...draft, volatility })}
                   />
                   <RangeInput
                     label="Sharpe"
+                    term="sharpe"
                     range={draft.sharpe}
                     onChange={(sharpe) => setDraft({ ...draft, sharpe })}
                   />
@@ -575,6 +629,7 @@ export function StrategyFilters({
                   />
                   <RangeInput
                     label="Calmar"
+                    term="calmar"
                     range={draft.calmar}
                     onChange={(calmar) => setDraft({ ...draft, calmar })}
                   />

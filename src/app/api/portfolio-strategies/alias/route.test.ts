@@ -279,7 +279,8 @@ describe("PATCH /api/portfolio-strategies/alias — ownership / 404", () => {
       }),
     );
     expect(res.status).toBe(404);
-    expect((await res.json()).error).toBe("portfolio not found");
+    // 201-21 / D-04: hand-typed full sentence.
+    expect((await res.json()).error).toBe("Allocation not found");
   });
 
   it("[G8.B.6 regression] returns 404 when the (portfolio_id, strategy_id) tuple updates zero rows", async () => {

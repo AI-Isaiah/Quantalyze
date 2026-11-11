@@ -6,6 +6,9 @@ import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Skeleton, SkeletonText } from "@/components/ui/Skeleton";
+import { Term } from "@/components/ui/Term";
+import { Tooltip } from "@/components/ui/Tooltip";
+import { termDefinition, type TermKey } from "@/lib/glossary";
 import { LiveRegion } from "@/components/ui/LiveRegion";
 import { cn, formatNumber, formatPercent } from "@/lib/utils";
 import { RouteResponseError } from "@/lib/route-response-error";
@@ -105,31 +108,64 @@ function formatMetric(value: number | null, unit: MetricUnit): string {
   return unit === "signedDecimal" && signTone(value, 2) === "positive" ? `+${decimal}` : decimal;
 }
 
-// Phase 100 / PI-05 (UI-SPEC W3): verbatim narrative tooltips on the metric
-// labels. Also mounts on /portfolios/[id]:353. The `title` attribute + the
-// per-metric `unit` formatting are the render surface; ordering and every other
-// DOM node are unchanged.
+// Phase 100 / PI-05 (UI-SPEC W3) and Phase 201 U-02 / U-17: the narrative tooltip on each
+// metric label is the registry definition for `term` (the same text OptimizerPanel's
+// glossary shows), opened through the app's one `Term` affordance. Also mounts on
+// /portfolios/[id]:353. Ordering and every other DOM node are unchanged.
+//
+// `note` is a per-row sentence appended to the definition (194 D-15: why a lift is withheld,
+// or what the `<1y` marker means). `Term` shows the registry text alone, so a row with a note
+// opens the same bubble with the note appended, on a trigger carrying the same `data-term`
+// and the same classes (`PortfolioOptimizer.test.tsx` pins the two classNames equal).
+const TERM_TRIGGER_CLASSES =
+  "cursor-help underline decoration-dotted decoration-1 decoration-text-muted underline-offset-2 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 print:no-underline";
+
+function MetricLabel({
+  term,
+  label,
+  note,
+}: {
+  term: TermKey;
+  label: string;
+  note?: string;
+}) {
+  if (!note) return <Term k={term}>{label}</Term>;
+  return (
+    <Tooltip content={`${termDefinition(term)} ${note}`} className="inline">
+      {({ "aria-describedby": describedBy }) => (
+        <span
+          tabIndex={0}
+          data-term={term}
+          aria-describedby={describedBy}
+          className={TERM_TRIGGER_CLASSES}
+        >
+          {label}
+        </span>
+      )}
+    </Tooltip>
+  );
+}
+
 function MetricCell({
   label,
+  term,
   value,
   unit,
-  tooltip,
+  note,
   marker,
 }: {
   label: string;
+  term: TermKey;
   value: number | null;
   unit: MetricUnit;
-  tooltip?: string;
+  note?: string;
   /** 194 D-15: the `<1y` marker, rendered after the value. */
   marker?: { title: string };
 }) {
   return (
     <div className="text-right">
-      <p
-        title={tooltip}
-        className="text-micro uppercase tracking-wider text-text-muted font-medium"
-      >
-        {label}
+      <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
+        <MetricLabel term={term} label={label} note={note} />
       </p>
       <p
         className={cn(
@@ -216,25 +252,23 @@ function SuggestionRow({
       <div className="flex items-center gap-4 sm:gap-6">
         <MetricCell
           label="Sharpe lift"
+          term="sharpe_lift"
           value={gatedValue(suggestion.sharpe_lift, liftState)}
           unit="signedDecimal"
-          tooltip={
-            "Modeled change in your portfolio's Sharpe ratio if this strategy were added — a unitless delta, not a percentage. Positive means better risk-adjusted return in backtest." +
-            (withheldReason ? ` ${withheldReason}` : shortTitle ? ` ${shortTitle}` : "")
-          }
+          note={withheldReason ?? shortTitle ?? undefined}
           marker={shortTitle ? { title: shortTitle } : undefined}
         />
         <MetricCell
-          label="Corr w/ portfolio"
+          label="Corr w/ allocation"
+          term="corr_with_allocation"
           value={suggestion.corr_with_portfolio}
           unit="decimal"
-          tooltip="Correlation of this strategy's daily returns with your current portfolio, from -1 to 1 (not a percentage). Lower means more diversification benefit."
         />
         <MetricCell
           label="DD improve"
+          term="dd_improve"
           value={suggestion.dd_improvement}
           unit="percent"
-          tooltip="Modeled reduction in your portfolio's maximum drawdown from adding this strategy, as a percentage of NAV."
         />
       </div>
       <div className="flex items-center gap-2">
@@ -372,7 +406,7 @@ export default function PortfolioOptimizer({
             unmounted and focus has fallen to <body>. Carries the card's own
             sentence — no new copy, no visual delta (DESIGN-05). */}
         <LiveRegion
-          message={error ?? "We couldn't compute suggestions for this portfolio."}
+          message={error ?? "We couldn't compute suggestions for this allocation."}
           assertive
         />
         <div className="rounded-lg border border-negative/30 bg-negative/5 px-4 py-3">
@@ -380,7 +414,7 @@ export default function PortfolioOptimizer({
             Optimizer failed
           </p>
           <p className="mt-0.5 text-caption text-text-secondary">
-            {error ?? "We couldn't compute suggestions for this portfolio."}
+            {error ?? "We couldn't compute suggestions for this allocation."}
           </p>
         </div>
         <div className="mt-4">
@@ -399,7 +433,7 @@ export default function PortfolioOptimizer({
         {heading}
         <p className="text-small text-text-secondary">
           Run the optimizer to see strategies that could improve your
-          portfolio&apos;s risk-adjusted return.
+          allocation&apos;s risk-adjusted return.
         </p>
         {/* No inline `{error && …}` here: the failed branch above now returns
             on ANY error, so this state is only ever reached with `error` null.

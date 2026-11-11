@@ -4,6 +4,8 @@ import { useId, type ReactNode } from "react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { formatUsd } from "@/lib/dollar-validation";
+import { Term } from "@/components/ui/Term";
+import type { TermContext, TermKey } from "@/lib/glossary";
 import { formatCloseDay } from "@/lib/factsheet/returns-unit";
 import { annualizedCell } from "@/components/strategy/annualized-cell";
 import {
@@ -57,12 +59,17 @@ const VALUE = "mt-1 font-mono text-lg font-medium tabular-nums whitespace-nowrap
 
 function Cell({
   label,
+  term,
+  termContext,
   testId,
   value,
   tone = "",
   children,
 }: {
   label: string;
+  /** Phase 201 plan 12 (D-03): the registry term the label names; the label renders through `Term`. */
+  term?: TermKey;
+  termContext?: TermContext;
   testId: string;
   value: ReactNode;
   tone?: string;
@@ -70,7 +77,15 @@ function Cell({
 }) {
   return (
     <div className={CELL}>
-      <div className={LABEL}>{label}</div>
+      <div className={LABEL}>
+        {term ? (
+          <Term k={term} context={termContext}>
+            {label}
+          </Term>
+        ) : (
+          label
+        )}
+      </div>
       <div data-testid={testId} className={`${VALUE} ${tone}`}>
         {value}
       </div>
@@ -146,7 +161,7 @@ export function GlancePanel({
           id={titleId}
           className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted"
         >
-          Book at a glance
+          Allocation at a glance
         </h2>
         {stamp !== "" && (
           <p className="text-micro font-mono text-text-muted">{stamp}</p>
@@ -157,6 +172,7 @@ export function GlancePanel({
           <Group title="Return">
             <Cell
               label="YTD TWR"
+              term="twr"
               testId="glance-ytd"
               value={
                 <>
@@ -170,6 +186,7 @@ export function GlancePanel({
           <Group title="Risk">
             <Cell
               label="Sharpe"
+              term="sharpe"
               testId="glance-sharpe"
               value={
                 <>
@@ -181,6 +198,8 @@ export function GlancePanel({
             />
             <Cell
               label="Max DD 12m"
+              term="max_drawdown"
+              termContext="last12m"
               testId="glance-maxdd"
               value={
                 <>
@@ -193,7 +212,7 @@ export function GlancePanel({
           </Group>
           <Group title="Holdings">
             <Cell
-              label="Book equity"
+              label="Allocation equity"
               testId="glance-book-equity"
               value={formatUsd(equity)}
             >

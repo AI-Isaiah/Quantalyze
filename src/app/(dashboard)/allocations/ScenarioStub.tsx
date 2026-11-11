@@ -1,4 +1,5 @@
 import { Card } from "@/components/ui/Card";
+import { Term } from "@/components/ui/Term";
 import {
   ScenarioFlaggedHoldingsList,
   type ScenarioFlaggedHoldingsListProps,
@@ -53,7 +54,7 @@ export function ScenarioStub({
         className="mb-2 text-2xl text-text-primary"
         style={{ fontFamily: "var(--font-serif)" }}
       >
-        Scenario builder coming soon
+        <Term k="scenario">Scenario</Term> builder coming soon
       </h2>
       <p className="mx-auto max-w-md text-sm text-text-secondary">
         Model what-if outcomes by adding or removing strategies and holdings

@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { withPublishedOrOwner } from "@/lib/visibility";
+import { isDiscoveryVisible, withPublishedOrOwner } from "@/lib/visibility";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -39,20 +39,26 @@ export const runtime = "nodejs";
 export interface BrowseStrategyRow {
   id: string;
   /**
-   * Audit C-0112 — display label only. For `disclosure_tier='institutional'`
-   * rows this is the real strategy name; for exploratory rows it is the
-   * codename (when present) or a synthetic `Strategy #<id-prefix>` label
-   * derived by `displayStrategyName`. The raw `strategies.name` column is
-   * NEVER emitted on another owner's exploratory rows because pairing it with
-   * the codename defeats the pseudonymity contract (the drawer search would
-   * otherwise cross-correlate a known real name back to its codename).
+   * Display label, resolved by `displayStrategyName` with the viewer's
+   * visibility fact (Phase 201 / D-09, D-17). A row visible to the caller in
+   * discovery (published, or the caller's own) carries its REAL name, else its
+   * codename, else `Strategy #<id-prefix>`. A row that is not visible never
+   * carries its name: it reads as the codename or the synthetic label. The query
+   * predicate (`withPublishedOrOwner`) and RLS already keep such a row out of
+   * the response; the per-row `isDiscoveryVisible` guard is the third layer.
    *
-   * CONTRIB-03 exception: the caller's OWN rows (`user_id === session id`,
-   * surfaced by the owner-inclusive predicate) carry their REAL name so the
-   * allocator can recognise the contribution they just named. This widens
-   * disclosure to nobody — the owner already knows their own name + codename.
+   * Audit C-0112 used to suppress `name` on every non-institutional row so the
+   * drawer search could not map a known real name back to its codename. The
+   * founder accepted that link on 2026-11-10 ("Real name everywhere"): a
+   * published strategy's name is already public on anonymous `/browse`. The
+   * manager's identity (organization) is a separate field and is not on this
+   * wire.
    */
   name: string;
+  /**
+   * Kept on the wire (D-17: no API change) so the three search surfaces keep
+   * matching a strategy by its codename as well as its name.
+   */
   codename: string | null;
   markets: string[];
   strategy_types: string[];
@@ -165,11 +171,10 @@ export const GET = withAllocatorAuth(
     // client handed INTO the helper, whose `.or()` is marker-exempt). RLS is the
     // backstop for a DIFFERENT failure — the predicate being dropped on this
     // user-scoped client. Keep this call on the user-scoped client.
-    // Audit C-0112 — co-fetch `disclosure_tier` so the response mapping
-     // can suppress the real `name` for non-institutional rows. Ordering
-     // still happens on `name` server-side (alphabetical browse is the
-     // drawer contract); the leak prevention is in the projection step
-     // below, not in the SELECT/ORDER list.
+    // Phase 201 / D-17 — `status` and `user_id` are in the select list below, read
+    // so the projection can state the viewer's visibility fact per row. Ordering
+    // still happens on `name` server-side (alphabetical browse is the drawer
+    // contract).
     const { data, error } = await withPublishedOrOwner(
       supabase
         .from("strategies")
@@ -220,16 +225,11 @@ export const GET = withAllocatorAuth(
     // them to [] so downstream consumers (the drawer's filter pills, the
     // mandate-fit chip computation) can iterate without a null check.
     //
-    // Audit C-0112 — `name` is run through `displayStrategyName` so the
-    // raw strategies.name column is suppressed on any row whose
-    // `disclosure_tier !== 'institutional'`. This mirrors the rule
-    // applied by the Match Queue: codename wins;
-    // institutional rows may surface the real name; exploratory rows
-    // missing a codename collapse to a synthetic `Strategy #<id>`.
-    // Without this guard, the drawer's case-insensitive search keyed on
-    // `name || codename` lets an attacker who knows a real strategy
-    // name look it up and read its codename — defeating the
-    // pseudonymity contract for the entire verified catalog.
+    // Phase 201 / D-17 — `name` is run through `displayStrategyName` with the
+    // viewer's visibility fact (`isDiscoveryVisible`): a row the caller can see
+    // in discovery is labelled by its real name, anything else by its codename or
+    // `Strategy #<id>`. The predicate and RLS keep invisible rows out of `data`;
+    // this guard means a dropped predicate on a service-role swap cannot name one.
     // M-0343: the +1 probe row tells us the catalog exceeds the cap. Drop it
     // from the payload and surface `has_more` so a consumer CAN warn instead of
     // silently truncating (the drawer does not yet — deferred UX follow-up,
@@ -253,27 +253,27 @@ export const GET = withAllocatorAuth(
         status: unknown;
       };
       const tier: DisclosureTier = r.disclosure_tier ?? "exploratory";
-      // CONTRIB-03 — the owner's OWN rows (now surfaced by withPublishedOrOwner,
-      // including their not-yet-published contributions) show the REAL name they
-      // just typed: an allocator must be able to recognise their own strategy in
-      // the drawer. `displayStrategyName` would otherwise collapse a fresh
-      // (non-institutional) contribution to a codename / `Strategy #<id>` label,
-      // over-redacting it from its own author. This is safe — the owner already
-      // knows both their name and codename, so it never widens disclosure to
-      // anyone else. Everyone else's rows stay pseudonymised (below).
+      // CONTRIB-03 — the owner's OWN rows (surfaced by withPublishedOrOwner,
+      // including their not-yet-published contributions) are visible to their
+      // author, so `isDiscoveryVisible` lets their real name through. `isOwnRow`
+      // still drives the `isOwn` bit and the owner-only metadata below.
       const isOwnRow = r.user_id !== null && r.user_id === user.id;
-      // Phase 29 / UNIFY-03 — `displayStrategyName` runs on example rows too:
-      // the provenance tag must NOT reintroduce a raw-name leak. An example
-      // row whose tier is exploratory still surfaces its codename / synthetic
-      // label, never `strategies.name` (T12-class pseudonymity contract).
-      const safeLabel = isOwnRow
-        ? r.name
-        : displayStrategyName({
-            id: r.id,
-            name: r.name,
-            codename: r.codename,
-            disclosure_tier: tier,
-          });
+      // Phase 29 / UNIFY-03 — example rows go through the same resolver: the
+      // provenance tag does not change what the viewer may see named.
+      const safeLabel = displayStrategyName(
+        {
+          id: r.id,
+          name: r.name,
+          codename: r.codename,
+          disclosure_tier: tier,
+        },
+        {
+          visible: isDiscoveryVisible(
+            { status: typeof r.status === "string" ? r.status : null, user_id: r.user_id },
+            user.id,
+          ),
+        },
+      );
       return {
         id: r.id,
         name: safeLabel,

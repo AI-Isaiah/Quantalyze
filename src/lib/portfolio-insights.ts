@@ -115,7 +115,7 @@ export function computeBiggestRisk(
       return {
         key: "biggest_risk_concentration",
         severity: "high",
-        sentence: `Risk is concentrated in ${top.strategy_name}: ${Math.round(top.marginal_risk_pct)}% of portfolio volatility on ${Math.round(top.weight_pct)}% of capital.`,
+        sentence: `Risk is concentrated in ${top.strategy_name}: ${Math.round(top.marginal_risk_pct)}% of allocation volatility on ${Math.round(top.weight_pct)}% of capital.`,
         strategy_id: top.strategy_id,
         strategy_name: top.strategy_name,
       };
@@ -128,7 +128,7 @@ export function computeBiggestRisk(
     return {
       key: "biggest_risk_correlation",
       severity: "medium",
-      sentence: `Your portfolio is ${formatPct0(corr)} correlated on average. Concentration risk masked as diversification.`,
+      sentence: `Your allocation is ${formatPct0(corr)} correlated on average. Concentration risk masked as diversification.`,
     };
   }
 
@@ -176,7 +176,7 @@ export function computeRegimeChange(
   return {
     key: "regime_change",
     severity: "medium",
-    sentence: `Correlation regime shift: pairwise correlation ${direction} from ${formatFixedSigned(best.prior, { dp: 2 })} to ${formatFixedSigned(best.recent, { dp: 2 })} between two strategies in your portfolio.`,
+    sentence: `Correlation regime shift: pairwise correlation ${direction} from ${formatFixedSigned(best.prior, { dp: 2 })} to ${formatFixedSigned(best.recent, { dp: 2 })} between two strategies in your allocation.`,
   };
 }
 
@@ -228,7 +228,7 @@ export function computeUnderperformance(
   return {
     key: "underperformance",
     severity: "medium",
-    sentence: `${worst.strategy_name} has trailed the portfolio baseline by ${formatPct2(Math.abs(trailDistance))} over the trailing window.`,
+    sentence: `${worst.strategy_name} has trailed the allocation baseline by ${formatPct2(Math.abs(trailDistance))} over the trailing window.`,
     strategy_id: worst.strategy_id,
     strategy_name: worst.strategy_name,
   };
@@ -258,7 +258,7 @@ export function computeConcentrationCreep(
   return {
     key: "concentration_creep",
     severity: "low",
-    sentence: `${top.strategy_name} is ${Math.round(top.weight_pct)}% of the portfolio (equal-weight baseline would be ${Math.round(equalWeight)}%).`,
+    sentence: `${top.strategy_name} is ${Math.round(top.weight_pct)}% of the allocation (equal-weight baseline would be ${Math.round(equalWeight)}%).`,
     strategy_id: top.strategy_id,
     strategy_name: top.strategy_name,
   };

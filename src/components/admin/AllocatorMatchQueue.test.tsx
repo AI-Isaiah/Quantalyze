@@ -824,7 +824,7 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
     });
   }
 
-  it("below md, action-bar and empty-state Recompute now issue no request and Edit preferences opens no panel", async () => {
+  it("below md, action-bar and empty-state Recompute now issue no request and Edit mandate opens no panel", async () => {
     installMatchMedia({ md: false, lg: false });
     const payload = { ...buildPayload(), batch: null, candidates: [] };
     const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(jsonResponse(payload));
@@ -835,7 +835,7 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
     const recomputes = screen.getAllByRole("button", { name: /Recompute now/i });
     expect(recomputes).toHaveLength(2);
     for (const button of recomputes) fireEvent.click(button);
-    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Edit mandate/i }));
 
     expect(mutationCalls(fetchMock, "/api/admin/match/recompute")).toHaveLength(0);
     expect(screen.queryByRole("heading", { name: /CRM-style editor/i })).toBeNull();
@@ -887,9 +887,9 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
 
     render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
     await screen.findByRole("heading", { name: /Demo Allocator/i });
-    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Edit mandate/i }));
     const editor = screen.getByRole("heading", { name: /CRM-style editor/i });
-    const save = screen.getByRole("button", { name: "Save preferences" });
+    const save = screen.getByRole("button", { name: "Save mandate" });
     expect(save).not.toBeDisabled();
 
     act(() => {
@@ -899,7 +899,7 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
     expect(save).toBeDisabled();
     const panel = editor.closest(".fixed") as HTMLElement;
     expect(within(panel).getByRole("status").textContent).toMatch(
-      /Read-only on mobile\..*768px or wider.*save preferences/,
+      /Read-only on mobile\..*768px or wider.*save the mandate/,
     );
 
     // A disabled button does not stop a scripted or implicit submit.
@@ -919,10 +919,10 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
 
     render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
     await screen.findByRole("heading", { name: /Demo Allocator/i });
-    fireEvent.click(screen.getByRole("button", { name: /Edit preferences/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Edit mandate/i }));
 
     // Save at md: the PUT goes out and its success arms the 100 ms confirm.
-    fireEvent.submit(screen.getByRole("button", { name: "Save preferences" }).closest("form")!);
+    fireEvent.submit(screen.getByRole("button", { name: "Save mandate" }).closest("form")!);
     await waitFor(() => {
       expect(mutationCalls(fetchMock, "/preferences/")).toHaveLength(1);
     });
@@ -949,7 +949,7 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
     render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
     await screen.findByRole("heading", { name: /Demo Allocator/i });
 
-    for (const name of [/Recompute now/i, /Edit preferences/i]) {
+    for (const name of [/Recompute now/i, /Edit mandate/i]) {
       const classes = screen.getByRole("button", { name }).className.split(/\s+/);
       expect(classes, String(name)).toContain("hidden");
       expect(classes, String(name)).toContain("md:inline-flex");
@@ -982,5 +982,148 @@ describe("<AllocatorMatchQueue> — N-MATCH read-only below md", () => {
     expect(banner.closest("div")?.className).toContain("md:hidden");
     expect(banner.closest("div")?.className).toContain("border-accent/30");
     expect(banner.closest("div")?.className).toContain("bg-accent/5");
+  });
+});
+
+/**
+ * Phase 201 / D-17 - the admin queue names a strategy only when it is published.
+ * An admin is a viewer like any other: discovery shows an admin only published
+ * strategies, so the strategy's `status` decides the name, not the admin gate
+ * (`isAdminUser` on `/api/admin/match/[allocator_id]`). Every other status keeps
+ * the codename, and a row that arrives with no `status` at all keeps it too.
+ */
+describe("<AllocatorMatchQueue> - D-17: a name only for a published strategy", () => {
+  function payloadWithStatus(status: string | undefined) {
+    const base = buildRichPayload();
+    const st = status === undefined ? {} : { status };
+    return {
+      ...base,
+      candidates: base.candidates.map((c) => ({
+        ...c,
+        strategies: { ...c.strategies, name: "Fibonacci Ghost", codename: "ghost-cand", ...st },
+      })),
+      excluded: base.excluded.map((c) => ({
+        ...c,
+        strategies: { ...c.strategies, name: "Excluded Ghost", codename: "ghost-exc", ...st },
+      })),
+      decisions: base.decisions.map((d) => ({
+        ...d,
+        strategies: { ...d.strategies, name: "History Ghost", codename: "ghost-dec", ...st },
+      })),
+    };
+  }
+
+  async function mountOpen(status: string | undefined) {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(payloadWithStatus(status)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findAllByText(/Fibonacci Ghost|ghost-cand/);
+    fireEvent.click(screen.getByText(/Excluded strategies/));
+    fireEvent.click(screen.getByText(/Decision history/));
+    await screen.findByText(/AUM below floor/);
+    return document.body.textContent ?? "";
+  }
+
+  // The Send intro panel is its own resolver call site, opened from the detail's action.
+  for (const [status, shown, hidden] of [
+    ["published", "Fibonacci Ghost", "ghost-cand"],
+    ["draft", "ghost-cand", "Fibonacci Ghost"],
+  ] as const) {
+    it(`the Send intro panel heads a ${status} strategy with ${shown}`, async () => {
+      await mountOpen(status);
+      // The exact name skips the shortlist card itself (role=button, name = its whole text).
+      fireEvent.click(screen.getAllByRole("button", { name: "Send intro \u2192" })[0]);
+      const eyebrow = await screen.findByText("Send intro", { selector: "p" });
+      const header = eyebrow.parentElement as HTMLElement;
+      expect(header.textContent).toContain(shown);
+      expect(header.textContent).not.toContain(hidden);
+    });
+  }
+
+  it("a published strategy prints its name in the candidate, excluded and history rows", async () => {
+    const text = await mountOpen("published");
+    for (const name of ["Fibonacci Ghost", "Excluded Ghost", "History Ghost"]) {
+      expect(text).toContain(name);
+    }
+    for (const codename of ["ghost-cand", "ghost-exc", "ghost-dec"]) {
+      expect(text).not.toContain(codename);
+    }
+  });
+
+  for (const status of ["draft", "private", "pending_review", "archived", undefined]) {
+    it(`a ${status ?? "status-less"} strategy keeps its codename and never prints its name`, async () => {
+      const text = await mountOpen(status);
+      for (const codename of ["ghost-cand", "ghost-exc", "ghost-dec"]) {
+        expect(text).toContain(codename);
+      }
+      for (const name of ["Fibonacci Ghost", "Excluded Ghost", "History Ghost"]) {
+        expect(text).not.toContain(name);
+      }
+    });
+  }
+});
+
+/**
+ * Phase 201 plan 20 (D-06, D-11, U-13) - the queue's button and empty state say "mandate", and a
+ * decision's date reads the helper's `Oct 9, 2026` in a cell that cannot wrap.
+ * WHY: the same instant must read the same on every machine (UTC, not the browser locale), and a
+ * wrapped date column is unreadable in a 4-column table.
+ */
+describe("<AllocatorMatchQueue> - mandate copy and decision dates (D-06, D-11)", () => {
+  function mount(payload: unknown) {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    return render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+  }
+
+  it("the action bar button reads 'Edit mandate', never 'Edit preferences'", async () => {
+    mount(buildPayload());
+    expect(await screen.findByRole("button", { name: "Edit mandate" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Edit preferences/i })).toBeNull();
+  });
+
+  it("an empty batch points at the mandate", async () => {
+    mount({ ...buildPayload(), candidates: [] });
+    expect(
+      await screen.findByText(
+        "No eligible candidates for this batch. Try editing the mandate or relaxing criteria.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("prints a decision's date as Oct 9, 2026 (UTC) in nowrap cells, both layouts", async () => {
+    const payload = buildPayload();
+    mount({
+      ...payload,
+      decisions: [
+        {
+          id: "dec-date",
+          strategy_id: "strat-1",
+          decision: "thumbs_up",
+          founder_note: null,
+          contact_request_id: null,
+          created_at: "2026-10-09T23:30:00Z",
+          strategies: {
+            id: "strat-1",
+            name: "Alpha One",
+            codename: "alpha",
+            disclosure_tier: "named" as const,
+          },
+        },
+      ],
+    });
+    await screen.findAllByText(/alpha/);
+    fireEvent.click(screen.getByText(/Decision history/));
+    const stamps = screen.getAllByText("Oct 9, 2026");
+    expect(stamps).toHaveLength(2);
+    for (const el of stamps) expect(el.className).toContain("whitespace-nowrap");
   });
 });

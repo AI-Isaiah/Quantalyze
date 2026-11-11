@@ -1,5 +1,5 @@
 import { parseIsoDay, utcEpoch } from "@/lib/dateday";
-import { cn } from "@/lib/utils";
+import { cn, formatDay } from "@/lib/utils";
 import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import type { CoverageSpan, CoverageWindow } from "@/lib/scenario-window";
 
@@ -119,7 +119,8 @@ export function CoverageTimeline({
             const membershipWord = row.inBlend ? "in blend" : "auto-excluded";
             const coverage =
               first != null && last != null
-                ? `covers ${first}–${last}`
+                ? `covers ${formatDay(first)} – ` +
+                  `${formatDay(last)}`
                 : "no data";
             const ariaLabel = `${row.name}: ${coverage}, ${membershipWord}`;
 

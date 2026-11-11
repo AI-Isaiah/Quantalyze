@@ -9,6 +9,10 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
  * not read its open positions (a derivative-side failure keeps only the spot
  * rows at the key's newest day) must say its positions are missing, beside the
  * table the owner reads them from, for as long as those rows are shown.
+ *
+ * F-11 / D-11 (review R3-01 item 3, plan 201-36): every note prints its read day
+ * through formatDay ("Aug 31, 2026"), never the raw ISO day. The fixtures stay
+ * ISO, so the stale-read grouping still compares ISO days; only the sentence moved.
  */
 
 vi.mock("./components/HoldingsTable", () => ({
@@ -119,8 +123,10 @@ describe("HoldingsTabPanel: open positions say how old an older key's read is (S
     );
     const notes = screen.getAllByTestId("open-positions-read-day-note");
     expect(notes.map((n) => n.textContent)).toEqual([
-      "Positions from the Binance key Old are as last read on 2026-08-31: BTC-PERP, SOL-PERP.",
+      "Positions from the Binance key Old are as last read on Aug 31, 2026: BTC-PERP, SOL-PERP.",
     ]);
+    // F-11: no note carries a raw YYYY-MM-DD day.
+    for (const n of notes) expect(n.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 
   it("says nothing when every key read on the same day", () => {
@@ -139,7 +145,7 @@ describe("HoldingsTabPanel: open positions say how old an older key's read is (S
     expect(
       screen.getAllByTestId("open-positions-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Positions from the Binance key Main are as last read on 2026-09-08: BTC-PERP.",
+      "Positions from the Binance key Main are as last read on Sep 8, 2026: BTC-PERP.",
     ]);
   });
 
@@ -151,8 +157,8 @@ describe("HoldingsTabPanel: open positions say how old an older key's read is (S
     expect(
       screen.getAllByTestId("open-positions-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Positions from the Binance key A are as last read on 2026-09-20: BTC-PERP.",
-      "Positions from the Binance key B are as last read on 2026-09-20: ETH-PERP.",
+      "Positions from the Binance key A are as last read on Sep 20, 2026: BTC-PERP.",
+      "Positions from the Binance key B are as last read on Sep 20, 2026: ETH-PERP.",
     ]);
   });
 
@@ -188,7 +194,10 @@ describe("HoldingsTabPanel: a key whose rows' poll could not read its positions 
     expect(
       screen.getByTestId("open-positions-partial-read-note").textContent,
     ).toBe(
-      "Open positions from the Binance key Main could not be read on its sync of 2026-09-05. Any it holds are missing below until a sync reads them.",
+      "Open positions from the Binance key Main could not be read on its sync of Sep 5, 2026. Any it holds are missing below until a sync reads them.",
+    );
+    expect(screen.getByTestId("open-positions-partial-read-note").textContent).not.toMatch(
+      /\d{4}-\d{2}-\d{2}/,
     );
   });
 
@@ -214,7 +223,7 @@ describe("HoldingsTabPanel: a key whose rows' poll could not read its positions 
     expect(
       screen.getByTestId("open-positions-partial-read-note").textContent,
     ).toBe(
-      "Open positions from the Binance key Old could not be read on its sync of 2026-09-05. Any it held then are missing below.",
+      "Open positions from the Binance key Old could not be read on its sync of Sep 5, 2026. Any it held then are missing below.",
     );
   });
 
@@ -263,7 +272,7 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     );
     expect(
       screen.getAllByTestId("holdings-read-day-note").map((n) => n.textContent),
-    ).toEqual(["Spot holdings from the Binance key Main are as last read on 2026-09-20: BTC, USDT."]);
+    ).toEqual(["Spot holdings from the Binance key Main are as last read on Sep 20, 2026: BTC, USDT."]);
   });
 
   it("wraps long unbroken symbols instead of overflowing a 375px page (class tokens pinned)", () => {
@@ -320,8 +329,8 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key are as last read on 2026-09-20: BTC.",
-      "Spot holdings from a Binance key are as last read on 2026-09-20: USDT.",
+      "Spot holdings from the Binance key are as last read on Sep 20, 2026: BTC.",
+      "Spot holdings from a Binance key are as last read on Sep 20, 2026: USDT.",
     ]);
   });
 
@@ -333,7 +342,7 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key Main are as last read on 2026-09-08: BTC.",
+      "Spot holdings from the Binance key Main are as last read on Sep 8, 2026: BTC.",
     ]);
   });
 
@@ -379,8 +388,8 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key B are as last read on 2026-09-18: SOL, USDC.",
-      "Spot holdings from the Binance key A are as last read on 2026-09-20: BTC, USDT.",
+      "Spot holdings from the Binance key B are as last read on Sep 18, 2026: SOL, USDC.",
+      "Spot holdings from the Binance key A are as last read on Sep 20, 2026: BTC, USDT.",
     ]);
   });
 
@@ -400,10 +409,10 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key A are as last read on 2026-09-28: BTC.",
+      "Spot holdings from the Binance key A are as last read on Sep 28, 2026: BTC.",
     ]);
     expect(positionLines()).toEqual([
-      "Positions from the Binance key A are as last read on 2026-09-28: BTC-PERP.",
+      "Positions from the Binance key A are as last read on Sep 28, 2026: BTC-PERP.",
     ]);
   });
 
@@ -420,10 +429,10 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key S are as last read on 2026-09-20: BTC.",
+      "Spot holdings from the Binance key S are as last read on Sep 20, 2026: BTC.",
     ]);
     expect(positionLines()).toEqual([
-      "Positions from the Binance key P are as last read on 2026-09-21: ETH-PERP.",
+      "Positions from the Binance key P are as last read on Sep 21, 2026: ETH-PERP.",
     ]);
   });
 
@@ -442,7 +451,7 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key Old are as last read on 2026-09-01: BTC.",
+      "Spot holdings from the Binance key Old are as last read on Sep 1, 2026: BTC.",
     ]);
   });
 });
@@ -458,13 +467,13 @@ describe("HoldingsTabPanel: a spot row with no price is named under the spot tab
 
   it("one gap row beside a priced one reads the singular sentence, in the muted wrapping class", () => {
     // WHY (D-07): the tab shows no AUM figure, so the line is where the
-    // allocator learns the unpriced row is not in portfolio AUM.
+    // allocator learns the unpriced row is not in allocation AUM.
     renderPanel(
       [gapRow("key-a", "ZZZ"), spotRow("key-a", "BTC")],
       [apiKey("key-a", "A")],
     );
     expect(note().map((n) => n.textContent)).toEqual([
-      "1 holding has no price, so portfolio AUM leaves it out.",
+      "1 holding has no price, so allocation AUM leaves it out.",
     ]);
     const el = note()[0];
     const tokens = el.className.split(/\s+/);
@@ -500,7 +509,7 @@ describe("HoldingsTabPanel: a spot row with no price is named under the spot tab
       [apiKey("key-a", "A")],
     );
     expect(note().map((n) => n.textContent)).toEqual([
-      "3 holdings have no price, so portfolio AUM leaves them out.",
+      "3 holdings have no price, so allocation AUM leaves them out.",
     ]);
   });
 
@@ -530,7 +539,7 @@ describe("HoldingsTabPanel: a spot row with no price is named under the spot tab
     const section = screen.getByTestId("holdings-price-gap-note").parentElement as HTMLElement;
     fireEvent.click(within(section).getByTestId("stub-hide-revoked"));
     expect(note().map((n) => n.textContent)).toEqual([
-      "1 holding has no price, so portfolio AUM leaves it out.",
+      "1 holding has no price, so allocation AUM leaves it out.",
     ]);
   });
 });

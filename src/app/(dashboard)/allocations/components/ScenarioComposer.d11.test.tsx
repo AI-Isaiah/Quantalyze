@@ -676,8 +676,14 @@ describe("ScenarioComposer Sharpe delta - an unreadable own-book series fails cl
         <OwnBookDeltaPanel />
       </FactsheetProvider>,
     );
-    const row = (label: string) => view.getByText(label).closest("tr")!.textContent ?? "";
-    expect(row("Max DD (blend vs book)")).toMatch(/\d/);
+    // Phase 201 D-01, D-03: a row label is a Term (or a Term lead plus plain words), so its text sits in
+    // several nodes. Find the label cell by its whole text and read its row.
+    const row = (label: string) => {
+      const cell = Array.from(view.container.querySelectorAll("td")).find((td) => td.textContent === label);
+      expect(cell, `the panel must carry a ${label} row`).toBeDefined();
+      return cell!.closest("tr")!.textContent ?? "";
+    };
+    expect(row("Max DD (blend vs allocation)")).toMatch(/\d/);
     expect(row("Sharpe")).toContain("\u2014");
     expect(row("Sortino")).toContain("\u2014");
     expect(view.getByTestId("own-book-delta-note").textContent).toContain("could not be read");

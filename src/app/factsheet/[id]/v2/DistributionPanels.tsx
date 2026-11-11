@@ -10,6 +10,8 @@ import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 import { benchmarkWithheldReason } from "@/lib/factsheet/returns-unit";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import { pctSigned, ratio, signed } from "./format";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 import { estLabelWidth, fitBaselineY, fitTickLabel } from "@/lib/chart-ticks";
 
 /**
@@ -265,11 +267,11 @@ export function QuantileBoxPlotPanel() {
           <p className="text-micro text-text-muted">This view has no usable daily returns to summarise.</p>
         </header>
         <div className="grid grid-cols-5 gap-3 text-micro tabular-nums font-mono mt-1">
-          <Kpi label="P5" value="—" tone="muted" />
-          <Kpi label="P25" value="—" tone="muted" />
+          <Kpi label="P5" term="percentile" value="—" tone="muted" />
+          <Kpi label="P25" term="percentile" value="—" tone="muted" />
           <Kpi label="Median" value="—" tone="accent" />
-          <Kpi label="P75" value="—" tone="muted" />
-          <Kpi label="P95" value="—" tone="muted" />
+          <Kpi label="P75" term="percentile" value="—" tone="muted" />
+          <Kpi label="P95" term="percentile" value="—" tone="muted" />
         </div>
       </figure>
     );
@@ -380,20 +382,20 @@ export function QuantileBoxPlotPanel() {
         ))}
       </ResponsiveChartFrame>
       <div className="grid grid-cols-5 gap-3 text-micro tabular-nums font-mono mt-1">
-        <Kpi label="P5" value={pctSigned(q.p05)} tone="muted" />
-        <Kpi label="P25" value={pctSigned(q.p25)} tone="muted" />
+        <Kpi label="P5" term="percentile" value={pctSigned(q.p05)} tone="muted" />
+        <Kpi label="P25" term="percentile" value={pctSigned(q.p25)} tone="muted" />
         <Kpi label="Median" value={pctSigned(q.p50)} tone="accent" />
-        <Kpi label="P75" value={pctSigned(q.p75)} tone="muted" />
-        <Kpi label="P95" value={pctSigned(q.p95)} tone="muted" />
+        <Kpi label="P75" term="percentile" value={pctSigned(q.p75)} tone="muted" />
+        <Kpi label="P95" term="percentile" value={pctSigned(q.p95)} tone="muted" />
       </div>
     </figure>
   );
 }
 
-function Kpi({ label, value, tone }: { label: string; value: string; tone: "muted" | "accent" }) {
+function Kpi({ label, term, value, tone }: { label: string; term?: TermKey; value: string; tone: "muted" | "accent" }) {
   return (
     <div>
-      <p className="text-micro uppercase tracking-[0.18em] text-text-muted">{label}</p>
+      <p className="text-micro uppercase tracking-[0.18em] text-text-muted">{term ? <Term k={term}>{label}</Term> : label}</p>
       <p
         className="text-small"
         style={{ color: tone === "accent" && value !== "—" ? "var(--color-accent)" : "var(--color-text-primary)", fontWeight: 600 }}

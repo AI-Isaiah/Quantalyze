@@ -370,7 +370,24 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
 
     // Name + persistent PROJECTED framing rendered.
     expect(html).toContain("My Q3 Blend");
-    expect(html).toContain("PROJECTED — hypothetical, not a live book");
+    expect(html).toContain("PROJECTED — hypothetical, not a live allocation");
+    expect(html).not.toContain("not a live book");
+
+    // Phase 201 PLAINWORDS (D-02, D-18): the registered metric labels in the KPI
+    // strip render through Term, so an anonymous recipient can read what Sharpe,
+    // CAGR and the rest mean. A bare label (no data-term) is the defect.
+    for (const key of [
+      "cagr",
+      "volatility",
+      "sharpe",
+      "sortino",
+      "max_drawdown",
+      "avg_abs_correlation",
+    ]) {
+      expect(html, `KPI label for ${key} must render data-term`).toContain(
+        `data-term="${key}"`,
+      );
+    }
     expect(html).toContain("Shared scenario · PROJECTED");
     expect(html).toContain("scenario-projected-badge");
 
@@ -596,6 +613,19 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // NEVER a rendered curve / KPI strip / live-book substitution.
     expect(html).not.toContain("equity-chart");
     expect(html).not.toContain("correlation-heatmap");
+  });
+
+  it("book-only share → honest-absence copy says allocation sources, not book sources (D-18)", async () => {
+    // A draft with zero added strategies resolves to honest-absence "book-only"
+    // (a union member and identifier, unchanged). The words the recipient reads
+    // follow the canonical allocation word.
+    rpcMock.mockResolvedValueOnce({ data: [{ ...okRow(), draft: { ...okDraft(), addedStrategies: [], weightOverrides: {} }, series: [] }], error: null });
+
+    const html = await renderPage("book-only");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toMatch(/built only on the owner(?:&#x27;|&apos;|')s private allocation sources/);
+    expect(html).not.toMatch(/book sources/i);
   });
 
   it("PRESENT-03 — a MIXED share renders the verbatim honesty caption in the note register", async () => {

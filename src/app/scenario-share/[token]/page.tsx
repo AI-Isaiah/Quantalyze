@@ -53,6 +53,8 @@ import {
 } from "@/lib/figure-gate";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { Card } from "@/components/ui/Card";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { EquityChart } from "@/app/(dashboard)/allocations/widgets/performance/EquityChart";
@@ -88,7 +90,7 @@ const BENCHMARK_FETCH_TIMEOUT_MS = 2500;
 // The persistent PROJECTED framing. Single-sourced so the badge and the subtext
 // can never drift apart — both render the same literal (the subtext only
 // prefixes "Shared scenario · ").
-const PROJECTED_LABEL = "PROJECTED — hypothetical, not a live book";
+const PROJECTED_LABEL = "PROJECTED — hypothetical, not a live allocation";
 
 /** Fetch the public BTC closes (`{ prices, dropped, through }`, Phase 169.4
  *  D-67) for the benchmark overlay and the vs-BTC section. The route is shared
@@ -384,7 +386,7 @@ export default async function ScenarioSharePage({
           heading="This shared scenario can't be displayed"
           body={
             resolved.reason === "book-only"
-              ? "This scenario is built only on the owner's private book sources, which are never shown on a public link. Ask the owner for a scenario that includes catalog strategies."
+              ? "This scenario is built only on the owner's private allocation sources, which are never shown on a public link. Ask the owner for a scenario that includes catalog strategies."
               : "The link is valid, but this scenario was saved in a newer format we can't show here."
           }
         />
@@ -436,14 +438,14 @@ export default async function ScenarioSharePage({
 
   // KPI strip — RETURN / PERCENTAGE form only. No USD, no AUM. Null/non-finite
   // metrics render the em-dash "—" via the shared formatters (never a 0).
-  const kpis: Array<{ label: string; value: string }> = [
+  const kpis: Array<{ label: string; value: string; term?: TermKey }> = [
     { label: "Total return", value: formatPercent(metrics.twr) },
-    { label: "CAGR", value: formatPercent(gatedValue(metrics.cagr, blendGateState)) },
-    { label: "Volatility", value: formatPercent(gatedValue(metrics.volatility, blendGateState)) },
-    { label: "Sharpe", value: formatNumber(gatedValue(metrics.sharpe, blendGateState)) },
-    { label: "Sortino", value: formatNumber(gatedValue(metrics.sortino, blendGateState)) },
-    { label: "Max drawdown", value: formatPercent(metrics.max_drawdown) },
-    { label: "Avg |ρ|", value: formatNumber(metrics.avg_pairwise_correlation) },
+    { label: "CAGR", term: "cagr", value: formatPercent(gatedValue(metrics.cagr, blendGateState)) },
+    { label: "Volatility", term: "volatility", value: formatPercent(gatedValue(metrics.volatility, blendGateState)) },
+    { label: "Sharpe", term: "sharpe", value: formatNumber(gatedValue(metrics.sharpe, blendGateState)) },
+    { label: "Sortino", term: "sortino", value: formatNumber(gatedValue(metrics.sortino, blendGateState)) },
+    { label: "Max drawdown", term: "max_drawdown", value: formatPercent(metrics.max_drawdown) },
+    { label: "Avg |ρ|", term: "avg_abs_correlation", value: formatNumber(metrics.avg_pairwise_correlation) },
   ];
 
   return (
@@ -494,7 +496,7 @@ export default async function ScenarioSharePage({
           {kpis.map((k) => (
             <div key={k.label} className="bg-surface px-4 py-3">
               <div className="text-fixed-11 uppercase tracking-wide text-text-muted">
-                {k.label}
+                {k.term ? <Term k={k.term}>{k.label}</Term> : k.label}
               </div>
               <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-text-primary">
                 {k.value}

@@ -14,6 +14,7 @@ import {
   formatPercent,
   formatNumber,
   formatRelativeTime,
+  formatDay,
 } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { gateAnnualized, gatedValue } from "@/lib/figure-gate";
@@ -21,6 +22,7 @@ import { recordFromScalars } from "@/lib/figure-record-scalars";
 import { annualizedCell } from "@/components/strategy/annualized-cell";
 import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
+import { isDiscoveryVisible } from "@/lib/visibility";
 import { analyticsStatusLabel, strategySourceLabel } from "@/lib/display-labels";
 import { ComputeJobsTable } from "./ComputeJobsTable";
 
@@ -50,6 +52,9 @@ export interface IntroRequestRow {
     name: string;
     codename: string | null;
     disclosure_tier: string;
+    // Phase 201 / D-17: read with the embed so the name follows discovery
+    // visibility. Pinned by the admin embeds test in src/lib/strategy-display.test.ts (the compiler cannot check an untyped select).
+    status: string | null;
   } | null;
 }
 
@@ -245,6 +250,9 @@ function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
             // DisplayableStrategy union; the embed columns are now typed, so a
             // dropped/renamed join column surfaces at compile time.
             const strategy = r.strategies as DisplayableStrategy | null;
+            // D-17: the admin gate (`isAdminUser`, admin/page.tsx) admits this row;
+            // discovery visibility (`isDiscoveryVisible`, null viewer id) decides
+            // whether the strategy's name is printed.
             const status = r.status;
             return (
               <Card key={r.id}>
@@ -254,7 +262,7 @@ function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
                       {profile?.display_name ?? "Unknown"} {profile?.company ? `(${profile.company})` : ""}
                     </p>
                     <p className="text-caption text-text-muted mt-0.5">
-                      wants intro to <span className="font-medium text-text-secondary">{displayStrategyName(strategy)}</span>
+                      wants intro to <span className="font-medium text-text-secondary">{displayStrategyName(strategy, { visible: isDiscoveryVisible(r.strategies ?? {}, null) })}</span>
                     </p>
                     {typeof r.message === "string" && r.message && (
                       <p className="text-caption text-text-secondary mt-2 bg-page rounded p-2">{r.message}</p>
@@ -263,7 +271,7 @@ function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
                       <p className="text-micro text-text-muted mt-1 italic">Note: {r.admin_note}</p>
                     )}
                     <p className="text-micro text-text-muted mt-1">
-                      {new Date(r.created_at).toLocaleDateString()}
+                      {formatDay(r.created_at)}
                     </p>
                   </div>
                   <div className="flex items-center gap-2 ml-4 shrink-0">

@@ -33,7 +33,7 @@ export function ExchangesTabContent({
         ) : (
           <>
             Upload read-only exchange API keys to automatically sync your real
-            positions and build your Active Allocation portfolio. No manual data
+            positions and build your allocation. No manual data
             entry — your invest and divest events are detected directly from your
             exchange account.
           </>
@@ -45,7 +45,7 @@ export function ExchangesTabContent({
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs uppercase tracking-wider text-text-muted font-semibold">
-                Real portfolio
+                Real allocation
               </p>
               <Link
                 href="/allocations"
@@ -54,7 +54,7 @@ export function ExchangesTabContent({
                 {activePortfolio.name}
               </Link>
               <p className="mt-1 text-xs text-text-muted">
-                This portfolio&apos;s positions, allocations, and invest/divest
+                This allocation&apos;s positions, amounts, and invest/divest
                 events are derived automatically from the exchange connections
                 below.
               </p>
@@ -63,7 +63,7 @@ export function ExchangesTabContent({
               href="/allocations"
               className="text-xs px-3 py-2 rounded-md border border-border bg-surface text-text-secondary hover:text-text-primary hover:bg-bg-secondary"
             >
-              Open My Allocation →
+              Open My allocation →
             </Link>
           </div>
         </Card>

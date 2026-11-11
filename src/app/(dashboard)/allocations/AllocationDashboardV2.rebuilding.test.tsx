@@ -96,16 +96,16 @@ const REASON_LINES = [
     // 198-09 (D-01): the Overview says whose history: the book's.
     // 198-UAT-01 (D-10): and names what it hides, never return or risk.
     "awaiting_derivation",
-    "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
+    "Your allocation's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
   ],
   [
     "derivation_rejected",
-    "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden for your whole history. Use the contact form to have it checked.",
+    "The latest rebuild of your allocation's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden for your whole history. Use the contact form to have it checked.",
   ],
   [
     // Review C2 round 2 IN-05: active voice (DESIGN.md Voice).
     "history_read_failed",
-    "We could not load your book's history just now. Reload the page to try again.",
+    "We could not load your allocation's history just now. Reload the page to try again.",
   ],
   [
     // Review C2 round 3 R3-WR-03: the cause and the unlock, never "did not
@@ -221,6 +221,15 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     expect(buildPayloadSpy).not.toHaveBeenCalled();
 
     expect(screen.getByTestId("mock-insight-strip")).toBeInTheDocument();
+  });
+
+  // Phase 201 plan 12 (D-06): the Mandate heading on the full Overview is a registered term too.
+  it("the Mandate heading on the full Overview renders through Term with the mandate key (201-12 D-06)", () => {
+    render(
+      <AllocationDashboardV2 {...baseProps} equityHistoryState="rebuilding" />,
+    );
+    const heading = screen.getByRole("heading", { name: "Mandate" });
+    expect(heading.querySelector('[data-term="mandate"]')?.textContent).toBe("Mandate");
   });
 
   it("a payload WITHOUT equityHistoryState is treated as rebuilding (fail-closed)", () => {
@@ -350,7 +359,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     const panel = screen.getByTestId("overview-missing-data");
     // 198-UAT-01 (D-10): names what the history hides, never return or risk.
     expect(panel.textContent).toContain(
-      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
+      "Your allocation's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
     );
     expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
     expect(screen.queryByText(/appear once/)).toBeNull();
@@ -588,7 +597,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     // One fact, one sentence: the gap line replaces the unnamed fallback.
     expect(section.textContent).not.toContain("One of your keys");
 
-    const glance = screen.getByRole("region", { name: "Book at a glance" });
+    const glance = screen.getByRole("region", { name: "Allocation at a glance" });
     const insight = screen.getByTestId("mock-insight-strip");
     const after = (a: Node, b: Node) =>
       Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
@@ -619,7 +628,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       const section = screen.getByTestId("overview-missing-data");
       expect(section.querySelectorAll("p").length).toBeGreaterThanOrEqual(2);
       const glanceText = screen.getByRole("region", {
-        name: "Book at a glance",
+        name: "Allocation at a glance",
       }).textContent;
       // No live baseline here, so each dash cell points at the note that exists.
       expect(glanceText).toContain(NO_LIVE_FIGURES_POINTER);

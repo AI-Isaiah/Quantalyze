@@ -158,8 +158,10 @@ function renderPage(series: DailyPoint[]): {
   const kpi = kpiTile("Sharpe");
   const sortino = kpiTile("Sortino");
   const calmar = kpiTile("Calmar");
-  const rowLabel = Array.from(container.querySelectorAll("td, span, div")).find(
-    (el) => el.children.length === 0 && el.textContent === "Sharpe" && !kpiGrid!.contains(el),
+  // Phase 201 D-03: the row's label cell holds a Term (nested spans), so the label text is no longer a
+  // leaf; the label cell is the td whose whole text is "Sharpe", and the value cell is its next sibling.
+  const rowLabel = Array.from(container.querySelectorAll("td")).find(
+    (el) => el.textContent === "Sharpe" && !kpiGrid!.contains(el),
   );
   expect(rowLabel, "Main Metrics must carry a Sharpe row").toBeDefined();
   const row = (rowLabel!.nextElementSibling?.textContent ?? "").trim();

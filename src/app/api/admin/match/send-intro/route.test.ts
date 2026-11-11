@@ -733,17 +733,20 @@ describe("POST /api/admin/match/send-intro — holdings RBAC (H-0229/M-0282/C-00
     expect((await res.json()).error).toMatch(/current holdings/);
   });
 
-  it("returns 400 when allocator has no portfolio", async () => {
+  it("returns 400 when allocator has no allocation", async () => {
     portfolioState.portfolioId = null;
     const { POST } = await importRoute();
     const res = await POST(makeReq());
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/no portfolio/);
+    // 201-21 / D-04: hand-typed full sentence, retired noun gone.
+    expect((await res.json()).error).toBe(
+      "This allocator has no allocation; cannot record an intro",
+    );
   });
 
   // audit-2026-05-07 cluster-E Phase-2 fix (testing M conf 8) — guard the
   // portfolios-lookup DB error branch (`portfolioErr → 500 "Failed to verify
-  // allocator portfolio"`). Only the null-row branch was tested previously;
+  // the allocator's allocation"`). Only the null-row branch was tested previously;
   // a future change to the error envelope would silently regress without
   // this regression test.
   it("returns 500 when portfolio lookup errors", async () => {
@@ -751,7 +754,7 @@ describe("POST /api/admin/match/send-intro — holdings RBAC (H-0229/M-0282/C-00
     const { POST } = await importRoute();
     const res = await POST(makeReq());
     expect(res.status).toBe(500);
-    expect((await res.json()).error).toMatch(/verify allocator portfolio/);
+    expect((await res.json()).error).toBe("Failed to verify the allocator's allocation");
   });
 
   // audit-2026-05-07 cluster-E Phase-2 fix (testing M conf 8) — guard the

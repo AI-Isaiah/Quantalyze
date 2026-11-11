@@ -44,7 +44,7 @@ import {
   readPublicVerificationSignals,
   shapeRowAnalytics,
 } from "@/lib/queries";
-import { extractAnalytics } from "@/lib/utils";
+import { extractAnalytics, formatDay } from "@/lib/utils";
 import type { Strategy } from "@/lib/types";
 import {
   ownerRemedy,
@@ -1414,8 +1414,8 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
                   </p>
                   <p className="mt-0.5 text-xs text-text-muted">
                     {wizardDraft.name
-                      ? `"${wizardDraft.name}" — started ${new Date(wizardDraft.created_at).toLocaleDateString()}. Drafts expire after 30 days.`
-                      : `Started ${new Date(wizardDraft.created_at).toLocaleDateString()}. Drafts expire after 30 days.`}
+                      ? `"${wizardDraft.name}" — started ${formatDay(wizardDraft.created_at)}. Drafts expire after 30 days.`
+                      : `Started ${formatDay(wizardDraft.created_at)}. Drafts expire after 30 days.`}
                   </p>
                 </>
               )}

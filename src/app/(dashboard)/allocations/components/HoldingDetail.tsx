@@ -28,6 +28,8 @@ import { useNoteAutoSave } from "@/components/notes/useNoteAutoSave";
 import { shouldSaveNoteOnBlur } from "@/components/notes/should-save-note";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 import { formatNumber, formatPercent } from "@/lib/utils";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 // Phase 169 review round 1 IN-04: the ONE money module (DESIGN.md Currency
 // row). The private copy that stood here duplicated its body.
 import { formatUsd } from "@/lib/dollar-validation";
@@ -229,8 +231,8 @@ export function HoldingDetail({
           <Metric label="Allocation" value={formatUsd(row.alloc)} />
           <Metric label="Weight" value={formatPercent(row.weight, 2, { signed: false })} />
           <Metric label="MTD" value={formatPercent(row.mtd, 2)} />
-          <Metric label="Sharpe" value={formatNumber(row.sharpe)} />
-          <Metric label="Max DD" value={formatPercent(row.dd, 2)} />
+          <Metric label="Sharpe" term="sharpe" value={formatNumber(row.sharpe)} />
+          <Metric label="Max DD" term="max_drawdown" value={formatPercent(row.dd, 2)} />
           <Metric label="Age" value={formatDays(row.age)} />
         </div>
       ) : null}
@@ -245,8 +247,8 @@ export function HoldingDetail({
             />
           ) : (
             <p className="text-xs text-text-muted">
-              This holding is not flagged for Bridge action — no candidate to
-              record against.
+              This holding is not flagged as outside your mandate — no
+              replacement to record against.
             </p>
           )}
         </div>
@@ -309,11 +311,20 @@ export function HoldingDetail({
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function Metric({
+  label,
+  term,
+  value,
+}: {
+  label: string;
+  /** Registry key (Phase 201 D-01): the label opens its definition. Omit for a plain word. */
+  term?: TermKey;
+  value: string;
+}) {
   return (
     <div>
       <div className="text-fixed-10 uppercase tracking-wider text-text-muted">
-        {label}
+        {term ? <Term k={term}>{label}</Term> : label}
       </div>
       <div className="font-metric tabular-nums text-text-primary">{value}</div>
     </div>

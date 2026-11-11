@@ -8,6 +8,11 @@ import { CONTACT_FORM_LINK_TEXT } from "@/lib/contact";
  * every other character alone. A string without the phrase is returned as is, so
  * a copy constant that has not been rewritten yet renders exactly as it did.
  *
+ * Phase 201 PLAINWORDS plan 32 (F-12, U-28): the optional `linkText` names a
+ * different phrase to link (the egress pair passes `egress IP status`), so the
+ * wizard hint and the error envelope share this renderer's classes, `rel` and
+ * suffix. It defaults to `contact form`, so every other caller is unchanged.
+ *
  * `text` is plain text and is rendered as React text nodes plus one `Link`, never
  * as markup (T-164.6.6.3.5-19): envelope `cause` / `debug_context` come from the
  * server. `href` is built by the caller with `contactHref`, the one encoder.
@@ -15,22 +20,24 @@ import { CONTACT_FORM_LINK_TEXT } from "@/lib/contact";
  * `newTab` is for surfaces that sit over unsaved state (the error envelope, the
  * wizard; AD-04): the `rel` pair (noopener, noreferrer) is the reverse-tabnabbing
  * mitigation (T-164.6.6.3.5-20), and the visually hidden suffix makes the
- * accessible name `contact form (opens in a new tab)`.
+ * accessible name `<linkText> (opens in a new tab)`.
  */
 export function ContactPointerText({
   text,
   href,
   newTab = false,
+  linkText = CONTACT_FORM_LINK_TEXT,
 }: {
   text: string;
   href: string;
   newTab?: boolean;
+  linkText?: string;
 }) {
-  const at = text.indexOf(CONTACT_FORM_LINK_TEXT);
+  const at = text.indexOf(linkText);
   if (at === -1) return <>{text}</>;
 
   const before = text.slice(0, at);
-  const after = text.slice(at + CONTACT_FORM_LINK_TEXT.length);
+  const after = text.slice(at + linkText.length);
 
   return (
     <>
@@ -40,7 +47,7 @@ export function ContactPointerText({
         className="text-accent underline underline-offset-4"
         {...(newTab ? { target: "_blank", rel: "noopener noreferrer" } : {})}
       >
-        {CONTACT_FORM_LINK_TEXT}
+        {linkText}
         {newTab && <span className="sr-only"> (opens in a new tab)</span>}
       </Link>
       {after}

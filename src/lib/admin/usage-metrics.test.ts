@@ -18,6 +18,10 @@ vi.mock("server-only", () => ({}));
  *     last-known-good payload when one exists.
  *   - Successful queries write through to the in-memory cache so a later
  *     PostHog incident can still serve last-known-good.
+ *
+ * Phase 201 plan 39 (F-11, D-11, D-21, U-13, R3-01): the stale-cache notice names
+ * its instant through `formatDayTime` ("Apr 10, 2026, 14:05 UTC"), never a full
+ * ISO timestamp.
  */
 
 const fetchSpy = vi.fn<typeof fetch>();
@@ -125,6 +129,9 @@ describe("src/lib/admin/usage-metrics.ts — PostHog HogQL helpers", () => {
   });
 
   it("falls back to the cached last-known-good when both 5xx attempts fail", async () => {
+    // Pin the clock so the priming call stores a known instant (the cache
+    // stamp the notice prints).
+    vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 3, 10, 14, 5, 0));
     // Prime the cache with one successful call.
     fetchSpy.mockResolvedValueOnce(
       makeResponse(
@@ -149,7 +156,12 @@ describe("src/lib/admin/usage-metrics.ts — PostHog HogQL helpers", () => {
     // admin page can render a notice instead of pretending the data
     // is fresh.
     expect(second.rows[0]?.session_start).toBe(99);
-    expect(second.error).toMatch(/PostHog unavailable .* showing cached data/);
+    expect(second.error).toBe(
+      "PostHog unavailable — showing cached data from Apr 10, 2026, 14:05 UTC",
+    );
+    // D-21: no ISO timestamp (T..:..:..) and no YYYY-MM-DD day in the notice.
+    expect(second.error).not.toMatch(/T\d{2}:\d{2}:\d{2}/);
+    expect(second.error).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 
   it("returns { error: PostHog unavailable } when both 5xx attempts fail and no cache exists", async () => {

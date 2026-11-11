@@ -168,14 +168,38 @@ describe("OutcomesWidget", () => {
     expect(bodyRows).toHaveLength(3);
   });
 
-  it("empty state: 0 outcomes -> literal copy 'Your Bridge outcomes will appear here after you act on one' + 'View Holdings' CTA", () => {
+  // Plan 201-30 (F-04, U-26): the panel says whose outcomes they are, in plain words.
+  it("empty state: 0 outcomes -> literal copy 'Your replacement outcomes will appear here after you act on a suggestion' + 'View Holdings' CTA", () => {
     renderWidget([]);
     expect(
       screen.getByText(
-        "Your Bridge outcomes will appear here after you act on one",
+        "Your replacement outcomes will appear here after you act on a suggestion",
       ),
     ).toBeInTheDocument();
     expect(screen.getByText("View Holdings")).toBeInTheDocument();
+  });
+
+  it("empty and populated panels render no retired word in text, aria-label, title or Term (F-04, U-26)", () => {
+    for (const rows of [[], [makeOutcome({ id: "o1" })]]) {
+      const { container, unmount } = renderWidget(rows);
+      expect(container.textContent ?? "").not.toMatch(/\bBridge\b/);
+      for (const attr of ["aria-label", "title"]) {
+        for (const el of Array.from(container.querySelectorAll(`[${attr}]`))) {
+          expect(el.getAttribute(attr) ?? "").not.toMatch(/\bBridge\b/);
+        }
+      }
+      expect(container.querySelector('[data-term="bridge"]')).toBeNull();
+      unmount();
+    }
+  });
+
+  it("header sub-line reads 'Realized delta from reallocations made on a replacement suggestion'", () => {
+    renderWidget([makeOutcome({ id: "o1" })]);
+    expect(
+      screen.getByText(
+        /^Realized delta from reallocations made on a replacement suggestion/,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("loading state: outcomes=undefined -> 5 skeleton rows with aria-label='Loading outcomes data'", () => {
@@ -300,11 +324,27 @@ describe("OutcomesWidget — KPI strip (inline KpiStrip)", () => {
     expect(screen.getByText("Total outcomes")).toBeInTheDocument();
   });
 
-  it("renders 'Bridge outcomes' h3 header with 'Feedback loop' badge (Phase 09.1 Plan 10 designer header)", () => {
+  it("renders 'Replacement outcomes' h3 header with 'Feedback loop' badge (Phase 09.1 Plan 10 designer header)", () => {
     renderWidget([makeOutcome({ id: "o1" })]);
     const header = screen.getByRole("heading", { level: 3 });
-    expect(header.textContent).toContain("Bridge outcomes");
+    expect(header.textContent).toContain("Replacement outcomes");
     expect(header.textContent).toContain("Feedback loop");
+  });
+
+  // Plan 201-14 (F-04, U-26): the retired word no longer heads this panel; the
+  // heading reads `Replacement outcomes` and carries no Term.
+  it("heading reads 'Replacement outcomes' with no Term (F-04, U-26)", () => {
+    renderWidget([makeOutcome({ id: "o1" })]);
+    const header = screen.getByRole("heading", { level: 3 });
+    expect(header.textContent).toContain("Replacement outcomes");
+    expect(header.textContent).not.toContain("Bridge");
+    expect(header.querySelector("[data-term]")).toBeNull();
+  });
+
+  // Plan 201-14 (U-15, D-11): the timeline's Recorded column prints the helper day.
+  it("prints the Recorded date through the helper, `Mar 1, 2026`", () => {
+    renderWidget([makeOutcome({ id: "o1", allocated_at: "2026-03-01" })]);
+    expect(screen.getAllByText("Mar 1, 2026").length).toBeGreaterThan(0);
   });
 });
 

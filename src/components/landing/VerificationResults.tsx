@@ -5,6 +5,8 @@ import { formatPercent, formatNumber, cn } from "@/lib/utils";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Button } from "@/components/ui/Button";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 import { buildFactsheetHref } from "@/lib/factsheet/origin";
 
 interface VerificationResultsProps {
@@ -22,16 +24,21 @@ interface VerificationResultsProps {
 
 function MetricCard({
   label,
+  term,
   value,
   mono,
 }: {
   label: string;
+  /** Phase 201 D-02: the registry term this label names; the label is its Term trigger. */
+  term?: TermKey;
   value: string;
   mono?: boolean;
 }) {
   return (
     <div className="rounded-lg border border-border bg-white p-4 shadow-card">
-      <p className="text-xs uppercase tracking-wider text-text-muted">{label}</p>
+      <p className="text-xs uppercase tracking-wider text-text-muted">
+        {term ? <Term k={term}>{label}</Term> : label}
+      </p>
       <p
         className={cn(
           "mt-1 text-xl font-bold text-text-primary",
@@ -56,11 +63,13 @@ export function VerificationResults({
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <MetricCard
           label="TWR"
+          term="twr"
           value={formatPercent(results.twr)}
           mono
         />
         <MetricCard
           label="Sharpe"
+          term="sharpe"
           value={formatNumber(results.sharpe)}
           mono
         />

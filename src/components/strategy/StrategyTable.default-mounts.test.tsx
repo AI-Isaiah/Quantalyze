@@ -140,6 +140,20 @@
  * on `href="/factsheet/<id>`, 9 occurrences (3 per mount, the three mounts x the first three owner
  * rows), each now reading `?from=strategies`. The fixture was NOT regenerated and the test still has
  * no write or update path. `strategy-table-default-mounts.json` did not move.
+ *
+ * NEXT SURGICAL EDIT 2026-11-11 (Phase 201 plan 16, D-01, U-06): ONE class of hunk in BOTH fixtures,
+ * the two plain headers, and nothing else moved. "Return curve" and "Underwater" were a hover-only
+ * Tooltip around the label (`<span class="relative inline-flex"><span>LABEL</span></span>`) and are
+ * now a Form A `Term` (the `inline` wrapper, the describedby span, and a `tabindex="0"` span carrying
+ * `data-term` and the dotted-underline classes). The new markup was captured by rendering `Term`
+ * alone, then substituted by hand, 3 occurrences per label per fixture (discovery, browse and
+ * strategiesOwner in the default-mounts fixture; the three owner-list mounts in the other). The
+ * fixtures were NOT regenerated and the test still has no write or update path.
+ *
+ * SAME EDIT, SECOND HUNK CLASS (Phase 201 plan 16, D-11): the Created cell prints through
+ * `formatDay`, so `>2024-01-01</td>` became `>Jan 1, 2024</td>` BY HAND, 3 occurrences in each of
+ * the owner-list fixture's three mounts (9 in all). The default-mounts fixture carries no Created
+ * cell and did not move for this. Not regenerated.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";

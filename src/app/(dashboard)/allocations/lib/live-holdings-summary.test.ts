@@ -799,8 +799,8 @@ describe("priceGapSentence and priceGapHoldingsNote — [167.2.1.1.1.1 D-07, UI-
   });
 
   it("priceGapHoldingsNote: 1 singular, 3 plural", () => {
-    expect(priceGapHoldingsNote(1)).toBe("1 holding has no price, so portfolio AUM leaves it out.");
-    expect(priceGapHoldingsNote(3)).toBe("3 holdings have no price, so portfolio AUM leaves them out.");
+    expect(priceGapHoldingsNote(1)).toBe("1 holding has no price, so allocation AUM leaves it out.");
+    expect(priceGapHoldingsNote(3)).toBe("3 holdings have no price, so allocation AUM leaves them out.");
   });
 
   it("priceGapHoldingsNote: 0 and NaN are the empty string", () => {

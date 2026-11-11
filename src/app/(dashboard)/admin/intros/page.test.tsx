@@ -127,14 +127,29 @@ describe("/admin/intros labels and names", () => {
     expect(text).not.toContain("Unnamed strategy");
   });
 
+  // Phase 201 / F-04, U-26: a row from the `bridge` source reads "Replacement"
+  // and the header explains it in plain words. The stored value `bridge` and
+  // the retired word never reach the rendered page.
   it("labels the source and the snapshot status", async () => {
     state.rows = [request({ source: "bridge", snapshot_status: "ready" })];
     const { container } = render(await AdminIntrosPage());
     const text = container.textContent ?? "";
-    expect(text).toContain("Bridge");
+    expect(text).toContain("Replacement");
+    expect(text).toContain(
+      "Allocator → manager introductions. Rows from a replacement suggestion include replacement context.",
+    );
+    expect(text).not.toMatch(/\bBridge\b/);
     expect(text).toContain("Ready");
     expect(text).not.toContain("bridge");
     expect(text).not.toContain("ready");
+  });
+
+  // Phase 201 / R2-02 (D-21): a time stamp is the day format, then the time.
+  it("prints the request time as a day then a UTC time, not a raw ISO slice", async () => {
+    const { container } = render(await AdminIntrosPage());
+    const text = container.textContent ?? "";
+    expect(text).toContain("Jan 1, 2026, 12:00 UTC");
+    expect(text).not.toContain("2026-01-01 12:00");
   });
 
   it("reads a source outside the set as Other source", async () => {

@@ -83,7 +83,7 @@ describe("buildAllocatorPortfolioFactsheetPayload", () => {
     expect(payload!.benchmark).toBeNull();
   });
 
-  it("falls back to 'My Portfolio' when no name is supplied", () => {
+  it("falls back to 'My allocation' when no name is supplied", () => {
     const wealth = Array.from({ length: 10 }).map((_, i) => ({
       date: `2025-02-${String(i + 1).padStart(2, "0")}`,
       value: 1 + i * 0.01,
@@ -91,7 +91,7 @@ describe("buildAllocatorPortfolioFactsheetPayload", () => {
     const payload = buildAllocatorPortfolioFactsheetPayload(wealth, {
       allocatorId: "alloc-default-name",
     });
-    expect(payload?.strategyName).toBe("My Portfolio");
+    expect(payload?.strategyName).toBe("My allocation");
   });
 
   it("BLEND-02: risk metrics ride the √365 crypto basis; CAGR byte-identical (calendar clock)", () => {
@@ -176,7 +176,7 @@ describe("buildAllocatorPortfolioFactsheetPayload", () => {
     const ref = buildFactsheetPayload(
       {
         id: "portfolio:alloc-returns",
-        name: "My Portfolio",
+        name: "My allocation",
         types: ["allocator_portfolio"],
         markets: [],
         computedAt: "2025-02-10T00:00:00Z",

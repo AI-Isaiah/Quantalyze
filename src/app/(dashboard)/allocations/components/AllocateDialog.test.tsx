@@ -536,7 +536,9 @@ describe("<AllocateDialog> — the write", () => {
     );
     // The copy must NAME the remedy — a mark, and where to set it.
     expect(envelope.textContent).toMatch(/own capital/i);
-    expect(envelope.textContent).toMatch(/My Strategies/i);
+    // The envelope copy lives in wizardErrors.ts (another plan renames "My Strategies"
+    // to "Strategies", D-07); this arm pins that the page is named, not which wording.
+    expect(envelope.textContent).toMatch(/Strategies/);
     // And it must NOT be the sentence that makes no claim about what happened.
     expect(envelope.textContent).not.toContain("Something went wrong.");
   });

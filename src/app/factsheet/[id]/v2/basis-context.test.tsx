@@ -137,14 +137,14 @@ describe("basis-context", () => {
     // voice: factual, institutional, no contractions, never fabricating).
     // The dropped daily-mark smoothing framing on the options-book reason is GONE.
     expect(mtmDisabledReasonCopy("unsmoothed_options_book")).toBe(
-      "Mark-to-market unavailable: composites that include an options book report cash settlement only.",
+      "Mark-to-market unavailable: composites that include options positions report cash settlement only.",
     );
     // Unchanged — the venue reason keeps its byte-identical copy.
     expect(mtmDisabledReasonCopy("mtm_basis_unavailable_for_venue")).toBe(
       "Mark-to-market unavailable for this venue.",
     );
     expect(mtmDisabledReasonCopy("mtm_summary_coverage_incomplete")).toBe(
-      "Mark-to-market unavailable: settlement history does not fully cover this book, so a mark-to-market series cannot be reconstructed.",
+      "Mark-to-market unavailable: settlement history does not fully cover these positions, so a mark-to-market series cannot be reconstructed.",
     );
     expect(mtmDisabledReasonCopy("mtm_series_uncomputable")).toBe(
       "Mark-to-market unavailable: the reconstructed mark-to-market series could not produce valid metrics.",

@@ -64,7 +64,7 @@ export const ROLE_META = {
   allocator: {
     label: "Allocator",
     description:
-      "LP-side user. Can request intros, own portfolios, and see factsheets.",
+      "LP-side user. Can request intros, keep an allocation, and see factsheets.",
   },
   quant_manager: {
     label: "Quant manager",

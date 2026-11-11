@@ -239,7 +239,7 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
     const { unmount } = render(<AlphaBetaDecomposition data={book(3)} {...base} />);
     expect(screen.getByTestId("alpha-value").textContent).toBe("—");
     expect(
-      screen.getByText("Alpha and beta need at least 10 days paired with BTC; this book has 3."),
+      screen.getByText("Alpha and beta need at least 10 days paired with BTC; this allocation has 3."),
     ).toBeTruthy();
     expect(screen.queryByText("annualized")).toBeNull();
     expect(screen.queryByText(/%$/)).toBeNull();
@@ -249,9 +249,9 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
     expect(overview(3).comparators.btc.jointWithheld).toEqual({ paired: 3, floor: 10 });
     // Review round 2 (SFH-R2 MEDIUM-2): the Overview no longer drops the α cell
     // and §IV silently. Both stay, read "—" (still no figure, D-69) and give the
-    // widget's cause, with "record" for "book".
+    // widget's cause, with "record" for "allocation".
     renderOverview(3);
-    const cell = screen.getByText("α vs BTC").parentElement!;
+    const cell = screen.getByText("α vs BTC").closest("p")!.parentElement!;
     expect(cell.querySelectorAll("p")[1].textContent).toBe("—");
     const alphaRow = screen.getByText("Alpha (ann)").closest("tr")!;
     expect(within(alphaRow).getAllByRole("cell")[1].textContent).toBe("—");
@@ -299,7 +299,7 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
       </FactsheetProvider>,
     );
     expect(screen.queryByTestId("joint-floor-reason")).toBeNull();
-    const cell = screen.getByText("α vs BTC").parentElement!;
+    const cell = screen.getByText("α vs BTC").closest("p")!.parentElement!;
     expect(within(cell).getByText(pctSigned(joint.alpha, 1))).toBeTruthy();
   });
 });

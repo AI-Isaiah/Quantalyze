@@ -44,7 +44,7 @@ const CARDS_GRID =
 const CARDS_CELL = "rounded-lg border border-border bg-surface p-4";
 
 function group(): HTMLElement {
-  return screen.getByRole("group", { name: "Portfolio KPIs" });
+  return screen.getByRole("group", { name: "Allocation KPIs" });
 }
 
 describe("KpiPanel — default variant is cards (PortfolioKpiPanel / live strip)", () => {
@@ -55,7 +55,7 @@ describe("KpiPanel — default variant is cards (PortfolioKpiPanel / live strip)
     // The host must NOT be the grid. An element never queries its own container.
     expect(grid.className).not.toContain("@container");
     expect(grid.parentElement?.className).toBe("@container");
-    expect(grid.getAttribute("aria-label")).toBe("Portfolio KPIs");
+    expect(grid.getAttribute("aria-label")).toBe("Allocation KPIs");
     const cells = Array.from(grid.children) as HTMLElement[];
     expect(cells).toHaveLength(4);
     for (const cell of cells) {
@@ -92,7 +92,7 @@ describe('KpiPanel — variant="panel" (Blend-window row)', () => {
     expect(grid.parentElement?.className).toContain("@container");
     expect(grid.parentElement).not.toBe(grid);
     expect(grid.getAttribute("role")).toBe("group");
-    expect(grid.getAttribute("aria-label")).toBe("Portfolio KPIs");
+    expect(grid.getAttribute("aria-label")).toBe("Allocation KPIs");
     const cells = Array.from(grid.children) as HTMLElement[];
     expect(cells).toHaveLength(4);
     for (const cell of cells) {

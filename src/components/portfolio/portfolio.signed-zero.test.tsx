@@ -94,7 +94,7 @@ function suggestion(partial: Partial<OptimizerSuggestion> = {}): OptimizerSugges
 
 /** The value <p> of the MetricCell that owns `label`. */
 function metricEl(label: string): HTMLElement {
-  const cell = screen.getByText(label).parentElement as HTMLElement;
+  const cell = screen.getByText(label).closest("div") as HTMLElement;
   return cell.querySelectorAll("p")[1] as HTMLElement;
 }
 

@@ -129,7 +129,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error:
-          "Too many simulations. The portfolio impact simulator is capped at 20 runs per hour.",
+          "Too many simulations. The allocation impact simulator is capped at 20 runs per hour.",
         code: "RATE_LIMITED",
         retryAfter: rl.retryAfter,
       },
@@ -155,7 +155,7 @@ export async function POST(req: NextRequest) {
 
   if (!portfolio) {
     return NextResponse.json(
-      { error: "Portfolio not found", code: "PORTFOLIO_NOT_FOUND" },
+      { error: "Allocation not found", code: "PORTFOLIO_NOT_FOUND" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }
@@ -249,7 +249,7 @@ export async function POST(req: NextRequest) {
       typeof rawSeamCode === "string" && rawSeamCode !== "" ? rawSeamCode : null;
     return NextResponse.json(
       {
-        error: "Portfolio impact simulation failed.",
+        error: "Allocation impact simulation failed.",
         code: seamCode ?? "UNKNOWN",
       },
       { status: 500, headers: NO_STORE_HEADERS },

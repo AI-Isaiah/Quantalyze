@@ -1002,10 +1002,16 @@ async function buildFromResolved(
   // synthetic Strategy#id. Without this, exploratory strategies with a
   // real name (e.g. "Phoenix Protocol") get redacted to a hex prefix on
   // the factsheet even though the discovery list shows the real name.
-  const factsheetName =
-    strategy.name ??
-    strategy.codename ??
-    displayStrategyName(strategy);
+  //
+  // Visibility fact (Phase 201 D-09, D-17). The builder is lane-agnostic by
+  // design (header docblock, SL-1), so it takes no lane parameter and passes
+  // `{ visible: true }`: every caller's predicate already admitted the row, the
+  // public lane through `withPublishedOnly`, the owner lane through
+  // `withPublishedOrOwner`, the token lane through `withTokenBearer`. The token
+  // lane can serve an unpublished strategy, and D-17 keeps what that lane
+  // printed before, so the name still leads there; only a blank name now falls
+  // through to the codename, which names nothing the lane did not name.
+  const factsheetName = displayStrategyName(strategy, { visible: true });
   const strategyArg = {
     id: strategy.id,
     name: factsheetName,

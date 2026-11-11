@@ -8,7 +8,7 @@
  * ScenarioCompareTable.
  *
  * Honesty invariants pinned here:
- *   - The live-book column is present and labeled "Live book" when included.
+ *   - The live-allocation column is present and labeled "Live allocation" when included.
  *   - With < 2 columns the under-selection hint shows — no fabricated table.
  *   - A degenerate draft (codec reset OR null engine metrics) reaches the table
  *     as NULL metrics → em-dash; the panel never coerces to 0 (no `?? 0`).
@@ -179,7 +179,7 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
 
   // 194.1 plan 03 — the blend basis from computeDraftColumn reaches the table, for a
   // saved column and the live book alike: a 40-day crypto record is withheld in both.
-  it("carries the engine's blend basis to the table so a 40-day column and the live book are withheld", () => {
+  it("carries the engine's blend basis to the table so a 40-day column and the live allocation are withheld", () => {
     const short = metrics({
       n: 40,
       sharpe: 1.5,
@@ -196,7 +196,7 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
       />,
     );
 
-    for (const name of ["Alpha", "Live book"]) {
+    for (const name of ["Alpha", "Live allocation"]) {
       const cell = screen.getByTestId(`cell-${name}-sharpe`);
       expect(cell.textContent?.startsWith("—")).toBe(true);
       expect(cell.querySelector("[title]")?.getAttribute("title")).toBe(
@@ -206,10 +206,10 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_CP2 — Live book column is present + labeled, computed via the synthetic
+  // T_CP2 — Live allocation column is present + labeled, computed via the synthetic
   //         all-on draft.
   // -------------------------------------------------------------------------
-  it("T_CP2 includes a 'Live book' column computed via buildLiveBookDraft", () => {
+  it("T_CP2 includes a 'Live allocation' column computed via buildLiveBookDraft", () => {
     mockComputeMetricsForDraft.mockReturnValue(metrics({}));
 
     render(
@@ -234,8 +234,8 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
     const liveCall = mockComputeMetricsForDraft.mock.calls[1];
     expect(savedCall[2]).toBeUndefined();
     expect(liveCall[2]).toEqual({ liveBook: true });
-    // The live-book column header is labeled "Live book".
-    expect(screen.getByText("Live book")).toBeInTheDocument();
+    // The live-allocation column header is labeled "Live allocation".
+    expect(screen.getByText("Live allocation")).toBeInTheDocument();
     expect(screen.getByText("Alpha")).toBeInTheDocument();
   });
 
@@ -255,7 +255,7 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
 
     expect(
       screen.getByText(
-        "Select 2 or more scenarios (or the live book) to compare.",
+        "Select 2 or more scenarios (or the live allocation) to compare.",
       ),
     ).toBeInTheDocument();
     // No metric rows fabricated.
@@ -614,6 +614,33 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
       expect.stringContaining("scenario_compare_compute_failed"),
       expect.objectContaining({ id: "b" }),
     );
+    warnSpy.mockRestore();
+  });
+
+  // D-04: the live column keeps its canonical name ("Live allocation") when its
+  // compute throws too (the empty-metrics branch), so the header never reverts
+  // to the retired word and the column degrades to em-dashes.
+  it("T_CP7b a throwing live column is still named 'Live allocation' and shows em-dashes", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockComputeMetricsForDraft
+      .mockReturnValueOnce(metrics({ twr: 0.2, sharpe: 1.0 })) // saved column
+      .mockImplementationOnce(() => {
+        throw new Error("live boom");
+      }); // live column
+
+    expect(() =>
+      render(
+        <ScenarioComparePanel
+          selectedRows={[row("a", "Alpha", v2Draft("fp-a"))]}
+          includeLiveBook={true}
+          payload={PAYLOAD}
+        />,
+      ),
+    ).not.toThrow();
+
+    expect(screen.getByText("Live allocation")).toBeInTheDocument();
+    expect(screen.queryByText("Live book")).toBeNull();
+    expect(screen.getByTestId("cell-Live allocation-sharpe")).toHaveTextContent("—");
     warnSpy.mockRestore();
   });
 });

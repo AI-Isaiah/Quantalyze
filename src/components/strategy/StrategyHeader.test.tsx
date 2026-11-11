@@ -29,24 +29,37 @@ const makeStrategy = (overrides?: Partial<Strategy>): Strategy => ({
 });
 
 describe("StrategyHeader", () => {
+  // Phase 201 / D-09, D-17: the caller states whether its viewer can see the
+  // strategy in discovery; the header never decides that itself.
+  it("prints the name when the viewer can see the strategy, and the codename when not", () => {
+    const strategy = makeStrategy({ name: "Fibonacci Ghost", codename: "Ghost-7" });
+    const { unmount } = render(<StrategyHeader nameVisible strategy={strategy} />);
+    expect(screen.getByText("Fibonacci Ghost")).toBeDefined();
+    expect(screen.queryByText("Ghost-7")).toBeNull();
+    unmount();
+    render(<StrategyHeader nameVisible={false} strategy={strategy} />);
+    expect(screen.getByText("Ghost-7")).toBeDefined();
+    expect(screen.queryByText("Fibonacci Ghost")).toBeNull();
+  });
+
   it("renders strategy name", () => {
-    render(<StrategyHeader strategy={makeStrategy()} />);
+    render(<StrategyHeader nameVisible strategy={makeStrategy()} />);
     expect(screen.getByText("Test Strategy")).toBeDefined();
   });
 
   it("renders start date when present", () => {
-    const { container } = render(<StrategyHeader strategy={makeStrategy()} />);
+    const { container } = render(<StrategyHeader nameVisible strategy={makeStrategy()} />);
     expect(container.textContent).toContain("Live since 2023-01-15");
   });
 
   it("hides start date when null", () => {
-    const { container } = render(<StrategyHeader strategy={makeStrategy({ start_date: null })} />);
+    const { container } = render(<StrategyHeader nameVisible strategy={makeStrategy({ start_date: null })} />);
     expect(container.textContent).not.toContain("Live since");
   });
 
   it("shows no stale indicator for fresh data", () => {
     const recentDate = new Date().toISOString();
-    render(<StrategyHeader strategy={makeStrategy()} computedAt={recentDate} />);
+    render(<StrategyHeader nameVisible strategy={makeStrategy()} computedAt={recentDate} />);
     expect(screen.queryByText(/stale/i)).toBeNull();
     expect(screen.queryByText(/last synced/i)).toBeNull();
   });
@@ -63,14 +76,14 @@ describe("StrategyHeader", () => {
     ["72h (3d)", 72 * 60 * 60 * 1000],
   ])("makes no freshness claim from a %s old computedAt", (_label, ageMs) => {
     const oldDate = new Date(Date.now() - ageMs).toISOString();
-    const { container } = render(<StrategyHeader strategy={makeStrategy()} computedAt={oldDate} />);
+    const { container } = render(<StrategyHeader nameVisible strategy={makeStrategy()} computedAt={oldDate} />);
     expect(container.textContent).toContain("Live since 2023-01-15");
     expect(container.textContent).not.toMatch(/Synced|Trades fetched|No trade fetch|Track record/);
     expect(container.querySelector("span.rounded-full")).toBeNull();
   });
 
   it("shows no indicator when computedAt is undefined", () => {
-    const { container } = render(<StrategyHeader strategy={makeStrategy()} />);
+    const { container } = render(<StrategyHeader nameVisible strategy={makeStrategy()} />);
     expect(container.textContent).not.toContain("stale");
     expect(container.textContent).not.toContain("synced");
   });
@@ -90,6 +103,7 @@ describe("StrategyHeader", () => {
   it("renders no raw deribit and still renders no badge for a deribit-listed strategy", () => {
     const { container } = render(
       <StrategyHeader
+        nameVisible
         strategy={makeStrategy({ supported_exchanges: ["deribit"] })}
         computedAt={new Date().toISOString()}
       />,

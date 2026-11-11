@@ -850,8 +850,7 @@ export function ScenarioCommitDrawer({
               Commit scenario
             </div>
             <div className="mt-1 text-xs text-text-muted">
-              {diffs.length} decisions to record · routed through the Bridge
-              outcome graph
+              {diffs.length} decisions to record · each is saved as an outcome
             </div>
           </div>
           <button
@@ -899,8 +898,7 @@ export function ScenarioCommitDrawer({
                     Holdings removed · {removed.length}
                   </div>
                   <div className="mt-1 text-xs text-text-secondary">
-                    Each removal is recorded as a Bridge rejection so the
-                    outcome graph tracks why you exited.
+                    Each removal is recorded as a rejected outcome, so your outcomes show why you exited.
                   </div>
                 </div>
                 <ul className="mt-3 grid gap-3">
@@ -987,8 +985,7 @@ export function ScenarioCommitDrawer({
                     Strategies added · {added.length}
                   </div>
                   <div className="mt-1 text-xs text-text-secondary">
-                    Each addition is recorded as a Bridge allocation so the
-                    daily delta cron tracks realized return.
+                    Each addition is recorded as an allocated outcome, so its realized return is tracked daily.
                   </div>
                 </div>
                 <ul className="mt-3 grid gap-3">
@@ -1168,9 +1165,9 @@ export function ScenarioCommitDrawer({
               </div>
               <div className="mt-2 text-xs text-text-secondary">
                 This will record {diffs.length} outcome
-                {diffs.length === 1 ? "" : "s"} against the Bridge graph and
-                feed the daily delta cron. Decisions can&apos;t be undone — but
-                you can record corrections later from the Outcomes timeline.
+                {diffs.length === 1 ? "" : "s"}, and the realized return of each
+                is tracked daily. Decisions can&apos;t be undone — but you can
+                record corrections later from the Outcomes timeline.
               </div>
               <div className="mt-4 flex justify-end gap-3">
                 <button

@@ -85,7 +85,7 @@ describe("ScenarioCompareTable — all-columns guard (TABLE-01 / SC#2)", () => {
     render(
       <ScenarioCompareTable
         columns={scenarioNames.map((nm) => col(nm, healthy(120)))}
-        liveBook={col("Live book", healthy(120))}
+        liveBook={col("Live allocation", healthy(120))}
       />,
     );
 
@@ -101,7 +101,7 @@ describe("ScenarioCompareTable — all-columns guard (TABLE-01 / SC#2)", () => {
     expect(scenarioColHeaders).toHaveLength(renderedColumnCount);
 
     // Each expected name appears as its own column header (anchored on testid).
-    for (const nm of [...scenarioNames, "Live book"]) {
+    for (const nm of [...scenarioNames, "Live allocation"]) {
       expect(screen.getByTestId(`scenario-col-${nm}`)).toBeInTheDocument();
     }
 
@@ -119,7 +119,7 @@ describe("ScenarioCompareTable — all-columns guard (TABLE-01 / SC#2)", () => {
     // And every column has a value cell for every metric row (N columns × 6
     // rows) — a dropped cell at any (column, metric) intersection goes RED.
     const metricKeys = ["twr", "cagr", "sharpe", "sortino", "max_drawdown", "volatility"];
-    for (const nm of [...scenarioNames, "Live book"]) {
+    for (const nm of [...scenarioNames, "Live allocation"]) {
       for (const key of metricKeys) {
         expect(screen.getByTestId(`cell-${nm}-${key}`)).toBeInTheDocument();
       }

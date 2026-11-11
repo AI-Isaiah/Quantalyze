@@ -263,6 +263,9 @@ describe("label vocabularies cover exactly their database CHECK sets", () => {
 describe("wrappers: a real value reads its label", () => {
   it("compute jobs", () => {
     expect(computeJobKindLabel("sync_trades")).toBe("Trade sync");
+    // Phase 201 D-04: the allocator's live set of holdings is the allocation,
+    // so the job that computes it is not "Portfolio computation".
+    expect(computeJobKindLabel("compute_portfolio")).toBe("Allocation computation");
     expect(computeJobKindLabel("derive_allocator_equity")).toBe("Allocator equity derivation");
     expect(computeJobStatusLabel("failed_retry")).toBe("Retrying");
     expect(computeJobStatusLabel("done_pending_children")).toBe("Done, follow-up jobs pending");
@@ -304,7 +307,9 @@ describe("wrappers: a real value reads its label", () => {
     expect(profileStatusLabel("newbie")).toBe("New");
     expect(verificationStatusLabel("metrics_captured")).toBe("Metrics captured");
     expect(introSnapshotStatusLabel("ready")).toBe("Ready");
-    expect(introSourceLabel("bridge")).toBe("Bridge");
+    // Phase 201 / F-04, U-26: the `bridge` key is the stored
+    // `contact_requests_source_check` value and stays; only its label changes.
+    expect(introSourceLabel("bridge")).toBe("Replacement");
     expect(relationshipStatusLabel("exited")).toBe("Exited");
     expect(analyticsStatusLabel("complete_with_warnings")).toBe("Analytics complete, with warnings");
     expect(analyticsStatusLabel("complete")).toBe("Analytics complete");

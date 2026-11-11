@@ -26,13 +26,23 @@
  * The composer (Plan 06) wires this callback to the scenario-state hook.
  */
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   computeMandateFitApprox,
   type AllocatorMandateForFit,
   type MandateFitTier,
 } from "../lib/mandate-fit";
 import { YoursChip } from "./YoursChip";
+import { Term } from "@/components/ui/Term";
+import { formatDay } from "@/lib/utils";
 // Review WR-05 — the ONE declaration of the added-strategy shape. Type-only, so
 // nothing from scenario-state.ts reaches this component's runtime bundle.
 import type { AddedStrategy as PersistedAddedStrategy } from "../lib/scenario-state";
@@ -127,10 +137,24 @@ export interface StrategyBrowseDrawerProps {
   onAddOwn?: () => void;
 }
 
-const TIER_COPY: Record<MandateFitTier, string> = {
-  green: "Strong mandate fit",
-  yellow: "Partial mandate fit",
-  red: "Weak mandate fit",
+// Plan 201-15 (D-01, D-06): only the word "mandate" is the term, so only it sits in
+// `Term` (Form A, a span in a non-interactive badge); the badge text reads the same.
+const TIER_COPY: Record<MandateFitTier, ReactNode> = {
+  green: (
+    <>
+      Strong <Term k="mandate">mandate</Term> fit
+    </>
+  ),
+  yellow: (
+    <>
+      Partial <Term k="mandate">mandate</Term> fit
+    </>
+  ),
+  red: (
+    <>
+      Weak <Term k="mandate">mandate</Term> fit
+    </>
+  ),
 };
 
 const TIER_CLASS: Record<MandateFitTier, string> = {
@@ -575,7 +599,7 @@ export function StrategyBrowseDrawer({
             <p className="mt-1 text-xs text-text-secondary">
               Got a read-only exchange API key from a new team? Connect it — or
               upload a CSV — to add the strategy here and project how it fits your
-              book.
+              allocation.
             </p>
             <button
               type="button"
@@ -639,6 +663,16 @@ export function StrategyBrowseDrawer({
                 !Number.isNaN(parsedCreatedAt.getTime())
                   ? parsedCreatedAt
                   : null;
+              const codenameLine = [
+                typeof s.codename === "string" &&
+                s.codename.length > 0 &&
+                s.codename !== s.name
+                  ? s.codename
+                  : null,
+                ...s.markets,
+              ]
+                .filter((part): part is string => part !== null)
+                .join(" · ");
               return (
                 <li
                   key={s.id}
@@ -686,11 +720,22 @@ export function StrategyBrowseDrawer({
                           />
                         )}
                       </div>
-                      <div className="mt-1 text-xs text-text-muted">
-                        {s.codename ?? ""}
-                        {s.codename && s.markets.length > 0 ? " · " : ""}
-                        {s.markets.join(" · ")}
-                      </div>
+                      {/* Plan 201-15 (U-12, D-17): the codename line shows the
+                          codename only when it differs from the displayed name.
+                          `s.name` is the route's visibility-resolved label (a
+                          strategy with no real name arrives with the codename AS
+                          its name), so an equal codename would print the same
+                          string twice. This compares against `s.name` as the route
+                          returned it and adds no name source of its own. The line
+                          disappears when neither a codename nor a market is left. */}
+                      {codenameLine !== "" && (
+                        <div
+                          className="mt-1 text-xs text-text-muted"
+                          data-testid={`browse-codename-${s.id}`}
+                        >
+                          {codenameLine}
+                        </div>
+                      )}
                       {/* Phase 152 (SCEN-05) — own-vs-own duplicate
                           disambiguation. A second sibling of the codename line
                           above, same recipe, muted: a duplicate name is a fact
@@ -705,7 +750,7 @@ export function StrategyBrowseDrawer({
                           `typeof`. The typeof check alone covered an ABSENT
                           key (the pre-152 wire shape) but not a
                           present-and-unparseable string, which flowed straight
-                          into `new Date(…).toLocaleDateString(…)` and rendered
+                          into a locale date formatter and rendered
                           the literal text "Created Invalid Date". The
                           first-party route only emits Postgres ISO timestamps,
                           so that was not reachable today — it becomes reachable
@@ -734,11 +779,7 @@ export function StrategyBrowseDrawer({
                             className="mt-1 text-xs text-text-muted"
                             data-testid={`browse-dedup-${s.id}`}
                           >
-                            {`Created ${createdAt.toLocaleDateString("en-US", {
-                              month: "short",
-                              day: "numeric",
-                              year: "numeric",
-                            })}`}
+                            {`Created ${formatDay(s.created_at)}`}
                             {typeof s.status === "string" && s.status.length > 0
                               ? ` · ${productCaseStatus(s.status)}`
                               : ""}

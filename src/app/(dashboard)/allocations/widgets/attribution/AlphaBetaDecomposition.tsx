@@ -9,6 +9,7 @@ import { alignCoveredReturns, COMPARATOR_CALENDARS } from "@/lib/factsheet/align
 import { jointMetrics, MIN_PAIRED_OBSERVATIONS, pairedFloorReason } from "@/lib/factsheet/joint";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import { formatNumber } from "@/lib/utils";
+import { Term } from "@/components/ui/Term";
 import { ALLOCATOR_PORTFOLIO_ASSET_CLASS } from "@/lib/factsheet/allocator-portfolio-payload";
 import {
   figureRecord,
@@ -181,7 +182,7 @@ export function computeBookAlphaBeta(data: AlphaBetaWidgetData): BookAlphaBeta {
   };
 }
 
-/** The decomposition chart's x-axis tick, in percent of the book's return. */
+/** The decomposition chart's x-axis tick, in percent of the allocation's return. */
 export function formatDecompositionTick(v: number): string {
   return formatFixedSigned(v, { dp: 0, scale: 100, suffix: "%" });
 }
@@ -246,7 +247,7 @@ function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & B
           </span>
         </div>
         <p className="px-3 text-xs text-text-muted">
-          {pairedFloorReason("BTC", result.pairedCount, "book", result.floor)}
+          {pairedFloorReason("BTC", result.pairedCount, "allocation", result.floor)}
         </p>
       </div>
     );
@@ -275,7 +276,7 @@ function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & B
           <>
             <div className="mt-3 flex items-baseline gap-2 px-3">
               <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
-                Beta
+                <Term k="beta">Beta</Term>
               </span>
               <span
                 className="text-2xl font-metric tabular-nums font-bold text-text-primary"
@@ -285,7 +286,7 @@ function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & B
               </span>
             </div>
             <p className="px-3 text-xs text-text-muted" data-testid="beta-contribution">
-              {`Beta contributed ${formatFixedSigned(result.betaContribution, { dp: 1, scale: 100, suffix: "%", plus: true })} of the book's return over the paired window.`}
+              {`Beta contributed ${formatFixedSigned(result.betaContribution, { dp: 1, scale: 100, suffix: "%", plus: true })} of the allocation's return over the paired window.`}
             </p>
           </>
         )}

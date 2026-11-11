@@ -110,6 +110,31 @@ describe("MandateForm", () => {
     expect(screen.getByText("Excluded styles")).toBeInTheDocument();
   });
 
+  // Phase 201 plan 18 (D-04, D-06): the form says allocation, never portfolio, and
+  // explains the two terms its own labels name through the registry.
+  it("the help sentences name the allocation (D-04)", () => {
+    render(<MandateForm initial={BLANK_PREFS} />);
+    expect(
+      screen.getByText("Largest share of your allocation any single strategy can hold. 5%-50%."),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Advanced constraints" }));
+    expect(
+      screen.getByText("Worst peak-to-trough loss you can accept across your allocation."),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/portfolio/i);
+  });
+
+  it("wraps only the words of the term in Term inside the field labels, and the label text is unchanged (D-06)", () => {
+    render(<MandateForm initial={BLANK_PREFS} />);
+    fireEvent.click(screen.getByRole("button", { name: "Advanced constraints" }));
+    const mandateLabel = screen.getByText("Mandate", { selector: '[data-term="mandate"]' });
+    expect(mandateLabel.closest("label")).toHaveTextContent("Mandate in one sentence");
+    const corr = screen.getByText("Correlation", { selector: '[data-term="correlation"]' });
+    expect(corr.closest("label")).toHaveTextContent("Correlation ceiling");
+    // The slider's own accessible name stays the full label.
+    expect(screen.getByLabelText("Correlation ceiling")).toHaveAttribute("type", "range");
+  });
+
   it("excluded_exchanges chip uses negative variant class when selected", () => {
     render(<MandateForm initial={BLANK_PREFS} />);
     // Pick an exchange chip by name.

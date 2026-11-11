@@ -227,5 +227,10 @@ describe("ScenarioFlaggedHoldingsList", () => {
     expect(screen.queryByRole("button", { name: /^allocated$/i })).not.toBeInTheDocument();
     // OutcomeRecordedRow renders instead
     expect(screen.getByTestId("outcome-recorded-row")).toBeInTheDocument();
+    // F-11 / D-11 (review R3-01 item 3, plan 201-36): the recorded day reads in
+    // the helper's form, never the raw `allocated_at` ISO day.
+    const row = screen.getByTestId("outcome-recorded-row");
+    expect(row.textContent).toContain("on Apr 20, 2026");
+    expect(row.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });

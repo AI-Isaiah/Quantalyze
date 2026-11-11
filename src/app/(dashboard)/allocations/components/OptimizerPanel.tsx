@@ -5,6 +5,8 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 import { Card } from "@/components/ui/Card";
 import { Skeleton, SkeletonText } from "@/components/ui/Skeleton";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 import type { OptimizerSuggestion } from "@/components/portfolio/PortfolioOptimizer";
 import type { OptimizerPrefetch } from "../lib/watchlist-read";
 
@@ -12,7 +14,7 @@ import type { OptimizerPrefetch } from "../lib/watchlist-read";
  * PI-05 (optimizer half) — a THIN /allocations wrapper around the shared
  * `PortfolioOptimizer` (mounted via next/dynamic exactly like
  * portfolios/[id]/page.tsx:68). This wrapper owns ONLY the concerns
- * PortfolioOptimizer does not: the portfolio selector, the 0-portfolio honest
+ * PortfolioOptimizer does not: the allocation selector, the 0-allocation honest
  * gate, the mandatory ranked-list footer disclaimer, and the narrative metric
  * glossary (one entry per rendered column). PortfolioOptimizer already solves
  * pending/computing/failed/stale/skeleton + the refresh POST — none of that is
@@ -49,27 +51,20 @@ const FOOTER =
   "Ranked by modeled fit from historical daily returns — suggestions, not an allocation and not a forecast.";
 
 /**
- * Honest metric glossary. Red-team F-2: every entry's label MUST match a column
- * actually rendered by PortfolioOptimizer ("Sharpe lift" / "Corr w/ portfolio" /
- * "DD improve") — the old glossary documented a "Score" column that is never
- * rendered (score only orders the list) and mislabelled the others, so a reader
- * could not map a tooltip to the column it describes. Copy also states the unit
- * (unitless delta / -1..1 coefficient / percentage) so no value reads as an
- * allocation %.
+ * Honest metric glossary (Phase 201 U-02, U-17). One registry key per column
+ * PortfolioOptimizer renders ("Sharpe lift" / "Corr w/ allocation" / "DD
+ * improve"), shown through `Term` so the app keeps one dotted-underline
+ * affordance and the column tooltips read the same registry text. Red-team F-2:
+ * every entry MUST match a rendered column — the old glossary documented a
+ * "Score" column that is never rendered (score only orders the list), so a
+ * reader could not map a tooltip to the column it describes. The registry copy
+ * states the unit (unitless delta / -1..1 coefficient / percentage) so no value
+ * reads as an allocation %.
  */
-const METRIC_TOOLTIPS: { label: string; copy: string }[] = [
-  {
-    label: "Sharpe lift",
-    copy: "Modeled change in your portfolio's Sharpe ratio if this strategy were added — a unitless delta, not a percentage. Positive means better risk-adjusted return in backtest.",
-  },
-  {
-    label: "Corr w/ portfolio",
-    copy: "Correlation of this strategy's daily returns with your current portfolio, from -1 to 1 (not a percentage). Lower means more diversification benefit.",
-  },
-  {
-    label: "DD improve",
-    copy: "Modeled reduction in your portfolio's maximum drawdown from adding this strategy, as a percentage of NAV.",
-  },
+const GLOSSARY_KEYS: readonly TermKey[] = [
+  "sharpe_lift",
+  "corr_with_allocation",
+  "dd_improve",
 ];
 
 /** Rank by score DESC; a null score sorts last (unrankable, never fabricated). */
@@ -106,7 +101,7 @@ export function OptimizerPanel({
         Diversification Optimizer
       </h3>
       <p className="mt-0.5 text-caption text-text-muted">
-        Strategies modeled to improve your portfolio&apos;s risk-adjusted return.
+        Strategies modeled to improve your allocation&apos;s risk-adjusted return.
       </p>
     </div>
   );
@@ -122,11 +117,11 @@ export function OptimizerPanel({
         <Card>
           {heading}
           <p className="mt-3 text-small font-medium text-text-primary">
-            Simulate Impact needs a portfolio
+            Simulate Impact needs an allocation
           </p>
           <p className="mt-1 text-small text-text-secondary">
-            Your exchange keys are connected, but you have no portfolio yet. A
-            portfolio starts when you allocate to a strategy.
+            Your exchange keys are connected, but you have no allocation yet. An
+            allocation starts when you allocate to a strategy.
           </p>
         </Card>
       );
@@ -135,7 +130,7 @@ export function OptimizerPanel({
       <Card>
         {heading}
         <p className="mt-3 text-small font-medium text-text-primary">
-          Simulate Impact needs a live portfolio
+          Simulate Impact needs a live allocation
         </p>
         <p className="mt-1 text-small text-text-secondary">
           Connect a read-only exchange API key to build your allocation, then
@@ -166,7 +161,7 @@ export function OptimizerPanel({
         {heading}
         {prefetch.portfolios.length >= 2 && (
           <select
-            aria-label="Select portfolio"
+            aria-label="Select allocation"
             value={portfolioId}
             onChange={(e) => setPortfolioId(e.target.value)}
             className="rounded-md border border-border bg-white px-2 py-1.5 text-caption text-text-primary focus-visible:border-accent focus-visible:outline-none"
@@ -191,15 +186,10 @@ export function OptimizerPanel({
 
       {/* Honest metric glossary — one entry per rendered column label. */}
       <dl className="flex flex-wrap gap-x-5 gap-y-1">
-        {METRIC_TOOLTIPS.map(({ label, copy }) => (
-          <div key={label} className="flex items-center">
-            <dt
-              tabIndex={0}
-              title={copy}
-              aria-label={`${label}: ${copy}`}
-              className="cursor-help border-b border-dotted border-text-muted text-micro font-medium uppercase tracking-wider text-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-            >
-              {label}
+        {GLOSSARY_KEYS.map((key) => (
+          <div key={key} className="flex items-center">
+            <dt className="text-micro font-medium uppercase tracking-wider text-text-muted">
+              <Term k={key} />
             </dt>
           </div>
         ))}

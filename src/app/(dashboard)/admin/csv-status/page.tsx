@@ -8,6 +8,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { TrustTierLabel, type TrustTier } from "@/components/strategy/TrustTierLabel";
 import { verificationStatusLabel } from "@/lib/display-labels";
 import { buildFactsheetHref } from "@/lib/factsheet/origin";
+import { formatDayTime } from "@/lib/utils";
 import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = {
@@ -119,16 +120,7 @@ export default async function CsvStatusPage() {
                 const email = strat?.user_id
                   ? (emailByUserId.get(strat.user_id) ?? "—")
                   : "—";
-                const submittedAt = new Date(row.created_at).toLocaleString(
-                  "en-US",
-                  {
-                    month: "short",
-                    day: "numeric",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                    timeZone: "UTC",
-                  },
-                );
+                const submittedAt = formatDayTime(row.created_at);
                 return (
                   <tr
                     key={row.id}
@@ -147,7 +139,7 @@ export default async function CsvStatusPage() {
                       {/* The column is CHECK-constrained to the three TrustTier values. */}
                       <TrustTierLabel trustTier={row.trust_tier as TrustTier} />
                     </td>
-                    <td className="px-3 py-2 text-caption text-text-muted font-metric">
+                    <td className="px-3 py-2 text-caption text-text-muted font-metric whitespace-nowrap">
                       {submittedAt}
                     </td>
                     <td className="px-3 py-2">

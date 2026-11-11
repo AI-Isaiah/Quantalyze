@@ -230,7 +230,7 @@ describe("discovery-selectors SELECTORS contract (H-1040 — drift detection)", 
     expectMatchCount(container, SELECTORS.tableRows, STRATEGIES.length, "tableRows");
   });
 
-  it("savePreferences selector matches the real CustomizeDrawer save button", () => {
+  it("saveView selector matches the real CustomizeDrawer save button", () => {
     const { container } = render(
       <CustomizeDrawer
         open
@@ -242,9 +242,9 @@ describe("discovery-selectors SELECTORS contract (H-1040 — drift detection)", 
       />,
     );
     expect(
-      screen.getByRole("button", { name: "Save preferences" }),
-    ).toBe(matchPlaywrightSelector(container, SELECTORS.savePreferences)[0]);
-    expectMatchCount(container, SELECTORS.savePreferences, 1, "savePreferences");
+      screen.getByRole("button", { name: "Save view" }),
+    ).toBe(matchPlaywrightSelector(container, SELECTORS.saveView)[0]);
+    expectMatchCount(container, SELECTORS.saveView, 1, "saveView");
   });
 
   it("starAddButton selector matches StarToggle in the unstarred state", () => {
@@ -277,7 +277,7 @@ describe("discovery-selectors SELECTORS contract (H-1040 — drift detection)", 
     expectMatchCount(container, SELECTORS.starAddButton, 0, "starAddButton(starred)");
   });
 
-  it("the cog opens a drawer whose save button the savePreferences selector finds (end-to-end binding)", () => {
+  it("the cog opens a drawer whose save button the saveView selector finds (end-to-end binding)", () => {
     const { container } = render(
       <StrategyTable
         strategies={STRATEGIES}
@@ -292,7 +292,7 @@ describe("discovery-selectors SELECTORS contract (H-1040 — drift detection)", 
     expect(cog).toBeDefined();
     fireEvent.click(cog as Element);
     const dialog = screen.getByRole("dialog");
-    expectMatchCount(dialog, SELECTORS.savePreferences, 1, "savePreferences(in-drawer)");
+    expectMatchCount(dialog, SELECTORS.saveView, 1, "saveView(in-drawer)");
   });
 });
 

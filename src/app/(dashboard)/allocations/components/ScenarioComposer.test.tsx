@@ -8,7 +8,7 @@
  *     list + Browse strategies CTA row + ScenarioFooter
  *   - composition row toggle (role=switch + aria-label)
  *   - toggle-off row visual treatment (opacity + strikethrough + disabled weight)
- *   - Bridge inline card section visible iff flaggedHoldings.length > 0
+ *   - flagged-holdings card section visible iff flaggedHoldings.length > 0
  *   - Compare → deep-link routes to /compare?ids={scopeRef},{candidateUuid}
  *   - Remove × on added strategies
  *   - Footer Commit disabled when diff_count = 0 (no diff)
@@ -516,7 +516,7 @@ import { blendPeriodsPerYear } from "@/lib/closed-sets";
 // Phase 112 (WEIGHTS-02) — the shared leverage ceiling, asserted as the max
 // attribute on the per-key leverage inputs the phase adds.
 import { MAX_LEVERAGE } from "@/lib/leverage";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, formatDay } from "@/lib/utils";
 import {
   buildHoldingRef,
   type FlaggedHolding,
@@ -882,7 +882,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
     expect(
-      screen.getByText("Start a portfolio"),
+      screen.getByText("Start a scenario"),
+    ).toBeInTheDocument();
+    // 201 D-04: the no-key prompt names the live allocation and a scenario.
+    expect(
+      screen.getByText(
+        "Connect a read-only exchange API key to project scenarios from your live allocation — or start from a blank slate and browse strategies to compose one.",
+      ),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: /Connect Exchange/i }),
@@ -918,7 +924,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(screen.getByText("Start a portfolio")).toBeInTheDocument();
+    expect(screen.getByText("Start a scenario")).toBeInTheDocument();
     expect(
       screen.getByText(
         "Your connected exchange accounts hold no open positions yet. Start from a blank slate and browse strategies to compose one.",
@@ -1418,10 +1424,45 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C8 — Bridge inline card visible when flaggedHoldings.length>0
+  // T_C8 / T_C9 — flagged-holdings card visible iff flaggedHoldings.length>0
+  //
+  // Plan 201-30 (F-04, U-26): the card no longer names the retired feature. The
+  // title reads `{n} holding{s} outside your mandate`, the accent button reads
+  // `Review replacements` (it still opens the composer-owned replacement
+  // drawer), and no text, aria-label or title renders the retired word.
   // -------------------------------------------------------------------------
-  it("T_C8 flaggedHoldings.length>0 → Bridge inline card visible with Open Bridge CTA", () => {
+  it("T_C8 flaggedHoldings.length>0 → card reads '1 holding outside your mandate' and 'Review replacements' opens the drawer", () => {
     const payload = makePayload({ flaggedHoldings: [FLAGGED_BTC] });
+    const { container } = render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.getByText("1 holding outside your mandate")).toBeInTheDocument();
+    // The old button label is gone.
+    expect(screen.queryByRole("button", { name: /Open Bridge/i })).toBeNull();
+    const reviewBtn = screen.getByRole("button", { name: "Review replacements" });
+    fireEvent.click(reviewBtn);
+    expect(screen.getByTestId("bridge-drawer-mock")).toBeInTheDocument();
+    // ScenarioFlaggedHoldingsList embedded as the inline section body
+    expect(screen.getByTestId("flagged-list-mock")).toBeInTheDocument();
+    // F-04: the retired word renders nowhere in the composer — text, aria-label
+    // or title — and no Term carries the retired key.
+    expect(container.textContent ?? "").not.toMatch(/\bBridge\b/);
+    for (const attr of ["aria-label", "title"]) {
+      for (const el of Array.from(container.querySelectorAll(`[${attr}]`))) {
+        expect(el.getAttribute(attr) ?? "").not.toMatch(/\bBridge\b/);
+      }
+    }
+    expect(container.querySelector('[data-term="bridge"]')).toBeNull();
+  });
+
+  it("T_C8b two flagged holdings → '2 holdings outside your mandate' (plural)", () => {
+    const payload = makePayload({
+      flaggedHoldings: [FLAGGED_BTC, { ...FLAGGED_BTC, symbol: "ETH" }],
+    });
     render(
       <ScenarioComposer
         payload={payload}
@@ -1429,18 +1470,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(screen.getByText(/Bridge flagged 1 holding/i)).toBeInTheDocument();
-    const openBridgeBtn = screen.getByRole("button", { name: /Open Bridge/i });
-    fireEvent.click(openBridgeBtn);
-    expect(screen.getByTestId("bridge-drawer-mock")).toBeInTheDocument();
-    // ScenarioFlaggedHoldingsList embedded as the inline section body
-    expect(screen.getByTestId("flagged-list-mock")).toBeInTheDocument();
+    expect(screen.getByText("2 holdings outside your mandate")).toBeInTheDocument();
   });
 
-  // -------------------------------------------------------------------------
-  // T_C9 — Bridge inline card hidden when no flagged holdings
-  // -------------------------------------------------------------------------
-  it("T_C9 flaggedHoldings.length=0 → Bridge inline card section hidden", () => {
+  it("T_C8c the add-more card points to the catalog beyond the suggested replacements", () => {
     const payload = makePayload({ flaggedHoldings: [] });
     render(
       <ScenarioComposer
@@ -1449,7 +1482,24 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(screen.queryByText(/Bridge flagged/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Browse the verified-strategies catalog to add candidates beyond the suggested replacements.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("T_C9 flaggedHoldings.length=0 → flagged-holdings card section hidden", () => {
+    const payload = makePayload({ flaggedHoldings: [] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.queryByText(/outside your mandate/i)).not.toBeInTheDocument();
+    expect(document.querySelector('[data-term="bridge"]')).toBeNull();
     expect(screen.queryByTestId("flagged-list-mock")).not.toBeInTheDocument();
   });
 
@@ -2607,7 +2657,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     }).not.toThrow();
     expect(
       screen.getByText(
-        /This saved portfolio uses an older format and can't be reopened\./i,
+        /This saved scenario uses an older format and can't be reopened\./i,
       ),
     ).toBeInTheDocument();
   });
@@ -2766,10 +2816,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // -------------------------------------------------------------------------
   // T_C_MODE1 — entry-mode segmented control renders two accessible segments
   //   (UNIFY-01/02). radiogroup + two radios; the live book defaults to
-  //   "From my book". Active segment carries the accent OUTLINE, never a fill
+  //   "From my allocation". Active segment carries the accent OUTLINE, never a fill
   //   (accent = action/verified, a mode toggle is neither — 29-UI-SPEC §1).
   // -------------------------------------------------------------------------
-  it("T_C_MODE1 entry-mode control renders an accessible radiogroup with 'From my book' (default) + 'Blank slate'; active = accent outline, NOT a fill", () => {
+  it("T_C_MODE1 entry-mode control renders an accessible radiogroup with 'From my allocation' (default) + 'Blank slate'; active = accent outline, NOT a fill", () => {
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -2782,9 +2832,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       name: /Composition entry mode/i,
     });
     expect(group).toBeInTheDocument();
-    const book = screen.getByRole("radio", { name: /From my book/i });
+    const book = screen.getByRole("radio", { name: /From my allocation/i });
     const blank = screen.getByRole("radio", { name: /Blank slate/i });
-    // Live book present → "From my book" is the default selected segment.
+    // Live book present → "From my allocation" is the default selected segment.
     expect(book).toHaveAttribute("aria-checked", "true");
     expect(blank).toHaveAttribute("aria-checked", "false");
     // Active segment uses the accent OUTLINE recipe, never a fill.
@@ -2795,12 +2845,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C_MODE2 — no live book → "From my book" is NOT rendered as a dead
+  // T_C_MODE2 — no live book → "From my allocation" is NOT rendered as a dead
   //   default; the composer defaults to Blank slate (29-UI-SPEC §1).
   //   With nothing added, the no-book allocator sees the empty-state front
   //   door; once a strategy is added the main body renders with the control.
   // -------------------------------------------------------------------------
-  it("T_C_MODE2 no live book → defaults to Blank slate, never a dead 'From my book' segment", () => {
+  it("T_C_MODE2 no live book → defaults to Blank slate, never a dead 'From my allocation' segment", () => {
     const payload = makePayload({
       holdingsSummary: [],
       hasConnectedKeys: false,
@@ -2817,7 +2867,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       screen.getByRole("link", { name: /Connect Exchange/i }),
     ).toBeInTheDocument();
     // Add a strategy → main body renders; the control shows Blank-slate-only
-    // (no dead "From my book" default for a no-book allocator).
+    // (no dead "From my allocation" default for a no-book allocator).
     addStrategy({
       id: "strat-mode2",
       name: "Mode2 Strat",
@@ -2827,7 +2877,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const blank = screen.getByRole("radio", { name: /Blank slate/i });
     expect(blank).toHaveAttribute("aria-checked", "true");
     expect(
-      screen.queryByRole("radio", { name: /From my book/i }),
+      screen.queryByRole("radio", { name: /From my allocation/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -2857,7 +2907,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       strategy_types: ["momentum"],
     });
     const blank = screen.getByRole("radio", { name: /Blank slate/i });
-    const book = screen.getByRole("radio", { name: /From my book/i });
+    const book = screen.getByRole("radio", { name: /From my allocation/i });
     expect(book).toHaveAttribute("aria-checked", "true");
 
     // Click the inactive "Blank slate" segment with a dirty draft.
@@ -2867,13 +2917,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(
       screen.getByText(/Discard your scenario draft\?/i),
     ).toBeInTheDocument();
-    // CRITICAL non-vacuous assertion: the mode did NOT flip — "From my book" is
+    // CRITICAL non-vacuous assertion: the mode did NOT flip — "From my allocation" is
     // still the active segment, and the added strategy is still present (the
     // draft was NOT silently wiped). A naive onClick that calls setEntryMode /
     // reset directly would already have flipped aria-checked here and this would
     // fail.
     expect(
-      screen.getByRole("radio", { name: /From my book/i }),
+      screen.getByRole("radio", { name: /From my allocation/i }),
     ).toHaveAttribute("aria-checked", "true");
     expect(
       screen.getByRole("radio", { name: /Blank slate/i }),
@@ -2953,12 +3003,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // apiKeys row for the eligible key, so no label resolves and the line reads about
     // the connected keys (a key id is never printed in a label's place).
     expect(fallback.textContent).toContain(
-      "Your connected keys have no per-key return series yet, so this projection blends your whole book. Per-source toggles appear after their next sync.",
+      "Your connected keys have no per-key return series yet, so this projection blends your whole allocation. Per-source toggles appear after their next sync.",
     );
     expect(fallback.querySelector('[data-degrade-id="scenario.per-source-fallback"]')).not.toBeNull();
   });
 
-  it("ENGINE-03 gate=false book holder → 'From my book' segment is ABSENT and an arrow-key cannot enter book mode", () => {
+  it("ENGINE-03 gate=false book holder → 'From my allocation' segment is ABSENT and an arrow-key cannot enter book mode", () => {
     const payload = makePayload({
       perKeyDailiesGateSatisfied: false,
       eligibleApiKeyIds: ["key-binance"],
@@ -2972,7 +3022,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     );
     // Book entry is unreachable — the segment is not rendered at all.
     expect(
-      screen.queryByRole("radio", { name: /From my book/i }),
+      screen.queryByRole("radio", { name: /From my allocation/i }),
     ).not.toBeInTheDocument();
     // Arrow-key navigation must not conjure or enter the (engineless) book mode.
     const group = screen.getByRole("radiogroup", {
@@ -2983,7 +3033,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       screen.getByRole("radio", { name: /Blank slate/i }),
     ).toHaveAttribute("aria-checked", "true");
     expect(
-      screen.queryByRole("radio", { name: /From my book/i }),
+      screen.queryByRole("radio", { name: /From my allocation/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -3000,7 +3050,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
     expect(
-      screen.getByRole("radio", { name: /From my book/i }),
+      screen.getByRole("radio", { name: /From my allocation/i }),
     ).toHaveAttribute("aria-checked", "true");
     expect(
       screen.queryByTestId("scenario-constituent-fallback"),
@@ -3185,8 +3235,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // -------------------------------------------------------------------------
   // (Removed T_C16) — CONSTIT-03 deletes the per-coin holding rows from the
   // composer's constituent list, so the per-row inline "Compare →" deep-link is
-  // gone with them. The Bridge / Compare flow survives via the Bridge inline
-  // card + BridgeDrawer ("Open Bridge"), covered by T_C8 / the Bridge suite.
+  // gone with them. The Compare flow survives via the flagged-holdings card +
+  // replacement drawer ("Review replacements"), covered by T_C8.
   // -------------------------------------------------------------------------
 
   // -------------------------------------------------------------------------
@@ -3326,12 +3376,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // refuse and surface an inline role="alert" naming the AUM input.
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
 
-    // Test 10 — EXACT copy. No live book here, so "From my book" does not
+    // Test 10 — EXACT copy. No live book here, so "From my allocation" does not
     // render and the refusal must not offer it.
     const banner = screen.getByTestId("scenario-commit-error");
     expect(banner).toHaveAttribute("role", "alert");
     expect(banner.textContent).toBe(
-      "Can't record a scenario commit: portfolio AUM is not set. Set portfolio AUM before submitting.",
+      "Can't record a scenario commit: scenario AUM is not set. Set scenario AUM before submitting.",
     );
 
     // Test 12 — the never-strings. Both name affordances that do not exist on
@@ -3559,7 +3609,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     );
     // Initial: empty-state branch
     expect(
-      screen.getByText("Start a portfolio"),
+      screen.getByText("Start a scenario"),
     ).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: /Browse strategies/i }),
@@ -4624,7 +4674,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // The prescribed empty copy (UI-SPEC §Copywriting) is rendered.
     expect(
       screen.getByText(
-        /at least 10 overlapping daily returns to chart its distribution/i,
+        /This scenario needs at least 10 overlapping daily returns to chart its distribution/i,
       ),
     ).toBeInTheDocument();
     // CRITICAL honesty invariant: a derived-client panel has no fetch to fail,
@@ -4743,7 +4793,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     ).not.toBeNull();
     expect(
       screen.getByText(
-        /at least 10 overlapping daily returns to chart its distribution/i,
+        /This scenario needs at least 10 overlapping daily returns to chart its distribution/i,
       ),
     ).toBeInTheDocument();
     // The populated body MUST NOT render: no histogram/quantile leaf mounts and
@@ -5398,7 +5448,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const badge = screen.getByTestId("scenario-projected-badge");
     expect(badge).toBeInTheDocument();
     expect(badge.textContent).toBe(
-      "PROJECTED — hypothetical, not your live book",
+      "PROJECTED — hypothetical, not your live allocation",
     );
   });
 
@@ -6124,7 +6174,7 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     expect(line).not.toBeNull();
     // Key A has a nickname; key B has none, so its label carries the masked id tail.
     expect(line!.textContent).toBe(
-      "Binance — Main desk and OKX — ••••ey-B have no per-key return series yet, so this projection blends your whole book. Per-source toggles appear after their next sync.",
+      "Binance — Main desk and OKX — ••••ey-B have no per-key return series yet, so this projection blends your whole allocation. Per-source toggles appear after their next sync.",
     );
     expect(fallback.textContent).not.toContain("One or more connected keys");
   });
@@ -7206,7 +7256,7 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
       screen.getByText(/Discard your scenario draft\?/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("radio", { name: /From my book/i }),
+      screen.getByRole("radio", { name: /From my allocation/i }),
     ).toHaveAttribute("aria-checked", "true");
   });
 
@@ -7544,6 +7594,10 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
       "scenario-target-dd-portfolio-note",
     );
     expect(note.textContent).toMatch(/[−-]?\d+\.\d{2}%/);
+    // 201 D-18: the blend is a scenario, so the note names the scenario.
+    expect(note.textContent).toMatch(
+      /^Scenario max-DD at \d+\.\d{2}× \(computed for the whole scenario\):/,
+    );
   });
 
   // (k) INFEASIBLE HONESTY — an unreachable target (99% on the SHALLOW series
@@ -8713,7 +8767,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     );
     expect(includeBtn).toHaveTextContent("Include → shortens window to");
     // The disclosed bound (2026-01-06) + a "−N mo" delta are both in the label.
-    expect(includeBtn).toHaveTextContent("2026-01-06");
+    expect(includeBtn).toHaveTextContent("Jan 6, 2026");
     expect(includeBtn.textContent).toMatch(/−\d+ mo/);
 
     // Click Include → narrows the window to the intersection that re-admits B.
@@ -8733,7 +8787,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     // The applied window is exactly the intersection [2026-01-01, 2026-01-06].
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-01 → 2026-01-06");
+    ).toContain("Jan 1, 2026 → Jan 6, 2026");
   });
 
   // WR-01 — the HEAD-ragged branch. The tail case above only moves the END
@@ -8785,7 +8839,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     );
     expect(includeBtn).toHaveTextContent("Include → moves window start to");
     expect(includeBtn).not.toHaveTextContent("shortens window");
-    expect(includeBtn).toHaveTextContent("2026-01-04");
+    expect(includeBtn).toHaveTextContent("Jan 4, 2026");
     // The month cost is reconcilable with the shown (start) bound: the head
     // pulls forward 3 days (01-01 → 01-04), which floors to a "−1 mo" delta.
     expect(includeBtn.textContent).toMatch(/−1 mo/);
@@ -8806,7 +8860,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     // the disclosed start bound is the one that actually moved.
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-04 → 2026-01-12");
+    ).toContain("Jan 4, 2026 → Jan 12, 2026");
   });
 
   // WR-02 — the BOTH-ends-ragged branch. When a strategy begins after the window
@@ -8853,7 +8907,12 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
       `auto-excluded-include-${REF_WIN_MID}`,
     );
     expect(includeBtn).toHaveTextContent("Include → shortens window to");
-    expect(includeBtn).toHaveTextContent("2026-01-04–2026-01-09");
+    // Phase 201 plan 201-37 (gap SC-3, F-11, UI-SPEC Interaction contract 5,
+    // R3-01 item 8): a day range is two formatDay calls joined by space, en
+    // dash (U+2013), space, and no raw YYYY-MM-DD day reaches the label.
+    expect(includeBtn).toHaveTextContent("Jan 4, 2026 – Jan 9, 2026");
+    expect(includeBtn.textContent).not.toContain("Jan 4, 2026–Jan 9, 2026");
+    expect(includeBtn.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     // Head +3 days (01-01 → 01-04) and tail −3 days (01-12 → 01-09) = 6 days →
     // floors to "−1 mo". The single number now names a span, not one bound.
     expect(includeBtn.textContent).toMatch(/−1 mo/);
@@ -8868,7 +8927,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     );
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-04 → 2026-01-09");
+    ).toContain("Jan 4, 2026 → Jan 9, 2026");
   });
 
   it("COVERAGE-04: applying a window (the include path) NEVER reselects a manually-off strategy — manual-off stays sticky (T-58-05)", () => {
@@ -9067,7 +9126,7 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
     // The applied window is exactly the intersection.
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-01 → 2026-01-06");
+    ).toContain("Jan 1, 2026 → Jan 6, 2026");
   });
 
   it("preset: 'Full range (some drop out)' widens to the union — the short-span strategy drops (member_count < selected count)", () => {
@@ -9090,7 +9149,7 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
     expect(sm?.member_ids).toEqual([REF_WIN_A]);
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-01 → 2026-01-12");
+    ).toContain("Jan 1, 2026 → Jan 12, 2026");
   });
 
   it("preset: 'Common period' is disabled on an empty intersection; 'Full range' stays enabled", () => {
@@ -9224,7 +9283,7 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
     ).toContain(
-      `${(windowBefore as { start: string }).start} → ${(windowBefore as { end: string }).end}`,
+      `${formatDay((windowBefore as { start: string }).start)} → ${formatDay((windowBefore as { end: string }).end)}`,
     );
   });
 
@@ -9660,8 +9719,8 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     expect(row).toBeInTheDocument();
     const reason = within(row).getByTestId("auto-excluded-reason");
     // B ends 2026-01-06 (< window end 2026-01-12) → "ends Jan 2026 — outside window".
-    expect(reason).toHaveTextContent(/outside window/i);
-    expect(reason).toHaveTextContent(/ends Jan 2026/i);
+    // 201 D-11: the month goes through formatMonth ("Mon YYYY"), the one date format.
+    expect(reason).toHaveTextContent("ends Jan 2026 — outside window");
     // Real text, not color-only.
     expect(reason.textContent?.trim().length ?? 0).toBeGreaterThan(0);
   });
@@ -10113,7 +10172,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     // Baseline: the mount auto-default seeded the intersection [01-01, 01-06].
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-01 → 2026-01-06");
+    ).toContain("Jan 1, 2026 → Jan 6, 2026");
 
     // Reopen a v3 draft whose SAVED window is a NARROWER [01-02, 01-05] — a value
     // the intersection default would never produce, so it can only be the applied
@@ -10128,7 +10187,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
 
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-02 → 2026-01-05");
+    ).toContain("Jan 2, 2026 → Jan 5, 2026");
     // No provenance note for a fresh v3-with-window open.
     expect(
       screen.queryByTestId("scenario-provenance-note"),
@@ -10160,7 +10219,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     });
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-03 → 2026-01-04");
+    ).toContain("Jan 3, 2026 → Jan 4, 2026");
     // No note yet — this is a live edit, not an upgraded-v2 reopen.
     expect(
       screen.queryByTestId("scenario-provenance-note"),
@@ -10178,7 +10237,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
 
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-01 → 2026-01-06");
+    ).toContain("Jan 1, 2026 → Jan 6, 2026");
     // The provenance note appears with the locked copy + the escape hatch.
     const note = screen.getByTestId("scenario-provenance-note");
     expect(note.textContent).toMatch(/predates coverage windows/);
@@ -10213,7 +10272,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     // Intersection default applies (windowless v3 → same rule) …
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-01 → 2026-01-06");
+    ).toContain("Jan 1, 2026 → Jan 6, 2026");
     // … but a fresh v3 is NOT a pre-window upgrade, so no provenance note.
     expect(
       screen.queryByTestId("scenario-provenance-note"),
@@ -10287,7 +10346,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     });
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-02 → 2026-01-05");
+    ).toContain("Jan 2, 2026 → Jan 5, 2026");
 
     // Reset (footer Reset → confirm). The fresh draft is a v3 live book — the
     // prior open's FOREIGN window must not linger (the Phase-57 "sticky by
@@ -10297,7 +10356,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     fireEvent.click(screen.getByRole("button", { name: /Discard draft/i }));
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-01 → 2026-01-06");
+    ).toContain("Jan 1, 2026 → Jan 6, 2026");
   });
 
   it("review WR-02: dismissing the note then reopening the SAME upgraded-v2 scenario re-shows it (dismissal is per-OPEN, not per-scenario-id)", async () => {
@@ -10429,7 +10488,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     });
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-01 → 2026-01-12");
+    ).toContain("Jan 1, 2026 → Jan 12, 2026");
     expect(
       screen.queryByTestId("scenario-provenance-note"),
     ).not.toBeInTheDocument();
@@ -10473,7 +10532,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     });
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("2026-01-02 → 2026-01-05");
+    ).toContain("Jan 2, 2026 → Jan 5, 2026");
     expect(
       screen.queryByTestId("scenario-provenance-note"),
     ).not.toBeInTheDocument();
@@ -11008,9 +11067,9 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
   /** Save a brand-new scenario through the real toolbar → name → Save gesture. */
   async function saveNew(name: string, fetchMock: ReturnType<typeof vi.fn>) {
     fireEvent.click(
-      screen.getByRole("button", { name: /^Save portfolio$/i }),
+      screen.getByRole("button", { name: /^Save scenario$/i }),
     );
-    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+    fireEvent.change(screen.getByPlaceholderText(/Name this scenario/i), {
       target: { value: name },
     });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
@@ -11102,7 +11161,7 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
       ).toEqual(["key-A", "key-B"]);
     });
     // …and an immediate save (no further edits) round-trips it end-to-end.
-    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Update scenario/i }));
     await waitFor(() => {
       expect(saveCalls(fetchMock)).toHaveLength(1);
     });
@@ -11139,7 +11198,7 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
     });
     // Update with NO edits. The PUT must PRESERVE the book membership — pre-fix
     // the blank-session stamp overwrote it with [] (silent book→blank wipe).
-    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Update scenario/i }));
     await waitFor(() => {
       expect(saveCalls(fetchMock)).toHaveLength(1);
     });
@@ -11162,12 +11221,12 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
     });
     // Post-fix: the open syncs the session to book → the per-key engine basis
     // (usePerKeySources), the SAME basis compare shows. The per-key constituent
-    // rows now render in the unified list and the "From my book" segment selects.
+    // rows now render in the unified list and the "From my allocation" segment selects.
     expect(
       screen.getAllByTestId("scenario-constituent-perkey"),
     ).toHaveLength(2);
     expect(
-      screen.getByRole("radio", { name: /From my book/i }),
+      screen.getByRole("radio", { name: /From my allocation/i }),
     ).toHaveAttribute("aria-checked", "true");
   });
 
@@ -11188,7 +11247,7 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
     expect(
       screen.getByRole("radio", { name: /Blank slate/i }),
     ).toHaveAttribute("aria-checked", "true");
-    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Update scenario/i }));
     await waitFor(() => {
       expect(saveCalls(fetchMock)).toHaveLength(1);
     });
@@ -12382,7 +12441,7 @@ describe("ScenarioComposer — Phase 147 SCEN-01 hydration re-fetch (P6)", () =>
 // Root cause being closed: the founder's ~$460k book (8 keys, 6 of them
 // strategy-linked manager keys with no allocator per-key series) pinned the
 // all-or-nothing gate FALSE, so the composer FORCE-initialized to blank and the
-// "From my book" segment never rendered. Blank slate was forced, not chosen.
+// "From my allocation" segment never rendered. Blank slate was forced, not chosen.
 // ---------------------------------------------------------------------------
 describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () => {
   const AUM4_DATES = Array.from(
@@ -12529,8 +12588,8 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
     fetchMock: ReturnType<typeof vi.fn>,
     expectedCalls = 1,
   ) {
-    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
-    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+    fireEvent.click(screen.getByRole("button", { name: /^Save scenario$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this scenario/i), {
       target: { value: name },
     });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
@@ -12574,7 +12633,7 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
 
     renderAum4(payload);
 
-    const bookSegment = screen.getByRole("radio", { name: /From my book/i });
+    const bookSegment = screen.getByRole("radio", { name: /From my allocation/i });
     expect(bookSegment).toBeInTheDocument();
     // Initial entryMode is BOOK — the composer never force-initializes to blank
     // when the book is reachable (CONTEXT lock, UI-SPEC §3 "No forced blank").
@@ -12592,11 +12651,11 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
 
     // RECORDED NARROWING (not an oversight): CONTEXT's "never force-initializes
     // to blank" is narrowed on RESEARCH Open-Q4 grounds to the >= 1 contributing
-    // case. An engineless "From my book" (zero per-key units) is a worse dead end
+    // case. An engineless "From my allocation" (zero per-key units) is a worse dead end
     // than blank mode, and 151-06's manual AUM input removes blank mode's
     // residual harm — it can then size and commit.
     expect(
-      screen.queryByRole("radio", { name: /From my book/i }),
+      screen.queryByRole("radio", { name: /From my allocation/i }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Blank slate/i })).toHaveAttribute(
       "aria-checked",
@@ -12658,7 +12717,7 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
     renderAum4(partial);
     // NON-VACUITY: the session IS in book mode, so the stamp's `entryMode ===
     // "book"` conjunct is satisfied and the id SET is the thing under test.
-    expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
+    expect(screen.getByRole("radio", { name: /From my allocation/i })).toHaveAttribute(
       "aria-checked",
       "true",
     );
@@ -12718,7 +12777,7 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
     // Pre-fix: `targetEntryMode` read the all-or-nothing flag (false here), so
     // the reopen stayed BLANK, `holdingsSummary` was gated to [] and the book
     // rows vanished.
-    expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
+    expect(screen.getByRole("radio", { name: /From my allocation/i })).toHaveAttribute(
       "aria-checked",
       "true",
     );
@@ -12959,7 +13018,7 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
     });
     // Non-vacuity: the session really is in BOOK mode, so the union arm — not
     // the blank stamp and not the F-1 freeze — is the code under test.
-    expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
+    expect(screen.getByRole("radio", { name: /From my allocation/i })).toHaveAttribute(
       "aria-checked",
       "true",
     );
@@ -12970,7 +13029,7 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
         .map((r) => r.getAttribute("data-scope-ref")),
     ).toEqual(["key-a"]);
 
-    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Update scenario/i }));
     await waitFor(() => {
       expect(aum4SaveCalls(fetchMock)).toHaveLength(1);
     });
@@ -13005,7 +13064,7 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
         },
       });
     });
-    expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
+    expect(screen.getByRole("radio", { name: /From my allocation/i })).toHaveAttribute(
       "aria-checked",
       "true",
     );
@@ -13023,7 +13082,7 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
       screen.queryAllByTestId("scenario-constituent-perkey"),
     ).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Update scenario/i }));
     await waitFor(() => {
       expect(aum4SaveCalls(fetchMock)).toHaveLength(1);
     });
@@ -13065,9 +13124,9 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
     });
     // Non-vacuity: blank here is FORCED (the book segment does not even render),
     // not chosen — the distinction the fix turns on.
-    expect(screen.queryByRole("radio", { name: /From my book/i })).toBeNull();
+    expect(screen.queryByRole("radio", { name: /From my allocation/i })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Update scenario/i }));
     await waitFor(() => {
       expect(aum4SaveCalls(fetchMock)).toHaveLength(1);
     });
@@ -13096,7 +13155,7 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
     act(() => {
       registeredOpen!({ id: "row-1", name: "Partial book", draft: savedRow });
     });
-    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Update scenario/i }));
     await waitFor(() => {
       expect(aum4SaveCalls(fetchMock)).toHaveLength(1);
     });
@@ -13115,13 +13174,13 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
 });
 
 // ---------------------------------------------------------------------------
-// Phase 151 / AUM-01 — the direct Portfolio AUM input.
+// Phase 151 / AUM-01 — the direct Scenario AUM input.
 //
 // AUM was DERIVED-ONLY before this plan: the sum of the toggled-on live
 // holdings. A blank-slate scenario — the primary use case — therefore had an
 // AUM of exactly 0 and structurally could not size or commit.
 // ---------------------------------------------------------------------------
-describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
+describe("ScenarioComposer — AUM-01 Scenario AUM input", () => {
   const A1_DATES = Array.from(
     { length: 14 },
     (_, i) => `2026-04-${String(i + 1).padStart(2, "0")}`,
@@ -13265,7 +13324,7 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
 
     setAum("1000000");
 
-    // The manual value is now THE portfolio AUM for every scenarioAum consumer.
+    // The manual value is now THE scenario AUM for every scenarioAum consumer.
     expect(drawerAum()).toBe(1_000_000);
     // Recorded UI-SPEC decision: the illustrative note keys off scenarioAum <= 0
     // and clears itself once AUM is set (the persistent PROJECTED pill still
@@ -13274,7 +13333,7 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
 
     // And the commit no longer trips the AUM gate.
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
-    expect(alertText()).not.toMatch(/portfolio AUM is not set/);
+    expect(alertText()).not.toMatch(/scenario AUM is not set/);
   });
 
   it("AUM-01 Test 6 (a zero is a claim): blank mode starts EMPTY, never pre-filled 0, and says what the field is for", () => {
@@ -13388,7 +13447,7 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 151 UAT (founder, 2026-08-07) — WHOLE DOLLARS in the Portfolio AUM field.
+  // 151 UAT (founder, 2026-08-07) — WHOLE DOLLARS in the Scenario AUM field.
   //
   // The founder's book summed to a float, so the seeded field read
   // `39963.1076231`: eleven digits of false precision on a money input, and a
@@ -13401,7 +13460,7 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
   // rounded number as a manual OVERRIDE — re-opening exactly the hole WR-04
   // closed, through the same no-keystroke gesture.
   // -------------------------------------------------------------------------
-  it("151 UAT: the seeded Portfolio AUM displays WHOLE dollars while state keeps the precise value", () => {
+  it("151 UAT: the seeded Scenario AUM displays WHOLE dollars while state keeps the precise value", () => {
     // A float book — the founder's shape (sums to 39963.1076231).
     const { payload } = aumBook([21_000.5076231, 18_962.6]);
     renderAum1(payload);
@@ -13598,7 +13657,7 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
     fireEvent.change(el, { target: { value: "0" } });
     fireEvent.keyDown(el, { key: "Enter" });
     expect(screen.getByTestId("scenario-commit-error").textContent).toContain(
-      "Portfolio AUM must be greater than $0",
+      "Scenario AUM must be greater than $0",
     );
     expect(aumInput().value).toBe("39963");
     // Non-vacuity: the refusal really refused — nothing was written.
@@ -13740,10 +13799,10 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
     }
   });
 
-  // AUM-03 Test 11 — the SECOND refusal variant. The "From my book" clause is
+  // AUM-03 Test 11 — the SECOND refusal variant. The "From my allocation" clause is
   // named ONLY when that segment genuinely renders; offering a control the user
   // cannot see is the same class of lie as the old "toggle on a live holding".
-  it("AUM-03 Test 11 (book reachable): the refusal offers 'From my book' — but only because the segment actually renders", () => {
+  it("AUM-03 Test 11 (book reachable): the refusal offers 'From my allocation' — but only because the segment actually renders", () => {
     const { payload } = aumBook([300_000, 160_000]);
     const onCommitRequested = vi.fn();
     render(
@@ -13758,7 +13817,7 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
 
     // Non-vacuity: the segment IS on screen, so the clause below is honest.
     expect(
-      screen.getByRole("radio", { name: /From my book/i }),
+      screen.getByRole("radio", { name: /From my allocation/i }),
     ).toBeInTheDocument();
 
     // Switch to blank slate (a clean draft switches immediately), which drops
@@ -13778,7 +13837,7 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
 
     const banner = screen.getByTestId("scenario-commit-error");
     expect(banner.textContent).toBe(
-      'Can\'t record a scenario commit: portfolio AUM is not set. Set portfolio AUM, or switch to "From my book", before submitting.',
+      'Can\'t record a scenario commit: scenario AUM is not set. Set scenario AUM, or switch to "From my allocation", before submitting.',
     );
     expect(banner.textContent).not.toContain("toggle on a live holding");
     expect(banner.textContent).not.toContain("Connect an exchange API key");
@@ -13928,7 +13987,7 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     });
   }
 
-  /** Set the portfolio AUM through the AUM-01 input (commits on blur). */
+  /** Set the scenario AUM through the AUM-01 input (commits on blur). */
   function setAum(raw: string) {
     const el = screen.getByTestId("scenario-aum-input") as HTMLInputElement;
     act(() => {
@@ -13942,7 +14001,7 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
   function usdDrawerAum(): number | undefined {
     return vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.scenarioAum;
   }
-  /** The Portfolio AUM field's displayed (whole-dollar) text. */
+  /** The Scenario AUM field's displayed (whole-dollar) text. */
   function aumInputValue(): string {
     return (screen.getByTestId("scenario-aum-input") as HTMLInputElement).value;
   }
@@ -14053,14 +14112,14 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     setDollar(D_A, "500000");
     // Non-vacuity: the portfolio really is funded, and by this row alone.
     expect(aumInputValue()).toBe("500000");
-    expect(alertText()).not.toContain("A portfolio needs a size");
+    expect(alertText()).not.toContain("A scenario needs a size");
 
     // The ordinary gesture that reaches this arm: type 0 to drop the last
     // funded row. AUM' would be 0 — no size to divide by.
     setDollar(D_A, "0");
 
     expect(screen.getByTestId("scenario-commit-error").textContent).toBe(
-      "A portfolio needs a size — zeroing the last funded strategy would leave nothing to allocate. Set another strategy's dollars first, or exclude this row instead.",
+      "A scenario needs a size — zeroing the last funded strategy would leave nothing to allocate. Set another strategy's dollars first, or exclude this row instead.",
     );
     // The refusal REFUSED: no 0/NaN AUM was written, the field snapped back.
     expect(aumInputValue()).toBe("500000");
@@ -14254,7 +14313,7 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     expect(dollarInput(D_A).value).toBe("600000");
   });
 
-  it("151 UAT (the AUM field is the OTHER direction): editing portfolio AUM holds WEIGHTS fixed and rescales dollars proportionally", () => {
+  it("151 UAT (the AUM field is the OTHER direction): editing scenario AUM holds WEIGHTS fixed and rescales dollars proportionally", () => {
     renderUsd(blankSlatePayload());
     add(D_A, "Dollar Strat A");
     add(D_B, "Dollar Strat B");
@@ -14351,7 +14410,7 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     setDollar(D_A, "5000000");
 
     expect(screen.getByTestId("scenario-commit-error").textContent).toBe(
-      "Weight clamped to 1 — the maximum allocation is 100% of portfolio AUM.",
+      "Weight clamped to 1 — the most one strategy can take is 100% of scenario AUM.",
     );
     expect(weightInput(D_A).value).toBe("1.000");
     expect(weightInput(D_K1).value).toBe("0.000");
@@ -14401,6 +14460,11 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     expect(weightInput(D_A).value).toBe("0.250");
     expect(weightInput(D_K1).value).toBe("0.750");
     expect(dollarInput(D_A).value).toBe("500000");
+    // 201 U-07 / U-09: the per-strategy dollar field's help names an amount and
+    // the scenario's size, never a portfolio.
+    expect(dollarInput(D_A).title).toBe(
+      "Amount in dollars = weight × scenario AUM. Commits on blur/Enter and back-computes the weight.",
+    );
 
     // 5b — collapse the basis to a single constituent (no added row), then edit
     // the sole remaining unit's weight on the SAME handler.
@@ -14516,7 +14580,7 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
   //                 em-dash here is a dead end: `liveHoldingsSum` is 0 by
   //                 construction and nothing has been typed, so EVERY row
   //                 rendered the em-dash and the allocator had to seed a
-  //                 top-down Portfolio AUM first — exactly the flow UAT-1
+  //                 top-down Scenario AUM first — exactly the flow UAT-1
   //                 replaced. Live input. (Arm 2.)
   //
   // Both arms are kept because collapsing them in EITHER direction is a real
@@ -14558,11 +14622,11 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     const cell = screen.getAllByTestId("scenario-constituent-usd-unset")[0];
     expect(cell.tagName).toBe("SPAN");
     expect(cell.getAttribute("title")).toBe(
-      "Set portfolio AUM to size in dollars",
+      "Set scenario AUM to size in dollars",
     );
     expect(cell.textContent).toContain("—");
     expect(
-      within(cell).getByText("Set portfolio AUM to size in dollars"),
+      within(cell).getByText("Set scenario AUM to size in dollars"),
     ).toBeInTheDocument();
     // No fabricated zero, no NaN leaking out of a divide-by-zero.
     expect(
@@ -14942,7 +15006,7 @@ describe("ScenarioComposer — SCEN-04 header (Phase 152)", () => {
 // makes it read "not applicable, and here is why".
 //
 // The sentence is CAUSE-ACCURATE by decision D-3, and that is the whole point of
-// the tests below. Shipping CONTEXT's "Set portfolio AUM to size in dollars"
+// the tests below. Shipping CONTEXT's "Set scenario AUM to size in dollars"
 // here would tell a book-less allocator to type a number that CANNOT make the
 // cell derivable: a dishonest remedy, which is precisely the defect class this
 // phase exists to remove. That sentence stays on the USD cell, where it is true.
@@ -14967,7 +15031,7 @@ describe("ScenarioComposer — SCEN-04 honest notional (Phase 152)", () => {
    *  literal, never imported from the component — an oracle that reads the
    *  implementation's own constant asserts nothing. */
   const NOTIONAL_NOTE =
-    "Notional needs live book equity — not derivable in this scenario";
+    "Notional needs live allocation equity — not derivable in this scenario";
   /** Review CR-01 — the pinned copy for the "ref absent from blendShareByRef"
    *  cause: an excluded row, or a selected weight mass of 0. A literal, byte
    *  for byte. */
@@ -15090,7 +15154,7 @@ describe("ScenarioComposer — SCEN-04 honest notional (Phase 152)", () => {
     // …and it names the RIGHT remedy: the AUM sentence would be a lie here,
     // because typing an AUM cannot make this cell derivable.
     expect(cell.getAttribute("title")).not.toBe(
-      "Set portfolio AUM to size in dollars",
+      "Set scenario AUM to size in dollars",
     );
   });
 
@@ -15166,7 +15230,7 @@ describe("ScenarioComposer — SCEN-04 honest notional (Phase 152)", () => {
     // equity on screen. Naming it as the blocker is a lie whose implied remedy
     // (get a live book) cannot make the cell derivable.
     expect(cell.getAttribute("title")).not.toBe(NOTIONAL_NOTE);
-    expect(cell.textContent).not.toContain("live book equity");
+    expect(cell.textContent).not.toContain("live allocation equity");
     // …and the cause it DOES name is the real one, with a reachable remedy
     // (re-include the row).
     expect(cell.getAttribute("title")).toBe(NOT_IN_BLEND_NOTE);
@@ -15199,7 +15263,7 @@ describe("ScenarioComposer — SCEN-04 honest notional (Phase 152)", () => {
     // Same title+sr-only treatment as the added row — a title alone is
     // unreachable by keyboard/touch.
     expect(within(cell).getByText(NOT_IN_BLEND_NOTE)).toBeInTheDocument();
-    expect(cell.textContent).not.toContain("live book equity");
+    expect(cell.textContent).not.toContain("live allocation equity");
   });
 
   it("SCEN-04 honest notional (CR-01, book-less row): the equity sentence survives — it is still the right one for ITS cause", () => {
@@ -15358,7 +15422,7 @@ describe("ScenarioComposer — SCEN-02 seams + chip (Phase 152)", () => {
     // Non-vacuity / seam identity: the blank-slate card is on screen, so the
     // captured onAdd belongs to the EMPTY-STATE twin. Without this line the
     // test could silently be re-testing Seam B.
-    expect(screen.getByText("Start a portfolio")).toBeInTheDocument();
+    expect(screen.getByText("Start a scenario")).toBeInTheDocument();
 
     addOwn(OWN_ID, "Scen02 Own");
 
@@ -15373,7 +15437,7 @@ describe("ScenarioComposer — SCEN-02 seams + chip (Phase 152)", () => {
     // Non-vacuity / seam identity: the blank-slate card is ABSENT, so the only
     // drawer that mounted is the MAIN-BODY twin. This run cannot be exercising
     // Seam A, which is what makes it a second, independent proof.
-    expect(screen.queryByText("Start a portfolio")).toBeNull();
+    expect(screen.queryByText("Start a scenario")).toBeNull();
 
     addOwn(OWN_ID, "Scen02 Own");
 
@@ -16090,7 +16154,7 @@ describe("ScenarioComposer — SCEN-03 detail (Phase 152)", () => {
     expect(panel(id)).toBeInTheDocument();
   }
 
-  /** Set the portfolio AUM through the AUM-01 input (commits on blur) so the
+  /** Set the scenario AUM through the AUM-01 input (commits on blur) so the
    *  per-row dollar cell renders as an INPUT rather than its em-dash
    *  read-only state — otherwise the dollar exclusion would test nothing. */
   function setAum(raw: string) {
@@ -16203,7 +16267,7 @@ describe("ScenarioComposer — SCEN-03 detail (Phase 152)", () => {
 //
 //   F2 — one dollar BASIS. The AUM the per-row dollars are drawn from and the
 //        equity the NOTIONAL column is drawn from must be the SAME book.
-//   F4 — the Portfolio AUM refusal must be VISIBLE, not console-only.
+//   F4 — the Scenario AUM refusal must be VISIBLE, not console-only.
 //   F5 — the NOTIONAL column must have an accessible name on BOTH branches.
 //
 // The money oracle is hand-computed from the fixture below and never re-derived
@@ -16338,7 +16402,7 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
   // -------------------------------------------------------------------------
   // F2 — THE ECONOMIC INVARIANT: the rows add up to the book they are drawn from
   // -------------------------------------------------------------------------
-  it("F2: in a partial book the per-row dollars sum to the modelled book — Σ notional === PORTFOLIO AUM === $40,000, not the $460,000 custody total", () => {
+  it("F2: in a partial book the per-row dollars sum to the modelled book — Σ notional === SCENARIO AUM === $40,000, not the $460,000 custody total", () => {
     const payload = f2Payload();
 
     // Fixture self-proof (non-vacuity): custody really does hold 11.5× the
@@ -16366,7 +16430,7 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
     expect(notionalCell(F2_KEY_A).textContent).toContain(F2_NOTIONAL_A);
     expect(notionalCell(F2_KEY_B).textContent).toContain(F2_NOTIONAL_B);
 
-    // (2) The headline PORTFOLIO AUM — the denominator every per-row USD cell
+    // (2) The headline SCENARIO AUM — the denominator every per-row USD cell
     // is `Math.round(weight × AUM)` of. Pre-fix this summed EVERY holding
     // toggle in the draft (defaultDraftFromHoldings seeds them all true), so it
     // read the custody total while the notionals above read the modelled book:
@@ -16423,13 +16487,13 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
     expect(
       screen.queryByTestId("scenario-aum-modelled-note"),
     ).not.toBeInTheDocument();
-    expect(aumLabel()?.textContent).toBe("PORTFOLIO AUM (USD)");
+    expect(aumLabel()?.textContent).toBe("SCENARIO AUM (USD)");
   });
 
   // -------------------------------------------------------------------------
   // F4 — the AUM refusal is visible
   // -------------------------------------------------------------------------
-  it("F4: an invalid Portfolio AUM surfaces a cause-accurate banner naming the accepted range — not a console.warn and a silent snap-back", () => {
+  it("F4: an invalid Scenario AUM surfaces a cause-accurate banner naming the accepted range — not a console.warn and a silent snap-back", () => {
     renderF2(f2Payload());
     // Pre-condition: no banner, and the field holds the modelled book.
     expect(screen.queryByTestId("scenario-commit-error")).not.toBeInTheDocument();
@@ -16440,7 +16504,7 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
 
     const banner = screen.getByTestId("scenario-commit-error");
     expect(banner.textContent).toBe(
-      "Invalid portfolio AUM — enter a positive amount under $1,000,000,000,000. The previous value was kept.",
+      "Invalid scenario AUM — enter a positive amount under $1,000,000,000,000. The previous value was kept.",
     );
     // The pre-existing half of the behaviour is intact: the field never
     // displays a number the draft does not hold.
@@ -16454,7 +16518,7 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
     fireEvent.blur(aumField());
 
     expect(screen.getByTestId("scenario-commit-error").textContent).toBe(
-      "Portfolio AUM must be greater than $0 — a zero size cannot be allocated. The zero was not applied.",
+      "Scenario AUM must be greater than $0 — a zero size cannot be allocated. The zero was not applied.",
     );
   });
 
@@ -16524,7 +16588,7 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
     fireEvent.blur(aumField());
     const banner = screen.getByTestId("scenario-commit-error");
     expect(banner.textContent).toBe(
-      "Portfolio AUM must be greater than $0 — a zero size cannot be allocated. The zero was not applied.",
+      "Scenario AUM must be greater than $0 — a zero size cannot be allocated. The zero was not applied.",
     );
     // The specific lie, named — any rewording that again sends the allocator to
     // the field-clearing gesture (1) just proved is a no-op fails here.
@@ -16716,7 +16780,7 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
     );
     expect(notionalCell(E1_KEY_SPOT).textContent).toContain(E1_NOTIONAL_SPOT);
 
-    // (2) The headline PORTFOLIO AUM. Pre-fix this summed `value_usd`, so the
+    // (2) The headline SCENARIO AUM. Pre-fix this summed `value_usd`, so the
     // derivative's leveraged notional went in whole and the field read
     // $910,000 while the notionals above described a $40,000 book.
     expect(aumField().value).toBe(String(E1_MODELLED_EQUITY));
@@ -16755,7 +16819,7 @@ describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)",
 //
 // Founder decision 2026-09-22, binding: KEEP THE TOTAL AND FLAG IT. A holding
 // from a key whose sync is untrusted (`sign_in_failed`, `revoked`) stays in the
-// PORTFOLIO AUM field's live total, and a muted sentence beside the field names
+// SCENARIO AUM field's live total, and a muted sentence beside the field names
 // how many of those dollars come from such keys. Excluding them was rejected: a
 // password rotation would then read as an AUM loss.
 //
@@ -16986,7 +17050,7 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     vi.stubGlobal("localStorage", localStorageMock);
   });
 
-  it("AUMTRUST tracer (D-02/D-03, D-15 pin 1): a sign_in_failed holding stays in the PORTFOLIO AUM field and the field says so — 'Includes $12,345 from keys needing attention.'", () => {
+  it("AUMTRUST tracer (D-02/D-03, D-15 pin 1): a sign_in_failed holding stays in the SCENARIO AUM field and the field says so — 'Includes $12,345 from keys needing attention.'", () => {
     const payload = atPayload();
 
     // Fixture self-proof (non-vacuity). (1) Every holding has a distinct
@@ -17064,7 +17128,7 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
   });
 
-  it("170.4 D-08: two live keys holding ONE venue:symbol:type are both summed — PORTFOLIO AUM 65,000 (40,000 + 25,000), the second key's row is never overwritten, and the sign_in_failed key's 25,000 is the disclosed part", () => {
+  it("170.4 D-08: two live keys holding ONE venue:symbol:type are both summed — SCENARIO AUM 65,000 (40,000 + 25,000), the second key's row is never overwritten, and the sign_in_failed key's 25,000 is the disclosed part", () => {
     // Both rows share ONE scope ref (binance:AUMTRUST-A:spot). Before D-08 the
     // composer kept the last row per ref, so the field read 25,000.
     const payload = atBook([
@@ -18150,7 +18214,7 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     }
   });
 
-  it("AUMTRUST a11y (review WR-02): the PORTFOLIO AUM input's accessible description is whichever note qualifies its value — the State A disclosure, then the override note once a manual value is committed", () => {
+  it("AUMTRUST a11y (review WR-02): the SCENARIO AUM input's accessible description is whichever note qualifies its value — the State A disclosure, then the override note once a manual value is committed", () => {
     renderAt(atStateBBook());
     // State A: focus on the field announces the disclosure beside it. The
     // expected text is typed, never read back from the DOM node.
@@ -18723,7 +18787,7 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   const OWN_BOOK_UNKNOWN_REASON_COPY =
     "The equity chart and the ratios built from it are hidden for your whole history for now. Use the contact form to have it checked.";
   const OWN_BOOK_AWAITING_COPY =
-    "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.";
+    "Your allocation's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.";
   const THREE_POINT_CURVE = [
     { date: "2026-01-01", value: 100_000 },
     { date: "2026-01-02", value: 101_000 },
@@ -18896,7 +18960,7 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
       );
       // Book mode is live (the default fixture has holdings), so blank mode
       // is not what decides the disclosure here.
-      expect(screen.getByRole("radio", { name: /from my book/i })).toHaveAttribute(
+      expect(screen.getByRole("radio", { name: /from my allocation/i })).toHaveAttribute(
         "aria-checked",
         "true",
       );
@@ -19558,6 +19622,75 @@ function blendWindowPanel(from: HTMLElement): HTMLElement {
   throw new Error("blend window panel not found");
 }
 
+/**
+ * The "Scenario blend" eyebrow `<p>`. Phase 201 plan 34 (U-27) wraps its first word in a Term span, so
+ * the paragraph's own text nodes read " blend" and `getByText("Scenario blend")` no longer finds it.
+ * Find the Term and walk up to the paragraph whose full text is the label.
+ */
+function scenarioBlendEyebrow(): HTMLElement {
+  const eyebrow = screen
+    .getAllByText("Scenario", { selector: '[data-term="scenario"]' })
+    .map((term) => term.closest("p"))
+    .find((p) => p?.textContent === "Scenario blend");
+  if (!eyebrow) throw new Error("Scenario blend eyebrow not found");
+  return eyebrow;
+}
+
+// Phase 201 plan 34 (F-04, F-08, U-27): the composer's static "Scenario ..." labels explain the word
+// through Form A, a `Term` around only the word `Scenario`. The visible text of each label is
+// unchanged. The arms fail when a Term goes (no [data-term]), when a Term grows past the one word,
+// when the label's text changes, and when an excluded string (the uppercase SCENARIO AUM field label,
+// an accessible name, a prose sentence) picks up a Term.
+describe("ScenarioComposer — Phase 201 plan 34 the Scenario labels explain scenario (U-27)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  function renderComposer(): void {
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  it("the h2 still reads Scenario draft and its word Scenario is the term", () => {
+    renderComposer();
+    const h2 = screen.getByRole("heading", { level: 2, name: "Scenario draft" });
+    expect(h2.textContent).toBe("Scenario draft");
+    const term = h2.querySelector('[data-term="scenario"]');
+    expect(term).not.toBeNull();
+    expect(term?.textContent).toBe("Scenario");
+  });
+
+  it("the KPI eyebrow still reads Scenario blend, keeps its mono uppercase voice, and its word Scenario is the term", () => {
+    renderComposer();
+    const eyebrow = scenarioBlendEyebrow();
+    expect(eyebrow.textContent).toBe("Scenario blend");
+    expect(eyebrow.querySelector('[data-term="scenario"]')?.textContent).toBe("Scenario");
+    expect(eyebrow.className).toContain("font-mono");
+    expect(eyebrow.className).toContain("uppercase");
+  });
+
+  it("no excluded string carries a Term: the SCENARIO AUM label, the footer's accessible name, a prose sentence", () => {
+    renderComposer();
+    const aum = document.querySelector('label[for="scenario-aum"]');
+    expect(aum).not.toBeNull();
+    expect(aum?.querySelector("[data-term]")).toBeNull();
+    const footer = screen.getByRole("region", { name: /Scenario draft summary and actions/i });
+    expect(footer.getAttribute("aria-label")).toBe("Scenario draft summary and actions");
+    // Every Term of this key sits inside the one h2 or the one eyebrow, or the max-DD label:
+    // never in a form label, a region name, or a sentence.
+    for (const term of Array.from(document.querySelectorAll('[data-term="scenario"]'))) {
+      expect(term.closest("label, [role=region]")).toBeNull();
+    }
+  });
+});
+
 describe("ScenarioComposer — Phase 170 SC1-LAYERS blend window (C1-A2)", () => {
   beforeEach(() => {
     lsStore.clear();
@@ -19573,7 +19706,7 @@ describe("ScenarioComposer — Phase 170 SC1-LAYERS blend window (C1-A2)", () =>
         allocatorMandate={null}
       />,
     );
-    const eyebrow = screen.getByText("Scenario blend");
+    const eyebrow = scenarioBlendEyebrow();
     const kpi = screen.getByTestId("kpi-strip-mock");
     // The eyebrow is immediately above the KPI group, not a sibling section.
     expect(eyebrow.nextElementSibling).toBe(kpi);
@@ -19614,7 +19747,7 @@ describe("ScenarioComposer — Phase 170 SC1-LAYERS blend window (C1-A2)", () =>
     expect(rows[0]).toBe(header.parentElement);
     expect(rows[1]).toBe(windowRow);
     expect(rows[2]).toBe(timeline!.parentElement);
-    expect(rows[3]).toContainElement(screen.getByText("Scenario blend"));
+    expect(rows[3]).toContainElement(scenarioBlendEyebrow());
 
     // Row 1 is padding only. Rows 2–4 carry the interior hairline.
     expect(classTokens(rows[0].className)).toEqual(
@@ -19663,7 +19796,7 @@ describe("ScenarioComposer — Phase 170 SC1-LAYERS blend window (C1-A2)", () =>
     const panel = screen.getByTestId("scenario-blend-window");
     const rows = Array.from(panel.children);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toContainElement(screen.getByText("Scenario blend"));
+    expect(rows[0]).toContainElement(scenarioBlendEyebrow());
     expect(classTokens(rows[0].className)).not.toContain("border-t");
   });
 

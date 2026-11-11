@@ -77,6 +77,59 @@ describe("wizardErrors", () => {
       }
     });
 
+    // Phase 201 PLAINWORDS plan 32 (F-12, UI-SPEC 8.3, U-28) replaces plan 05's
+    // arm "the two egress-IP bullets send the user to the contact form, not to a
+    // docs link that never renders" (D-23, U-16). No component renders
+    // `docsHref`, so each line still names where to look; since F-12 it names
+    // the `/security#egress-ips` statement through the phrase `egress IP status`
+    // (ErrorEnvelope links it, U-28), not the contact form. The bullet COUNT is
+    // unchanged, and a fixRequires array stays index-aligned to fix.
+    it("the two egress-IP bullets and the allowlist cause point at the egress IP status (F-12)", () => {
+      const denied = WIZARD_ERROR_COPY.KEY_PERMISSION_DENIED;
+      const allowlist = WIZARD_ERROR_COPY.KEY_IP_ALLOWLIST;
+      expect(denied.fix).toHaveLength(3);
+      expect(allowlist.fix).toHaveLength(2);
+      expect(denied.fix[1]).toBe(
+        "Then, if the key is pinned to specific IPs, remove the restriction. Our egress IP status says whether there is an address you could allow instead.",
+      );
+      expect(allowlist.fix[1]).toBe(
+        "Or, if our egress IP status lists addresses, add them to the allowlist instead.",
+      );
+      expect(allowlist.cause).toBe(
+        "The exchange rejected the request with an IP restriction error. You enabled IP pinning on this key, and the address our requests come from is not on the list.",
+      );
+      expect(allowlist.fix[0]).toBe(
+        "Remove the IP restriction on this key (recommended \u2014 read-only keys cannot move funds regardless of origin).",
+      );
+      for (const copy of [denied, allowlist]) {
+        expect(copy.fix.join(" ")).not.toMatch(/docs link/i);
+        if (copy.fixRequires !== undefined) {
+          expect(copy.fixRequires).toHaveLength(copy.fix.length);
+        }
+        expect(copy.docsHref).toBe("/security#egress-ips");
+      }
+    });
+
+    it("no wizard error line carries both pointer phrases, and exactly two codes link the egress status in a fix line (F-12, U-28)", () => {
+      const withEgressFix: string[] = [];
+      for (const [code, copy] of Object.entries(WIZARD_ERROR_COPY)) {
+        const lines = [copy.cause ?? "", ...(copy.fix ?? [])];
+        for (const line of lines) {
+          expect(
+            line.includes("contact form") && line.includes("egress IP status"),
+            `${code}: one line carries both pointer phrases: ${line}`,
+          ).toBe(false);
+        }
+        if ((copy.fix ?? []).some((l) => l.includes("egress IP status"))) {
+          withEgressFix.push(code);
+        }
+      }
+      expect(withEgressFix.sort()).toEqual([
+        "KEY_IP_ALLOWLIST",
+        "KEY_PERMISSION_DENIED",
+      ]);
+    });
+
     it("actions only contain known action IDs", () => {
       const allowed = new Set([
         "try_another_key",
@@ -5133,11 +5186,11 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
     ).toBeGreaterThan(80);
 
     const reuseBullet = bullets.find(
-      (b) => b.includes("my strategies") && b.includes("finish setup"),
+      (b) => b.includes("strategies page") && b.includes("finish setup"),
     );
     expect(
       reuseBullet,
-      "No bullet names the route an owner can actually take: My Strategies " +
+      "No bullet names the route an owner can actually take: the Strategies page " +
         "lists a stored key with no strategy as a 'No strategy yet' row, and " +
         "162-06 made its 'Finish setup' control REUSE that key instead of " +
         "reopening this wizard's credential form. A refusal that withholds the " +
@@ -5146,7 +5199,7 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
 
     expect(
       reuseBullet,
-      "The My Strategies bullet asserts that page FLATLY. It is guarded by " +
+      "The Strategies-page bullet asserts that page FLATLY. It is guarded by " +
         "requireRolePage(…, 'allocator'), and this refusal also renders in the " +
         "manager wizard, where that page redirects away — so an unconditional " +
         "sentence names an unreachable surface for the manager population. It " +
@@ -5189,7 +5242,7 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
     expect(
       claimsIn(surface),
       "KEY_ORPHANED tells the owner that reusing this exact account means " +
-        "emailing us. Since 162-06 an owner who can reach My Strategies reuses " +
+        "emailing us. Since 162-06 an owner who can reach the Strategies page reuses " +
         "the stored key themselves through 'Finish setup', so that sentence " +
         "lies to the population this phase exists for.",
     ).toEqual([]);
@@ -6710,5 +6763,46 @@ describe("[170.1-02 / R-3] csvRuleLabel", () => {
   it("a rule with no label answers the fallback sentence, never the raw key", () => {
     expect(csvRuleLabel("mystery_rule")).toBe("This value does not pass a format check");
     expect(csvRuleLabel("constructor")).toBe("This value does not pass a format check");
+  });
+});
+
+/**
+ * Phase 201 D-07 / U-18 — the wizard's error copy names the page "Strategies".
+ *
+ * WHY: Phase 199 merged the lists at `/strategies`, so a wizard error that sends a manager to
+ * "My Strategies" names a page that no longer exists under that name. The sweep covers every
+ * string the envelope can render (title, cause, every fix bullet), so a later entry that
+ * reintroduces the old name reds here, not in a UI pass.
+ */
+describe("201 D-07: the wizard names the Strategies page, never My Strategies", () => {
+  const RETIRED_PAGE_NAME = /\bmy strategies\b/i;
+
+  it("the predicate is live against the retired phrase (positive control)", () => {
+    expect(RETIRED_PAGE_NAME.test("Open My Strategies and mark it")).toBe(true);
+    expect(RETIRED_PAGE_NAME.test("Open Strategies and mark it")).toBe(false);
+  });
+
+  it("no entry's title, cause or fix bullet carries the retired page name", () => {
+    const entries = Object.entries(WIZARD_ERROR_COPY);
+    expect(entries.length, "the table collapsed, so the sweep is vacuous").toBeGreaterThan(50);
+    const offenders = entries
+      .filter(([, c]) => RETIRED_PAGE_NAME.test([c.title, c.cause, ...c.fix].join(" | ")))
+      .map(([code]) => code);
+    expect(offenders).toEqual([]);
+  });
+
+  it("the four sentences the UI-SPEC rewrites read word for word", () => {
+    expect(WIZARD_ERROR_COPY.KEY_ORPHANED.fix).toContain(
+      "If your account includes the Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",
+    );
+    expect(WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE.fix).toContain(
+      "If you arrived from Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",
+    );
+    expect(WIZARD_ERROR_COPY.METADATA_CAPITAL_OWNERSHIP_INVALID.fix).toContain(
+      "You can change the answer later from Strategies.",
+    );
+    expect(WIZARD_ERROR_COPY.ALLOCATION_NOT_ALLOCATABLE.fix).toContain(
+      "Open Strategies and mark this strategy as your own capital, then allocate again.",
+    );
   });
 });

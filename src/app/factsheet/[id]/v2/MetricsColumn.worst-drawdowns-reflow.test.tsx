@@ -17,7 +17,7 @@ import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 
 import { FactsheetProvider } from "./factsheet-context";
-import { MetricsColumn } from "./MetricsColumn";
+import { MetricsColumn, isoToMonthDay } from "./MetricsColumn";
 
 function payloadWithWorst10(): FactsheetPayload {
   const dailyReturns = Array.from({ length: 300 }).map((_, i) => ({
@@ -66,5 +66,33 @@ describe("MetricsColumn — Worst Drawdowns 320px reflow regression (F1 follow-u
     expect(region).not.toBeNull();
     expect(region!.className).toContain("overflow-x-auto");
     expect(region!.getAttribute("aria-label")).toMatch(/worst.*drawdowns/i);
+  });
+
+  // Phase 201 (D-11): the three date cells print through the one date helper ("Oct 9, 2026",
+  // which has spaces) and must not wrap, or a date breaks across two lines in a 320px column.
+  it("prints the start, trough and recovery dates as 'Mon D, YYYY' in nowrap cells", () => {
+    const payload = payloadWithWorst10();
+    const { container } = render(
+      <FactsheetProvider payload={payload}>
+        <MetricsColumn />
+      </FactsheetProvider>,
+    );
+    const table = [...container.querySelectorAll("table")].find(t => /0\.65625rem/.test(t.className))!;
+    const first = table.querySelector("tbody tr")!;
+    const cells = [...first.querySelectorAll("td")].slice(1, 4);
+    expect(cells.map(td => td.textContent)).toEqual(
+      [5, 20, 40].map(i => isoToMonthDay(payload.dates[i])),
+    );
+    for (const td of cells) {
+      expect(td.textContent).toMatch(/^[A-Z][a-z]{2} \d{1,2}, \d{4}$/);
+      expect(td.className, "a date cell must not wrap").toContain("whitespace-nowrap");
+    }
+  });
+
+  it("isoToMonthDay keeps its export and prints the one format, with the dash for a missing date", () => {
+    expect(isoToMonthDay("2026-10-09")).toBe("Oct 9, 2026");
+    expect(isoToMonthDay("2026-01-01")).toBe("Jan 1, 2026");
+    expect(isoToMonthDay("")).toBe("—");
+    expect(isoToMonthDay("not a date")).toBe("—");
   });
 });

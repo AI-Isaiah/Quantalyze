@@ -711,7 +711,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       // conflict that only a reload resolves.
       return NextResponse.json(
         {
-          error: "Portfolio changed since you started this scenario",
+          error: "Your allocation changed since you started this scenario",
           detail:
             "Your holdings were updated after you opened this scenario. Refresh to load the latest holdings, then re-apply your changes.",
           code: CONFLICT_CODES.PORTFOLIO_FINGERPRINT_STALE,

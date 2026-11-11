@@ -567,6 +567,39 @@ describe("email.ts — notification_dispatches audit trail", () => {
     expect(html).not.toContain("/portfolios");
   });
 
+  // Phase 201 PLAINWORDS (D-04, D-18): an allocator's set of holdings is an
+  // "allocation" in every email an allocator reads. The alert digest heading and
+  // the allocator welcome email follow it; the subject keeps the caller's own name.
+  it("alert digest heading says allocation alerts, never portfolio alerts (D-04)", async () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.example.test");
+    vi.resetModules();
+    const { sendAlertDigest } = await import("./email");
+
+    await sendAlertDigest("allocator@example.com", "Core", [
+      {
+        id: "a-1",
+        severity: "high",
+        message: "Drawdown breached the limit",
+        triggered_at: "2026-11-07T00:00:00Z",
+      },
+    ] as unknown as Parameters<typeof sendAlertDigest>[2]);
+
+    const html = state.sendCalls[0].html as string;
+    expect(html).toContain("Allocation alerts</h2>");
+    expect(html).not.toMatch(/Portfolio Alerts/i);
+  });
+
+  it("allocator welcome email says build an allocation, never build a portfolio (D-04)", async () => {
+    vi.resetModules();
+    const { notifyUserSignupApproved } = await import("./email");
+
+    await notifyUserSignupApproved("allocator@example.com", "allocator");
+
+    const html = state.sendCalls[0].html as string;
+    expect(html).toContain("browse exchange-verified strategies and build an allocation");
+    expect(html).not.toMatch(/build a portfolio/i);
+  });
+
   it("empty recipient short-circuits before any dispatch write or Resend call", async () => {
     const { notifyManagerIntroRequest } = await import("./email");
 

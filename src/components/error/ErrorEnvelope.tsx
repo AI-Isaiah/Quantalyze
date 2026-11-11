@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { scrubFreeformString } from "@/lib/admin/pii-scrub";
-import { contactHref } from "@/lib/contact";
+import { contactHref, EGRESS_IP_STATUS_LINK } from "@/lib/contact";
 import type { ErrorEnvelope as ErrorEnvelopeType } from "@/lib/envelope";
 
 // Phase 17 / DESIGN-02 — canonical surface-agnostic error envelope renderer.
@@ -125,6 +125,23 @@ export function ErrorEnvelope({
     draft: contactDraftId,
   });
 
+  // Phase 201 PLAINWORDS plan 32 (F-12, U-28): a line that says `egress IP status`
+  // links that phrase to the /security statement of whether there is an address
+  // to allow; every other line keeps the contact-form pointer. The href is the
+  // shared constant, never taken from the line (T-201-44).
+  function pointer(text: string) {
+    return text.includes(EGRESS_IP_STATUS_LINK.text) ? (
+      <ContactPointerText
+        text={text}
+        href={EGRESS_IP_STATUS_LINK.href}
+        linkText={EGRESS_IP_STATUS_LINK.text}
+        newTab
+      />
+    ) : (
+      <ContactPointerText text={text} href={pointerHref} newTab />
+    );
+  }
+
   const showRetry = envelope.recoverable && Boolean(onRetry);
   const showCancel = Boolean(onCancel);
 
@@ -164,7 +181,7 @@ export function ErrorEnvelope({
         // Same secondary token as debug_context — keeps contrast ≥4.5:1
         // on bg-negative/5.
         <p className="mt-1.5 text-sm text-text-secondary">
-          <ContactPointerText text={envelope.cause} href={pointerHref} newTab />
+          {pointer(envelope.cause)}
         </p>
       )}
       {envelope.debug_context.length > 0 && (
@@ -177,7 +194,7 @@ export function ErrorEnvelope({
         <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-text-secondary">
           {envelope.debug_context.map((step, i) => (
             <li key={i}>
-              <ContactPointerText text={step} href={pointerHref} newTab />
+              {pointer(step)}
             </li>
           ))}
         </ul>

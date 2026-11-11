@@ -958,7 +958,7 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
 
     expect(screen.getByText(/Coverage gaps \(2 days total\)/)).toBeInTheDocument();
     expect(
-      screen.getByText(/2025-09-25 → 2025-09-26 \(2 days\)/),
+      screen.getByText(/Sep 25, 2025 → Sep 26, 2025 \(2 days\)/),
     ).toBeInTheDocument();
     // Non-blocking: submit stays enabled.
     expect(
@@ -981,7 +981,7 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
 
     expect(screen.getByText(/Coverage gaps \(3 days total\)/)).toBeInTheDocument();
     expect(
-      screen.getByText(/2025-10-01 → 2025-10-03 \(3 days\)/),
+      screen.getByText(/Oct 1, 2025 → Oct 3, 2025 \(3 days\)/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/2025-09-25/)).not.toBeInTheDocument();
   });
@@ -1299,7 +1299,13 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     expect(negative).toBeInTheDocument();
     expect(negative.className).toContain("text-negative");
     // Data-window column shows per_key ACTUAL inclusive days; Days shows n_days.
-    expect(screen.getByText("2025-01-01 – 2025-01-02")).toBeInTheDocument();
+    // F-11 / D-11 / UI-SPEC Interaction contract 5 / R3-01 item 5 / plan
+    // 201-38: the window cell prints through `formatDay`, never the raw ISO.
+    const windowCell = screen.getByText("Jan 1, 2025 – Jan 2, 2025");
+    expect(windowCell).toBeInTheDocument();
+    expect(windowCell.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    // UI-SPEC "Wider date cells": a date-bearing table cell never wraps.
+    expect(windowCell.className).toContain("whitespace-nowrap");
     // Reconciliation caption in the arithmetic (sum) direction.
     expect(
       screen.getByText(/Contributions sum to the composite cumulative return\./),
@@ -1411,21 +1417,33 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     // 01-08 — so it does not reach member 2's first owned day (01-08).
     expect(
       screen.getByRole("img", {
-        name: /Key A: covers 2025-01-01.2025-01-07, in blend/,
+        name: "Key A: covers Jan 1, 2025 – Jan 7, 2025, in blend",
       }),
     ).toBeInTheDocument();
     // Member 2: window_end 01-13 → inclusive 01-12.
     expect(
       screen.getByRole("img", {
-        name: /Key B: covers 2025-01-08.2025-01-12, in blend/,
+        name: "Key B: covers Jan 8, 2025 – Jan 12, 2025, in blend",
       }),
     ).toBeInTheDocument();
     // The old half-open pass-through (member 1 through 01-08) must be gone.
     expect(
       screen.queryByRole("img", {
-        name: /Key A: covers 2025-01-01.2025-01-08/,
+        name: /Key A: covers Jan 1, 2025 – Jan 8, 2025/,
       }),
     ).not.toBeInTheDocument();
+  });
+
+  // F-11 / D-11 / UI-SPEC Interaction contract 5 / R3-01 item 5 / plan 201-38:
+  // the success paragraph names the stitched range through `formatDay`. It had
+  // no test before this arm. Fixture per_key: 2025-01-01 .. 2025-01-12.
+  it("[201-38] the success paragraph reads the range in the helper's form", async () => {
+    await renderPassed({});
+    const para = screen.getByText(/stitched into one\s+continuous track record/);
+    expect(para.textContent).toContain(
+      "continuous track record, Jan 1, 2025 – Jan 12, 2025.",
+    );
+    expect(para.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });
 
@@ -1529,9 +1547,16 @@ describe("[93-02] SyncPreviewStep — declared-window fallback (HARD-02)", () =>
     });
 
     // Tier 2: declared strategy_keys window; open-ended → "live".
-    expect(screen.getByText("2025-08-03 – live")).toBeInTheDocument();
+    // F-11 / plan 201-38 (T-201-54): the start prints through `formatDay`; the
+    // word "live" stays OUTSIDE the helper call, because formatDay(null) would
+    // print an em dash and a still-live key would read as having no window.
+    // (The gantt's union endpoint labels stay ISO, D-21, so the negative ISO
+    // assertion is scoped to the window cell.)
+    const liveCell = screen.getByText("Aug 3, 2025 – live");
+    expect(liveCell).toBeInTheDocument();
+    expect(liveCell.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     // Days column stays coverage-honest.
-    const daysCell = screen.getByText("2025-08-03 – live").closest("tr");
+    const daysCell = screen.getByText("Aug 3, 2025 – live").closest("tr");
     expect(daysCell).not.toBeNull();
     expect(within(daysCell as HTMLElement).getByText("0")).toBeInTheDocument();
   });
@@ -1573,8 +1598,10 @@ describe("[93-02] SyncPreviewStep — declared-window fallback (HARD-02)", () =>
       }),
     });
 
-    expect(screen.getByText("2025-08-03 – 2025-09-24")).toBeInTheDocument();
-    expect(screen.queryByText("2025-08-03 – live")).not.toBeInTheDocument();
+    const pkCell = screen.getByText("Aug 3, 2025 – Sep 24, 2025");
+    expect(pkCell).toBeInTheDocument();
+    expect(pkCell.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(screen.queryByText("Aug 3, 2025 – live")).not.toBeInTheDocument();
   });
 
   // Test 3 (bounded declared end) — declared windowStart + windowEnd with absent
@@ -1600,7 +1627,40 @@ describe("[93-02] SyncPreviewStep — declared-window fallback (HARD-02)", () =>
       }),
     });
 
-    expect(screen.getByText("2025-08-03 – 2025-09-30")).toBeInTheDocument();
+    const boundedCell = screen.getByText("Aug 3, 2025 – Sep 30, 2025");
+    expect(boundedCell).toBeInTheDocument();
+    expect(boundedCell.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+
+  // Plan 201-38 — tier 3 is unchanged: a member with no entered window and no
+  // reconstructed coverage still reads an em dash in the window cell.
+  it("still renders an em dash when no window was ever entered (tier 3)", async () => {
+    await renderPassed({
+      members: [
+        {
+          api_key_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          // An empty declared start is the "no window was ever entered" state
+          // the tier-3 branch guards (`member?.windowStart` falsy).
+          window_start: "",
+          window_end: null,
+          seq: 1,
+          api_keys: { exchange: "deribit", label: "Key A" },
+        },
+      ],
+      series: DECLARED_FALLBACK_SERIES,
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          per_key: [{ seq: 1, first_day: null, last_day: null, n_days: 0 }],
+          gap_spans: [],
+          gap_day_count: 0,
+        },
+      }),
+    });
+
+    const row = screen.getByText("Key A").closest("tr");
+    expect(row).not.toBeNull();
+    const cells = within(row as HTMLElement).getAllByRole("cell");
+    expect(cells[2].textContent).toBe("—");
   });
 });
 

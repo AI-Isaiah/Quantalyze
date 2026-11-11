@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { displayStrategyName } from "@/lib/strategy-display";
+import { isDiscoveryVisible } from "@/lib/visibility";
 import { gateAnnualized, gatedValue } from "@/lib/figure-gate";
 import { recordFromScalars } from "@/lib/figure-record-scalars";
 import { annualizedCell } from "@/components/strategy/annualized-cell";
@@ -49,7 +50,12 @@ export function CandidateDetail({
             Rank {candidate.rank}
           </p>
           <h2 className="text-h3 font-display text-text-primary">
-            {displayStrategyName(strategy)}
+            {/* D-17: the admin gate (`isAdminUser`) admits this row; discovery
+                visibility (`isDiscoveryVisible`, null viewer id) decides whether
+                its name is printed. */}
+            {displayStrategyName(strategy, {
+              visible: isDiscoveryVisible(strategy ?? {}, null),
+            })}
           </h2>
           {strategy?.strategy_types && strategy.strategy_types.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1.5">
@@ -149,7 +155,7 @@ export function CandidateDetail({
         <div className="space-y-2">
           {breakdown.portfolio_fit !== undefined && (
             <>
-              <SubScoreBar label="Portfolio fit" value={breakdown.portfolio_fit} />
+              <SubScoreBar label="Allocation fit" value={breakdown.portfolio_fit} />
               {/* GAP-01: admin-only cause of a null fit. Only a known reason renders (short
                   overlap also needs numeric counts); an unknown reason or a bad count renders
                   nothing. */}
@@ -157,21 +163,21 @@ export function CandidateDetail({
                 Number.isFinite(raw.fit_overlap_days) &&
                 Number.isFinite(raw.fit_min_overlap_days) && (
                   <p className="text-caption text-text-muted">
-                    {`Portfolio fit not computed: only ${raw.fit_overlap_days} shared ${
+                    {`Allocation fit not computed: only ${raw.fit_overlap_days} shared ${
                       raw.fit_overlap_days === 1 ? "day" : "days"
-                    } with the book (needs ${raw.fit_min_overlap_days}).`}
+                    } with the allocation (needs ${raw.fit_min_overlap_days}).`}
                   </p>
                 )}
               {raw.fit_unavailable_reason === "no_candidate_returns" && (
                 <p className="text-caption text-text-muted">
-                  Portfolio fit not computed: this strategy has no daily returns to compare with
-                  the book.
+                  Allocation fit not computed: this strategy has no daily returns to compare with
+                  the allocation.
                 </p>
               )}
             </>
           )}
           {breakdown.preference_fit !== undefined && (
-            <SubScoreBar label="Preference fit" value={breakdown.preference_fit} />
+            <SubScoreBar label="Mandate fit" value={breakdown.preference_fit} />
           )}
           {breakdown.track_record !== undefined && (
             <SubScoreBar label="Track record" value={breakdown.track_record} />

@@ -82,6 +82,13 @@ describe("RegimeDetector", () => {
     ).toBeNull();
   });
 
+  // Plan 201-14 (U-15, D-11): the regime start date prints through the helper.
+  it("prints the regime start as a helper day, `Mon D, YYYY`", () => {
+    renderRegime(makeReturns(300, () => 0.002));
+    const since = screen.getByText(/^Since/);
+    expect(since.textContent).toMatch(/^Since [A-Z][a-z]{2} \d{1,2}, 20\d\d$/);
+  });
+
   it("M-0177: down-then-up series produces a bullish crossover → exactly 'Bull Market'", () => {
     // 250 mildly-declining days then 100 strongly-rising days drives the fast
     // MA from below the slow MA to above it → a single bullish crossover.

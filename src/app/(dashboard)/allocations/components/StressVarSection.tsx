@@ -216,7 +216,7 @@ export function StressVarSection({
       <div className="mt-3">
         <MetricRow
           metric="projected-impact"
-          label="Projected portfolio impact"
+          label="Projected allocation impact"
           value={formatPercent(impactShown ? result.projectedImpact : null)}
         />
         <MetricRow

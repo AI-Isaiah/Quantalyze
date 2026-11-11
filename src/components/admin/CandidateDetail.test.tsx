@@ -5,7 +5,7 @@ import type { CandidateRow } from "@/components/admin/AllocatorMatchQueue";
 
 /**
  * 167.1.1.1 GAP-01 — an admin opening a candidate whose returns share too few days with the
- * book sees WHY the Portfolio fit is empty, beside the Portfolio fit bar.
+ * allocation sees WHY the Allocation fit is empty, beside the Allocation fit bar.
  *
  * The cause lives in `score_breakdown.raw` only. The allocator-facing `reasons` list never
  * carries it, and an absent or unknown reason (or a count that is not a number) renders
@@ -37,6 +37,7 @@ function candidateWithRaw(raw: Record<string, unknown>): CandidateRow {
       name: "Candidate Strategy",
       codename: "Falcon",
       disclosure_tier: "institutional",
+      status: null,
       strategy_types: ["trend"],
       supported_exchanges: ["binance"],
       aum: 1_000_000,
@@ -61,7 +62,42 @@ function renderDetail(raw: Record<string, unknown>) {
   );
 }
 
-const LINE = /Portfolio fit not computed/;
+const LINE = /Allocation fit not computed/;
+
+/**
+ * Phase 201 plan 20 (U-24, D-06) - the admin sub-scores read "Allocation fit" and "Mandate fit".
+ * WHY: staff and allocator name the holdings an allocation and the criteria a mandate. Only the
+ * visible labels changed (T-201-26), so each label must still show ITS OWN field's value: the two
+ * scores are different numbers here so a swapped binding fails.
+ */
+describe("CandidateDetail sub-score labels (U-24, D-06)", () => {
+  function rowValue(label: string): string {
+    return screen.getByText(label).parentElement?.textContent ?? "";
+  }
+
+  it("reads Allocation fit and Mandate fit, each beside its own field's value", () => {
+    const base = candidateWithRaw({});
+    const candidate: CandidateRow = {
+      ...base,
+      score_breakdown: { ...base.score_breakdown, portfolio_fit: 0.8, preference_fit: 0.3 },
+    };
+    render(
+      <CandidateDetail
+        candidate={candidate}
+        alreadySent={false}
+        isKept={false}
+        isSkipped={false}
+        onSendIntro={vi.fn()}
+        onKeep={vi.fn()}
+        onSkip={vi.fn()}
+      />,
+    );
+    expect(rowValue("Allocation fit")).toBe("Allocation fit80");
+    expect(rowValue("Mandate fit")).toBe("Mandate fit30");
+    expect(screen.queryByText("Portfolio fit")).not.toBeInTheDocument();
+    expect(screen.queryByText("Preference fit")).not.toBeInTheDocument();
+  });
+});
 
 describe("CandidateDetail short-overlap line (GAP-01)", () => {
   it("renders the cause with the numbers from raw", () => {
@@ -72,7 +108,7 @@ describe("CandidateDetail short-overlap line (GAP-01)", () => {
     });
     expect(
       screen.getByText(
-        "Portfolio fit not computed: only 8 shared days with the book (needs 30).",
+        "Allocation fit not computed: only 8 shared days with the allocation (needs 30).",
       ),
     ).toBeInTheDocument();
   });
@@ -85,7 +121,7 @@ describe("CandidateDetail short-overlap line (GAP-01)", () => {
     });
     expect(
       screen.getByText(
-        "Portfolio fit not computed: only 1 shared day with the book (needs 30).",
+        "Allocation fit not computed: only 1 shared day with the allocation (needs 30).",
       ),
     ).toBeInTheDocument();
   });
@@ -136,7 +172,7 @@ describe("CandidateDetail short-overlap line (GAP-01)", () => {
 
 describe("CandidateDetail no-returns line (GAP-01, SFH-R5 M1)", () => {
   const NO_RETURNS =
-    "Portfolio fit not computed: this strategy has no daily returns to compare with the book.";
+    "Allocation fit not computed: this strategy has no daily returns to compare with the allocation.";
 
   it("names a candidate with no returns series, and only that sentence", () => {
     renderDetail({

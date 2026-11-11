@@ -28,13 +28,20 @@ import React from "react";
 
 vi.mock("server-only", () => ({}));
 
-const recorded = vi.hoisted(() => ({ views: [] as Array<Record<string, unknown>> }));
+const recorded = vi.hoisted(() => ({
+  views: [] as Array<Record<string, unknown>>,
+  // D-20 / U-03 print arm only: render the REAL `FactsheetView` under the stub's recorder.
+  renderReal: false,
+}));
 
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(() => {
     throw new Error("NEXT_HTTP_ERROR_FALLBACK;404");
   }),
+  // Only the real `FactsheetView` (the print arm) reads the router.
+  useRouter: () => ({ refresh: vi.fn() }),
 }));
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 // next/link needs the App Router context; a plain anchor keeps the className and href.
 vi.mock("next/link", () => ({
@@ -49,12 +56,18 @@ vi.mock("next/link", () => ({
   }) => React.createElement("a", { href, className }, children),
 }));
 
-vi.mock("../v2/FactsheetView", () => ({
-  FactsheetView: (props: Record<string, unknown>) => {
-    recorded.views.push(props);
-    return React.createElement("div", { "data-testid": "factsheet-view" }, "OPENING VIEW");
-  },
-}));
+vi.mock("../v2/FactsheetView", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../v2/FactsheetView")>();
+  return {
+    FactsheetView: (props: Record<string, unknown>) => {
+      recorded.views.push(props);
+      if (recorded.renderReal) {
+        return React.createElement(actual.FactsheetView, props as unknown as React.ComponentProps<typeof actual.FactsheetView>);
+      }
+      return React.createElement("div", { "data-testid": "factsheet-view" }, "OPENING VIEW");
+    },
+  };
+});
 
 vi.mock("@/lib/queries", () => ({
   getFactsheetDetail: vi.fn(),
@@ -66,7 +79,7 @@ vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 // 194 D-06: the AUM gate asks `getUserRolesResult` whether the viewer is an allocator.
 vi.mock("@/lib/auth", () => ({ getUserRolesResult: vi.fn() }));
 
-import TearSheetPage from "./page";
+import TearSheetPage, { generateMetadata } from "./page";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getFactsheetDetail, getPercentiles, readPublicVerificationSignals } from "@/lib/queries";
@@ -76,6 +89,7 @@ import { withPublishedOnly } from "@/lib/visibility";
 import { KCS10_PUBLIC_SENTENCE } from "@/lib/status-surface-copy";
 import { figureRecord } from "@/lib/figure-gate";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
+import { censusPayloadA } from "../v2/test-fixtures/census-payloads";
 
 const RECORD = figureRecord({
   seriesStart: "2024-01-01",
@@ -163,6 +177,7 @@ const lastView = () => recorded.views[recorded.views.length - 1];
 
 beforeEach(() => {
   recorded.views.length = 0;
+  recorded.renderReal = false;
   vi.mocked(notFound).mockClear();
   vi.mocked(getFactsheetDetail).mockReset().mockResolvedValue(DETAIL as never);
   vi.mocked(getPercentiles).mockReset().mockResolvedValue(null);
@@ -180,7 +195,7 @@ describe("TearSheet page - C-0189 disclosure-tier redaction", () => {
     await renderPage();
 
     // The redacted block renders this blurb when the tier downgrades to "exploratory".
-    expect(screen.getByText(/Pseudonymous strategy/i)).toBeInTheDocument();
+    expect(screen.getByText("Pseudonymous manager")).toBeInTheDocument();
     expect(screen.getByText(/Exploratory/i)).toBeInTheDocument();
     // The bio text is the load-bearing assertion: its presence proves the bypass.
     expect(screen.queryByText(/Test bio body/i)).toBeNull();
@@ -204,7 +219,7 @@ describe("TearSheet page - C-0189 disclosure-tier redaction", () => {
     expect(screen.getByText(/12\+ years trading/)).toBeInTheDocument();
     expect(screen.getByText(/\$10M-\$50M AUM/)).toBeInTheDocument();
     expect(screen.getByText(/LinkedIn profile/i)).toBeInTheDocument();
-    expect(screen.queryByText(/Pseudonymous strategy/i)).toBeNull();
+    expect(screen.queryByText("Pseudonymous manager")).toBeNull();
   });
 
   it("authenticated + UNATTESTED viewer: redacted (red-team C-9 closure)", async () => {
@@ -213,7 +228,7 @@ describe("TearSheet page - C-0189 disclosure-tier redaction", () => {
     stubAuth({ data: { user: { id: "newbie-1", email: "newbie@example.com" } }, error: null });
     await renderPage();
 
-    expect(screen.getByText(/Pseudonymous strategy/i)).toBeInTheDocument();
+    expect(screen.getByText("Pseudonymous manager")).toBeInTheDocument();
     expect(screen.queryByText(/Test bio body/i)).toBeNull();
     expect(screen.queryByText(/Jane Doe/)).toBeNull();
     expect(screen.queryByText(/Doe Capital/)).toBeNull();
@@ -226,7 +241,7 @@ describe("TearSheet page - C-0189 disclosure-tier redaction", () => {
     // RLS denial or a transient DB blip must redact, never leak (mirrors /discovery/layout.tsx).
     stubAuth(user("u-2"), { data: null, error: { message: "permission denied" } });
     await renderPage();
-    expect(screen.getByText(/Pseudonymous strategy/i)).toBeInTheDocument();
+    expect(screen.getByText("Pseudonymous manager")).toBeInTheDocument();
     expect(screen.queryByText(/Test bio body/i)).toBeNull();
     expect(screen.queryByText(/LinkedIn profile/i)).toBeNull();
   });
@@ -241,7 +256,7 @@ describe("TearSheet page - C-0189 disclosure-tier redaction", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await renderPage();
-      expect(screen.getByText(/Pseudonymous strategy/i)).toBeInTheDocument();
+      expect(screen.getByText("Pseudonymous manager")).toBeInTheDocument();
       expect(screen.queryByText(/Test bio body/i)).toBeNull();
       expect(screen.queryByText(/Jane Doe/)).toBeNull();
       expect(screen.queryByText(/LinkedIn profile/i)).toBeNull();
@@ -260,7 +275,7 @@ describe("TearSheet page - C-0189 disclosure-tier redaction", () => {
       from: vi.fn(),
     } as unknown as Awaited<ReturnType<typeof createClient>>);
     await renderPage();
-    expect(screen.getByText(/Pseudonymous strategy/i)).toBeInTheDocument();
+    expect(screen.getByText("Pseudonymous manager")).toBeInTheDocument();
     expect(screen.queryByText(/Test bio body/i)).toBeNull();
   });
 });
@@ -360,7 +375,8 @@ describe("TearSheet page - a published strategy that is not built yet is not a 4
         `${KCS10_PUBLIC_SENTENCE} Check with the person who shared this link before trying again.`,
       );
       expect(pending.getAttribute("data-degrade-id")).toBe("factsheet.public-pending");
-      expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("STRAT-001");
+      // Phase 201 D-09: the H1 is the name discovery prints for a published strategy.
+      expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Test Strategy");
       expect(screen.getByRole("link", { name: "Back to factsheet" }).getAttribute("href")).toBe("/factsheet/s-1");
       expect(recorded.views).toHaveLength(0);
     },
@@ -474,6 +490,49 @@ describe("TearSheet page - AUM follows 194 D-06 / D-22 (the payload handed down 
   });
 });
 
+/**
+ * Phase 201 plan 23 (D-20, U-03): the print view carries no Term. `FactsheetView printView`
+ * wraps its body in `PlainTerms`, so every `Term` prints as its plain label: no dotted underline,
+ * no tab stop and no bubble on paper. The factsheet's own test proves that for the view alone;
+ * this arm asserts it on the tearsheet ROUTE, where the page hands the view `printView`, so a
+ * page that stopped passing the flag, or a view that dropped the wrapper, fails here. The real
+ * `FactsheetView` is rendered (the rest of this file stubs it), and the same payload on screen is
+ * the control that proves the arm can see a trigger.
+ */
+describe("TearSheet page - the print view renders no Term (D-20, U-03)", () => {
+  const MOMENTUM_RANKS = { "s-1": RANKS };
+
+  async function renderRealPage() {
+    recorded.renderReal = true;
+    vi.mocked(getPercentiles).mockResolvedValue(MOMENTUM_RANKS as never);
+    vi.mocked(fetchAndBuildPayloadWithReason).mockResolvedValue({
+      payload: { ...censusPayloadA(), strategyId: "s-1" } as FactsheetPayload,
+      reason: null,
+    });
+    stubAuth(ANON);
+    return renderPage();
+  }
+
+  it("has no [data-term] and no Term tab stop, while the strip and section labels still read their text", async () => {
+    const { container } = await renderRealPage();
+
+    expect(lastView().printView).toBe(true);
+    expect(container.querySelectorAll("[data-term]")).toHaveLength(0);
+    // A Term is the only element here that carries both; under PlainTerms there is none.
+    expect(container.querySelectorAll("[data-term][tabindex]")).toHaveLength(0);
+    // The labels the Terms wrapped are still printed: the strip's own, and the page's section heading.
+    const labels = Array.from(container.querySelectorAll('[data-testid="factsheet-kpi-label"]')).map((l) => l.textContent);
+    expect(labels).toContain("Sharpe");
+    expect(screen.getByText("Peer-relative ranks")).toBeInTheDocument();
+  });
+
+  it("the same payload as the on-screen view does render triggers (the print arm is not vacuous)", async () => {
+    const { FactsheetView: Screen } = await vi.importActual<typeof import("../v2/FactsheetView")>("../v2/FactsheetView");
+    const { container } = render(<Screen payload={censusPayloadA()} />);
+    expect(container.querySelectorAll("[data-term]").length).toBeGreaterThan(0);
+  });
+});
+
 describe("TearSheet page - what the print view keeps around the opening view", () => {
   const MOMENTUM_RANKS = { "s-1": RANKS };
 
@@ -485,7 +544,7 @@ describe("TearSheet page - what the print view keeps around the opening view", (
     expect(getPercentiles).toHaveBeenCalledWith("momentum");
     const view = screen.getByTestId("factsheet-view");
     const ranks = screen.getByText("Peer-relative ranks");
-    const identity = screen.getByText(/Pseudonymous strategy/i);
+    const identity = screen.getByText("Pseudonymous manager");
     const follows = (a: Node, b: Node) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING;
     expect(follows(view, ranks)).toBeTruthy();
     expect(follows(ranks, identity)).toBeTruthy();
@@ -497,6 +556,20 @@ describe("TearSheet page - what the print view keeps around the opening view", (
     stubAuth(ANON);
     await renderPage();
     expect(screen.queryByText("Peer-relative ranks")).toBeNull();
+  });
+
+  // Phase 201 D-11: the stamp prints through formatDay, read in UTC. The instant is pinned just
+  // after midnight UTC so a local-time reading (any zone west of UTC) would print the day before.
+  it("the Generated stamp is formatDay of the request instant, read in UTC", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-09T00:30:00Z"));
+    try {
+      stubAuth(ANON);
+      await renderPage();
+      expect(screen.getByText("Generated Oct 9, 2026")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("the Generated line renders once, is printed, and sits after the opening view", async () => {
@@ -514,7 +587,7 @@ describe("TearSheet page - what the print view keeps around the opening view", (
     stubAuth(ANON);
     await renderPage();
 
-    // The strategy has no `name` override, so the display name is the codename or name the H1 shows.
+    // The display name is the real name the H1 and the title show (Phase 201 D-09).
     const heading = screen.getByText(/^Interested in /);
     expect(heading.textContent).toMatch(/^Interested in .+\?$/);
     const block = heading.closest("section") as HTMLElement;
@@ -541,7 +614,7 @@ describe("TearSheet page - what the print view keeps around the opening view", (
     const nodes = [
       screen.getByTestId("factsheet-view"),
       screen.getByText("Peer-relative ranks"),
-      screen.getByText(/Pseudonymous strategy/i),
+      screen.getByText("Pseudonymous manager"),
       screen.getByText(/^Interested in /),
       screen.getByRole("heading", { name: "Risk Disclosure" }),
     ];
@@ -615,28 +688,62 @@ describe("TearSheet page - screen-only controls (D-09, UI-SPEC Print and Tearshe
 describe("TearSheet page - one Risk Disclosure block (195 D-09, UC-19, T-195-09)", () => {
   // Sentences are pinned as LITERALS: a test reading the page's own constants cannot fail
   // when a legally required sentence is dropped from them.
-  const SENTENCES = [
+  const LEAD = [
     "Past performance does not guarantee future results.",
     "Cryptocurrency trading involves substantial risk of total loss.",
     "This tear sheet is for informational purposes only and does not constitute investment, legal, or tax advice.",
-    "Strategies are monitored via read-only exchange APIs; managers retain asset custody.",
-    "Quantalyze provides analytics only — no pooling, no fund administration, no custody of client assets.",
   ];
+  const ANALYTICS_ONLY =
+    "Quantalyze provides analytics only — no pooling, no fund administration, no custody of client assets.";
+  const API_CLAUSE = "Strategies are monitored via read-only exchange APIs; managers retain asset custody.";
+  const PLAIN_CLAUSE = "Managers retain asset custody.";
 
-  it("carries every prior sentence once plus the analytics-only custody sentence, as the one block", async () => {
+  async function disclosureText(tier: string | null) {
+    if (tier !== null) {
+      vi.mocked(readPublicVerificationSignals).mockResolvedValue(
+        new Map([["s-1", { trust_tier: tier }]]) as never,
+      );
+    }
     stubAuth(ANON);
     const { container } = await renderPage();
+    const heading = screen.getByRole("heading", { name: "Risk Disclosure" });
+    const section = heading.closest("section") as HTMLElement;
+    return { container, section, paragraph: section.querySelector("p")?.textContent ?? "" };
+  }
+
+  it("an api_verified strategy carries every prior sentence once plus the analytics-only custody sentence, as the one block", async () => {
+    const { container, section, paragraph } = await disclosureText("api_verified");
     const text = container.textContent ?? "";
-    for (const sentence of SENTENCES) {
+    for (const sentence of [...LEAD, API_CLAUSE, ANALYTICS_ONLY]) {
       expect(text.split(sentence).length - 1, sentence).toBe(1);
     }
     // The custody box is gone: its capitalised wording appears nowhere.
     expect(text).not.toContain("Manager retains asset custody");
+    expect(paragraph).toBe(
+      `${[...LEAD, API_CLAUSE, ANALYTICS_ONLY].join(" ")} Read the full risk disclaimer at /legal/disclaimer.`,
+    );
+    expect(section.querySelector('a[href="/legal/disclaimer"]')).not.toBeNull();
+  });
 
-    const heading = screen.getByRole("heading", { name: "Risk Disclosure" });
-    const section = heading.closest("section") as HTMLElement;
-    expect(section.querySelector("p")?.textContent).toBe(
-      `${SENTENCES.join(" ")} Read the full risk disclaimer at /legal/disclaimer.`,
+  // Phase 201 D-24 (founder-folded D-16): a record uploaded as a CSV, or reported by the manager
+  // themselves, is NOT monitored through an exchange API, so the tear sheet must not say it is.
+  // A reader (an allocator weighing a record) relies on this sentence to know how far the numbers
+  // were checked. Each arm goes RED if the API-monitoring sentence is printed for that tier.
+  it.each([
+    ["csv_uploaded", "csv_uploaded"],
+    ["self_reported", "self_reported"],
+    ["a missing tier", null],
+    ["a tier outside the three known kinds", "platinum"],
+  ])("%s: the clause is the plain custody sentence and never says API-monitored", async (_label, tier) => {
+    const { container, section, paragraph } = await disclosureText(tier);
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("read-only exchange APIs");
+    expect(text.split(PLAIN_CLAUSE).length - 1).toBe(1);
+    for (const sentence of [...LEAD, ANALYTICS_ONLY]) {
+      expect(text.split(sentence).length - 1, sentence).toBe(1);
+    }
+    expect(paragraph).toBe(
+      `${[...LEAD, PLAIN_CLAUSE, ANALYTICS_ONLY].join(" ")} Read the full risk disclaimer at /legal/disclaimer.`,
     );
     expect(section.querySelector('a[href="/legal/disclaimer"]')).not.toBeNull();
   });
@@ -647,5 +754,59 @@ describe("TearSheet page - one Risk Disclosure block (195 D-09, UC-19, T-195-09)
     const contact = screen.getByText(/^Interested in /).closest("section") as HTMLElement;
     const risk = screen.getByRole("heading", { name: "Risk Disclosure" }).closest("section") as HTMLElement;
     expect(contact.compareDocumentPosition(risk) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe("TearSheet page - the real name in the title, the H1 and the manager card (Phase 201 D-09, U-11)", () => {
+  const GHOST = {
+    ...DETAIL,
+    strategy: { ...DETAIL.strategy, name: "Fibonacci Ghost", codename: "Ghost-7", disclosure_tier: "exploratory" },
+    manager: null,
+    disclosureTier: "exploratory",
+  };
+
+  it("generateMetadata titles a published exploratory strategy with its real name", async () => {
+    vi.mocked(getFactsheetDetail).mockResolvedValue(GHOST as never);
+    const meta = await generateMetadata({ params: Promise.resolve({ id: "s-1" }) });
+    expect(String(meta.title).startsWith("Fibonacci Ghost")).toBe(true);
+    expect(String(meta.title)).not.toContain("Ghost-7");
+  });
+
+  it("falls back to the codename when the name is blank, and to the neutral word when nothing was read", async () => {
+    vi.mocked(getFactsheetDetail).mockResolvedValue({
+      ...GHOST,
+      strategy: { ...GHOST.strategy, name: "   " },
+    } as never);
+    expect(String((await generateMetadata({ params: Promise.resolve({ id: "s-1" }) })).title)).toMatch(/^Ghost-7 /);
+    vi.mocked(getFactsheetDetail).mockResolvedValue(null as never);
+    expect(String((await generateMetadata({ params: Promise.resolve({ id: "s-1" }) })).title)).toMatch(/^Strategy /);
+  });
+
+  it("the pending H1 prints the real name", async () => {
+    vi.mocked(getFactsheetDetail).mockResolvedValue(GHOST as never);
+    vi.mocked(fetchAndBuildPayloadWithReason).mockResolvedValue({ payload: null, reason: "not_computed" });
+    stubAuth(ANON);
+    await renderPage();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Fibonacci Ghost");
+  });
+
+  it("the exploratory manager card reads Pseudonymous manager and Manages {name}", async () => {
+    vi.mocked(getFactsheetDetail).mockResolvedValue(GHOST as never);
+    stubAuth(ANON);
+    await renderPage();
+    expect(screen.getByRole("heading", { level: 3, name: "Pseudonymous manager" })).toBeInTheDocument();
+    expect(screen.getByText(/^Manages Fibonacci Ghost\./)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 3, name: "Fibonacci Ghost" })).toBeNull();
+  });
+
+  it("an unattested viewer of an institutional strategy still gets the exploratory card (C-0189 unchanged)", async () => {
+    vi.mocked(getFactsheetDetail).mockResolvedValue({
+      ...DETAIL,
+      strategy: { ...DETAIL.strategy, name: "Fibonacci Ghost" },
+    } as never);
+    stubAuth(user("newbie-1"));
+    await renderPage();
+    expect(screen.getByText(/^Manages Fibonacci Ghost\./)).toBeInTheDocument();
+    expect(screen.queryByText(/Jane Doe/)).toBeNull();
   });
 });

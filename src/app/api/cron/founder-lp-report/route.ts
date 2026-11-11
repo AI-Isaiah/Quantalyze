@@ -73,6 +73,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { checkFounderStrategyReadiness } from "@/lib/founder-lp/readiness";
 import { getPlatformName, getPlatformEmail } from "@/lib/platform";
 import { parseRetryAfterSeconds } from "@/lib/retry";
+import { formatMonth } from "@/lib/utils";
 import {
   renderSuccessEmailHtml,
   renderFailureAlertHtml,
@@ -247,10 +248,7 @@ async function sendFailureAlert(
   // email module so escape-on-interpolation, brand strip, hairline
   // dividers, and the FactSet-aligned typography all live in one place
   // and stay aligned with DESIGN.md.
-  const monthLabel = new Date().toLocaleString("en-US", {
-    month: "long",
-    year: "numeric",
-  });
+  const monthLabel = formatMonth(new Date().toISOString());
   const html = renderFailureAlertHtml({
     correlationId: ctx.correlation_id,
     monthLabel,
@@ -516,10 +514,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         Object.assign(err, { name: ERROR_CLASS.PDF_TOO_LARGE });
         throw err;
       }
-      const monthLabel = new Date().toLocaleString("en-US", {
-        month: "long",
-        year: "numeric",
-      });
+      const monthLabel = formatMonth(new Date().toISOString());
 
       // Phase 18 / round-2 polish — institutional-factsheet HTML email
       // rendered via `@/lib/founder-lp/email-templates` so DESIGN.md

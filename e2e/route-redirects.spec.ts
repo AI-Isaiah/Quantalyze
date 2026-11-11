@@ -140,7 +140,7 @@ test.describe("selective route moves — anon redirect canary (NAV-01)", () => {
       res.status(),
       `/portfolio-pdf/<id> returned HTTP ${res.status()} — expected 200 (public retired-report page, no login wall, no 404)`,
     ).toBe(200);
-    expect(await res.text()).toContain("This portfolio report has been retired");
+    expect(await res.text()).toContain("This allocation report has been retired");
   });
 
   // Phase 195 TRIM (D-04), 2026-11-07 — Decks is hidden until it works. The

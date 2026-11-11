@@ -7,6 +7,7 @@ import { computeVaR, computeExpectedShortfall } from "@/lib/portfolio-stats";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 import { formatPercent } from "@/lib/utils";
+import { Term } from "@/components/ui/Term";
 import { signTone } from "@/lib/factsheet/display-sign";
 
 // ---------------------------------------------------------------------------
@@ -86,7 +87,7 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
             className="mt-1 font-sans text-fixed-11 font-medium uppercase tracking-wider"
             style={{ color: "#64748B" }}
           >
-            VaR 95%
+            <Term k="var_95">VaR 95%</Term>
           </div>
         </div>
         <div className="text-center">
@@ -114,7 +115,7 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
             className="mt-1 font-sans text-fixed-11 font-medium uppercase tracking-wider"
             style={{ color: "#64748B" }}
           >
-            CVaR 95%
+            <Term k="cvar_95">CVaR 95%</Term>
           </div>
         </div>
       </div>

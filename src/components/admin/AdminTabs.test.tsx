@@ -60,6 +60,7 @@ const INTRO: IntroRequestRow = {
     name: "Alpha Strat",
     codename: null,
     disclosure_tier: "institutional",
+    status: "published",
   },
 };
 
@@ -149,6 +150,7 @@ describe("AdminTabs — typed-row render paths (H-0353)", () => {
         name: "Top Secret Strat",
         codename: null,
         disclosure_tier: "exploratory",
+        status: "draft",
       },
     };
     render(
@@ -161,6 +163,51 @@ describe("AdminTabs — typed-row render paths (H-0353)", () => {
     );
     expect(screen.getByText(/Strategy #explor01/)).toBeTruthy();
     expect(screen.queryByText(/Top Secret Strat/)).toBeNull();
+  });
+
+  // Phase 201 / D-17 - an admin is a viewer like any other: discovery shows an
+  // admin only published strategies, so the strategy's `status` (not the admin
+  // gate, `isAdminUser` in `admin/page.tsx`) decides whether its name is printed.
+  describe("Intro Requests tab names a strategy only when it is published (D-17)", () => {
+    const withStatus = (status: string): IntroRequestRow => ({
+      ...INTRO,
+      id: `ir-${status}`,
+      strategies: {
+        id: "st-ghost-0001",
+        name: "Fibonacci Ghost",
+        codename: "Ghost-7",
+        disclosure_tier: "exploratory",
+        status,
+      },
+    });
+
+    it("a published strategy prints its name, not its codename", () => {
+      render(
+        <AdminTabs
+          introRequests={[withStatus("published")]}
+          pendingStrategies={[]}
+          pendingAllocators={[]}
+          pendingManagers={[]}
+        />,
+      );
+      expect(screen.getByText(/Fibonacci Ghost/)).toBeTruthy();
+      expect(screen.queryByText(/Ghost-7/)).toBeNull();
+    });
+
+    for (const status of ["draft", "private", "pending_review", "archived"]) {
+      it(`a ${status} strategy keeps its codename and never prints its name`, () => {
+        render(
+          <AdminTabs
+            introRequests={[withStatus(status)]}
+            pendingStrategies={[]}
+            pendingAllocators={[]}
+            pendingManagers={[]}
+          />,
+        );
+        expect(screen.getByText(/Ghost-7/)).toBeTruthy();
+        expect(screen.queryByText(/Fibonacci Ghost/)).toBeNull();
+      });
+    }
   });
 
   // Radix Tabs triggers activate on the pointerdown/keyboard sequence that
@@ -573,5 +620,16 @@ describe("AdminTabs - Strategy Review cards withhold by the strategy's total rec
     await renderCard("crypto", aliasesFor(40));
     // computeRecency reads the RAW stored figures: a withheld Sharpe must not blank it.
     expect(screen.getByText(/^by Quant Bob/).textContent).toMatch(/Computed/);
+  });
+});
+
+/**
+ * Phase 201 plan 20 (D-11) - an intro request's date prints through `formatDay`, in UTC, so
+ * 2025-01-01T00:00:00Z reads "Jan 1, 2025" for staff in any time zone.
+ */
+describe("AdminTabs - intro request date (D-11)", () => {
+  it("prints the request date as 'Jan 1, 2025', not a locale string", () => {
+    renderTabs();
+    expect(screen.getByText("Jan 1, 2025")).toBeTruthy();
   });
 });

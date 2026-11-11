@@ -5,7 +5,7 @@ import { isAdminUser } from "@/lib/admin";
 import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { scrubPii } from "@/lib/admin/pii-scrub";
-import { formatNumber, formatPercent } from "@/lib/utils";
+import { formatDayTime, formatNumber, formatPercent } from "@/lib/utils";
 import { introSnapshotStatusLabel, introSourceLabel } from "@/lib/display-labels";
 import { PortfolioSnapshotSchema, type PortfolioSnapshotJSON } from "@/lib/intro/snapshot";
 import { gateAnnualized, gatedValue, type FigureRecord } from "@/lib/figure-gate";
@@ -20,7 +20,7 @@ export const metadata: Metadata = {
  * /admin/intros — founder triage for contact_requests (intro requests).
  *
  * Surfaces every request with source (direct | bridge), replacement_for
- * context for Bridge-sourced requests, the portfolio_snapshot (PII-scrubbed)
+ * context for replacement-sourced requests, the portfolio_snapshot (PII-scrubbed)
  * computed at request time, and the current snapshot_status.
  *
  * Access: isAdminUser gate. Non-admin → redirected.
@@ -155,7 +155,7 @@ export default async function AdminIntrosPage() {
     <>
       <PageHeader
         title="Intro requests"
-        description="Allocator → manager introductions. Bridge-sourced rows include replacement context."
+        description="Allocator → manager introductions. Rows from a replacement suggestion include replacement context."
       />
 
       {rows.length === 0 ? (
@@ -214,8 +214,7 @@ export default async function AdminIntrosPage() {
                 const top3 = snap?.top_3_strategies ?? [];
                 const bottom3 = snap?.bottom_3_strategies ?? [];
 
-                const createdAtDate = new Date(row.created_at);
-                const createdAtLabel = createdAtDate.toISOString().slice(0, 16).replace("T", " ");
+                const createdAtLabel = formatDayTime(row.created_at);
 
                 const source = row.source ?? "direct";
                 const snapshotStatus = row.snapshot_status ?? "ready";

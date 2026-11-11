@@ -14,6 +14,8 @@
  * unit adds no copy.
  */
 
+import { formatDay } from "@/lib/utils";
+
 /**
  * The shape of a unit code. The same pattern the database CHECK on
  * `api_keys.account_currency` uses, so a value the DB would refuse is refused
@@ -79,7 +81,6 @@ export function unitTag(unit: string): string {
   return `in ${unit}`;
 }
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAY_MS = 86_400_000;
 const ISO_DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
@@ -98,13 +99,15 @@ function parseIsoDay(iso: string): number | null {
   return t;
 }
 
-/** `Oct 8, 2026` (or `Oct 8` with `{ year: false }`), UTC. A malformed day is `—`. */
-export function formatCloseDay(iso: string, opts?: { year?: boolean }): string {
+/**
+ * `Oct 8, 2026`, UTC, through the app-wide `formatDay`. A malformed day is `—`: `parseIsoDay`
+ * rejects a day such as Feb 30 that `Date` would roll over to Mar 2. No factsheet date is
+ * yearless (Phase 201 U-14), so the day is the only argument.
+ */
+export function formatCloseDay(iso: string): string {
   const t = parseIsoDay(iso);
   if (t == null) return "—";
-  const d = new Date(t);
-  const md = `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
-  return opts?.year === false ? md : `${md}, ${d.getUTCFullYear()}`;
+  return formatDay(new Date(t).toISOString());
 }
 
 /**

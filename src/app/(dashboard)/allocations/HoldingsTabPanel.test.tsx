@@ -269,14 +269,14 @@ describe("HoldingsTabPanel — Watchlist/Optimizer + Notes (100-04 wiring)", () 
     });
     const text = container.textContent ?? "";
     // Watchlist honest-empty.
-    expect(text).toContain("No favorites yet.");
+    expect(text).toContain("No strategies on your watchlist yet.");
     // Optimizer 0-portfolio honest gate (copy updated in Phase 116-02 — the
     // remedy now deep-links the allocator connect-exchange path instead of the
     // manager-only /portfolios dead-end; ADDALLOC-04).
-    expect(text).toContain("Simulate Impact needs a live portfolio");
+    expect(text).toContain("Simulate Impact needs a live allocation");
     // Notes: placeholder present, no rendered preview (empty content).
     expect(
-      getByPlaceholderText(/Add a private note about your allocation book/i),
+      getByPlaceholderText(/Add a private note about your allocation — markdown supported/i),
     ).toBeTruthy();
     // Zero favorites rows fabricated (the watchlist table only renders with rows).
     expect(

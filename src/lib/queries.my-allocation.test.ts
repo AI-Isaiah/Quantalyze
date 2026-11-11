@@ -964,11 +964,17 @@ const P5_OUTCOME_O1 = {
   // tier where the resolver lets the canonical name through). Without
   // it, the resolver falls back to the synthetic Strategy #<id> — which
   // is exactly the leak-prevention behaviour for non-institutional rows.
+  //
+  // Phase 201 / D-17: the embeds also carry `status` + `user_id`, the facts
+  // `isDiscoveryVisible` decides the name from. These two are published, so the
+  // real name surfaces; the draft arms below build their own variants.
   replacement_strategy: {
     id: "s-repl",
     name: "Crypto Momentum LP",
     codename: null,
     disclosure_tier: "institutional",
+    status: "published",
+    user_id: "owner-2",
   },
   match_decision: {
     original_strategy: {
@@ -976,6 +982,8 @@ const P5_OUTCOME_O1 = {
       name: "Legacy Equity LP",
       codename: null,
       disclosure_tier: "institutional",
+      status: "published",
+      user_id: "owner-2",
     },
   },
 };
@@ -1062,6 +1070,110 @@ describe("getMyAllocationDashboard — outcomes top-level fan-out (Phase 5 D-15)
         (e) => e.column === "allocator_id" && e.value === "user-1",
       ),
     ).toBe(true);
+  });
+});
+
+// Phase 201 / D-17 — the bridge outcome embeds are read through the service-role
+// client, so RLS does not decide what the viewer may see named. `isDiscoveryVisible`
+// does, per embed, and an embed that is not visible never carries its name.
+describe("getMyAllocationDashboard — outcome embeds name only what the viewer can see (D-17)", () => {
+  beforeEach(() => {
+    resetState();
+    state.portfolios = [PORTFOLIO_FIXTURE];
+  });
+
+  const outcomeWith = (
+    repl: Record<string, unknown>,
+    orig: Record<string, unknown>,
+  ) =>
+    ({
+      ...P5_OUTCOME_O1,
+      replacement_strategy: { id: "s-repl", disclosure_tier: "exploratory", ...repl },
+      match_decision: { original_strategy: { id: "s-orig", disclosure_tier: "exploratory", ...orig } },
+    }) as unknown as (typeof state.bridgeOutcomes)[number];
+
+  it("a published replacement and original show their real names", async () => {
+    state.bridgeOutcomes = [
+      outcomeWith(
+        { name: "Fibonacci Ghost", codename: "Ghost-7", status: "published", user_id: "owner-2" },
+        { name: "Legacy Alpha", codename: "Legacy-1", status: "published", user_id: "owner-2" },
+      ),
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const o = (await getMyAllocationDashboard("user-1")).outcomes[0];
+    expect(o.replacement_strategy?.name).toBe("Fibonacci Ghost");
+    expect(o.match_decision?.original_strategy.name).toBe("Legacy Alpha");
+  });
+
+  it("a draft replacement owned by someone else shows its codename, never its name", async () => {
+    state.bridgeOutcomes = [
+      outcomeWith(
+        { name: "Zeppelin Secret Book", codename: "Phantom-2", status: "draft", user_id: "owner-2" },
+        { name: "Legacy Alpha", codename: "Legacy-1", status: "published", user_id: "owner-2" },
+      ),
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.outcomes[0].replacement_strategy?.name).toBe("Phantom-2");
+    expect(JSON.stringify(result.outcomes)).not.toContain("Zeppelin");
+  });
+
+  it("a draft original (match_decision.original_strategy) owned by someone else is not named either, and with no codename reads Strategy #<id>", async () => {
+    state.bridgeOutcomes = [
+      outcomeWith(
+        { name: "Fibonacci Ghost", codename: null, status: "published", user_id: "owner-2" },
+        { name: "Hidden Legacy Fund", codename: null, status: "pending_review", user_id: "owner-2" },
+      ),
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.outcomes[0].match_decision?.original_strategy.name).toBe("Strategy #s-orig");
+    expect(JSON.stringify(result.outcomes)).not.toContain("Hidden Legacy");
+  });
+
+  it("the viewer's OWN unpublished replacement shows its real name", async () => {
+    state.bridgeOutcomes = [
+      outcomeWith(
+        { name: "My Draft Sleeve", codename: "Mine-1", status: "draft", user_id: "user-1" },
+        { name: "Legacy Alpha", codename: "Legacy-1", status: "published", user_id: "owner-2" },
+      ),
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.outcomes[0].replacement_strategy?.name).toBe("My Draft Sleeve");
+  });
+
+  it("the extra visibility columns never leave the normaliser: each embed is exactly { id, name }", async () => {
+    state.bridgeOutcomes = [
+      outcomeWith(
+        { name: "Fibonacci Ghost", codename: "Ghost-7", status: "published", user_id: "owner-2" },
+        { name: "Legacy Alpha", codename: "Legacy-1", status: "published", user_id: "owner-2" },
+      ),
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const o = (await getMyAllocationDashboard("user-1")).outcomes[0];
+    expect(Object.keys(o.replacement_strategy ?? {}).sort()).toEqual(["id", "name"]);
+    expect(Object.keys(o.match_decision?.original_strategy ?? {}).sort()).toEqual(["id", "name"]);
+    expect(JSON.stringify(o)).not.toContain("owner-2");
+  });
+
+  it("the outcome read selects status and user_id on both embedded strategies", async () => {
+    state.bridgeOutcomes = [];
+    const { getMyAllocationDashboard } = await import("./queries");
+    await getMyAllocationDashboard("user-1");
+    const selects = chainAudit.entries
+      .filter((c) => c.table === "bridge_outcomes")
+      .map((c) => c.select ?? "")
+      .filter((cols) => cols.includes("replacement_strategy"));
+    expect(selects.length).toBeGreaterThanOrEqual(1);
+    for (const cols of selects) {
+      const embeds = cols.match(/strategies![a-z_]+\(([^)]*)\)/g) ?? [];
+      expect(embeds).toHaveLength(2);
+      for (const e of embeds) {
+        expect(e).toContain("status");
+        expect(e).toContain("user_id");
+      }
+    }
   });
 });
 
@@ -2483,6 +2595,15 @@ function psProvenance(overrides: {
   record_observations?: unknown;
   /** 194 D-15: the strategy's asset class (default `crypto`, as before). */
   asset_class?: string | null;
+  /** 201 D-17: the visibility facts and the identity fields the name rule reads.
+   *  Each is emitted on the embed ONLY when given, so every earlier fixture is
+   *  byte-identical to before. */
+  name?: string;
+  codename?: string | null;
+  disclosure_tier?: string;
+  status?: string;
+  user_id?: string | null;
+  organization?: { name: string } | null;
 }): unknown {
   const {
     strategy_id = "sc",
@@ -2496,6 +2617,10 @@ function psProvenance(overrides: {
     record_observations,
     asset_class = "crypto",
   } = overrides;
+  const identity201 = {
+    ...(overrides.status === undefined ? {} : { status: overrides.status }),
+    ...(overrides.user_id === undefined ? {} : { user_id: overrides.user_id }),
+  };
   return {
     portfolio_id: "real-1",
     strategy_id,
@@ -2504,15 +2629,16 @@ function psProvenance(overrides: {
     alias: null,
     strategy: {
       id: strategy_id,
-      name: "Composite Book",
-      codename: null,
-      disclosure_tier: "institutional",
+      name: overrides.name ?? "Composite Book",
+      codename: overrides.codename === undefined ? null : overrides.codename,
+      disclosure_tier: overrides.disclosure_tier ?? "institutional",
+      ...identity201,
       strategy_types: [],
       markets: [],
       start_date: null,
       asset_class,
       created_at: strategy_created_at,
-      organization: null,
+      organization: overrides.organization === undefined ? null : overrides.organization,
       strategy_verifications: verifications,
       strategy_analytics: analyticsRow
         ? {
@@ -2604,6 +2730,131 @@ describe("getMyAllocationDashboard — CONSTIT-02 provenance threading", () => {
     // the venue-detail degraded_members must not appear anywhere in the payload
     expect(JSON.stringify(row)).not.toContain("degraded_members");
     expect(JSON.stringify(row)).not.toContain("okx:BTC");
+  });
+});
+
+// Phase 201 / D-09, D-17 — the My allocation builder reads `portfolio_strategies`
+// with a `strategies!inner` embed through the service-role client, so RLS does not
+// decide what the viewer may see named. `isDiscoveryVisible` does, per holding.
+// Manager identity (`organization_name`) is NOT widened: it keeps its tier rule.
+describe("getMyAllocationDashboard — holding names follow discovery visibility (D-17)", () => {
+  beforeEach(() => {
+    resetState();
+    state.portfolios = [PORTFOLIO_FIXTURE];
+  });
+
+  const holding = (id: string, over: Parameters<typeof psProvenance>[0]) =>
+    psProvenance({ strategy_id: id, ...over }) as (typeof state.portfolioStrategies)[number];
+
+  async function load() {
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const by = (id: string) => result.strategies.find((s) => s.strategy_id === id)!.strategy;
+    return { result, by };
+  }
+
+  it("a published exploratory holding (not own) carries its REAL name; organization_name stays null", async () => {
+    state.portfolioStrategies = [
+      holding("pub", {
+        name: "Fibonacci Ghost",
+        codename: "Ghost-7",
+        disclosure_tier: "exploratory",
+        status: "published",
+        user_id: "owner-2",
+        organization: { name: "Ghost Capital LLC" },
+      }),
+    ];
+    const { by } = await load();
+    expect(by("pub").name).toBe("Fibonacci Ghost");
+    // T-201-04: the manager's organisation is still pseudonymous off institutional tier.
+    expect(by("pub").organization_name).toBeNull();
+  });
+
+  it("a draft exploratory holding owned by someone else has name null (the payload never carries it)", async () => {
+    state.portfolioStrategies = [
+      holding("hid", {
+        name: "Zeppelin Secret Book",
+        codename: "Phantom-2",
+        disclosure_tier: "exploratory",
+        status: "draft",
+        user_id: "owner-2",
+        organization: { name: "Zeppelin Capital LLC" },
+      }),
+    ];
+    const { result, by } = await load();
+    expect(by("hid").name).toBeNull();
+    expect(by("hid").organization_name).toBeNull();
+    expect(JSON.stringify(result.strategies)).not.toContain("Zeppelin");
+  });
+
+  it("a draft holding owned by the viewer carries its real name", async () => {
+    state.portfolioStrategies = [
+      holding("mine", {
+        name: "My Draft Sleeve",
+        codename: null,
+        disclosure_tier: "exploratory",
+        status: "draft",
+        user_id: "user-1",
+      }),
+    ];
+    const { by } = await load();
+    expect(by("mine").name).toBe("My Draft Sleeve");
+  });
+
+  it("an unpublished institutional holding owned by someone else is not named either (197 D-02), while its organization_name keeps HEAD's tier rule", async () => {
+    state.portfolioStrategies = [
+      holding("inst-hid", {
+        name: "Two Sigma Hidden Sleeve",
+        codename: null,
+        disclosure_tier: "institutional",
+        status: "pending_review",
+        user_id: "owner-2",
+        organization: { name: "Two Sigma Hidden LLC" },
+      }),
+      holding("inst-pub", {
+        name: "Two Sigma Equity",
+        codename: null,
+        disclosure_tier: "institutional",
+        status: "published",
+        user_id: "owner-2",
+        organization: { name: "Two Sigma LLC" },
+      }),
+    ];
+    const { by } = await load();
+    expect(by("inst-hid").name).toBeNull();
+    expect(by("inst-pub").name).toBe("Two Sigma Equity");
+    // organization_name is untouched by D-17: the tier rule, exactly as at HEAD.
+    expect(by("inst-pub").organization_name).toBe("Two Sigma LLC");
+  });
+
+  it("the portfolio_strategies read selects status and user_id inside the strategy embed", async () => {
+    state.portfolioStrategies = [];
+    await load();
+    const cols = chainAudit.entries
+      .filter((c) => c.table === "portfolio_strategies")
+      .map((c) => c.select ?? "")
+      .find((c) => c.includes("strategy:strategies!inner"));
+    expect(cols).toBeDefined();
+    const embed = cols!.slice(cols!.indexOf("strategy:strategies!inner"));
+    expect(embed).toMatch(/\bstatus\b/);
+    expect(embed).toMatch(/\buser_id\b/);
+  });
+
+  it("status and user_id are read for the decision and never reach the payload", async () => {
+    state.portfolioStrategies = [
+      holding("pub", {
+        name: "Fibonacci Ghost",
+        disclosure_tier: "exploratory",
+        status: "published",
+        user_id: "owner-2-secret-id",
+      }),
+    ];
+    const { result, by } = await load();
+    const strat = by("pub") as unknown as Record<string, unknown>;
+    expect("status" in strat).toBe(false);
+    expect("user_id" in strat).toBe(false);
+    // user_id is manager-identifying: it appears nowhere in the serialised payload.
+    expect(JSON.stringify(result.strategies)).not.toContain("owner-2-secret-id");
   });
 });
 

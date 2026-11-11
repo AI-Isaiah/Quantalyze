@@ -1,4 +1,4 @@
-import { formatIsoDay } from "@/lib/utils";
+import { formatDay } from "@/lib/utils";
 import type { ListSeriesVerdict } from "@/lib/freshness";
 
 // Phase 149 Delta 4 — the 147 chip BASE, copied VERBATIM from
@@ -74,7 +74,7 @@ export function StaleSeriesChip({
       title={`The newest return day is ${ageDays} days old. Strategies with data older than ${thresholdDays} days are listed after current ones.`}
       className={tone}
     >
-      {`Data from ${formatIsoDay(seriesEnd)}`}
+      {`Data from ${formatDay(seriesEnd)}`}
     </span>
   );
 }

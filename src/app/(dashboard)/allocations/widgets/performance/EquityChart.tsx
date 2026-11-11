@@ -12,8 +12,11 @@ import { useTapPin } from "@/hooks/useTapPin";
 import { CustomRangePicker } from "../../components/CustomRangePicker";
 import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
-import { formatRelativeTime } from "@/lib/utils";
+import { formatRelativeTime, formatDay, formatDayTime, MONTH_ABBR } from "@/lib/utils";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { Term } from "@/components/ui/Term";
+import { Tooltip } from "@/components/ui/Tooltip";
+import { termDefinition, type TermKey } from "@/lib/glossary";
 import { estLabelWidth, fitTickLabel, pow10 } from "@/lib/chart-ticks";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import {
@@ -219,6 +222,9 @@ export type OverlaySeries = {
   label: string;
   color: string;
   points: DailyPoint[];
+  /** Phase 201 plan 34 (U-27): the glossary term this overlay's label is. The legend, a static
+   *  label, prints it with Form A. */
+  term?: TermKey;
 };
 
 export type CustomRange = { start: string; end: string };
@@ -733,6 +739,7 @@ export function EquityChart({
       {
         id: "scenario",
         label: "Scenario",
+        term: "scenario" as const,
         color: "var(--color-chart-strategy)",
         points: scenarioSeries!,
       },
@@ -1166,10 +1173,8 @@ export function EquityChart({
           const midEpoch = (visStart + visEnd) / 2;
           ticks.push({
             i: nearestIndex(visibleEpochs, midEpoch),
-            label: new Date(monthStart).toLocaleDateString("en-US", {
-              month: "short",
-              timeZone: "UTC",
-            }),
+            // chart axis tick (D-21): the month abbreviation from the one list.
+            label: MONTH_ABBR[new Date(monthStart).getUTCMonth()],
           });
         }
         cursor.setUTCMonth(cursor.getUTCMonth() + 1);
@@ -1181,11 +1186,8 @@ export function EquityChart({
         const d = new Date(visibleEpochs[i]);
         ticks.push({
           i,
-          label: d.toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-            timeZone: "UTC",
-          }),
+          // chart axis tick (D-21): month and day, no year, from the one list.
+          label: `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`,
         });
       }
       ticks.reverse();
@@ -1506,12 +1508,13 @@ export function EquityChart({
             {(["live", "scenario", "both"] as const).map((m) => {
               const active = visibilityMode === m;
               const label = m === "live" ? "Live" : m === "scenario" ? "Scenario" : "Both";
-              return (
+              const radio = (describedBy?: string) => (
                 <button
                   key={m}
                   type="button"
                   role="radio"
                   aria-checked={active}
+                  aria-describedby={describedBy}
                   onClick={() => setVisibilityMode(m)}
                   style={{
                     padding: "4px 10px",
@@ -1533,6 +1536,20 @@ export function EquityChart({
                 >
                   {label}
                 </button>
+              );
+              if (m !== "scenario") return radio();
+              // Phase 201 plan 34 (F-04, F-08, U-27) — Form B: the radio is the control, so the
+              // registry definition rides on a Tooltip around it and `aria-describedby` lands on
+              // the radio itself. The wrapper spans are role-less and attribute-less, and flex
+              // boxes so the radio sits in the pill row as an unwrapped one does.
+              return (
+                <Tooltip
+                  key={m}
+                  content={termDefinition("scenario")}
+                  className="inline-flex [&>span]:flex"
+                >
+                  {({ "aria-describedby": describedBy }) => radio(describedBy)}
+                </Tooltip>
               );
             })}
           </div>
@@ -1588,7 +1605,7 @@ export function EquityChart({
             }}
             title={
               lastSyncAt
-                ? new Date(lastSyncAt).toLocaleString()
+                ? formatDayTime(lastSyncAt)
                 : undefined
             }
           >
@@ -1626,7 +1643,7 @@ export function EquityChart({
           flexWrap: "wrap",
         }}
       >
-        <LegendSwatch color="var(--color-chart-strategy)" label="Portfolio" />
+        <LegendSwatch color="var(--color-chart-strategy)" label="Allocation" />
         {visibleBenchmarkNormalized && (
           <LegendSwatch
             color="var(--color-chart-benchmark)"
@@ -1639,7 +1656,7 @@ export function EquityChart({
           />
         )}
         {overlaySeries.map((o) => (
-          <LegendSwatch key={o.id} color={o.color} label={o.label} />
+          <LegendSwatch key={o.id} color={o.color} label={o.label} term={o.term} />
         ))}
       </div>
       )}
@@ -1955,18 +1972,10 @@ export function EquityChart({
                   fontFamily: "var(--font-mono)",
                 }}
               >
-                {new Date(parseISO(visible[i].date)).toLocaleDateString(
-                  "en-US",
-                  {
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                    timeZone: "UTC",
-                  },
-                )}
+                {formatDay(visible[i].date)}
               </div>
               <TooltipRow
-                label="Portfolio"
+                label="Allocation"
                 color="var(--color-chart-strategy)"
                 pct={portPct}
               />
@@ -2083,10 +2092,13 @@ function LegendSwatch({
   color,
   label,
   dashed,
+  term,
 }: {
   color: string;
   label: string;
   dashed?: boolean;
+  /** Form A: the label is a registered term (Phase 201 plan 34, U-27). */
+  term?: TermKey;
 }) {
   return (
     <span
@@ -2106,7 +2118,7 @@ function LegendSwatch({
           borderTop: `${dashed ? "1.5px dashed" : "2px solid"} ${color}`,
         }}
       />
-      {label}
+      {term ? <Term k={term}>{label}</Term> : label}
     </span>
   );
 }
@@ -2413,7 +2425,7 @@ function EquityChartWidgetInner({
           >
             <HeaderLegendSwatch
               color="var(--color-chart-strategy)"
-              label="Portfolio"
+              label="Allocation"
             />
             {hasBenchmark && (
               <HeaderLegendSwatch
@@ -2448,7 +2460,7 @@ function EquityChartWidgetInner({
               equityCurveSource === "derived" &&
               derivedCurveComputedAt &&
               now !== null
-                ? new Date(derivedCurveComputedAt).toLocaleString()
+                ? formatDayTime(derivedCurveComputedAt)
                 : undefined
             }
           >
@@ -2546,7 +2558,7 @@ function EquityChartWidgetInner({
             className="text-[10px] font-mono uppercase tracking-[0.14em] text-text-muted"
             title={
               lastSyncAt
-                ? new Date(lastSyncAt).toLocaleString()
+                ? formatDayTime(lastSyncAt)
                 : undefined
             }
           >

@@ -20,6 +20,7 @@ import PortfolioOptimizer, {
   type OptimizerSuggestion,
 } from "./PortfolioOptimizer";
 import { shortTrackMarkerTitle, widenedWithheldReason } from "@/lib/figure-gate";
+import { termDefinition, termLabel, type TermKey } from "@/lib/glossary";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn(), push: vi.fn(), replace: vi.fn() }),
@@ -57,10 +58,19 @@ function visibleAndAnnounced(text: string): HTMLElement[] {
   return nodes;
 }
 
+/**
+ * Phase 201 U-02 / U-17: a metric label is a registry `Term` trigger (a span inside the label
+ * `<p>`), so its tooltip is the bubble that opens on focus, not a `title` attribute.
+ */
+async function bubbleOf(trigger: HTMLElement): Promise<string> {
+  fireEvent.focus(trigger);
+  return (await screen.findByRole("tooltip")).textContent ?? "";
+}
+
 /** The value <p> is the 2nd <p> inside the MetricCell that owns `label`. */
 function metricValue(label: string): string {
   const labelEl = screen.getByText(label);
-  const cell = labelEl.parentElement as HTMLElement;
+  const cell = labelEl.closest("div") as HTMLElement;
   const ps = cell.querySelectorAll("p");
   return ps[1]?.textContent ?? "";
 }
@@ -98,10 +108,43 @@ describe("PortfolioOptimizer suggestion card (Phase 195 D-02)", () => {
   });
 });
 
+// Phase 201 U-02 / U-17: the three column labels are registry `Term` triggers, so the column
+// tooltip and OptimizerPanel's glossary are one text, and "Corr w/ allocation" is the label in both.
+describe("PortfolioOptimizer metric labels read the glossary registry (U-02, U-17)", () => {
+  const COLUMNS: [TermKey, string][] = [
+    ["sharpe_lift", "Sharpe lift"],
+    ["corr_with_allocation", "Corr w/ allocation"],
+    ["dd_improve", "DD improve"],
+  ];
+
+  it.each(COLUMNS)("%s: the column label equals the registry label and opens the registry definition", async (key, label) => {
+    renderOptimizer();
+    expect(termLabel(key)).toBe(label);
+    const trigger = screen.getByText(label);
+    expect(trigger.getAttribute("data-term")).toBe(key);
+    expect(await bubbleOf(trigger)).toBe(termDefinition(key));
+  });
+
+  it("a Sharpe lift label that carries a row note keeps the same trigger classes as a plain Term label", () => {
+    render(
+      <PortfolioOptimizer
+        portfolioId="p1"
+        initialSuggestions={[{ ...SUGGESTION, sharpe_lift_state: "withheld" }]}
+        computedAt="2026-07-11T00:00:00Z"
+        computationStatus="complete"
+      />,
+    );
+    const noted = screen.getByText("Sharpe lift");
+    const plain = screen.getByText("DD improve");
+    expect(noted.getAttribute("tabindex")).toBe("0");
+    expect(noted.className).toBe(plain.className);
+  });
+});
+
 describe("PortfolioOptimizer metric formatting (F-2 honesty)", () => {
   it("renders correlation as a plain decimal, NOT a percentage", () => {
     renderOptimizer();
-    const value = metricValue("Corr w/ portfolio");
+    const value = metricValue("Corr w/ allocation");
     expect(value).toBe("0.45");
     expect(value).not.toMatch(/%/);
     expect(value).not.toBe("+45.00%"); // the old formatPercent output
@@ -138,7 +181,8 @@ describe("PortfolioOptimizer metric formatting (F-2 honesty)", () => {
     expect(metricValue("DD improve")).toBe("-0.87%");
     const valueEl = screen
       .getByText("DD improve")
-      .parentElement?.querySelectorAll("p")[1] as HTMLElement;
+      .closest("div")
+      ?.querySelectorAll("p")[1] as HTMLElement;
     expect(valueEl.className).not.toContain("text-positive");
   });
 
@@ -417,7 +461,7 @@ describe("[140.3-07 / SEAMUX-09] a failed re-run discards the invalidated rankin
 
     expect(screen.getByText("Optimizer failed")).toBeInTheDocument();
     expect(
-      visibleAndAnnounced("We couldn't compute suggestions for this portfolio.")[0],
+      visibleAndAnnounced("We couldn't compute suggestions for this allocation.")[0],
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
@@ -474,8 +518,8 @@ describe("[140.3-07 / SEAMUX-09] a failed re-run discards the invalidated rankin
 // records it compares. Withheld prints a dash with the reason; short keeps the value with the
 // `<1y` marker; full, unknown and absent are the cell as before.
 describe("<PortfolioOptimizer> Sharpe lift gate (194 D-15)", () => {
-  const BASE_TOOLTIP =
-    "Modeled change in your portfolio's Sharpe ratio if this strategy were added — a unitless delta, not a percentage. Positive means better risk-adjusted return in backtest.";
+  // 201 U-02: the base tooltip is the registry definition, not a private copy.
+  const BASE_TOOLTIP = termDefinition("sharpe_lift");
 
   function renderWith(suggestions: OptimizerSuggestion[]) {
     return render(
@@ -489,9 +533,9 @@ describe("<PortfolioOptimizer> Sharpe lift gate (194 D-15)", () => {
   }
 
   const label = () => screen.getByText("Sharpe lift");
-  const valueEl = () => label().parentElement!.querySelectorAll("p")[1] as HTMLElement;
+  const valueEl = () => label().closest("div")!.querySelectorAll("p")[1] as HTMLElement;
 
-  it("withheld, crypto failing record of 50 days: a dash with no lift colour, the reason ends the tooltip", () => {
+  it("withheld, crypto failing record of 50 days: a dash with no lift colour, the reason ends the tooltip", async () => {
     renderWith([
       {
         ...SUGGESTION,
@@ -504,14 +548,14 @@ describe("<PortfolioOptimizer> Sharpe lift gate (194 D-15)", () => {
     expect(valueEl().textContent).toBe("—");
     expect(valueEl().className).toContain("text-text-muted");
     expect(valueEl().className).not.toMatch(/text-(positive|negative)/);
-    expect(label().getAttribute("title")?.endsWith(reason)).toBe(true);
+    expect((await bubbleOf(label())).endsWith(reason)).toBe(true);
     expect(screen.queryByText("<1y")).toBeNull();
   });
 
   it.each([
     ["null", null],
     ["a malformed object", { span_days: "abc", observations: 51, crypto: true }],
-  ])("withheld with a failing record that is %s: a dash, a generic reason in the tooltip, and a report (R2-M1)", (_name, record) => {
+  ])("withheld with a failing record that is %s: a dash, a generic reason in the tooltip, and a report (R2-M1)", async (_name, record) => {
     captureToSentryMock.mockClear();
     renderWith([
       {
@@ -521,14 +565,14 @@ describe("<PortfolioOptimizer> Sharpe lift gate (194 D-15)", () => {
       },
     ]);
     expect(valueEl().textContent).toBe("—");
-    expect(label().getAttribute("title")).toBe(
+    expect(await bubbleOf(label())).toBe(
       `${BASE_TOOLTIP} Withheld: the record is too short to annualize.`,
     );
     expect(captureToSentryMock).toHaveBeenCalledTimes(1);
     expect(captureToSentryMock.mock.calls[0][1].tags.stage).toBe("lift-record-unreadable");
   });
 
-  it("withheld with a readable record: the specific reason, nothing reported", () => {
+  it("withheld with a readable record: the specific reason, nothing reported", async () => {
     captureToSentryMock.mockClear();
     renderWith([
       {
@@ -537,18 +581,18 @@ describe("<PortfolioOptimizer> Sharpe lift gate (194 D-15)", () => {
         sharpe_lift_failing_record: { span_days: 50, observations: 51, crypto: true },
       },
     ]);
-    expect(label().getAttribute("title")).not.toContain("too short to annualize");
+    expect(await bubbleOf(label())).not.toContain("too short to annualize");
     expect(captureToSentryMock).not.toHaveBeenCalled();
   });
 
-  it.each([60, 200])("short, span %i: the value prints with <1y and the span's marker title", (span) => {
+  it.each([60, 200])("short, span %i: the value prints with <1y and the span's marker title", async (span) => {
     renderWith([{ ...SUGGESTION, sharpe_lift_state: "short", sharpe_lift_span_days: span }]);
     const title = shortTrackMarkerTitle(span);
     expect(valueEl().textContent).toContain("+0.15");
     const marker = screen.getByText("<1y", { exact: false });
     expect(marker.getAttribute("title")).toBe(title);
     expect(marker.querySelector(".sr-only")?.textContent).toBe(` ${title}`);
-    expect(label().getAttribute("title")?.endsWith(title)).toBe(true);
+    expect((await bubbleOf(label())).endsWith(title)).toBe(true);
   });
 
   it("short with no span: the value shows, no marker invented", () => {
@@ -561,14 +605,14 @@ describe("<PortfolioOptimizer> Sharpe lift gate (194 D-15)", () => {
     ["full", { sharpe_lift_state: "full" as const, sharpe_lift_span_days: 400 }],
     ["null", { sharpe_lift_state: "null" as const }],
     ["absent", {}],
-  ])("state %s: identical to a pre-194 suggestion", (_name, extra) => {
+  ])("state %s: identical to a pre-194 suggestion", async (_name, extra) => {
     renderWith([{ ...SUGGESTION, ...extra }]);
     const gated = valueEl().outerHTML;
-    const gatedTitle = label().getAttribute("title");
+    const gatedTitle = await bubbleOf(label());
     cleanup();
     renderWith([SUGGESTION]);
     expect(valueEl().outerHTML).toBe(gated);
-    expect(label().getAttribute("title")).toBe(gatedTitle);
+    expect(await bubbleOf(label())).toBe(gatedTitle);
     expect(gatedTitle).toBe(BASE_TOOLTIP);
   });
 
@@ -618,10 +662,10 @@ describe("<PortfolioOptimizer> Sharpe lift gate (194 D-15)", () => {
     ]);
     const names = screen.getAllByText(/^(First|Second)$/).map((n) => n.textContent);
     expect(names).toEqual(["First", "Second"]);
-    expect(screen.getAllByText("Corr w/ portfolio")).toHaveLength(2);
-    const corr = screen.getAllByText("Corr w/ portfolio").map((l) => l.parentElement!.querySelectorAll("p")[1].textContent);
+    expect(screen.getAllByText("Corr w/ allocation")).toHaveLength(2);
+    const corr = screen.getAllByText("Corr w/ allocation").map((l) => l.closest("div")!.querySelectorAll("p")[1].textContent);
     expect(corr).toEqual(["0.45", "0.10"]);
-    const dd = screen.getAllByText("DD improve").map((l) => l.parentElement!.querySelectorAll("p")[1].textContent);
+    const dd = screen.getAllByText("DD improve").map((l) => l.closest("div")!.querySelectorAll("p")[1].textContent);
     expect(dd).toEqual(["+3.00%", "+3.00%"]);
   });
 });

@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { DeletionRequestActions } from "@/components/admin/DeletionRequestActions";
+import { formatDayTime } from "@/lib/utils";
 import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 
 export const metadata: Metadata = {
@@ -157,13 +158,11 @@ export default async function AdminDeletionRequestsPage() {
                           </div>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-text-secondary text-caption">
-                        {new Date(r.requested_at).toLocaleString()}
+                      <td className="px-4 py-3 text-text-secondary text-caption whitespace-nowrap">
+                        {formatDayTime(r.requested_at)}
                       </td>
-                      <td className="px-4 py-3 text-text-secondary text-caption">
-                        {terminalAt
-                          ? new Date(terminalAt).toLocaleString()
-                          : "—"}
+                      <td className="px-4 py-3 text-text-secondary text-caption whitespace-nowrap">
+                        {formatDayTime(terminalAt)}
                       </td>
                       <td className="px-4 py-3 text-text-secondary text-caption max-w-[240px]">
                         {r.rejection_reason || r.notes || "—"}

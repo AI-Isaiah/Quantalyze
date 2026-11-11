@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { APP_ROLES, ROLE_META, type AppRole } from "@/lib/auth-types";
+import { formatDay } from "@/lib/utils";
 
 /**
  * Role-provisioning panel. Client component rendered inside
@@ -29,16 +30,6 @@ import { APP_ROLES, ROLE_META, type AppRole } from "@/lib/auth-types";
 // `ROLE_META` (UX copy per role) lives in `@/lib/auth-types` so server
 // components can read it too: an export of a "use client" module is a client
 // reference on the server and cannot be read there.
-
-/** Render a `granted_at` ISO timestamp as YYYY-MM-DD in UTC. Using UTC
- * avoids the timezone-jitter that would make "Granted 2026-04-16" on
- * the west coast display as "Granted 2026-04-15" — the grant date is a
- * server-side fact, not a local-time event. */
-function formatGrantDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toISOString().slice(0, 10);
-}
 
 interface UserRolesPanelProps {
   targetUserId: string;
@@ -149,7 +140,7 @@ export function UserRolesPanel({
                   <p className="text-micro text-text-muted mt-1.5">
                     Granted
                     {grantInfo.granted_at
-                      ? ` ${formatGrantDate(grantInfo.granted_at)}`
+                      ? ` ${formatDay(grantInfo.granted_at)}`
                       : ""}
                     {grantInfo.granter_email
                       ? ` by ${grantInfo.granter_email}`

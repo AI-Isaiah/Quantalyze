@@ -116,6 +116,27 @@ describe("ScenarioBenchmarkSection", () => {
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
+  // D-01, D-02, D-19: the four metric labels in the benchmark section open
+  // their registry definitions through Term (text unchanged).
+  it("the benchmark metric labels render as Term triggers keyed to the registry", () => {
+    const dates = buildDates("2024-01-01", 40);
+    render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={series(dates, (i) => (i % 2 === 0 ? 0.012 : -0.006))}
+        btc={btcClosesFromReturns(series(dates, (i) => (i % 3 === 0 ? 0.02 : -0.01)))}
+      />,
+    );
+    const terms: Array<[string, string]> = [
+      ["Tracking Error", "tracking_error"],
+      ["Information Ratio", "information_ratio"],
+      ["Alpha", "alpha"],
+      ["Beta", "beta"],
+    ];
+    for (const [label, key] of terms) {
+      expect(screen.getByText(label).getAttribute("data-term")).toBe(key);
+    }
+  });
+
   // 194 R4 WR-01: the caption names the basis the values were annualised at, never a constant.
   it("a crypto blend (periodsPerYear 365) reads '365-day annualized active returns', never 252", () => {
     const dates = buildDates("2024-01-01", 40);

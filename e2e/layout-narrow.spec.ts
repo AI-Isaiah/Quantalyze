@@ -96,7 +96,7 @@ async function loginViaForm(page: Page, email: string, password: string) {
 /**
  * Drive the composer into composed mode the way composer-axe does: unique
  * "0 …" fixture (sorts inside the 200-row browse cap), search by codename,
- * add by id, close the drawer, gate on the Portfolio heading.
+ * add by id, close the drawer, gate on the Scenario draft heading.
  */
 async function openComposedScenario(page: Page): Promise<void> {
   await cleanupStrategiesByNamePrefix(NAME_PREFIX);
@@ -112,7 +112,7 @@ async function openComposedScenario(page: Page): Promise<void> {
 
   await page.goto("/allocations?tab=scenario");
   await page.waitForLoadState("networkidle");
-  await expect(page.locator("h2", { hasText: "Start a portfolio" })).toBeVisible({
+  await expect(page.locator("h2", { hasText: "Start a scenario" })).toBeVisible({
     timeout: 10_000,
   });
 
@@ -126,7 +126,7 @@ async function openComposedScenario(page: Page): Promise<void> {
   await fixtureAdd.click();
   await page.click('[aria-label="Close drawer"]');
   await page.waitForLoadState("networkidle");
-  await expect(page.locator("h2", { hasText: "Portfolio" }).first()).toBeVisible({
+  await expect(page.locator("h2", { hasText: "Scenario draft" }).first()).toBeVisible({
     timeout: 10_000,
   });
 }
@@ -353,7 +353,7 @@ test.describe("/profile — SC2-PROFILE", () => {
 
 const WRITE_CONTROLS = [
   "Recompute now",
-  "Edit preferences",
+  "Edit mandate",
   "Send intro",
   "KEEP",
   "SKIP",
@@ -2574,7 +2574,7 @@ async function openNarrowComposer(
 
   await page.goto("/allocations?tab=scenario");
   await page.waitForLoadState("networkidle");
-  await expect(page.locator("h2", { hasText: "Start a portfolio" })).toBeVisible({
+  await expect(page.locator("h2", { hasText: "Start a scenario" })).toBeVisible({
     timeout: 10_000,
   });
   await page.click('button:has-text("Browse strategies")');
@@ -2587,7 +2587,7 @@ async function openNarrowComposer(
   await fixtureAdd.click();
   await page.click('[aria-label="Close drawer"]');
   await page.waitForLoadState("networkidle");
-  await expect(page.locator("h2", { hasText: "Portfolio" }).first()).toBeVisible({
+  await expect(page.locator("h2", { hasText: "Scenario draft" }).first()).toBeVisible({
     timeout: 10_000,
   });
   await expect(

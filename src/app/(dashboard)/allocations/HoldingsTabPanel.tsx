@@ -88,6 +88,7 @@ import {
 } from "./lib/book-figures";
 import { formatUsd } from "@/lib/dollar-validation";
 import { formatCloseDay } from "@/lib/factsheet/returns-unit";
+import { formatDay } from "@/lib/utils";
 
 /** Honest-empty optimizer state when the prop is absent (test harnesses). */
 /** A venue's display name. The exchange ids that need more than a capital. */
@@ -152,7 +153,7 @@ export function openPositionReadDayNotes(
   const keysById = new Map(apiKeys.map((k) => [k.id, k]));
   return staleReadGroups(derivativeRows, allRows, today).map(({ keyId, asof, venue, symbols }) => {
     const phrase = keyPhrase(keysById.get(keyId), venue);
-    return `Positions from ${phrase} are as last read on ${asof}: ${symbols.join(", ")}.`;
+    return `Positions from ${phrase} are as last read on ${formatDay(asof)}: ${symbols.join(", ")}.`;
   });
 }
 
@@ -181,7 +182,7 @@ export function spotHoldingReadDayNotes(
   const keysById = new Map(apiKeys.map((k) => [k.id, k]));
   return staleReadGroups(spotRows, allRows, today).map(({ keyId, asof, venue, symbols }) => {
     const phrase = keyPhrase(keysById.get(keyId), venue);
-    return `Spot holdings from ${phrase} are as last read on ${asof}: ${symbols.join(", ")}.`;
+    return `Spot holdings from ${phrase} are as last read on ${formatDay(asof)}: ${symbols.join(", ")}.`;
   });
 }
 
@@ -269,7 +270,7 @@ export function partialPositionReadNotes(
     const key = keysById.get(api_key_id);
     const venue = key?.exchange ?? rows.find((r) => r.api_key_id === api_key_id)?.venue;
     if (venue === undefined || !CCXT_POSITION_VENUES.has(venue.trim().toLowerCase())) continue;
-    const lead = `Open positions from ${keyPhrase(key, venue)} could not be read on its sync of ${asof}.`;
+    const lead = `Open positions from ${keyPhrase(key, venue)} could not be read on its sync of ${formatDay(asof)}.`;
     notes.push(
       key !== undefined && isLiveKey(key)
         ? `${lead} Any it holds are missing below until a sync reads them.`
@@ -729,7 +730,7 @@ export function HoldingsTabPanel(
             data-testid="positions-book-equity"
             className="text-micro font-mono text-text-muted"
           >
-            Book equity {formatUsd(bookEquity)}
+            Allocation equity {formatUsd(bookEquity)}
             {readDay !== null ? ` · read ${formatCloseDay(readDay)}` : ""}
           </span>
         </div>

@@ -34,7 +34,7 @@ describe("ScenarioStub — Phase 09 branch (D-08 + Pitfall 7)", () => {
   it("renders existing stub card when flaggedHoldings is undefined or empty", () => {
     render(<ScenarioStub />);
     expect(
-      screen.getByText(/Scenario builder coming soon/i),
+      screen.getByRole("heading", { name: "Scenario builder coming soon" }),
     ).toBeInTheDocument();
   });
 
@@ -47,7 +47,7 @@ describe("ScenarioStub — Phase 09 branch (D-08 + Pitfall 7)", () => {
       />,
     );
     expect(
-      screen.getByText(/Scenario builder coming soon/i),
+      screen.getByRole("heading", { name: "Scenario builder coming soon" }),
     ).toBeInTheDocument();
   });
 
@@ -60,8 +60,24 @@ describe("ScenarioStub — Phase 09 branch (D-08 + Pitfall 7)", () => {
       />,
     );
     expect(
-      screen.queryByText(/Scenario builder coming soon/i),
+      screen.queryByRole("heading", { name: "Scenario builder coming soon" }),
     ).not.toBeInTheDocument();
     expect(screen.getByText("BTC")).toBeInTheDocument();
+  });
+});
+
+// Phase 201 plan 34 (F-04, F-08, U-27): the stub heading explains the word Scenario through Form A,
+// a Term around only that word, with the visible heading text unchanged. Fails when the Term goes,
+// when it grows past the one word, and when the heading's text changes.
+describe("ScenarioStub — the heading explains scenario (U-27)", () => {
+  it("the h2 still reads Scenario builder coming soon and its word Scenario is the term", () => {
+    render(<ScenarioStub />);
+    const h2 = screen.getByRole("heading", { level: 2, name: "Scenario builder coming soon" });
+    expect(h2.textContent).toBe("Scenario builder coming soon");
+    const terms = h2.querySelectorAll('[data-term="scenario"]');
+    expect(terms).toHaveLength(1);
+    expect(terms[0].textContent).toBe("Scenario");
+    // The Term's text is the first word of the heading and nothing else is wrapped.
+    expect(h2.textContent?.startsWith(terms[0].textContent ?? "?")).toBe(true);
   });
 });

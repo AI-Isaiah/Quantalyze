@@ -438,7 +438,7 @@ test.describe("axe app-wide (A11Y-01) — embedded factsheet (composer, serious+
       // a no-book/no-draft session renders the blank-slate front door; the real
       // factsheet body only folds in once a strategy is added.
       await expect(
-        page.locator("h2", { hasText: "Start a portfolio" }),
+        page.locator("h2", { hasText: "Start a scenario" }),
       ).toBeVisible({ timeout: 5_000 });
       await page.click('button:has-text("Browse strategies")');
       await expect(
@@ -450,11 +450,11 @@ test.describe("axe app-wide (A11Y-01) — embedded factsheet (composer, serious+
       await page.click('[aria-label="Close drawer"]');
       await page.waitForLoadState("networkidle");
 
-      // Anti-false-green: gate on the composed <h2>Portfolio</h2> AND the folded
+      // Anti-false-green: gate on the composed <h2>Scenario draft</h2> AND the folded
       // real factsheet body (#factsheet-main) so a body that failed to mount
       // fails loud rather than hollow-zeroing.
       await expect(
-        page.locator("h2", { hasText: "Portfolio" }).first(),
+        page.locator("h2", { hasText: "Scenario draft" }).first(),
       ).toBeVisible({ timeout: 10_000 });
       await page.locator('[id="factsheet-main"]').scrollIntoViewIfNeeded();
       await expect(page.locator('[id="factsheet-main"]')).toBeVisible({

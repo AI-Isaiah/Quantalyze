@@ -43,4 +43,14 @@ describe("AllocationDashboardV2 with no eligible key (WR-04)", () => {
     expect(screen.getByTestId("mandate-snapshot")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Mandate" })).toBeInTheDocument();
   });
+
+  // Phase 201 plan 12 (D-02, D-06): the Mandate heading is a registered term, so the allocator can
+  // read what the word means where it first meets it. The heading's accessible name stays "Mandate".
+  it("renders the Mandate heading through Term with the mandate key (201-12 D-06)", () => {
+    render(<AllocationDashboardV2 {...props} />);
+    const heading = screen.getByRole("heading", { name: "Mandate" });
+    const term = heading.querySelector<HTMLElement>('[data-term="mandate"]');
+    expect(term).not.toBeNull();
+    expect(term!.textContent).toBe("Mandate");
+  });
 });

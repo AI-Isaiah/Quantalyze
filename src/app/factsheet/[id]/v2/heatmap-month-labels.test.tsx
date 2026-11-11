@@ -20,7 +20,7 @@ vi.mock("@/hooks/useBreakpoint", () => ({
 }));
 
 import { FactsheetProvider } from "./factsheet-context";
-import { DailyReturnsHeatmap } from "./HeatmapPanels";
+import { DailyReturnsHeatmap, MonthlyReturnsHeatmap } from "./HeatmapPanels";
 
 beforeEach(() => {
   vi.stubGlobal("localStorage", {
@@ -205,14 +205,14 @@ describe("each year's calendar draws only that year's days (D-05, founder 2026-1
     expect(await hoverCell(container, "2023", 53, 0)).toBeNull();
     // Control: week 52, Sunday is Dec 31 2023 (day 365) and still reveals.
     const tip = await hoverCell(container, "2023", 52, 6);
-    expect(tip?.textContent).toContain("2023-12-31");
+    expect(tip?.textContent).toContain("Dec 31, 2023");
   });
 
   it("a leap year starting on a Sunday keeps its day 366 (Dec 31) in the last column", async () => {
     // 2012: Jan 1 is a Sunday, so week 53 Monday = day-of-year 366 = Dec 31 2012, a real 2012 day.
     const { container } = mountYearWithCells("2012", 6, [[53, 0]]);
     const tip = await hoverCell(container, "2012", 53, 0);
-    expect(tip?.textContent).toContain("2012-12-31");
+    expect(tip?.textContent).toContain("Dec 31, 2012");
   });
 
   // Canvas pins. jsdom's getContext("2d") is null, so the draw effect used to return early and no
@@ -253,5 +253,30 @@ describe("each year's calendar draws only that year's days (D-05, founder 2026-1
     }
     // The real value still paints (fill only).
     expect(fills.some(([x, y]) => x === 14 + 10 * 14 && y === 14)).toBe(true);
+  });
+});
+
+// Phase 201 D-11: the monthly grid's column headers read the shared month abbreviations and each
+// cell's hover title prints the month the way every other date does (`Feb 2025`), not the machine
+// key `2025-02`. Typed by hand: a reader hovering a cell sees a date, not a database key.
+describe("monthly grid prints dates, not machine keys (D-11)", () => {
+  it("the headers are the twelve abbreviations and every cell title leads with `Mon YYYY`", () => {
+    const { container } = render(
+      <FactsheetProvider payload={payload()} persist={false}>
+        <MonthlyReturnsHeatmap fullHistoryWithheld={false} />
+      </FactsheetProvider>,
+    );
+    const heads = Array.from(container.querySelectorAll("thead th")).map((t) => t.textContent);
+    expect(heads.slice(1, 13)).toEqual([
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]);
+    const titles = Array.from(container.querySelectorAll("td[title]")).map((t) => t.getAttribute("title") ?? "");
+    expect(titles.length).toBeGreaterThan(12);
+    // 2025 starts on Jan 1, so its February cell is a closed month with a figure in its title.
+    expect(titles.some((t) => /^Feb 2025: /.test(t))).toBe(true);
+    for (const t of titles) {
+      expect(t, t).toMatch(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4}: /);
+      expect(t, t).not.toMatch(/^\d{4}-\d{2}/);
+    }
   });
 });

@@ -96,7 +96,7 @@ function payload(over: Partial<Record<string, unknown>> = {}) {
 // Typed by hand, never read from the component.
 // 198-UAT-01 (D-10): the glance prints Sharpe and Max DD without the history (C7),
 // so the line names the history the section needs and not risk figures.
-const RISK_LINE = "This section needs your book's history. See the note above.";
+const RISK_LINE = "This section needs your allocation's history. See the note above.";
 // The six widgets in the order the Risk section lists them (planning D-06).
 const RISK_WIDGET_IDS = [
   "var-expected-shortfall",
@@ -159,7 +159,7 @@ describe("Overview Risk section — the 2026-10-03 case (D-04, D-07, D-09)", () 
     expect(panels).toHaveLength(1);
     // 198-UAT-01 (D-10): names what the history hides, never return or risk.
     expect(panels[0].textContent).toContain(
-      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
+      "Your allocation's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
     );
     const risk = riskSection();
     expect(risk).not.toBeNull();

@@ -1253,7 +1253,8 @@ describe("[161-10 / WIZERR-07] the allocation route classifies every arm it refu
     "internal error",
     "strategy not found",
     "not_allocatable",
-    "portfolio not found",
+    // 201-21 / D-04: the one sentence this phase rewrote (was "portfolio not found").
+    "Allocation not found",
     "investment row not found",
   ];
 

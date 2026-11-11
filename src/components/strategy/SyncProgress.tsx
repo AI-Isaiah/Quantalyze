@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
 import { venueLabel } from "@/lib/display-labels";
+import { formatDay } from "@/lib/utils";
 import type { StrategyAnalytics } from "@/lib/types";
 import {
   MISSING_ROW_GRACE_POLLS,
@@ -699,7 +700,7 @@ function formatRelativeTime(dateStr: string): string {
   if (diffHr < 24) return `${diffHr}h ago`;
   const diffDay = Math.floor(diffHr / 24);
   if (diffDay < 7) return `${diffDay}d ago`;
-  return date.toLocaleDateString();
+  return formatDay(dateStr);
 }
 
 function formatElapsed(seconds: number): string {

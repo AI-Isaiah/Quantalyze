@@ -315,13 +315,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       portfolioErr,
     );
     return NextResponse.json(
-      { error: "Failed to verify allocator portfolio" },
+      { error: "Failed to verify the allocator's allocation" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
   if (!portfolioRow) {
     return NextResponse.json(
-      { error: "Allocator has no portfolio; cannot record an intro" },
+      { error: "This allocator has no allocation; cannot record an intro" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }

@@ -100,7 +100,7 @@ const FORBIDDEN = [
   "MultiMarket",
   "60/40 Stocks/Bonds",
   "Multi-Asset Risk Parity",
-  "Diversified Crypto Book",
+  "Diversified Crypto Blend",
 ] as const;
 
 const DAY = 86_400_000;

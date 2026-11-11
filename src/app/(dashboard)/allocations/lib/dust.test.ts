@@ -116,7 +116,7 @@ describe("dust copy", () => {
 
   it("the caption states the rule the function implements", () => {
     expect(DUST_RULE_CAPTION).toBe(
-      "Small positions are under $50 or under 0.1% of book equity.",
+      "Small positions are under $50 or under 0.1% of allocation equity.",
     );
   });
 });

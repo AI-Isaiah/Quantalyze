@@ -105,7 +105,7 @@ describe("StressVarSection", () => {
     expect(active?.textContent).toBe("−30%");
 
     // The headline impact row + the VaR + CVaR rows.
-    expect(screen.getByText("Projected portfolio impact")).toBeTruthy();
+    expect(screen.getByText("Projected allocation impact")).toBeTruthy();
     expect(screen.getByText("Value at Risk (95%)")).toBeTruthy();
     expect(screen.getByText("Expected Shortfall (CVaR, 95%)")).toBeTruthy();
 
@@ -233,7 +233,7 @@ describe("StressVarSection", () => {
     // The tail estimates are gated — the metric rows must NOT render.
     expect(screen.queryByText("Value at Risk (95%)")).toBeNull();
     expect(screen.queryByText("Expected Shortfall (CVaR, 95%)")).toBeNull();
-    expect(screen.queryByText("Projected portfolio impact")).toBeNull();
+    expect(screen.queryByText("Projected allocation impact")).toBeNull();
   });
 
   it("em-dash discipline: a null projected-impact cell renders '—', NEVER '0.00'", () => {
@@ -254,7 +254,7 @@ describe("StressVarSection", () => {
     );
 
     // ok path renders.
-    expect(screen.getByText("Projected portfolio impact")).toBeTruthy();
+    expect(screen.getByText("Projected allocation impact")).toBeTruthy();
 
     const impactRow = screen.getByTestId("stress-row-projected-impact");
     const impactValue = within(impactRow).getByTestId(

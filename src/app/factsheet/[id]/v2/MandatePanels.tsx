@@ -1,6 +1,7 @@
 "use client";
 
 import { formatRecordLength } from "@/lib/factsheet/record-length";
+import { formatDay } from "@/lib/utils";
 import { usePayload } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
 import { useUnitView } from "./unit-view";
@@ -86,9 +87,12 @@ export function TermsPanel({ variant = "full" }: { variant?: "full" | "document"
     tier === "csv_uploaded" ? "CSV-uploaded (verification pending)" :
     tier === "self_reported" ? "Self-reported" :
     "—";
-  const computed = iso(payload.computedAt);
-  const start = iso(m.start);
-  const end = iso(m.end);
+  // F-11 (the one date helper): every Terms day prints through `formatDay` at its print
+  // position. `recordStart`, `declaredStart` and `obsStart` below stay ISO values because the
+  // backtest-gap comparison reads them.
+  const computed = formatDay(payload.computedAt);
+  const start = formatDay(m.start);
+  const end = formatDay(m.end);
 
   // Inception / live-date separator: if the strategy declares a start_date
   // BEFORE the observation window starts, the gap is implicitly backtest —
@@ -120,10 +124,10 @@ export function TermsPanel({ variant = "full" }: { variant?: "full" | "document"
         <Term label="Data source">{tierLabel}</Term>
         {native.startDate && (
           <Term label="Live since">
-            {iso(native.startDate)}
+            {formatDay(native.startDate)}
             {hasBacktestGap && (
               <span className="ml-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
-                — observation window starts {iso(recordStart)}; portion before live date is backtest
+                — observation window starts {formatDay(recordStart)}; portion before live date is backtest
               </span>
             )}
           </Term>
@@ -183,11 +187,11 @@ export function TermsPanel({ variant = "full" }: { variant?: "full" | "document"
  *
  * HONEST-EMPTY (PEER-04):
  *   - Per constituent: when a constituent has NO strategy_types AND NO markets,
- *     its sub-block reads "no mandate metadata" (the leverage chip alone is not
+ *     its sub-block reads "no type or market listed" (the leverage chip alone is not
  *     "metadata" — it always exists at ≥ 1.0, so a types+markets-empty constituent
  *     is treated as empty per the UI-SPEC honest-empty rule).
  *   - Whole panel: when NO constituent has any types/markets, the panel body reads
- *     "No mandate metadata available for this blend's constituents." — the "Mandate"
+ *     "No strategy type or market is listed for this blend's constituents." — the "Constituents"
  *     title still renders (the absence is itself informative).
  *
  * The interactive `MandateChipGroup` is deliberately NOT reused — it is a
@@ -209,7 +213,7 @@ export function ConstituentMandatePanel() {
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-fixed-13 font-semibold uppercase tracking-wider text-text-primary">Mandate</h3>
+        <h3 className="text-fixed-13 font-semibold uppercase tracking-wider text-text-primary">Constituents</h3>
       </header>
       {anyMetadata ? (
         <div>
@@ -245,7 +249,7 @@ export function ConstituentMandatePanel() {
                     )}
                   </div>
                 ) : (
-                  <p className="text-fixed-11 italic text-text-muted">no mandate metadata</p>
+                  <p className="text-fixed-11 italic text-text-muted">no type or market listed</p>
                 )}
               </div>
             );
@@ -253,7 +257,7 @@ export function ConstituentMandatePanel() {
         </div>
       ) : (
         <p className="text-fixed-11 italic text-text-muted">
-          No mandate metadata available for this blend&apos;s constituents.
+          No strategy type or market is listed for this blend&apos;s constituents.
         </p>
       )}
     </section>
@@ -297,14 +301,4 @@ function Term({ label, children }: { label: string; children: React.ReactNode })
 export function LeverageProfilePanel() {
   // Wiring point — until the backend ships leverage data, render nothing.
   return null;
-}
-
-function iso(s: string): string {
-  if (!s) return "—";
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return s;
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
 }

@@ -1100,7 +1100,7 @@ describe("LEV-02 leverageOverrides", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 151 / AUM-01 — the manual portfolio-AUM draft field.
+// Phase 151 / AUM-01 — the manual scenario-AUM draft field.
 //
 // The whole point of these four behaviours is the DRAFT-DELETING RESET hazard
 // (Phase-59 Pitfall 1): `scenarioDraftSchema` is safeParsed on EVERY codec

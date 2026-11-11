@@ -134,7 +134,9 @@ describe("PeerPercentilePanel — scenario-path disclosure (PEER-02)", () => {
     // The three percentile bars render.
     expect(getByText("Sharpe")).toBeTruthy();
     expect(getByText("Sortino")).toBeTruthy();
-    expect(getByText("Max DD (shallower = better)")).toBeTruthy();
+    // Max DD is a Term with its qualifier outside it (Phase 201 plan 09, D-01).
+    expect(getByText("Max DD")).toBeTruthy();
+    expect(getByText("Max DD").parentElement!.parentElement!.parentElement!.textContent).toBe("Max DD (shallower = better)");
 
     // The verbatim disclosure copy renders — plain muted micro-tier, NOT italic.
     // (Phase 52-06 / TYPE-04 migrated the raw `text-[10px]` onto the fluid
@@ -182,7 +184,9 @@ describe("PeerPercentilePanel — scenario-path disclosure (PEER-02)", () => {
   ])("scenario path: a Sharpe rank of %s renders a dash and no bar fill", (_label, sharpe) => {
     const peer = { cohortSize: 20, sharpe, sortino: 55, max_dd: 48 } as unknown as PeerPercentilePayload;
     const { getByText, container } = renderPanel(csvPayload(peer));
-    const row = getByText("Sharpe").parentElement!;
+    // Sharpe is a Term (trigger > Tooltip inner span > Tooltip wrapper > label span), and the label
+    // span sits in the bar's grid row.
+    const row = getByText("Sharpe").parentElement!.parentElement!.parentElement!.parentElement!;
     expect(row.lastElementChild!.textContent).toBe("—");
     expect(row.querySelector(".bg-accent")).toBeNull();
     // The other two ranks still render as ranks.

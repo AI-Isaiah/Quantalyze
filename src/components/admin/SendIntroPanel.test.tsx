@@ -39,6 +39,7 @@ const CANDIDATE: CandidateRow = {
     name: "Candidate Strategy",
     codename: "Falcon",
     disclosure_tier: "institutional",
+    status: null,
     strategy_types: ["trend"],
     supported_exchanges: ["binance"],
     aum: 1_000_000,
@@ -240,5 +241,24 @@ describe("SendIntroPanel — holdings fetch/state (M-0389)", () => {
     expect(parsed.original_strategy_id).toBe("top-weight");
     expect(parsed.strategy_id).toBe(CANDIDATE_STRATEGY_ID);
     expect(parsed.allocator_id).toBe(ALLOCATOR_ID);
+  });
+});
+
+/**
+ * Phase 201 plan 20 (D-04, D-08) - the empty-holdings copy says "allocation", not "portfolio".
+ * WHY: staff read this to a founder on a call; the allocator's own word has to be the one used.
+ */
+describe("SendIntroPanel - empty holdings copy (D-04)", () => {
+  it("reads 'start an allocation' and 'No current holdings in this allocation.'", async () => {
+    installRoutedFetch({ holdings: [{ id: CANDIDATE_STRATEGY_ID, name: "Self" }] });
+    renderPanel();
+    await screen.findByText("Cannot send intro");
+    expect(
+      screen.getByText(
+        "Allocator has no current holdings \u2014 cannot send intro without an underperformer reference. Have them start an allocation first, or record at least one position.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No current holdings in this allocation.")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/portfolio/i);
   });
 });

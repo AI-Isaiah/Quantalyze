@@ -115,8 +115,10 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
         if (data?.strategies && Array.isArray(data.strategies)) {
           for (const s of data.strategies) {
             const id = s?.strategy_id ?? s?.strategy?.id;
+            // D-09: alias, then the name, then the codename. The payload nulls
+            // `name` upstream for a strategy the viewer cannot see (D-17).
             const name =
-              s?.alias ?? s?.strategy?.codename ?? s?.strategy?.name;
+              s?.alias ?? (s?.strategy?.name?.trim() || undefined) ?? s?.strategy?.codename;
             if (id && name) nameMap[id] = name;
           }
         }
@@ -133,8 +135,13 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
           s?.strategy?.strategy_analytics?.daily_returns,
         );
         if (dr.length > 0) {
+          // D-09: alias, then the name, then the codename (see the precomputed
+          // path above); the payload nulls `name` upstream for a hidden strategy.
           const name =
-            s?.alias ?? s?.strategy?.codename ?? s?.strategy?.name ?? "Unnamed strategy";
+            s?.alias ??
+            (s?.strategy?.name?.trim() || undefined) ??
+            s?.strategy?.codename ??
+            "Unnamed strategy";
           // The row index backs a row with no id, so a key is never shared.
           const id = s?.strategy_id ?? s?.strategy?.id ?? `row-${idx}`;
           const dates: string[] = [];

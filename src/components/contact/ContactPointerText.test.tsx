@@ -8,13 +8,20 @@
  *     sibling plan has not rewritten yet must not break);
  *   - `newTab` is what keeps a user's unsaved wizard / dialog state alive (AD-04),
  *     and its `rel` is the reverse-tabnabbing mitigation (T-164.6.6.3.5-20);
- *   - server-supplied text is rendered as text nodes, never markup (T-...-19).
+ *   - server-supplied text is rendered as text nodes, never markup (T-...-19);
+ *   - plan 201-32 (F-12, U-28): an optional `linkText` links another phrase
+ *     (the egress pair) through the same classes, `rel` and suffix; without it
+ *     the component links `contact form` exactly as before.
  */
 
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import { ContactPointerText } from "./ContactPointerText";
-import { CONTACT_FORM_LINK_TEXT, contactHref } from "@/lib/contact";
+import {
+  CONTACT_FORM_LINK_TEXT,
+  EGRESS_IP_STATUS_LINK,
+  contactHref,
+} from "@/lib/contact";
 
 const HREF = contactHref({ topic: "support" });
 const SENTENCE =
@@ -76,6 +83,50 @@ describe("ContactPointerText", () => {
     const hidden = link.querySelector(".sr-only");
     expect(hidden).not.toBeNull();
     expect(hidden!.textContent).toBe(" (opens in a new tab)");
+  });
+
+  it("linkText links that phrase instead, with the same class, rel and suffix (F-12, U-28)", () => {
+    const text = "Check our egress IP status first, or use the contact form.";
+    const { container } = render(
+      <ContactPointerText
+        text={text}
+        href={EGRESS_IP_STATUS_LINK.href}
+        linkText={EGRESS_IP_STATUS_LINK.text}
+        newTab
+      />,
+    );
+    const links = container.querySelectorAll("a");
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute("href")).toBe("/security#egress-ips");
+    expect(links[0].textContent).toBe("egress IP status (opens in a new tab)");
+    expect(links[0].getAttribute("rel")).toBe("noopener noreferrer");
+    expect(links[0].className).toContain("text-accent underline underline-offset-4");
+    // The contact-form phrase in the same text is left as plain text.
+    expect(container.textContent).toBe(
+      "Check our egress IP status (opens in a new tab) first, or use the contact form.",
+    );
+  });
+
+  it("without linkText it still links 'contact form' and ignores the egress phrase", () => {
+    const text = "Check our egress IP status first, or use the contact form.";
+    const { container } = render(<ContactPointerText text={text} href={HREF} />);
+    const links = container.querySelectorAll("a");
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe(CONTACT_FORM_LINK_TEXT);
+    expect(links[0].getAttribute("href")).toBe(HREF);
+  });
+
+  it("a text with neither phrase renders as plain text even with linkText set", () => {
+    const text = "Something went wrong. Try again.";
+    const { container } = render(
+      <ContactPointerText
+        text={text}
+        href={EGRESS_IP_STATUS_LINK.href}
+        linkText={EGRESS_IP_STATUS_LINK.text}
+      />,
+    );
+    expect(container.querySelector("a")).toBeNull();
+    expect(container.textContent).toBe(text);
   });
 
   it("renders server text as text nodes, never as markup", () => {

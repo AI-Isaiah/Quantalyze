@@ -14,7 +14,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
  *     the genuinely-absent row.
  *   - P35 (G8.A.2): `strategies[].strategy.name` was shipped to the
  *     RSC payload regardless of disclosure tier; canonical name is now
- *     `null` for non-institutional rows.
+ *     `null` unless the viewer can see the strategy in discovery
+ *     (narrowed from "non-institutional rows" by Phase 201 / D-17).
  *   - P44 (G8.A.11): `alertCount.total` over-counted unknown
  *     severities; `total === critical+high+medium+low` invariant
  *     restored.
@@ -251,7 +252,7 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 + 24 (P35, P57)",
     };
   });
 
-  it("redacts strategy.name to null for non-institutional disclosure tier (P35)", async () => {
+  it("redacts strategy.name to null for a strategy the viewer cannot see in discovery (P35, D-17)", async () => {
     buildResult.byTable["portfolio_strategies"] = {
       data: [
         {
@@ -264,6 +265,9 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 + 24 (P35, P57)",
             name: "Manager-Given Canonical Name",
             codename: "Quasar",
             disclosure_tier: "exploratory",
+            // Phase 201 / D-17: someone else's unpublished row.
+            status: "draft",
+            user_id: "other-owner",
             strategy_types: ["macro"],
             markets: ["BTC"],
             start_date: null,
@@ -280,8 +284,28 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 + 24 (P35, P57)",
             name: "Institutional Strategy",
             codename: null,
             disclosure_tier: "institutional",
+            status: "published",
+            user_id: "other-owner",
             strategy_types: ["systematic"],
             markets: ["ETH"],
+            start_date: null,
+            strategy_analytics: null,
+          },
+        },
+        {
+          strategy_id: "s-explor-pub",
+          current_weight: 0.5,
+          allocated_amount: 100,
+          alias: null,
+          strategy: {
+            id: "s-explor-pub",
+            name: "Published Exploratory Name",
+            codename: "Nova",
+            disclosure_tier: "exploratory",
+            status: "published",
+            user_id: "other-owner",
+            strategy_types: ["macro"],
+            markets: ["BTC"],
             start_date: null,
             strategy_analytics: null,
           },
@@ -295,10 +319,13 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 + 24 (P35, P57)",
 
     const explor = payload.strategies.find((s) => s.strategy_id === "s-explor");
     const inst = payload.strategies.find((s) => s.strategy_id === "s-inst");
+    const explorPub = payload.strategies.find((s) => s.strategy_id === "s-explor-pub");
 
     expect(explor?.strategy.name).toBeNull();
     expect(explor?.strategy.codename).toBe("Quasar");
     expect(inst?.strategy.name).toBe("Institutional Strategy");
+    // D-09: a published exploratory strategy is named (it was null before 201).
+    expect(explorPub?.strategy.name).toBe("Published Exploratory Name");
   });
 
   it("filters out portfolio_strategies rows with a missing strategy embed instead of crashing (P57)", async () => {
@@ -403,7 +430,7 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
     };
   });
 
-  it("outcomes payload: replacement_strategy.name is redacted for exploratory tier (was: leaked canonical name)", async () => {
+  it("outcomes payload: replacement_strategy.name is redacted for a strategy the viewer cannot see in discovery (was: leaked canonical name)", async () => {
     buildResult.byTable["bridge_outcomes"] = {
       data: [
         {
@@ -427,6 +454,9 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
             name: "Leaked Manager Name",
             codename: "Pulsar",
             disclosure_tier: "exploratory",
+            // Phase 201 / D-17: someone else's unpublished rows.
+            status: "draft",
+            user_id: "other-owner",
           },
           match_decision: {
             original_strategy: {
@@ -434,6 +464,8 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
               name: "Original Leaked Name",
               codename: "Vega",
               disclosure_tier: "exploratory",
+              status: "pending_review",
+              user_id: "other-owner",
             },
           },
         },
@@ -619,7 +651,7 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
     );
   });
 
-  it("outcomes payload: institutional tier still surfaces canonical name verbatim", async () => {
+  it("outcomes payload: a published institutional strategy still surfaces its canonical name verbatim", async () => {
     buildResult.byTable["bridge_outcomes"] = {
       data: [
         {
@@ -643,6 +675,8 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
             name: "Institutional Strategy",
             codename: null,
             disclosure_tier: "institutional",
+            status: "published",
+            user_id: "other-owner",
           },
           match_decision: null,
         },
@@ -702,8 +736,12 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
     errSpy.mockRestore();
   });
 
-  it("flaggedHoldings.top_candidate_name is redacted for exploratory candidate strategies (was: leaked canonical name)", async () => {
-    // Seed a flagged batch pointing at an exploratory candidate strategy.
+  // Phase 201 / D-09, D-17: the candidate read is `withPublishedOnly`, so every row it
+  // returns is visible in discovery and its name prints ahead of the codename. The
+  // visibility fact is the read's predicate, not the disclosure tier this arm used to
+  // pin; a candidate with no name still reads as its codename.
+  it("flaggedHoldings.top_candidate_name is the candidate's name, ahead of its codename (D-17)", async () => {
+    // Seed a flagged batch pointing at a published candidate strategy.
     buildResult.byTable["match_batches"] = {
       data: [
         {
@@ -727,7 +765,7 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
       data: [
         {
           id: "s-explor-cand",
-          name: "Leaked Candidate Name",
+          name: "Fibonacci Ghost",
           codename: "Lyra",
           disclosure_tier: "exploratory",
         },
@@ -739,10 +777,17 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
     const payload = await getMyAllocationDashboard("user-1");
 
     expect(payload.flaggedHoldings.length).toBe(1);
-    expect(payload.flaggedHoldings[0].top_candidate_name).toBe("Lyra");
-    expect(payload.flaggedHoldings[0].top_candidate_name).not.toBe(
-      "Leaked Candidate Name",
-    );
+    expect(payload.flaggedHoldings[0].top_candidate_name).toBe("Fibonacci Ghost");
+
+    // A candidate whose name is null or blank still reads as its codename.
+    buildResult.byTable["strategies"] = {
+      data: [
+        { id: "s-explor-cand", name: null, codename: "Lyra", disclosure_tier: "exploratory" },
+      ],
+      error: null,
+    };
+    const again = await getMyAllocationDashboard("user-1");
+    expect(again.flaggedHoldings[0].top_candidate_name).toBe("Lyra");
   });
 
   // 167.1.1.1 D-04 / D-12: the matcher now persists an entry for every spot holding it

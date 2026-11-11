@@ -2,6 +2,8 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import type { ChangeEvent, KeyboardEvent, PointerEvent, TouchEvent } from "react";
+import { Term } from "@/components/ui/Term";
+import { termLabel, type TermKey } from "@/lib/glossary";
 
 // M-0421: the only keys that move a native range input's value. A keyUp for any
 // other key (Tab/Escape/Shift/screen-reader nav) must NOT arm a commit, else it
@@ -19,6 +21,12 @@ const COMMIT_KEYS = new Set([
 
 interface Props {
   label: string;
+  /**
+   * Phase 201 D-06: the registry term this label's opening words name. Only those
+   * words are wrapped in `Term` (the label text and the slider's accessible name
+   * are unchanged). The label must start with the term's registry label.
+   */
+  term?: TermKey;
   helper: string;
   value: number | null;
   min: number;
@@ -54,6 +62,7 @@ interface Props {
  */
 export function MandateSlider({
   label,
+  term,
   helper,
   value,
   min,
@@ -114,7 +123,14 @@ export function MandateSlider({
     <div className="space-y-2">
       <div className="flex items-baseline justify-between">
         <label htmlFor={id} className="text-sm font-medium text-text-primary">
-          {label}
+          {term && label.startsWith(termLabel(term)) ? (
+            <>
+              <Term k={term}>{termLabel(term)}</Term>
+              {label.slice(termLabel(term).length)}
+            </>
+          ) : (
+            label
+          )}
         </label>
         <div className="flex items-center gap-3">
           {saving && (

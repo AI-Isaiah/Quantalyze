@@ -9,6 +9,7 @@ import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel
 import { PeerRanksSection } from "@/components/strategy/PeerRanksSection";
 import { PrintButton } from "@/components/ui/PrintButton";
 import { createClient } from "@/lib/supabase/server";
+import { formatDay } from "@/lib/utils";
 import { canViewAum, withViewerAum } from "@/lib/factsheet/viewer-aum";
 import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-payload";
 import { DegradeLine } from "@/components/degrade/DegradeLine";
@@ -38,7 +39,10 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { id } = await params;
   const result = await getFactsheetDetail(id);
-  const name = result ? displayStrategyName(result.strategy) : "Strategy";
+  // Visibility fact (Phase 201 D-17): `getFactsheetDetail` reads published-only
+  // (`withPublishedOnly`), so every row it returns is visible in discovery and the
+  // title prints the same name discovery prints.
+  const name = result ? displayStrategyName(result.strategy, { visible: true }) : "Strategy";
   return {
     title: `${name} institutional tear sheet`,
     robots: "noindex",
@@ -86,8 +90,9 @@ export async function generateMetadata({
  * exactly the predicate enforced by /discovery/layout.tsx. Anonymous
  * traffic, brand-new accounts, strategy managers logged into their own
  * console, and link recipients who haven't signed the attestation all see
- * the codename-only redacted block. Performance metrics stay public
- * (they're also on the non-tearsheet factsheet). Admins are auto-attested
+ * the pseudonymous-manager card (it names the strategy, never the manager).
+ * Performance metrics stay public (they're also on the non-tearsheet
+ * factsheet). Admins are auto-attested
  * via migration 20260408113028 backfill, so the founder sees institutional
  * identity during demos. The PDF wrapper at
  * /api/factsheet/[id]/tearsheet.pdf inherits this fix automatically
@@ -180,7 +185,10 @@ export default async function TearSheetPage({
   // traffic from the public tearsheet route — mirroring /discovery/*.
   const effectiveDisclosureTier = isAttested ? disclosureTier : "exploratory";
   const effectiveManager = isAttested ? manager : null;
-  const displayName = displayStrategyName(strategy);
+  // Same published-only fact as `generateMetadata`: `getFactsheetDetail` (and the
+  // `withPublishedOnly` payload read below) only return a published strategy, which
+  // discovery shows under its real name (Phase 201 D-09, D-17).
+  const displayName = displayStrategyName(strategy, { visible: true });
   const categorySlug: string | undefined =
     (strategy as { discovery_categories?: { slug?: string } | null }).discovery_categories?.slug ??
     undefined;
@@ -229,11 +237,17 @@ export default async function TearSheetPage({
       : null;
   const payload = withTrustTier(builtPayload, trustTier);
 
-  const generated = new Date().toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
+  // Phase 201 D-11: the one UI date, read in UTC so the server render and the printed PDF agree.
+  const generated = formatDay(new Date().toISOString());
+
+  // Phase 201 D-24 (folding D-16): the exchange-API monitoring sentence is true only of an
+  // api_verified record. A CSV upload or a self-reported series is not monitored through an
+  // exchange API, so every other tier (and a missing one) states custody alone. Mirrors the
+  // `Disclaimer` `strategy-page` tier rule.
+  const custodyClause =
+    trustTier === "api_verified"
+      ? "Strategies are monitored via read-only exchange APIs; managers retain asset custody."
+      : "Managers retain asset custody.";
 
   return (
     // `id="tearsheet-main"` is the positive marker of the FULL tear sheet: the pending,
@@ -288,7 +302,7 @@ export default async function TearSheetPage({
         <ManagerIdentityPanel
           disclosureTier={effectiveDisclosureTier}
           manager={effectiveManager}
-          strategyCodename={displayName}
+          strategyName={displayName}
         />
       </section>
 
@@ -318,8 +332,7 @@ export default async function TearSheetPage({
           Past performance does not guarantee future results. Cryptocurrency
           trading involves substantial risk of total loss. This tear sheet is
           for informational purposes only and does not constitute investment,
-          legal, or tax advice. Strategies are monitored via read-only exchange
-          APIs; managers retain asset custody. {ANALYTICS_ONLY_TEXT} Read the
+          legal, or tax advice. {custodyClause} {ANALYTICS_ONLY_TEXT} Read the
           full risk disclaimer at{" "}
           <Link
             href="/legal/disclaimer"

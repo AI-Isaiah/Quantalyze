@@ -18,6 +18,17 @@ import type { OutcomeRow } from "@/lib/queries";
 //     CONTEXT §specifics, app.jsx:131 designer bug)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Phase 201 plan 28 — F-04 / U-26: "Bridge" is retired from user-visible copy.
+// The card reads in plain words in every state: the eyebrow is "Mandate check"
+// (Term Form A around "Mandate" only, D-01 / D-06), the load-failed message
+// reads "Couldn’t check your holdings against your mandate.", and the active
+// regions are named "Replacement suggestions". The rendered arm at the bottom
+// reads text plus every aria-label / title over all five states and fails if
+// the retired word returns. Identifiers, `bridge-*` test ids and
+// `--color-bridge-*` tokens are unchanged (copy only).
+// ---------------------------------------------------------------------------
+
 const FIXED_NOW = new Date("2026-04-26T12:00:00Z");
 
 beforeEach(() => {
@@ -62,8 +73,14 @@ describe("BridgeWidget — empty state (no breaches, with outcomes)", () => {
     );
     expect(screen.getByText("All clear")).toBeTruthy();
     // Region role + accessible label preserved
-    const region = screen.getByRole("region", { name: /bridge status/i });
+    const region = screen.getByRole("region", { name: "Mandate check" });
     expect(region).toBeTruthy();
+    // D-01 / D-06: the eyebrow's "Mandate" opens its definition (Form A, key `mandate`).
+    expect(region.querySelector('[data-term="mandate"]')?.textContent).toBe("Mandate");
+    expect(region.querySelector('[data-term="bridge"]')).toBeNull();
+    expect(region.querySelector('[data-term="mandate"]')?.closest("span.inline")?.nextSibling?.textContent).toBe(
+      " check",
+    );
     // Flat cream fill applied via inline style ("no gradients" is a top-level
     // DESIGN.md rule — the prior linear-gradient was removed for a flat
     // --color-bridge-bg-100 fill, keeping the Bridge cream identity).
@@ -161,19 +178,12 @@ describe("BridgeWidget — empty state (no breaches, with outcomes)", () => {
     );
   });
 
-  it("L-0069 — 366 days ago → absolute toLocaleDateString form (>= 1 year boundary)", () => {
+  it("L-0069 — 366 days ago → the one date format, `Mon D, YYYY` (>= 1 year boundary)", () => {
+    // Phase 201 D-11: the absolute branch prints through `formatDay`, so the
+    // string is the same on the server and in the browser. The literal is
+    // fixed (FIXED_NOW minus 366 days is 2025-04-25T12:00Z), not derived from
+    // the runtime locale.
     const outcome = makeOutcome(366);
-    // The absolute branch formats `new Date(Date.parse(created_at))` via
-    // toLocaleDateString("en-US", {month:'short', day:'numeric', year:'numeric'}).
-    // Derive the expected string from the SAME timestamp the component parses,
-    // so this never hardcodes a locale-/TZ-fragile literal.
-    const expected = new Date(
-      Date.parse(outcome.created_at),
-    ).toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
     render(
       <BridgeWidget
         flaggedHoldings={[]}
@@ -182,9 +192,24 @@ describe("BridgeWidget — empty state (no breaches, with outcomes)", () => {
       />,
     );
     const text = screen.getByTestId("bridge-empty-last-reviewed").textContent;
-    expect(text).toBe(expected);
+    expect(text).toBe("Apr 25, 2025");
     // Sanity: the absolute branch must NOT collapse to a relative phrase.
     expect(text).not.toMatch(/ago/);
+  });
+
+  it("T-201-19 — an outcome stamped 23:30 UTC names that UTC day, whatever the runtime zone (U-13)", () => {
+    // 2025-04-25T23:30Z is 365.5 days before FIXED_NOW, so it takes the
+    // absolute branch. A zone-local read east of UTC would print Apr 26.
+    render(
+      <BridgeWidget
+        flaggedHoldings={[]}
+        matchDecisionsByHoldingRef={{}}
+        outcomes={[makeOutcome(366, { created_at: "2025-04-25T23:30:00.000Z" })]}
+      />,
+    );
+    expect(screen.getByTestId("bridge-empty-last-reviewed").textContent).toBe(
+      "Apr 25, 2025",
+    );
   });
 
   it("L-0069 — future timestamp (negative elapsed) clamps to 'today'", () => {
@@ -305,10 +330,23 @@ describe("BridgeWidget — load-failure (unknown) state, H-1210", () => {
     );
     // Distinct error region + copy.
     expect(
-      screen.getByRole("region", { name: /bridge status unavailable/i }),
+      screen.getByRole("region", { name: "Mandate check unavailable" }),
     ).toBeTruthy();
     expect(screen.getByTestId("bridge-error-state")).toBeTruthy();
     expect(screen.getByText("Status unavailable")).toBeTruthy();
+    // D-01 / D-06: the error eyebrow's "Mandate" opens its definition too.
+    const errorState = screen.getByTestId("bridge-error-state");
+    expect(
+      errorState.querySelector('[data-term="mandate"]')?.textContent,
+    ).toBe("Mandate");
+    expect(errorState.querySelector('[data-term="bridge"]')).toBeNull();
+    // F-04 / U-26: the eyebrow reads "Mandate" (Term) + " check"; the message names the failure.
+    expect(errorState.querySelector('[data-term="mandate"]')?.closest("span.inline")?.nextSibling?.textContent).toBe(
+      " check",
+    );
+    expect(
+      screen.getByText("Couldn\u2019t check your holdings against your mandate."),
+    ).toBeTruthy();
     // The reassuring empty state must NOT appear — this is the headline bug:
     // a failed load that looks "All clear" silently misinforms the allocator.
     expect(screen.queryByText("All clear")).toBeNull();
@@ -364,15 +402,69 @@ describe("BridgeWidget — active-breach state preserved", () => {
         outcomes={[makeOutcome(3)]}
       />,
     );
-    // Active state has its own region label + "Bridge flagged" pill copy
-    expect(
-      screen.getByRole("region", { name: /bridge recommendations/i }),
-    ).toBeTruthy();
-    expect(screen.getByText(/Bridge flagged/i)).toBeTruthy();
+    // Active state has its own region label + "Mandate check" eyebrow copy
+    const region = screen.getByRole("region", { name: "Replacement suggestions" });
+    expect(region).toBeTruthy();
+    // D-01 / D-06: the eyebrow's "Mandate" opens its definition; " check" stays text.
+    expect(region.querySelector('[data-term="mandate"]')?.textContent).toBe("Mandate");
+    expect(region.querySelector('[data-term="bridge"]')).toBeNull();
+    expect(region.textContent).toMatch(/Mandate check/);
     // The venue reads as a label, never the raw exchange code.
     expect(screen.getByText(/BTC \(OKX\)/)).toBeTruthy();
     expect(screen.queryByText(/\(okx\)/)).toBeNull();
     // Empty-state copy must NOT render when there are active breaches
     expect(screen.queryByText("All clear")).toBeNull();
   });
+});
+
+// ---------------------------------------------------------------------------
+// F-04 / U-26 — the retired word must not render in ANY state of the card.
+// Reads container text plus every aria-label and title value. Case-sensitive,
+// so lowercase `bridge-*` test ids are not read.
+// ---------------------------------------------------------------------------
+describe("BridgeWidget — no retired word in any state (F-04, U-26)", () => {
+  const FLAGGED = [
+    {
+      symbol: "BTC",
+      venue: "okx",
+      holding_type: "perp",
+      top_candidate_composite: 0.92,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any,
+  ];
+
+  const STATES: Array<{ name: string; props: Record<string, unknown> }> = [
+    { name: "load-failed", props: { flaggedHoldings: null } },
+    { name: "empty", props: { flaggedHoldings: [] } },
+    { name: "subtle", props: { flaggedHoldings: FLAGGED, variant: "subtle" } },
+    { name: "card", props: { flaggedHoldings: FLAGGED, variant: "card" } },
+    { name: "full", props: { flaggedHoldings: FLAGGED, variant: "full" } },
+  ];
+
+  function readable(container: HTMLElement): string[] {
+    const attrs = Array.from(
+      container.querySelectorAll("[aria-label], [title]"),
+    ).flatMap((el) => [el.getAttribute("aria-label"), el.getAttribute("title")]);
+    return [container.textContent ?? "", ...attrs].filter(
+      (v): v is string => typeof v === "string",
+    );
+  }
+
+  for (const state of STATES) {
+    it(`${state.name}: no /\\bBridge\\b/ in text, aria-label or title, and no bridge Term`, () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { container } = render(
+        <BridgeWidget
+          flaggedHoldings={null}
+          matchDecisionsByHoldingRef={{}}
+          outcomes={[]}
+          {...(state.props as object)}
+        />,
+      );
+      for (const value of readable(container)) {
+        expect(value).not.toMatch(/\bBridge\b/);
+      }
+      expect(container.querySelector('[data-term="bridge"]')).toBeNull();
+    });
+  }
 });

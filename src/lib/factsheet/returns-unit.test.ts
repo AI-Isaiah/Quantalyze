@@ -105,9 +105,11 @@ describe("unitTag", () => {
 });
 
 describe("formatCloseDay", () => {
-  it("formats a UTC ISO day with and without the year", () => {
+  // Phase 201 U-14, D-11 (plan 201-23): no factsheet date is yearless, so the helper takes the day
+  // and nothing else. The `{ year: false }` option it once ignored is gone with its last caller.
+  it("formats a UTC ISO day with the year, and takes one argument", () => {
     expect(formatCloseDay("2026-10-08")).toBe("Oct 8, 2026");
-    expect(formatCloseDay("2026-10-08", { year: false })).toBe("Oct 8");
+    expect(formatCloseDay.length).toBe(1);
   });
 
   it("returns an em dash for a malformed day", () => {

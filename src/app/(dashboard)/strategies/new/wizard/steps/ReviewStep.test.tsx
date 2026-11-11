@@ -173,7 +173,13 @@ describe("[APPLY-02] ReviewStep — CSV branch recap", () => {
     expect(screen.getByText("BTC Vol Carry")).toBeInTheDocument();
     expect(screen.getByText("Daily returns")).toBeInTheDocument();
     expect(screen.getByText("252")).toBeInTheDocument();
-    expect(screen.getByText("2025-01-02 → 2026-01-02")).toBeInTheDocument();
+    // F-11 / D-11 / UI-SPEC Interaction contract 5 / R3-01 item 5 / plan
+    // 201-38: the CSV range prints through `formatDay`, two days joined by a
+    // spaced en dash. The ISO form is a stale pin, so it must be absent.
+    const range = screen.getByText("Jan 2, 2025 – Jan 2, 2026");
+    expect(range).toBeInTheDocument();
+    expect(range.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(screen.queryByText(/\d{4}-\d{2}-\d{2}/)).toBeNull();
     expect(screen.getByText("date, daily_return")).toBeInTheDocument();
   });
 

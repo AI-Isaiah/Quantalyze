@@ -30,6 +30,8 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { BridgeDrawer } from "./BridgeDrawer";
 import { venueLabel } from "@/lib/display-labels";
+import { formatDay } from "@/lib/utils";
+import { Term } from "@/components/ui/Term";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 import type { OutcomeRow } from "@/lib/queries";
 
@@ -43,7 +45,7 @@ export interface BridgeWidgetProps {
    * the upstream dashboard payload failed to resolve flaggedHoldings (network
    * blip / query threw). For a SAFETY-RELEVANT widget we must NEVER collapse
    * "unknown" into the reassuring "All clear" UI; `null` renders a distinct
-   * "Bridge status unavailable" state with a retry affordance. Callers that
+   * "Mandate check unavailable" state with a retry affordance. Callers that
    * coalesce a failed payload field MUST pass `null`, not `[]`.
    */
   flaggedHoldings: FlaggedHolding[] | null;
@@ -60,7 +62,7 @@ export interface BridgeWidgetProps {
    */
   outcomes?: ReadonlyArray<OutcomeRow>;
   /**
-   * H-1210 (F1 loud-fail) — optional retry handler for the "Bridge status
+   * H-1210 (F1 loud-fail) — optional retry handler for the "Mandate check
    * unavailable" error state (rendered when `flaggedHoldings` is `null`).
    * When provided, the error card shows a Retry button that invokes it so
    * the caller can re-fetch. When omitted the error state still renders
@@ -89,12 +91,9 @@ function formatRelativeDate(iso: string, now: Date = new Date()): string {
   if (days < 14) return "a week ago";
   if (days < 60) return `${Math.floor(days / 7)} weeks ago`;
   if (days < 365) return `${Math.floor(days / 30)} months ago`;
-  // Older than a year — fall back to absolute date for clarity.
-  return new Date(ts).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
+  // Older than a year — fall back to the absolute day for clarity (D-11: the
+  // one date helper, read in UTC, so the server and the browser agree).
+  return formatDay(iso);
 }
 
 export function BridgeWidget({
@@ -107,8 +106,8 @@ export function BridgeWidget({
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   // L-0070 — memoize the empty-state's relative-date phrase on the most-recent
-  // outcome's created_at. `formatRelativeDate` does a `Date.parse` + a locale
-  // `toLocaleDateString` and defaults `now` to a fresh `new Date()`; calling it
+  // outcome's created_at. `formatRelativeDate` does a `Date.parse` + a
+  // `formatDay` read and defaults `now` to a fresh `new Date()`; calling it
   // inline on every render re-ran all of that on each 30s dashboard payload
   // refresh. Keyed on the timestamp string, it now recomputes only when the
   // latest outcome actually changes (~once/day). Hook sits above the early
@@ -131,7 +130,7 @@ export function BridgeWidget({
     return (
       <div
         role="region"
-        aria-label="Bridge status unavailable"
+        aria-label="Mandate check unavailable"
         data-testid="bridge-error-state"
         className="rounded-lg border px-4 py-3"
         style={{
@@ -144,13 +143,13 @@ export function BridgeWidget({
             className="text-fixed-10 font-mono uppercase tracking-[0.14em]"
             style={{ color: "var(--color-warning)" }}
           >
-            Bridge
+            <Term k="mandate">Mandate</Term> check
           </span>
           <span className="text-base font-display text-text-primary">
             Status unavailable
           </span>
           <span className="text-sm text-text-secondary">
-            Couldn&rsquo;t load your Bridge status.
+            Couldn&rsquo;t check your holdings against your mandate.
           </span>
           {onRetry ? (
             <button
@@ -178,7 +177,7 @@ export function BridgeWidget({
     // the count of reviews on file. The CTA always routes to the Outcomes
     // tab (NOT a dismissal toggle — see CONTEXT §specifics, app.jsx:131
     // designer bug). When `outcomes` is empty, the card collapses to the
-    // "Bridge will alert..." copy without crashing.
+    // "No reviews recorded yet." copy without crashing.
     const hasOutcomes = outcomes.length > 0;
     const lastOutcome = hasOutcomes ? outcomes[0] : null;
     const outcomeCount = outcomes.length;
@@ -192,7 +191,7 @@ export function BridgeWidget({
     return (
       <div
         role="region"
-        aria-label="Bridge status"
+        aria-label="Mandate check"
         data-testid="bridge-empty-state"
         className="rounded-lg border px-4 py-3"
         style={{
@@ -205,7 +204,7 @@ export function BridgeWidget({
             className="text-fixed-10 font-mono uppercase tracking-[0.14em]"
             style={{ color: "var(--color-warning)" }}
           >
-            Bridge
+            <Term k="mandate">Mandate</Term> check
           </span>
           <span className="text-base font-display text-text-primary">
             All clear
@@ -256,10 +255,10 @@ export function BridgeWidget({
       <>
         <div
           role="region"
-          aria-label="Bridge recommendations"
+          aria-label="Replacement suggestions"
           className="rounded-md border border-border bg-surface p-3 text-sm text-text-primary"
         >
-          Bridge flagged {count} holding{plural} —
+          {count} holding{plural} outside your mandate —
           <button
             type="button"
             onClick={() => setDrawerOpen(true)}
@@ -283,7 +282,7 @@ export function BridgeWidget({
       <>
         <div
           role="region"
-          aria-label="Bridge recommendations"
+          aria-label="Replacement suggestions"
           className="rounded-lg border p-4"
           style={{
             borderColor: "var(--color-bridge-border-100)",
@@ -294,7 +293,7 @@ export function BridgeWidget({
             className="text-xs uppercase"
             style={{ color: "var(--color-warning)", letterSpacing: "0.08em" }}
           >
-            Bridge
+            <Term k="mandate">Mandate</Term> check
           </div>
           <div className="mt-1 text-base font-medium text-text-primary">
             {count} holding{plural} flagged
@@ -322,7 +321,7 @@ export function BridgeWidget({
     <>
       <div
         role="region"
-        aria-label="Bridge recommendations"
+        aria-label="Replacement suggestions"
         className="rounded-lg border p-6"
         style={{
           borderColor: "var(--color-bridge-border-100)",
@@ -333,7 +332,7 @@ export function BridgeWidget({
           className="text-xs uppercase"
           style={{ color: "var(--color-warning)", letterSpacing: "0.08em" }}
         >
-          Bridge flagged
+          <Term k="mandate">Mandate</Term> check
         </div>
         <div className="mt-1 text-xl font-display text-text-primary">
           {count} holding{plural} need{count === 1 ? "s" : ""} review

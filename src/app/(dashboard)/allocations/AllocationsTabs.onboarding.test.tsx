@@ -135,6 +135,19 @@ function setSearchParams(query: string): void {
   );
 }
 
+/**
+ * The Mandate quick-set card's heading, found by its whole text. Phase 201 D-01 made "Mandate" a Term
+ * inside the heading, so `getByText("Mandate quick-set")` no longer matches (the text sits in two
+ * nodes) and its `queryByText(...).toBeNull()` twin would pass with the card on screen.
+ */
+function quickSetHeading(): HTMLElement | null {
+  return (
+    Array.from(document.querySelectorAll<HTMLElement>("h1, h2, h3, h4")).find(
+      (h) => h.textContent === "Mandate quick-set",
+    ) ?? null
+  );
+}
+
 describe("AllocationsTabs — Phase 11 / 11-05 onboarding visibility", () => {
   beforeEach(() => {
     mockReplace.mockReset();
@@ -160,7 +173,7 @@ describe("AllocationsTabs — Phase 11 / 11-05 onboarding visibility", () => {
     expect(
       screen.getByText("Connect your exchange to see real performance"),
     ).toBeInTheDocument();
-    expect(screen.getByText("Mandate quick-set")).toBeInTheDocument();
+    expect(quickSetHeading()).toBeInTheDocument();
     // Existing tabs still render below.
     expect(screen.getByRole("tab", { name: "Overview" })).toBeInTheDocument();
   });
@@ -174,7 +187,7 @@ describe("AllocationsTabs — Phase 11 / 11-05 onboarding visibility", () => {
     expect(
       screen.getByText("Connect your exchange to see real performance"),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Mandate quick-set")).toBeNull();
+    expect(quickSetHeading()).toBeNull();
   });
 
   it("apiKeysCount=1 + mandateIsSet=false → NEITHER renders (D-02 hides both once first key connects)", () => {
@@ -186,7 +199,7 @@ describe("AllocationsTabs — Phase 11 / 11-05 onboarding visibility", () => {
     expect(
       screen.queryByText("Connect your exchange to see real performance"),
     ).toBeNull();
-    expect(screen.queryByText("Mandate quick-set")).toBeNull();
+    expect(quickSetHeading()).toBeNull();
     // Existing tabs still render — additive nudge surface only.
     expect(screen.getByRole("tab", { name: "Overview" })).toBeInTheDocument();
   });
@@ -200,7 +213,7 @@ describe("AllocationsTabs — Phase 11 / 11-05 onboarding visibility", () => {
     expect(
       screen.queryByText("Connect your exchange to see real performance"),
     ).toBeNull();
-    expect(screen.queryByText("Mandate quick-set")).toBeNull();
+    expect(quickSetHeading()).toBeNull();
     expect(screen.getByRole("tab", { name: "Overview" })).toBeInTheDocument();
   });
 });

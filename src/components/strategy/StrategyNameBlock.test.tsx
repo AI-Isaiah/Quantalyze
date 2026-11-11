@@ -33,7 +33,8 @@ if (typeof HTMLDialogElement !== "undefined") {
 const LOCKED_SENTENCE =
   "Names can change only while a strategy is private or a draft. An admin reviews the name before publication.";
 const STRATEGY_ID = "88888888-8888-4888-8888-888888888888";
-const PREVIEW = { factsheet: "Helios alpha sleeve", discovery: "Orion" };
+// Phase 201 D-09: both legs are the same string, the name every viewer who can see the strategy reads.
+const PREVIEW = { factsheet: "Helios alpha sleeve", discovery: "Helios alpha sleeve" };
 
 function renderBlock(status: Parameters<typeof StrategyNameBlock>[0]["status"]) {
   return render(
@@ -82,7 +83,7 @@ describe("StrategyNameBlock — D-11 public-name preview", () => {
       "The public factsheet shows Helios alpha sleeve.",
     );
     expect(screen.getByTestId("preview-discovery")).toHaveTextContent(
-      "Discovery shows other signed-in viewers Orion.",
+      "Discovery shows other signed-in viewers Helios alpha sleeve.",
     );
   });
 
@@ -95,7 +96,7 @@ describe("StrategyNameBlock — D-11 public-name preview", () => {
         "A shared factsheet link shows Helios alpha sleeve.",
       );
       expect(screen.getByTestId("preview-discovery")).toHaveTextContent(
-        "Discovery shows it as Orion once published.",
+        "Discovery shows it as Helios alpha sleeve once published.",
       );
     },
   );
@@ -106,7 +107,7 @@ describe("StrategyNameBlock — D-11 public-name preview", () => {
     fireEvent.click(screen.getByRole("button", { name: "Rename…" }));
     const dialog = screen.getByRole("dialog", { hidden: true });
     const hint = within(dialog).getByText(
-      "The name you save is what a shared factsheet link shows. Discovery shows it as Orion once published.",
+      "The name you save is what a shared factsheet link shows. Discovery shows it as Helios alpha sleeve once published.",
     );
     // the old name sits in the block's own preview, but never in the dialog,
     // where the manager is typing the new one

@@ -46,9 +46,21 @@ const useIsomorphicLayoutEffect =
  * border, 6px radius, subtle shadow.
  */
 
+/** What a function child receives (Phase 201, `Term`): the bubble id while open. */
+export interface TooltipTriggerProps {
+  "aria-describedby": string | undefined;
+}
+
 interface TooltipProps {
   content: string;
-  children: ReactNode;
+  /**
+   * A node renders inside the inner span exactly as before, and that span carries
+   * `aria-describedby` while open. A function is the opt-in for a trigger that is
+   * itself focusable (Phase 201 `Term`): it receives the bubble id so it can put
+   * `aria-describedby` on the focusable element, and the inner span then carries
+   * none. Wrapper and inner spans, and so the DOM depth, are the same either way.
+   */
+  children: ReactNode | ((props: TooltipTriggerProps) => ReactNode);
   /** Optional extra className on the wrapper span. */
   className?: string;
 }
@@ -66,7 +78,14 @@ const ESTIMATED_BUBBLE_HEIGHT = 80;
 
 type BubblePos = { left: number; top: number };
 
-export function Tooltip({ content, children, className }: TooltipProps) {
+/**
+ * The tooltip's behaviour without its trigger markup (Phase 201, WR-02). `Tooltip` is the one
+ * consumer that owns a wrapper span. A control that cannot sit inside one, such as the `<summary>`
+ * of a `<details>`, which must stay the element's direct child, wires `show` / `hide` / `id` /
+ * `open` onto itself and renders `bubble` beside it. `setTriggerEl` marks the element the bubble
+ * anchors to.
+ */
+export function useTooltip(content: string) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<BubblePos | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -172,6 +191,38 @@ export function Tooltip({ content, children, className }: TooltipProps) {
     };
   }, [open, reposition]);
 
+  const bubble =
+    open &&
+    typeof document !== "undefined" &&
+    createPortal(
+      <span
+        ref={setBubbleEl}
+        id={id}
+        role="tooltip"
+        className="fixed z-[210] w-56 rounded-md border bg-white px-3 py-2 text-fixed-13 leading-snug shadow-sm pointer-events-none"
+        style={{
+          left: pos?.left,
+          top: pos?.top,
+          // WR-01: keep the bubble unpainted until it has been measured &
+          // positioned (the layout effect above measures before paint), so
+          // it never flashes at the body's top-left or a stale position.
+          visibility: pos ? undefined : "hidden",
+          color: "#1A1A2E",
+          borderColor: "#E2E8F0",
+          fontFamily: "var(--font-body)",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+        }}
+      >
+        {content}
+      </span>,
+      document.body,
+    );
+
+  return { setTriggerEl, show, hide, id, open, bubble };
+}
+
+export function Tooltip({ content, children, className }: TooltipProps) {
+  const { setTriggerEl, show, hide, id, open, bubble } = useTooltip(content);
   return (
     <span
       ref={setTriggerEl}
@@ -181,34 +232,12 @@ export function Tooltip({ content, children, className }: TooltipProps) {
       onFocus={show}
       onBlur={hide}
     >
-      <span aria-describedby={open ? id : undefined}>
-        {children}
-      </span>
-      {open &&
-        typeof document !== "undefined" &&
-        createPortal(
-          <span
-            ref={setBubbleEl}
-            id={id}
-            role="tooltip"
-            className="fixed z-[210] w-56 rounded-md border bg-white px-3 py-2 text-fixed-13 leading-snug shadow-sm pointer-events-none"
-            style={{
-              left: pos?.left,
-              top: pos?.top,
-              // WR-01: keep the bubble unpainted until it has been measured &
-              // positioned (the layout effect above measures before paint), so
-              // it never flashes at the body's top-left or a stale position.
-              visibility: pos ? undefined : "hidden",
-              color: "#1A1A2E",
-              borderColor: "#E2E8F0",
-              fontFamily: "var(--font-body)",
-              boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-            }}
-          >
-            {content}
-          </span>,
-          document.body,
-        )}
+      {typeof children === "function" ? (
+        <span>{children({ "aria-describedby": open ? id : undefined })}</span>
+      ) : (
+        <span aria-describedby={open ? id : undefined}>{children}</span>
+      )}
+      {bubble}
     </span>
   );
 }

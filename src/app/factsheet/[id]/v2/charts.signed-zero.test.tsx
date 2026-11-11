@@ -121,6 +121,15 @@ describe("TimeSeriesChart tooltip and legend values (D-02, D-06)", () => {
     expect(texts.join(" ")).not.toMatch(/-0\.0%|\+0\.0%/);
   });
 
+  it("the tooltip header reads 'Mon D, YYYY' (SC-3 / GC-02), never the ISO day", async () => {
+    const r = mount(cfg("dailyReturns"), { strategyReturns: series(0.012, { 5: -0.0004 }) });
+    await hover(r, 5);
+    const texts = Array.from(r.container.querySelectorAll("svg text")).map((t) => t.textContent ?? "");
+    // Observation 5 is 2026-01-06.
+    expect(texts).toContain("Jan 6, 2026");
+    expect(texts.join(" ")).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+
   it("the legend value next to the series name reads 0.0% too", async () => {
     const r = mount(cfg("dailyReturns"), { strategyReturns: series(0.012, { 5: -0.0004 }) });
     await hover(r, 5);
@@ -473,10 +482,10 @@ describe("HeatmapPanels printed text and tone (D-02, D-03, D-06)", () => {
 
   it("month cell title: -0.00004 reads 0.00%; -0.0004 stays -0.04% (it is not zero at 2 dp); +-0.153 keep their sign", () => {
     const row = cells(mountMonthly().container, 0);
-    expect(row[3].getAttribute("title")).toBe("2023-04: 0.00%");
-    expect(row[2].getAttribute("title")).toBe("2023-03: -0.04%");
-    expect(row[0].getAttribute("title")).toBe("2023-01: +15.30%");
-    expect(row[1].getAttribute("title")).toBe("2023-02: -15.30%");
+    expect(row[3].getAttribute("title")).toBe("Apr 2023: 0.00%");
+    expect(row[2].getAttribute("title")).toBe("Mar 2023: -0.04%");
+    expect(row[0].getAttribute("title")).toBe("Jan 2023: +15.30%");
+    expect(row[1].getAttribute("title")).toBe("Feb 2023: -15.30%");
   });
 
   it("YTD -0.0004 prints 0.0% with no colour; +0.2 is positive green; -0.153 is red", () => {

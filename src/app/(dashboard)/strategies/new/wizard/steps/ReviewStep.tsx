@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/Button";
+import { formatDay } from "@/lib/utils";
 import type { WizardStepKey } from "@/lib/wizard/localStorage";
 import type { MetadataDraft } from "./MetadataStep";
 
@@ -212,7 +213,7 @@ function CsvRecap({
         <RecapRow label="Rows detected" value={`${csv.rowCount}`} numeric />
         <RecapRow
           label="Date range"
-          value={`${csv.dateRange[0]} → ${csv.dateRange[1]}`}
+          value={`${formatDay(csv.dateRange[0])} – ${formatDay(csv.dateRange[1])}`}
           numeric
         />
         <RecapRow

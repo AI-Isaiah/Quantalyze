@@ -257,6 +257,16 @@ describe("CompareTable: annualised rows follow the total record (D-04 as superse
     expect(valueSpan(cell("Cumulative Return", 0)).textContent).toContain("+42.31%");
   });
 
+  it("Volatility prints unsigned with two decimals while CAGR keeps its sign (D-15, D-25)", () => {
+    render(
+      <CompareTable
+        items={[makeItem(STRATEGY_ID_A, "A", FULL_RECORD, { volatility: 0.2346, cagr: 0.1 })]}
+      />,
+    );
+    expect(valueSpan(cell("Volatility", 0)).textContent).toBe("23.46%");
+    expect(valueSpan(cell("CAGR", 0)).textContent).toBe("+10.00%");
+  });
+
   it("a withheld column carries no qualitative chip (the chip would restate a hidden figure)", () => {
     render(
       <CompareTable
@@ -389,5 +399,34 @@ describe("CompareTable: per-column Remove links (197 plan 04, D-04 / U-10)", () 
     } as unknown as HoldingCompareItem;
     render(<CompareTable items={[holding, ...TWO_STRATEGIES]} removeHrefs={{}} />);
     expect(screen.queryByText("Remove")).toBeNull();
+  });
+});
+
+// Phase 201 plan 16 (D-02): a registered term in a row label opens its definition. The label text is
+// unchanged (`tableRow` above reads `td.textContent`), and a row that names no registered term gets none.
+describe("CompareTable: row labels are Form A terms (D-02)", () => {
+  const TERMS: Record<string, string> = {
+    CAGR: "cagr",
+    Sharpe: "sharpe",
+    Sortino: "sortino",
+    Calmar: "calmar",
+    "Max Drawdown": "max_drawdown",
+    "DD Duration": "dd_duration",
+    Volatility: "volatility",
+  };
+
+  it.each(Object.entries(TERMS))("%s is a focusable [data-term=%s]", (label, key) => {
+    render(<CompareTable items={TWO_STRATEGIES} />);
+    const trigger = tableRow(label).querySelector("td")!.querySelector("[data-term]");
+    expect(trigger?.getAttribute("data-term")).toBe(key);
+    expect(trigger?.textContent).toBe(label);
+    expect((trigger as HTMLElement).tabIndex).toBe(0);
+  });
+
+  it("the unregistered rows get no trigger", () => {
+    render(<CompareTable items={TWO_STRATEGIES} />);
+    for (const label of ["Cumulative Return", "6 Month Return"]) {
+      expect(tableRow(label).querySelector("[data-term]")).toBeNull();
+    }
   });
 });

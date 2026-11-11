@@ -130,6 +130,15 @@ async function flush() {
   });
 }
 
+// Plan 201-15 (D-01, D-06): a fit badge wraps only the word "mandate" in Term, so
+// the badge text is split across text nodes and `getByText` cannot see it whole.
+// A badge is the span whose full textContent is the printed phrase.
+function badgesReading(phrase: string): HTMLElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>("span.inline-block"),
+  ).filter((el) => el.textContent === phrase);
+}
+
 describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
   beforeEach(() => {
     vi.useRealTimers();
@@ -258,10 +267,10 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     // Arbitrage Gamma → strategy_type "arbitrage" excluded → red → "Weak mandate fit".
     // Trend Delta — coinbase only, prefs binance+okx → 0/1 overlap → also red.
     // → at least 2 weak chips render.
-    expect(screen.getAllByText("Weak mandate fit").length).toBeGreaterThanOrEqual(2);
+    expect(badgesReading("Weak mandate fit").length).toBeGreaterThanOrEqual(2);
     // Momentum Alpha (binance), Mean Reversion Beta (okx), Momentum OKX (okx)
     // — all 1.0 fraction overlap of single-market with prefs → green → "Strong".
-    expect(screen.getAllByText("Strong mandate fit").length).toBeGreaterThanOrEqual(3);
+    expect(badgesReading("Strong mandate fit").length).toBeGreaterThanOrEqual(3);
   });
 
   it("T9 — row Add button calls onAdd(strategy) with the right id", async () => {
@@ -1250,5 +1259,142 @@ describe("StrategyBrowseDrawer — SCEN-02 'Yours' chip on own rows (Phase 152, 
     // A chip is not an action — the strategy-add selector still resolves only
     // to the two Add buttons.
     expect(document.querySelectorAll('[data-testid^="browse-add-"]')).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan 201-15 (U-12, D-17, D-01, D-06, D-11): one name per row, "mandate" explained,
+// one date format.
+//
+// WHY these arms exist: the route already resolves each row's `name` by plan
+// 201-02's visibility rule, so a strategy without a real name arrives with the
+// codename AS its name. Printing the codename again on the second line shows the
+// same string twice, and a viewer who may not see the real name must still never
+// get a second name source from this drawer (D-17).
+// ---------------------------------------------------------------------------
+describe("StrategyBrowseDrawer — plan 201-15 name, term and date copy", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const NAMED: StrategyBrowseRow = {
+    id: "s-named",
+    name: "Real Name Fund",
+    codename: "RN-1",
+    markets: ["binance", "okx"],
+    strategy_types: ["momentum"],
+  };
+  // No real name: the route resolved the displayed name to the codename.
+  const CODENAME_ONLY: StrategyBrowseRow = {
+    id: "s-code-only",
+    name: "CO-7",
+    codename: "CO-7",
+    markets: ["okx"],
+    strategy_types: ["momentum"],
+  };
+  const NAME_NO_CODENAME: StrategyBrowseRow = {
+    id: "s-no-code",
+    name: "Plain Fund",
+    codename: null,
+    markets: [],
+    strategy_types: ["momentum"],
+  };
+
+  it("U-12: a row with a real name and a different codename shows the name, then the codename and markets", async () => {
+    renderDrawer({ fetchStrategies: async () => [NAMED] });
+    await flush();
+    expect(screen.getByText("Real Name Fund")).toBeInTheDocument();
+    expect(screen.getByTestId("browse-codename-s-named").textContent).toBe(
+      "RN-1 · binance · okx",
+    );
+  });
+
+  it("U-12: a row whose displayed name IS the codename prints it once; the second line carries only markets", async () => {
+    renderDrawer({ fetchStrategies: async () => [CODENAME_ONLY] });
+    await flush();
+    expect(screen.getAllByText("CO-7")).toHaveLength(1);
+    const line = screen.getByTestId("browse-codename-s-code-only");
+    expect(line.textContent).toBe("okx");
+    expect(line.textContent).not.toContain("·");
+  });
+
+  it("U-12: a row with neither a different codename nor markets renders no second line", async () => {
+    renderDrawer({ fetchStrategies: async () => [NAME_NO_CODENAME] });
+    await flush();
+    expect(screen.getByText("Plain Fund")).toBeInTheDocument();
+    expect(screen.queryByTestId("browse-codename-s-no-code")).toBeNull();
+  });
+
+  it("D-17: search still matches a codename the row no longer prints a second time", async () => {
+    renderDrawer({ fetchStrategies: async () => [CODENAME_ONLY, NAMED] });
+    await flush();
+    fireEvent.change(screen.getByPlaceholderText("Search by name or codename"), {
+      target: { value: "rn-1" },
+    });
+    expect(screen.getByText("Real Name Fund")).toBeInTheDocument();
+    expect(screen.queryByText("CO-7")).toBeNull();
+  });
+
+  it("D-01/D-06: only the word mandate sits in Term inside each fit badge, and the badge text is unchanged", async () => {
+    renderDrawer();
+    await flush();
+    const strong = badgesReading("Strong mandate fit");
+    expect(strong.length).toBeGreaterThan(0);
+    for (const badge of strong) {
+      const terms = badge.querySelectorAll('[data-term="mandate"]');
+      expect(terms).toHaveLength(1);
+      expect(terms[0].textContent).toBe("mandate");
+    }
+    for (const phrase of ["Partial mandate fit", "Weak mandate fit"]) {
+      // Partial needs a mandate with overlap in between; Weak is in FIVE_STRATS.
+      for (const badge of badgesReading(phrase)) {
+        expect(badge.querySelector('[data-term="mandate"]')?.textContent).toBe(
+          "mandate",
+        );
+      }
+    }
+  });
+
+  it("D-11: the dedup line's date reads the instant in UTC, not the offset the string carries", async () => {
+    // 2026-08-04 23:30 at UTC-5 is Aug 5 in UTC. A locale or offset reading prints Aug 4.
+    const offsetPair: StrategyBrowseRow[] = [
+      {
+        id: "s-off-a",
+        name: "Offset Twin",
+        codename: "OT-A",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+        isOwn: true,
+        created_at: "2026-08-04T23:30:00-05:00",
+        status: "private",
+      },
+      {
+        id: "s-off-b",
+        name: "Offset Twin",
+        codename: "OT-B",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+        isOwn: true,
+        created_at: "2026-07-20T12:00:00.000Z",
+        status: "private",
+      },
+    ];
+    renderDrawer({ fetchStrategies: async () => offsetPair });
+    await flush();
+    expect(screen.getByTestId("browse-dedup-s-off-a").textContent).toBe(
+      "Created Aug 5, 2026 · Private",
+    );
+  });
+
+  it("D-04: the Add your own track record blurb says allocation, never book", async () => {
+    renderDrawer({ onAddOwn: vi.fn() });
+    await flush();
+    const body = document.body.textContent ?? "";
+    expect(body).toContain("project how it fits your allocation.");
+    expect(body).not.toContain("your book");
   });
 });

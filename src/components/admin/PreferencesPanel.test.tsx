@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { PreferencesPanel } from "./PreferencesPanel";
 import type { AllocatorPreferences } from "@/lib/preferences";
 
@@ -132,5 +132,69 @@ describe("PreferencesPanel — exclusion chip semantics (H-0358)", () => {
     expect(chip).not.toBeNull();
     expect(chip!.className).toContain("text-accent");
     expect(chip!.className).not.toContain("text-negative");
+  });
+});
+
+/**
+ * Phase 201 plan 20 (D-06, D-11, U-13) - the admin panel names the criteria the way the allocator
+ * does. WHY: staff and allocator must say one word in a support conversation, so the save button,
+ * both saved messages and the failure all read "mandate"; the stamp prints through `formatDay`
+ * so the same instant reads the same on every machine.
+ */
+describe("PreferencesPanel - mandate copy (D-06)", () => {
+  function submit() {
+    const save = screen.getByRole("button", { name: "Save mandate" });
+    fireEvent.submit(save.closest("form")!);
+  }
+
+  it("the save button reads 'Save mandate', never the retired 'Save preferences'", () => {
+    renderPanel();
+    expect(screen.getByRole("button", { name: "Save mandate" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Save preferences" })).toBeNull();
+  });
+
+  it("a save shows 'Mandate saved.' and offers the recompute in the same word", async () => {
+    const confirmSpy = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmSpy);
+    renderPanel();
+    submit();
+    expect(await screen.findByText("Mandate saved.")).toBeTruthy();
+    await waitFor(() =>
+      expect(confirmSpy).toHaveBeenCalledWith(
+        "Mandate saved. Recompute the match queue now with the new mandate?",
+      ),
+    );
+  });
+
+  it("a failed save with no server message reads 'Failed to save mandate'", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve({ ok: false, json: () => Promise.resolve({}) } as Response)),
+    );
+    renderPanel();
+    submit();
+    expect(await screen.findByText("Failed to save mandate")).toBeTruthy();
+  });
+
+  it("the read-only notice says to save the mandate", () => {
+    render(
+      <PreferencesPanel
+        allocatorId={ALLOCATOR_ID}
+        preferences={null}
+        onClose={noop}
+        onSuccess={noop}
+        onRecomputeRequested={noop}
+        readOnly
+      />,
+    );
+    expect(screen.getByRole("status").textContent).toContain("to save the mandate.");
+  });
+
+  it("prints the last-edited stamp through the date helper, in UTC", () => {
+    renderPanel({
+      mandate_edited_at: "2026-10-09T23:30:00Z",
+      edited_by_user_id: null,
+    } as unknown as AllocatorPreferences);
+    expect(screen.getByText(/Mandate last edited by:/).textContent).toContain("Oct 9, 2026");
   });
 });

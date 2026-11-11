@@ -12,6 +12,8 @@ import {
   widenedWithheldReason,
 } from "@/lib/figure-gate";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 import {
   computeScenarioBenchmark,
   pairScenarioWithBtc,
@@ -92,10 +94,13 @@ interface ScenarioBenchmarkSectionProps {
 function MetricRow({
   metric,
   label,
+  term,
   value,
 }: {
   metric: string;
   label: string;
+  /** Registry key (D-01, D-02): the label opens its definition. */
+  term: TermKey;
   value: string;
 }) {
   return (
@@ -103,7 +108,9 @@ function MetricRow({
       data-testid={`benchmark-row-${metric}`}
       className="flex items-center justify-between border-b border-border/50 py-2"
     >
-      <span className="text-xs text-text-muted">{label}</span>
+      <span className="text-xs text-text-muted">
+        <Term k={term}>{label}</Term>
+      </span>
       <span
         data-testid={`benchmark-value-${metric}`}
         className="text-xs font-metric text-text-secondary"
@@ -183,19 +190,27 @@ export function ScenarioBenchmarkSection({
         <MetricRow
           metric="tracking-error"
           label="Tracking Error"
+          term="tracking_error"
           value={formatPercent(gatedValue(m.trackingError, state))}
         />
         <MetricRow
           metric="information-ratio"
           label="Information Ratio"
+          term="information_ratio"
           value={formatNumber(gatedValue(m.informationRatio, state))}
         />
         <MetricRow
           metric="alpha"
           label="Alpha"
+          term="alpha"
           value={formatPercent(gatedValue(m.alpha, state))}
         />
-        <MetricRow metric="beta" label="Beta" value={formatNumber(m.beta)} />
+        <MetricRow
+          metric="beta"
+          label="Beta"
+          term="beta"
+          value={formatNumber(m.beta)}
+        />
       </div>
       {note !== null ? (
         <p

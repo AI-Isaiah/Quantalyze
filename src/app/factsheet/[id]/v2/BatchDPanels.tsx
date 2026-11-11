@@ -3,6 +3,9 @@
 import { usePayload } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, BaseLeverageNote } from "./basis-context";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
+import { formatMonth } from "@/lib/utils";
+import { Term } from "@/components/ui/Term";
+import type { TermKey } from "@/lib/glossary";
 import {
   SHORT_TRACK_MARKER,
   gateAnnualized,
@@ -53,14 +56,15 @@ export function StyleDriftPanel() {
   // Each half should have >=126 trading days (~6 months) for the half-vs-half
   // comparison to be meaningful. Flag if either half is below that.
   const thinHalf = h1.n < 126 || h2.n < 126;
-  // The fifth member marks a row annualized (withheld with the record, D-15).
-  const rows: Array<[string, number, number, DriftKind, boolean]> = [
-    ["Sharpe", h1.sharpe, h2.sharpe, "ratio", true],
-    ["Sortino", h1.sortino, h2.sortino, "ratio", true],
-    ["Ann. Volatility", h1.ann_vol, h2.ann_vol, "pct", true],
-    ["Skew", h1.skew, h2.skew, "intSigned", false],
-    ["Kurtosis", h1.kurt, h2.kurt, "ratio", false],
-    ["Max Drawdown", h1.max_dd, h2.max_dd, "pctSigned", false],
+  // The fifth member marks a row annualized (withheld with the record, D-15). The sixth is the
+  // registry term the label names (Phase 201 plan 09, D-01); the label stays the React key.
+  const rows: Array<[string, number, number, DriftKind, boolean, TermKey?]> = [
+    ["Sharpe", h1.sharpe, h2.sharpe, "ratio", true, "sharpe"],
+    ["Sortino", h1.sortino, h2.sortino, "ratio", true, "sortino"],
+    ["Ann. Volatility", h1.ann_vol, h2.ann_vol, "pct", true, "volatility"],
+    ["Skew", h1.skew, h2.skew, "intSigned", false, "skew"],
+    ["Kurtosis", h1.kurt, h2.kurt, "ratio", false, "kurtosis"],
+    ["Max Drawdown", h1.max_dd, h2.max_dd, "pctSigned", false, "max_drawdown"],
     ["Win % (days)", h1.win_rate, h2.win_rate, "pct", false],
   ];
   return (
@@ -83,12 +87,12 @@ export function StyleDriftPanel() {
           </tr>
         </thead>
         <tbody>
-          {rows.map(([label, a, b, kind, annualized]) => {
+          {rows.map(([label, a, b, kind, annualized, term]) => {
             // A withheld annualized row prints an untoned dash in both halves and the delta.
             const dash = annualized && withheld;
             return (
               <tr key={label} className="border-b border-border/30 last:border-0">
-                <td className="py-1 pr-2 text-text-2">{label}</td>
+                <td className="py-1 pr-2 text-text-2">{term ? <Term k={term}>{label}</Term> : label}</td>
                 <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{dash ? "—" : fmt(a, kind)}</td>
                 <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{dash ? "—" : fmt(b, kind)}</td>
                 <td className="py-1 pl-2 text-right font-mono tabular-nums text-text-2">{dash ? "—" : fmtDelta(a, b, kind)}</td>
@@ -103,7 +107,7 @@ export function StyleDriftPanel() {
         </p>
       )}
       <p className="mt-2 text-micro italic text-text-muted">
-        Two-sample Kolmogorov-Smirnov: D = {ksD.toFixed(3)}, p = {ksP.toFixed(3)} —{" "}
+        <Term k="kolmogorov_smirnov">Two-sample Kolmogorov-Smirnov</Term>: D = {ksD.toFixed(3)}, p = {ksP.toFixed(3)} —{" "}
         {ksSignificant ? "distributions differ at α=0.05" : "no significant distributional drift (α=0.05)"}
       </p>
       {/* 194 D-13 (A-194-D13-03, founder 2026-11-07): a short-record warning is one muted
@@ -152,9 +156,9 @@ export function PeerPercentilePanel() {
         </span>
       </header>
       <div className="flex flex-col gap-2.5 mt-2">
-        <PercentileBar label="Sharpe" pct={blendWithheld ? null : p.sharpe} marker={marker} />
-        <PercentileBar label="Sortino" pct={blendWithheld ? null : p.sortino} marker={marker} />
-        <PercentileBar label="Max DD (shallower = better)" pct={p.max_dd} />
+        <PercentileBar label="Sharpe" term="sharpe" pct={blendWithheld ? null : p.sharpe} marker={marker} />
+        <PercentileBar label="Sortino" term="sortino" pct={blendWithheld ? null : p.sortino} marker={marker} />
+        <PercentileBar label="Max DD (shallower = better)" term="max_drawdown" pct={p.max_dd} />
       </div>
       {/* Disclosure copy (PEER-02): the scenario BLEND shows the hypothetical
           disclosure — PLAIN 10px muted (not italic), U+00B7 middle-dot separators —
@@ -206,7 +210,7 @@ export function PeerPercentilePanel() {
  * The basis note discloses BOTH observation counts (blend_n · book_n). The two
  * legs share the sample/252 FORMULA but generally span DIFFERENT calendar windows
  * (the blend's constituent-overlap window vs the allocator's full live-book
- * history), so showing both counts keeps the "vs Your Book" framing honest about
+ * history), so showing both counts keeps the "vs Your Allocation" framing honest about
  * the window mismatch instead of implying full comparability (WR-02).
  */
 export function OwnBookDeltaPanel() {
@@ -229,19 +233,19 @@ export function OwnBookDeltaPanel() {
     <section>
       <header className="mb-2 border-b border-text pb-1">
         <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">
-          vs Your Book
+          vs Your Allocation
         </h3>
       </header>
       <table className="w-full text-caption">
         <tbody>
-          <DeltaRow label="Sharpe" value={gatedValue(delta.sharpe, deltaState)} kind="ratio" />
-          <DeltaRow label="Sortino" value={gatedValue(delta.sortino, deltaState)} kind="ratio" />
-          <DeltaRow label="Max DD (blend vs book)" value={delta.max_dd} kind="maxdd" />
+          <DeltaRow label="Sharpe" term="sharpe" value={gatedValue(delta.sharpe, deltaState)} kind="ratio" />
+          <DeltaRow label="Sortino" term="sortino" value={gatedValue(delta.sortino, deltaState)} kind="ratio" />
+          <DeltaRow label="Max DD (blend vs allocation)" term="max_drawdown" value={delta.max_dd} kind="maxdd" />
         </tbody>
       </table>
       <p className="mt-2 text-micro italic text-text-muted">
-        Delta = blend minus your live book · sample/{basisDays} basis · over each series&rsquo; own window
-        ({delta.blend_n.toLocaleString()} obs blend · {delta.book_n.toLocaleString()} obs book)
+        Delta = blend minus your live allocation · sample/{basisDays} basis · over each series&rsquo; own window
+        ({delta.blend_n.toLocaleString()} obs blend · {delta.book_n.toLocaleString()} obs allocation)
       </p>
       {deltaNote && (
         <p data-testid="own-book-delta-note" className="mt-1 text-micro text-text-muted">
@@ -277,12 +281,29 @@ function ownBookDeltaNote(
  * (a positive delta = shallower = good = positive token) and render in pp. A null
  * delta renders "—" (insufficient data) with no color.
  */
+/**
+ * A label that names a term and may carry a qualifier after it, `Max DD (shallower = better)`:
+ * only the term's own words are the trigger, the qualifier stays plain (UI-SPEC contract 1).
+ */
+function TermLead({ k, label }: { k: TermKey; label: string }) {
+  const at = label.indexOf(" (");
+  const head = at < 0 ? label : label.slice(0, at);
+  return (
+    <>
+      <Term k={k}>{head}</Term>
+      {label.slice(head.length)}
+    </>
+  );
+}
+
 function DeltaRow({
   label,
+  term,
   value,
   kind,
 }: {
   label: string;
+  term: TermKey;
   value: number | null;
   kind: "ratio" | "maxdd";
 }) {
@@ -306,7 +327,7 @@ function DeltaRow({
     tone === "positive" ? "var(--color-positive)" : tone === "negative" ? "var(--color-negative)" : undefined;
   return (
     <tr className="border-b border-border/30 last:border-0">
-      <td className="py-1.5 pr-2 text-text-2">{label}</td>
+      <td className="py-1.5 pr-2 text-text-2"><TermLead k={term} label={label} /></td>
       <td
         className="py-1.5 pl-2 text-right font-mono tabular-nums text-text-primary"
         style={color ? { color } : undefined}
@@ -319,10 +340,12 @@ function DeltaRow({
 
 function PercentileBar({
   label,
+  term,
   pct,
   marker = null,
 }: {
   label: string;
+  term: TermKey;
   pct: number | null;
   /** The `<1y` marker's title text (`shortTrackMarkerTitle`); null renders no marker. */
   marker?: string | null;
@@ -334,7 +357,7 @@ function PercentileBar({
   return (
     <div className="grid grid-cols-[110px_1fr_48px] items-center gap-2 text-micro">
       <span className="text-text-2">
-        {label}
+        <TermLead k={term} label={label} />
         {marker != null && (
           <span
             title={marker}
@@ -358,14 +381,7 @@ function PercentileBar({
   );
 }
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
-
-function monthYear(iso: string): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
-}
+const monthYear = formatMonth;
 
 type DriftKind = "pct" | "ratio" | "pctSigned" | "intSigned";
 

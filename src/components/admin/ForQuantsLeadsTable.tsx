@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import {
-  formatAbsoluteDate,
+  formatDay,
   formatRelativeTime,
   minuteBucket,
 } from "@/lib/utils";
@@ -173,7 +173,7 @@ export function ForQuantsLeadsTable({
               lead.processed_at === null;
             const timeLabel =
               now === null
-                ? formatAbsoluteDate(lead.created_at)
+                ? formatDay(lead.created_at)
                 : formatRelativeTime(lead.created_at, now);
             return (
               <Card key={lead.id} padding="md">

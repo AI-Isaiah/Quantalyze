@@ -89,3 +89,16 @@ describe("StressWindowsPanel — 320px reflow regression (F1)", () => {
     expect(region!.getAttribute("aria-label")).toMatch(/stress windows/i);
   });
 });
+
+describe("StressWindowsPanel: the window dates read through the one date helper (F-11)", () => {
+  it("prints the window as 'Aug 1, 2024 → Aug 9, 2024', never raw ISO", () => {
+    const { container } = render(
+      <FactsheetProvider payload={payloadWithStress()}>
+        <StressWindowsPanel />
+      </FactsheetProvider>,
+    );
+    const cell = container.querySelector("tbody td:nth-child(2)")!;
+    expect(cell.textContent?.trim()).toBe("Aug 1, 2024 → Aug 9, 2024");
+    expect(container.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+});

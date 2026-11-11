@@ -18,6 +18,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
  *   5. sendBridgeIntro error → drawer stays open + error rendered.
  *   6. Back button → returns to browse stage.
  *   7. flaggedHoldings=[] → empty-state copy + no candidates list.
+ *
+ * Phase 201 plan 28 — F-04 / U-26: "Bridge" is retired from user-visible copy.
+ * The dialog is named "Replacement review"; a rendered arm over the browse and
+ * confirm stages fails on the retired word in text, aria-label or title.
  */
 
 // Mock the shared helper. The test asserts on its call shape — not on
@@ -88,7 +92,10 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
       />,
     );
     expect(screen.getByText("Review candidates")).toBeInTheDocument();
-    expect(screen.getByText(/Mandate gates failed/i)).toBeInTheDocument();
+    // D-01 / D-06: the card heading's word "Mandate" opens its definition; the rest stays text.
+    const gates = screen.getByText("Mandate").closest("[data-term]") as HTMLElement;
+    expect(gates).toHaveAttribute("data-term", "mandate");
+    expect(gates.closest("div")?.textContent).toBe("Mandate gates failed");
     // BTC/USDT and ETH/USDT each render in two places (breach list + candidate
     // button), and React splits them across text nodes. Match by candidate
     // testid which is the more reliable assertion.
@@ -101,6 +108,33 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
 
     fireEvent.click(screen.getByTestId("bridge-drawer-backdrop"));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("dialog is named 'Replacement review' and renders no retired word in either stage (F-04, U-26)", () => {
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    const readable = () => {
+      const dialog = screen.getByRole("dialog", { name: "Replacement review" });
+      return [
+        dialog.textContent ?? "",
+        ...Array.from(dialog.querySelectorAll("[aria-label], [title]")).flatMap((el) => [
+          el.getAttribute("aria-label") ?? "",
+          el.getAttribute("title") ?? "",
+        ]),
+      ];
+    };
+    for (const v of readable()) expect(v).not.toMatch(/\bBridge\b/);
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    expect(screen.getByText("Confirm intro")).toBeInTheDocument();
+    for (const v of readable()) expect(v).not.toMatch(/\bBridge\b/);
   });
 
   it("close button (×) dismisses", () => {

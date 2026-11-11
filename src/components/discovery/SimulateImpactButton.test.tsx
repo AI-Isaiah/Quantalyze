@@ -20,6 +20,38 @@ describe("<SimulateImpactButton>", () => {
     ).toBeInTheDocument();
   });
 
+  // Phase 201 D-04 / U-22: the button's accessible name and its help speak of the allocation.
+  // The help stays button help (what pressing does), not a term definition.
+  it("names the allocation in its accessible name", () => {
+    render(
+      <SimulateImpactButton
+        candidateStrategyId="c1"
+        candidateName="High Sharpe"
+        portfolioId="p1"
+      />,
+    );
+    expect(
+      screen.getByRole("button", {
+        name: "Simulate impact of adding High Sharpe to your allocation",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    ["p1", "See the impact on your allocation's Sharpe, Max DD and correlation."],
+    [null, "Start your allocation first to see the impact of adding this strategy."],
+  ])("help text for portfolioId=%s reads the allocation wording", async (portfolioId, help) => {
+    render(
+      <SimulateImpactButton
+        candidateStrategyId="c1"
+        candidateName="High Sharpe"
+        portfolioId={portfolioId}
+      />,
+    );
+    fireEvent.focus(screen.getByRole("button", { name: /Simulate impact of adding High Sharpe/i }));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(help);
+  });
+
   it("is disabled when no portfolio id is provided", () => {
     render(
       <SimulateImpactButton

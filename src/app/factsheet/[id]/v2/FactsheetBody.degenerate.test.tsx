@@ -314,13 +314,13 @@ describe("FactsheetBody — affirmative scenarioMode gate mounts the carve-out p
     const text = renderWithCarveouts(true).container.textContent ?? "";
     expect(text).toMatch(/Peer Percentile/); // PEER-01 gate
     expect(text).toMatch(/Trend Alpha/); // PEER-04 mandate constituent chip
-    expect(text).toMatch(/vs Your Book/); // PEER-05 own-book delta
+    expect(text).toMatch(/vs Your Allocation/); // PEER-05 own-book delta
   });
 
   it("scenarioMode=false with the SAME populated carve-outs: all three stay absent (the scenarioMode disjunct is load-bearing — falsifiable proof the gate isn't a no-op)", () => {
     const text = renderWithCarveouts(false).container.textContent ?? "";
     expect(text).not.toMatch(/Peer Percentile/);
     expect(text).not.toMatch(/Trend Alpha/);
-    expect(text).not.toMatch(/vs Your Book/);
+    expect(text).not.toMatch(/vs Your Allocation/);
   });
 });

@@ -16,8 +16,20 @@ vi.mock("next/navigation", () => ({ notFound: () => undefined }));
 vi.mock("next/cache", () => ({
   unstable_cache: (fn: (...args: unknown[]) => Promise<unknown>) => fn,
 }));
+// Phase 201 D-17: `withPublishedOnly` is DISCRIMINATING, not identity. The real helper adds
+// `.eq("status", "published")`, so the database never returns an unpublished row to the
+// public lane. This mock reproduces that on the queued row: a row that carries a `status`
+// other than "published" reads as a miss. A fixture without a `status` passes through, as
+// every fixture in this file did before the mock discriminated. Dropping the wrapper from
+// `generateMetadata` lets the draft row through, which the "Hidden Draft" arm catches.
 vi.mock("@/lib/visibility", () => ({
-  withPublishedOnly: (qb: unknown) => qb,
+  withPublishedOnly: (qb: { maybeSingle: () => Promise<{ data: unknown; error: unknown }> }) => ({
+    maybeSingle: async () => {
+      const res = await qb.maybeSingle();
+      const status = (res.data as { status?: string } | null)?.status;
+      return status !== undefined && status !== "published" ? { data: null, error: null } : res;
+    },
+  }),
   withPublishedOrOwner: (qb: unknown) => qb,
 }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
@@ -36,6 +48,7 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 import { generateMetadata } from "./page";
+import { publicNamePreview } from "@/lib/strategy-display";
 
 const params = Promise.resolve({ id: "51a10001-0000-4000-8000-0000000000f1" });
 
@@ -52,6 +65,37 @@ describe("/factsheet/[id]/v2 generateMetadata", () => {
     };
     expect((await generateMetadata({ params })).title).toBe("Alpha factsheet");
     expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+
+  it("a queued DRAFT row never reaches the public title: neutral title, the name is not printed (D-17)", async () => {
+    read.result = {
+      data: { id: "s2", name: "Hidden Draft", codename: "HD-1", status: "draft", disclosure_tier: "exploratory" },
+      error: null,
+    };
+    const meta = await generateMetadata({ params });
+    expect(meta.title).toBe("Strategy factsheet");
+    expect(JSON.stringify(meta)).not.toContain("Hidden Draft");
+    expect(JSON.stringify(meta)).not.toContain("HD-1");
+  });
+
+  it("a queued PUBLISHED row still titles under its name (the discriminating mock is not a blanket miss)", async () => {
+    read.result = {
+      data: { id: "s3", name: "Alpha", codename: null, status: "published", disclosure_tier: "exploratory" },
+      error: null,
+    };
+    expect((await generateMetadata({ params })).title).toBe("Alpha factsheet");
+  });
+
+  it.each([
+    ["a name and a codename", "Fibonacci Ghost", "Ghost-7"],
+    ["a whitespace-only name and a codename", "   ", "Ghost-7"],
+    ["a null name and a codename", null, "Ghost-7"],
+  ])("the title is the rename place's factsheet leg for %s (Phase 200 D-11, 201 D-09)", async (_label, name, codename) => {
+    const row = { id: "s4", name, codename, status: "published", disclosure_tier: "exploratory" as const };
+    read.result = { data: row, error: null };
+    const preview = publicNamePreview(row);
+    expect((await generateMetadata({ params })).title).toBe(`${preview.factsheet} factsheet`);
+    expect(preview.factsheet).toBe(preview.discovery);
   });
 
   it("falls back to the neutral title on a miss, without a capture", async () => {

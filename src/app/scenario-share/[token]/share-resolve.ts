@@ -119,7 +119,7 @@ export interface ResolvedHonestAbsence {
   /**
    * P61-BUG-2 — why the scenario can't be displayed, so the page can say the
    * honest thing. "book-only": the draft is built solely on the owner's
-   * private book sources (API keys), which the live-book boundary deliberately
+   * private allocation sources (API keys), which the live-book boundary deliberately
    * never resolves on this public page — there is nothing computable to show.
    * Absent → the original undecodable-format copy.
    */

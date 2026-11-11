@@ -75,7 +75,7 @@ export function DeleteAccountButton() {
             This cannot be undone once completed.
           </p>
           <p className="mt-1 text-xs text-text-secondary">
-            Your profile, strategies, portfolios, and historical match data
+            Your profile, strategies, allocation, scenarios, and historical match data
             will be removed. Confirm to submit the request.
           </p>
           {error && (

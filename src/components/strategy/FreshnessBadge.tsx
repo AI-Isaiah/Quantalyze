@@ -1,4 +1,4 @@
-import { cn, formatAbsoluteDate } from "@/lib/utils";
+import { cn, formatDay } from "@/lib/utils";
 import {
   computeFreshness,
   freshnessLabel,
@@ -51,11 +51,12 @@ export function FreshnessBadge({
   const colors = FRESHNESS_COLORS[freshness];
   const title = freshnessTooltip(freshness);
   const ts = toTimestamp(computedAt);
-  // formatAbsoluteDate prints the literal "Invalid Date" for a bad input, so
-  // the finite check has to come first.
+  // The finite check stays first: `new Date(NaN).toISOString()` throws, and an
+  // absent or unparseable timestamp must show no date at all (formatDay would
+  // answer "—", which is not "no date"). The full day, "Oct 9, 2026" (U-14, D-11).
   const date =
     showDate && Number.isFinite(ts)
-      ? formatAbsoluteDate(new Date(ts).toISOString())
+      ? formatDay(new Date(ts).toISOString())
       : null;
 
   if (variant === "dot") {

@@ -295,7 +295,7 @@ export function RequestIntroButton({
                     value={mandateFreeform}
                     onChange={(e) => setMandateFreeform(e.target.value)}
                     rows={2}
-                    placeholder="Mandate details: horizon, constraints, style preferences..."
+                    placeholder="Mandate details: horizon, constraints, preferred styles..."
                     maxLength={2000}
                   />
 

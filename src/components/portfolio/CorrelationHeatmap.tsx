@@ -3,6 +3,7 @@
 import { Fragment } from "react";
 
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
+import { Term } from "@/components/ui/Term";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 
 interface CorrelationHeatmapProps {
@@ -328,7 +329,8 @@ export function CorrelationHeatmap({
           caption rather than a fabricated 0.00. */}
       {avgAbsCorrelation != null && Number.isFinite(avgAbsCorrelation) ? (
         <div className="mt-2 text-micro text-text-muted">
-          Avg |ρ| <span className="font-metric">{avgAbsCorrelation.toFixed(2)}</span>
+          <Term k="avg_abs_correlation">Avg |ρ|</Term>{" "}
+          <span className="font-metric">{avgAbsCorrelation.toFixed(2)}</span>
           {measuredPairs < totalPairs ? (
             <>
               {" "}

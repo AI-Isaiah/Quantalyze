@@ -87,7 +87,7 @@ describe("<PortfolioImpactPanel>", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Loading portfolio impact")).toBeInTheDocument();
+    expect(screen.getByLabelText("Loading allocation impact")).toBeInTheDocument();
   });
 
   it("renders all four delta chips after a successful fetch", async () => {
@@ -115,6 +115,11 @@ describe("<PortfolioImpactPanel>", () => {
     expect(screen.getByText("MaxDD")).toBeInTheDocument();
     expect(screen.getByText("Correlation")).toBeInTheDocument();
     expect(screen.getByText("Concentration")).toBeInTheDocument();
+    // 201 D-01: the three registered labels are Term triggers; Concentration has no entry.
+    expect(screen.getByText("Sharpe")).toHaveAttribute("data-term", "sharpe");
+    expect(screen.getByText("MaxDD")).toHaveAttribute("data-term", "max_drawdown");
+    expect(screen.getByText("Correlation")).toHaveAttribute("data-term", "correlation");
+    expect(screen.getByText("Concentration")).not.toHaveAttribute("data-term");
   });
 
   it("announces improvements through the ARIA live region", async () => {
@@ -241,7 +246,7 @@ describe("<PortfolioImpactPanel>", () => {
     // Second fetch succeeds → the deltas section renders.
     await waitFor(() =>
       expect(
-        screen.getByRole("region", { name: "Portfolio impact deltas" }),
+        screen.getByRole("region", { name: "Allocation impact deltas" }),
       ).toBeInTheDocument(),
     );
     expect(call).toBe(2);
@@ -628,7 +633,7 @@ describe("<PortfolioImpactPanel>", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(/already in your portfolio/i),
+        screen.getByText(/already in your allocation/i),
       ).toBeInTheDocument(),
     );
     // NonOkState must NOT render the DeltaHero / chips.
@@ -656,7 +661,7 @@ describe("<PortfolioImpactPanel>", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(/Your portfolio has no strategies yet/i),
+        screen.getByText(/Your allocation has no strategies yet/i),
       ).toBeInTheDocument(),
     );
     expect(screen.queryByText("Projected impact")).toBeNull();
@@ -819,7 +824,7 @@ describe("<PortfolioImpactPanel>", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByLabelText("Portfolio equity curve: current vs proposed"),
+        screen.getByLabelText("Allocation equity curve: current vs proposed"),
       ).toBeInTheDocument(),
     );
 
@@ -1213,12 +1218,12 @@ describe("<PortfolioImpactPanel>", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByLabelText("Portfolio equity curve: current vs proposed"),
+        screen.getByLabelText("Allocation equity curve: current vs proposed"),
       ).toBeInTheDocument(),
     );
 
     // The chart renders despite the duplicate (last-write-wins).
-    expect(screen.getByLabelText("Portfolio equity curve: current vs proposed")).toBeTruthy();
+    expect(screen.getByLabelText("Allocation equity curve: current vs proposed")).toBeTruthy();
     // A dev warning must have been emitted so the problem is visible in tests.
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('duplicate date "2025-01-01" in current series'),

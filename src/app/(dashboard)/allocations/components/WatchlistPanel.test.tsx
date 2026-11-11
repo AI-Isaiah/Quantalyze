@@ -67,7 +67,7 @@ describe("WatchlistPanel", () => {
     render(<WatchlistPanel favorites={[]} suggestedIds={[]} />);
     expect(
       screen.getByText(
-        "No favorites yet. Star strategies in Discovery to build your watchlist.",
+        "No strategies on your watchlist yet. Use the star on a strategy in Discovery to add it.",
       ),
     ).toBeInTheDocument();
     const browse = screen.getByRole("link", { name: /Browse strategies/i });
@@ -84,7 +84,33 @@ describe("WatchlistPanel", () => {
     );
     // TrustTierLabel renders a data-trust-tier attribute per variant.
     expect(screen.getAllByTestId("trust-tier-label").length).toBe(2); // null tier renders nothing
-    expect(screen.getByText("2026-06-10")).toBeInTheDocument();
+    // D-11: the added date reads `Oct 9, 2026`, not the ISO day, and its cell
+    // never wraps (a wrapped date reads as two cells' worth of text).
+    const added = screen.getByText("Jun 10, 2026");
+    expect(added.tagName).toBe("TD");
+    expect(added.className).toContain("whitespace-nowrap");
+    expect(screen.queryByText("2026-06-10")).not.toBeInTheDocument();
+  });
+
+  it("D-11: the added date is the UTC day of the instant, not the day in the offset the string carries", () => {
+    render(
+      <WatchlistPanel
+        favorites={[
+          {
+            ...FAVORITES[0],
+            created_at: "2026-06-10T23:30:00-05:00",
+          },
+        ]}
+        suggestedIds={[]}
+      />,
+    );
+    expect(screen.getByText("Jun 11, 2026")).toBeInTheDocument();
+  });
+
+  it("D-05: the empty copy names the star and the watchlist, never favorites", () => {
+    render(<WatchlistPanel favorites={[]} suggestedIds={[]} />);
+    const body = document.body.textContent ?? "";
+    expect(body).not.toMatch(/favorites|starred/i);
   });
 
   it("Suggested chip renders ONLY for ids in suggestedIds", () => {
@@ -211,7 +237,7 @@ describe("WatchlistPanel", () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          "No favorites yet. Star strategies in Discovery to build your watchlist.",
+          "No strategies on your watchlist yet. Use the star on a strategy in Discovery to add it.",
         ),
       ).toBeInTheDocument(),
     );

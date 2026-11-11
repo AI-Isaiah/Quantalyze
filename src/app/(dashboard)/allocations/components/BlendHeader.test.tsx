@@ -16,8 +16,14 @@ import type { CoverageWindow } from "@/lib/scenario-window";
  * Branch coverage (per 58-UI-SPEC §Copywriting Contract, verbatim strings):
  *   - N=0            → "No strategies span the selected window"
  *   - N=1            → "1 strategy — not a blend"
- *   - N>=2 normal    → "Mean of {N} strategies · {effStart}–{effEnd}"
+ *   - N>=2 normal    → "Mean of {N} strategies · {formatDay(start)} – {formatDay(end)}"
  *   - N>=2 truncated → appends "· window truncated from full range"
+ *
+ * Phase 201 plan 201-37 (gap SC-3, F-11, UI-SPEC Interaction contract 5, review
+ * R3-01 item 4): the window prints through `formatDay` and a day range is two
+ * helper calls joined by space, en dash (U+2013), space. The `truncated` flag
+ * still compares the engine's ISO bounds, so the truncation arm below proves the
+ * wrap sits at the print position only.
  */
 
 const EMPTY_METRICS: ComputedMetrics = {
@@ -63,7 +69,7 @@ describe("BlendHeader (COVERAGE-03)", () => {
     expect(screen.getByText(/1 strategy — not a blend/)).toBeInTheDocument();
   });
 
-  it("N>=2, not truncated → 'Mean of N strategies · start–end'", () => {
+  it("N>=2, not truncated → 'Mean of N strategies · Mon D, YYYY – Mon D, YYYY' (F-11)", () => {
     const metrics: ComputedMetrics = {
       ...EMPTY_METRICS,
       member_count: 3,
@@ -73,9 +79,12 @@ describe("BlendHeader (COVERAGE-03)", () => {
     const unionSpan: CoverageWindow = { start: "2022-06-15", end: "2024-06-15" };
     render(<BlendHeader metrics={metrics} unionSpan={unionSpan} />);
     // The label spans wrap N + dates in mono; assert the visible composed text.
-    expect(screen.getByText(/Mean of/)).toHaveTextContent(
-      "Mean of 3 strategies · 2022-06-15–2024-06-15",
+    const header = screen.getByText(/Mean of/);
+    expect(header).toHaveTextContent(
+      "Mean of 3 strategies · Jun 15, 2022 – Jun 15, 2024",
     );
+    // F-11: no raw YYYY-MM-DD day reaches the primary header.
+    expect(header.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     // Not truncated → no truncation note.
     expect(
       screen.queryByText(/window truncated from full range/),
@@ -95,6 +104,10 @@ describe("BlendHeader (COVERAGE-03)", () => {
     expect(
       screen.getByText(/window truncated from full range/),
     ).toBeInTheDocument();
+    // The flag compares ISO bounds; the print position still reads the helper form.
+    expect(screen.getByText(/Mean of/)).toHaveTextContent(
+      "Mean of 2 strategies · Jan 1, 2023 – Jan 1, 2024",
+    );
   });
 
   it("root is a polite live region (role=status, never role=alert)", () => {

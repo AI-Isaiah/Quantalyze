@@ -193,10 +193,15 @@ function cardFor(name: string): HTMLElement {
   return li as HTMLElement;
 }
 
-/** The value span beside a metric label ("CAGR", "Sharpe", "Max DD"). */
+/**
+ * The value span beside a metric label ("CAGR", "Sharpe", "Max DD"). Phase 201 plan 17: the
+ * label text sits inside a `Term` trigger, so the row is the nearest
+ * `[data-metric]` ancestor, not the label's direct parent.
+ */
 function cell(card: HTMLElement, label: string): HTMLElement {
   const l = within(card).getByText(label);
-  return l.parentElement!.lastElementChild as HTMLElement;
+  const row = l.closest("[data-metric]") as HTMLElement;
+  return row.lastElementChild as HTMLElement;
 }
 
 /** The `title` the cell carries, or null when it carries none. */

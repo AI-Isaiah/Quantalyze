@@ -18,6 +18,7 @@
  */
 
 import type { ApiKeyAccountShareKind } from "@/lib/types";
+import { formatDay } from "@/lib/utils";
 
 /** The fields of a key the rule reads. `is_active` defaults to true when absent. */
 export interface DepartedHistoryKey {
@@ -383,11 +384,11 @@ export function departedHistorySentence(decision: DepartedHistoryDecision): stri
   if (decision.included) {
     switch (decision.reason) {
       case "same_account_as_connected_key":
-        return `History included until ${decision.until}. From the next day a key you still have connected reads this account.`;
+        return `History included until ${formatDay(decision.until)}. From the next day a key you still have connected reads this account.`;
       case "same_account_as_later_key":
-        return `History included until ${decision.until}. From the next day a later key read this account.`;
+        return `History included until ${formatDay(decision.until)}. From the next day a later key read this account.`;
       default:
-        return `History included until ${decision.until}.`;
+        return `History included until ${formatDay(decision.until)}.`;
     }
   }
   switch (decision.reason) {

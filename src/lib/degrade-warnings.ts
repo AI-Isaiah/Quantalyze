@@ -694,7 +694,7 @@ export const DEGRADE_WARNINGS = [
     scope: "whole_history",
     action: "A-WAIT-RECOMPUTE",
     text: (): DegradeSegment[] => [
-      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. ",
+      "Your allocation's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. ",
       { action: "A-WAIT-RECOMPUTE" },
     ],
   },
@@ -705,7 +705,7 @@ export const DEGRADE_WARNINGS = [
     scope: "whole_history",
     action: "A-CONTACT-CHECK",
     text: (): DegradeSegment[] => [
-      "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden for your whole history. ",
+      "The latest rebuild of your allocation's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden for your whole history. ",
       { action: "A-CONTACT-CHECK" },
     ],
   },
@@ -807,7 +807,7 @@ export const DEGRADE_WARNINGS = [
     action: null,
     shippedAction: "Reload the page to try again.",
     text: (): DegradeSegment[] => [
-      "We could not load your book's history just now. Reload the page to try again.",
+      "We could not load your allocation's history just now. Reload the page to try again.",
     ],
   },
   // Phase 199 plan 05 Task 3: the inventory of every other warning under the allocations
@@ -894,12 +894,12 @@ export const DEGRADE_WARNINGS = [
     text: (a: { labels: readonly string[] }): DegradeSegment[] =>
       a.labels.length === 0
         ? [
-            "Your connected keys have no per-key return series yet, so this projection blends your whole book. ",
+            "Your connected keys have no per-key return series yet, so this projection blends your whole allocation. ",
             { action: "A-WAIT-NEXT-SYNC" },
           ]
         : [
             ...labelSegments(a.labels),
-            ` ${a.labels.length === 1 ? "has" : "have"} no per-key return series yet, so this projection blends your whole book. `,
+            ` ${a.labels.length === 1 ? "has" : "have"} no per-key return series yet, so this projection blends your whole allocation. `,
             { action: "A-WAIT-NEXT-SYNC" },
           ],
   },

@@ -34,6 +34,7 @@ import { annualizationPeriods } from "@/lib/closed-sets";
 import { formatRatio, formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 import { figureRecord, gateAnnualized, gatedValue } from "@/lib/figure-gate";
 import { formatNumber } from "@/lib/utils";
+import { Term } from "@/components/ui/Term";
 import { venueLabel } from "@/lib/display-labels";
 
 function fmtPct(v: number | null): string {
@@ -181,7 +182,7 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
             </div>
             <div>
               <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
-                Sharpe
+                <Term k="sharpe">Sharpe</Term>
               </dt>
               <dd className="font-mono text-lg text-text-primary">
                 {sharpeCell}

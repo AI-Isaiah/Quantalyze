@@ -715,7 +715,7 @@ describe("StrategyTable managerRows — the actions slot mounts once (D-01)", ()
 //      key is the whole change; a wider exemption would file an unranked row
 //      mid-table under Sharpe at an invented 0.
 //   3. THE DATE IS THE UTC DAY. Not a locale string (server and browser
-//      disagree), so the cell is formatIsoDay of the stored timestamp.
+//      disagree), so the cell is formatDay of the stored timestamp, its UTC day (D-11).
 //   4. TD COUNT EQUALS TH COUNT in every row kind, with Created counted.
 
 const ID_NEW = "66666666-0000-4000-8000-000000000001";
@@ -767,13 +767,13 @@ function createdButton(): HTMLElement {
 }
 
 describe("StrategyTable managerRows — Created cell (D-09)", () => {
-  it("each row's cell right after Status reads that row's UTC day, YYYY-MM-DD", () => {
+  it("each row's cell right after Status reads that row's UTC day through formatDay (D-11)", () => {
     renderManager({ rows: DATE_ROWS });
     // 0 rank, 1 Strategy, 2 Status, 3 Health (199-12), 4 Created. The newest row is 23:30 at -05:00,
-    // i.e. already the NEXT UTC day: a string slice would print 2026-10-09.
-    expect(cells(dataRow(NAME_NEW))[4].textContent?.trim()).toBe("2026-10-10");
-    expect(cells(dataRow(NAME_MID))[4].textContent?.trim()).toBe("2026-06-01");
-    expect(cells(dataRow(NAME_OLD))[4].textContent?.trim()).toBe("2025-02-03");
+    // i.e. already the NEXT UTC day: a string slice would print Oct 9, 2026.
+    expect(cells(dataRow(NAME_NEW))[4].textContent?.trim()).toBe("Oct 10, 2026");
+    expect(cells(dataRow(NAME_MID))[4].textContent?.trim()).toBe("Jun 1, 2026");
+    expect(cells(dataRow(NAME_OLD))[4].textContent?.trim()).toBe("Feb 3, 2025");
   });
 
   it("a malformed created_at prints an em dash, never Invalid Date", () => {
@@ -813,7 +813,7 @@ describe("StrategyTable managerRows — Created cell (D-09)", () => {
       />,
     );
     expect(screen.queryByRole("columnheader", { name: "Created" })).toBeNull();
-    expect(screen.queryByText("2026-06-01")).toBeNull();
+    expect(screen.queryByText("Jun 1, 2026")).toBeNull();
   });
 });
 

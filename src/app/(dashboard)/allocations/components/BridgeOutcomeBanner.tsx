@@ -57,12 +57,12 @@ export function BridgeOutcomeBanner({
   return (
     <div
       role="region"
-      aria-label="Record outcome for Bridge-introduced strategy"
+      aria-label="Record outcome for a suggested replacement"
       data-testid="bridge-outcome-banner"
       className="flex items-center gap-3 border-t border-border bg-page px-4 py-3 text-sm font-sans"
     >
       <span className="flex-1 text-text-secondary">
-        Did you act on this Bridge suggestion?
+        Did you act on this replacement suggestion?
       </span>
       <div className="flex items-center gap-2">
         <Button

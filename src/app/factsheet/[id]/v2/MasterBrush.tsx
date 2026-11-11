@@ -8,6 +8,7 @@ import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { ChartHintContext } from "./chart-hint";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { fitTickLabel } from "@/lib/chart-ticks";
+import { formatDay } from "@/lib/utils";
 
 /**
  * Master brush — a mini equity-curve overview pinned above the chart stack.
@@ -234,7 +235,7 @@ export function MasterBrush() {
       <div className="flex items-baseline justify-between px-1 pb-1 text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
         <span>Timeline</span>
         <span className="normal-case tracking-normal text-text-2">
-          {startDate} → {endDate}
+          {formatDay(startDate)} – {formatDay(endDate)}
         </span>
       </div>
       {/* Brush is wide + short; ResponsiveChartFrame emits the meet aspect that

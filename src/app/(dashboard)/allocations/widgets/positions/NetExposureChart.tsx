@@ -22,7 +22,7 @@ import {
   CHART_TICK_STYLE,
   CHART_TOOLTIP_STYLE,
 } from "@/components/charts/chart-tokens";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, formatDay } from "@/lib/utils";
 import {
   asofToUtcMs,
   gapXDomain,
@@ -120,7 +120,7 @@ export function NetExposureChart({
       <div className="flex items-baseline justify-between">
         <h4 className="text-small font-semibold text-text-primary">Net exposure over time</h4>
         <span className="text-caption font-metric text-text-muted">
-          as of {points.at(-1)!.asof}
+          as of {formatDay(points.at(-1)!.asof)}
         </span>
       </div>
       <div className="mt-2 flex items-center gap-4">
@@ -183,7 +183,9 @@ export function NetExposureChart({
             />
             <TouchTooltip
               contentStyle={CHART_TOOLTIP_STYLE}
-              labelFormatter={(ms) => new Date(Number(ms)).toISOString().slice(0, 10)}
+              labelFormatter={(ms) =>
+                Number.isFinite(Number(ms)) ? formatDay(new Date(Number(ms)).toISOString()) : "—"
+              }
               formatter={(v, name) => [formatCurrency(Number(v)), String(name)]}
             />
           </ComposedChart>

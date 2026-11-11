@@ -111,6 +111,6 @@ export function capitalOwnershipRefusalMessage(
   error: { message?: string | null } | null | undefined,
 ): string {
   return error?.message?.includes(`capital_ownership=${TEAM_REVIEW}`)
-    ? "This strategy is marked as a trading team's capital under review, so it can't be added to a portfolio. Its owner can change that mark in My Strategies."
-    : "This strategy isn't marked as your own capital — mark it in My Strategies first.";
+    ? "This strategy is marked as a trading team's capital under review, so it can't be added to an allocation. Its owner can change that mark in Strategies."
+    : "This strategy isn't marked as your own capital — mark it in Strategies first.";
 }

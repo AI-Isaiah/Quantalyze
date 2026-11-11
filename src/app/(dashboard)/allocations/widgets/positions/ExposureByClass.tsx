@@ -3,6 +3,7 @@
 import type { ExposureSnapshot, HoldingClass } from "@/lib/portfolio-exposure";
 import { Card } from "@/components/ui/Card";
 import { formatUsd } from "@/lib/dollar-validation";
+import { formatDay } from "@/lib/utils";
 import { CHART_ACCENT } from "@/components/charts/chart-tokens";
 
 /**
@@ -52,9 +53,9 @@ const CLASS_COLOR: Record<HoldingClass, string> = {
 function readDayStamp(snapshot: ExposureSnapshot): string | null {
   if (snapshot.asof === null) return null;
   if (snapshot.oldestAsof === null || snapshot.oldestAsof === snapshot.asof) {
-    return `as of ${snapshot.asof}`;
+    return `as of ${formatDay(snapshot.asof)}`;
   }
-  return `as of ${snapshot.oldestAsof} to ${snapshot.asof}`;
+  return `as of ${formatDay(snapshot.oldestAsof)} to ${formatDay(snapshot.asof)}`;
 }
 
 export function ExposureByClass({ snapshot }: { snapshot: ExposureSnapshot | null }) {

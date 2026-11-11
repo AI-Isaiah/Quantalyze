@@ -296,7 +296,7 @@ test.describe("Preferences page", () => {
     await ticket.fill("50000");
 
     // Save
-    await page.click('button:has-text("Save preferences")');
+    await page.click('button:has-text("Save mandate")');
 
     // Wait for one of the two explicit feedback states. If neither appears
     // within 5 seconds, the form is broken and the test FAILS.

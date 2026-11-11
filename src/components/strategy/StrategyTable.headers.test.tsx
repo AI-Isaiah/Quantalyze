@@ -192,7 +192,9 @@ describe("CLAR-01 Track column (D-05): months of record from the covered-day spa
   it("titles a known span with the day count and the first and last day", () => {
     renderTable([rowWithSpan("t-30", "Thirty Days", 30)]);
     const cell = cellUnder(TRACK, rowFor("Thirty Days"));
-    expect(cell.getAttribute("title")).toBe(`30 days of record, ${startFor(SERIES_END, 30)} to ${SERIES_END}.`);
+    // Phase 201 plan 16 (D-11): both days print through formatDay. The expected text is typed by
+    // hand: 30 covered days ending Nov 7 start on Oct 9.
+    expect(cell.getAttribute("title")).toBe("30 days of record, Oct 9, 2026 to Nov 7, 2026.");
   });
 
   it("counts a chain-broken row from headline_since, the record its figures are computed on", () => {
@@ -206,7 +208,7 @@ describe("CLAR-01 Track column (D-05): months of record from the covered-day spa
     renderTable([row]);
     const cell = cellUnder(TRACK, rowFor("Broken Chain"));
     expect(cell.textContent?.trim()).toBe("1");
-    expect(cell.getAttribute("title")).toBe(`45 days of record, ${startFor(SERIES_END, 45)} to ${SERIES_END}.`);
+    expect(cell.getAttribute("title")).toBe("45 days of record, Sep 24, 2026 to Nov 7, 2026.");
   });
 
   it("treats a present but malformed headline_since as an unknown length, not the full-series span (197 WR-01)", () => {
@@ -424,6 +426,60 @@ describe("CLAR-01 headers (D-05): label line, qualifier line, accessible name, d
     // The sparkline headers are plain: no sort button.
     expect(curve?.querySelector("button")).toBeNull();
     expect(ths[ths.length - 1].textContent).toBe("Actions");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 201 plan 16 (D-01, U-01, U-06): the two plain headers are Form A terms.
+//
+// WHY. A hover-only Tooltip around plain text gave Return curve and Underwater no keyboard path:
+// a keyboard reader could not reach their definitions. Form A makes the label one tab stop that
+// opens the registry definition. A sortable header is already a control, so it stays Form B (the
+// Tooltip around the sort button) and must NOT gain a second tab stop inside the button.
+// The definitions are typed by hand, so a registry edit that changed them fails here.
+// ---------------------------------------------------------------------------
+describe("201-16 plain headers are Form A terms; sort headers stay Form B", () => {
+  const PLAIN = [
+    {
+      aria: "Return curve, full record",
+      term: "return_curve",
+      definition: "Cumulative return over the whole record.",
+    },
+    {
+      aria: "Underwater, full record",
+      term: "underwater",
+      definition: "Distance below the previous peak over the whole record.",
+    },
+  ] as const;
+
+  const thByAria = (aria: string) =>
+    Array.from(document.querySelectorAll<HTMLTableCellElement>("thead th")).find(
+      (th) => th.getAttribute("aria-label") === aria,
+    )!;
+
+  it.each(PLAIN)("$aria: the label is a focusable [data-term] and not inside a button", ({ aria, term }) => {
+    renderTable([rowWithSpan("t-30", "Thirty Days", 30)]);
+    const th = thByAria(aria);
+    const trigger = th.querySelector<HTMLElement>("[data-term]");
+    expect(trigger?.getAttribute("data-term")).toBe(term);
+    expect(trigger?.tabIndex).toBe(0);
+    expect(trigger?.closest("button")).toBeNull();
+  });
+
+  it.each(PLAIN)("$aria: keyboard focus opens its definition", async ({ aria, definition }) => {
+    renderTable([rowWithSpan("t-30", "Thirty Days", 30)]);
+    const trigger = thByAria(aria).querySelector<HTMLElement>("[data-term]")!;
+    fireEvent.focus(trigger);
+    const tip = await within(document.body).findByRole("tooltip");
+    expect(tip.textContent).toBe(definition);
+  });
+
+  it("a sortable header keeps its Tooltip-wrapped button and gains no nested tab stop", () => {
+    renderTable([rowWithSpan("t-30", "Thirty Days", 30)]);
+    const button = headerButton("CAGR, full record, annualized");
+    expect(button.closest("th")?.querySelector("[data-term]")).toBeNull();
+    // The sort button is the one focusable thing in its header.
+    expect(button.closest("th")?.querySelectorAll("[tabindex]")).toHaveLength(0);
   });
 });
 

@@ -209,13 +209,25 @@ function peerPayload(record: FigureRecord | null): FactsheetPayload {
   return { ...base, figureRecord: record } as FactsheetPayload;
 }
 
-/** The label span of a percentile bar, found by its own text. */
+/**
+ * The label span of a percentile bar, found by the Term that names it (Phase 201 plan 09, D-01):
+ * the term's own words are the trigger, the qualifier after them (`(shallower = better)`) is plain
+ * text beside it, and the span's whole text must read the label.
+ */
 function labelSpan(container: HTMLElement, text: string): HTMLElement {
-  const hit = Array.from(container.querySelectorAll("span")).find(
-    (s) => Array.from(s.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("") === text,
-  );
+  const head = text.split(" (")[0];
+  const hit = Array.from(container.querySelectorAll<HTMLElement>("[data-term]"))
+    .filter((t) => t.textContent === head)
+    // Term renders label span > Tooltip wrapper > Tooltip inner span > trigger.
+    .map((t) => t.parentElement!.parentElement!.parentElement as HTMLElement)
+    .find((span) =>
+      Array.from(span.childNodes)
+        .filter((n) => n.nodeType === 3 || n === span.firstElementChild)
+        .map((n) => n.textContent)
+        .join("") === text,
+    );
   if (!hit) throw new Error(`label not found: ${text}`);
-  return hit as HTMLElement;
+  return hit;
 }
 
 function markerOf(label: HTMLElement): HTMLElement | null {
@@ -259,7 +271,7 @@ describe("PeerPercentilePanel - the blend's `<1y` marker follows its record (D-1
   });
 });
 
-// --- vs Your Book -------------------------------------------------------------
+// --- vs Your Allocation -------------------------------------------------------------
 
 function ownBookPayload(delta: OwnBookDeltaPayload): FactsheetPayload {
   return buildScenarioFactsheetPayload({
@@ -289,7 +301,7 @@ describe("OwnBookDeltaPanel - the Sharpe and Sortino deltas follow both records 
       expect(cell.textContent, label).toBe("—");
       expect(cell.getAttribute("style"), label).toBeNull();
     }
-    expect(valueCell(container, "Max DD (blend vs book)").textContent).toBe("+1.8pp");
+    expect(valueCell(container, "Max DD (blend vs allocation)").textContent).toBe("+1.8pp");
     expect(getByTestId("own-book-delta-note").textContent).toBe(widenedWithheldReason("delta", records.blend));
   });
 

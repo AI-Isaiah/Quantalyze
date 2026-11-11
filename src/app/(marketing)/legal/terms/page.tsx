@@ -4,6 +4,7 @@ import {
   KEY_STORAGE_SENTENCE,
   LISTING_COST_SENTENCE,
 } from "@/lib/status-surface-copy";
+import { formatDay } from "@/lib/utils";
 
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 
@@ -19,7 +20,7 @@ export default function TermsOfServicePage() {
   return (
     <>
       <h1 className="font-display text-page-title text-text-primary">Terms of Service</h1>
-      <p className="text-caption text-text-muted">Last updated: 2026-11-07</p>
+      <p className="text-caption text-text-muted">Last updated: {formatDay("2026-11-07")}</p>
 
       <h2>1. Acceptance</h2>
       <p>

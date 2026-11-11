@@ -171,7 +171,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
       within(tablist).getByRole("tab", { name: /^All$/ }),
     ).toBeDefined();
     expect(
-      within(tablist).getByRole("tab", { name: /My Watchlist/ }),
+      within(tablist).getByRole("tab", { name: /My watchlist/ }),
     ).toBeDefined();
   });
 
@@ -211,7 +211,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
   // primitive, whose Trigger activates on the real pointer sequence
   // `@testing-library/user-event` dispatches (bare `fireEvent.click` does not flip
   // the controlled scope). The scope-switch clicks below therefore use
-  // `await user.click(...)`; the test INTENT (switching to My Watchlist filters
+  // `await user.click(...)`; the test INTENT (switching to My watchlist filters
   // the table) is unchanged.
   it("Case 5: scope='watchlist' with empty initialWatchedSet renders <EmptyWatchlist> and no table", async () => {
     const user = userEvent.setup();
@@ -223,14 +223,14 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
         initialWatchedSet={new Set()}
       />,
     );
-    // Switch to My Watchlist scope.
-    await user.click(screen.getByRole("tab", { name: /My Watchlist/ }));
+    // Switch to My watchlist scope.
+    await user.click(screen.getByRole("tab", { name: /My watchlist/ }));
 
     // EmptyWatchlist heading + body are now visible and the table itself
     // is not rendered.
     expect(screen.getByText("Your watchlist is empty")).toBeDefined();
     expect(
-      screen.getByText(/Star strategies from the All tab to track them here/),
+      screen.getByText(/Use the star on a strategy in the All tab to add it to your watchlist\./),
     ).toBeDefined();
     // The table contains the strategy name link cells; once empty-watchlist
     // takes over, those links are gone.
@@ -250,7 +250,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
         initialWatchedSet={new Set([STRATEGY_ID_A, STRATEGY_ID_B])}
       />,
     );
-    await user.click(screen.getByRole("tab", { name: /My Watchlist/ }));
+    await user.click(screen.getByRole("tab", { name: /My watchlist/ }));
 
     // Table is still rendered (watchedSet is non-empty); only the two
     // starred strategies appear.
@@ -276,7 +276,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
       />,
     );
 
-    // Initially the My Watchlist tab carries no badge — WatchlistTabs
+    // Initially the My watchlist tab carries no badge — WatchlistTabs
     // hides the count span when count === 0.
     expect(screen.queryByTestId("watchlist-count-badge")).toBeNull();
 
@@ -288,11 +288,11 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     })[0];
     fireEvent.click(firstStar);
 
-    // After the click the badge renders inside the My Watchlist tab
+    // After the click the badge renders inside the My watchlist tab
     // with textContent === "1". Anchoring on data-testid pins the
     // behavioural contract (badge visible AND scoped to the tab) without
     // coupling to any utility-class names.
-    const watchTabAfter = screen.getByRole("tab", { name: /My Watchlist/ });
+    const watchTabAfter = screen.getByRole("tab", { name: /My watchlist/ });
     const badge = within(watchTabAfter).getByTestId("watchlist-count-badge");
     expect(badge.textContent).toBe("1");
   });
@@ -309,7 +309,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     expect(screen.getByRole("link", { name: "Gamma Pioneer" })).toBeDefined();
   });
 
-  it("Save preferences applies the new hide_examples value to the rendered table immediately", async () => {
+  it("Save view applies the new hide_examples value to the rendered table immediately", async () => {
     // Default DEFAULTS.hide_examples=true, so an example strategy is hidden
     // on first paint. Opening Customize, flipping the toggle off, and
     // clicking Save must reveal the example row without requiring a reload.
@@ -352,7 +352,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     expect(hideExamplesCheckbox).toBeDefined();
     fireEvent.click(hideExamplesCheckbox!);
 
-    fireEvent.click(screen.getByRole("button", { name: "Save preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save view" }));
 
     // The example strategy is now visible without a reload.
     await waitFor(() => {
@@ -361,7 +361,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     });
   });
 
-  it("Save preferences applies view-mode change to the rendered table immediately", async () => {
+  it("Save view applies view-mode change to the rendered table immediately", async () => {
     // Locks down the second legacy state slot (viewMode) — a regression
     // dropping setViewMode from handleSavePrefs would be invisible to the
     // hide_examples test alone.
@@ -391,7 +391,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     expect(gridButton).toBeDefined();
     fireEvent.click(gridButton!);
 
-    fireEvent.click(screen.getByRole("button", { name: "Save preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save view" }));
 
     // After Save the table element is gone (grid replaces it) without a reload.
     await waitFor(() => {
@@ -1744,7 +1744,8 @@ async function applyRange(label: string, from: string, to: string) {
   // The label text also names a table header, so take the one whose row holds the two inputs.
   const row = screen
     .getAllByText(label)
-    .map((el) => el.parentElement)
+    // The label may be a Term trigger (Form A) inside the label span, so climb to the row.
+    .map((el) => el.closest("div"))
     .find((p) => p !== null && within(p).queryAllByRole("spinbutton").length === 2)!;
   const [fromInput, toInput] = within(row).getAllByRole("spinbutton");
   if (from !== "") fireEvent.change(fromInput!, { target: { value: from } });

@@ -24,6 +24,18 @@ vi.mock("recharts", async () => {
   };
 });
 
+// recharts never invokes the tooltip's labelFormatter under jsdom (no pointer);
+// capture it so a test can call it with the values a hover could hand it.
+const captured = vi.hoisted(() => ({
+  labelFormatter: null as null | ((ms: unknown) => string),
+}));
+vi.mock("@/components/charts/TouchTooltip", () => ({
+  TouchTooltip: (props: { labelFormatter: NonNullable<typeof captured.labelFormatter> }) => {
+    captured.labelFormatter = props.labelFormatter;
+    return null;
+  },
+}));
+
 const utc = (iso: string) => {
   const [y, m, d] = iso.split("-").map(Number);
   return Date.UTC(y, m - 1, d);
@@ -133,9 +145,25 @@ describe("NetExposureChart — a11y + header + legend", () => {
     });
     expect(img).toBeTruthy();
     expect(screen.getByText("Net exposure over time")).toBeTruthy();
-    expect(screen.getByText("as of 2026-01-12")).toBeTruthy();
+    // F-11 / D-11 (review R3-01 item 2, plan 201-36): the caption reads the
+    // helper's day form, the one ExposureByClass prints, never the raw ISO day.
+    expect(screen.getByText("as of Jan 12, 2026")).toBeTruthy();
+    expect(screen.queryByText(/as of \d{4}-\d{2}-\d{2}/)).toBeNull();
     // D-08: the legend chips name their quantity.
     expect(screen.getByText("Net exposure")).toBeTruthy();
     expect(screen.getByText("Gross exposure")).toBeTruthy();
+  });
+});
+
+describe("tooltip labelFormatter - a non-finite hover value (201 R2-SFH-01)", () => {
+  // `new Date(NaN).toISOString()` throws a RangeError inside tooltip render, so
+  // a hover value that is not a finite ms must read as a dash, not crash.
+  it("formats a finite ms as a day and a non-finite one as a dash", () => {
+    render(<NetExposureChart points={HEDGED_POINTS} gaps={HEDGED_GAP} />);
+    const fmt = captured.labelFormatter!;
+    expect(fmt(utc("2026-03-01"))).toBe("Mar 1, 2026");
+    expect(() => fmt(undefined)).not.toThrow();
+    expect(fmt(undefined)).toBe("\u2014");
+    expect(fmt("not-a-number")).toBe("\u2014");
   });
 });

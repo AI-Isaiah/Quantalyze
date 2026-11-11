@@ -830,8 +830,10 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
     // label node. If the manager stops reading `exchange`/`last_sync_at`, or
     // either arrives null/absent on the row, this assertion fails — the
     // render-contract guard for the degraded-card regression.
+    // D-11 (Phase 201): the stamp prints through formatDay, one date format, never
+    // the browser locale's `4/19/2026`.
     expect(
-      screen.getByText(/^Binance\s*·\s*Key checked/),
+      screen.getByText(/^Binance\s*·\s*Key checked Apr 19, 2026$/),
     ).toBeInTheDocument();
     // D-15: the owner must never read the key check as a trade sync.
     expect(screen.queryByText(/Last synced/)).toBeNull();

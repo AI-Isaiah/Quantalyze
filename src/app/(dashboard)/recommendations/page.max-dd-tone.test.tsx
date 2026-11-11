@@ -126,8 +126,10 @@ async function maxDdValue(maxDrawdown: number | null): Promise<HTMLElement> {
   seeded.statusError = null;
   const ui = await RecommendationsPage();
   render(ui as React.ReactElement);
+  // Phase 201 plan 17: the label is a `Term` trigger inside the label span, so the row is the
+  // nearest `[data-metric]` ancestor.
   const label = screen.getByText("Max DD");
-  return label.parentElement!.lastElementChild as HTMLElement;
+  return (label.closest("[data-metric]") as HTMLElement).lastElementChild as HTMLElement;
 }
 
 describe("/recommendations Max DD cell tone", () => {

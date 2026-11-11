@@ -5,6 +5,12 @@ import { MandateQuickSetCard } from "./MandateQuickSetCard";
 /**
  * Phase 11 / 11-05 / S2 / ONBOARD-02 — MandateQuickSetCard tests.
  *
+ * Phase 201 plan 29 (F-04, U-26): the retired product word is gone from the
+ * three help sentences. They say what a mandate does in plain words (holdings
+ * are checked against it, replacements are suggested), pinned as exact text
+ * below, and a rendered arm fails if the word comes back in text, aria-label
+ * or title.
+ *
  * Critical invariants pinned here:
  *   - Verbatim UI-SPEC §S2 copy (heading, body, field labels, helper text,
  *     button labels)
@@ -81,18 +87,31 @@ afterEach(() => {
 });
 
 describe("MandateQuickSetCard (Phase 11 / S2) — copy + chrome", () => {
-  it("renders heading 'Mandate quick-set' verbatim", () => {
+  it("renders heading 'Mandate quick-set' verbatim, with the word Mandate opening its definition", () => {
     render(<MandateQuickSetCard />);
-    expect(screen.getByText("Mandate quick-set")).toBeInTheDocument();
+    // The accessible name is still the whole heading (a Term adds no text node).
+    const heading = screen.getByRole("heading", { name: "Mandate quick-set" });
+    expect(heading.textContent).toBe("Mandate quick-set");
+    // D-01 / D-06: only the term's own word is the trigger (registry key `mandate`).
+    expect(heading.querySelector('[data-term="mandate"]')?.textContent).toBe("Mandate");
   });
 
   it("renders the verbatim UI-SPEC §S2 body copy", () => {
     render(<MandateQuickSetCard />);
     expect(
       screen.getByText(
-        /Set how the Bridge ranks recommendations for you\. We've suggested defaults — review and save, or skip for now\./,
+        /Set the mandate your holdings are checked against\. We've suggested defaults — review and save, or skip for now\./,
       ),
     ).toBeInTheDocument();
+  });
+
+  it("renders no retired product word in text, aria-label or title (F-04)", () => {
+    const { container } = render(<MandateQuickSetCard />);
+    expect(container.textContent ?? "").not.toMatch(/\bBridge\b/);
+    for (const el of container.querySelectorAll("[aria-label], [title]")) {
+      expect(el.getAttribute("aria-label") ?? "").not.toMatch(/\bBridge\b/);
+      expect(el.getAttribute("title") ?? "").not.toMatch(/\bBridge\b/);
+    }
   });
 
   it("renders Field 1 label + helper + empty Input with placeholder 'e.g. 15' (BLOCK-2 reconciliation)", () => {
@@ -104,7 +123,7 @@ describe("MandateQuickSetCard (Phase 11 / S2) — copy + chrome", () => {
     // Helper text — Phase 11 D-04 (suggestion display)
     expect(
       screen.getByText(
-        /Suggested: 15%\. The Bridge flags any holding that exceeds this share of your portfolio\./,
+        /Suggested: 15%\. Any holding above this share of your allocation is flagged for review\./,
       ),
     ).toBeInTheDocument();
     // Input — BLOCK-2 reconciliation: empty value on first paint, placeholder hints
@@ -123,7 +142,7 @@ describe("MandateQuickSetCard (Phase 11 / S2) — copy + chrome", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /Suggested: none — keep open until you've seen a few Bridge picks\./,
+        /Suggested: none — keep open until you've seen a few replacement suggestions\./,
       ),
     ).toBeInTheDocument();
     // Chip group exists; no chip is in the active state on first render.

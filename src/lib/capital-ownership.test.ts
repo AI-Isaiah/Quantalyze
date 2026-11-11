@@ -157,9 +157,9 @@ describe("capitalOwnershipRefusalMessage — one sentence, two readers", () => {
     `strategy ${RAW_UUID} cannot become a position: capital_ownership=${mark} (required: own_capital)`;
 
   const COPY_TEAM_REVIEW =
-    "This strategy is marked as a trading team's capital under review, so it can't be added to a portfolio. Its owner can change that mark in My Strategies.";
+    "This strategy is marked as a trading team's capital under review, so it can't be added to an allocation. Its owner can change that mark in Strategies.";
   const COPY_OWNER_REMEDY =
-    "This strategy isn't marked as your own capital — mark it in My Strategies first.";
+    "This strategy isn't marked as your own capital — mark it in Strategies first.";
 
   it("ARM 1 (team_review) returns the team sentence", () => {
     expect(capitalOwnershipRefusalMessage({ message: pgMessage("team_review") })).toBe(
@@ -172,7 +172,8 @@ describe("capitalOwnershipRefusalMessage — one sentence, two readers", () => {
     // Copy that only states the refusal leaves them with no lever.
     const msg = capitalOwnershipRefusalMessage({ message: pgMessage("team_review") });
     expect(msg).toMatch(/owner can change/i);
-    expect(msg).toMatch(/My Strategies/);
+    expect(msg).toMatch(/in Strategies\./);
+    expect(msg).not.toMatch(/My Strategies/);
   });
 
   it("ARM 1 (b) — the remedy is ATTRIBUTED, never addressed: no second person, no imperative", () => {

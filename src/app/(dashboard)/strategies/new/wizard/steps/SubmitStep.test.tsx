@@ -355,7 +355,7 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
 
   // Contribution mount → the finalize body sends entry_context='contribution'
   // (→ server finalizes status='private'). Contribution CTA copy is
-  // "Add to my strategies", not "Submit for review".
+  // "Add to Strategies" (201 U-18, D-07), not "Submit for review".
   it("sends entry_context='contribution' and shows allocator copy when entryContext='contribution'", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
@@ -374,7 +374,7 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
 
     // Allocator-framed copy — no sell-side "Submit for review".
     expect(
-      screen.getByRole("button", { name: "Add to my strategies" }),
+      screen.getByRole("button", { name: "Add to Strategies" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Submit for review")).not.toBeInTheDocument();
 
@@ -1201,7 +1201,9 @@ describe("SubmitStep — 151 review E8: a dropped capital mark is announced", ()
     expect(notice.textContent).toMatch(/saved/i);
     // It names the remedy AND where to reach it.
     expect(notice.textContent).toMatch(/own capital/i);
-    expect(notice.textContent).toMatch(/My Strategies/i);
+    // Phase 201 D-07: the page is named "Strategies", never "My Strategies".
+    expect(notice.textContent).toContain("in Strategies —");
+    expect(notice.textContent).not.toMatch(/My Strategies/i);
     // NOT an error envelope, and no retry affordance.
     expect(screen.queryByTestId("error-envelope")).toBeNull();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();

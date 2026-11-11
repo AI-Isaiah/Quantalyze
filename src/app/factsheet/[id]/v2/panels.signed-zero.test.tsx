@@ -228,10 +228,10 @@ describe("OwnBookDeltaPanel: signed zero and favourability tone (D-02, D-03, O-4
     const sortino = ownBookCell({ sharpe: 0.24, sortino: -0.18, max_dd: 0.018 }, "Sortino");
     expect(sortino.textContent).toBe(`${U2212}0.18`);
     expect(styleOf(sortino)).toContain(NEGATIVE);
-    const dd = ownBookCell({ sharpe: 0.24, sortino: -0.18, max_dd: 0.018 }, "Max DD (blend vs book)");
+    const dd = ownBookCell({ sharpe: 0.24, sortino: -0.18, max_dd: 0.018 }, "Max DD (blend vs allocation)");
     expect(dd.textContent).toBe("+1.8pp");
     expect(styleOf(dd)).toContain(POSITIVE);
-    const deeper = ownBookCell({ sharpe: 0.24, sortino: -0.18, max_dd: -0.023 }, "Max DD (blend vs book)");
+    const deeper = ownBookCell({ sharpe: 0.24, sortino: -0.18, max_dd: -0.023 }, "Max DD (blend vs allocation)");
     expect(deeper.textContent).toBe(`${U2212}2.3pp`);
     expect(styleOf(deeper)).toContain(NEGATIVE);
   });
@@ -249,13 +249,13 @@ describe("OwnBookDeltaPanel: signed zero and favourability tone (D-02, D-03, O-4
   });
 
   it("a max DD delta of +0.0004 prints '0.0pp' with no colour (today '+0.0pp' in green)", () => {
-    const cell = ownBookCell({ sharpe: 0.1, sortino: 0.1, max_dd: 0.0004 }, "Max DD (blend vs book)");
+    const cell = ownBookCell({ sharpe: 0.1, sortino: 0.1, max_dd: 0.0004 }, "Max DD (blend vs allocation)");
     expect(cell.textContent).toBe("0.0pp");
     expect(hasTone(cell)).toBe(false);
   });
 
   it("a max DD delta of -0.0004 prints '0.0pp' with no colour (today '−0.0pp' in red)", () => {
-    const cell = ownBookCell({ sharpe: 0.1, sortino: 0.1, max_dd: -0.0004 }, "Max DD (blend vs book)");
+    const cell = ownBookCell({ sharpe: 0.1, sortino: 0.1, max_dd: -0.0004 }, "Max DD (blend vs allocation)");
     expect(cell.textContent).toBe("0.0pp");
     expect(hasTone(cell)).toBe(false);
   });

@@ -138,10 +138,11 @@ async function renderPage(series: Array<{ date: string; value: number }>): Promi
   return renderToStaticMarkup(element);
 }
 
-/** A KPI cell's printed value, by its label. */
+/** A KPI cell's printed value, by its label. A registered label is wrapped in Term (201 D-02), so the
+ *  label's closing tag is followed by up to three closing spans before the cell's `</div>`. */
 function cell(html: string, label: string): string {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const m = new RegExp(`${escaped}</div><div class="[^"]*">([^<]*)</div>`).exec(html);
+  const m = new RegExp(`${escaped}(?:</span>){0,3}</div><div class="[^"]*">([^<]*)</div>`).exec(html);
   if (!m) throw new Error(`no KPI cell for ${label}`);
   return m[1]!;
 }

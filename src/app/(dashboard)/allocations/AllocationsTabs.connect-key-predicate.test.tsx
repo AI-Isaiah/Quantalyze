@@ -213,7 +213,7 @@ const TABS = [
   {
     tab: "scenario",
     rendered: () => {
-      expect(screen.getByText("Start a portfolio")).toBeTruthy();
+      expect(screen.getByText("Start a scenario")).toBeTruthy();
     },
   },
 ] as const;

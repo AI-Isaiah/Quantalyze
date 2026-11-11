@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
+import { formatDay } from "@/lib/utils";
 import { EXCHANGES, STRATEGY_TYPES, MARKETS, SUBTYPES } from "@/lib/constants";
 import type { AllocatorPreferences } from "@/components/admin/AllocatorMatchQueue";
 
@@ -156,15 +157,15 @@ export function PreferencesPanel({
       });
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody.error || "Failed to save preferences");
+        throw new Error(errBody.error || "Failed to save mandate");
       }
-      setSavedMessage("Preferences saved.");
+      setSavedMessage("Mandate saved.");
       // Give the user a moment to see the success state before closing.
       // Timer ref is cleared on unmount to prevent orphaned confirm().
       successTimerRef.current = setTimeout(() => {
         successTimerRef.current = null;
         const wantsRecompute = confirm(
-          "Preferences saved. Recompute the match queue now with the new preferences?",
+          "Mandate saved. Recompute the match queue now with the new mandate?",
         );
         if (wantsRecompute) {
           onSuccess();
@@ -191,7 +192,7 @@ export function PreferencesPanel({
         <div className="sticky top-0 bg-surface border-b border-border px-6 py-4 flex items-center justify-between z-10">
           <div>
             <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
-              Preferences
+              Mandate
             </p>
             <h2 className="mt-0.5 text-h3 font-display text-text-primary">
               CRM-style editor
@@ -464,7 +465,7 @@ export function PreferencesPanel({
               Mandate last edited by:{" "}
               {preferences.edited_by_user_id == null ? "allocator" : "admin"}{" "}
               {String.fromCharCode(183)}{" "}
-              {new Date(preferences.mandate_edited_at).toLocaleDateString()}
+              {formatDay(preferences.mandate_edited_at)}
             </p>
           )}
 
@@ -475,14 +476,14 @@ export function PreferencesPanel({
             >
               <p className="text-small text-text-primary">
                 <strong className="font-semibold">Read-only on mobile.</strong>{" "}
-                Open on a tablet or desktop (768px or wider) to save preferences.
+                Open on a tablet or desktop (768px or wider) to save the mandate.
               </p>
             </div>
           )}
 
           <div className="sticky bottom-0 bg-surface border-t border-border -mx-6 px-6 pt-4 pb-0 flex items-center gap-2">
             <Button type="submit" variant="primary" disabled={submitting || readOnly}>
-              {submitting ? "Saving..." : "Save preferences"}
+              {submitting ? "Saving..." : "Save mandate"}
             </Button>
             <Button type="button" variant="ghost" onClick={onClose} disabled={submitting}>
               Cancel

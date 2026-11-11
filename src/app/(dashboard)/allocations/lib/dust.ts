@@ -45,7 +45,7 @@ export function isDust(row: DustRow, bookEquityUsd: number | null): boolean {
 }
 
 export const DUST_RULE_CAPTION =
-  "Small positions are under $50 or under 0.1% of book equity.";
+  "Small positions are under $50 or under 0.1% of allocation equity.";
 
 const positions = (n: number): string =>
   n === 1 ? "1 small position" : `${n} small positions`;

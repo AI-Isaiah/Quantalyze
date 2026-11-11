@@ -374,7 +374,10 @@ describe("<CorrelationHeatmap>", () => {
         avgAbsCorrelation={0.4}
       />,
     );
-    const caption = screen.getByText(/Avg \|ρ\|/);
+    // The words "Avg |ρ|" are the registered term's trigger; the caption is its parent line.
+    const trigger = screen.getByText(/Avg \|ρ\|/);
+    expect(trigger.getAttribute("data-term")).toBe("avg_abs_correlation");
+    const caption = trigger.closest("div")!;
     expect(caption.textContent).toBe("Avg |ρ| 0.40 · 1 of 3 pairs measured");
     // The four cells of the undefined pairs (a-c, b-c and mirrors) read "—".
     const dashes = Array.from(container.querySelectorAll('[role="img"]')).filter((el) => el.textContent === "—");
@@ -392,7 +395,7 @@ describe("<CorrelationHeatmap>", () => {
         avgAbsCorrelation={0.3}
       />,
     );
-    expect(screen.getByText(/Avg \|ρ\|/).textContent).toBe("Avg |ρ| 0.30");
+    expect(screen.getByText(/Avg \|ρ\|/).closest("div")!.textContent).toBe("Avg |ρ| 0.30");
   });
 
   it("CORR-03: hides the Avg |ρ| caption when the host passes no value", () => {

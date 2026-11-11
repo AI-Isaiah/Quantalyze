@@ -31,7 +31,7 @@ import { join } from "node:path";
 import React from "react";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 import { Badge } from "@/components/ui/Badge";
-import { formatIsoDay } from "@/lib/utils";
+import { formatDay } from "@/lib/utils";
 
 vi.mock("server-only", () => ({}));
 // Phase 199 plan 10 (D-02, CD-12): the page now ranks the owner's rows and
@@ -195,6 +195,8 @@ interface MockStrategyRow {
 const state = vi.hoisted(() => ({
   user: null as { id: string } | null,
   strategies: [] as unknown[],
+  /** The wizard-draft banner's row (`maybeSingle` on `strategies`); null reads as "no draft". */
+  wizardDraft: null as { id: string; name: string | null; created_at: string; review_note: string | null } | null,
   /**
    * Every `.from(table).select(cols)` the page issued, in order, with the
    * `.eq(col, val)` filters chained after it (WR-03: the owner scope is a
@@ -252,7 +254,10 @@ vi.mock("@/lib/supabase/server", () => ({
         in: () => builder,
         limit: () => builder,
         order: () => builder,
-        maybeSingle: async () => ({ data: null, error: null }),
+        maybeSingle: async () => ({
+          data: table === "strategies" ? state.wizardDraft : null,
+          error: null,
+        }),
         then: (
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           onF: (v: { data: unknown; error: unknown }) => any,
@@ -384,6 +389,7 @@ beforeEach(() => {
   // UUID-shaped: the probe runs under `withPublishedOrOwner(q, user.id)`.
   state.user = { id: "00000000-0000-4000-8000-0000000000a1" };
   state.strategies = [];
+  state.wizardDraft = null;
   state.selects = [];
 });
 
@@ -466,7 +472,7 @@ describe("StrategiesPage — Status, Created and Actions (D-01, D-09, P2)", () =
       for (const r of rows) {
         const tr = dataRow(r.name);
         expect(cellUnder(tr, "Status").textContent?.trim()).toBe(badgeLabel(r.status));
-        expect(cellUnder(tr, "Created").textContent?.trim()).toBe(formatIsoDay(r.created_at));
+        expect(cellUnder(tr, "Created").textContent?.trim()).toBe(formatDay(r.created_at));
 
         const actions = cellUnder(tr, "Actions");
         const edit = within(actions).getByRole("link", { name: `Edit ${r.name}` });
@@ -480,7 +486,7 @@ describe("StrategiesPage — Status, Created and Actions (D-01, D-09, P2)", () =
         expect(share!.compareDocumentPosition(lifecycle!) & FOLLOWING).toBeTruthy();
       }
       // The Created column really tells the three rows apart.
-      expect(new Set(rows.map((r) => formatIsoDay(r.created_at))).size).toBe(3);
+      expect(new Set(rows.map((r) => formatDay(r.created_at))).size).toBe(3);
     },
     T,
   );
@@ -717,4 +723,28 @@ describe("StrategiesPage — the owner list read (source pins, T-170.7-05 and T-
       expect(embedded, `the embed must not project the whole ${blob}`).not.toContain(blob);
     }
   }, T);
+});
+
+describe("StrategiesPage - the unfinished-draft banner prints its day through formatDay (D-11)", () => {
+  it(
+    "reads 'started Oct 9, 2026', never a locale string",
+    async () => {
+      state.wizardDraft = {
+        id: "d-1",
+        name: "Alpha Draft",
+        created_at: "2026-10-09T23:30:00.000Z",
+        review_note: null,
+      };
+      const container = await renderPage();
+      const line = Array.from(container.querySelectorAll("p")).find((p) =>
+        (p.textContent ?? "").includes("Drafts expire after 30 days."),
+      );
+      // The expected text is typed by hand: the UTC day is the 9th, and the format is the one
+      // helper's, `MMM D, YYYY`, with the year (a locale string would read 10/9/2026 or 9/10/2026).
+      expect(line?.textContent).toBe(
+        '"Alpha Draft" \u2014 started Oct 9, 2026. Drafts expire after 30 days.',
+      );
+    },
+    T,
+  );
 });

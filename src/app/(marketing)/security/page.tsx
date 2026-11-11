@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { isSfoxEnabledServer, isMt5EnabledServer } from "@/lib/closed-sets";
 import { contactHref } from "@/lib/contact";
+import { formatDay } from "@/lib/utils";
 
 /**
  * `/security` — public security practices page.
@@ -16,7 +17,9 @@ import { contactHref } from "@/lib/contact";
  *      `docsHref` values and `ConnectKeyStep` deep-link here; the
  *      anchors must stay stable (#readonly-key, #binance-readonly,
  *      #okx-readonly, #bybit-readonly, #regenerate-key, #egress-ips,
- *      #sync-timing, #draft-resume, #thresholds).
+ *      #sync-timing, #draft-resume, #thresholds). #egress-ips is static
+ *      copy saying no static egress address exists yet (F-12); the wizard hint
+ *      and two wizard errors link it as "egress IP status".
  *   3. Security contact + RFC 9116 pointer.
  *
  * Plain Server Component — no auth state, no PostHog, no client JS.
@@ -26,7 +29,7 @@ import { contactHref } from "@/lib/contact";
 export const metadata: Metadata = {
   title: "Security",
   description:
-    "How Quantalyze handles your exchange API keys, portfolio data, and compliance posture.",
+    "How Quantalyze handles your exchange API keys, allocation data, and compliance posture.",
   alternates: {
     canonical: "/security",
   },
@@ -34,7 +37,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "Security — Quantalyze",
     description:
-      "How Quantalyze handles your exchange API keys, portfolio data, and compliance posture.",
+      "How Quantalyze handles your exchange API keys, allocation data, and compliance posture.",
     url: "/security",
     type: "article",
   },
@@ -398,7 +401,7 @@ export default function SecurityPage() {
               coordinated disclosure are published on this page.
             </p>
             <p className="mt-3 text-caption text-text-muted">
-              Last reviewed: 2026-11-07.
+              Last reviewed: {formatDay("2026-11-07")}.
             </p>
           </section>
         </article>
@@ -597,17 +600,11 @@ export default function SecurityPage() {
             </Section>
 
             <Section id="egress-ips" title="Egress IPs (IP-allowlist keys)">
-              <p>
-                If your exchange key is locked to an IP allowlist, allow our
-                analytics service egress range. Use the{" "}
-                <Link
-                  href={SECURITY_CONTACT_HREF}
-                  className="text-accent underline underline-offset-4"
-                >
-                  contact form
-                </Link>{" "}
-                for the current IP set — we rotate infrequently and will
-                notify ahead of any change.
+              <p data-testid="egress-ip-status">
+                We have no static egress IP yet, so there is no address to add
+                to an IP allowlist. Create your read-only key without an IP
+                restriction; this section will list the addresses once they
+                exist.
               </p>
             </Section>
 

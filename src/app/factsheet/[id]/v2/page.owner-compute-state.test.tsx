@@ -407,6 +407,24 @@ describe("KCS-09 — the owner pending page states the trigger shape's real stat
   });
 });
 
+describe("Phase 201 D-09 - the owner pending heading names the strategy through the resolver", () => {
+  // Visibility fact: the owner lane's signature read is `withPublishedOrOwner`, so the
+  // row is published or the viewer's own, and the resolver is told it is visible.
+  it("prints the real name of the owner's pending draft", async () => {
+    givenOwnerPendingDraft({ name: "Draft Alpha", codename: "DA-1" });
+    givenJobs([]);
+    const { container } = await renderOwnerPending();
+    expect(container.querySelector("h1")!.textContent).toBe("Draft Alpha");
+  });
+
+  it("a whitespace-only name falls through to the codename", async () => {
+    givenOwnerPendingDraft({ name: "   ", codename: "DA-1" });
+    givenJobs([]);
+    const { container } = await renderOwnerPending();
+    expect(container.querySelector("h1")!.textContent).toBe("DA-1");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Task 2 — every KCS09 row, the KCS21 shape remedies, and the unreadable degrade
 // ---------------------------------------------------------------------------

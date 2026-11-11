@@ -3,6 +3,7 @@ import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { captureToSentry, shouldCaptureNow } from "@/lib/sentry-capture";
 import { withPublishedOnly } from "@/lib/visibility";
+import { displayStrategyName } from "@/lib/strategy-display";
 import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
 import { shortenOgDescription } from "@/lib/factsheet/og-description";
 import { isComputedAnalytics } from "@/lib/closed-sets";
@@ -171,7 +172,13 @@ export async function GET(
     reportOgFailure("read", id, err);
   }
 
-  const name = data?.name ?? data?.codename ?? "Strategy";
+  // Visibility fact (Phase 201 D-09, D-17): the read above is published-only
+  // (`withPublishedOnly`), so a row that reached `data` is visible in discovery and
+  // prints the name discovery prints; an unpublished row never gets here
+  // (route.public-access.test.tsx P1 and P4). The absent-row fallback stays "Strategy".
+  const name = data
+    ? displayStrategyName({ id: data.id ?? id, name: data.name, codename: data.codename }, { visible: true })
+    : "Strategy";
   // Phase 170.3 D-04..D-06: word-boundary shortening, not a raw 140-unit cut.
   const description = shortenOgDescription(data?.description);
 

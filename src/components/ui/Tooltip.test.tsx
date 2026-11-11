@@ -297,6 +297,45 @@ describe("UIFIX-01: portaled positioning", () => {
   });
 });
 
+// Phase 201 plan 01 (U-01, D-19): opt-in function child. `Term` needs the bubble
+// id on the FOCUSABLE element, not on the inner wrapper, so a function child
+// receives it and the wrapper span stops carrying it. A node child is unchanged
+// (Test 5 above pins that path).
+describe("Phase 201: function child hands aria-describedby to the focusable element", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  it("passes the bubble id to the function while open, undefined while closed, and the inner span carries none", () => {
+    render(
+      <Tooltip content="fn child">
+        {({ "aria-describedby": describedBy }) => (
+          <button aria-describedby={describedBy}>info</button>
+        )}
+      </Tooltip>,
+    );
+    const button = screen.getByText("info");
+    const innerSpan = button.parentElement!;
+    const wrapper = innerSpan.parentElement!;
+    expect(button.getAttribute("aria-describedby")).toBeNull();
+
+    fireEvent.mouseEnter(wrapper);
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    const bubble = screen.getByRole("tooltip");
+    expect(button.getAttribute("aria-describedby")).toBe(bubble.id);
+    expect(innerSpan.getAttribute("aria-describedby")).toBeNull();
+
+    fireEvent.mouseLeave(wrapper);
+    expect(button.getAttribute("aria-describedby")).toBeNull();
+  });
+});
+
 // WR-01 / WR-02 (phase 117 review-fix) — the portal must be MEASURED before it
 // paints and TOP-clamped on-screen. Two intertwined defects in one measure pass:
 //   WR-02: the flip-to-below decision used a fixed 80px height estimate. A real

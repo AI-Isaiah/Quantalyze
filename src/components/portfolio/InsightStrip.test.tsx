@@ -98,7 +98,7 @@ describe("<InsightStrip>", () => {
       />,
     );
     expect(
-      screen.getByRole("region", { name: "Portfolio insights" }),
+      screen.getByRole("region", { name: "Allocation insights" }),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/below peak/),
@@ -173,31 +173,44 @@ const MOCK_ANALYTICS_WITH_INSIGHTS = buildAnalytics({
   ],
 });
 
+// Phase 201 / F-04, U-26: the flagged line no longer carries the retired word.
+// It reads "{n} holding(s) outside your mandate — Review in Scenario →" and the
+// href is unchanged.
 describe("InsightStrip — Phase 09 flaggedCount line (LIVE-02, D-07)", () => {
-  it("renders 'Bridge flagged N holding(s) — Review in Scenario →' when flaggedCount > 0", () => {
+  it("renders '{n} holding(s) outside your mandate — Review in Scenario →' when flaggedCount > 0", () => {
     render(<InsightStrip analytics={MOCK_ANALYTICS} portfolioId="p-1" flaggedCount={3} />);
-    expect(screen.getByText(/Bridge flagged 3 holding\(s\) — Review in Scenario →/)).toBeInTheDocument();
+    expect(screen.getByText(/3 holding\(s\) outside your mandate — Review in Scenario →/)).toBeInTheDocument();
+  });
+
+  it("the flagged line never prints the retired word, in its text or its link name", () => {
+    const { container } = render(
+      <InsightStrip analytics={MOCK_ANALYTICS} portfolioId="p-1" flaggedCount={3} />,
+    );
+    expect(container.textContent).not.toMatch(/\bBridge\b/);
+    const link = screen.getByRole("link", { name: /outside your mandate/ });
+    expect(link.textContent ?? "").not.toMatch(/\bBridge\b/);
+    expect(link.getAttribute("aria-label") ?? "").not.toMatch(/\bBridge\b/);
   });
 
   it("links to /allocations?tab=scenario", () => {
     render(<InsightStrip analytics={MOCK_ANALYTICS} portfolioId="p-1" flaggedCount={2} />);
-    const link = screen.getByRole("link", { name: /Bridge flagged/ });
+    const link = screen.getByRole("link", { name: /outside your mandate/ });
     expect(link).toHaveAttribute("href", "/allocations?tab=scenario");
   });
 
   it("hides line when flaggedCount === 0", () => {
     render(<InsightStrip analytics={MOCK_ANALYTICS} portfolioId="p-1" flaggedCount={0} />);
-    expect(screen.queryByText(/Bridge flagged/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/outside your mandate/)).not.toBeInTheDocument();
   });
 
   it("hides line when flaggedCount undefined (backward-compatible)", () => {
     render(<InsightStrip analytics={MOCK_ANALYTICS} portfolioId="p-1" />);
-    expect(screen.queryByText(/Bridge flagged/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/outside your mandate/)).not.toBeInTheDocument();
   });
 
   it("line appears ABOVE regular insights (prepended)", () => {
     render(<InsightStrip analytics={MOCK_ANALYTICS_WITH_INSIGHTS} portfolioId="p-1" flaggedCount={1} />);
-    const flagged = screen.getByText(/Bridge flagged 1 holding\(s\)/);
+    const flagged = screen.getByText(/1 holding\(s\) outside your mandate/);
     const firstInsight = screen.getByText(/below peak/);
     // compareDocumentPosition: DOCUMENT_POSITION_FOLLOWING = 4 means firstInsight comes after flagged
     expect(flagged.compareDocumentPosition(firstInsight) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -221,7 +234,7 @@ function underperf(strategyId: string, name: string): PortfolioInsight {
   return {
     key: "underperformance",
     severity: "medium",
-    sentence: `${name} has trailed the portfolio baseline by 4.20% over the trailing window.`,
+    sentence: `${name} has trailed the allocation baseline by 4.20% over the trailing window.`,
     strategy_id: strategyId,
     strategy_name: name,
   };

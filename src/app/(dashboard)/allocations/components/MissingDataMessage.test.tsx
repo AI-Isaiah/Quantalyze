@@ -358,15 +358,15 @@ describe("MissingDataMessage: the shipped fallbacks, once, and only when no line
       // 198-UAT-01 (D-10): names what the history hides, never return or risk.
       // 199-05 (OQ-2): the shipped D-10 wording plus `for your whole history` and one action.
       "awaiting_derivation",
-      "Your book's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
+      "Your allocation's history is recomputed once a day from each account's returns and cash flows. Until the next recompute, the equity chart and the ratios built from it are hidden for your whole history. They appear after the next daily recompute.",
     ],
     [
       "derivation_rejected",
-      "The latest rebuild of your book's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden for your whole history. Use the contact form to have it checked.",
+      "The latest rebuild of your allocation's history did not pass its checks, so it is not shown. The equity chart and the ratios built from it are hidden for your whole history. Use the contact form to have it checked.",
     ],
     [
       "history_read_failed",
-      "We could not load your book's history just now. Reload the page to try again.",
+      "We could not load your allocation's history just now. Reload the page to try again.",
     ],
     [
       "shared_account_history_truncated",
@@ -530,7 +530,7 @@ describe("MissingDataMessage: order, shell and the scope rule", () => {
     expect(named).toContain(L2);
     expect(named).toContain(L3);
     // The book-level line is last. 198-UAT-01 (D-10): it names the history, not return or risk.
-    expect(out[3]).toContain("Your book's history is recomputed once a day");
+    expect(out[3]).toContain("Your allocation's history is recomputed once a day");
   });
 
   it("the section is labelled by its eyebrow, is not a live region, and wraps long text", () => {

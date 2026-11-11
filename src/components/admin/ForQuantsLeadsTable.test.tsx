@@ -246,3 +246,23 @@ describe("<ForQuantsLeadsTable> source, topic and reference (D-02)", () => {
     }
   });
 });
+
+/**
+ * Phase 201 plan 20 (D-11) - before the minute clock mounts, the lead's age prints as the
+ * helper's `Jun 1, 2026` (with the year), never the retired yearless `Jun 1`. WHY: the
+ * server-rendered first paint is the string every staff member sees first, and it must agree
+ * with every other date in the product.
+ */
+describe("<ForQuantsLeadsTable> first-paint date (D-11)", () => {
+  it("prints the lead's date as 'Jun 1, 2026' before the clock mounts", () => {
+    render(
+      <ForQuantsLeadsTable
+        leads={[TEST_LEAD]}
+        showAll={false}
+        hitCap={false}
+        fullViewCap={100}
+      />,
+    );
+    expect(screen.getByText("Jun 1, 2026")).toBeInTheDocument();
+  });
+});

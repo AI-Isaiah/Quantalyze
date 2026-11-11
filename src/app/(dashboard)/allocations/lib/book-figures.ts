@@ -35,7 +35,7 @@ type Holding = MyAllocationDashboardPayload["holdingsSummary"][number];
 
 /** D-06: names the series behind the glance's return and risk cells, so the blend is not read as the factsheet's. */
 export const BOOK_FIGURES_SERIES_CAPTION =
-  "Return and risk: live book, blended from each key's daily returns.";
+  "Return and risk: live allocation, blended from each key's daily returns.";
 
 /**
  * The live baseline annualizes at the square root of 365

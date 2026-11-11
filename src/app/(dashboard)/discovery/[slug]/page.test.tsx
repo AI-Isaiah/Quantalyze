@@ -154,3 +154,20 @@ describe("/discovery/[slug] passes the admin-only partner map only for an admin 
     expect("sharedAccountPartners" in tableProps!).toBe(false);
   });
 });
+
+describe("/discovery/[slug] watchlist-unavailable notice (Phase 201 plan 17, D-05)", () => {
+  it("names the watchlist, never a 'starred' or 'favorite' strategy", async () => {
+    const queries = await import("@/lib/queries");
+    vi.mocked(queries.getMyWatchlist).mockResolvedValueOnce(null);
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const element = await DiscoveryPage({ params: Promise.resolve({ slug: "crypto-sma" }) });
+    const html = renderToStaticMarkup(element);
+
+    expect(html).toContain(
+      "Watchlist temporarily unavailable \u2014 strategies on your watchlist may not appear. Refresh to retry.",
+    );
+    expect(html, "the retired words 'starred' / 'favorite' came back").not.toMatch(
+      /starred|favorite/i,
+    );
+  });
+});

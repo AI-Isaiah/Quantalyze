@@ -10,6 +10,7 @@ import {
   KEY_STORAGE_SENTENCE,
   LISTING_COST_SENTENCE,
 } from "@/lib/status-surface-copy";
+import type { TermKey } from "@/lib/glossary";
 import { ForQuantsCtas } from "./ForQuantsCtas";
 
 /**
@@ -63,12 +64,18 @@ export const metadata: Metadata = {
 // Seeded demo data for the Factsheet Sample block. Synthetic equity
 // path: ~68% total return over 30 buckets with one shallow drawdown —
 // keep the shape recognizable if a future editor tunes it.
-const SAMPLE_METRICS: FactsheetPreviewMetric[] = [
-  { label: "CAGR", value: "+24.3%", qualifier: "Strong" },
-  { label: "Sharpe", value: "1.82", qualifier: "Strong" },
-  { label: "Sortino", value: "2.46", qualifier: "Strong" },
-  { label: "Max Drawdown", value: "-14.2%", qualifier: "Moderate" },
-  { label: "Volatility", value: "12.8%" },
+//
+// Phase 201 plan 22 (D-02): each registered label carries its glossary key in `term`. This page
+// is a static marketing sample outside the covered-surface list, and `FactsheetPreview` (another
+// plan's file) does not read `term` yet, so the key is carried for it and nothing renders it:
+// the sample's labels do not explain themselves today.
+type SampleMetric = FactsheetPreviewMetric & { term?: TermKey };
+const SAMPLE_METRICS: SampleMetric[] = [
+  { label: "CAGR", term: "cagr", value: "+24.3%", qualifier: "Strong" },
+  { label: "Sharpe", term: "sharpe", value: "1.82", qualifier: "Strong" },
+  { label: "Sortino", term: "sortino", value: "2.46", qualifier: "Strong" },
+  { label: "Max Drawdown", term: "max_drawdown", value: "-14.2%", qualifier: "Moderate" },
+  { label: "Volatility", term: "volatility", value: "12.8%" },
   { label: "Cumulative Return", value: "+158.4%" },
 ];
 
@@ -253,7 +260,7 @@ export default function ForQuantsPage() {
       <section className="border-b border-border bg-page">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
           <h2 className="font-display text-h2 tracking-tight text-text-primary">
-            Allocator view: your codename factsheet and verified risk metrics.
+            Allocator view: your strategy&apos;s factsheet and verified risk metrics.
           </h2>
           <p className="mt-3 max-w-2xl text-text-secondary">
             Allocators see a single-page report generated from your real
@@ -319,11 +326,11 @@ const TRUST_ATOMS: {
   },
   {
     title: "Codename anonymization",
-    body: "You pick a codename at listing time. A visitor who is not signed in sees the codename, never your firm name.",
+    body: "You pick a codename at listing time. A visitor who is not signed in sees your strategy's name, never your firm name.",
   },
   {
-    title: "Public, under your codename",
-    body: "A published factsheet is listed on Browse and opens for anyone, without signing in. It shows your codename, never your firm name.",
+    title: "Public, under your strategy's name",
+    body: "A published factsheet is listed on Browse and opens for anyone, without signing in. It shows your strategy's name, never your firm name. Your identity as its manager is disclosed once an allocator requests an introduction and you accept.",
   },
   {
     title: "Delete a key",
@@ -349,6 +356,6 @@ const HOW_STEPS: { n: string; title: string; body: string }[] = [
   {
     n: "03",
     title: "Your strategy is listed under a codename",
-    body: "Allocators read the factsheet under your codename. Intro requests are routed through the founder.",
+    body: "Allocators read the factsheet under your strategy's name. Intro requests are routed through the founder, and your identity as its manager is disclosed once an allocator requests an introduction and you accept.",
   },
 ];

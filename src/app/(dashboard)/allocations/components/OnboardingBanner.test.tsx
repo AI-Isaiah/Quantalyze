@@ -75,11 +75,24 @@ describe("OnboardingBanner (Phase 11 / S1) — verbatim copy + behavior", () => 
   it("renders body copy verbatim per UI-SPEC §S1", () => {
     render(<OnboardingBanner />);
     // Use getByText with normalized whitespace to allow HTML entity parsing.
-    expect(
-      screen.getByText(
-        /Add a read-only API key — we'll pull your real holdings within one sync cycle and populate Performance, Bridge, and Scenario\./,
-      ),
-    ).toBeInTheDocument();
+    // Phase 201 plan 29 (F-04, U-26): the sentence names the three tabs the
+    // allocations page shows. The tab names are hand-typed here on purpose (not
+    // imported from AllocationsTabs), so a tab rename or a stale list fails
+    // this test instead of following the component (T-201-38).
+    const tabs = ["Overview", "Holdings", "Scenario"];
+    const expected =
+      "Add a read-only API key — we'll pull your real holdings within one sync cycle and populate " +
+      `${tabs[0]}, ${tabs[1]} and ${tabs[2]}.`;
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  });
+
+  it("renders no retired product word in text, aria-label or title (F-04)", () => {
+    const { container } = render(<OnboardingBanner />);
+    expect(container.textContent ?? "").not.toMatch(/\bBridge\b/);
+    for (const el of container.querySelectorAll("[aria-label], [title]")) {
+      expect(el.getAttribute("aria-label") ?? "").not.toMatch(/\bBridge\b/);
+      expect(el.getAttribute("title") ?? "").not.toMatch(/\bBridge\b/);
+    }
   });
 
   it("renders CTA <a href='/profile?tab=exchanges'> with text 'Connect Exchange →'", () => {

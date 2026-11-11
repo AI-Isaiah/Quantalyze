@@ -136,4 +136,17 @@ describe("<UserRolesPanel> — P465", () => {
       expect(routerRefreshMock).toHaveBeenCalledTimes(1);
     });
   });
+
+  it("prints the grant date through the one date helper, 'Apr 16, 2026', never raw ISO (F-11)", () => {
+    render(
+      <UserRolesPanel
+        targetUserId={TARGET_USER_ID}
+        currentRoles={["admin"]}
+        isSelf={false}
+        roleMetadata={{ admin: { granted_at: "2026-04-16T23:30:00Z", granter_email: "boss@example.com" } }}
+      />,
+    );
+    expect(screen.getByText(/Granted Apr 16, 2026 by boss@example\.com/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/2026-04-16/);
+  });
 });

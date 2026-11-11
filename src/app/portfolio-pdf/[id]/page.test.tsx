@@ -3,11 +3,18 @@
  * Phase 195 TRIM (D-03) — `/portfolio-pdf/<id>` is a named, data-free "report
  * retired" landing page.
  *
+ * Phase 201 PLAINWORDS (U-23, D-07) — the page names what the old link opened in
+ * today's word, an allocation report, and its link reads `Open My allocation`.
+ * The route path stays `/portfolio-pdf/` (identifier: old links still land here).
+ *
  * Why this matters: an old share link must never land on a login wall, a 404
  * or a generic error, and it must not read a stored portfolio any more (the
  * renderer and its render-token gate are deleted). So the contract is: the same
  * page for ANY id, with or without a render token, and no database client is
  * ever constructed.
+ *
+ * Plan 201-35 (F-11, D-11, review R3-01 item 7): the retired-on stamp prints through the one
+ * date helper, `Retired Nov 7, 2026`, and the page text carries no YYYY-MM-DD day.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
@@ -66,7 +73,7 @@ describe("/portfolio-pdf/[id] retired page", () => {
       expect(
         screen.getByRole("heading", {
           level: 1,
-          name: "This portfolio report has been retired",
+          name: "This allocation report has been retired",
         }),
       ).toBeTruthy();
       expect(container.querySelectorAll("h1")).toHaveLength(1);
@@ -83,22 +90,31 @@ describe("/portfolio-pdf/[id] retired page", () => {
     const browse = screen.getByRole("link", {
       name: "Browse verified strategies",
     });
-    const allocations = screen.getByRole("link", { name: "Open My Allocation" });
+    const allocations = screen.getByRole("link", { name: "Open My allocation" });
     expect(browse.getAttribute("href")).toBe("/browse");
     expect(allocations.getAttribute("href")).toBe("/allocations");
   });
 
   it("states the retirement date and carries no disclaimer block (it shows no figures)", () => {
     const { container } = render(callWithProps(CASES[0].props));
-    expect(screen.getByText("Retired 2026-11-07")).toBeTruthy();
+    expect(screen.getByText("Retired Nov 7, 2026")).toBeTruthy();
+    // F-11: one day format, no ISO day on the page.
+    expect(container.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     // LegalFooter is navigation and stays; the risk disclaimer must not appear.
     expect(screen.getByRole("navigation", { name: "Legal" })).toBeTruthy();
     expect(container.textContent).not.toMatch(/Past performance/i);
     expect(container.textContent).not.toMatch(/asset custody/i);
   });
 
+  it("names an allocation report in its eyebrow and body, never a portfolio report (U-23)", () => {
+    const { container } = render(callWithProps(CASES[0].props));
+    expect(container.textContent).toContain("Allocation report · Retired");
+    expect(container.textContent).toContain("opened an allocation report");
+    expect(container.textContent).not.toMatch(/portfolio report/i);
+  });
+
   it("is noindex with its own tab title", () => {
     expect(metadata.robots).toBe("noindex");
-    expect(metadata.title).toBe("Portfolio report retired");
+    expect(metadata.title).toBe("Allocation report retired");
   });
 });

@@ -824,9 +824,10 @@ describe("FactsheetView KPI strip — UIFIX-03 (117-03): CUM RETURN extreme valu
  * ("A VS BTC", a different-looking symbol that reads as a misspelt "A"). The
  * glyph must survive: the label `<p>` carries `first-letter:normal-case`, but
  * ONLY when the label starts with alpha, because the same pseudo-element on
- * "Sharpe" would render "sHARPE". The DOM text stays "α vs BTC" (a wrapping
- * span would change the element's own text nodes and break the six
- * `getByText("α vs ...")` locators in FactsheetBody.joint-floor / .basis).
+ * "Sharpe" would render "sHARPE". The DOM text stays "α vs BTC". Phase 201 plan 09 puts the
+ * label inside a Term span, so the six `getByText("α vs ...")` locators in
+ * FactsheetBody.joint-floor / .basis now reach the label through
+ * `closest('[data-testid="factsheet-kpi-label"]')`.
  *
  * Fixture: a record that pairs with BTC (30 days, benchmark prices from the day
  * before), so a real "α vs BTC" cell mounts. The scenario payload used above is
@@ -876,8 +877,10 @@ describe("FactsheetView KPI strip — 164.6.6.3.1 D-09: the alpha eyebrow keeps 
 
   it("D-09: the α label is exempt from the uppercase on its first letter, keeps uppercase + the bounded clip, and its text stays \"α vs BTC\"", () => {
     mountWithAlpha();
-    const label = screen.getByText("α vs BTC");
-    expect(label.getAttribute("data-testid")).toBe("factsheet-kpi-label");
+    // Phase 201 plan 09 (D-03): the text now sits in the Term span INSIDE the label <p>, which
+    // keeps its test id and its classes; the locator reaches the <p> through its own test id.
+    const label = screen.getByText("α vs BTC").closest<HTMLElement>('[data-testid="factsheet-kpi-label"]')!;
+    expect(label, "the α text must sit inside the factsheet-kpi-label").not.toBeNull();
     const t = tokens(label);
     expect(t).toContain("first-letter:normal-case");
     expect(t).toContain("uppercase");

@@ -244,6 +244,50 @@ describe("GET /api/cron/founder-lp-report", () => {
     expect(captureExceptionMock).not.toHaveBeenCalled();
   });
 
+  it("D-11: the success email's month label is the helper's `Oct 2026`, in the subject, the body and the PDF filename", async () => {
+    // Only Date is faked: the route's withTimeout / retry timers must stay real.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-21T09:15:00Z"));
+    try {
+      const { GET } = await import("./route");
+      const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+      fetchSpy.mockResolvedValueOnce(pdfResponseOk());
+
+      const res = await GET(buildAuthorizedRequest());
+      expect(res.status).toBe(200);
+
+      expect(sendMock).toHaveBeenCalledTimes(1);
+      const sendArgs = sendMock.mock.calls[0][0] as Record<string, unknown>;
+      // Hand-typed expectations, never produced by formatMonth itself.
+      expect(sendArgs.subject).toBe("Founder LP report \u2014 Oct 2026");
+      expect(String(sendArgs.html)).toContain("Oct 2026");
+      expect(String(sendArgs.html)).not.toContain("October 2026");
+      const attachments = sendArgs.attachments as Array<{ filename: string }>;
+      expect(attachments[0].filename).toBe("founder-lp-Oct-2026.pdf");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("D-11: the failure alert's month label is the helper's `Oct 2026`", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-21T09:15:00Z"));
+    try {
+      mockSupabaseStillActive();
+      const { GET } = await import("./route");
+
+      const res = await GET(buildAuthorizedRequest());
+      expect(res.status).toBe(500);
+
+      expect(sendMock).toHaveBeenCalledTimes(1);
+      const alertArgs = sendMock.mock.calls[0][0] as Record<string, unknown>;
+      expect(String(alertArgs.html)).toContain("Oct 2026");
+      expect(String(alertArgs.html)).not.toContain("October 2026");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("Grok W5: Supabase precheck short-circuits when status='active' (no fetch, dual-alert fires)", async () => {
     mockSupabaseStillActive();
     const { GET } = await import("./route");

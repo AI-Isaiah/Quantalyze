@@ -84,7 +84,7 @@ function equityEnding(end: string, days: number) {
 
 function baseline(days: number, over: Record<string, unknown> = {}) {
   return {
-    aum: 999_999_999, // a trap: Book equity must never read this (C5)
+    aum: 999_999_999, // a trap: Allocation equity must never read this (C5)
     ytdTwr: 0.0421,
     sharpe: 1.37,
     maxDd: -0.068,
@@ -128,7 +128,7 @@ function payload(
 }
 
 function glance() {
-  return screen.getByRole("region", { name: "Book at a glance" });
+  return screen.getByRole("region", { name: "Allocation at a glance" });
 }
 
 describe("GlancePanel on the Overview (198 plan 01)", () => {
@@ -152,7 +152,7 @@ describe("GlancePanel on the Overview (198 plan 01)", () => {
     );
   });
 
-  it("Book equity is spot value plus each derivative's reported P&L, and Positions counts every row", () => {
+  it("Allocation equity is spot value plus each derivative's reported P&L, and Positions counts every row", () => {
     render(
       <AllocationDashboardV2
         {...payload({
@@ -230,7 +230,7 @@ describe("GlancePanel on the Overview (198 plan 01)", () => {
     expect(screen.getByTestId("glance-positions").textContent).toBe("2");
   });
 
-  it("Book equity is a dash, not $0, when every row is a derivative with no reported P&L", () => {
+  it("Allocation equity is a dash, not $0, when every row is a derivative with no reported P&L", () => {
     render(
       <AllocationDashboardV2
         {...payload({ holdingsSummary: [deriv(null), deriv(null)] })}
@@ -240,7 +240,7 @@ describe("GlancePanel on the Overview (198 plan 01)", () => {
     expect(screen.getByTestId("glance-book-equity").textContent).not.toContain("$0");
   });
 
-  it("derivatives with no reported P&L are excluded from Book equity and counted in a caption", () => {
+  it("derivatives with no reported P&L are excluded from Allocation equity and counted in a caption", () => {
     const two = payload({
       holdingsSummary: [spot(1_000), deriv(null), deriv(null)],
     });
@@ -269,7 +269,7 @@ describe("GlancePanel on the Overview (198 plan 01)", () => {
         {...payload({ holdingsSummary: [], hasConnectedKeys: false })}
       />,
     );
-    expect(screen.queryByRole("region", { name: "Book at a glance" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Allocation at a glance" })).toBeNull();
     expect(screen.queryByTestId("glance-ytd")).toBeNull();
   });
 
@@ -300,7 +300,7 @@ describe("GlancePanel on the Overview (198 plan 01)", () => {
     expect(within(glance()).getByText("YTD TWR")).toBeInTheDocument();
     expect(within(glance()).getByText(BOOK_FIGURES_SERIES_CAPTION)).toBeInTheDocument();
     expect(BOOK_FIGURES_SERIES_CAPTION).toBe(
-      "Return and risk: live book, blended from each key's daily returns.",
+      "Return and risk: live allocation, blended from each key's daily returns.",
     );
   });
 
