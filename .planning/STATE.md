@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
-current_phase: 200
-current_phase_name: MANAGERKEYS — keys, names and adding a strategy each have one place
+current_phase: 201
+current_phase_name: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed
 status: executing
-stopped_at: Phase 206 closed; 200 executing; 201 waits on 200
+stopped_at: Phase 200 closed (v0.133.37.0, PR #1251); 201 starting
 last_updated: "2026-11-10T22:35:54.371Z"
 last_activity: 2026-11-11
-last_activity_desc: Phase 206 SESSIONLOOP (v0.133.36.0, PR #1249) closed
+last_activity_desc: Phase 200 MANAGERKEYS (v0.133.37.0, PR #1251) closed
 state_head: 6f3a99f5988dad02c803f5c2a77c847508d0ff97
 progress:
   total_phases: 17
-  completed_phases: 15
+  completed_phases: 16
   total_plans: 146
   completed_plans: 146
-  percent: 88
+  percent: 94
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 200 (MANAGERKEYS) executing; 201 waits on 200
-Plan: 200: executing; 201: not planned yet
-Status: 206 closed (v0.133.36.0, PR #1249); 200 executing
-Last activity: 2026-11-11 — Phase 206 SESSIONLOOP closed
-Progress: [█████████░] 88% (15 of 17 phases)
+Phase: 201 (PLAINWORDS) starting, the only open phase of v1.21
+Plan: 201: not planned yet
+Status: 200 closed (shipped v0.133.37.0, PR #1251); 201 starting
+Last activity: 2026-11-11 — Phase 200 MANAGERKEYS closed
+Progress: [█████████░] 94% (16 of 17 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
