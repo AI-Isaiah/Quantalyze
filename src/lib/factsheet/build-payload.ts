@@ -527,7 +527,8 @@ export function deriveSeriesBundle(
   // Full pairwise matrix — strategy short-name on the diagonal head so the matrix
   // reads as a self-similarity heatmap with one corner for the strategy.
   const matrixSeries: Array<{ name: string; al: CoveredAlignment }> = [
-    { name: strategyName.length > 12 ? strategyName.slice(0, 11) + "…" : strategyName, al: stratAl },
+    // The cap is 13 so the allocation's default name ("My allocation", Phase 201 D-03) prints whole.
+    { name: strategyName.length > 13 ? strategyName.slice(0, 12) + "…" : strategyName, al: stratAl },
     { name: "BTC", al: btcAl },
     { name: "ETH", al: al.eth },
     { name: "SPX", al: al.spx },

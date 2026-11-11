@@ -25,12 +25,14 @@ Phase 201. Every concept now has one name in the UI, every registered metric or 
 - **CompareTable prints volatility unsigned** (`23.46%`) (201-04).
 - **Chart tooltip labels read a dash for a non-finite hover value** (review R2-SFH-01).
 - **Admin row `status` is required**, so a select that omits it fails to compile (review SFH-02).
+- **The correlation matrix prints the default allocation name whole.** Its first label was capped at 12 characters, which cut the renamed default `My allocation` (13) to `My allocati…`. The cap is 13 (`build-payload.ts`); a longer name still ends in an ellipsis. The three SC-4 byte-identity snapshots moved only by the `Bundle Fixture` fixture's own truncated label.
 
 ### Removed
 - **Deprecated date helpers, the inert `formatCloseDay` option and the `book` noun (201-23).** This also removes the private date converters in `FactsheetView` and `MandatePanels`. An unparseable Terms date now reads as an em dash.
 
 ### Tests
 - **Rendered-text tests pin every changed date site,** each with a negative `YYYY-MM-DD` assertion. The census gate and every scanner branch have RED and GREEN arms. The `visible: true` name call sites are pinned (review SFH-01), and so is the admin embed status, by a source scan (R2-03). Gap-closure RED proofs ran on byte backups restored with `cmp` identical.
+- **The seeded composite factsheet spec reads a KPI value from the label `<p>` by its test id,** not from the innermost text node, which is now the `Term` span inside it (201-09). `Max DD` carries a `Term`, so the old locator found no sibling value `<p>`. A vitest arm pins the matrix label.
 - **The e2e literal sweep re-pinned the specs that quoted old copy** (201-24): axe, composer, CSV upload, discovery, layout-narrow, match queue and route redirects, plus the narrowcharts fixtures. The full suite at the phase head has two failures, both in `compute.conventions.test.ts`, and both fail identically at the pre-phase base.
 
 ### Notes
