@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.133.37.1] - 2026-11-11 — records: close 200 MANAGERKEYS
+
+Records PR for Phase 200, which shipped as PR #1251 (v0.133.37.0). Four commits on `records/200`, no source change. Its planning artifacts lived only on `feat/200-managerkeys` until now.
+
+### Added
+- **Phase 200 planning artifacts on `main`:** the 12 plans and summaries, CONTEXT (with the review-time decision D-R1), RESEARCH, PATTERNS, VALIDATION, `200-REVIEW.md` (three rounds), `200-VERIFICATION.md` (`human_needed`, 6/6, `verified_at_sha` plus `drift_subjects`, no covered_files or covered_digest) and `200-SECURITY.md` (SECURED).
+- **Five LOW `TODOS.md` entries** under `## Phase 200 (MANAGERKEYS)`: role gating for manager Delete key and holdings sync is client-side only (T-200-20 closed at level 1); a stale `cascadeHoldings` edge case for role `both`; founder sign-off pending on accepted risks T-200-06, T-200-09, T-200-10, T-200-13 and on decisions D-01..D-15 and D-R1; small leftovers (two unused exports in `key-card-copy.ts`, stale "Use & Sync" comments, the Disconnected card has no Delete key); UAT at 320px and desktop pending.
+
+### Changed
+- **ROADMAP, REQUIREMENTS and STATE close Phase 200:** 12/12 plans ticked, ROUTE-09, ROUTE-10 and LEAN-04 complete, STATE at 16 of 17 phases with 201 PLAINWORDS the only open phase of v1.21. Hand-edited, because `phase complete` refuses a `human_needed` verification.
+
+### Notes
+- Not covered by the v0.133.37.0 entry: #1251's CI fix commit `e82338737` lowered the OBSERV-12 floor for `e2e/api-key-flow.spec.ts` from 8000 to 6000 after the legitimate rewrite of that spec, and routed two feed links (`ConnectKeyStep.tsx`, `AllocatorExchangeManager.tsx`) through `buildFactsheetHref`. It also cleared a raw `lastIndexOf` in the key-storage census.
+- The Phase 200 verification stays `human_needed` until the 320px and desktop UAT is done.
+
 ## [0.133.37.0] - 2026-11-11 — MANAGERKEYS: one key panel, one picker, a manager-only API keys tab
 
 Phase 200. 87 commits on `feat/200-managerkeys` (merge base `25d31622b`) ship as one PR. Plans 06, 08 and 11 ship together: the Use & Sync confirm (06), the one key panel (08) and the Change key picker (11) depend on each other. No migration.
