@@ -541,7 +541,7 @@ Plans 01-05 can execute now; plans 06-18 execute only after Phase 196 merges int
 **Goal:** A manager can see which strategies each key feeds, and nothing re-points a strategy's key without an explicit confirmation. Renaming happens in one place that shows which name is public. Adding a strategy and managing keys each have one entry point, and the security explanation lives in one place.
 **Requirements**: ROUTE-09, ROUTE-10, LEAN-04
 **Depends on:** Phase 192 (the one security explanation carries 192's corrected account), Phase 199 (adding a strategy's one entry point lives on the merged list)
-**Plans:** 15/15 plans executed
+**Plans:** 15/15 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -737,7 +737,7 @@ Plans:
 | 197. SCREEN | 6/6 | Complete    | 2026-11-10 |
 | 198. MYBOOK | 14/14 | Complete    | 2026-11-10 |
 | 199. MANAGERHOME | 18/18 | Complete    | 2026-11-10 |
-| 200. MANAGERKEYS | 15/15 | In Progress |  |
+| 200. MANAGERKEYS | 15/15 | Complete    | 2026-11-12 |
 | 201. PLAINWORDS | 0/0 | Not started | - |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
