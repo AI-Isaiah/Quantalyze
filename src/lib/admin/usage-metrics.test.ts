@@ -157,7 +157,7 @@ describe("src/lib/admin/usage-metrics.ts — PostHog HogQL helpers", () => {
     // is fresh.
     expect(second.rows[0]?.session_start).toBe(99);
     expect(second.error).toBe(
-      "PostHog unavailable — showing cached data from Apr 10, 2026, 14:05 UTC",
+      "PostHog unavailable — showing cached data from Apr\u00a010,\u00a02026, 14:05\u00a0UTC",
     );
     // D-21: no ISO timestamp (T..:..:..) and no YYYY-MM-DD day in the notice.
     expect(second.error).not.toMatch(/T\d{2}:\d{2}:\d{2}/);

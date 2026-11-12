@@ -137,7 +137,7 @@ describe("AllocationDashboardV2 — NEW-C09-04 staleness banner", () => {
     );
     const banner = screen.getByTestId("dashboard-staleness-banner");
     expect(banner.textContent).toBe(
-      `Analytics may be stale: no exchange key has synced since May 25, 2026. ${EXPECTED_ACTION}`,
+      `Analytics may be stale: no exchange key has synced since May\u00a025,\u00a02026. ${EXPECTED_ACTION}`,
     );
     // The registry id marks the render site (the scan test attributes it by this).
     expect(banner.querySelector('[data-degrade-id="allocation.staleness"]')).not.toBeNull();

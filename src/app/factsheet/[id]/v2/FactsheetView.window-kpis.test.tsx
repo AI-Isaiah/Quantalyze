@@ -395,7 +395,7 @@ describe("the window holds across basis and leverage and never fabricates a figu
     } as FactsheetPayload;
   }
   const BEFORE_JUN_1 =
-    "This range starts before Jun 1, 2024, where the full-history figures begin. Its figures include returns from before that date, which the full-history figures leave out.";
+    "This range starts before Jun\u00a01,\u00a02024, where the full-history figures begin. Its figures include returns from before that date, which the full-history figures leave out.";
   const UNNAMEABLE =
     "The record has a break in the return chain at a date this view cannot name, so this range may span it. Its figures compound across any break inside it.";
   const ANY_SPAN_NOTE = /Measured since|This range starts before|a date this view cannot name|Headline figures withheld/;
@@ -405,7 +405,7 @@ describe("the window holds across basis and leverage and never fabricates a figu
   it("on a chain-broken record a range starting before the break keeps a sentence on the strip and the rail; the full-history note returns on reset", async () => {
     const payload = chainBroken({ headlineCoversFrom: "2024-06-01" });
     const stored = headlineCoverageNote(payload.dataQuality, "cash_settlement", "stripRelative")?.text;
-    expect(stored).toContain("Measured since Jun 1, 2024;");
+    expect(stored).toContain("Measured since Jun\u00a01,\u00a02024;");
     const { container } = mount(payload); // zoom [100, 299]: 2024-04-10 to 2024-10-26
     expect(container.textContent).toContain(stored!);
     await click("zoom");

@@ -101,7 +101,7 @@ const minutesAgo = (m: number) => new Date(NOW_MS - m * 60_000).toISOString();
 // 199-18 (SC-4): the failed and stalled lines name the day of the last attempt. Every fixture job
 // below is minutes before NOW_ISO, so its day is Sep 24, 2026 (UTC).
 const FAIL_PERMANENT =
-  "The last computation, on Sep 24, 2026, stopped on a problem that retrying alone will not resolve.";
+  "The last computation, on Sep\u00a024,\u00a02026, stopped on a problem that retrying alone will not resolve.";
 const CONTACT_PERMANENT = "Use the contact form to have it resolved.";
 const RELOAD = "Reload this page to see the latest status.";
 const CONTACT_CHECK = "Use the contact form to have it checked.";
@@ -109,7 +109,7 @@ const RETRY_READ = "Reload this page to try again.";
 const UNREADABLE_LINE =
   "We could not read this strategy's computation status.";
 const FAIL_TRANSIENT =
-  "The last computation, on Sep 24, 2026, stopped after its automatic retries ran out.";
+  "The last computation, on Sep\u00a024,\u00a02026, stopped after its automatic retries ran out.";
 const SHAPE_SINGLE =
   "Start a new computation with Resync on this strategy's edit page. Use the contact form if it does not complete.";
 const SHAPE_UNLINKED =
@@ -516,7 +516,7 @@ const STATE_ROWS: ReadonlyArray<{
     id: "KCS09-STALLED (stitch heartbeat older than 12 minutes)",
     rows: [stitchRunning(["successful", "in_process", "waiting"], 13)],
     memberCount: 3,
-    line: "The last computation, on Sep 24, 2026, for this composite strategy stopped reporting progress more than 12 minutes ago.",
+    line: "The last computation, on Sep\u00a024,\u00a02026, for this composite strategy stopped reporting progress more than 12 minutes ago.",
     tone: "text-warning",
     remedy: SHAPE_COMPOSITE,
   },
@@ -537,21 +537,21 @@ const STATE_ROWS: ReadonlyArray<{
   {
     id: "KCS09-FAIL-ORPHANED",
     rows: [chainJob("process_key_long", "failed_final", "orphaned")],
-    line: "The last computation, on Sep 24, 2026, stopped before it finished because the process running it went away.",
+    line: "The last computation, on Sep\u00a024,\u00a02026, stopped before it finished because the process running it went away.",
     tone: "text-warning",
     remedy: SHAPE_SINGLE,
   },
   {
     id: "KCS09-FAIL-UNKNOWN",
     rows: [chainJob("compute_analytics_from_csv", "failed_final", "unknown")],
-    line: "The last computation, on Sep 24, 2026, stopped, and the service could not tell why.",
+    line: "The last computation, on Sep\u00a024,\u00a02026, stopped, and the service could not tell why.",
     tone: "text-warning",
     remedy: SHAPE_SINGLE,
   },
   {
     id: "KCS09-FAIL-OTHER (error_kind null)",
     rows: [chainJob("compute_analytics_from_csv", "failed_final", null)],
-    line: "The last computation, on Sep 24, 2026, did not finish.",
+    line: "The last computation, on Sep\u00a024,\u00a02026, did not finish.",
     tone: "text-warning",
     remedy: SHAPE_SINGLE,
   },

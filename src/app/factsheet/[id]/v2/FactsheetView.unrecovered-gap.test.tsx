@@ -137,9 +137,9 @@ function tradeFetchLine(container: HTMLElement): HTMLElement | null {
 }
 
 const GAP_63 =
-  "No trade data May 7, 2026 – Jul 8, 2026 (63 days). These days are not recovered; they are left out of the record, not counted as zero.";
+  "No trade data May\u00a07,\u00a02026 – Jul\u00a08,\u00a02026 (63 days). These days are not recovered; they are left out of the record, not counted as zero.";
 const GAP_1 =
-  "No trade data Sep 3, 2026 (1 day). This day is not recovered; it is left out of the record, not counted as zero.";
+  "No trade data Sep\u00a03,\u00a02026 (1 day). This day is not recovered; it is left out of the record, not counted as zero.";
 
 describe("FactsheetView - UnrecoveredGapLines (D-02, F1)", () => {
   it("one multi-day gap: the binding F1 sentence, an en dash with a space either side, 63 inclusive days", () => {
@@ -174,9 +174,9 @@ describe("FactsheetView - UnrecoveredGapLines (D-02, F1)", () => {
     const { container } = renderFactsheet(withGaps(parseUnrecoveredGaps(provenance)));
     const texts = gapLines(container).map((p) => p.textContent);
     expect(texts).toEqual([
-      "No trade data Aug 15, 2026 – Aug 16, 2026 (2 days). These days are not recovered; they are left out of the record, not counted as zero.",
+      "No trade data Aug\u00a015,\u00a02026 – Aug\u00a016,\u00a02026 (2 days). These days are not recovered; they are left out of the record, not counted as zero.",
       GAP_63,
-      "No trade data Mar 1, 2026 – Mar 31, 2026 (31 days). These days are not recovered; they are left out of the record, not counted as zero.",
+      "No trade data Mar\u00a01,\u00a02026 – Mar\u00a031,\u00a02026 (31 days). These days are not recovered; they are left out of the record, not counted as zero.",
       "2 more gaps without trade data.",
     ]);
   });
@@ -278,8 +278,8 @@ describe("FactsheetView - UnrecoveredGapLines (D-02, F1)", () => {
     expect(fetchLine!.nextElementSibling).toBe(lines[0]);
     expect(lines[0].nextElementSibling).toBe(lines[1]);
     expect(lines[0].parentElement).toBe(fetchLine!.parentElement);
-    expect(lines[0].textContent).toContain("Aug 15, 2026");
-    expect(lines[1].textContent).toContain("May 7, 2026");
+    expect(lines[0].textContent).toContain("Aug\u00a015,\u00a02026");
+    expect(lines[1].textContent).toContain("May\u00a07,\u00a02026");
   });
 
   it("a gap is server truth independent of the trade-fetch line: it renders when that line makes no claim", () => {

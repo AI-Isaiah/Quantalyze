@@ -913,10 +913,10 @@ describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", (
     await flush();
 
     expect(screen.getByTestId("browse-dedup-s-ac-new").textContent).toBe(
-      "Created Aug 4, 2026 · Private",
+      "Created Aug\u00a04,\u00a02026 · Private",
     );
     expect(screen.getByTestId("browse-dedup-s-ac-old").textContent).toBe(
-      "Created Jul 20, 2026 · Private",
+      "Created Jul\u00a020,\u00a02026 · Private",
     );
   });
 
@@ -969,8 +969,8 @@ describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", (
     expect(document.querySelectorAll('[data-testid^="browse-dedup-"]')).toHaveLength(0);
     // The leaked dates must not surface anywhere in the drawer either.
     const body = document.body.textContent ?? "";
-    expect(body).not.toContain("Aug 4, 2026");
-    expect(body).not.toContain("Jul 20, 2026");
+    expect(body).not.toContain("Aug\u00a04,\u00a02026");
+    expect(body).not.toContain("Jul\u00a020,\u00a02026");
   });
 
   it("a lone own row whose name matches TWO third-party rows gets no line — collisions are counted own-only", async () => {
@@ -1025,10 +1025,10 @@ describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", (
 
     // A raw-string collision key would see two distinct names and render nothing.
     expect(screen.getByTestId("browse-dedup-s-norm-a").textContent).toBe(
-      "Created Aug 4, 2026 · Private",
+      "Created Aug\u00a04,\u00a02026 · Private",
     );
     expect(screen.getByTestId("browse-dedup-s-norm-b").textContent).toBe(
-      "Created Jul 20, 2026 · Private",
+      "Created Jul\u00a020,\u00a02026 · Private",
     );
   });
 
@@ -1071,7 +1071,7 @@ describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", (
     await flush();
 
     expect(screen.getByTestId("browse-dedup-s-has-date").textContent).toBe(
-      "Created Aug 4, 2026 · Private",
+      "Created Aug\u00a04,\u00a02026 · Private",
     );
     expect(screen.queryByTestId("browse-dedup-s-no-date")).toBeNull();
     expect(document.body.textContent ?? "").not.toContain("Invalid Date");
@@ -1102,7 +1102,7 @@ describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", (
 
     // The good sibling proves the collision was detected at all.
     expect(screen.getByTestId("browse-dedup-s-good-date").textContent).toBe(
-      "Created Aug 4, 2026 · Private",
+      "Created Aug\u00a04,\u00a02026 · Private",
     );
     expect(screen.queryByTestId("browse-dedup-s-bad-date")).toBeNull();
     // The literal string the pre-fix code rendered.
@@ -1125,7 +1125,7 @@ describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", (
     expect(document.body.textContent ?? "").not.toContain("Invalid Date");
     // The falsifier for a `?? new Date(0)` style "fix": the epoch date must not
     // appear anywhere.
-    expect(document.body.textContent ?? "").not.toContain("Jan 1, 1970");
+    expect(document.body.textContent ?? "").not.toContain("Jan\u00a01,\u00a01970");
   });
 
   it("renders the raw status enum product-cased, and omits the segment entirely when status is absent", async () => {
@@ -1139,13 +1139,13 @@ describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", (
     // Underscores → spaces, first letter capitalized. The raw DB enum is a
     // second vocabulary the allocator never agreed to read.
     expect(screen.getByTestId("browse-dedup-s-st-review").textContent).toBe(
-      "Created Aug 4, 2026 · Pending review",
+      "Created Aug\u00a04,\u00a02026 · Pending review",
     );
     expect(document.body.textContent ?? "").not.toContain("pending_review");
     // No status → no dangling separator (the sibling codename line's
     // conditional-separator idiom).
     expect(screen.getByTestId("browse-dedup-s-st-none").textContent).toBe(
-      "Created Jul 20, 2026",
+      "Created Jul\u00a020,\u00a02026",
     );
   });
 
@@ -1386,7 +1386,7 @@ describe("StrategyBrowseDrawer — plan 201-15 name, term and date copy", () => 
     renderDrawer({ fetchStrategies: async () => offsetPair });
     await flush();
     expect(screen.getByTestId("browse-dedup-s-off-a").textContent).toBe(
-      "Created Aug 5, 2026 · Private",
+      "Created Aug\u00a05,\u00a02026 · Private",
     );
   });
 

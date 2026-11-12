@@ -302,7 +302,7 @@ describe("successAnnouncement", () => {
       dateIso: "2026-11-01",
     });
     expect(line).toBe(
-      "Allocation recorded: Alpha One, $25,000 from Nov 1, 2026. It is listed under Outcomes on Holdings.",
+      "Allocation recorded: Alpha One, $25,000 from Nov\u00a01,\u00a02026. It is listed under Outcomes on Holdings.",
     );
     expect(line).not.toContain("Strategies on Holdings");
   });

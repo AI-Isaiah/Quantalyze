@@ -51,7 +51,7 @@ function makeSeries(n: number): DailyPoint[] {
 
 const START_MID = "2024-03-01"; // inside ALL, before the 1M window
 const START_RECENT = addDays(LAST_DAY, -10); // inside 1M
-const FORMAT_MID = "Mar 1, 2024";
+const FORMAT_MID = "Mar\u00a01,\u00a02024";
 
 const MARKER = '[data-testid="marks-start-marker"]';
 const NOTE = '[data-testid="marks-start-note"]';
@@ -98,7 +98,7 @@ describe("EquityChart marks-start note, (a): start inside the visible range (per
 
     const text = g.querySelector("text");
     expect(text, "at 960 the 12 px label fits").not.toBeNull();
-    expect(text!.textContent).toBe("RECORDED EQUITY FROM MAR 1, 2024");
+    expect(text!.textContent).toBe("RECORDED EQUITY FROM MAR\u00a01,\u00a02024");
     expect(text!.textContent).toBe(marksStartLabelRendered(FORMAT_MID));
     expect(text!.getAttribute("font-size")).toBe("12");
     expect(text!.getAttribute("font-family")).toBe("var(--font-mono), monospace");
@@ -262,7 +262,7 @@ describe("EquityChart marks-trailing note (SFH-2 N1): says so when the marks sto
     const note = container.querySelector(TRAILING)!;
     expect(note).not.toBeNull();
     expect(note.tagName.toLowerCase()).toBe("p");
-    expect(note.textContent).toBe("Marks paused from Jul 10, 2024");
+    expect(note.textContent).toBe("Marks paused from Jul\u00a010,\u00a02024");
     for (const cls of ["mt-2", "font-mono", "uppercase", "tracking-wider", "text-text-secondary"]) {
       expect(note.className).toContain(cls);
     }

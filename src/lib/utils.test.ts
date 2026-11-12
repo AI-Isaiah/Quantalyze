@@ -297,17 +297,26 @@ describe("formatDay", () => {
   // Phase 201 / D-11 - the one UI date. en-US short month, unpadded day,
   // four-digit year, UTC fields only so SSR and the browser agree.
   it("prints a bare date as Oct 9, 2026", () => {
-    expect(formatDay("2026-10-09")).toBe("Oct 9, 2026");
+    expect(formatDay("2026-10-09")).toBe("Oct\u00a09,\u00a02026");
   });
   it("reads the UTC instant, not the offset the string carries", () => {
     // 23:30 at -05:00 is 04:30 UTC the NEXT day.
-    expect(formatDay("2026-10-09T23:30:00-05:00")).toBe("Oct 10, 2026");
+    expect(formatDay("2026-10-09T23:30:00-05:00")).toBe("Oct\u00a010,\u00a02026");
   });
   it("handles a year boundary", () => {
-    expect(formatDay("2026-01-01T00:00:00Z")).toBe("Jan 1, 2026");
+    expect(formatDay("2026-01-01T00:00:00Z")).toBe("Jan\u00a01,\u00a02026");
   });
   it("prints Sep, not Sept, with an unpadded day", () => {
-    expect(formatDay("2026-09-03")).toBe("Sep 3, 2026");
+    expect(formatDay("2026-09-03")).toBe("Sep\u00a03,\u00a02026");
+  });
+  it("keeps a date together: U+00A0 between month and day and before the year, no U+0020 (D-04)", () => {
+    // Code-point oracle, written as escapes so no invisible character hides in the source.
+    const out = formatDay("2026-11-11");
+    expect(out).toBe("Nov\u00a011,\u00a02026");
+    expect(out).not.toContain("\u0020");
+    expect([...out].map((c) => c.codePointAt(0)!.toString(16))).toEqual(
+      ["4e", "6f", "76", "a0", "31", "31", "2c", "a0", "32", "30", "32", "36"],
+    );
   });
   it("prints an em dash for null, undefined, empty and unparseable input", () => {
     expect(formatDay(null)).toBe("\u2014");
@@ -319,12 +328,20 @@ describe("formatDay", () => {
 
 describe("formatMonth", () => {
   it("prints a month string and a timestamp as Oct 2026", () => {
-    expect(formatMonth("2026-10")).toBe("Oct 2026");
-    expect(formatMonth("2026-10-31T23:59:00Z")).toBe("Oct 2026");
+    expect(formatMonth("2026-10")).toBe("Oct\u00a02026");
+    expect(formatMonth("2026-10-31T23:59:00Z")).toBe("Oct\u00a02026");
   });
   it("reads the UTC instant across a year boundary", () => {
     // 23:30 at -05:00 on Dec 31 is 04:30 UTC on Jan 1.
-    expect(formatMonth("2026-12-31T23:30:00-05:00")).toBe("Jan 2027");
+    expect(formatMonth("2026-12-31T23:30:00-05:00")).toBe("Jan\u00a02027");
+  });
+  it("keeps month and year together: U+00A0, no U+0020 (D-04)", () => {
+    const out = formatMonth("2026-10-09");
+    expect(out).toBe("Oct\u00a02026");
+    expect(out).not.toContain("\u0020");
+    expect([...out].map((c) => c.codePointAt(0)!.toString(16))).toEqual(
+      ["4f", "63", "74", "a0", "32", "30", "32", "36"],
+    );
   });
   it("prints an em dash for null, undefined, empty and unparseable input", () => {
     expect(formatMonth(null)).toBe("\u2014");
@@ -337,13 +354,19 @@ describe("formatMonth", () => {
 describe("formatDayTime", () => {
   // U-13: both parts in UTC, zone named.
   it("prints day and 24-hour UTC time", () => {
-    expect(formatDayTime("2026-10-09T14:05:00Z")).toBe("Oct 9, 2026, 14:05 UTC");
+    expect(formatDayTime("2026-10-09T14:05:00Z")).toBe("Oct\u00a09,\u00a02026, 14:05\u00a0UTC");
   });
   it("zero-pads hours and minutes", () => {
-    expect(formatDayTime("2026-10-09T03:07:00Z")).toBe("Oct 9, 2026, 03:07 UTC");
+    expect(formatDayTime("2026-10-09T03:07:00Z")).toBe("Oct\u00a09,\u00a02026, 03:07\u00a0UTC");
   });
   it("converts an offset to UTC, day included", () => {
-    expect(formatDayTime("2026-10-09T23:30:00-05:00")).toBe("Oct 10, 2026, 04:30 UTC");
+    expect(formatDayTime("2026-10-09T23:30:00-05:00")).toBe("Oct\u00a010,\u00a02026, 04:30\u00a0UTC");
+  });
+  it("holds one ordinary space, right after the year's comma, and U+00A0 before UTC (D-04, U-07)", () => {
+    const out = formatDayTime("2026-10-09T14:05:00Z");
+    expect(out).toBe("Oct\u00a09,\u00a02026, 14:05\u00a0UTC");
+    expect(out.split("\u0020")).toHaveLength(2);
+    expect(out.indexOf("\u0020")).toBe("Oct\u00a09,\u00a02026,".length);
   });
   it("prints an em dash for null, undefined, empty and unparseable input", () => {
     expect(formatDayTime(null)).toBe("\u2014");
@@ -379,7 +402,7 @@ describe("formatRelativeTime", () => {
   it("falls back to the full formatDay date, year included, past 30 days", () => {
     const iso = new Date(NOW - 45 * 24 * 60 * 60_000).toISOString();
     expect(formatRelativeTime(iso, NOW)).toBe(formatDay(iso));
-    expect(formatRelativeTime(iso, NOW)).toBe("Feb 25, 2026");
+    expect(formatRelativeTime(iso, NOW)).toBe("Feb\u00a025,\u00a02026");
   });
   it("keeps the under-30-day age unchanged", () => {
     const iso = new Date(NOW - 3 * 24 * 60 * 60_000).toISOString();

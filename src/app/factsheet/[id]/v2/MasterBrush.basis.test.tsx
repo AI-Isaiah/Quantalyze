@@ -164,8 +164,8 @@ describe("[F2] MasterBrush follows the active basis", () => {
     const { container } = renderBrush("cash_settlement");
     const { start, end } = edgeLabels(container);
     // Cash axis → 2020 dates on both edges, never a 2031 MTM day.
-    expect(start).toBe("Jan 1, 2020");
-    expect(end).toBe("Apr 16, 2020");
+    expect(start).toBe("Jan\u00a01,\u00a02020");
+    expect(end).toBe("Apr\u00a016,\u00a02020");
   });
 
   it("mark_to_market labels the window with MTM dates, NOT cash (neuter → cash → RED)", () => {
@@ -174,7 +174,7 @@ describe("[F2] MasterBrush follows the active basis", () => {
     // Under MTM the start edge reads the bundle's own axis (2031-01-01), never the
     // cash 2020 date. This is the line that reddens if MasterBrush reverts to
     // usePayload() (it would label the window with cash dates under MTM).
-    expect(start).toBe("Jan 1, 2031");
+    expect(start).toBe("Jan\u00a01,\u00a02031");
     expect(start).not.toContain("2020");
   });
 
@@ -186,7 +186,7 @@ describe("[F2] MasterBrush follows the active basis", () => {
     const { container } = renderBrush("mark_to_market", { drive: [0, MTM_LEN - 1] });
     await waitFor(() => {
       const { end } = edgeLabels(container);
-      expect(end).toBe("May 30, 2031");
+      expect(end).toBe("May\u00a030,\u00a02031");
     });
   });
 
@@ -215,7 +215,7 @@ describe("[F2] MasterBrush follows the active basis", () => {
     });
     await waitFor(() => {
       const { end } = edgeLabels(container);
-      expect(end).toBe("May 29, 2032");
+      expect(end).toBe("May\u00a029,\u00a02032");
     });
   });
 });

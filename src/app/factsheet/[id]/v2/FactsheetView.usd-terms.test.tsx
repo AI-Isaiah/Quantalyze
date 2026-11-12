@@ -181,9 +181,9 @@ describe("CR-02 — the Terms panel describes the strategy, not the unit", () =>
     const usd = termValue(termsPanel(container), "Live since");
     expect(usd).toContain("portion before live date is backtest");
     // ...and it names the NATIVE record's start, not the USD series' later one.
-    expect(usd).toContain("observation window starts Jan 1, 2023");
+    expect(usd).toContain("observation window starts Jan\u00a01,\u00a02023");
     // F-11: one day format, no ISO day anywhere in the row (declared start included).
-    expect(usd).toContain("Dec 25, 2022");
+    expect(usd).toContain("Dec\u00a025,\u00a02022");
     expect(usd).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });

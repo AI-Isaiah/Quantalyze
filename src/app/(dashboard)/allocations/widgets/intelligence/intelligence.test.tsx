@@ -86,7 +86,7 @@ describe("RegimeDetector", () => {
   it("prints the regime start as a helper day, `Mon D, YYYY`", () => {
     renderRegime(makeReturns(300, () => 0.002));
     const since = screen.getByText(/^Since/);
-    expect(since.textContent).toMatch(/^Since [A-Z][a-z]{2} \d{1,2}, 20\d\d$/);
+    expect(since.textContent).toMatch(/^Since [A-Z][a-z]{2}\u00a0\d{1,2},\u00a020\d\d$/);
   });
 
   it("M-0177: down-then-up series produces a bullish crossover → exactly 'Bull Market'", () => {

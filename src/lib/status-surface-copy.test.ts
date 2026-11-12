@@ -906,12 +906,12 @@ describe("192 PUBLICTRUTH shared sentences", () => {
 describe("199-18 — the failed and stalled owner state lines carry the last attempt's day", () => {
   const DAY = "2026-10-03";
   const dated: Array<[string, ComputeState, string, "amber" | "red"]> = [
-    ["KCS09-STALLED", { state: "stalled" }, "The last computation, on Oct 3, 2026, for this composite strategy stopped reporting progress more than 12 minutes ago.", "amber"],
-    ["KCS09-FAIL-PERMANENT", { state: "failed", errorKind: "permanent" }, "The last computation, on Oct 3, 2026, stopped on a problem that retrying alone will not resolve.", "red"],
-    ["KCS09-FAIL-TRANSIENT", { state: "failed", errorKind: "transient" }, "The last computation, on Oct 3, 2026, stopped after its automatic retries ran out.", "amber"],
-    ["KCS09-FAIL-ORPHANED", { state: "failed", errorKind: "orphaned" }, "The last computation, on Oct 3, 2026, stopped before it finished because the process running it went away.", "amber"],
-    ["KCS09-FAIL-UNKNOWN", { state: "failed", errorKind: "unknown" }, "The last computation, on Oct 3, 2026, stopped, and the service could not tell why.", "amber"],
-    ["KCS09-FAIL-OTHER", { state: "failed", errorKind: null }, "The last computation, on Oct 3, 2026, did not finish.", "amber"],
+    ["KCS09-STALLED", { state: "stalled" }, "The last computation, on Oct\u00a03,\u00a02026, for this composite strategy stopped reporting progress more than 12 minutes ago.", "amber"],
+    ["KCS09-FAIL-PERMANENT", { state: "failed", errorKind: "permanent" }, "The last computation, on Oct\u00a03,\u00a02026, stopped on a problem that retrying alone will not resolve.", "red"],
+    ["KCS09-FAIL-TRANSIENT", { state: "failed", errorKind: "transient" }, "The last computation, on Oct\u00a03,\u00a02026, stopped after its automatic retries ran out.", "amber"],
+    ["KCS09-FAIL-ORPHANED", { state: "failed", errorKind: "orphaned" }, "The last computation, on Oct\u00a03,\u00a02026, stopped before it finished because the process running it went away.", "amber"],
+    ["KCS09-FAIL-UNKNOWN", { state: "failed", errorKind: "unknown" }, "The last computation, on Oct\u00a03,\u00a02026, stopped, and the service could not tell why.", "amber"],
+    ["KCS09-FAIL-OTHER", { state: "failed", errorKind: null }, "The last computation, on Oct\u00a03,\u00a02026, did not finish.", "amber"],
   ];
 
   it.each(dated)("%s with a day: the dated sentence, the same id and the same tone", (id, state, text, tone) => {

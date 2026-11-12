@@ -5933,7 +5933,7 @@ export function ScenarioComposer({
             data-testid="scenario-coverage-window-value"
           >
             {coverageWindow
-              ? `${formatDay(coverageWindow.start)} → ${formatDay(coverageWindow.end)}`
+              ? `${formatDay(coverageWindow.start)} – ${formatDay(coverageWindow.end)}`
               : "All history"}
           </span>
           <div className="ml-auto flex flex-wrap items-center gap-2">

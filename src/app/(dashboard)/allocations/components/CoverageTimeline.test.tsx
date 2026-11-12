@@ -130,9 +130,11 @@ describe("CoverageTimeline (COVERAGE-01)", () => {
     // Coverage dates present in both.
     // F-11 / D-11 / UI-SPEC Interaction contract 5 / R3-01 item 4 / plan
     // 201-38: the bar's spoken name prints its days through `formatDay`, never
-    // the raw ISO. The union endpoint labels below stay ISO (D-21 axis ends).
-    expect(inLabel).toContain("covers Jan 1, 2022 – Dec 31, 2024");
-    expect(outLabel).toContain("covers Jan 1, 2022 – Aug 15, 2023");
+    // the raw ISO. Phase 201.1 D-02: the union endpoint labels print through
+    // `formatDay` too. Dates keep U+00A0 inside (plan 201.1-01), written as
+    // escapes here; the range's own separator spaces stay U+0020.
+    expect(inLabel).toContain("covers Jan\u00a01,\u00a02022 – Dec\u00a031,\u00a02024");
+    expect(outLabel).toContain("covers Jan\u00a01,\u00a02022 – Aug\u00a015,\u00a02023");
     expect(inLabel).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     expect(outLabel).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     // Membership stated as a word — never color-only.
@@ -140,17 +142,40 @@ describe("CoverageTimeline (COVERAGE-01)", () => {
     expect(outLabel.toLowerCase()).toContain("auto-excluded");
   });
 
-  it("renders the union start + end endpoint date labels (no interior ticks)", () => {
-    render(
+  it("renders the union endpoints through formatDay, start left and end right, with no raw ISO", () => {
+    const { container } = render(
       <CoverageTimeline
         rows={ROWS}
-        unionWindow={UNION}
+        unionWindow={{ start: "2025-09-17", end: "2026-11-10" }}
         activeWindow={ACTIVE}
       />,
     );
-    // Endpoint labels for the union axis extents.
-    expect(screen.getByText("2022-01-01")).toBeInTheDocument();
-    expect(screen.getByText("2024-12-31")).toBeInTheDocument();
+    // Literal expected strings with U+00A0 escapes, never built with the helper.
+    // The default text normalizer folds U+00A0 to a plain space, so match exact.
+    const exact = { normalizer: (t: string) => t };
+    const start = screen.getByText("Sep\u00a017,\u00a02025", exact);
+    const end = screen.getByText("Nov\u00a010,\u00a02026", exact);
+    expect(start).toBeInTheDocument();
+    expect(end).toBeInTheDocument();
+    // DOM order is the reading order: start first, end second.
+    expect(
+      start.compareDocumentPosition(end) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // The rendered timeline holds no YYYY-MM-DD text anywhere.
+    expect(container.textContent ?? "").not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    // The 320px wrap rule: the endpoint row wraps and the end label stays
+    // right-aligned on its own line (the geometry is measured in a real
+    // browser by plan 201.1-15).
+    const row = start.parentElement as HTMLElement;
+    expect(row.className).toContain("flex-wrap");
+    expect(end.className).toContain("ml-auto");
+    // Plan 201.1-15 (measured at 320px): the row must be allowed to shrink to the track
+    // (`min-w-0`; its min-content is a whole label, wider than the 70px track) and pack toward the
+    // end (`justify-end`, start `mr-auto`), so a label wider than the track spills left over the
+    // empty spacer instead of right out of the section.
+    expect(row.className).toContain("min-w-0");
+    expect(row.className).toContain("justify-end");
+    expect(start.className).toContain("mr-auto");
   });
 
   it("renders nothing when there are no rows to plot", () => {

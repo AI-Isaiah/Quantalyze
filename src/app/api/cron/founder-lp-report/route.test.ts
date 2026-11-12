@@ -259,8 +259,8 @@ describe("GET /api/cron/founder-lp-report", () => {
       expect(sendMock).toHaveBeenCalledTimes(1);
       const sendArgs = sendMock.mock.calls[0][0] as Record<string, unknown>;
       // Hand-typed expectations, never produced by formatMonth itself.
-      expect(sendArgs.subject).toBe("Founder LP report \u2014 Oct 2026");
-      expect(String(sendArgs.html)).toContain("Oct 2026");
+      expect(sendArgs.subject).toBe("Founder LP report \u2014 Oct\u00a02026");
+      expect(String(sendArgs.html)).toContain("Oct\u00a02026");
       expect(String(sendArgs.html)).not.toContain("October 2026");
       const attachments = sendArgs.attachments as Array<{ filename: string }>;
       expect(attachments[0].filename).toBe("founder-lp-Oct-2026.pdf");
@@ -281,7 +281,7 @@ describe("GET /api/cron/founder-lp-report", () => {
 
       expect(sendMock).toHaveBeenCalledTimes(1);
       const alertArgs = sendMock.mock.calls[0][0] as Record<string, unknown>;
-      expect(String(alertArgs.html)).toContain("Oct 2026");
+      expect(String(alertArgs.html)).toContain("Oct\u00a02026");
       expect(String(alertArgs.html)).not.toContain("October 2026");
     } finally {
       vi.useRealTimers();

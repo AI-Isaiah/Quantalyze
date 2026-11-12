@@ -213,7 +213,7 @@ describe("StrategyTable Health column (199-12, D-03)", () => {
     const col = headers().findIndex((h) => (h.textContent ?? "").trim() === "Health");
     const td = cells(dataRow("Health Stale"))[col];
     expect(td.className).toContain("whitespace-nowrap");
-    expect(td.textContent).toMatch(/^Stale \(no data since [A-Z][a-z]{2} \d{1,2}, \d{4}\)$/);
+    expect(td.textContent).toMatch(/^Stale \(no data since [A-Z][a-z]{2}\u00a0\d{1,2},\u00a0\d{4}\)$/);
   });
 
   it("a row the page passed no health for prints the em dash, never a word", () => {

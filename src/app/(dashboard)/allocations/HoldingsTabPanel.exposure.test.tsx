@@ -159,7 +159,7 @@ describe("HoldingsTabPanel — Exposure section (99-04 wiring)", () => {
     const card = exposureCard(section);
     expect(card.querySelector("table")).toBeNull();
     expect(card.querySelector("tr")).toBeNull();
-    expect(section.textContent).toContain("as of Oct 3, 2026");
+    expect(section.textContent).toContain("as of Oct\u00a03,\u00a02026");
     expect(section.textContent).not.toContain("No current positions.");
   });
 
@@ -225,7 +225,7 @@ describe("HoldingsTabPanel — Exposure section (99-04 wiring)", () => {
     expect(section.textContent).toContain("Net exposure over time");
     expect(section.textContent).toContain("Allocation over time");
     // As-of stamps: snapshot asof + the last point of each series.
-    expect(section.textContent).toContain("as of Mar 1, 2024");
+    expect(section.textContent).toContain("as of Mar\u00a01,\u00a02024");
     // F-11 / D-11 (review R3-01 item 2, plan 201-36): the chart captions read
     // the helper's day form, the same one ExposureByClass prints, so the
     // section carries no `as of` followed by a raw YYYY-MM-DD day.

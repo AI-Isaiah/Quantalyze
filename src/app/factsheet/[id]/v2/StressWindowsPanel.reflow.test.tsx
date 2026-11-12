@@ -98,7 +98,7 @@ describe("StressWindowsPanel: the window dates read through the one date helper 
       </FactsheetProvider>,
     );
     const cell = container.querySelector("tbody td:nth-child(2)")!;
-    expect(cell.textContent?.trim()).toBe("Aug 1, 2024 → Aug 9, 2024");
+    expect(cell.textContent?.trim()).toBe("Aug\u00a01,\u00a02024 → Aug\u00a09,\u00a02024");
     expect(container.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });

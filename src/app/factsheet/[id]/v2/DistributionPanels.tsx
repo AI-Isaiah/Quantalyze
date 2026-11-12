@@ -562,7 +562,9 @@ export function CorrelationsMatrixPanel() {
   // Desktop cell/label dims = today's literals (88 / 36 / 110 / 11 / 12).
   const CELL_W = isMobile ? 104 : 88;
   const CELL_H = isMobile ? 48 : 36;
-  const LABEL_W = isMobile ? 128 : 110;
+  // 136 at mobile (was 128): "My allocation" is 13 glyphs, 13 × 0.6 × 16 = 124.8px end-anchored at
+  // LABEL_W - 8, so it starts at +3.2px; at 128 it started at -4.8px, outside the svg (201.1 D-05).
+  const LABEL_W = isMobile ? 136 : 110;
   const HEADER_H = 28;
   const headerFont = isMobile ? 16 : 11;
   const rowLabelFont = isMobile ? 16 : 11;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -10,6 +10,7 @@ import {
   CartesianGrid,
 } from "recharts";
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
+import { EdgeFitXTick } from "@/components/charts/EdgeFitXTick";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { formatPercent, formatDay } from "@/lib/utils";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
@@ -20,6 +21,15 @@ import {
   CHART_FONT_MONO,
   CHART_TOOLTIP_STYLE,
 } from "@/components/charts/chart-tokens";
+
+/**
+ * Recharts hands `labelFormatter` a `ReactNode` (the x value), which for this
+ * chart is always the ISO `date` string. A non-string is passed through
+ * untouched rather than fed to `formatDay`.
+ */
+function formatTooltipDay(label: ReactNode): ReactNode {
+  return typeof label === "string" ? formatDay(label) : label;
+}
 
 const LINE_COLORS = ["#1B6B5A", "#3B82F6", "#8B5CF6", "#F97316"];
 
@@ -219,9 +229,18 @@ export function CompareEquityOverlay({ items }: { items: CompareItem[] }) {
             stroke={CHART_BORDER}
             vertical={false}
           />
+          {/* Phase 201.1 D-02 / U-04: ticks print formatDay (Apr 14, 2026), drawn by
+              EdgeFitXTick at the unchanged 10px so an edge date stays inside the svg. */}
           <XAxis
             dataKey="date"
-            tick={{ fontSize: 10, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
+            tick={
+              <EdgeFitXTick
+                fontSize={10}
+                fill={CHART_AXIS_TICK}
+                fontFamily={CHART_FONT_MONO}
+              />
+            }
+            tickFormatter={formatDay}
             tickLine={false}
             axisLine={{ stroke: CHART_BORDER }}
             interval="preserveStartEnd"
@@ -236,6 +255,7 @@ export function CompareEquityOverlay({ items }: { items: CompareItem[] }) {
           />
           <TouchTooltip
             contentStyle={CHART_TOOLTIP_STYLE}
+            labelFormatter={formatTooltipDay}
             formatter={(value, name) => {
               const label = keys.find((k) => k.key === name)?.name ?? String(name);
               return [formatPercent(Number(value) / 100), label];

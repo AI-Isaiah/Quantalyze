@@ -285,13 +285,13 @@ describe("GlancePanel on the Overview (198 plan 01)", () => {
       />,
     );
     expect(glance().textContent).toContain(
-      "Figures through Nov 6, 2026 · holdings read Nov 7, 2026",
+      "Figures through Nov\u00a06,\u00a02026 · holdings read Nov\u00a07,\u00a02026",
     );
   });
 
   it("with no asof on any row only the first half of the stamp renders", () => {
     render(<AllocationDashboardV2 {...payload()} />);
-    expect(glance().textContent).toContain("Figures through Nov 6, 2026");
+    expect(glance().textContent).toContain("Figures through Nov\u00a06,\u00a02026");
     expect(glance().textContent).not.toContain("holdings read");
   });
 

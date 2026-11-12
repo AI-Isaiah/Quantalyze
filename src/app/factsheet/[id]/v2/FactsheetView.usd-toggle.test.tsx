@@ -80,7 +80,7 @@ function makeReturnsSeries(n: number, startDay = 1, drift = 0.0015): DailyPoint[
 }
 
 // Native record: 300 days from 2023-01-01, last day 2023-10-27.
-const NATIVE_END = "Oct 27, 2023";
+const NATIVE_END = "Oct\u00a027,\u00a02023";
 const NATIVE_BASE: FactsheetPayload = buildScenarioFactsheetPayload({
   portfolioDaily: makeReturnsSeries(300),
   benchmark: null,
@@ -274,7 +274,7 @@ describe("D-19 — the masthead stays native in both views", () => {
     expect(h.querySelector('[data-returns-unit="BTC"]')?.textContent).toBe("Returns in BTC");
     expect(h.textContent).toContain(`Track record through ${NATIVE_END}`);
     // The USD record ends a day earlier; that date must not reach the recency line.
-    expect(h.textContent).not.toContain("Track record through Oct 26, 2023");
+    expect(h.textContent).not.toContain("Track record through Oct\u00a026,\u00a02023");
     const aum = Array.from(h.querySelectorAll("p")).find((p) => (p.textContent ?? "").startsWith("AUM"))!.parentElement as HTMLElement;
     expect(aum.querySelectorAll("p")[1].textContent).toBe("—");
     expect(aum.textContent).not.toContain("$");
@@ -297,7 +297,7 @@ describe("D-21 / D-22 — the USD disclosure block", () => {
     expect(d.className).toContain("mt-4");
     expect(d.firstElementChild!.className).toContain("text-caption");
     expect(d.firstElementChild!.className).toContain("text-text-muted");
-    expect(d.firstElementChild!.textContent).toBe(`${DISCLOSURE_TAIL} Priced through Oct 26, 2023.`);
+    expect(d.firstElementChild!.textContent).toBe(`${DISCLOSURE_TAIL} Priced through Oct\u00a026,\u00a02023.`);
     expect(unpricedNote(container)).toBeNull();
   });
 
@@ -305,7 +305,7 @@ describe("D-21 / D-22 — the USD disclosure block", () => {
     const { container } = renderView(nativeWithUsd(usdViewOf({ leadingHole: true, usdStart: "2023-01-05" })));
     switchToUsd(container);
     expect(disclosure(container)!.firstElementChild!.textContent).toBe(
-      "Shown in USD, converted from BTC at the stored daily BTC close. Priced from Jan 5, 2023 through Oct 26, 2023.",
+      "Shown in USD, converted from BTC at the stored daily BTC close. Priced from Jan\u00a05,\u00a02023 through Oct\u00a026,\u00a02023.",
     );
   });
 
@@ -339,25 +339,25 @@ describe("D-06 — the unpriced-days note", () => {
 
   it("worked example 1: a native day followed by a native day (m=1, k=2)", () => {
     expect(noteFor(["2026-10-03"], 2)).toBe(
-      `No BTC close for 1 day: Oct 3, 2026. 2 daily USD returns that need that close are ${UNPRICED_TAIL}`,
+      `No BTC close for 1 day: Oct\u00a03,\u00a02026. 2 daily USD returns that need that close are ${UNPRICED_TAIL}`,
     );
   });
 
   it("worked example 2: an unpriced day between two native days (m=1, k=1)", () => {
     expect(noteFor(["2026-10-04"], 1)).toBe(
-      `No BTC close for 1 day: Oct 4, 2026. 1 daily USD return that needs that close is ${UNPRICED_TAIL}`,
+      `No BTC close for 1 day: Oct\u00a04,\u00a02026. 1 daily USD return that needs that close is ${UNPRICED_TAIL}`,
     );
   });
 
   it("plural forms: m=2 days, k=3 returns", () => {
     expect(noteFor(["2026-10-03", "2026-10-05"], 3)).toBe(
-      `No BTC close for 2 days: Oct 3, 2026; Oct 5, 2026. 3 daily USD returns that need those closes are ${UNPRICED_TAIL}`,
+      `No BTC close for 2 days: Oct\u00a03,\u00a02026; Oct\u00a05,\u00a02026. 3 daily USD returns that need those closes are ${UNPRICED_TAIL}`,
     );
   });
 
   it("m=2 days with k=1: those closes, singular return", () => {
     expect(noteFor(["2026-10-03", "2026-10-04"], 1)).toBe(
-      `No BTC close for 2 days: Oct 3, 2026 – Oct 4, 2026. 1 daily USD return that needs those closes is ${UNPRICED_TAIL}`,
+      `No BTC close for 2 days: Oct\u00a03,\u00a02026 – Oct\u00a04,\u00a02026. 1 daily USD return that needs those closes is ${UNPRICED_TAIL}`,
     );
   });
 
@@ -365,7 +365,7 @@ describe("D-06 — the unpriced-days note", () => {
     const days = ["2026-01-02", "2026-02-02", "2026-03-02", "2026-04-02", "2026-05-02", "2026-06-02"];
     const text = noteFor(days, 6);
     expect(text).toContain("No BTC close for 6 days:");
-    for (const d of ["Jan 2, 2026", "Feb 2, 2026", "Mar 2, 2026", "Apr 2, 2026", "May 2, 2026", "Jun 2, 2026"]) {
+    for (const d of ["Jan\u00a02,\u00a02026", "Feb\u00a02,\u00a02026", "Mar\u00a02,\u00a02026", "Apr\u00a02,\u00a02026", "May\u00a02,\u00a02026", "Jun\u00a02,\u00a02026"]) {
       expect(text).toContain(d);
     }
     expect(text).not.toContain("…");

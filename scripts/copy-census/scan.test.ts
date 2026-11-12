@@ -210,7 +210,7 @@ describe("rule A: a retired word in user-visible copy", () => {
       applies: (rule) => rule === "A",
       retiredWords: [{ id: "planted", re: /\bzebra\b/ }],
       terms: [],
-      dates: { deprecatedHelpers: [], monthNames: [], optionKeys: [], fieldNames: [] },
+      dates: { deprecatedHelpers: [], monthNames: [], optionKeys: [], fieldNames: [], axisDateKeys: [] },
     };
     expect(scanSource(FILE, "export const C = () => <p>A zebra</p>;\n", only)).toHaveLength(1);
     expect(scanSource(FILE, "export const C = () => <p>Saved portfolios</p>;\n", only)).toHaveLength(0);
@@ -223,7 +223,7 @@ describe("rule A: a retired word in user-visible copy", () => {
       applies: (rule) => rule === "C",
       retiredWords: [],
       terms: [],
-      dates: { deprecatedHelpers: [], monthNames: [], optionKeys: [], fieldNames: ["zebraDay"] },
+      dates: { deprecatedHelpers: [], monthNames: [], optionKeys: [], fieldNames: ["zebraDay"], axisDateKeys: [] },
     };
     const hitsOf = (src: string) => scanSource(FILE, src, onlyFields).filter((h) => h.rule === "C");
     expect(hitsOf("export const C = (r: { zebraDay: string }) => <p>{r.zebraDay}</p>;\n")).toHaveLength(1);
@@ -579,6 +579,48 @@ describe("rule C: a date printed by anything but the one helper", () => {
         expect(c(`export const s = (r: Record<string, string>, ${name}: string) => \`Covers ${"$"}{${name}}\`;\n`), `template ${name}`).toHaveLength(1);
         expect(c(`export const X = ({ r }: { r: { ${name}: string } }) => <p>{r.${name}}</p>;\n`), `child ${name}`).toHaveLength(1);
       }
+    });
+
+    // Phase 201.1 D-02 / U-06: a Recharts XAxis on a date key with neither a formatter nor a tick
+    // renderer prints the raw ISO day. The form reads `DATES.axisDateKeys` and holds no key list.
+    describe("axis-date-key: a date XAxis with no tickFormatter and no tick renderer", () => {
+      const axis = (attrs: string) => c(`export const X = () => <XAxis ${attrs} />;\n`);
+
+      it("flags an unformatted date axis, with a style-object tick or none (RED)", () => {
+        const one = axis('dataKey="date" tick={{ fontSize: 10 }}');
+        expect(one).toHaveLength(1);
+        expect(one[0]).toMatchObject({ rule: "C", id: "axis-date-key", kind: "axis-date-key" });
+        expect(axis('dataKey="date"')).toHaveLength(1);
+        expect(axis('dataKey="date" tick={CHART_TICK_STYLE}')).toHaveLength(1);
+        expect(c('export const X = () => <XAxis dataKey="date">{null}</XAxis>;\n')).toHaveLength(1);
+      });
+
+      it("stays quiet for a formatter, a tick renderer, a non-date key and an expression key (GREEN)", () => {
+        expect(axis('dataKey="date" tickFormatter={formatDay}')).toHaveLength(0);
+        expect(axis('dataKey="date" tick={<EdgeFitXTick />}')).toHaveLength(0);
+        expect(axis('dataKey="date" tick={(p) => <text>{p.value}</text>}')).toHaveLength(0);
+        expect(axis('dataKey="date" tick={function Tick() { return null; }}')).toHaveLength(0);
+        expect(axis('dataKey="label"')).toHaveLength(0);
+        // Blind spot, stated in the scanner header: a dataKey that is an expression is not read.
+        expect(axis("dataKey={key}")).toHaveLength(0);
+        expect(c('export const X = () => <YAxis dataKey="date" />;\n')).toHaveLength(0);
+      });
+
+      it("reads the key list from the policy it is given (the form holds no key list)", () => {
+        const only: ScanPolicy = {
+          applies: (rule) => rule === "C",
+          retiredWords: [],
+          terms: [],
+          dates: { deprecatedHelpers: [], monthNames: [], optionKeys: [], fieldNames: [], axisDateKeys: ["zebraDay"] },
+        };
+        const hitsOf = (src: string) => scanSource(FILE, src, only).filter((h) => h.rule === "C");
+        expect(hitsOf('export const X = () => <XAxis dataKey="zebraDay" />;\n')).toHaveLength(1);
+        expect(hitsOf('export const X = () => <XAxis dataKey="date" />;\n')).toHaveLength(0);
+      });
+
+      it("carries the policy's axis date keys, and a non-empty list", () => {
+        expect(DATES.axisDateKeys).toContain("date");
+      });
     });
 
     it("carries the date field names typed again here, in both directions", () => {

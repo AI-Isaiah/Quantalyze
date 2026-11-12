@@ -39,7 +39,7 @@ const L2 = "Binance — ••••4f2a";
 const L3 = "OKX — Spare";
 
 const RANGE = [{ from: "2026-10-03", to: "2026-10-11" }];
-const RANGE_TEXT = "Oct 3, 2026 – Oct 11, 2026";
+const RANGE_TEXT = "Oct\u00a03,\u00a02026 – Oct\u00a011,\u00a02026";
 
 const gap = (
   cause: KeyDataGap["cause"],
@@ -144,7 +144,7 @@ describe("MissingDataMessage: one line per key, named, dated and actionable (D-0
           ranges: [{ from: "2026-10-03", to: "2026-10-03" }],
         }),
       ])[0],
-    ).toBe(`${L1}: no data for Oct 3, 2026. ${EXCHANGES_ACTION}`);
+    ).toBe(`${L1}: no data for Oct\u00a03,\u00a02026. ${EXCHANGES_ACTION}`);
     cleanup();
     expect(
       linesText([
@@ -156,7 +156,7 @@ describe("MissingDataMessage: one line per key, named, dated and actionable (D-0
           ],
         }),
       ])[0],
-    ).toBe(`${L1}: no data for Oct 3, 2026 – Oct 4, 2026; Oct 9, 2026. ${EXCHANGES_ACTION}`);
+    ).toBe(`${L1}: no data for Oct\u00a03,\u00a02026 – Oct\u00a04,\u00a02026; Oct\u00a09,\u00a02026. ${EXCHANGES_ACTION}`);
   });
 
   it("a range that crosses a month and a year edge is expanded day by day, not guessed", () => {
@@ -167,18 +167,18 @@ describe("MissingDataMessage: one line per key, named, dated and actionable (D-0
           ranges: [{ from: "2026-12-30", to: "2027-01-02" }],
         }),
       ])[0],
-    ).toBe(`${L1}: no data for Dec 30, 2026 – Jan 2, 2027. ${EXCHANGES_ACTION}`);
+    ).toBe(`${L1}: no data for Dec\u00a030,\u00a02026 – Jan\u00a02,\u00a02027. ${EXCHANGES_ACTION}`);
   });
 
   it("range unknown, first missing day known: 'no data since {day}.' then the action", () => {
     expect(
       linesText([gap("sync_failing", [K1.id], { firstMissingDay: "2026-10-03", ranges: null })])[0],
-    ).toBe(`${L1}: no data since Oct 3, 2026. ${EXCHANGES_ACTION}`);
+    ).toBe(`${L1}: no data since Oct\u00a03,\u00a02026. ${EXCHANGES_ACTION}`);
     cleanup();
     expect(
       linesText([gap("read_incomplete", [K1.id], { firstMissingDay: "2026-10-03", ranges: null })])[0],
     ).toBe(
-      `${L1}: no data since Oct 3, 2026. Wait for the next sync, or reconnect the key on the Exchanges page if this persists.`,
+      `${L1}: no data since Oct\u00a03,\u00a02026. Wait for the next sync, or reconnect the key on the Exchanges page if this persists.`,
     );
   });
 

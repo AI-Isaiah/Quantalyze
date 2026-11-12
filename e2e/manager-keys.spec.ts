@@ -492,3 +492,96 @@ test.describe("Phase 200 - the Profile API keys rows at narrow and wide widths (
     ).toBeGreaterThanOrEqual(200);
   });
 });
+
+// Plain prose, nothing key-shaped (T-201.1-03): the gitleaks scan has nothing to match.
+const FAILED_ROW_LABEL = "Unified trading account for the BTC desk, long-only sleeve 1";
+const FAILED_ROW_SYNC_ERROR =
+  "The exchange rejected the read: this key may not read futures balances. Turn on read access for futures in the exchange settings, then press Resync now.";
+const LABEL_COLUMN_FLOOR = 200;
+
+test.describe("Phase 201.1 - a failed key row keeps a readable label (seeded, blocking)", () => {
+  let seeded: SeededManagerKeyPanel;
+  // See the first describe: cleared before every seed, set only after one succeeds.
+  let cleanupTarget: SeededManagerKeyPanel | undefined;
+
+  test.beforeEach(async ({ page }) => {
+    cleanupTarget = undefined;
+    seeded = await seedManagerKeyPanel({
+      linkedLabel: FAILED_ROW_LABEL,
+      linkedSyncStatus: "error",
+      linkedSyncError: FAILED_ROW_SYNC_ERROR,
+      disconnectedLabel: "Bybit old",
+    });
+    cleanupTarget = seeded;
+    await loginAs(page, seeded.manager.email, seeded.manager.password, {
+      landing: "/strategies",
+    });
+  });
+
+  test.afterEach(async () => {
+    if (cleanupTarget) await cleanupManagerKeyPanel(cleanupTarget);
+  });
+
+  // WR-13 / D-01: with a zero flex basis the line-breaker counted the label
+  // column as 0px, so the long status helper took line one and the label
+  // shrank to "U…" (20.2px at 1440px, 120px at 1920px in the UAT). A real
+  // basis (12.5rem) makes the line-breaker reserve the label's width first.
+  for (const width of [1280, 1440, 1920]) {
+    test(`at ${width}px a failed key row with a long sync_error keeps a ${LABEL_COLUMN_FLOOR}px label column`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/profile?tab=exchanges");
+      await expect(page).toHaveURL(/\/profile\?tab=exchanges/);
+
+      const g = await measureKeyRow(page, FAILED_ROW_LABEL);
+      const row = page.locator('[data-testid="allocator-key-row"]', {
+        hasText: FAILED_ROW_LABEL,
+      });
+      const helper = row.locator('[data-testid="allocator-sync-helper"]');
+      const pill = row.locator('[data-testid="allocator-sync-pill"]');
+      // Anti-vacuity: the long helper is really there, exactly as seeded.
+      await expect(helper).toBeVisible();
+      await expect(helper).toHaveText(FAILED_ROW_SYNC_ERROR);
+      await expect(pill).toHaveAttribute("data-sync-status", "error");
+      const helperBox = await helper.boundingBox();
+      if (!helperBox) throw new Error("the failed row's helper has no bounding box");
+
+      const numbers = `${width}px ${JSON.stringify(g)} helper=${JSON.stringify(helperBox)}`;
+      expect(
+        g.row.right - g.row.left,
+        `the single-line layout (row >= 56rem) is the one under test. ${numbers}`,
+      ).toBeGreaterThanOrEqual(896);
+      expect(
+        g.column.right - g.column.left,
+        `the failed row's label column is squeezed (WR-13). ${numbers}`,
+      ).toBeGreaterThanOrEqual(LABEL_COLUMN_FLOOR - 1);
+      expect(
+        helperBox.x + helperBox.width,
+        `the status helper must stay inside the row's content box. ${numbers}`,
+      ).toBeLessThanOrEqual(g.row.right - g.row.paddingRight + 1);
+
+      if (width === 1440) {
+        // UI-SPEC A-3: the disconnected row carries the same basis, so its
+        // label column keeps the same floor.
+        const d = await measureKeyRow(page, seeded.disconnectedKey!.label);
+        expect(
+          d.column.right - d.column.left,
+          `the disconnected row's label column is squeezed (UI-SPEC A-3 parity). ${width}px ${JSON.stringify(d)}`,
+        ).toBeGreaterThanOrEqual(LABEL_COLUMN_FLOOR - 1);
+        // The disconnected row has no long helper, so its column fills the line
+        // even on a zero basis and the width check alone cannot see a lost
+        // basis. Pin the basis itself (12.5rem = 200px at the default root size).
+        const basis = await page
+          .getByText(seeded.disconnectedKey!.label, { exact: true })
+          .evaluate((el) => getComputedStyle(el.closest(".min-w-0")!).flexBasis);
+        expect(
+          basis,
+          "the disconnected row's label column lost its 12.5rem single-line basis (UI-SPEC A-3 parity)",
+        ).toBe("200px");
+      }
+
+      await assertNoReflow(page, '[data-testid="allocator-key-row"]');
+    });
+  }
+});

@@ -172,7 +172,7 @@ describe("Cumulative Return Metrics: 3 Year / 5 Year rows exist only when the re
     expect(labels).not.toContain("5 Year");
     expect(rowValue(panel, "Since Inception")).toBe(pctSigned(payload.strategyMetrics.cum_ret));
     // Phase 170 AD-10: dense(166) ends 2024-06-14, an ended record, so its month row names that month.
-    const kept = ["Final month (Jun 2024)", "3 Month", "Year-to-date", "Since Inception", "CAGR"];
+    const kept = ["Final month (Jun\u00a02024)", "3 Month", "Year-to-date", "Since Inception", "CAGR"];
     expect(labels.filter((l) => kept.includes(l))).toEqual(kept);
   });
 
@@ -387,7 +387,7 @@ describe("the record length follows the selected basis at every site (WR-03)", (
     expect(liveSinceText(container)).toBe("Jan 1, 2024");
     expect(liveSinceText(container)).not.toContain("backtest");
     // The length fields still describe the selected (MTM) record.
-    expect(termValue(container, "Observation start")).toBe("Aug 8, 2024");
+    expect(termValue(container, "Observation start")).toBe("Aug\u00a08,\u00a02024");
   });
 
   it("R2-1: the same strategy makes no backtest claim under cash (control, unchanged)", () => {

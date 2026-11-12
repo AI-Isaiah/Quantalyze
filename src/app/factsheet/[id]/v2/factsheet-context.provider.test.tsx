@@ -501,3 +501,75 @@ describe("FactsheetProvider — the removed dark option is never read or re-writ
     expect(blob.cb).toBe("1");
   });
 });
+
+/**
+ * Phase 201.1 plan 04 (D-07) — the range contract the composer depends on. The composer
+ * mounts its chart before the lazy returns fetch lands, so the provider's payload GROWS
+ * after mount. A range the user never set must follow that growth (else the chart opens
+ * on a one-day "Selected range" with dashes in the KPI strip); a range the user DID set
+ * must survive it; and reset returns to the CURRENT full range, not the first render's.
+ */
+describe("FactsheetProvider — xRange follows the full range until the user sets one (D-07)", () => {
+  function payloadOfLength(n: number): FactsheetPayload {
+    const d = new Date(Date.UTC(2024, 0, 1));
+    const dates = Array.from({ length: n }, () => {
+      const iso = d.toISOString().slice(0, 10);
+      d.setUTCDate(d.getUTCDate() + 1);
+      return iso;
+    });
+    return { ...makePayload(), dates };
+  }
+
+  function RangeProbe() {
+    const { xRange, setXRange, resetXRange } = useXRange();
+    return (
+      <>
+        <span data-testid="range">{`${xRange[0]}-${xRange[1]}`}</span>
+        <button data-testid="set" onClick={() => setXRange([10, 40] as const)}>
+          set
+        </button>
+        <button data-testid="reset" onClick={() => resetXRange()}>
+          reset
+        </button>
+      </>
+    );
+  }
+
+  const tree = (n: number) => (
+    <FactsheetProvider payload={payloadOfLength(n)} persist={false}>
+      <RangeProbe />
+    </FactsheetProvider>
+  );
+  const range = () => screen.getByTestId("range").textContent;
+
+  it("an unset range follows the axis when the payload grows from 3 to 120 dates", () => {
+    const { rerender } = render(tree(3));
+    expect(range()).toBe("0-2");
+    rerender(tree(120));
+    expect(range()).toBe("0-119");
+  });
+
+  it("a range the user set is kept when the series grows, and reset returns to the CURRENT full range", () => {
+    const { rerender } = render(tree(120));
+    act(() => {
+      fireEvent.click(screen.getByTestId("set"));
+    });
+    expect(range()).toBe("10-40");
+    rerender(tree(150));
+    expect(range()).toBe("10-40");
+    act(() => {
+      fireEvent.click(screen.getByTestId("reset"));
+    });
+    expect(range()).toBe("0-149");
+  });
+
+  it("a range the user set that points past the end of a SHRUNK axis falls back to the current full range", () => {
+    const { rerender } = render(tree(120));
+    act(() => {
+      fireEvent.click(screen.getByTestId("set"));
+    });
+    expect(range()).toBe("10-40");
+    rerender(tree(20));
+    expect(range()).toBe("0-19");
+  });
+});

@@ -333,7 +333,7 @@ describe("ScenarioCompareTable", () => {
     expect(within(alphaStamp).getByText(methodologyLine(120), { exact: false })).toBeInTheDocument();
     // Both effective bounds render through formatDay, joined by a spaced
     // en-dash (U+2013), after a " · " separator (F-11, UI-SPEC contract 5).
-    expect(alphaStamp.textContent).toContain("· Jan 2, 2024 – Jun 1, 2024");
+    expect(alphaStamp.textContent).toContain("· Jan\u00a02,\u00a02024 – Jun\u00a01,\u00a02024");
     // F-11: no raw YYYY-MM-DD day reaches the stamp.
     expect(alphaStamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     // The WHOLE stamp (day count + dates) keeps the pre-existing font-metric
@@ -342,7 +342,7 @@ describe("ScenarioCompareTable", () => {
     const stampSpan = alphaStamp.querySelector("span.font-metric");
     expect(stampSpan).not.toBeNull();
     expect(stampSpan!.className).toContain("text-fixed-11");
-    expect(stampSpan!.textContent).toContain("Jan 2, 2024 – Jun 1, 2024");
+    expect(stampSpan!.textContent).toContain("Jan\u00a02,\u00a02024 – Jun\u00a01,\u00a02024");
     // The label stays the quiet honesty caption — never accent/warning/winner.
     expect(alphaStamp.innerHTML).not.toMatch(/text-accent|text-negative|text-warning/);
   });
@@ -361,8 +361,8 @@ describe("ScenarioCompareTable", () => {
     const earlyStamp = screen.getByTestId("stamp-Early");
     const lateStamp = screen.getByTestId("stamp-Late");
     // Heterogeneous windows are visible — each column shows its OWN range.
-    expect(earlyStamp.textContent).toContain("Jan 2, 2023 – Jun 1, 2023");
-    expect(lateStamp.textContent).toContain("Jan 2, 2024 – Jun 3, 2024");
+    expect(earlyStamp.textContent).toContain("Jan\u00a02,\u00a02023 – Jun\u00a01,\u00a02023");
+    expect(lateStamp.textContent).toContain("Jan\u00a02,\u00a02024 – Jun\u00a03,\u00a02024");
     expect(earlyStamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     expect(lateStamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     // They are DIFFERENT — not force-aligned to a shared window.

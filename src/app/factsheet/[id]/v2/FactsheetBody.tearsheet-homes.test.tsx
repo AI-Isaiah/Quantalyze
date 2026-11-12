@@ -251,7 +251,7 @@ describe("inside Advanced", () => {
   it('"Live since" start date -> a Live since row in Terms', async () => {
     const { advanced } = await mountOpen();
     const liveSince = termValue(advanced, "Live since");
-    expect(liveSince).toContain("Jun 1, 2024");
+    expect(liveSince).toContain("Jun\u00a01,\u00a02024");
     expect(liveSince).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
   it("the Generated date -> the Terms Factsheet computed row", async () => {

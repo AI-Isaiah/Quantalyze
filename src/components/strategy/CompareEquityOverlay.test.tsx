@@ -16,16 +16,33 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { isValidElement } from "react";
 import { CompareEquityOverlay } from "./CompareEquityOverlay";
+import { EdgeFitXTick } from "@/components/charts/EdgeFitXTick";
 import { formatPercent } from "@/lib/utils";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
 type Row = Record<string, number | string>;
 type TooltipFormatter = (value: unknown, name: unknown) => [string, string];
 
-const captured: { data: Row[]; formatter: TooltipFormatter | null } = {
+type DateFormatter = (value: string) => string;
+interface XAxisCapture {
+  tickFormatter?: DateFormatter;
+  tick?: unknown;
+  interval?: unknown;
+  minTickGap?: unknown;
+}
+
+const captured: {
+  data: Row[];
+  formatter: TooltipFormatter | null;
+  labelFormatter: DateFormatter | null;
+  xAxis: XAxisCapture | null;
+} = {
   data: [],
   formatter: null,
+  labelFormatter: null,
+  xAxis: null,
 };
 
 // ResponsiveContainer measures 0x0 in jsdom, so it is a plain div, and the
@@ -36,6 +53,13 @@ vi.mock("recharts", async () => {
   return {
     ...actual,
     ResponsiveContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+    // jsdom cannot lay out axis ticks, so the XAxis records the props the
+    // overlay hands it (the wiring is the unit under test; the rendered tick
+    // is pinned in a real browser by plan 201.1-15).
+    XAxis: (props: XAxisCapture & { dataKey?: string }) => {
+      if (props.dataKey === "date") captured.xAxis = props;
+      return null;
+    },
     LineChart: ({ data, children }: { data: Row[]; children: ReactNode }) => {
       captured.data = data;
       return <div data-testid="line-chart">{children}</div>;
@@ -47,8 +71,15 @@ vi.mock("recharts", async () => {
 // real wiring (the component passes THIS formatter to the tooltip) without a
 // test-only prop.
 vi.mock("@/components/charts/TouchTooltip", () => ({
-  TouchTooltip: ({ formatter }: { formatter: TooltipFormatter }) => {
+  TouchTooltip: ({
+    formatter,
+    labelFormatter,
+  }: {
+    formatter: TooltipFormatter;
+    labelFormatter?: DateFormatter;
+  }) => {
     captured.formatter = formatter;
+    captured.labelFormatter = labelFormatter ?? null;
     return null;
   },
 }));
@@ -56,6 +87,8 @@ vi.mock("@/components/charts/TouchTooltip", () => ({
 beforeEach(() => {
   captured.data = [];
   captured.formatter = null;
+  captured.labelFormatter = null;
+  captured.xAxis = null;
 });
 afterEach(cleanup);
 
@@ -504,5 +537,38 @@ describe("D-07 agreement: the last tooltip string equals the CompareTable Cumula
       const [text] = captured.formatter!(lastPoint(key), key);
       expect(text).toBe(formatPercent(cumulativeReturn));
     }
+  });
+});
+
+describe("Phase 201.1 D-02: the compare chart speaks the one date format", () => {
+  // Literal expected string with U+00A0 escapes, never built with the helper.
+  const APR_14 = "Apr\u00a014,\u00a02026";
+
+  function renderOne() {
+    render(
+      <CompareEquityOverlay
+        items={[item({ id: "a", levels: curve(10, 1, 1.1), cumulativeReturn: 0.1 })]}
+      />,
+    );
+  }
+
+  it("x-axis ticks print formatDay through an EdgeFitXTick at the unchanged 10px, interval and gap untouched", () => {
+    renderOne();
+    const axis = captured.xAxis!;
+    expect(axis).not.toBeNull();
+    expect(axis.tickFormatter!("2026-04-14")).toBe(APR_14);
+    expect(isValidElement(axis.tick)).toBe(true);
+    const el = axis.tick as { type: unknown; props: { fontSize?: number } };
+    expect(el.type).toBe(EdgeFitXTick);
+    expect(el.props.fontSize).toBe(10);
+    expect(axis.interval).toBe("preserveStartEnd");
+    expect(axis.minTickGap).toBe(60);
+  });
+
+  it("the hover label prints formatDay and the value formatter is unchanged", () => {
+    renderOne();
+    expect(captured.labelFormatter).not.toBeNull();
+    expect(captured.labelFormatter!("2026-04-14")).toBe(APR_14);
+    expect(captured.formatter).not.toBeNull();
   });
 });

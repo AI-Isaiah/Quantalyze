@@ -148,7 +148,7 @@ describe("/admin/intros labels and names", () => {
   it("prints the request time as a day then a UTC time, not a raw ISO slice", async () => {
     const { container } = render(await AdminIntrosPage());
     const text = container.textContent ?? "";
-    expect(text).toContain("Jan 1, 2026, 12:00 UTC");
+    expect(text).toContain("Jan\u00a01,\u00a02026, 12:00\u00a0UTC");
     expect(text).not.toContain("2026-01-01 12:00");
   });
 

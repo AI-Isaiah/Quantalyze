@@ -969,7 +969,7 @@ describe("the Health column, computed on the server (199-12, D-03)", () => {
       state.strategies = [healthRow("s-old", 40, "crypto")];
       const { unmount } = render(await renderToElement());
       const word = healthCellText("Strategy s-old");
-      expect(word, role).toMatch(/^Stale \(no data since [A-Z][a-z]{2} \d{1,2}, \d{4}\)$/);
+      expect(word, role).toMatch(/^Stale \(no data since [A-Z][a-z]{2}\u00a0\d{1,2},\u00a0\d{4}\)$/);
       expect(word, role).toContain(
         String(new Date(`${dayAgo(40)}T00:00:00Z`).getUTCFullYear()),
       );
@@ -1236,7 +1236,7 @@ const FAILED_JOB = {
   claimed_at: "2026-11-02T10:00:00Z",
   created_at: "2026-11-02T09:00:00Z",
 };
-const FAILED_SENTENCE = "The last computation, on Nov 2, 2026, did not produce figures.";
+const FAILED_SENTENCE = "The last computation, on Nov\u00a02,\u00a02026, did not produce figures.";
 const UNREADABLE_SENTENCE =
   "We could not read this strategy's computation status. Reload this page to try again.";
 
@@ -1273,8 +1273,8 @@ describe("the Analytics failed detail names the failed day and the viewer's acti
     state.jobs["s-claimed"] = [{ ...FAILED_JOB, claimed_at: "2026-11-05T23:59:59Z", created_at: "2026-11-01T00:00:00Z" }];
     state.jobs["s-queued-then-failed"] = [{ ...FAILED_JOB, claimed_at: null, created_at: "2026-10-30T08:00:00Z" }];
     await renderPage();
-    expect(noteOf("Strategy s-claimed")!.textContent).toContain("on Nov 5, 2026,");
-    expect(noteOf("Strategy s-queued-then-failed")!.textContent).toContain("on Oct 30, 2026,");
+    expect(noteOf("Strategy s-claimed")!.textContent).toContain("on Nov\u00a05,\u00a02026,");
+    expect(noteOf("Strategy s-queued-then-failed")!.textContent).toContain("on Oct\u00a030,\u00a02026,");
   });
 
   it("an unreadable day prints the shipped KCS09-UNREADABLE sentence with its reload remedy, as a read failure, and never a day", async () => {
@@ -1397,7 +1397,9 @@ describe("the Stale detail names the day and the viewer's action (199-16 Task 2,
       day: "numeric",
       year: "numeric",
       timeZone: "UTC",
-    });
+    })
+      // D-04: the helpers keep a date together with U+00A0, so the independent oracle does too.
+      .replace(/ /g, "\u00a0");
 
   it("an API strategy: a manager and both are sent to the edit page, an allocator-only viewer to the Exchanges page and never the edit page", async () => {
     for (const role of ["manager", "both"] as const) {

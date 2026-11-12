@@ -171,7 +171,7 @@ describe("the metrics rail follows the zoom window (SC10, D-27)", () => {
     for (const r of bodyRows) {
       const tds = [...r.querySelectorAll("td")].map((td) => td.textContent ?? "");
       for (const d of tds.slice(1, 4)) {
-        expect(d, `${d} is not a day inside the window`).toMatch(/^[A-Z][a-z]{2} \d{1,2}, \d{4}$/);
+        expect(d, `${d} is not a day inside the window`).toMatch(/^[A-Z][a-z]{2}\u00a0\d{1,2},\u00a0\d{4}$/);
         expect(inWindow.has(d), `${d} is inside the window`).toBe(true);
       }
     }

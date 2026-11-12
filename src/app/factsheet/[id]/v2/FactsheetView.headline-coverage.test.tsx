@@ -65,7 +65,7 @@ beforeEach(() => {
 
 /** The first measured day, as the read path carries it (`headline_since`). */
 const SINCE = "2026-04-18";
-const D = "Apr 18, 2026";
+const D = "Apr\u00a018,\u00a02026";
 const R3 =
   "a zero or negative account balance, a near-zero account balance and a one-day gain or loss larger than the balance";
 // 164.6.6.2.3 D-14: the flow-dominance reason is retired, so the three reasons a

@@ -149,7 +149,7 @@ describe("departedHistoryCard — the switch and the line never disagree (SFH-C4
   it("an anchored included key: switch on, and it can be excluded", () => {
     const card = departedHistoryCard(knownKey, knownCase.keys, { state: "anchored" });
     expect(card).toEqual({
-      sentence: "History included until Jun 10, 2026.",
+      sentence: "History included until Jun\u00a010,\u00a02026.",
       checked: true,
       toggleTo: "exclude",
     });

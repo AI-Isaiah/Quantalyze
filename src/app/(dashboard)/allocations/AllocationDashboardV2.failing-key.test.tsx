@@ -126,7 +126,7 @@ describe("AllocationDashboardV2: the key the total stopped counting is named (18
     renderWith([E("Main")]);
     const note = screen.getByTestId(TID);
     expect(note.textContent).toBe(
-      "The total counts Main through Jun 3, 2026: its exchange key is failing to sync, so its capital is no longer counted after that day. " + ACT_FAILING,
+      "The total counts Main through Jun\u00a03,\u00a02026: its exchange key is failing to sync, so its capital is no longer counted after that day. " + ACT_FAILING,
     );
     expect(note.getAttribute("role")).toBe("status");
     expect(note.tagName).toBe("P");
@@ -136,7 +136,7 @@ describe("AllocationDashboardV2: the key the total stopped counting is named (18
   it("a read that came back incomplete: the total holds the last complete day", () => {
     renderWith([E("Main", "read_incomplete")]);
     expect(screen.getByTestId(TID).textContent).toBe(
-      "The total counts Main through Jun 3, 2026: the latest read of its exchange history came back incomplete, so the total holds its last complete day. " + ACT_INCOMPLETE,
+      "The total counts Main through Jun\u00a03,\u00a02026: the latest read of its exchange history came back incomplete, so the total holds its last complete day. " + ACT_INCOMPLETE,
     );
   });
 
@@ -155,7 +155,7 @@ describe("AllocationDashboardV2: the key the total stopped counting is named (18
   it("keys sharing a reason and a day are one clause and take 'their'", () => {
     renderWith([E("Main"), E("Alpha"), E("Zed")]);
     expect(screen.getByTestId(TID).textContent).toBe(
-      "The total counts Alpha, Main and Zed through Jun 3, 2026: their exchange key is failing to sync, so their capital is no longer counted after that day. " + ACT_FAILING,
+      "The total counts Alpha, Main and Zed through Jun\u00a03,\u00a02026: their exchange key is failing to sync, so their capital is no longer counted after that day. " + ACT_FAILING,
     );
   });
 
@@ -169,9 +169,9 @@ describe("AllocationDashboardV2: the key the total stopped counting is named (18
     ]);
     expect(screen.getByTestId(TID).textContent).toBe(
       [
-        "The total counts Alpha through Jun 1, 2026: its exchange key is failing to sync, so its capital is no longer counted after that day. " + ACT_FAILING,
-        "The total counts Main through Jun 3, 2026: its exchange key is failing to sync, so its capital is no longer counted after that day. " + ACT_FAILING,
-        "The total counts Zed through Jun 3, 2026: the latest read of its exchange history came back incomplete, so the total holds its last complete day. " + ACT_INCOMPLETE,
+        "The total counts Alpha through Jun\u00a01,\u00a02026: its exchange key is failing to sync, so its capital is no longer counted after that day. " + ACT_FAILING,
+        "The total counts Main through Jun\u00a03,\u00a02026: its exchange key is failing to sync, so its capital is no longer counted after that day. " + ACT_FAILING,
+        "The total counts Zed through Jun\u00a03,\u00a02026: the latest read of its exchange history came back incomplete, so the total holds its last complete day. " + ACT_INCOMPLETE,
         "The total leaves out Beta and Gamma: their exchange key has not returned a complete history yet. " + ACT_UNDATED,
       ].join(" "),
     );
@@ -251,7 +251,7 @@ describe("AllocationDashboardV2: the key the total stopped counting is named (18
       ranges: [{ from: "2026-06-04", to: "2026-06-10" }],
     });
     const GAP_LINE =
-      "OKX — Main: no data for Jun 4, 2026 – Jun 10, 2026. Reconnect the key on the Exchanges page or wait for the next sync.";
+      "OKX — Main: no data for Jun\u00a04,\u00a02026 – Jun\u00a010,\u00a02026. Reconnect the key on the Exchanges page or wait for the next sync.";
 
     function renderGaps(exits: Exit[], gaps: ReturnType<typeof gapFor>[] | undefined) {
       return render(
@@ -276,7 +276,7 @@ describe("AllocationDashboardV2: the key the total stopped counting is named (18
       expect(screen.getByTestId("overview-missing-data").textContent).toContain(GAP_LINE);
       const note = screen.getByTestId(TID);
       expect(note.textContent).toBe(
-        "The total counts Zed through Jun 3, 2026: its exchange key is failing to sync, so its capital is no longer counted after that day. " + ACT_FAILING,
+        "The total counts Zed through Jun\u00a03,\u00a02026: its exchange key is failing to sync, so its capital is no longer counted after that day. " + ACT_FAILING,
       );
       expect(note.textContent).not.toContain("Main");
     });
@@ -291,7 +291,7 @@ describe("AllocationDashboardV2: the key the total stopped counting is named (18
       renderGaps([E("Main")], undefined);
       expect(screen.queryByTestId("overview-missing-data")).toBeNull();
       expect(screen.getByTestId(TID).textContent).toBe(
-        "The total counts Main through Jun 3, 2026: its exchange key is failing to sync, so its capital is no longer counted after that day. " + ACT_FAILING,
+        "The total counts Main through Jun\u00a03,\u00a02026: its exchange key is failing to sync, so its capital is no longer counted after that day. " + ACT_FAILING,
       );
     });
   });

@@ -17,13 +17,22 @@
  *      into JSX text (F-11, D-11, review R3-01, plan 201-40). A second, `date-field`, reads a raw date
  *      FIELD printed with no call around it: a JSX child (also behind `&&`), the value of a copy
  *      attribute (`USER_ATTRS`), or a template literal with prose or a dash or arrow in its literal
- *      parts, whose printed value is one of the field names in `policy.dates.fieldNames`.
- *      The scanner holds no name list. BLIND SPOTS, stated: a date printed through a neutral name
+ *      parts, whose printed value is one of the field names in `policy.dates.fieldNames`. A third,
+ *      `axis-date-key` (Phase 201.1 D-02, U-06), reads a Recharts `XAxis` whose `dataKey` is a string
+ *      literal naming one of `policy.dates.axisDateKeys`, with no `tickFormatter` attribute and a
+ *      `tick` that is absent or a style (an object literal or an identifier): Recharts then prints the
+ *      raw ISO day. A `tick` given a JSX element or a function is a renderer and is not read.
+ *      The scanner holds no name or key list. BLIND SPOTS, stated: a date printed through a neutral name
  *      (`first`), through a call (a local converter, a slice other than 0..7 or 0..10, a
  *      `toISOString()` held in a variable), through a display prop outside `USER_ATTRS` (`value`,
  *      `subtitle`, …; review GC2-02), or as a string literal outside JSX text is not read by
  *      these forms. The R3-01 sites of those shapes carry a rendered-text pin instead (plans 201-37
- *      to 201-39).
+ *      to 201-39). The `axis-date-key` form adds its own: a `dataKey` given as an expression
+ *      (`dataKey={key}`) is not read; a formatter that itself prints an ISO fragment
+ *      (`(d) => d.slice(5)`, O-1 in the Phase 201.1 UI-SPEC) is deliberately neither reported nor
+ *      excepted, because the form only asks whether a formatter exists; and the tick text Recharts
+ *      produces at run time is invisible to a syntax scanner, so the rendered-tick pin of plan
+ *      201.1-15 is the second half of that gate.
  *
  * ONE HIT PER NODE PER RULE. A node carrying three retired words is one hit, so the hit count
  * for a file moves by one when one string is fixed.
@@ -80,6 +89,11 @@ export interface DatePolicy {
    * helper (F-11). A JSX child or a prose template that prints one with no call around it is a hit.
    */
   fieldNames: readonly string[];
+  /**
+   * `dataKey` values of a Recharts `XAxis` whose raw value is an ISO day (Phase 201.1 D-02, U-06).
+   * An `XAxis` on one of these with no `tickFormatter` and no tick renderer is a hit.
+   */
+  axisDateKeys: readonly string[];
 }
 
 export interface ScanPolicy {
@@ -440,6 +454,32 @@ const snippet = (n: ts.Node, sf: ts.SourceFile): string => norm(n.getText(sf)).s
 /** A YYYY-MM-DD day, word-bounded so a longer digit run or a phone-like number is not one. Mechanism, like the 0..10 slice bounds. */
 const ISO_DAY_RE = /\b\d{4}-\d{2}-\d{2}\b/;
 
+/** The attribute named `name` among a JSX element's attributes, or undefined. Spread attributes are not read. */
+function jsxAttr(attrs: ts.JsxAttributes, name: string, sf: ts.SourceFile): ts.JsxAttribute | undefined {
+  for (const a of attrs.properties) {
+    if (ts.isJsxAttribute(a) && a.name.getText(sf) === name) return a;
+  }
+  return undefined;
+}
+
+/**
+ * An `XAxis` on a date key that neither formats nor renders its ticks (Phase 201.1 D-02, U-06).
+ * Reads a string-literal `dataKey` only. `tick` counts as a renderer when it is a JSX element or a
+ * function; absent, an object literal or an identifier is a style, which prints the raw value.
+ */
+function isUnformattedDateAxis(attrs: ts.JsxAttributes, keys: ReadonlySet<string>, sf: ts.SourceFile): boolean {
+  const key = jsxAttr(attrs, "dataKey", sf)?.initializer;
+  if (!key || !ts.isStringLiteral(key) || !keys.has(key.text)) return false;
+  if (jsxAttr(attrs, "tickFormatter", sf)) return false;
+  const tick = jsxAttr(attrs, "tick", sf);
+  if (!tick) return true;
+  const init = tick.initializer;
+  if (!init || !ts.isJsxExpression(init) || !init.expression) return false;
+  let e: ts.Expression = init.expression;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  return ts.isObjectLiteralExpression(e) || ts.isIdentifier(e);
+}
+
 export function scanSource(file: string, source: string, policy: ScanPolicy): CensusHit[] {
   const wantA = policy.applies("A", file);
   const wantB = policy.applies("B", file);
@@ -503,6 +543,7 @@ export function scanSource(file: string, source: string, policy: ScanPolicy): Ce
   const optionKeys = new Set(dates.optionKeys);
   const deprecated = new Set(dates.deprecatedHelpers);
   const fieldNames = new Set(dates.fieldNames);
+  const axisDateKeys = new Set(dates.axisDateKeys);
   const ruleC = (n: ts.Node): void => {
     const hit = (id: string, kind: string, text?: string): void => {
       out.push({ rule: "C", id, file, line: lineOf(sf, n), kind, text: text ?? snippet(n, sf) });
@@ -517,6 +558,11 @@ export function scanSource(file: string, source: string, policy: ScanPolicy): Ce
         ts.isJsxElement(n.parent) || ts.isJsxFragment(n.parent) || (ts.isJsxAttribute(n.parent) && USER_ATTRS.has(n.parent.name.getText(sf)));
       if (printed && n.expression && printsDateField(n.expression, fieldNames)) {
         hit("date-field", "date-field");
+      }
+    } else if (ts.isJsxSelfClosingElement(n) || ts.isJsxOpeningElement(n)) {
+      // Phase 201.1 D-02 / U-06: a date XAxis nothing formats and nothing renders prints the raw ISO day.
+      if (n.tagName.getText(sf) === "XAxis" && isUnformattedDateAxis(n.attributes, axisDateKeys, sf)) {
+        hit("axis-date-key", "axis-date-key");
       }
     } else if (ts.isTemplateExpression(n)) {
       // One hit per template, and only a template with prose: `${id}:${asof}` is a key, `until ${d.until}` is a sentence,

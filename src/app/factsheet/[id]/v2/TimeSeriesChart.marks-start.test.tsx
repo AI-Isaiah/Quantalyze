@@ -66,7 +66,7 @@ const LAST_DAY = DATES[N - 1];
 /** Deterministic, finite, non-zero daily returns. */
 const RETURNS = DATES.map((_, i) => 0.002 + Math.sin(i * 0.7) * 0.01);
 const START_INSIDE = "2026-02-10"; // index 40
-const START_FORMATTED = "Feb 10, 2026";
+const START_FORMATTED = "Feb\u00a010,\u00a02026";
 
 function points(): DailyPoint[] {
   return DATES.map((date, i) => ({ date, value: RETURNS[i] }));
@@ -142,7 +142,7 @@ describe("TimeSeriesChart marks-start note, (a): start inside the drawn range", 
 
     const text = g.querySelector("text");
     expect(text).not.toBeNull();
-    expect(text!.textContent).toBe("RECORDED EQUITY FROM FEB 10, 2026");
+    expect(text!.textContent).toBe("RECORDED EQUITY FROM FEB\u00a010,\u00a02026");
     expect(text!.textContent).toBe(marksStartLabelRendered(START_FORMATTED));
     expect(text!.getAttribute("letter-spacing")).toBe("0.05em");
     expect(text!.getAttribute("font-size")).toBe("10");
@@ -333,13 +333,13 @@ describe("TimeSeriesChart marks-start note: the flag is cumulative-only", () => 
 describe("TimeSeriesChart marks-trailing note (SFH-2 N1): says so when the marks stopped updating", () => {
   const TRAILING = '[data-testid="marks-trailing-note"]';
   const TRAILING_DAY = "2026-02-20";
-  const TRAILING_FORMATTED = "Feb 20, 2026";
+  const TRAILING_FORMATTED = "Feb\u00a020,\u00a02026";
 
   it("draws one note in the uppercase tracked mono voice, with the formatted day", () => {
     const { container } = renderChart(payloadWith({ marksSince: START_INSIDE, marksTrailingSince: TRAILING_DAY }));
     const note = container.querySelector(TRAILING)!;
     expect(note).not.toBeNull();
-    expect(note.textContent).toBe("Marks paused from Feb 20, 2026");
+    expect(note.textContent).toBe("Marks paused from Feb\u00a020,\u00a02026");
     expect(note.textContent).toBe(marksTrailingNote(TRAILING_FORMATTED));
     for (const cls of ["font-mono", "uppercase", "tracking-wider", "text-text-secondary"]) {
       expect(note.className).toContain(cls);

@@ -136,7 +136,7 @@ function benchCell(label: string, title = "Main Metrics"): string {
   return tr.querySelectorAll("td")[2]?.textContent ?? "";
 }
 
-const STARTS_AFTER = "BTC compared over Jun 15, 2025 – Dec 1, 2025 (its data starts after this range).";
+const STARTS_AFTER = "BTC compared over Jun\u00a015,\u00a02025 – Dec\u00a01,\u00a02025 (its data starts after this range).";
 
 describe("D-05 zoomed benchmark covered-span note", () => {
   it("populated: BTC starting after the window start prints the starts-after sentence and the vs-benchmark figures still show", async () => {
@@ -178,14 +178,14 @@ describe("D-05 zoomed benchmark covered-span note", () => {
     // last is 650 (2025-10-12); the window [100, 700] runs 50 days past it.
     mount(build(0, 650), { range: [100, 700] });
     await click("zoom");
-    expect(notes()).toEqual(["BTC compared over Apr 10, 2024 \u2013 Oct 12, 2025 (its data ends before this range)."]);
+    expect(notes()).toEqual(["BTC compared over Apr\u00a010,\u00a02024 \u2013 Oct\u00a012,\u00a02025 (its data ends before this range)."]);
   });
 
   it("populated: both sides short prints the 'starts after and ends before' sentence", async () => {
     mount(build(530, 650), { range: [500, 700] });
     await click("zoom");
     expect(notes()).toEqual([
-      "BTC compared over Jun 15, 2025 \u2013 Oct 12, 2025 (its data starts after and ends before this range).",
+      "BTC compared over Jun\u00a015,\u00a02025 \u2013 Oct\u00a012,\u00a02025 (its data starts after and ends before this range).",
     ]);
   });
 
@@ -193,7 +193,7 @@ describe("D-05 zoomed benchmark covered-span note", () => {
     // Closes on 699 and 700 only: index 700 (2025-12-01) is the one covered day.
     mount(build(699, 700), { range: [500, 700] });
     await click("zoom");
-    expect(notes()).toEqual(["BTC compared on Dec 1, 2025 only (its data starts after this range)."]);
+    expect(notes()).toEqual(["BTC compared on Dec\u00a01,\u00a02025 only (its data starts after this range)."]);
   });
 
   it("empty: no benchmark day inside the window prints no D-05 note, and nothing prints a dash for a date", async () => {

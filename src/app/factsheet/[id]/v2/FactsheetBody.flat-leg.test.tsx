@@ -229,7 +229,7 @@ describe("a flat strategy leg on the factsheet (D-04, B13), the KPI strip", () =
       // 170.6 plan 11 (D-08): SPX's last close (2026-05-08) is before this record's last date, so the
       // floor sentence ends with the day its prices end. Typed by hand, not rebuilt by the function.
       expect(slot[0].textContent).toBe(
-        `Alpha and beta need at least ${spx.jointWithheld!.floor} days paired with SPX; this record has ${spx.jointWithheld!.paired}. SPX prices end May 8, 2026.`,
+        `Alpha and beta need at least ${spx.jointWithheld!.floor} days paired with SPX; this record has ${spx.jointWithheld!.paired}. SPX prices end May\u00a08,\u00a02026.`,
       );
     }
     expect(screen.queryByTestId("joint-flat-leg-reason")).toBeNull();

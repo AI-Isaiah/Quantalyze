@@ -25,7 +25,7 @@ describe("FreshnessBadge — the batch date (D-07)", () => {
     expect(container.querySelector(".font-metric")).toBeNull();
     const text = container.textContent ?? "";
     expect(text).not.toContain("·");
-    expect(text).not.toContain("Sep 25");
+    expect(text).not.toContain("Sep\u00a025");
   });
 
   it("showDate={false} equals the default render", () => {
@@ -57,7 +57,7 @@ describe("FreshnessBadge — the batch date (D-07)", () => {
     const sep = container.querySelector('span[aria-hidden="true"]');
     expect(sep?.textContent).toBe("·");
     const date = container.querySelector(".font-metric");
-    expect(date?.textContent).toBe("Sep 25, 2026");
+    expect(date?.textContent).toBe("Sep\u00a025,\u00a02026");
     expect(container.textContent).toContain("Batch:");
   });
 
@@ -83,14 +83,14 @@ describe("FreshnessBadge — the batch date (D-07)", () => {
       <FreshnessBadge computedAt={new Date(PARSEABLE)} showDate />,
     );
     expect(asDate.container.querySelector(".font-metric")?.textContent).toBe(
-      "Sep 25, 2026",
+      "Sep\u00a025,\u00a02026",
     );
     asDate.unmount();
     const asNumber = render(
       <FreshnessBadge computedAt={Date.parse(PARSEABLE)} showDate />,
     );
     expect(asNumber.container.querySelector(".font-metric")?.textContent).toBe(
-      "Sep 25, 2026",
+      "Sep\u00a025,\u00a02026",
     );
   });
 
@@ -99,6 +99,6 @@ describe("FreshnessBadge — the batch date (D-07)", () => {
       <FreshnessBadge computedAt={PARSEABLE} variant="dot" showDate />,
     );
     expect(container.querySelector(".font-metric")).toBeNull();
-    expect(container.textContent).not.toContain("Sep 25");
+    expect(container.textContent).not.toContain("Sep\u00a025");
   });
 });

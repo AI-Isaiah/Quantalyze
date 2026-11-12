@@ -168,14 +168,25 @@ export function CoverageTimeline({
           })}
         </ul>
         {/* Union axis endpoint date labels only (no interior ticks —
-            58-RESEARCH Open Question 1). Timezone-free raw ISO strings. The
+            58-RESEARCH Open Question 1). Printed through `formatDay` (Phase
+            201.1 D-02), which keeps each date whole with U+00A0; the row wraps
+            and packs toward the track's right edge (`min-w-0 justify-end`, start
+            `mr-auto`, end `ml-auto`), so a pair that does not fit moves the end
+            to a second line, right-aligned, and a label wider than the track
+            (320px: 79px in 70px) spills left over the empty spacer, never right
+            out of the section (measured in plan 201.1-15). The
             leading spacer (w-32 + gap-2) aligns the labels under the bar track,
             matching the per-row name column. */}
         <div className="mt-2 flex items-center gap-2 text-fixed-11 font-mono tabular-nums text-text-muted">
           <span className="w-32 shrink-0" aria-hidden />
-          <span className="flex flex-1 justify-between">
-            <span>{unionWindow.start}</span>
-            <span>{unionWindow.end}</span>
+          <span
+            data-testid="coverage-endpoint-labels"
+            className="flex min-w-0 flex-1 flex-wrap justify-end gap-x-2"
+          >
+            <span data-testid="coverage-endpoint-start" className="mr-auto">{formatDay(unionWindow.start)}</span>
+            <span data-testid="coverage-endpoint-end" className="ml-auto">
+              {formatDay(unionWindow.end)}
+            </span>
           </span>
         </div>
       </div>

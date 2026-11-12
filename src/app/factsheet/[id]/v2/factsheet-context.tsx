@@ -205,7 +205,23 @@ export function FactsheetProvider({
     [payload.dates.length],
   );
   const [comparator, setComparator] = useState<ComparatorKey>(payload.activeComparator);
-  const [xRange, setXRangeRaw] = useState<readonly [number, number]>(fullRange);
+  // Phase 201.1 (D-07): the range the USER set (a pan, zoom, brush drag or the period
+  // control), null until they set one. `xRange` below is derived: the user's range when
+  // set, the CURRENT full range otherwise. Seeding `useState(fullRange)` once froze the
+  // opening range at the first render's axis, so a composer chart mounted before its
+  // lazy returns landed (axis of 1 point, `[0, 0]`) kept that one-day range after the
+  // series grew, and read as `Selected range: <d> - <d>` with dashes in the KPI strip.
+  const [userRange, setUserRange] = useState<readonly [number, number] | null>(null);
+  // A user range that points past the end of a SHRUNK axis falls back to the current full
+  // range (else `TimeSeriesChart` clamps both ends to the last index and the strip reads
+  // a one-day "Selected range"). Bounded by the SAME three-term max `setXRange` clamps to.
+  const maxIdx =
+    Math.max(
+      payload.dates.length,
+      payload.seriesByBasis?.mark_to_market?.dates.length ?? 0,
+      payload.seriesByBasis?.smoothed_mtm?.dates.length ?? 0,
+    ) - 1;
+  const xRange = userRange && userRange[1] <= maxIdx ? userRange : fullRange;
   const [colorblind, setColorblind] = useState(false);
   const [regimes, setRegimes] = useState(false);
 
@@ -243,7 +259,7 @@ export function FactsheetProvider({
       if (e > maxIdx) e = maxIdx;
       if (e - s < MIN_VISIBLE_SAMPLES - 1) e = Math.min(maxIdx, s + MIN_VISIBLE_SAMPLES - 1);
       if (e - s < MIN_VISIBLE_SAMPLES - 1) s = Math.max(0, e - MIN_VISIBLE_SAMPLES + 1);
-      startTransition(() => setXRangeRaw([s, e]));
+      startTransition(() => setUserRange([s, e]));
     },
     [
       payload.dates.length,
@@ -257,7 +273,8 @@ export function FactsheetProvider({
   // resetXRange is low-volume (one click), so the eager update is preferable
   // — wrapping it in startTransition risks interleaving with the URL-writer
   // debounce when a user pans then immediately resets.
-  const resetXRange = useCallback(() => setXRangeRaw(fullRange), [fullRange]);
+  // Clearing the user's range hands `xRange` back to the CURRENT `fullRange`.
+  const resetXRange = useCallback(() => setUserRange(null), []);
 
   // B7 — the localStorage half of view-state persistence now routes through the
   // cross-tab primitive + `factsheetViewStateCodec` (SSR-safe deferred
