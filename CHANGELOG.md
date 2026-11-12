@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.133.38.1] - 2026-11-12 — records: close 200 MANAGERKEYS and 201 PLAINWORDS, book 201.1 POLISHRESIDUALS
+
+Records PR for the Phase 200 gap closure (shipped as PR #1253, v0.133.37.2) and Phase 201 (shipped as PR #1254, v0.133.38.0). Seven commits on `records/close-200-201`, no source change. Their planning artifacts lived only on `feat/200-gaps` and `feat/201-plainwords` until now. Both phases close on the founder-authorized UAT of 2026-11-12, and its seven residual UI defects are booked as Phase 201.1.
+
+### Added
+- **Phase 200 gap closure artifacts on `main`:** plans and summaries 200-13 to 200-15, and the updated `200-REVIEW.md` and `200-VERIFICATION.md`.
+- **Phase 201 planning artifacts on `main`:** one directory, `201-plainwords-one-name-per-concept-explained-and-the-small-inco` (the slug gsd-tools resolves from ROADMAP), with the 40 plans and summaries, CONTEXT, DISCUSSION-LOG, RESEARCH, PATTERNS, UI-SPEC, VALIDATION, REVIEW, SECURITY and VERIFICATION.
+- **`## UAT 2026-11-12` in both verifications:** the production checks (the one-key panel, picker and 44px confirm dialog, the disclaimer, `/security#egress-ips`, no retired words, one date format, Escape on All Filters, the Max DD tooltip) and local items a to j at `5ad404c17`, each mapped to the frontmatter `human_verification` items it closes. The Phase 200 founder review of D-01..D-15 and D-R1 stays open in `TODOS.md`.
+- **Phase 201.1 POLISHRESIDUALS**, booked with `/gsd-phase --insert 201` and the founder's decision of 2026-11-12 ("One polish phase now"). It has seven success criteria: WR-13 (a failed key row with a long `sync_error` squeezes the label at 1440px), no ISO dates left in the composer CoverageTimeline or the compare chart ticks, one range separator, no year orphans, "My allocation" whole in the correlation matrix, the composer sticky bar at 390px, and the composer's one-day opening range debugged to its root cause. `201.1-CONTEXT.md` locks the seven criteria and leaves the implementation to Claude, so planning can skip discussion.
+
+### Changed
+- **Both verifications `passed`** on the 2026-11-12 UAT. They keep `verified_at_sha` and `drift_subjects`, with no covered_files or covered_digest.
+- **ROADMAP, REQUIREMENTS and STATE close Phases 200 and 201** through `gsd-tools phase complete`. Phase 200 shows 15/15 plans. Phase 201's plan list is rebuilt from each PLAN's `wave:` frontmatter, with all 40 plans in 11 waves, including 201-28 to 201-40, which the branch ROADMAP never listed. CLAR-03, CLAR-04 and CLAR-06 are complete. STATE names 201.1 as the only open phase of v1.21, at 17 of 18 phases.
+
+### Notes
+- The STATE fields that `phase complete` broke were fixed by hand. It cut `stopped_at` and `last_activity_desc` at a `#`, dropped `current_phase_name`, and moved `## Current Position` to "All phases complete". The phase list and next pointer in `state.json` now include 201.1.
+- The branches' own STATE and `state.json` edits ("executing 201, plan 8 of 27") were not brought over, because the closes supersede them.
+- The 201.1 title says "found in the 200/201 UAT" rather than the founder's "found in the Phase 200/201 UAT". An unchecked ROADMAP bullet that names "Phase 200" breaks planning hygiene rule 6e. The Goal line keeps the founder's wording, and the directory slug, made from the first wording, still resolves through gsd-tools.
+- Phase 200 is `passed` while the founder review of D-01..D-15 and D-R1 stays open in `TODOS.md`. That item is a decision review, not a code gap.
+- The Phase 200 first-CI-run item closed on PR #1253's green `e2e-seeded` job, which lists `e2e/manager-keys.spec.ts`. The reporter prints no per-spec count, so "0 skipped" for that spec is not measured.
+
 ## [0.133.38.0] - 2026-11-11 — PLAINWORDS: one name per concept, explained, and one date format
 
 Phase 201. Every concept now has one name in the UI, every registered metric or term opens its definition, every user-facing day prints in one format, and the small inconsistencies from the 2026-11 UAT are closed. 40 plans: 34 main plans plus 6 SC-3 gap-closure plans (201-35 to 201-40). There were three review rounds and two gap-closure review rounds. 132 code commits on `feat/201-plainwords` (merge base `19353fd1f`) ship as one filtered commit. The founder's smart-discuss decisions F-01 to F-15 (2026-11-11) override the D-decisions they name: "Bridge" is retired and "Scenario" is the registered term (F-04), and the wizard egress link points at a static statement (F-12).

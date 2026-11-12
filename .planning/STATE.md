@@ -3,7 +3,7 @@ gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
 current_phase: 201.1
-current_phase_name: POLISHRESIDUALS — the residual UI defects found in the Phase 200/201 UAT are fixed
+current_phase_name: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed
 status: planning
 stopped_at: Phases 200 and 201 closed on the 2026-11-12 UAT; 201.1 booked, not planned yet
 last_updated: "2026-11-12T07:09:24.180Z"
@@ -32,7 +32,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-06)
 
-**Current focus:** Phase 194 — FIGURETRUTH — a figure means one thing everywhere and shows only when it can mean something
+**Current focus:** Phase 201.1 — POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -685,7 +685,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 204 added (2026-11-10, /gsd-phase add, founder "Eigene Folgephase"): INTROAUTH, security follow-up of 194.2, runs first; tracked text neutral until the fix is live
 - Phase 205 added (2026-11-10, /gsd-phase add, founder 2026-11-10 routing): ONEVERDICT, 194.2 R3 WR-01..03
 - Phase 206 added (2026-11-10, /gsd-phase add): SESSIONLOOP, 199 R3 WR-01-R3 (proxy signed-in bounce confirms the user with getUser; pre-existing, user-facing)
-- Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the Phase 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
+- Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 
 ### Decisions
 

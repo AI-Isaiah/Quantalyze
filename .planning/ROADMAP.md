@@ -105,7 +105,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step (completed 2026-11-10)
 - [x] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
 - [x] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed (completed 2026-11-12)
-- [ ] **Phase 201.1: POLISHRESIDUALS — the residual UI defects found in the Phase 200/201 UAT are fixed** (INSERTED) - WR-13 key-row squeeze, the last ISO dates, one range separator, no year orphans, "My allocation" whole in the matrix, the composer sticky bar wrap and its one-day opening range
+- [ ] **Phase 201.1: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed** (INSERTED) - WR-13 key-row squeeze, the last ISO dates, one range separator, no year orphans, "My allocation" whole in the matrix, the composer sticky bar wrap and its one-day opening range
 - [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
 - [x] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input (completed 2026-11-07)
 - [x] **Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro** (completed 2026-11-10)
@@ -670,7 +670,7 @@ Plans:
 **Wave 11** *(blocked on Wave 10 completion)*
 - [x] 201-40-PLAN.md — The SC-3 date gate (SC-3 gap closure) (CLAR-06; wave 11)
 
-### Phase 201.1: POLISHRESIDUALS — the residual UI defects found in the Phase 200/201 UAT are fixed (INSERTED)
+### Phase 201.1: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (INSERTED)
 
 **Goal:** The residual UI defects found in the Phase 200/201 UAT are fixed. Booked 2026-11-12 by founder decision ("One polish phase now") after the 2026-11-12 UAT, which passed Phases 200 and 201 with these seven routed here rather than reopening either phase.
 **Requirements**: TBD
