@@ -541,7 +541,7 @@ Plans 01-05 can execute now; plans 06-18 execute only after Phase 196 merges int
 **Goal:** A manager can see which strategies each key feeds, and nothing re-points a strategy's key without an explicit confirmation. Renaming happens in one place that shows which name is public. Adding a strategy and managing keys each have one entry point, and the security explanation lives in one place.
 **Requirements**: ROUTE-09, ROUTE-10, LEAN-04
 **Depends on:** Phase 192 (the one security explanation carries 192's corrected account), Phase 199 (adding a strategy's one entry point lives on the merged list)
-**Plans:** 12/12 plans executed
+**Plans:** 15/15 plans executed
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -580,13 +580,18 @@ Plans:
 **Cross-cutting constraints:** <!-- gsd:generated -->
 - Every new gate in this plan was seen RED by a neuter applied to a byte copy in the scratchpad and restored with `cp`, then `cmp` exit 0.
 
+**Gap closure** *(UAT and e2e re-measurement 2026-11-11, the three gaps in 200-VERIFICATION.md; one local lane, so the plans run in sequence)*
+- [x] 200-13-PLAN.md — the one-key panel e2e tests move to a seeded spec in the blocking `e2e-seeded` list: seeded manager-only login, no env self-skip, a database read proves nothing is written before Change key (wave 1)
+- [x] 200-14-PLAN.md — the shared Modal's 20x20 Close becomes a 44x44 target for every dialog, pinned by the tap-target scan and measured on two open dialogs (wave 2)
+- [x] 200-15-PLAN.md — at 320px the Profile key row gives the label the full line and wraps Last sync below it, in both key lists; desktop stays one line (wave 3)
+
 
 ### Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed
 
 **Goal:** Specialist terms are explained where they appear, each concept has one name across the app, and the small inconsistencies are fixed: factsheet sections numbered in order, one date format, Escape closes the filter drawer, the egress-IP link leads to the IPs or is removed, and the disclaimer typo is gone. Added 2026-11-10 (founder, Phase 196/197 UAT, "Real name everywhere"): a strategy reads under its real name on every surface, including the browse route behind compare's "Add strategy" and the tearsheet card and title (`TODOS.md` `197-STRATEGY-NAME-PSEUDONYM-01`).
 **Requirements**: CLAR-03, CLAR-04, CLAR-06
 **Depends on:** Phase 196, Phase 197, Phase 198, Phase 200 (renames, tooltips and numbering apply to the surfaces those phases leave)
-**Plans:** 0 plans
+**Plans:** 27 plans
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -602,7 +607,44 @@ Plans:
 Wording and tooltips are checked against `DESIGN.md` (Voice / microcopy, Typography).
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [ ] 201-01-PLAN.md — Term registry and one `Term` wrapper (CLAR-03; wave 1)
+- [ ] 201-02-PLAN.md — Real name where the viewer can see it in discovery, never elsewhere: resolver, browse route, My allocation payload (CLAR-04; wave 1)
+- [ ] 201-03-PLAN.md — The one date helper (CLAR-06; wave 1)
+- [ ] 201-04-PLAN.md — Escape closes "All Filters"; CompareTable volatility unsigned (CLAR-06; wave 1)
+- [ ] 201-05-PLAN.md — Egress-IP pointer and the disclaimer typo (CLAR-06; wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 201-06-PLAN.md — Copy census scanner, policy and planted proofs (CLAR-03, CLAR-04, CLAR-06; wave 2)
+- [ ] 201-07-PLAN.md — Real name on the factsheet family and tearsheet manager card (CLAR-04; wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 201-25-PLAN.md — Census ledgers on the live tree and the census test (CLAR-03, CLAR-04, CLAR-06; wave 3)
+- [ ] 201-26-PLAN.md — Remaining resolver call sites, admin visibility fact, Risk widgets name order (CLAR-04; wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 201-08-PLAN.md — Factsheet Detailed metrics: numerals in render order, terms, dates (wave 4)
+- [ ] 201-09-PLAN.md — Factsheet opening view and panels: terms, print switch, Constituents (wave 4)
+- [ ] 201-10-PLAN.md — Remaining factsheet files and `src/lib/factsheet/**`: tier-aware custody clause, dates (wave 4)
+- [ ] 201-11-PLAN.md — Scenario composer: scenario, Scenario AUM, terms (wave 4)
+- [ ] 201-12-PLAN.md — My allocation overview: KPI terms, allocation wording, dates (wave 4)
+- [ ] 201-13-PLAN.md — Optimizer, impact, insights, exchanges (wave 4)
+- [ ] 201-14-PLAN.md — Navigation "Scenario", Bridge and mandate terms, widgets (wave 4)
+- [ ] 201-15-PLAN.md — Holdings tab and remaining allocations files (wave 4)
+- [ ] 201-16-PLAN.md — Discovery, compare, browse, Strategies page: tooltips from the registry, "Save view" (wave 4)
+- [ ] 201-17-PLAN.md — Watchlist, freshness chips, intro request, recommendations (wave 4)
+- [ ] 201-18-PLAN.md — Remaining components (wave 4)
+- [ ] 201-19-PLAN.md — Strategy wizard and its error copy (wave 4)
+- [ ] 201-20-PLAN.md — Admin copy (wave 4)
+- [ ] 201-21-PLAN.md — API user-visible strings (wave 4)
+- [ ] 201-22-PLAN.md — Everything else under `src/`, including /for-quants and the retired report page (wave 4)
+- [ ] 201-27-PLAN.md — Saved scenarios, commit drawer, compare views (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 201-23-PLAN.md — Fold ledgers into the permanent census, RED proofs, delete transitional helpers (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 201-24-PLAN.md — Merged-branch fix-up against a baseline, e2e sweep, TODOS closures, all gates (wave 6)
 
 ### Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained
 
@@ -672,7 +714,7 @@ Plans:
 | 197. SCREEN | 6/6 | Complete    | 2026-11-10 |
 | 198. MYBOOK | 14/14 | Complete    | 2026-11-10 |
 | 199. MANAGERHOME | 18/18 | Complete    | 2026-11-10 |
-| 200. MANAGERKEYS | 12/12 | Complete    | 2026-11-11 |
+| 200. MANAGERKEYS | 15/15 | In Progress |  |
 | 201. PLAINWORDS | 0/0 | Not started | - |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
