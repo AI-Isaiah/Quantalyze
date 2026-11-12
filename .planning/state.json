@@ -66,7 +66,7 @@
     {
       "number": "201.1",
       "name": "POLISHRESIDUALS (INSERTED)",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "202",
@@ -95,9 +95,9 @@
     }
   ],
   "next": {
-    "command": "/gsd-plan-phase 201.1",
-    "label": "Plan phase 201.1",
-    "reason": "Phase 201.1 POLISHRESIDUALS — needs a plan"
+    "command": "/gsd-new-milestone",
+    "label": "Start a new milestone",
+    "reason": "All phases complete — start a new milestone"
   },
-  "updated_at": "2026-11-12T07:08:51.842Z"
+  "updated_at": "2026-11-12T22:24:46.882Z"
 }

@@ -105,7 +105,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step (completed 2026-11-10)
 - [x] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
 - [x] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed (completed 2026-11-12)
-- [ ] **Phase 201.1: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed** (INSERTED) - WR-13 key-row squeeze, the last ISO dates, one range separator, no year orphans, "My allocation" whole in the matrix, the composer sticky bar wrap and its one-day opening range
+- [x] **Phase 201.1: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed** (INSERTED) - WR-13 key-row squeeze, the last ISO dates, one range separator, no year orphans, "My allocation" whole in the matrix, the composer sticky bar wrap and its one-day opening range (completed 2026-11-13)
 - [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
 - [x] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input (completed 2026-11-07)
 - [x] **Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro** (completed 2026-11-10)
@@ -675,7 +675,7 @@ Plans:
 **Goal:** The residual UI defects found in the Phase 200/201 UAT are fixed. Booked 2026-11-12 by founder decision ("One polish phase now") after the 2026-11-12 UAT, which passed Phases 200 and 201 with these seven routed here rather than reopening either phase.
 **Requirements**: TBD
 **Depends on:** Phase 200, Phase 201
-**Plans:** 0 plans
+**Plans:** 16/16 plans complete
 **UI hint**: yes
 
 **Success Criteria** (what must be TRUE):
@@ -688,7 +688,32 @@ Plans:
 7. **Composer opening range:** the composer opening on `SELECTED RANGE: <d> – <same d>` (1 day of overlap; KPIs show dashes until "Reset to full history" is pressed) is debugged to its root cause, and fixed if real or recorded as a seed/headless artifact with evidence. It reproduces before 201, at `4a65c8843`.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 201.1 to break down)
+**Wave 1**
+- [x] 201.1-01-PLAN.md — No year orphans: the date helpers' no-break spaces pinned by code point; the composer Coverage window uses the spaced en dash (D-04, D-03; wave 1)
+- [x] 201.1-02-PLAN.md — A failed key row keeps a readable label at 1280, 1440 and 1920 (`@4xl:basis-[12.5rem]`), proved on the lane (D-01; wave 1)
+- [x] 201.1-03-PLAN.md — "My allocation" whole in the matrix: cap 13, mobile `LABEL_W` 136, NARROWCHARTS fixtures reverted, payload cache key bumped (D-05; wave 1)
+- [x] 201.1-04-PLAN.md — Composer opening range: a failing jsdom rerender test, then a root-cause fix or a recorded artifact (D-07; wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 201.1-05-PLAN.md — No-break-space test pins: factsheet view, part 1 of 2 (D-04; wave 2)
+- [x] 201.1-06-PLAN.md — No-break-space test pins: factsheet body, owner page, trade-fetch and the last factsheet view files, part 2 of 2 (D-04; wave 2)
+- [x] 201.1-07-PLAN.md — No-break-space test pins: MetricsColumn and charts (D-04; wave 2)
+- [x] 201.1-08-PLAN.md — No-break-space test pins: allocations dashboard notices and holdings tab, part 1 of 2 (D-04; wave 2)
+- [x] 201.1-09-PLAN.md — No-break-space test pins: allocations widgets, add-allocation and intelligence, part 2 of 2 (D-04; wave 2)
+- [x] 201.1-10-PLAN.md — No-break-space test pins: allocations components, admin and recommendations (D-04; wave 2)
+- [x] 201.1-11-PLAN.md — No-break-space test pins: lib, exchanges and the admin component (D-04; wave 2)
+- [x] 201.1-12-PLAN.md — No-break-space test pins: strategies and StrategyTable (D-04; wave 2)
+- [x] 201.1-13-PLAN.md — No ISO dates: compare-chart ticks and hover label through `formatDay`, CoverageTimeline endpoints, copy census rule C gains the axis date key form (D-02; wave 2)
+- [x] 201.1-14-PLAN.md — The sticky bar keeps "No material change yet." readable at 320, 390, 768 and 1280; the opening-range lane test (D-06, D-07; wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 201.1-15-PLAN.md — Lane tests for the compare ticks and the coverage endpoints, plus the NARROWCHARTS cross-check (D-02, D-05; wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 201.1-16-PLAN.md — Re-bake the changed SVG goldens through `bake_svg_goldens` and commit exactly the measured set; run by the orchestrator, not autonomous (D-05; wave 4)
+
+**Cross-cutting constraints:** <!-- gsd:generated -->
+- No assertion in these files is weakened: no exact match turned into a normalising matcher, no `\s` in place of a date space, no expected value built with the helper, and no fixture input changed.
 
 ### Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained
 
@@ -760,7 +785,7 @@ Plans:
 | 199. MANAGERHOME | 18/18 | Complete    | 2026-11-10 |
 | 200. MANAGERKEYS | 15/15 | Complete    | 2026-11-12 |
 | 201. PLAINWORDS | 40/40 | Complete    | 2026-11-12 |
-| 201.1. POLISHRESIDUALS (INSERTED) | 0/0 | Not started | - |
+| 201.1. POLISHRESIDUALS (INSERTED) | 16/16 | Complete    | 2026-11-13 |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
 | 204. INTROAUTH | 2/2 | Complete    | 2026-11-10 |

@@ -2,20 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
-current_phase: 201.1
-current_phase_name: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed
-status: planning
-stopped_at: Phases 200 and 201 closed on the 2026-11-12 UAT; 201.1 booked, not planned yet
-last_updated: "2026-11-12T07:09:24.180Z"
-last_activity: 2026-11-12
-last_activity_desc: Phases 200 and 201 closed, Phase 201.1 POLISHRESIDUALS booked
-state_head: 2561250d3a0546d0056b74d7591ad3a79bce4f47
+current_phase: "201.1"
+status: completed
+stopped_at: Phase 201.1 complete — all phases complete
+last_updated: "2026-11-12T22:24:46.853Z"
+last_activity: 2026-11-13
+last_activity_desc: Phase 201.1 complete
+state_head: b7326d9901480a9697cbb6b64447046876f8fb8a
 progress:
   total_phases: 18
-  completed_phases: 17
-  total_plans: 201
-  completed_plans: 201
-  percent: 94
+  completed_phases: 18
+  total_plans: 217
+  completed_plans: 217
+  percent: 100
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 201.1 (POLISHRESIDUALS) booked, the only open phase of v1.21
-Plan: 201.1: not planned yet
-Status: 200 and 201 closed on the founder-authorized UAT of 2026-11-12 (shipped v0.133.37.2 PR #1253, v0.133.38.0 PR #1254); 201.1 ready to plan
-Last activity: 2026-11-12 — Phases 200 MANAGERKEYS and 201 PLAINWORDS closed, Phase 201.1 POLISHRESIDUALS booked
-Progress: [█████████░] 94% (17 of 18 phases)
+Phase: 201.1
+Plan: 16 of 16
+Status: All phases complete
+Last activity: 2026-11-13 — Phase 201.1 complete
+Progress: [██████████] 100% (18 of 18 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1767,9 +1766,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-11-07T17:42:15.306Z
-**Stopped At:** Phases 200 and 201 closed on the 2026-11-12 UAT; 201.1 booked, not planned yet
-**Resume File:** None
+**Last Date:** 2026-11-12T07:54:54.622Z
+**Stopped At:** Phase 201.1 complete — all phases complete
+**Resume File:** .planning/phases/201.1-polishresiduals-the-residual-ui-defects-found-in-the-phase-2/201.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md
