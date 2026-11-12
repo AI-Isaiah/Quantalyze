@@ -591,7 +591,7 @@ Plans:
 **Goal:** Specialist terms are explained where they appear, each concept has one name across the app, and the small inconsistencies are fixed: factsheet sections numbered in order, one date format, Escape closes the filter drawer, the egress-IP link leads to the IPs or is removed, and the disclaimer typo is gone. Added 2026-11-10 (founder, Phase 196/197 UAT, "Real name everywhere"): a strategy reads under its real name on every surface, including the browse route behind compare's "Add strategy" and the tearsheet card and title (`TODOS.md` `197-STRATEGY-NAME-PSEUDONYM-01`).
 **Requirements**: CLAR-03, CLAR-04, CLAR-06
 **Depends on:** Phase 196, Phase 197, Phase 198, Phase 200 (renames, tooltips and numbering apply to the surfaces those phases leave)
-**Plans:** 27 plans
+**Plans:** 40/40 plans executed
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -608,43 +608,66 @@ Wording and tooltips are checked against `DESIGN.md` (Voice / microcopy, Typogra
 
 Plans:
 **Wave 1**
-- [ ] 201-01-PLAN.md — Term registry and one `Term` wrapper (CLAR-03; wave 1)
-- [ ] 201-02-PLAN.md — Real name where the viewer can see it in discovery, never elsewhere: resolver, browse route, My allocation payload (CLAR-04; wave 1)
-- [ ] 201-03-PLAN.md — The one date helper (CLAR-06; wave 1)
-- [ ] 201-04-PLAN.md — Escape closes "All Filters"; CompareTable volatility unsigned (CLAR-06; wave 1)
-- [ ] 201-05-PLAN.md — Egress-IP pointer and the disclaimer typo (CLAR-06; wave 1)
+- [x] 201-01-PLAN.md — Term registry and one `Term` wrapper (CLAR-03; wave 1)
+- [x] 201-02-PLAN.md — Real name where the viewer can see it in discovery, never elsewhere: resolver, browse route, My allocation payload (CLAR-04; wave 1)
+- [x] 201-03-PLAN.md — The one date helper (CLAR-06; wave 1)
+- [x] 201-04-PLAN.md — Escape closes "All Filters"; CompareTable volatility unsigned (CLAR-06; wave 1)
+- [x] 201-05-PLAN.md — Egress-IP pointer and the disclaimer typo (CLAR-06; wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 201-06-PLAN.md — Copy census scanner, policy and planted proofs (CLAR-03, CLAR-04, CLAR-06; wave 2)
-- [ ] 201-07-PLAN.md — Real name on the factsheet family and tearsheet manager card (CLAR-04; wave 2)
+- [x] 201-06-PLAN.md — Copy census scanner, policy and planted proofs (CLAR-03, CLAR-04, CLAR-06; wave 2)
+- [x] 201-07-PLAN.md — Real name on the factsheet family and tearsheet manager card (CLAR-04; wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 201-25-PLAN.md — Census ledgers on the live tree and the census test (CLAR-03, CLAR-04, CLAR-06; wave 3)
-- [ ] 201-26-PLAN.md — Remaining resolver call sites, admin visibility fact, Risk widgets name order (CLAR-04; wave 3)
+- [x] 201-25-PLAN.md — Census ledgers on the live tree and the census test (CLAR-03, CLAR-04, CLAR-06; wave 3)
+- [x] 201-26-PLAN.md — Remaining resolver call sites, admin visibility fact, Risk widgets name order (CLAR-04; wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 201-08-PLAN.md — Factsheet Detailed metrics: numerals in render order, terms, dates (wave 4)
-- [ ] 201-09-PLAN.md — Factsheet opening view and panels: terms, print switch, Constituents (wave 4)
-- [ ] 201-10-PLAN.md — Remaining factsheet files and `src/lib/factsheet/**`: tier-aware custody clause, dates (wave 4)
-- [ ] 201-11-PLAN.md — Scenario composer: scenario, Scenario AUM, terms (wave 4)
-- [ ] 201-12-PLAN.md — My allocation overview: KPI terms, allocation wording, dates (wave 4)
-- [ ] 201-13-PLAN.md — Optimizer, impact, insights, exchanges (wave 4)
-- [ ] 201-14-PLAN.md — Navigation "Scenario", Bridge and mandate terms, widgets (wave 4)
-- [ ] 201-15-PLAN.md — Holdings tab and remaining allocations files (wave 4)
-- [ ] 201-16-PLAN.md — Discovery, compare, browse, Strategies page: tooltips from the registry, "Save view" (wave 4)
-- [ ] 201-17-PLAN.md — Watchlist, freshness chips, intro request, recommendations (wave 4)
-- [ ] 201-18-PLAN.md — Remaining components (wave 4)
-- [ ] 201-19-PLAN.md — Strategy wizard and its error copy (wave 4)
-- [ ] 201-20-PLAN.md — Admin copy (wave 4)
-- [ ] 201-21-PLAN.md — API user-visible strings (wave 4)
-- [ ] 201-22-PLAN.md — Everything else under `src/`, including /for-quants and the retired report page (wave 4)
-- [ ] 201-27-PLAN.md — Saved scenarios, commit drawer, compare views (wave 4)
+- [x] 201-08-PLAN.md — Factsheet Detailed metrics: numerals in render order, terms, dates (wave 4)
+- [x] 201-09-PLAN.md — Factsheet opening view and panels: terms, print switch, Constituents (wave 4)
+- [x] 201-10-PLAN.md — Remaining factsheet files and `src/lib/factsheet/**`: tier-aware custody clause, dates (wave 4)
+- [x] 201-11-PLAN.md — Scenario composer: scenario, Scenario AUM, terms (wave 4)
+- [x] 201-12-PLAN.md — My allocation overview: KPI terms, allocation wording, dates (wave 4)
+- [x] 201-13-PLAN.md — Optimizer, impact, insights, exchanges (wave 4)
+- [x] 201-14-PLAN.md — Navigation "Scenario", Bridge and mandate terms, widgets (wave 4)
+- [x] 201-15-PLAN.md — Holdings tab and remaining allocations files (wave 4)
+- [x] 201-16-PLAN.md — Discovery, compare, browse, Strategies page: tooltips from the registry, "Save view" (wave 4)
+- [x] 201-17-PLAN.md — Watchlist, freshness chips, intro request, recommendations (wave 4)
+- [x] 201-18-PLAN.md — Remaining components (wave 4)
+- [x] 201-19-PLAN.md — Strategy wizard and its error copy (wave 4)
+- [x] 201-20-PLAN.md — Admin copy (wave 4)
+- [x] 201-21-PLAN.md — API user-visible strings (wave 4)
+- [x] 201-22-PLAN.md — Everything else under `src/`, including /for-quants and the retired report page (wave 4)
+- [x] 201-27-PLAN.md — Saved scenarios, commit drawer, compare views (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 201-23-PLAN.md — Fold ledgers into the permanent census, RED proofs, delete transitional helpers (wave 5)
+- [x] 201-28-PLAN.md — Mandate-check card, replacement dialog and outcome banner in plain words; "Bridge" retired (F-04) (CLAR-03, CLAR-04; wave 5)
+- [x] 201-29-PLAN.md — Mandate, holding detail and onboarding copy in plain words (F-04) (CLAR-04; wave 5)
+- [x] 201-30-PLAN.md — Scenario tab copy in plain words (F-04) (CLAR-04; wave 5)
+- [x] 201-31-PLAN.md — Retire "Bridge" from the replacement flow's copy (F-04) (CLAR-04; wave 5)
+- [x] 201-32-PLAN.md — Egress IP status on `/security#egress-ips` (F-12) (CLAR-06; wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 201-24-PLAN.md — Merged-branch fix-up against a baseline, e2e sweep, TODOS closures, all gates (wave 6)
+- [x] 201-33-PLAN.md — "Scenario" registered, "Bridge" retired in the census (F-04, F-08) (CLAR-03, CLAR-04; wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 201-34-PLAN.md — Every Scenario label explains itself (F-08) (CLAR-03; wave 7)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [x] 201-23-PLAN.md — Fold ledgers into the permanent census, RED proofs, delete transitional helpers (wave 8)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [x] 201-24-PLAN.md — Merged-branch fix-up against a baseline, e2e sweep, TODOS closures, all gates (wave 9)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [x] 201-35-PLAN.md — Public-surface dates through `formatDay` (SC-3 gap closure) (CLAR-06; wave 10)
+- [x] 201-36-PLAN.md — My allocation dates through `formatDay` (SC-3 gap closure) (CLAR-06; wave 10)
+- [x] 201-37-PLAN.md — Scenario composer dates (SC-3 gap closure) (CLAR-06; wave 10)
+- [x] 201-38-PLAN.md — Strategy wizard dates (SC-3 gap closure) (CLAR-06; wave 10)
+- [x] 201-39-PLAN.md — Exchange-manager history sentence and staff-facing dates (SC-3 gap closure) (CLAR-06; wave 10)
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [x] 201-40-PLAN.md — The SC-3 date gate (SC-3 gap closure) (CLAR-06; wave 11)
 
 ### Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained
 

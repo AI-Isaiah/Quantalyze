@@ -2,7 +2,7 @@
 phase: 201-plainwords-one-name-per-concept-explained-and-the-small-inco
 verified: 2026-11-11T23:45:00Z
 verified_at_sha: f9d80353f0a7c26e23ae833af01dfaa8a70f25d1
-status: human_needed
+status: passed
 score: 8/8 must-haves verified
 behavior_unverified: 0
 drift_subjects:
@@ -174,6 +174,39 @@ Four items, in the frontmatter `human_verification` list: tooltip hover and keyb
 ### Gaps Summary
 
 None. The one gap from the previous verification (SC-3, raw `YYYY-MM-DD` display dates) is closed in the code: each named site prints through `formatDay`, no local date formatter or non-helper locale call remains outside `src/lib/utils.ts`, and the census gate now reads the field, literal and template forms, so a reintroduction in those shapes goes RED. Everything else in the roadmap contract held on the regression check. What remains is human verification of how the rendered pages read, plus the gate's stated blind spots, which are advisory.
+
+
+## UAT 2026-11-12
+
+Founder-authorized UAT on 2026-11-12 moves this verification from `human_needed` to `passed`. The `verified_at_sha` above is the commit the code verdict was issued at; the UAT ran on production and on a local stack at `5ad404c17`.
+
+**Production** (quantalyze.xyz, the founder's signed-in admin browser, 606px wide):
+- The edit-page one-key panel works: the picker, then the confirm dialog with Close at 44x44 and Cancel and Change key each 44px tall. After Cancel and a reload, the strategy still feeds from its original key.
+- The disclaimer reads "does not operate".
+- `/security#egress-ips` states "We have no static egress IP yet…".
+- My allocation and discovery show no retired words. Dates read "Nov 11, 2026".
+- Escape closes All Filters and focus returns to the opener.
+- The factsheet Max DD tooltip shows "The largest fall from a peak to a later low, in percent." inside the viewport.
+
+**Local stack at `5ad404c17`** (v0.133.38.0, both ship PRs merged; screenshots kept in the session scratchpad under `200-201-uat/`, not committed). Every item PASS:
+- a. The edit page at 320px and 1280px: Close is 44x44, no overflow.
+- b. The Profile key rows at 320, 768, 1024 and 1280px: no overflow, and labels are ellipsised rather than cut to 3 characters.
+- c. The Omega, Ulcer, Common-sense, KS, TWR, Scenario and Mandate tooltips open by hover, by keyboard and by tap, and sit inside the viewport. The tear sheet shows plain labels.
+- d. Escape discards the All Filters draft and returns focus.
+- e. The egress link lands on the anchor.
+- f. Compare finds strategies by their real name, and another owner's draft never surfaces.
+- g. One date format and the spaced en dash.
+- h. A 76-character strategy name causes no clipping.
+- i. 0 retired-word hits over 33 pages.
+- j. 320px with no overflow on every page.
+
+**Residuals.** The UAT found seven residual UI defects. By founder decision of 2026-11-12 ("One polish phase now") they are routed to Phase 201.1 POLISHRESIDUALS, one success criterion each: WR-13 (a failed key row with a long `sync_error` squeezes the label at 1440px), ISO dates left in the composer CoverageTimeline and the compare chart x-axis ticks, the composer "Coverage window" using "→" instead of the spaced en dash, a date breaking before its year, "My allocation" clipped in the correlation matrix, the composer sticky bar wrapping one word per line at 390px, and the composer opening on a one-day selected range. The founder accepted both phases with these residuals routed to 201.1 rather than reopening either phase. Two of them (the ISO dates and the year orphan) touch Phase 201 SC-3, and 201.1 owns closing them.
+
+Against the frontmatter `human_verification` list:
+1. *Tooltip hover and keyboard legibility.* Closed by local item c and the production Max DD tooltip.
+2. *Escape in a real browser.* Closed by local item d and the production All Filters check.
+3. *Egress link landing and compare real-name search.* Closed by local items e and f and the production `/security#egress-ips` check.
+4. *Browser walk over the date surfaces.* Closed by local item g and the production "Nov 11, 2026" dates. The ISO dates that remain in the composer CoverageTimeline and the compare chart ticks, and the year orphan, are booked as Phase 201.1 criteria.
 
 ---
 

@@ -1,7 +1,7 @@
 ---
 phase: 200-managerkeys
 verified: 2026-11-11T20:30:00Z
-status: human_needed
+status: passed
 score: 9/9 must-haves verified (6 original truths re-checked, 3 gap truths closed)
 verified_at_sha: 31aec2b150d217a28dadb4e69a098e89ff58f0da
 drift_subjects:
@@ -153,6 +153,38 @@ Gap-closure review rounds 1 to 3 (WR-07..WR-12, SFH-G1..G3, R-G1) were fixed; ro
 ### Gaps Summary
 
 No open gaps. The three gaps from the 2026-11-11 measurement are closed in code with gates that I confirmed can fail (Modal Close pin, e2e wiring pin) and geometry tests whose RED proofs are recorded in the plan SUMMARYs. Status is `human_needed` because the spec has not yet run in GitHub Actions, the visual UAT is manual, and the founder defaults are unreviewed. WR-13 is a known pre-existing item routed to a follow-up.
+
+
+## UAT 2026-11-12
+
+Founder-authorized UAT on 2026-11-12 moves this verification from `human_needed` to `passed`. The `verified_at_sha` above is the commit the code verdict was issued at; the UAT ran on production and on a local stack at `5ad404c17`.
+
+**Production** (quantalyze.xyz, the founder's signed-in admin browser, 606px wide):
+- The edit-page one-key panel works: the picker, then the confirm dialog with Close at 44x44 and Cancel and Change key each 44px tall. After Cancel and a reload, the strategy still feeds from its original key.
+- The disclaimer reads "does not operate".
+- `/security#egress-ips` states "We have no static egress IP yet…".
+- My allocation and discovery show no retired words. Dates read "Nov 11, 2026".
+- Escape closes All Filters and focus returns to the opener.
+- The factsheet Max DD tooltip shows "The largest fall from a peak to a later low, in percent." inside the viewport.
+
+**Local stack at `5ad404c17`** (v0.133.38.0, both ship PRs merged; screenshots kept in the session scratchpad under `200-201-uat/`, not committed). Every item PASS:
+- a. The edit page at 320px and 1280px: Close is 44x44, no overflow.
+- b. The Profile key rows at 320, 768, 1024 and 1280px: no overflow, and labels are ellipsised rather than cut to 3 characters.
+- c. The Omega, Ulcer, Common-sense, KS, TWR, Scenario and Mandate tooltips open by hover, by keyboard and by tap, and sit inside the viewport. The tear sheet shows plain labels.
+- d. Escape discards the All Filters draft and returns focus.
+- e. The egress link lands on the anchor.
+- f. Compare finds strategies by their real name, and another owner's draft never surfaces.
+- g. One date format and the spaced en dash.
+- h. A 76-character strategy name causes no clipping.
+- i. 0 retired-word hits over 33 pages.
+- j. 320px with no overflow on every page.
+
+**Residuals.** The UAT found seven residual UI defects. By founder decision of 2026-11-12 ("One polish phase now") they are routed to Phase 201.1 POLISHRESIDUALS, one success criterion each: WR-13 (a failed key row with a long `sync_error` squeezes the label at 1440px), ISO dates left in the composer CoverageTimeline and the compare chart x-axis ticks, the composer "Coverage window" using "→" instead of the spaced en dash, a date breaking before its year, "My allocation" clipped in the correlation matrix, the composer sticky bar wrapping one word per line at 390px, and the composer opening on a one-day selected range. The founder accepted both phases with these residuals routed to 201.1 rather than reopening either phase. Two of them (the ISO dates and the year orphan) touch Phase 201 SC-3, and 201.1 owns closing them.
+
+Against the frontmatter `human_verification` list:
+1. *First CI run for the new e2e spec.* PR #1253 (head `f4d68ab3a`) ran `e2e-seeded` with `e2e/manager-keys.spec.ts` in its spec list, and the job and the `frontend` aggregator were green (288 passed, 9 skipped across the whole job; the reporter does not print a per-spec count). Closed.
+2. *UAT at 320px and desktop.* Closed by the production checks and local items a and b above.
+3. *Founder review of D-01..D-15 and D-R1.* Not part of this UAT. It stays open as the `TODOS.md` entry under `## Phase 200 (MANAGERKEYS)`, and it is a decision review, not a code gap.
 
 ---
 
