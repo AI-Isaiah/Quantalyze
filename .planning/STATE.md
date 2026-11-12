@@ -2,19 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
-current_phase: 201
-status: completed
-stopped_at: Phase 201 complete — all phases complete
-last_updated: "2026-11-12T07:08:30.892Z"
+current_phase: 201.1
+current_phase_name: POLISHRESIDUALS — the residual UI defects found in the Phase 200/201 UAT are fixed
+status: planning
+stopped_at: Phases 200 and 201 closed on the 2026-11-12 UAT; 201.1 booked, not planned yet
+last_updated: "2026-11-12T07:09:24.180Z"
 last_activity: 2026-11-12
-last_activity_desc: Phase 201 complete
-state_head: 8f961cb5c000ac16565d9ba23c8095235f323a48
+last_activity_desc: Phases 200 and 201 closed, Phase 201.1 POLISHRESIDUALS booked
+state_head: 2561250d3a0546d0056b74d7591ad3a79bce4f47
 progress:
-  total_phases: 17
+  total_phases: 18
   completed_phases: 17
   total_plans: 201
   completed_plans: 201
-  percent: 100
+  percent: 94
 ---
 
 ## ⭐ STATE lineage
@@ -175,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 201
-Plan: Not started
-Status: All phases complete
-Last activity: 2026-11-12 — Phase 201 complete
-Progress: [██████████] 100% (16 of 17 phases)
+Phase: 201.1 (POLISHRESIDUALS) booked, the only open phase of v1.21
+Plan: 201.1: not planned yet
+Status: 200 and 201 closed on the founder-authorized UAT of 2026-11-12 (shipped v0.133.37.2 PR #1253, v0.133.38.0 PR #1254); 201.1 ready to plan
+Last activity: 2026-11-12 — Phases 200 MANAGERKEYS and 201 PLAINWORDS closed, Phase 201.1 POLISHRESIDUALS booked
+Progress: [█████████░] 94% (17 of 18 phases)
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -684,6 +685,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 204 added (2026-11-10, /gsd-phase add, founder "Eigene Folgephase"): INTROAUTH, security follow-up of 194.2, runs first; tracked text neutral until the fix is live
 - Phase 205 added (2026-11-10, /gsd-phase add, founder 2026-11-10 routing): ONEVERDICT, 194.2 R3 WR-01..03
 - Phase 206 added (2026-11-10, /gsd-phase add): SESSIONLOOP, 199 R3 WR-01-R3 (proxy signed-in bounce confirms the user with getUser; pre-existing, user-facing)
+- Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the Phase 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 
 ### Decisions
 
@@ -1766,7 +1768,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-07T17:42:15.306Z
-**Stopped At:** Phase 201 complete — all phases complete
+**Stopped At:** Phases 200 and 201 closed on the 2026-11-12 UAT; 201.1 booked, not planned yet
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z

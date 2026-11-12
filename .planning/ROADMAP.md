@@ -105,6 +105,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step (completed 2026-11-10)
 - [x] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
 - [x] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed (completed 2026-11-12)
+- [ ] **Phase 201.1: POLISHRESIDUALS — the residual UI defects found in the Phase 200/201 UAT are fixed** (INSERTED) - WR-13 key-row squeeze, the last ISO dates, one range separator, no year orphans, "My allocation" whole in the matrix, the composer sticky bar wrap and its one-day opening range
 - [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
 - [x] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input (completed 2026-11-07)
 - [x] **Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro** (completed 2026-11-10)
@@ -669,6 +670,26 @@ Plans:
 **Wave 11** *(blocked on Wave 10 completion)*
 - [x] 201-40-PLAN.md — The SC-3 date gate (SC-3 gap closure) (CLAR-06; wave 11)
 
+### Phase 201.1: POLISHRESIDUALS — the residual UI defects found in the Phase 200/201 UAT are fixed (INSERTED)
+
+**Goal:** The residual UI defects found in the Phase 200/201 UAT are fixed. Booked 2026-11-12 by founder decision ("One polish phase now") after the 2026-11-12 UAT, which passed Phases 200 and 201 with these seven routed here rather than reopening either phase.
+**Requirements**: TBD
+**Depends on:** Phase 200, Phase 201
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Success Criteria** (what must be TRUE):
+1. **WR-13:** in the one-line key-row layout, a failed key row with a long `sync_error` (about 150 characters) never squeezes the label below a readable width. Measured: the allocator profile at 1440px, with a 60-character label, gave a label column 20.2px wide showing "U…" and metadata at 7 lines; at 1920px the column is 120px. Reviewer hint: `@4xl:basis-[12.5rem]`, plus a failed-state row in the 1280px floor test, extended to 1440 and 1920.
+2. **No ISO dates in UI:** the Scenario composer CoverageTimeline endpoints (`CoverageTimeline.tsx`, which prints `2025-09-17` / `2026-11-10`) and the compare chart x-axis ticks (SVG tspans) use the shared date helper. The copy census rule C catches SVG tick text, or the gap is stated.
+3. **One range separator:** the composer "Coverage window" uses the spaced en dash, not "→".
+4. **No year orphans:** a date never breaks before its year ("Nov 11, / 2026"). The helper output keeps the date together with no-break spaces, and a test proves it.
+5. **Full name in the matrix:** the correlation matrix shows "My allocation" whole, not "My allocati…". The cap is at `build-payload.ts:530`. A previous attempt at cap 13 clipped V390 by 4.81px, and widening the mobile `LABEL_W` 128→136 changes the 320 golden `correlations-matrix-portrait-320-chromium-linux.png`, which needs a re-bake via the dispatch-only `bake_svg_goldens` workflow. The two NARROWCHARTS fixtures that currently pin "My allocati…" are reverted to "My allocation".
+6. **Sticky bar wrap:** at 390px the Scenario composer sticky bar does not wrap "No material change yet." one word per line.
+7. **Composer opening range:** the composer opening on `SELECTED RANGE: <d> – <same d>` (1 day of overlap; KPIs show dashes until "Reset to full history" is pressed) is debugged to its root cause, and fixed if real or recorded as a seed/headless artifact with evidence. It reproduces before 201, at `4a65c8843`.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 201.1 to break down)
+
 ### Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained
 
 **Goal:** A control capture across a nightly with no deploy in between shows whether stored values move without a code change, each value that moved in 188's re-reading (1214) is attributed to a cause or named as unexplained, and book b3's earlier reasons (`out_of_window_flow`, `window_truncated`) are explained and fixed where they are a defect.
@@ -739,6 +760,7 @@ Plans:
 | 199. MANAGERHOME | 18/18 | Complete    | 2026-11-10 |
 | 200. MANAGERKEYS | 15/15 | Complete    | 2026-11-12 |
 | 201. PLAINWORDS | 40/40 | Complete    | 2026-11-12 |
+| 201.1. POLISHRESIDUALS (INSERTED) | 0/0 | Not started | - |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
 | 204. INTROAUTH | 2/2 | Complete    | 2026-11-10 |
