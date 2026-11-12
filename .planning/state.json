@@ -56,11 +56,16 @@
     {
       "number": "200",
       "name": "MANAGERKEYS",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "201",
       "name": "PLAINWORDS",
+      "status": "complete"
+    },
+    {
+      "number": "201.1",
+      "name": "POLISHRESIDUALS (INSERTED)",
       "status": "pending"
     },
     {
@@ -90,9 +95,9 @@
     }
   ],
   "next": {
-    "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 200)",
-    "reason": "Phase 11 of 17 — needs a plan"
+    "command": "/gsd-plan-phase 201.1",
+    "label": "Plan phase 201.1",
+    "reason": "Phase 201.1 POLISHRESIDUALS — needs a plan"
   },
-  "updated_at": "2026-11-10T22:35:54.403Z"
+  "updated_at": "2026-11-12T07:08:51.842Z"
 }

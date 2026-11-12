@@ -104,7 +104,8 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 198: MYBOOK — My allocation answers "how is my book doing?" in three tabs** - "+ Allocation" opens the allocator's flow; the first tab shows the book's return, risk and holdings or names what is missing; Holdings labels correct; at most three tabs, positions listed once, dust hidden (completed 2026-11-10)
 - [x] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step (completed 2026-11-10)
 - [x] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
-- [ ] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed
+- [x] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed (completed 2026-11-12)
+- [ ] **Phase 201.1: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed** (INSERTED) - WR-13 key-row squeeze, the last ISO dates, one range separator, no year orphans, "My allocation" whole in the matrix, the composer sticky bar wrap and its one-day opening range
 - [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
 - [x] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input (completed 2026-11-07)
 - [x] **Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro** (completed 2026-11-10)
@@ -541,7 +542,7 @@ Plans 01-05 can execute now; plans 06-18 execute only after Phase 196 merges int
 **Goal:** A manager can see which strategies each key feeds, and nothing re-points a strategy's key without an explicit confirmation. Renaming happens in one place that shows which name is public. Adding a strategy and managing keys each have one entry point, and the security explanation lives in one place.
 **Requirements**: ROUTE-09, ROUTE-10, LEAN-04
 **Depends on:** Phase 192 (the one security explanation carries 192's corrected account), Phase 199 (adding a strategy's one entry point lives on the merged list)
-**Plans:** 12/12 plans executed
+**Plans:** 15/15 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -580,13 +581,18 @@ Plans:
 **Cross-cutting constraints:** <!-- gsd:generated -->
 - Every new gate in this plan was seen RED by a neuter applied to a byte copy in the scratchpad and restored with `cp`, then `cmp` exit 0.
 
+**Gap closure** *(UAT and e2e re-measurement 2026-11-11, the three gaps in 200-VERIFICATION.md; one local lane, so the plans run in sequence)*
+- [x] 200-13-PLAN.md — the one-key panel e2e tests move to a seeded spec in the blocking `e2e-seeded` list: seeded manager-only login, no env self-skip, a database read proves nothing is written before Change key (wave 1)
+- [x] 200-14-PLAN.md — the shared Modal's 20x20 Close becomes a 44x44 target for every dialog, pinned by the tap-target scan and measured on two open dialogs (wave 2)
+- [x] 200-15-PLAN.md — at 320px the Profile key row gives the label the full line and wraps Last sync below it, in both key lists; desktop stays one line (wave 3)
+
 
 ### Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed
 
 **Goal:** Specialist terms are explained where they appear, each concept has one name across the app, and the small inconsistencies are fixed: factsheet sections numbered in order, one date format, Escape closes the filter drawer, the egress-IP link leads to the IPs or is removed, and the disclaimer typo is gone. Added 2026-11-10 (founder, Phase 196/197 UAT, "Real name everywhere"): a strategy reads under its real name on every surface, including the browse route behind compare's "Add strategy" and the tearsheet card and title (`TODOS.md` `197-STRATEGY-NAME-PSEUDONYM-01`).
 **Requirements**: CLAR-03, CLAR-04, CLAR-06
 **Depends on:** Phase 196, Phase 197, Phase 198, Phase 200 (renames, tooltips and numbering apply to the surfaces those phases leave)
-**Plans:** 0 plans
+**Plans:** 40/40 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -602,7 +608,87 @@ Plans:
 Wording and tooltips are checked against `DESIGN.md` (Voice / microcopy, Typography).
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 201-01-PLAN.md — Term registry and one `Term` wrapper (CLAR-03; wave 1)
+- [x] 201-02-PLAN.md — Real name where the viewer can see it in discovery, never elsewhere: resolver, browse route, My allocation payload (CLAR-04; wave 1)
+- [x] 201-03-PLAN.md — The one date helper (CLAR-06; wave 1)
+- [x] 201-04-PLAN.md — Escape closes "All Filters"; CompareTable volatility unsigned (CLAR-06; wave 1)
+- [x] 201-05-PLAN.md — Egress-IP pointer and the disclaimer typo (CLAR-06; wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 201-06-PLAN.md — Copy census scanner, policy and planted proofs (CLAR-03, CLAR-04, CLAR-06; wave 2)
+- [x] 201-07-PLAN.md — Real name on the factsheet family and tearsheet manager card (CLAR-04; wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 201-25-PLAN.md — Census ledgers on the live tree and the census test (CLAR-03, CLAR-04, CLAR-06; wave 3)
+- [x] 201-26-PLAN.md — Remaining resolver call sites, admin visibility fact, Risk widgets name order (CLAR-04; wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 201-08-PLAN.md — Factsheet Detailed metrics: numerals in render order, terms, dates (wave 4)
+- [x] 201-09-PLAN.md — Factsheet opening view and panels: terms, print switch, Constituents (wave 4)
+- [x] 201-10-PLAN.md — Remaining factsheet files and `src/lib/factsheet/**`: tier-aware custody clause, dates (wave 4)
+- [x] 201-11-PLAN.md — Scenario composer: scenario, Scenario AUM, terms (wave 4)
+- [x] 201-12-PLAN.md — My allocation overview: KPI terms, allocation wording, dates (wave 4)
+- [x] 201-13-PLAN.md — Optimizer, impact, insights, exchanges (wave 4)
+- [x] 201-14-PLAN.md — Navigation "Scenario", Bridge and mandate terms, widgets (wave 4)
+- [x] 201-15-PLAN.md — Holdings tab and remaining allocations files (wave 4)
+- [x] 201-16-PLAN.md — Discovery, compare, browse, Strategies page: tooltips from the registry, "Save view" (wave 4)
+- [x] 201-17-PLAN.md — Watchlist, freshness chips, intro request, recommendations (wave 4)
+- [x] 201-18-PLAN.md — Remaining components (wave 4)
+- [x] 201-19-PLAN.md — Strategy wizard and its error copy (wave 4)
+- [x] 201-20-PLAN.md — Admin copy (wave 4)
+- [x] 201-21-PLAN.md — API user-visible strings (wave 4)
+- [x] 201-22-PLAN.md — Everything else under `src/`, including /for-quants and the retired report page (wave 4)
+- [x] 201-27-PLAN.md — Saved scenarios, commit drawer, compare views (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 201-28-PLAN.md — Mandate-check card, replacement dialog and outcome banner in plain words; "Bridge" retired (F-04) (CLAR-03, CLAR-04; wave 5)
+- [x] 201-29-PLAN.md — Mandate, holding detail and onboarding copy in plain words (F-04) (CLAR-04; wave 5)
+- [x] 201-30-PLAN.md — Scenario tab copy in plain words (F-04) (CLAR-04; wave 5)
+- [x] 201-31-PLAN.md — Retire "Bridge" from the replacement flow's copy (F-04) (CLAR-04; wave 5)
+- [x] 201-32-PLAN.md — Egress IP status on `/security#egress-ips` (F-12) (CLAR-06; wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 201-33-PLAN.md — "Scenario" registered, "Bridge" retired in the census (F-04, F-08) (CLAR-03, CLAR-04; wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 201-34-PLAN.md — Every Scenario label explains itself (F-08) (CLAR-03; wave 7)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [x] 201-23-PLAN.md — Fold ledgers into the permanent census, RED proofs, delete transitional helpers (wave 8)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [x] 201-24-PLAN.md — Merged-branch fix-up against a baseline, e2e sweep, TODOS closures, all gates (wave 9)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [x] 201-35-PLAN.md — Public-surface dates through `formatDay` (SC-3 gap closure) (CLAR-06; wave 10)
+- [x] 201-36-PLAN.md — My allocation dates through `formatDay` (SC-3 gap closure) (CLAR-06; wave 10)
+- [x] 201-37-PLAN.md — Scenario composer dates (SC-3 gap closure) (CLAR-06; wave 10)
+- [x] 201-38-PLAN.md — Strategy wizard dates (SC-3 gap closure) (CLAR-06; wave 10)
+- [x] 201-39-PLAN.md — Exchange-manager history sentence and staff-facing dates (SC-3 gap closure) (CLAR-06; wave 10)
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [x] 201-40-PLAN.md — The SC-3 date gate (SC-3 gap closure) (CLAR-06; wave 11)
+
+### Phase 201.1: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (INSERTED)
+
+**Goal:** The residual UI defects found in the Phase 200/201 UAT are fixed. Booked 2026-11-12 by founder decision ("One polish phase now") after the 2026-11-12 UAT, which passed Phases 200 and 201 with these seven routed here rather than reopening either phase.
+**Requirements**: TBD
+**Depends on:** Phase 200, Phase 201
+**Plans:** 0 plans
+**UI hint**: yes
+
+**Success Criteria** (what must be TRUE):
+1. **WR-13:** in the one-line key-row layout, a failed key row with a long `sync_error` (about 150 characters) never squeezes the label below a readable width. Measured: the allocator profile at 1440px, with a 60-character label, gave a label column 20.2px wide showing "U…" and metadata at 7 lines; at 1920px the column is 120px. Reviewer hint: `@4xl:basis-[12.5rem]`, plus a failed-state row in the 1280px floor test, extended to 1440 and 1920.
+2. **No ISO dates in UI:** the Scenario composer CoverageTimeline endpoints (`CoverageTimeline.tsx`, which prints `2025-09-17` / `2026-11-10`) and the compare chart x-axis ticks (SVG tspans) use the shared date helper. The copy census rule C catches SVG tick text, or the gap is stated.
+3. **One range separator:** the composer "Coverage window" uses the spaced en dash, not "→".
+4. **No year orphans:** a date never breaks before its year ("Nov 11, / 2026"). The helper output keeps the date together with no-break spaces, and a test proves it.
+5. **Full name in the matrix:** the correlation matrix shows "My allocation" whole, not "My allocati…". The cap is at `build-payload.ts:530`. A previous attempt at cap 13 clipped V390 by 4.81px, and widening the mobile `LABEL_W` 128→136 changes the 320 golden `correlations-matrix-portrait-320-chromium-linux.png`, which needs a re-bake via the dispatch-only `bake_svg_goldens` workflow. The two NARROWCHARTS fixtures that currently pin "My allocati…" are reverted to "My allocation".
+6. **Sticky bar wrap:** at 390px the Scenario composer sticky bar does not wrap "No material change yet." one word per line.
+7. **Composer opening range:** the composer opening on `SELECTED RANGE: <d> – <same d>` (1 day of overlap; KPIs show dashes until "Reset to full history" is pressed) is debugged to its root cause, and fixed if real or recorded as a seed/headless artifact with evidence. It reproduces before 201, at `4a65c8843`.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 201.1 to break down)
 
 ### Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained
 
@@ -672,8 +758,9 @@ Plans:
 | 197. SCREEN | 6/6 | Complete    | 2026-11-10 |
 | 198. MYBOOK | 14/14 | Complete    | 2026-11-10 |
 | 199. MANAGERHOME | 18/18 | Complete    | 2026-11-10 |
-| 200. MANAGERKEYS | 12/12 | Complete    | 2026-11-11 |
-| 201. PLAINWORDS | 0/0 | Not started | - |
+| 200. MANAGERKEYS | 15/15 | Complete    | 2026-11-12 |
+| 201. PLAINWORDS | 40/40 | Complete    | 2026-11-12 |
+| 201.1. POLISHRESIDUALS (INSERTED) | 0/0 | Not started | - |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
 | 204. INTROAUTH | 2/2 | Complete    | 2026-11-10 |
