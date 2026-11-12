@@ -61,7 +61,7 @@
     {
       "number": "201",
       "name": "PLAINWORDS",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "202",
@@ -90,9 +90,9 @@
     }
   ],
   "next": {
-    "command": "/gsd-progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 12 of 17 · 100% · executing"
+    "command": "/gsd-new-milestone",
+    "label": "Start a new milestone",
+    "reason": "All phases complete — start a new milestone"
   },
-  "updated_at": "2026-11-12T07:08:22.359Z"
+  "updated_at": "2026-11-12T07:08:30.922Z"
 }

@@ -104,7 +104,7 @@ UI-SPEC or VERIFICATION. `DESIGN.md` wins over a finding's suggested fix.
 - [x] **Phase 198: MYBOOK — My allocation answers "how is my book doing?" in three tabs** - "+ Allocation" opens the allocator's flow; the first tab shows the book's return, risk and holdings or names what is missing; Holdings labels correct; at most three tabs, positions listed once, dust hidden (completed 2026-11-10)
 - [x] **Phase 199: MANAGERHOME — each role lands on its own page, and a manager has one strategies list that shows health** - Role-aware landing after sign-in; `/strategies` and `/my-strategies` merged; a health column and a chip legend; every degrade warning names the days or key and the next step (completed 2026-11-10)
 - [x] **Phase 200: MANAGERKEYS — keys, names and adding a strategy each have one place** - Each key shows the strategies it feeds and nothing re-points a key without confirmation; rename in one place with the public name shown; one entry point each for adding a strategy and managing keys; one security explanation
-- [ ] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed
+- [x] **Phase 201: PLAINWORDS — one name per concept, explained, and the small inconsistencies fixed** - Tooltips or a glossary for specialist terms; one word per concept; factsheet sections in order, one date format, Escape closes the filter drawer, the egress-IP link fixed, the disclaimer typo fixed (completed 2026-11-12)
 - [x] **Phase 202: RESIDCHURN — the value churn left by 188 is attributed and book b3's earlier reasons are explained** - Parallel track, starts now: two captures around one nightly with no deploy between, each of the 1214 moved values attributed or named unexplained, b3's two reasons explained and fixed where a defect (completed 2026-11-07)
 - [x] **Phase 203: B3TRUNC — why book b3 carries window_truncated** - Follow-up to 202 (founder D-17): find why b3 carries `window_truncated`, with 202's evidence as input (completed 2026-11-07)
 - [x] **Phase 204: INTROAUTH — the intro path's database-side authorization matches /api/intro** (completed 2026-11-10)
@@ -591,7 +591,7 @@ Plans:
 **Goal:** Specialist terms are explained where they appear, each concept has one name across the app, and the small inconsistencies are fixed: factsheet sections numbered in order, one date format, Escape closes the filter drawer, the egress-IP link leads to the IPs or is removed, and the disclaimer typo is gone. Added 2026-11-10 (founder, Phase 196/197 UAT, "Real name everywhere"): a strategy reads under its real name on every surface, including the browse route behind compare's "Add strategy" and the tearsheet card and title (`TODOS.md` `197-STRATEGY-NAME-PSEUDONYM-01`).
 **Requirements**: CLAR-03, CLAR-04, CLAR-06
 **Depends on:** Phase 196, Phase 197, Phase 198, Phase 200 (renames, tooltips and numbering apply to the surfaces those phases leave)
-**Plans:** 40/40 plans executed
+**Plans:** 40/40 plans complete
 **UI hint**: yes
 
 **Evidence at HEAD** (spot-checked 2026-11-06, `8e592536`):
@@ -738,7 +738,7 @@ Plans:
 | 198. MYBOOK | 14/14 | Complete    | 2026-11-10 |
 | 199. MANAGERHOME | 18/18 | Complete    | 2026-11-10 |
 | 200. MANAGERKEYS | 15/15 | Complete    | 2026-11-12 |
-| 201. PLAINWORDS | 0/0 | Not started | - |
+| 201. PLAINWORDS | 40/40 | Complete    | 2026-11-12 |
 | 202. RESIDCHURN | 8/8 | Complete    | 2026-11-07 |
 | 203. B3TRUNC | 1/1 | Complete    | 2026-11-07 |
 | 204. INTROAUTH | 2/2 | Complete    | 2026-11-10 |

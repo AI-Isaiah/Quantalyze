@@ -36,10 +36,10 @@
 
 - [x] **CLAR-01**: Every discovery column states its period and whether it is annualised; volatility carries no sign; a track-length column exists.
 - [x] **CLAR-02**: A strategy whose data is stale is flagged in discovery and does not rank as if it were current.
-- [ ] **CLAR-03**: Specialist terms (Omega, Ulcer, Common-sense ratio, Kolmogorov-Smirnov, Bridge, mandate, TWR and the like) carry a tooltip or a glossary entry.
-- [ ] **CLAR-04**: Each concept has one name across the app (allocation / book / portfolio; watchlist / favorites / star; mandate / preferences / profile).
+- [x] **CLAR-03**: Specialist terms (Omega, Ulcer, Common-sense ratio, Kolmogorov-Smirnov, Bridge, mandate, TWR and the like) carry a tooltip or a glossary entry.
+- [x] **CLAR-04**: Each concept has one name across the app (allocation / book / portfolio; watchlist / favorites / star; mandate / preferences / profile).
 - [x] **CLAR-05**: A listing says when two strategies draw on the same exchange account.
-- [ ] **CLAR-06**: Factsheet sections are numbered in order, dates use one format, Escape closes the filter drawer, the egress-IP link leads to the IPs (or is removed), and the disclaimer typo is fixed.
+- [x] **CLAR-06**: Factsheet sections are numbered in order, dates use one format, Escape closes the filter drawer, the egress-IP link leads to the IPs (or is removed), and the disclaimer typo is fixed.
 
 ### Lean — less to wade through
 
@@ -95,10 +95,10 @@ Deferred, tracked, not in this roadmap.
 | ROUTE-11 | Phase 199 | Complete |
 | CLAR-01 | Phase 197 | Complete |
 | CLAR-02 | Phase 197 | Complete |
-| CLAR-03 | Phase 201 | Pending |
-| CLAR-04 | Phase 201 | Pending |
+| CLAR-03 | Phase 201 | Complete |
+| CLAR-04 | Phase 201 | Complete |
 | CLAR-05 | Phase 197 | Complete |
-| CLAR-06 | Phase 201 | Pending |
+| CLAR-06 | Phase 201 | Complete |
 | LEAN-01 | Phase 199 | Complete |
 | LEAN-02 | Phase 196 | Complete |
 | LEAN-03 | Phase 195 | Complete |
