@@ -125,7 +125,11 @@ export function ScenarioFooter({
       aria-label="Scenario draft summary and actions"
       className="sticky bottom-16 md:bottom-0 z-10 min-h-[56px] flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2 bg-surface border-t border-border"
     >
-      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">
+      {/* Phase 201.1 (D-06, U-10): a real basis. At `flex-1` alone (`flex: 1 1 0%`) the line-breaker
+          counts this group as 0px, so the action group always shares line one and at 390px the
+          sentence is left about 100px and wraps one word per line. 14rem makes the actions drop to a
+          second row at narrow widths and still share the line from `md` up. */}
+      <div className="flex min-w-0 basis-[14rem] flex-1 flex-wrap items-center gap-x-3 gap-y-1">
         <span className="rounded-md px-2 py-1 text-xs font-medium text-text-muted">
           {countLabel}
         </span>

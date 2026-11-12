@@ -657,7 +657,7 @@ describe("164.6.6.3.1 / D-07 · /recommendations footer and batch chip", () => {
     // is not asserted: the fixture is stale against a real clock.
     const pill = screen.getByText("Batch:").parentElement as HTMLElement;
     const text = pill.textContent ?? "";
-    expect(text).toContain("Sep 25");
+    expect(text).toContain("Sep\u00a025");
     expect(text).toContain("\u00b7");
   });
 });

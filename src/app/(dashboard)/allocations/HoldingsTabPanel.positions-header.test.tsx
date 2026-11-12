@@ -108,7 +108,7 @@ describe("Positions header: Book equity, one string with the glance", () => {
   it("prints Allocation equity and the read day, byte-equal to the glance's figure", () => {
     const { glance } = renderBoth(BOOK);
     const header = screen.getByTestId("positions-book-equity");
-    expect(header.textContent).toBe("Allocation equity $43,700 · read Nov 7, 2026");
+    expect(header.textContent).toBe("Allocation equity $43,700 · read Nov\u00a07,\u00a02026");
     expect(glance("glance-book-equity").textContent).toBe("$43,700");
     expect(header.textContent).toContain(glance("glance-book-equity").textContent);
   });

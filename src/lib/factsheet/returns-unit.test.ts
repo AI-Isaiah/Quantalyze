@@ -108,7 +108,7 @@ describe("formatCloseDay", () => {
   // Phase 201 U-14, D-11 (plan 201-23): no factsheet date is yearless, so the helper takes the day
   // and nothing else. The `{ year: false }` option it once ignored is gone with its last caller.
   it("formats a UTC ISO day with the year, and takes one argument", () => {
-    expect(formatCloseDay("2026-10-08")).toBe("Oct 8, 2026");
+    expect(formatCloseDay("2026-10-08")).toBe("Oct\u00a08,\u00a02026");
     expect(formatCloseDay.length).toBe(1);
   });
 
@@ -121,30 +121,30 @@ describe("formatCloseDay", () => {
 
 describe("formatUnpricedDays", () => {
   it("reads one day as a single date", () => {
-    expect(formatUnpricedDays(["2026-10-03"])).toBe("Oct 3, 2026");
+    expect(formatUnpricedDays(["2026-10-03"])).toBe("Oct\u00a03,\u00a02026");
   });
 
   it("collapses consecutive days into a spaced-en-dash run and joins runs with `; `", () => {
     expect(
       formatUnpricedDays(["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-09"]),
-    ).toBe("Oct 3, 2026 \u2013 Oct 5, 2026; Oct 9, 2026");
+    ).toBe("Oct\u00a03,\u00a02026 \u2013 Oct\u00a05,\u00a02026; Oct\u00a09,\u00a02026");
   });
 
   it("lists every run, none truncated", () => {
     const days = ["2026-01-01", "2026-01-03", "2026-01-05", "2026-01-07", "2026-01-09", "2026-01-11"];
     expect(formatUnpricedDays(days)).toBe(
-      "Jan 1, 2026; Jan 3, 2026; Jan 5, 2026; Jan 7, 2026; Jan 9, 2026; Jan 11, 2026",
+      "Jan\u00a01,\u00a02026; Jan\u00a03,\u00a02026; Jan\u00a05,\u00a02026; Jan\u00a07,\u00a02026; Jan\u00a09,\u00a02026; Jan\u00a011,\u00a02026",
     );
   });
 
   it("sorts unsorted input first and collapses across a month and year boundary", () => {
     expect(formatUnpricedDays(["2027-01-01", "2026-12-31", "2026-12-30"])).toBe(
-      "Dec 30, 2026 \u2013 Jan 1, 2027",
+      "Dec\u00a030,\u00a02026 \u2013 Jan\u00a01,\u00a02027",
     );
   });
 
   it("treats two-day runs as a run", () => {
-    expect(formatUnpricedDays(["2026-10-04", "2026-10-03"])).toBe("Oct 3, 2026 \u2013 Oct 4, 2026");
+    expect(formatUnpricedDays(["2026-10-04", "2026-10-03"])).toBe("Oct\u00a03,\u00a02026 \u2013 Oct\u00a04,\u00a02026");
   });
 });
 

@@ -771,9 +771,9 @@ describe("StrategyTable managerRows — Created cell (D-09)", () => {
     renderManager({ rows: DATE_ROWS });
     // 0 rank, 1 Strategy, 2 Status, 3 Health (199-12), 4 Created. The newest row is 23:30 at -05:00,
     // i.e. already the NEXT UTC day: a string slice would print Oct 9, 2026.
-    expect(cells(dataRow(NAME_NEW))[4].textContent?.trim()).toBe("Oct 10, 2026");
-    expect(cells(dataRow(NAME_MID))[4].textContent?.trim()).toBe("Jun 1, 2026");
-    expect(cells(dataRow(NAME_OLD))[4].textContent?.trim()).toBe("Feb 3, 2025");
+    expect(cells(dataRow(NAME_NEW))[4].textContent?.trim()).toBe("Oct\u00a010,\u00a02026");
+    expect(cells(dataRow(NAME_MID))[4].textContent?.trim()).toBe("Jun\u00a01,\u00a02026");
+    expect(cells(dataRow(NAME_OLD))[4].textContent?.trim()).toBe("Feb\u00a03,\u00a02025");
   });
 
   it("a malformed created_at prints an em dash, never Invalid Date", () => {

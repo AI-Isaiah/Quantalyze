@@ -1417,19 +1417,19 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     // 01-08 — so it does not reach member 2's first owned day (01-08).
     expect(
       screen.getByRole("img", {
-        name: "Key A: covers Jan 1, 2025 – Jan 7, 2025, in blend",
+        name: "Key A: covers Jan\u00a01,\u00a02025 – Jan\u00a07,\u00a02025, in blend",
       }),
     ).toBeInTheDocument();
     // Member 2: window_end 01-13 → inclusive 01-12.
     expect(
       screen.getByRole("img", {
-        name: "Key B: covers Jan 8, 2025 – Jan 12, 2025, in blend",
+        name: "Key B: covers Jan\u00a08,\u00a02025 – Jan\u00a012,\u00a02025, in blend",
       }),
     ).toBeInTheDocument();
     // The old half-open pass-through (member 1 through 01-08) must be gone.
     expect(
       screen.queryByRole("img", {
-        name: /Key A: covers Jan 1, 2025 – Jan 8, 2025/,
+        name: /Key A: covers Jan\u00a01,\u00a02025 – Jan\u00a08,\u00a02025/,
       }),
     ).not.toBeInTheDocument();
   });
@@ -1441,7 +1441,7 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     await renderPassed({});
     const para = screen.getByText(/stitched into one\s+continuous track record/);
     expect(para.textContent).toContain(
-      "continuous track record, Jan 1, 2025 – Jan 12, 2025.",
+      "continuous track record, Jan\u00a01,\u00a02025 – Jan\u00a012,\u00a02025.",
     );
     expect(para.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });

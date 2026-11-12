@@ -84,14 +84,14 @@ describe("MetricsColumn — Worst Drawdowns 320px reflow regression (F1 follow-u
       [5, 20, 40].map(i => isoToMonthDay(payload.dates[i])),
     );
     for (const td of cells) {
-      expect(td.textContent).toMatch(/^[A-Z][a-z]{2} \d{1,2}, \d{4}$/);
+      expect(td.textContent).toMatch(/^[A-Z][a-z]{2}\u00a0\d{1,2},\u00a0\d{4}$/);
       expect(td.className, "a date cell must not wrap").toContain("whitespace-nowrap");
     }
   });
 
   it("isoToMonthDay keeps its export and prints the one format, with the dash for a missing date", () => {
-    expect(isoToMonthDay("2026-10-09")).toBe("Oct 9, 2026");
-    expect(isoToMonthDay("2026-01-01")).toBe("Jan 1, 2026");
+    expect(isoToMonthDay("2026-10-09")).toBe("Oct\u00a09,\u00a02026");
+    expect(isoToMonthDay("2026-01-01")).toBe("Jan\u00a01,\u00a02026");
     expect(isoToMonthDay("")).toBe("—");
     expect(isoToMonthDay("not a date")).toBe("—");
   });

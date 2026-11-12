@@ -113,14 +113,14 @@ describe("AllocatorExchangeManager — a native BTC key's balance (D-07, D-17)",
     ]);
     const el = line("Deribit BTC");
     expect(el.textContent).toBe(
-      "Deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct 8, 2026 close",
+      "Deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct\u00a08,\u00a02026 close",
     );
     const titled = titledIn(el);
     expect(titled).toHaveLength(1);
     expect(titled[0].getAttribute("title")).toBe(
-      "Converted from BTC at the stored daily BTC close for Oct 8, 2026.",
+      "Converted from BTC at the stored daily BTC close for Oct\u00a08,\u00a02026.",
     );
-    expect(titled[0].textContent).toBe(" · Balance 0.4213 BTC · ≈ $26,100 at Oct 8, 2026 close");
+    expect(titled[0].textContent).toBe(" · Balance 0.4213 BTC · ≈ $26,100 at Oct\u00a08,\u00a02026 close");
   });
 
   it("unpriced: the BTC amount alone, no ≈ $ date or dash, with the not-stored title", () => {
@@ -182,7 +182,7 @@ describe("AllocatorExchangeManager — a native BTC key's balance (D-07, D-17)",
       ]);
       const el = line("Deribit BTC");
       expect(el.textContent).toBe(
-        "Deribit · Read-only · Balance 1.50 BTC · ≈ $90,000 at Oct 8, 2026 close",
+        "Deribit · Read-only · Balance 1.50 BTC · ≈ $90,000 at Oct\u00a08,\u00a02026 close",
       );
       expect(el.textContent).not.toContain("Dec");
     } finally {
@@ -206,7 +206,7 @@ describe("AllocatorExchangeManager — a native BTC key's balance (D-07, D-17)",
       }),
     ]);
     expect(line("Deribit BTC").textContent).toBe(
-      "Deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct 8, 2026 close",
+      "Deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct\u00a08,\u00a02026 close",
     );
   });
 });
@@ -259,7 +259,7 @@ describe("AllocatorExchangeManager — an unpriced day never moves the balance (
   it("A (native balance, USD null) stays the bearer, exactly as when A is priced", () => {
     const { unmount } = renderKeys([A(26_099.54), B]);
     expect(line("Key A").textContent).toBe(
-      "Deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct 8, 2026 close",
+      "Deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct\u00a08,\u00a02026 close",
     );
     expect(line("Key B").textContent).toBe("Deribit · Read-only");
     unmount();

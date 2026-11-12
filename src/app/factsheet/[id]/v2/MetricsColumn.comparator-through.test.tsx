@@ -104,9 +104,9 @@ describe("SFH-M-05 a partly covered comparator is dated beside its figures", () 
 
   it("Main Metrics, Returns and Max Drawdown carry 'vs BTC to Jan 20, 2025'", () => {
     const { container, unmount } = renderRail(partial());
-    expect(benchHeader(container, "Main Metrics")).toBe("vs BTC to Jan 20, 2025");
-    expect(benchHeader(container, "Returns")).toBe("vs BTC to Jan 20, 2025");
-    expect(benchHeader(container, "Max Drawdown")).toBe("vs BTC to Jan 20, 2025");
+    expect(benchHeader(container, "Main Metrics")).toBe("vs BTC to Jan\u00a020,\u00a02025");
+    expect(benchHeader(container, "Returns")).toBe("vs BTC to Jan\u00a020,\u00a02025");
+    expect(benchHeader(container, "Max Drawdown")).toBe("vs BTC to Jan\u00a020,\u00a02025");
     unmount();
   });
 
@@ -114,12 +114,12 @@ describe("SFH-M-05 a partly covered comparator is dated beside its figures", () 
     const { container, unmount } = renderRail(partial());
     const h = [...container.querySelectorAll("h3")].find(el => el.textContent === "EOY Returns")!;
     const note = h.closest("section")!.querySelector("p");
-    expect(note?.textContent).toBe("BTC 2025: prices through Jan 20, 2025 only.");
+    expect(note?.textContent).toBe("BTC 2025: prices through Jan\u00a020,\u00a02025 only.");
     unmount();
   });
 
   it("the EoY bars subtitle names the part-covered year and its through date", () => {
-    expect(barsSubtitle(partial())).toContain("BTC 2025 through Jan 20, 2025 only");
+    expect(barsSubtitle(partial())).toContain("BTC 2025 through Jan\u00a020,\u00a02025 only");
   });
 
   it("full coverage: every header and caption is as before (no date, no note)", () => {
@@ -200,12 +200,12 @@ describe("MR-01 a weekday comparator is not partial across the strategy's weeken
   it("control: SPX through Wed 2025-03-12 (Thu and Fri missing) is dated everywhere", () => {
     const p = spxPayload("2025-03-12");
     const { container, unmount } = renderRail(p);
-    expect(benchHeader(container, "Main Metrics")).toBe("vs SPX to Mar 12, 2025");
-    expect(benchHeader(container, "Returns")).toBe("vs SPX to Mar 12, 2025");
-    expect(benchHeader(container, "Max Drawdown")).toBe("vs SPX to Mar 12, 2025");
-    expect(eoyNote(container)?.textContent).toBe("SPX 2025: prices through Mar 12, 2025 only.");
+    expect(benchHeader(container, "Main Metrics")).toBe("vs SPX to Mar\u00a012,\u00a02025");
+    expect(benchHeader(container, "Returns")).toBe("vs SPX to Mar\u00a012,\u00a02025");
+    expect(benchHeader(container, "Max Drawdown")).toBe("vs SPX to Mar\u00a012,\u00a02025");
+    expect(eoyNote(container)?.textContent).toBe("SPX 2025: prices through Mar\u00a012,\u00a02025 only.");
     unmount();
-    expect(barsSubtitle(p)).toContain("SPX 2025 through Mar 12, 2025 only");
+    expect(barsSubtitle(p)).toContain("SPX 2025 through Mar\u00a012,\u00a02025 only");
   });
 
   it("helpers: the weekend is past a 7-day comparator's coverage and not a weekday one's", () => {

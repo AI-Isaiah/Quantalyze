@@ -1813,8 +1813,12 @@ export function AllocatorExchangeManager({
                       1rem gap), so Last sync, the status and the actions wrap below
                       it; from 56rem up it flexes as before (Phase 200 gap 2, 320px
                       UAT; R-G1; WR-12: measured clean from about 52rem of row on
-                      the heaviest rows, 56rem leaves margin). */}
-                  <div className="flex-1 min-w-0 basis-[calc(100%_-_3.5rem)] @4xl:basis-0">
+                      the heaviest rows, 56rem leaves margin). The single-line basis is
+                      a real 12.5rem, not 0: a zero basis makes the flex-wrap
+                      line-breaker count the column as 0px, so a long status helper
+                      took line one and squeezed the label to "U…" (Phase 201.1
+                      D-01, WR-13). */}
+                  <div className="flex-1 min-w-0 basis-[calc(100%_-_3.5rem)] @4xl:basis-[12.5rem]">
                     <p className="text-sm font-semibold text-text-primary truncate">
                       {key.label}
                     </p>
@@ -1944,8 +1948,9 @@ export function AllocatorExchangeManager({
                   >
                     {tag.label}
                   </div>
-                  {/* Mirrors the active row's label column (Phase 200 gap 2). */}
-                  <div className="flex-1 min-w-0 basis-[calc(100%_-_3.5rem)] @4xl:basis-0">
+                  {/* Mirrors the active row's label column, 12.5rem single-line
+                      basis included (Phase 200 gap 2; Phase 201.1 D-01 parity). */}
+                  <div className="flex-1 min-w-0 basis-[calc(100%_-_3.5rem)] @4xl:basis-[12.5rem]">
                     <p className="text-sm font-semibold text-text-primary truncate">
                       {key.label}
                     </p>

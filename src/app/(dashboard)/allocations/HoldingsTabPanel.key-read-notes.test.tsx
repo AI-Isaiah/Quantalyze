@@ -123,7 +123,7 @@ describe("HoldingsTabPanel: open positions say how old an older key's read is (S
     );
     const notes = screen.getAllByTestId("open-positions-read-day-note");
     expect(notes.map((n) => n.textContent)).toEqual([
-      "Positions from the Binance key Old are as last read on Aug 31, 2026: BTC-PERP, SOL-PERP.",
+      "Positions from the Binance key Old are as last read on Aug\u00a031,\u00a02026: BTC-PERP, SOL-PERP.",
     ]);
     // F-11: no note carries a raw YYYY-MM-DD day.
     for (const n of notes) expect(n.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
@@ -145,7 +145,7 @@ describe("HoldingsTabPanel: open positions say how old an older key's read is (S
     expect(
       screen.getAllByTestId("open-positions-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Positions from the Binance key Main are as last read on Sep 8, 2026: BTC-PERP.",
+      "Positions from the Binance key Main are as last read on Sep\u00a08,\u00a02026: BTC-PERP.",
     ]);
   });
 
@@ -157,8 +157,8 @@ describe("HoldingsTabPanel: open positions say how old an older key's read is (S
     expect(
       screen.getAllByTestId("open-positions-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Positions from the Binance key A are as last read on Sep 20, 2026: BTC-PERP.",
-      "Positions from the Binance key B are as last read on Sep 20, 2026: ETH-PERP.",
+      "Positions from the Binance key A are as last read on Sep\u00a020,\u00a02026: BTC-PERP.",
+      "Positions from the Binance key B are as last read on Sep\u00a020,\u00a02026: ETH-PERP.",
     ]);
   });
 
@@ -194,7 +194,7 @@ describe("HoldingsTabPanel: a key whose rows' poll could not read its positions 
     expect(
       screen.getByTestId("open-positions-partial-read-note").textContent,
     ).toBe(
-      "Open positions from the Binance key Main could not be read on its sync of Sep 5, 2026. Any it holds are missing below until a sync reads them.",
+      "Open positions from the Binance key Main could not be read on its sync of Sep\u00a05,\u00a02026. Any it holds are missing below until a sync reads them.",
     );
     expect(screen.getByTestId("open-positions-partial-read-note").textContent).not.toMatch(
       /\d{4}-\d{2}-\d{2}/,
@@ -223,7 +223,7 @@ describe("HoldingsTabPanel: a key whose rows' poll could not read its positions 
     expect(
       screen.getByTestId("open-positions-partial-read-note").textContent,
     ).toBe(
-      "Open positions from the Binance key Old could not be read on its sync of Sep 5, 2026. Any it held then are missing below.",
+      "Open positions from the Binance key Old could not be read on its sync of Sep\u00a05,\u00a02026. Any it held then are missing below.",
     );
   });
 
@@ -272,7 +272,7 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     );
     expect(
       screen.getAllByTestId("holdings-read-day-note").map((n) => n.textContent),
-    ).toEqual(["Spot holdings from the Binance key Main are as last read on Sep 20, 2026: BTC, USDT."]);
+    ).toEqual(["Spot holdings from the Binance key Main are as last read on Sep\u00a020,\u00a02026: BTC, USDT."]);
   });
 
   it("wraps long unbroken symbols instead of overflowing a 375px page (class tokens pinned)", () => {
@@ -329,8 +329,8 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key are as last read on Sep 20, 2026: BTC.",
-      "Spot holdings from a Binance key are as last read on Sep 20, 2026: USDT.",
+      "Spot holdings from the Binance key are as last read on Sep\u00a020,\u00a02026: BTC.",
+      "Spot holdings from a Binance key are as last read on Sep\u00a020,\u00a02026: USDT.",
     ]);
   });
 
@@ -342,7 +342,7 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key Main are as last read on Sep 8, 2026: BTC.",
+      "Spot holdings from the Binance key Main are as last read on Sep\u00a08,\u00a02026: BTC.",
     ]);
   });
 
@@ -388,8 +388,8 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key B are as last read on Sep 18, 2026: SOL, USDC.",
-      "Spot holdings from the Binance key A are as last read on Sep 20, 2026: BTC, USDT.",
+      "Spot holdings from the Binance key B are as last read on Sep\u00a018,\u00a02026: SOL, USDC.",
+      "Spot holdings from the Binance key A are as last read on Sep\u00a020,\u00a02026: BTC, USDT.",
     ]);
   });
 
@@ -409,10 +409,10 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key A are as last read on Sep 28, 2026: BTC.",
+      "Spot holdings from the Binance key A are as last read on Sep\u00a028,\u00a02026: BTC.",
     ]);
     expect(positionLines()).toEqual([
-      "Positions from the Binance key A are as last read on Sep 28, 2026: BTC-PERP.",
+      "Positions from the Binance key A are as last read on Sep\u00a028,\u00a02026: BTC-PERP.",
     ]);
   });
 
@@ -429,10 +429,10 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key S are as last read on Sep 20, 2026: BTC.",
+      "Spot holdings from the Binance key S are as last read on Sep\u00a020,\u00a02026: BTC.",
     ]);
     expect(positionLines()).toEqual([
-      "Positions from the Binance key P are as last read on Sep 21, 2026: ETH-PERP.",
+      "Positions from the Binance key P are as last read on Sep\u00a021,\u00a02026: ETH-PERP.",
     ]);
   });
 
@@ -451,7 +451,7 @@ describe("HoldingsTabPanel: a stale key's spot rows say how old their read is (1
     expect(
       screen.queryAllByTestId("holdings-read-day-note").map((n) => n.textContent),
     ).toEqual([
-      "Spot holdings from the Binance key Old are as last read on Sep 1, 2026: BTC.",
+      "Spot holdings from the Binance key Old are as last read on Sep\u00a01,\u00a02026: BTC.",
     ]);
   });
 });

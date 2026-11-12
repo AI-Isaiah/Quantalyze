@@ -592,7 +592,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     const section = screen.getByTestId("overview-missing-data");
     expect(section.textContent).toBe(
       "What is missing" +
-        "Binance — Main: no data for Oct 3, 2026 – Oct 11, 2026. Reconnect the key on the Exchanges page or wait for the next sync.",
+        "Binance — Main: no data for Oct\u00a03,\u00a02026 – Oct\u00a011,\u00a02026. Reconnect the key on the Exchanges page or wait for the next sync.",
     );
     // One fact, one sentence: the gap line replaces the unnamed fallback.
     expect(section.textContent).not.toContain("One of your keys");

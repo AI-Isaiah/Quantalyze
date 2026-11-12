@@ -42,7 +42,7 @@ describe("CsvPreviewStep — 201-38 the date range pill", () => {
     renderStep();
     const row = screen.getByText("Date range").closest("div");
     expect(row).not.toBeNull();
-    expect(row!.textContent).toContain("Apr 3, 2025 – May 6, 2026");
+    expect(row!.textContent).toContain("Apr\u00a03,\u00a02025 – May\u00a06,\u00a02026");
     expect(row!.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     expect(row!.textContent).not.toContain("→");
   });

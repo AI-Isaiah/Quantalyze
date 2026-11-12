@@ -186,7 +186,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
     expect(historyBlock("key-dep").textContent).toContain("Checking this key's history");
     await waitFor(() =>
       expect(historyBlock("key-dep").textContent).toContain(
-        "History included until Jun 10, 2026.",
+        "History included until Jun\u00a010,\u00a02026.",
       ),
     );
     // F-11: the block carries no raw ISO day.
@@ -229,7 +229,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
       }),
     );
     await settledSwitch("key-dep", "true");
-    expect(historyBlock("key-dep").textContent).toContain("History included until Jun 10, 2026.");
+    expect(historyBlock("key-dep").textContent).toContain("History included until Jun\u00a010,\u00a02026.");
     expect(historyBlock("key-dep").textContent).toContain(
       "Your equity history is recomputed with this change within a few minutes.",
     );
@@ -333,7 +333,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
       />,
     );
     await waitFor(() =>
-      expect(historyBlock("key-rev").textContent).toContain("History included until Jun 8, 2026."),
+      expect(historyBlock("key-rev").textContent).toContain("History included until Jun\u00a08,\u00a02026."),
     );
     expect(historySwitch("key-rev").getAttribute("aria-checked")).toBe("true");
     // A live, working key has no history choice.
@@ -351,7 +351,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
     );
     await waitFor(() =>
       expect(historyBlock("key-dep").textContent).toContain(
-        "History included until Jun 14, 2026. From the next day a key you still have connected reads this account.",
+        "History included until Jun\u00a014,\u00a02026. From the next day a key you still have connected reads this account.",
       ),
     );
     // The live key's first day was read too: it bounds the departed one.
@@ -376,7 +376,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
       />,
     );
     await waitFor(() =>
-      expect(historyBlock("key-b").textContent).toContain("History included until Jun 10, 2026."),
+      expect(historyBlock("key-b").textContent).toContain("History included until Jun\u00a010,\u00a02026."),
     );
     expect(historyBlock("key-b").textContent).not.toContain("an earlier key");
     expect(historySwitch("key-b").getAttribute("aria-checked")).toBe("true");

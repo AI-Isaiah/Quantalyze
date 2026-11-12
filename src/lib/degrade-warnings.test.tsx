@@ -457,10 +457,10 @@ describe("the Phase 198 per-key lines read word for word what shipped (199-05 Ta
 
   it("not-syncing and sync-failing: the key, the range, then the one action", () => {
     expect(text("allocation.key-gap.not-syncing", { labels: [KEY_A, KEY_B], coverage: { days: [FIXTURE_DAY, "2026-10-04"] } })).toBe(
-      `${KEY_A} and ${KEY_B}: no data for Oct 3, 2026 – Oct 4, 2026. Reconnect the key on the Exchanges page or wait for the next sync.`,
+      `${KEY_A} and ${KEY_B}: no data for Oct\u00a03,\u00a02026 – Oct\u00a04,\u00a02026. Reconnect the key on the Exchanges page or wait for the next sync.`,
     );
     expect(text("allocation.key-gap.sync-failing", { labels: [KEY_A], coverage: { since: FIXTURE_DAY } })).toBe(
-      `${KEY_A}: no data since Oct 3, 2026. Reconnect the key on the Exchanges page or wait for the next sync.`,
+      `${KEY_A}: no data since Oct\u00a03,\u00a02026. Reconnect the key on the Exchanges page or wait for the next sync.`,
     );
     expect(text("allocation.key-gap.not-syncing", { labels: [KEY_A], coverage: null })).toBe(
       `${KEY_A}: no complete history yet. Reconnect the key on the Exchanges page or wait for the next sync.`,
@@ -469,7 +469,7 @@ describe("the Phase 198 per-key lines read word for word what shipped (199-05 Ta
 
   it("read-incomplete says 'no complete data' and puts the wait before the reconnect", () => {
     expect(text("allocation.key-gap.read-incomplete", { labels: [KEY_A], coverage: { days: [FIXTURE_DAY] } })).toBe(
-      `${KEY_A}: no complete data for Oct 3, 2026. Wait for the next sync, or reconnect the key on the Exchanges page if this persists.`,
+      `${KEY_A}: no complete data for Oct\u00a03,\u00a02026. Wait for the next sync, or reconnect the key on the Exchanges page if this persists.`,
     );
   });
 
@@ -496,7 +496,7 @@ describe("allocation.staleness: the StalenessBanner copy names its day and its a
   it("the day sample reads the approved sentence and prints no relative age", () => {
     const text = degradePlainText(degradeSegments("allocation.staleness", { day: FIXTURE_DAY }));
     expect(text).toBe(
-      "Analytics may be stale: no exchange key has synced since Oct 3, 2026. Reconnect a key on the Exchanges page, or wait for the next sync.",
+      "Analytics may be stale: no exchange key has synced since Oct\u00a03,\u00a02026. Reconnect a key on the Exchanges page, or wait for the next sync.",
     );
     expect(text).not.toMatch(/\bago\b|\{relative age\}/);
   });
@@ -778,7 +778,7 @@ describe("strategies.analytics-failed: the last computation's day and the viewer
         degradeSegments("strategies.analytics-failed", { day: FIXTURE_DAY, action: "A-CONTACT-RESOLVE" }),
       ),
     ).toBe(
-      "The last computation, on Oct 3, 2026, did not produce figures. Use the contact form to have it resolved.",
+      "The last computation, on Oct\u00a03,\u00a02026, did not produce figures. Use the contact form to have it resolved.",
     );
   });
 
@@ -905,7 +905,7 @@ describe("strategies.stale, strategies.stale-no-data, strategies.key-problem (19
     expect(e.scope).toBe("day");
     expect(e.surface).toBe("strategies-list");
     expect(degradePlainText(degradeSegments("strategies.stale", { day: FIXTURE_DAY, action: "A-CSV" }))).toBe(
-      "No new data since Oct 3, 2026. Upload a newer CSV to extend the record.",
+      "No new data since Oct\u00a03,\u00a02026. Upload a newer CSV to extend the record.",
     );
     // The four ways it can end: a CSV upload, the edit page, the Exchanges page (CD-11), the contact form.
     expect([...(e.actions ?? [])].sort()).toEqual(["A-CONTACT-CHECK", "A-CSV", "A-EDIT", "A-EXCHANGES-KEY"]);
@@ -1093,7 +1093,7 @@ describe("the factsheet's owner state lines, the public pending sentence and the
       const words = degradePlainText(
         degradeSegments("factsheet.owner-state-dated", { state, day: FIXTURE_DAY, action: "A-CONTACT-RESOLVE" }),
       );
-      expect(words, JSON.stringify(state)).toMatch(/^The last computation, on Oct 3, 2026, /);
+      expect(words, JSON.stringify(state)).toMatch(/^The last computation, on Oct\u00a03,\u00a02026, /);
       expect(words.endsWith(` ${sentence("A-CONTACT-RESOLVE")}`), JSON.stringify(state)).toBe(true);
     }
   });

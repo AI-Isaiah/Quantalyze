@@ -154,6 +154,11 @@
  * `formatDay`, so `>2024-01-01</td>` became `>Jan 1, 2024</td>` BY HAND, 3 occurrences in each of
  * the owner-list fixture's three mounts (9 in all). The default-mounts fixture carries no Created
  * cell and did not move for this. Not regenerated.
+ *
+ * THIRD HUNK CLASS (Phase 201.1 plan 12, D-04): the helpers keep a date together with U+00A0
+ * (the \u00a0 escape in source), and `innerHTML` serializes it as an entity, so each of those 9
+ * dates now reads `Jan&nbsp;1,&nbsp;2024` in the fixture, edited BY HAND. The fixture was NOT
+ * regenerated and the comparison below is untouched.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";

@@ -105,7 +105,7 @@ describe("/admin/users/[id] labels", () => {
   // through `formatDayTime`: one instant, one string, UTC named.
   it("prints Created as 'Jan 1, 2026, 00:00 UTC', not a locale string", async () => {
     render(await AdminUserDetailPage({ params }));
-    expect(rowValue("Created")).toBe("Jan 1, 2026, 00:00 UTC");
+    expect(rowValue("Created")).toBe("Jan\u00a01,\u00a02026, 00:00\u00a0UTC");
   });
 
   it("reads a role outside the set as Unknown role, never the raw value", async () => {

@@ -110,7 +110,7 @@ function pctSigned(v: number | null | undefined): string {
 }
 
 const PANELS = ["Returns", "Cumulative Return Metrics"] as const;
-const FINAL_MONTH = /^Final month \([A-Z][a-z]{2} \d{4}\)$/;
+const FINAL_MONTH = /^Final month \([A-Z][a-z]{2}\u00a0\d{4}\)$/;
 
 describe("the month row names an ended record's last month (Phase 170, AD-10)", () => {
   it("a record whose last month is the current UTC month keeps 'Month-to-date' in both panels", () => {
@@ -131,7 +131,7 @@ describe("the month row names an ended record's last month (Phase 170, AD-10)", 
     const { container } = renderColumn(payload);
     for (const title of PANELS) {
       const row = firstRow(section(container, title));
-      expect(row.label, title).toBe("Final month (Jun 2024)");
+      expect(row.label, title).toBe("Final month (Jun\u00a02024)");
       expect(row.label, title).toMatch(FINAL_MONTH);
       expect(row.value, title).toBe(pctSigned(payload.strategyMetrics.mtd));
     }
@@ -141,14 +141,14 @@ describe("the month row names an ended record's last month (Phase 170, AD-10)", 
   it("the 1st of the month on a live record: a record ending 31 Aug reads 'Last month (Aug 2026)' from 00:30 UTC on 1 Sep, never 'Final month'", () => {
     vi.setSystemTime(new Date("2026-09-01T00:30:00Z"));
     const { container } = renderColumn(payloadEnding("2026-08-31"));
-    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Last month (Aug 2026)");
+    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Last month (Aug\u00a02026)");
     expect(container.textContent).not.toContain("Final month");
   });
 
   it("the review's own case: a live record ending 30 Sep reads 'Last month (Sep 2026)' on 1 Oct", () => {
     vi.setSystemTime(new Date("2026-10-01T09:00:00Z"));
     const { container } = renderColumn(payloadEnding("2026-09-30"));
-    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Last month (Sep 2026)");
+    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Last month (Sep\u00a02026)");
     expect(container.textContent).not.toContain("Final month");
   });
 
@@ -156,7 +156,7 @@ describe("the month row names an ended record's last month (Phase 170, AD-10)", 
     for (const now of ["2026-11-01T12:00:00Z", "2026-11-02T08:00:00Z"]) {
       vi.setSystemTime(new Date(now));
       const { container, unmount } = renderColumn(payloadEnding("2026-10-30"));
-      for (const title of PANELS) expect(firstRow(section(container, title)).label, `${title} @ ${now}`).toBe("Last month (Oct 2026)");
+      for (const title of PANELS) expect(firstRow(section(container, title)).label, `${title} @ ${now}`).toBe("Last month (Oct\u00a02026)");
       unmount();
     }
   });
@@ -164,13 +164,13 @@ describe("the month row names an ended record's last month (Phase 170, AD-10)", 
   it("the year boundary counts as one month: a record ending 31 Dec 2025 reads 'Last month (Dec 2025)' on 1 Jan 2026", () => {
     vi.setSystemTime(new Date("2026-01-01T00:30:00Z"));
     const { container } = renderColumn(payloadEnding("2025-12-31"));
-    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Last month (Dec 2025)");
+    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Last month (Dec\u00a02025)");
   });
 
   it("two calendar months back is a stopped record: a record ending 31 Aug reads 'Final month (Aug 2026)' on 1 Oct", () => {
     vi.setSystemTime(new Date("2026-10-01T00:30:00Z"));
     const { container } = renderColumn(payloadEnding("2026-08-31"));
-    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Final month (Aug 2026)");
+    for (const title of PANELS) expect(firstRow(section(container, title)).label, title).toBe("Final month (Aug\u00a02026)");
   });
 
   it("the same record is still 'Month-to-date' at 23:30 UTC on 31 Aug", () => {
@@ -186,7 +186,7 @@ describe("the month row names an ended record's last month (Phase 170, AD-10)", 
     const { container } = renderColumn(payload);
     for (const title of PANELS) {
       const row = firstRow(section(container, title));
-      expect(row.label, title).toBe("Final month (Jun 2024)");
+      expect(row.label, title).toBe("Final month (Jun\u00a02024)");
       expect(row.value, title).toBe("—");
     }
   });

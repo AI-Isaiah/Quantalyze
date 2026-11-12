@@ -704,7 +704,7 @@ describe("step 2: the two routes", () => {
     });
     const line = vi.mocked(props.onRecorded).mock.calls[0][0];
     expect(line).toMatch(
-      /^Allocation recorded: Alpha One, \$25,000 from [A-Z][a-z]{2} \d{1,2}, \d{4}\. It is listed under Outcomes on Holdings\.$/,
+      /^Allocation recorded: Alpha One, \$25,000 from [A-Z][a-z]{2}\u00a0\d{1,2},\u00a0\d{4}\. It is listed under Outcomes on Holdings\.$/,
     );
     expect(line).not.toContain("Strategies on Holdings");
     expect(props.onClose).toHaveBeenCalledTimes(1);

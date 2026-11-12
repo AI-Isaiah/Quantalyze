@@ -1057,7 +1057,7 @@ describe("EquityChart — plan 201-14 helper dates (U-13, U-15)", () => {
     );
     const svg = container.querySelector("svg");
     fireEvent.mouseMove(svg!, { clientX: (15 / 29) * 960 + 8, clientY: 40 });
-    expect(container.textContent).toMatch(/[A-Z][a-z]{2} \d{1,2}, 2024/);
+    expect(container.textContent).toMatch(/[A-Z][a-z]{2}\u00a0\d{1,2},\u00a02024/);
     expect(container.textContent).not.toMatch(/\d{1,2}\/\d{1,2}\/\d{4}/);
   });
 
@@ -1072,7 +1072,7 @@ describe("EquityChart — plan 201-14 helper dates (U-13, U-15)", () => {
     const titled = Array.from(container.querySelectorAll("[title]")).map((e) =>
       e.getAttribute("title"),
     );
-    expect(titled).toContain("Oct 9, 2026, 23:59 UTC");
+    expect(titled).toContain("Oct\u00a09,\u00a02026, 23:59\u00a0UTC");
   });
 });
 

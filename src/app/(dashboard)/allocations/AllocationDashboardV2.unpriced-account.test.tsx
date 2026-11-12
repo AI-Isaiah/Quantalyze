@@ -132,7 +132,7 @@ describe("AllocationDashboardV2: the account left out of the total is named (164
   it("one account: names it and the day", () => {
     renderWith([A("BTC desk")]);
     const note = screen.getByTestId(TID);
-    expect(note.textContent).toBe(`The total leaves out BTC desk for Oct 8, 2026: ${TAIL_ONE}`);
+    expect(note.textContent).toBe(`The total leaves out BTC desk for Oct\u00a08,\u00a02026: ${TAIL_ONE}`);
     expect(note.getAttribute("role")).toBe("status");
     expect(note.tagName).toBe("P");
     expect(note.className).toBe("mb-3 px-1 text-sm text-text-secondary");
@@ -141,28 +141,28 @@ describe("AllocationDashboardV2: the account left out of the total is named (164
   it("two accounts: joined by ' and ', plural tail", () => {
     renderWith([A("Alpha"), A("BTC desk")]);
     expect(screen.getByTestId(TID).textContent).toBe(
-      `The total leaves out Alpha and BTC desk for Oct 8, 2026: ${TAIL_MANY}`,
+      `The total leaves out Alpha and BTC desk for Oct\u00a08,\u00a02026: ${TAIL_MANY}`,
     );
   });
 
   it("three or more: commas with ' and ' before the last, no serial comma", () => {
     renderWith([A("A"), A("B"), A("C"), A("D")]);
     expect(screen.getByTestId(TID).textContent).toBe(
-      `The total leaves out A, B, C and D for Oct 8, 2026: ${TAIL_MANY}`,
+      `The total leaves out A, B, C and D for Oct\u00a08,\u00a02026: ${TAIL_MANY}`,
     );
   });
 
   it("sorts ascending by label whatever order the payload carries", () => {
     renderWith([A("Zed"), A("Alpha"), A("Mid")]);
     expect(screen.getByTestId(TID).textContent).toBe(
-      `The total leaves out Alpha, Mid and Zed for Oct 8, 2026: ${TAIL_MANY}`,
+      `The total leaves out Alpha, Mid and Zed for Oct\u00a08,\u00a02026: ${TAIL_MANY}`,
     );
   });
 
   it("accounts on different days are grouped by day in the one note, each day stated", () => {
     renderWith([A("Alpha", "2026-10-06"), A("Mid", "2026-10-08"), A("Zed", "2026-10-08")]);
     expect(screen.getByTestId(TID).textContent).toBe(
-      "The total leaves out Alpha for Oct 6, 2026; Mid and Zed for Oct 8, 2026: " +
+      "The total leaves out Alpha for Oct\u00a06,\u00a02026; Mid and Zed for Oct\u00a08,\u00a02026: " +
         "no BTC close is stored for those days yet, so they cannot be priced in USD." + WAIT_CLOSE,
     );
   });
@@ -186,7 +186,7 @@ describe("AllocationDashboardV2: the account left out of the total is named (164
     it("after a dated sentence it reads 'also', so the two facts are not run together", () => {
       renderWith([W("Alpha"), A("Mid"), A("Zed")]);
       expect(screen.getByTestId(TID).textContent).toBe(
-        `The total leaves out Mid and Zed for Oct 8, 2026: ${TAIL_MANY} ` +
+        `The total leaves out Mid and Zed for Oct\u00a08,\u00a02026: ${TAIL_MANY} ` +
           "The total also leaves out Alpha entirely: it cannot be priced in USD right now." + CONTACT_CHECK,
       );
     });
@@ -221,7 +221,7 @@ describe("AllocationDashboardV2: the account left out of the total is named (164
     it("follows the total's sentences when both are present, and never merges into them", () => {
       renderWith([H("Alpha", 2), A("Mid"), W("Zed")]);
       expect(screen.getByTestId(TID).textContent).toBe(
-        `The total leaves out Mid for Oct 8, 2026: ${TAIL_ONE} ` +
+        `The total leaves out Mid for Oct\u00a08,\u00a02026: ${TAIL_ONE} ` +
           "The total also leaves out Zed entirely: it cannot be priced in USD right now." + CONTACT_CHECK + " " +
           "The equity history leaves out Alpha on 2 days: no BTC close is stored for those days, so it could not be priced in USD." + WAIT_CLOSE,
       );

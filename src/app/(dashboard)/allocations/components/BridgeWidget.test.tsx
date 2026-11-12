@@ -192,7 +192,7 @@ describe("BridgeWidget — empty state (no breaches, with outcomes)", () => {
       />,
     );
     const text = screen.getByTestId("bridge-empty-last-reviewed").textContent;
-    expect(text).toBe("Apr 25, 2025");
+    expect(text).toBe("Apr\u00a025,\u00a02025");
     // Sanity: the absolute branch must NOT collapse to a relative phrase.
     expect(text).not.toMatch(/ago/);
   });
@@ -208,7 +208,7 @@ describe("BridgeWidget — empty state (no breaches, with outcomes)", () => {
       />,
     );
     expect(screen.getByTestId("bridge-empty-last-reviewed").textContent).toBe(
-      "Apr 25, 2025",
+      "Apr\u00a025,\u00a02025",
     );
   });
 

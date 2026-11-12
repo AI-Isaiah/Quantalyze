@@ -742,7 +742,7 @@ describe("StrategiesPage - the unfinished-draft banner prints its day through fo
       // The expected text is typed by hand: the UTC day is the 9th, and the format is the one
       // helper's, `MMM D, YYYY`, with the year (a locale string would read 10/9/2026 or 9/10/2026).
       expect(line?.textContent).toBe(
-        '"Alpha Draft" \u2014 started Oct 9, 2026. Drafts expire after 30 days.',
+        '"Alpha Draft" \u2014 started Oct\u00a09,\u00a02026. Drafts expire after 30 days.',
       );
     },
     T,

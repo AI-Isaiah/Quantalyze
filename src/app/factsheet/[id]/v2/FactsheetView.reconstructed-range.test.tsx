@@ -122,7 +122,7 @@ function rebuiltLines(container: HTMLElement): HTMLElement[] {
 }
 
 const SENTENCE_JUL_AUG =
-  "Jul 1, 2026 – Aug 1, 2026: rebuilt from OKX's quarterly account statement, not the live feed.";
+  "Jul\u00a01,\u00a02026 – Aug\u00a01,\u00a02026: rebuilt from OKX's quarterly account statement, not the live feed.";
 
 describe("FactsheetView - ReconstructedRangeLines (D-06, D-07)", () => {
   it("one stored range: the founder's sentence, byte for byte, with the en dash", () => {
@@ -146,7 +146,7 @@ describe("FactsheetView - ReconstructedRangeLines (D-06, D-07)", () => {
     const lines = rebuiltLines(container);
     expect(lines).toHaveLength(1);
     expect(lines[0].textContent).toBe(
-      "Sep 3, 2026 – Sep 3, 2026: rebuilt from OKX's quarterly account statement, not the live feed.",
+      "Sep\u00a03,\u00a02026 – Sep\u00a03,\u00a02026: rebuilt from OKX's quarterly account statement, not the live feed.",
     );
   });
 
@@ -177,9 +177,9 @@ describe("FactsheetView - ReconstructedRangeLines (D-06, D-07)", () => {
     };
     const { container } = renderFactsheet(withRanges(parseReconstructedRanges(provenance)));
     expect(rebuiltLines(container).map((p) => p.textContent)).toEqual([
-      "Aug 15, 2026 – Aug 16, 2026: rebuilt from OKX's quarterly account statement, not the live feed.",
-      "May 7, 2026 – Jul 8, 2026: rebuilt from OKX's quarterly account statement, not the live feed.",
-      "Mar 1, 2026 – Mar 31, 2026: rebuilt from OKX's quarterly account statement, not the live feed.",
+      "Aug\u00a015,\u00a02026 – Aug\u00a016,\u00a02026: rebuilt from OKX's quarterly account statement, not the live feed.",
+      "May\u00a07,\u00a02026 – Jul\u00a08,\u00a02026: rebuilt from OKX's quarterly account statement, not the live feed.",
+      "Mar\u00a01,\u00a02026 – Mar\u00a031,\u00a02026: rebuilt from OKX's quarterly account statement, not the live feed.",
       "2 more ranges rebuilt from OKX's quarterly account statement.",
     ]);
   });
@@ -236,7 +236,7 @@ describe("FactsheetView - ReconstructedRangeLines (D-06, D-07)", () => {
     const rebuilt = rebuiltLines(container);
     // 2026-05-24..2026-06-30: 8 days of May (24..31) + 30 of June = 38, worked by hand.
     expect(gaps.map((p) => p.textContent)).toEqual([
-      "No trade data May 24, 2026 – Jun 30, 2026 (38 days). These days are not recovered; they are left out of the record, not counted as zero.",
+      "No trade data May\u00a024,\u00a02026 – Jun\u00a030,\u00a02026 (38 days). These days are not recovered; they are left out of the record, not counted as zero.",
     ]);
     expect(rebuilt.map((p) => p.textContent)).toEqual([SENTENCE_JUL_AUG]);
     expect(gaps[0].nextElementSibling).toBe(rebuilt[0]);

@@ -823,7 +823,7 @@ describe("CsvSubmitStep — 201-38 the date range reads in the helper's form", (
     );
     const row = screen.getByText("Date range").closest("div");
     expect(row).not.toBeNull();
-    expect(row!.textContent).toContain("Jan 1, 2024 – Jan 3, 2024");
+    expect(row!.textContent).toContain("Jan\u00a01,\u00a02024 – Jan\u00a03,\u00a02024");
     expect(row!.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     expect(row!.textContent).not.toContain("→");
     cleanup();

@@ -516,7 +516,7 @@ import { blendPeriodsPerYear } from "@/lib/closed-sets";
 // Phase 112 (WEIGHTS-02) — the shared leverage ceiling, asserted as the max
 // attribute on the per-key leverage inputs the phase adds.
 import { MAX_LEVERAGE } from "@/lib/leverage";
-import { formatCurrency, formatDay } from "@/lib/utils";
+import { formatCurrency } from "@/lib/utils";
 import {
   buildHoldingRef,
   type FlaggedHolding,
@@ -8787,7 +8787,13 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     // The applied window is exactly the intersection [2026-01-01, 2026-01-06].
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 6, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
+    // Phase 201.1 D-03 / U-08 pin: the value is exactly one range in the house
+    // form (U+00A0 inside each date, U+0020 U+2013 U+0020 between them) and
+    // carries no U+2192 arrow.
+    const windowValue = screen.getByTestId("scenario-coverage-window-value").textContent;
+    expect(windowValue).toBe("Jan\u00a01,\u00a02026 \u2013 Jan\u00a06,\u00a02026");
+    expect(windowValue).not.toContain("\u2192");
   });
 
   // WR-01 — the HEAD-ragged branch. The tail case above only moves the END
@@ -8860,7 +8866,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     // the disclosed start bound is the one that actually moved.
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 4, 2026 → Jan 12, 2026");
+    ).toContain("Jan\u00a04,\u00a02026 – Jan\u00a012,\u00a02026");
   });
 
   // WR-02 — the BOTH-ends-ragged branch. When a strategy begins after the window
@@ -8927,7 +8933,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     );
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 4, 2026 → Jan 9, 2026");
+    ).toContain("Jan\u00a04,\u00a02026 – Jan\u00a09,\u00a02026");
   });
 
   it("COVERAGE-04: applying a window (the include path) NEVER reselects a manually-off strategy — manual-off stays sticky (T-58-05)", () => {
@@ -9126,7 +9132,7 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
     // The applied window is exactly the intersection.
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 6, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
   });
 
   it("preset: 'Full range (some drop out)' widens to the union — the short-span strategy drops (member_count < selected count)", () => {
@@ -9149,7 +9155,7 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
     expect(sm?.member_ids).toEqual([REF_WIN_A]);
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 12, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a012,\u00a02026");
   });
 
   it("preset: 'Common period' is disabled on an empty intersection; 'Full range' stays enabled", () => {
@@ -9282,9 +9288,7 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
     // The coverage-window READOUT is unchanged by a rolling-window click.
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain(
-      `${formatDay((windowBefore as { start: string }).start)} → ${formatDay((windowBefore as { end: string }).end)}`,
-    );
+    ).toContain("Jan\u00a01,\u00a02026 – May\u00a010,\u00a02026");
   });
 
   it("POLISH-01: ScenarioFactsheetChart's brush stays a VIEW axis — the mount receives NO coverage-window prop and no persist prop", () => {
@@ -10172,7 +10176,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     // Baseline: the mount auto-default seeded the intersection [01-01, 01-06].
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 6, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
 
     // Reopen a v3 draft whose SAVED window is a NARROWER [01-02, 01-05] — a value
     // the intersection default would never produce, so it can only be the applied
@@ -10187,7 +10191,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
 
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 2, 2026 → Jan 5, 2026");
+    ).toContain("Jan\u00a02,\u00a02026 – Jan\u00a05,\u00a02026");
     // No provenance note for a fresh v3-with-window open.
     expect(
       screen.queryByTestId("scenario-provenance-note"),
@@ -10219,7 +10223,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     });
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 3, 2026 → Jan 4, 2026");
+    ).toContain("Jan\u00a03,\u00a02026 – Jan\u00a04,\u00a02026");
     // No note yet — this is a live edit, not an upgraded-v2 reopen.
     expect(
       screen.queryByTestId("scenario-provenance-note"),
@@ -10237,7 +10241,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
 
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 6, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
     // The provenance note appears with the locked copy + the escape hatch.
     const note = screen.getByTestId("scenario-provenance-note");
     expect(note.textContent).toMatch(/predates coverage windows/);
@@ -10272,7 +10276,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     // Intersection default applies (windowless v3 → same rule) …
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 6, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
     // … but a fresh v3 is NOT a pre-window upgrade, so no provenance note.
     expect(
       screen.queryByTestId("scenario-provenance-note"),
@@ -10346,7 +10350,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     });
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 2, 2026 → Jan 5, 2026");
+    ).toContain("Jan\u00a02,\u00a02026 – Jan\u00a05,\u00a02026");
 
     // Reset (footer Reset → confirm). The fresh draft is a v3 live book — the
     // prior open's FOREIGN window must not linger (the Phase-57 "sticky by
@@ -10356,7 +10360,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     fireEvent.click(screen.getByRole("button", { name: /Discard draft/i }));
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 6, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
   });
 
   it("review WR-02: dismissing the note then reopening the SAME upgraded-v2 scenario re-shows it (dismissal is per-OPEN, not per-scenario-id)", async () => {
@@ -10488,7 +10492,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     });
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 12, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a012,\u00a02026");
     expect(
       screen.queryByTestId("scenario-provenance-note"),
     ).not.toBeInTheDocument();
@@ -10532,7 +10536,7 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     });
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 2, 2026 → Jan 5, 2026");
+    ).toContain("Jan\u00a02,\u00a02026 – Jan\u00a05,\u00a02026");
     expect(
       screen.queryByTestId("scenario-provenance-note"),
     ).not.toBeInTheDocument();

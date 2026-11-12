@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.133.39.0] - 2026-11-13 — POLISHRESIDUALS: the residual UI defects from the 200/201 UAT are fixed
+
+Phase 201.1. The seven residual defects the 2026-11-12 UAT routed out of Phases 200 and 201 are fixed: a failed key row keeps a readable label, no ISO date is left in the composer timeline or the compare chart, the composer uses one range separator, a date never breaks before its year, the correlation matrix prints "My allocation" whole, the composer sticky bar keeps its sentence on one line at 390px, and the composer no longer opens on a one-day range. 16 plans in 4 waves, one review fixer round (re-review clean). 39 code commits on `feat/201.1-polishresiduals` ship as one filtered commit.
+
+### Fixed
+- **A failed key row keeps a readable label (SC-1, WR-13; 201.1-02).** In the one-line key-row layout the label column now has a 12.5rem basis (`@4xl:basis-[12.5rem]`), on the failed row and the disconnected row alike. At 1440px a 60-character label with a long `sync_error` used to get a 20px column showing "U…". `e2e/manager-keys.spec.ts` seeds a failed key and asserts a label column of at least 199px at 1280, 1440 and 1920px, plus the disconnected row's computed 200px basis.
+- **No ISO dates left (SC-2; 201.1-13, 201.1-15).** The composer CoverageTimeline endpoints, the compare chart's x-axis ticks (drawn by `EdgeFitXTick` at the unchanged 10px) and its hover label now print through `formatDay`. At 320px the endpoint row wraps under the track instead of running past it: a `flex-1` wrapper could not shrink below one whole label until `min-w-0`, which a real-browser test found and fixed.
+- **One range separator (SC-3, D-03; 201.1-01).** The composer Coverage window reads `Jan 1, 2026 – Jan 6, 2026` with a spaced en dash, not an arrow.
+- **No year orphans (SC-4, D-04; 201.1-01).** `formatDay`, `formatMonth` and `formatDayTime` join the parts of a date (and a time to `UTC`) with U+00A0, so "Nov 11, / 2026" cannot break across lines. Code-point pins in `src/lib/utils.test.ts` prove it.
+- **"My allocation" whole in the correlation matrix (SC-5, D-05; 201.1-03, 201.1-16).** The payload label cap is 13 characters (12 plus an ellipsis beyond that) and the mobile `LABEL_W` is 136. The two NARROWCHARTS 1280 fixtures read "My allocation" again.
+- **The composer sticky bar at 390px (SC-6, D-06; 201.1-14).** The summary group has a real basis (`basis-[14rem]`), so "No material change yet." no longer wraps one word per line. Measured red at 390 and 768px before the fix.
+- **The composer's one-day opening range, root cause (SC-7, D-07; 201.1-04, 201.1-14).** `FactsheetProvider` seeded its range once with `useState(fullRange)`, so a composer chart that mounted before its lazy returns arrived kept a one-day range ("Selected range: d – d", dashes in the KPI strip) until Reset. The provider now keeps the user's range as nullable state and derives the shown range from the current full range until the user sets one. A jsdom rerender test and a lane test with the returns request held 1500ms both went red on the old seed.
+- **Review fixes (round 1).** CR-01: `e2e/composer-axe.spec.ts` still pinned the arrow form and would have failed every `e2e-seeded` run; it now expects the spaced en dash. WR-01: a user range that points past the end of an axis that shrank (the composer window shortened, or a strategy removed) now falls back to the full range instead of clamping to one day; a provider arm pins it.
+
+### Added
+- **Copy census rule C reads an unformatted date x-axis (201.1-13).** A new `axis-date-key` form flags an `XAxis` keyed on a date with no `tickFormatter`, with red, green and planted-tree fixtures. Its blind spots are stated in the scanner header (tick text made at run time, spread attributes, a namespaced tag).
+- **Real-browser layout tests (201.1-14, 201.1-15).** `e2e/layout-narrow.spec.ts` gains the compare-tick geometry at 320, 390 and 1280px, the CoverageTimeline endpoint wrap, the sticky-bar wrap, and the delayed-returns opening range. The full spec ran 76 passed, 0 failed on the seeded lane.
+
+### Changed
+- **The factsheet payload cache key moves from v23 to v24 (201.1-03).** For the same inputs a strategy named 13 characters now gets its whole name in the matrix, so an entry built before the deploy would keep the truncated label for the 1 h TTL drain.
+- **The 320px correlation-matrix golden is re-baked (201.1-16).** The wider mobile label column takes the matrix from 758 to 766 pixels. Baked on the Linux runner (dispatch run 43312722250); the other 28 goldens came back byte-identical.
+
+### Tests
+- **About 90 test files expect U+00A0 inside helper-printed dates (201.1-01, 201.1-05 to 201.1-12).** They are written as ` ` escapes, never raw bytes, with no matcher weakened. A neuter with an ordinary space turned all 82 sweep files red. The two NARROWCHARTS composer readings were regenerated with the spec's own switches because the composer now draws the full range (201.1-15); the overview entries are byte-identical.
+
+### Notes
+- The UI-SPEC claimed the sticky bar is one row at 768px and the timeline endpoints fit on one line at 390px. Both were measured false (one row needs about an 860px viewport, one endpoint line about 402px) and the UI-SPEC is corrected; the tests assert the measured behaviour.
+- A pre-existing 320px overflow from the KPI strip's nowrap suffix is booked, not fixed (`deferred-items-201.1-14.md`).
+- Booked for a founder decision: the composer stores the range as indices, so when its axis grows at the front (a strategy with earlier history is added) a 12M pick stops ending at the latest day. Storing it as dates would settle it, and it conflicts with the pinned "kept when the series grows" contract.
+- The founder LP email subject now carries U+00A0 inside the month label (plan 201.1-01's recorded assumption). The PDF file name is unchanged.
+- The CR-01 fix to `e2e/composer-axe.spec.ts` was not run on a local lane; its first run is this PR's `e2e-seeded` job.
+
 ## [0.133.38.1] - 2026-11-12 — records: close 200 MANAGERKEYS and 201 PLAINWORDS, book 201.1 POLISHRESIDUALS
 
 Records PR for the Phase 200 gap closure (shipped as PR #1253, v0.133.37.2) and Phase 201 (shipped as PR #1254, v0.133.38.0). Seven commits on `records/close-200-201`, no source change. Their planning artifacts lived only on `feat/200-gaps` and `feat/201-plainwords` until now. Both phases close on the founder-authorized UAT of 2026-11-12, and its seven residual UI defects are booked as Phase 201.1.

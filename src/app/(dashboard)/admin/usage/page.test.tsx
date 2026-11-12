@@ -64,7 +64,7 @@ describe("/admin/usage daily funnel", () => {
   it("prints the Day column as a formatted day, not the raw ISO string", async () => {
     const { container } = render(await AdminUsagePage());
     const text = container.textContent ?? "";
-    expect(text).toContain("Apr 16, 2026");
+    expect(text).toContain("Apr\u00a016,\u00a02026");
     expect(text).not.toContain("2026-04-16");
   });
 });
@@ -79,8 +79,8 @@ describe("/admin/usage session heatmap", () => {
     });
     const { container } = render(await AdminUsagePage());
     const headers = Array.from(container.querySelectorAll("th")).map((th) => th.textContent);
-    expect(headers).toContain("Apr 16, 2026");
-    expect(headers).toContain("Apr 17, 2026");
+    expect(headers).toContain("Apr\u00a016,\u00a02026");
+    expect(headers).toContain("Apr\u00a017,\u00a02026");
     // The yearless raw fragment is gone from every header.
     expect(headers).not.toContain("04-16");
     expect(headers).not.toContain("04-17");

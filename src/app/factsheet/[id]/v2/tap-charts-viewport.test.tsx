@@ -248,7 +248,7 @@ describe("[CHART-01a/02/03] tap-reveal panels — both viewport branches", () =>
     // the desktop hover shows. A regression in the bespoke glue fails this.
     const tip = container.querySelector('[role="status"]');
     expect(tip).not.toBeNull();
-    expect(tip?.textContent ?? "").toMatch(/[A-Z][a-z]{2} \d{1,2}, \d{4}/);
+    expect(tip?.textContent ?? "").toMatch(/[A-Z][a-z]{2}\u00a0\d{1,2},\u00a0\d{4}/);
     expect(tip?.textContent ?? "").not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 

@@ -230,7 +230,7 @@ describe("ScenarioFlaggedHoldingsList", () => {
     // F-11 / D-11 (review R3-01 item 3, plan 201-36): the recorded day reads in
     // the helper's form, never the raw `allocated_at` ISO day.
     const row = screen.getByTestId("outcome-recorded-row");
-    expect(row.textContent).toContain("on Apr 20, 2026");
+    expect(row.textContent).toContain("on Apr\u00a020,\u00a02026");
     expect(row.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });

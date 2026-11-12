@@ -886,7 +886,7 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
     // Sanity: the control mounted and the auto-default seeded the intersection.
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 6, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
 
     // REAL gesture: the Full-range preset applies the union [01-01, 01-12] — a
     // value the intersection default can never produce.
@@ -895,7 +895,7 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
     );
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 12, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a012,\u00a02026");
 
     fireEvent.click(screen.getByRole("button", { name: /^Save scenario$/i }));
     fireEvent.change(screen.getByPlaceholderText(/Name this scenario/i), {
@@ -930,7 +930,7 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
     // The auto-default IS showing (the user sees the intersection) …
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 6, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
 
     fireEvent.click(screen.getByRole("button", { name: /^Save scenario$/i }));
     fireEvent.change(screen.getByPlaceholderText(/Name this scenario/i), {
@@ -968,7 +968,7 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
     // The reopened window is applied to the view …
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 2, 2026 → Jan 5, 2026");
+    ).toContain("Jan\u00a02,\u00a02026 – Jan\u00a05,\u00a02026");
 
     const updateBtn = await screen.findByRole("button", {
       name: /Update scenario/i,
@@ -1013,7 +1013,7 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
     // Mount sanity: the auto-default seeded the intersection.
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 6, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
 
     // Reopen a v3 row that carries a window ONLY the saved draft can produce
     // ([01-02, 01-05], strictly inside the intersection) but whose fingerprint
@@ -1037,8 +1037,8 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
     const readout = screen.getByTestId(
       "scenario-coverage-window-value",
     ).textContent;
-    expect(readout).toContain("Jan 1, 2026 → Jan 6, 2026");
-    expect(readout).not.toContain("Jan 2, 2026 → Jan 5, 2026");
+    expect(readout).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
+    expect(readout).not.toContain("Jan\u00a02,\u00a02026 – Jan\u00a05,\u00a02026");
 
     // "Update scenario" (deliberately ungated on drift) persists EXACTLY what
     // is shown: the windowless default draft. The intersection default is
@@ -1075,7 +1075,7 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
     );
     expect(
       screen.getByTestId("scenario-coverage-window-value").textContent,
-    ).toContain("Jan 1, 2026 → Jan 12, 2026");
+    ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a012,\u00a02026");
 
     // Let the 150ms autosave debounce settle BEFORE dispatching the foreign
     // event: the primitive's flush-before-adopt would otherwise cement OUR
@@ -1106,7 +1106,7 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
     await waitFor(() => {
       expect(
         screen.getByTestId("scenario-coverage-window-value").textContent,
-      ).toContain("Jan 1, 2026 → Jan 6, 2026");
+      ).toContain("Jan\u00a01,\u00a02026 – Jan\u00a06,\u00a02026");
     });
   });
 });

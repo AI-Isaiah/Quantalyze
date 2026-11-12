@@ -192,6 +192,113 @@ test.describe("composed scenario — N-FOOT", () => {
   }
 });
 
+// Phase 201.1 D-06 / U-10 (POLISHRESIDUALS). The sticky bar's summary group was `flex-1`
+// (`flex: 1 1 0%`) inside a `flex-wrap` row, so the line-breaker counted it as 0px wide, the action
+// group (about 210px) always shared line one with it, and at 390px the summary was left about
+// 100px: "No material change yet." wrapped one word per line. A real basis (14rem) on the summary
+// group makes the actions wrap to a second row at narrow widths and share the line at 768 and up.
+// The widths are spec-local: `VIEWPORTS` is shared with the authed reflow sweep (founder decision,
+// "390px floor") and is not edited here.
+const FOOT_WRAP_VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V320", width: 320, height: 700 },
+  { id: "V390", width: 390, height: 844 },
+  { id: "V768", width: 768, height: 1024 },
+  { id: "V1280", width: 1280, height: 800 },
+];
+const FOOT_SENTENCE = "No material change yet.";
+// The bar sits inside the page's own gutters, and from md the sidebar takes its column too: at a
+// 768px viewport the bar is 396px wide, short of the ~482px a one-row bar needs (14rem summary +
+// gap + ~214px of actions + 32px padding). So 768 is a TWO-row width, not a one-row one. The
+// UI-SPEC's "at 768px the bar is one row, as at HEAD" is wrong on the numbers: at HEAD the summary
+// was squeezed to about 138px there and the sentence wrapped, the same defect. One row starts
+// somewhere above 768 and holds at 1280.
+const FOOT_TWO_ROW_MAX_PX = 768;
+
+test.describe("composed scenario — N-FOOT narrow", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+    }
+  });
+
+  for (const vp of FOOT_WRAP_VIEWPORTS) {
+    test(`${vp.id}: the sticky bar keeps its sentence on one line; actions ${
+      vp.width <= FOOT_TWO_ROW_MAX_PX ? "on a second row" : "share the line"
+    }`, async ({ page }) => {
+      test.setTimeout(120_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      await openComposedScenario(page);
+
+      const footer = page.locator(FOOTER);
+      await expect(footer, `${vp.id}: scenario footer region missing`).toBeVisible();
+      // Anti-vacuity: measure nothing until the sentence is really on the page. A footer that
+      // printed a delta list instead would pass every geometry assertion below for free.
+      const sentence = footer.getByText(FOOT_SENTENCE, { exact: true });
+      await expect(
+        sentence,
+        `${vp.id}: "${FOOT_SENTENCE}" is not in the footer, so the wrap geometry is unmeasured`,
+      ).toBeVisible();
+
+      const commit = page.locator(COMMIT);
+      const reset = page.locator('[data-testid="scenario-footer-reset"]');
+      // The sentence span is a direct child of the summary group.
+      const summaryGroup = sentence.locator("xpath=..");
+      const actionGroup = commit.locator("xpath=..");
+
+      const sentenceBox = await boxOf(sentence, `${vp.id} sentence`);
+      const lineHeight = await sentence.evaluate((el) => {
+        const cs = getComputedStyle(el);
+        const lh = parseFloat(cs.lineHeight);
+        // `normal` parses to NaN: fall back to 1.2 x the font size, the CSS `normal` approximation.
+        return Number.isNaN(lh) ? parseFloat(cs.fontSize) * 1.2 : lh;
+      });
+      const summaryBox = await boxOf(summaryGroup, `${vp.id} summary group`);
+      const actionBox = await boxOf(actionGroup, `${vp.id} action group`);
+      const footerBox = await boxOf(footer, `${vp.id} footer`);
+      const geometry = `footer ${footerBox.width}px wide, summary ${summaryBox.width}px, actions ${actionBox.width}px`;
+
+      if (vp.width <= FOOT_TWO_ROW_MAX_PX) {
+        expect(
+          sentenceBox.height,
+          `${vp.id}: sentence box ${sentenceBox.height}px vs line-height ${lineHeight}px: "${FOOT_SENTENCE}" wrapped`,
+        ).toBeLessThanOrEqual(lineHeight * 1.5);
+        expect(
+          actionBox.y,
+          `${vp.id}: action group top ${actionBox.y} is above summary bottom ${summaryBox.y + summaryBox.height}: the actions share the summary's line`,
+        ).toBeGreaterThanOrEqual(summaryBox.y + summaryBox.height - 1);
+        for (const [label, locator] of [
+          ["Reset", reset],
+          ["Commit scenario", commit],
+        ] as const) {
+          const box = await boxOf(locator, `${vp.id} ${label}`);
+          expect(box.height, `${vp.id}: ${label} height ${box.height} is under 44px`).toBeGreaterThanOrEqual(44);
+        }
+        if (vp.width > 320) {
+          await assertNoReflow(page, ALLOC_ANCHOR);
+        } else {
+          // At 320 the page already overflows by 7px at HEAD, from KpiStrip's nowrap
+          // "vs current allocation" suffix (not this plan's file; booked in deferred-items.md),
+          // so the whole-page walk would blame the footer for a defect it does not carry.
+          // The footer's own bounds are asserted instead.
+          await assertChildrenInside(page, footer, `${vp.id} sticky bar children`);
+          const footerOverflow = await footer.evaluate((el) => el.scrollWidth - el.clientWidth);
+          expect(footerOverflow, `${vp.id}: the sticky bar overflows itself by ${footerOverflow}px`).toBeLessThanOrEqual(1);
+        }
+      } else {
+        expect(
+          actionBox.y,
+          `${vp.id}: action group top ${actionBox.y} is not above summary bottom ${summaryBox.y + summaryBox.height}: the actions left the summary's line (${geometry})`,
+        ).toBeLessThan(summaryBox.y + summaryBox.height);
+      }
+    });
+  }
+});
+
 test.describe("allocations tab strip — SC2-(a)", () => {
   test.skip(
     !HAS_SEED_ENV,
@@ -1191,6 +1298,238 @@ test.describe("/compare — N-CMP", () => {
   });
 });
 
+// Phase 201.1 D-02 (SC-2), real-browser half. jsdom cannot lay out Recharts ticks, so the
+// compare chart's x-axis is measured here: every tick prints the formatDay form (Mon, a no-break
+// space, D, a comma, a no-break space, YYYY), none is raw ISO, each box lies inside the chart svg,
+// no two overlap, none is rotated, and the hover label reads in the same form.
+const FORMAT_DAY_RE = /^[A-Z][a-z]{2}\u00a0\d{1,2},\u00a0\d{4}$/;
+const ISO_DAY_RE = /\d{4}-\d{2}-\d{2}/;
+const CMP_TICK_VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V320", width: 320, height: 700 },
+  { id: "V390", width: 390, height: 844 },
+  { id: "V1280", width: 1280, height: 800 },
+];
+
+test.describe("/compare — N-CMP ticks", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+    }
+  });
+
+  for (const vp of CMP_TICK_VIEWPORTS) {
+    test(`${vp.id}: N-CMP ticks print the day form, whole and apart, inside the chart svg`, async ({
+      page,
+    }) => {
+      test.setTimeout(120_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      const ids: string[] = [];
+      for (const tag of ["a", "b"]) {
+        const name = `${NAME_PREFIX} cmp-ticks-${vp.id}-${tag} ${Math.random().toString(36).slice(2, 8)}`;
+        ids.push(await seedStrategyWithHistory({ days: 400, name, codename: name }));
+      }
+      const allocator = await seedTestAllocator();
+      await loginViaForm(page, allocator.email, allocator.password);
+      await page.goto(`/compare?ids=${ids.join(",")}`);
+
+      const svg = page.locator("svg.recharts-surface").first();
+      await expect(svg, `${vp.id}: the compare chart did not draw`).toBeVisible({
+        timeout: 20_000,
+      });
+      const tickSel = "text.recharts-xAxis.recharts-cartesian-axis-tick-value";
+      await expect(page.locator(tickSel).nth(1)).toBeVisible({ timeout: 10_000 });
+
+      const m = await page.evaluate((sel) => {
+        const chart = document.querySelector("svg.recharts-surface") as SVGSVGElement;
+        const c = chart.getBoundingClientRect();
+        return {
+          svg: { left: c.left, right: c.right, top: c.top, bottom: c.bottom },
+          ticks: Array.from(document.querySelectorAll<SVGTextElement>(sel)).map((t) => {
+            const r = t.getBoundingClientRect();
+            return {
+              text: t.textContent ?? "",
+              left: r.left,
+              right: r.right,
+              top: r.top,
+              bottom: r.bottom,
+              transform: t.getAttribute("transform") ?? "",
+              rotate: t.getAttribute("rotate") ?? "",
+            };
+          }),
+        };
+      }, tickSel);
+
+      console.log(
+        `N-CMP-TICKS viewport=${vp.width} ticks=${m.ticks.length} svg=${(m.svg.right - m.svg.left).toFixed(0)}px [${m.ticks.map((t) => t.text).join(" | ")}]`,
+      );
+      // Anti-vacuity: two ticks is the least a 400-day range can draw.
+      expect(m.ticks.length, `${vp.id}: fewer than 2 x-axis ticks measured`).toBeGreaterThanOrEqual(2);
+      const tol = 1;
+      for (const t of m.ticks) {
+        expect(
+          FORMAT_DAY_RE.test(t.text),
+          `${vp.id}: tick ${JSON.stringify(t.text)} is not the formatDay form`,
+        ).toBe(true);
+        expect(ISO_DAY_RE.test(t.text), `${vp.id}: tick ${JSON.stringify(t.text)} is raw ISO`).toBe(false);
+        expect(
+          t.left >= m.svg.left - tol && t.right <= m.svg.right + tol,
+          `${vp.id}: tick ${JSON.stringify(t.text)} [${t.left.toFixed(1)}, ${t.right.toFixed(1)}] leaves the svg [${m.svg.left.toFixed(1)}, ${m.svg.right.toFixed(1)}]`,
+        ).toBe(true);
+        expect(
+          t.top >= m.svg.top - tol && t.bottom <= m.svg.bottom + tol,
+          `${vp.id}: tick ${JSON.stringify(t.text)} leaves the svg vertically`,
+        ).toBe(true);
+        expect(
+          /rotate/i.test(t.transform) || (t.rotate !== "" && Number(t.rotate) !== 0),
+          `${vp.id}: tick ${JSON.stringify(t.text)} is rotated (${t.transform} ${t.rotate})`,
+        ).toBe(false);
+      }
+      const byLeft = [...m.ticks].sort((a, b) => a.left - b.left);
+      for (let i = 1; i < byLeft.length; i++) {
+        expect(
+          byLeft[i].left >= byLeft[i - 1].right,
+          `${vp.id}: ticks ${JSON.stringify(byLeft[i - 1].text)} and ${JSON.stringify(byLeft[i].text)} overlap`,
+        ).toBe(true);
+      }
+      await assertNoReflow(page, "h1");
+
+      if (vp.width >= 1280) {
+        // The chart sits below the fold at 800px; the pointer must be over the plot, not the page.
+        await svg.scrollIntoViewIfNeeded();
+        const box = await svg.boundingBox();
+        if (!box) throw new Error("V1280: the compare chart svg has no layout box");
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+        const label = page.locator(".recharts-tooltip-label").first();
+        await expect(label, "V1280: hovering the plot area showed no tooltip label").toBeVisible({
+          timeout: 5_000,
+        });
+        const text = (await label.textContent()) ?? "";
+        expect(
+          FORMAT_DAY_RE.test(text),
+          `V1280: hover label ${JSON.stringify(text)} is not the formatDay form`,
+        ).toBe(true);
+      }
+    });
+  }
+});
+
+// Phase 201.1 D-02 (SC-2), real-browser half. The CoverageTimeline prints its two union-axis days
+// through formatDay. Where both fit side by side (1280px) they share a line, start left and end
+// right. Where they do not (measured: the track is 70px at 320 and 140px at 390, a pair needs about
+// 152px) the end label wraps to a second line and is right-aligned under the track's right edge, and
+// the pair never overlaps and never leaves the timeline body. UI-SPEC row "390px and wider: one
+// line" assumed a 118px track at 320px; the measured track is narrower, see the plan 15 SUMMARY.
+const COVERAGE_BODY = '[data-testid="scenario-coverage-timeline-body"]';
+const COVERAGE_ENDPOINT_VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V320", width: 320, height: 700 },
+  { id: "V390", width: 390, height: 844 },
+  { id: "V1280", width: 1280, height: 800 },
+];
+
+test.describe("composed scenario — coverage endpoints", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+    }
+  });
+
+  for (const vp of COVERAGE_ENDPOINT_VIEWPORTS) {
+    test(`${vp.id}: coverage endpoints print days, ${vp.width >= 1280 ? "on one line" : "wrapping right-aligned when they do not fit"}`, async ({
+      page,
+    }) => {
+      test.setTimeout(120_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      await openComposedScenario(page);
+
+      const body = page.locator(COVERAGE_BODY);
+      if (!(await body.isVisible())) {
+        // The section starts collapsed.
+        await page.locator("#scenario-coverage-timeline > summary").click();
+      }
+      await expect(body, `${vp.id}: the coverage timeline body did not open`).toBeVisible({
+        timeout: 10_000,
+      });
+      const start = page.locator('[data-testid="coverage-endpoint-start"]');
+      const end = page.locator('[data-testid="coverage-endpoint-end"]');
+      await expect(start, `${vp.id}: start endpoint missing`).toHaveCount(1);
+      await expect(end, `${vp.id}: end endpoint missing`).toHaveCount(1);
+
+      const startText = (await start.textContent()) ?? "";
+      const endText = (await end.textContent()) ?? "";
+      expect(FORMAT_DAY_RE.test(startText), `${vp.id}: start ${JSON.stringify(startText)} is not the formatDay form`).toBe(true);
+      expect(FORMAT_DAY_RE.test(endText), `${vp.id}: end ${JSON.stringify(endText)} is not the formatDay form`).toBe(true);
+      const bodyText = (await body.textContent()) ?? "";
+      expect(ISO_DAY_RE.test(bodyText), `${vp.id}: the timeline body holds a YYYY-MM-DD text`).toBe(false);
+
+      const s = await boxOf(start, `${vp.id} start endpoint`);
+      const e = await boxOf(end, `${vp.id} end endpoint`);
+      const bodyBox = await boxOf(body, `${vp.id} timeline body`);
+      // The bar track the endpoints sit under: the coverage bar's parent.
+      const track = await boxOf(
+        page.locator('[data-testid^="coverage-bar-"]').first().locator("xpath=.."),
+        `${vp.id} bar track`,
+      );
+      const tol = 1;
+      const right = (r: Rect) => r.x + r.width;
+      const sameLine = Math.abs(s.y - e.y) <= tol;
+      console.log(
+        `COVERAGE-ENDPOINTS viewport=${vp.width} start=[${s.x.toFixed(1)},${right(s).toFixed(1)}]@${s.y.toFixed(1)} end=[${e.x.toFixed(1)},${right(e).toFixed(1)}]@${e.y.toFixed(1)} track=[${track.x.toFixed(1)},${right(track).toFixed(1)}] body=[${bodyBox.x.toFixed(1)},${right(bodyBox).toFixed(1)}] overshoot=${(right(e) - right(track)).toFixed(1)}px sameLine=${sameLine}`,
+      );
+
+      expect(rectsIntersect(s, e), `${vp.id}: the two endpoint labels overlap`).toBe(false);
+      // Both labels stay inside the track's column on the right: a label wider than the track
+      // (320px: 79px in a 70px track, spacer unchanged) spills LEFT over the empty spacer, never
+      // right past the track, the section or the page.
+      expect(
+        right(s) <= right(track) + tol && right(e) <= right(track) + tol,
+        `${vp.id}: an endpoint passes the track's right edge (start right ${right(s).toFixed(1)}, end right ${right(e).toFixed(1)}, track right ${right(track).toFixed(1)})`,
+      ).toBe(true);
+      // And the left side: a label may pass the track's left edge only by its own excess width,
+      // so the pair stays under the track and never drifts left across the name column.
+      for (const [name, r] of [["start", s], ["end", e]] as const) {
+        const allowed = Math.max(0, r.width - track.width);
+        expect(
+          r.x >= track.x - allowed - tol,
+          `${vp.id}: ${name} label starts ${(track.x - r.x).toFixed(1)}px left of the track; only its own excess ${allowed.toFixed(1)}px is allowed`,
+        ).toBe(true);
+      }
+      const over = await body.evaluate((el) => el.scrollWidth - el.clientWidth);
+      expect(over <= tol, `${vp.id}: the timeline body overflows horizontally by ${over}px`).toBe(true);
+
+      if (sameLine) {
+        expect(e.x >= right(s), `${vp.id}: the start label is not left of the end label`).toBe(true);
+        expect(right(e) <= right(track) + tol, `${vp.id}: end label is past the track's right edge`).toBe(true);
+      } else {
+        expect(e.y >= s.y + s.height - tol, `${vp.id}: wrapped end label is not below the start label`).toBe(true);
+        // Right-aligned under the track's right edge.
+        expect(
+          Math.abs(right(e) - right(track)) <= tol,
+          `${vp.id}: wrapped end label is not right-aligned under the track (end right ${right(e).toFixed(1)}, track right ${right(track).toFixed(1)})`,
+        ).toBe(true);
+      }
+
+      if (vp.width === 1280) {
+        expect(sameLine, `${vp.id}: both endpoints must share a line (tops ${s.y.toFixed(1)} vs ${e.y.toFixed(1)})`).toBe(true);
+      }
+      if (vp.width >= 390) {
+        await assertNoReflow(page, "h1");
+      }
+      // The whole-page reflow walk is not run at 320px: the composer's KpiStrip nowrap suffix
+      // overflows main by 7px there (deferred-items-201.1-14.md item 1, not this plan's defect).
+    });
+  }
+});
+
 // Plan 170-11, item (j). The factsheet KPI strip follows a 2 / 3 / full
 // container ladder, so at V390 and V640 no label is ellipsised and no value
 // breaks inside a number. Both mounts are measured: the composer's
@@ -1295,6 +1634,86 @@ test.describe("factsheet KPI — N-KPI", () => {
       await assertNoReflow(page, "#factsheet-main");
     });
   }
+});
+
+// Phase 201.1 D-07 (SC-7, the real-browser half). The composer mounts the factsheet chart on the
+// scenario's return series, which fills when the lazy GET /api/strategies/<id>/returns lands. At HEAD
+// before plan 201.1-04, FactsheetProvider seeded the brush range once from the then-empty series
+// ([0, 0]) and never followed it as it grew, so the composer opened on "Selected range: d - d", one
+// observation, KPI dashes and a Reset button. This delays the returns request so the chart reliably
+// mounts first, then asserts the composer opens on the full range: the eyebrow says "Full history",
+// no "Reset to full history" control exists, and a KPI figure is printed.
+const RETURNS_DELAY_MS = 1_500;
+
+test.describe("composed scenario — opening range", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+    }
+  });
+
+  test("V1280: returns landing after the chart mounts still open on Full history", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    // Anti-vacuity: count the requests the delay really held. A route that never matched would
+    // leave the chart mounting on the series it already had and prove nothing about the race.
+    let delayed = 0;
+    await page.route("**/api/strategies/*/returns*", async (route) => {
+      delayed += 1;
+      await new Promise((resolve) => setTimeout(resolve, RETURNS_DELAY_MS));
+      await route.continue();
+    });
+
+    await openComposedScenario(page);
+    expect(delayed, "the returns request was never intercepted, so the race was not forced").toBeGreaterThan(0);
+
+    const eyebrows = page.locator('[data-testid^="range-eyebrow-"]');
+    await expect(eyebrows.first(), "the composer rendered no range eyebrow").toBeVisible({
+      timeout: 15_000,
+    });
+    // Read textContent, not innerText: the eyebrow's CSS uppercases it.
+    const texts = async () => eyebrows.evaluateAll((els) => els.map((el) => (el.textContent ?? "").trim()));
+    // Wait for the delayed series to LAND before judging the range: with no series the eyebrow
+    // reads "Full history: — – —" and every KPI is a dash, which would fail the KPI check below
+    // for the wrong reason (or pass the label check before the race has played out).
+    await expect
+      .poll(async () => (await texts()).every((t) => t !== "" && !t.includes("—")), {
+        message: `the delayed returns never produced a dated range; eyebrows read ${JSON.stringify(await texts())}`,
+        timeout: 20_000,
+      })
+      .toBe(true);
+    await expect
+      .poll(async () => (await texts()).every((t) => t.startsWith("Full history")), {
+        message: `the composer did not open on Full history; eyebrows read ${JSON.stringify(await texts())}`,
+        timeout: 10_000,
+      })
+      .toBe(true);
+    // The evidence line the SUMMARY records (UI-SPEC Interaction contract 7).
+    console.log(`opening-range: eyebrows=${JSON.stringify(await texts())} delayed-returns=${delayed}`);
+
+    await expect(
+      page.locator('[data-testid^="range-reset-"]'),
+      'a "Reset to full history" control is showing on a composer that was never narrowed',
+    ).toHaveCount(0);
+
+    const values = await page
+      .locator(KPI_VALUE)
+      .evaluateAll((els) =>
+        els.filter((el) => el.getClientRects().length > 0).map((el) => (el.textContent ?? "").trim()),
+      );
+    expect(values.length, "no visible KPI value measured").toBeGreaterThan(0);
+    expect(
+      values.some((v) => v !== "" && v !== "—"),
+      `every KPI value is the em dash: ${JSON.stringify(values)}`,
+    ).toBe(true);
+  });
 });
 
 // 194.2 item 7 (FIGURERESIDUALS) — the print view's equity figure fits its card at 1470px.

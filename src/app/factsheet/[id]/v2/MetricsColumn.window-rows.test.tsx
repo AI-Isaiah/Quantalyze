@@ -135,7 +135,7 @@ describe("factsheet mount: 6 Month / 1 Year rows exist only when the record cove
     expect(labels).not.toContain("1 Year");
     // The kept rows are present, in their order.
     // Phase 170 AD-10: SHORT ends 2024-06-08, an ended record, so its month row names that month.
-    const kept = ["Final month (Jun 2024)", "3 Month", "Year-to-date", "Since Inception", "CAGR"];
+    const kept = ["Final month (Jun\u00a02024)", "3 Month", "Year-to-date", "Since Inception", "CAGR"];
     expect(labels.filter((l) => kept.includes(l))).toEqual(kept);
   });
 
@@ -144,7 +144,7 @@ describe("factsheet mount: 6 Month / 1 Year rows exist only when the record cove
     expect(labels).not.toContain("6 Month");
     expect(labels).not.toContain("1 Year");
     // Phase 170 AD-10: SHORT ends 2024-06-08, an ended record, so its month row names that month.
-    const kept = ["Final month (Jun 2024)", "Year-to-date", "3 Month", "Win Rate (days)", "Profit Factor"];
+    const kept = ["Final month (Jun\u00a02024)", "Year-to-date", "3 Month", "Win Rate (days)", "Profit Factor"];
     expect(labels.filter((l) => kept.includes(l))).toEqual(kept);
   });
 

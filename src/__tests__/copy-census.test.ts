@@ -316,6 +316,28 @@ describe("copy census (201 plan 23): the live tree against the exception list", 
       });
     }
 
+    // Phase 201.1 D-02 / U-06: the axis-date-key form fires through the walker and the judge too.
+    it("rule C axis-date-key: a planted unformatted date XAxis is one unregistered hit", () => {
+      const file = "src/components/layout/PlantedAxis.tsx";
+      withPlanted({ [file]: 'export const C = () => <XAxis dataKey="date" />;\n' }, (dir) => {
+        const found = scanTree(dir, POLICY).filter((h) => h.rule === "C" && h.id === "axis-date-key");
+        expect(found).toHaveLength(1);
+        const problems = judge(found, []);
+        expect(problems).toHaveLength(1);
+        expect(problems[0]).toContain(`unregistered: ${file}`);
+        expect(problems[0]).toContain("rule C");
+      });
+    });
+
+    it("rule C axis-date-key: a planted formatted date XAxis is quiet", () => {
+      withPlanted(
+        { "src/components/layout/PlantedAxisOk.tsx": 'export const C = () => <XAxis dataKey="date" tickFormatter={formatDay} />;\n' },
+        (dir) => {
+          expect(scanTree(dir, POLICY).filter((h) => h.id === "axis-date-key")).toEqual([]);
+        },
+      );
+    });
+
     it("a registered term wrapped in Term is not a hit, so rule B can also stay quiet", () => {
       withPlanted(
         { "src/components/layout/Wrapped.tsx": 'export const C = () => <Term k="sharpe"><span>Sharpe</span></Term>;\n' },

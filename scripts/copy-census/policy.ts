@@ -131,6 +131,9 @@ export const DATES: DatePolicy = {
     "effective_start", "effective_end", "windowStart", "windowEnd", "first_day", "last_day", "firstDay", "lastDay",
     "date_range", "dateRange", "allocated_at", "week_start",
   ],
+  // The `dataKey` of a Recharts XAxis whose raw value is an ISO day (Phase 201.1 D-02, U-06). Same
+  // reviewed-change rule as `fieldNames`, and a key listed here is never a reason to except a hit.
+  axisDateKeys: ["date"],
 };
 
 // ---------------------------------------------------------------------------------------

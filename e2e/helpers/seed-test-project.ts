@@ -1927,6 +1927,10 @@ export async function seedManagerKeyPanel(opts?: {
   linkedLabel?: string;
   spareLabel?: string;
   disconnectedLabel?: string;
+  /** Written into the LINKED key's `sync_status` (default: the column default). */
+  linkedSyncStatus?: string;
+  /** Written into the LINKED key's `sync_error` (the helper line for status `error`). */
+  linkedSyncError?: string;
 }): Promise<SeededManagerKeyPanel> {
   const admin = getAdmin();
   const manager = await seedTestAllocator({ role: "manager" });
@@ -1947,6 +1951,12 @@ export async function seedManagerKeyPanel(opts?: {
         label: linkedLabel,
         api_key_encrypted: "e2e-placeholder-ciphertext",
         is_active: true,
+        ...(opts?.linkedSyncStatus !== undefined
+          ? { sync_status: opts.linkedSyncStatus }
+          : {}),
+        ...(opts?.linkedSyncError !== undefined
+          ? { sync_error: opts.linkedSyncError }
+          : {}),
       })
       .select("id")
       .single();

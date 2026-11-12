@@ -168,7 +168,7 @@ describe("D-08: the paired-floor sentence dates a comparator that ends early", (
     expect(reasons).toHaveLength(2);
     for (const r of reasons) {
       expect(r.textContent).toBe(
-        "Alpha and beta need at least 10 days paired with SPX; this record has 5. SPX prices end Aug 2, 2024.",
+        "Alpha and beta need at least 10 days paired with SPX; this record has 5. SPX prices end Aug\u00a02,\u00a02024.",
       );
     }
   });

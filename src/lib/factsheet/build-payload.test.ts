@@ -346,3 +346,25 @@ describe("170.2 SC-4 / D-09 — the stored CSV source reaches the payload by con
     expect(payload.source).toBe("csv");
   });
 });
+
+describe("201.1 D-05 — the correlation matrix prints the strategy name whole up to 13 characters", () => {
+  const labelFor = (name: string) =>
+    buildFactsheetPayload({ ...SK_STRATEGY, name }, CASH_SERIES)!.correlationMatrix.labels[0];
+
+  // The allocator's portfolio is named "My allocation" (13 characters). The cap used to cut
+  // it to 11 characters and an ellipsis, so the one name every allocator sees read "My allocati…".
+  it("a 13-character name (My allocation) prints whole", () => {
+    expect("My allocation".length).toBe(13);
+    expect(labelFor("My allocation")).toBe("My allocation");
+  });
+
+  it("a 14-character name prints its first 12 characters and an ellipsis (13 glyphs)", () => {
+    const label = labelFor("My allocation!");
+    expect(label).toBe("My allocatio…");
+    expect(label.length).toBe(13);
+  });
+
+  it("a 12-character name is unchanged", () => {
+    expect(labelFor("My allocatio")).toBe("My allocatio");
+  });
+});

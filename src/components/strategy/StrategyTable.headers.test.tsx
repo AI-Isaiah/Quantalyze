@@ -194,7 +194,7 @@ describe("CLAR-01 Track column (D-05): months of record from the covered-day spa
     const cell = cellUnder(TRACK, rowFor("Thirty Days"));
     // Phase 201 plan 16 (D-11): both days print through formatDay. The expected text is typed by
     // hand: 30 covered days ending Nov 7 start on Oct 9.
-    expect(cell.getAttribute("title")).toBe("30 days of record, Oct 9, 2026 to Nov 7, 2026.");
+    expect(cell.getAttribute("title")).toBe("30 days of record, Oct\u00a09,\u00a02026 to Nov\u00a07,\u00a02026.");
   });
 
   it("counts a chain-broken row from headline_since, the record its figures are computed on", () => {
@@ -208,7 +208,7 @@ describe("CLAR-01 Track column (D-05): months of record from the covered-day spa
     renderTable([row]);
     const cell = cellUnder(TRACK, rowFor("Broken Chain"));
     expect(cell.textContent?.trim()).toBe("1");
-    expect(cell.getAttribute("title")).toBe("45 days of record, Sep 24, 2026 to Nov 7, 2026.");
+    expect(cell.getAttribute("title")).toBe("45 days of record, Sep\u00a024,\u00a02026 to Nov\u00a07,\u00a02026.");
   });
 
   it("treats a present but malformed headline_since as an unknown length, not the full-series span (197 WR-01)", () => {

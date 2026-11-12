@@ -107,13 +107,13 @@ describe("jointMetrics", () => {
 describe("pairedFloorReason (D-08)", () => {
   it("names the day a record's comparator prices end", () => {
     expect(pairedFloorReason("SPX", 4, "record", 10, "2024-07-25")).toBe(
-      "Alpha and beta need at least 10 days paired with SPX; this record has 4. SPX prices end Jul 25, 2024.",
+      "Alpha and beta need at least 10 days paired with SPX; this record has 4. SPX prices end Jul\u00a025,\u00a02024.",
     );
   });
 
   it("names the day a selected range's comparator prices end", () => {
     expect(pairedFloorReason("BTC", 3, "range", 10, "2025-01-05")).toBe(
-      "Alpha and beta need at least 10 days paired with BTC; the selected range has 3. BTC prices end Jan 5, 2025.",
+      "Alpha and beta need at least 10 days paired with BTC; the selected range has 3. BTC prices end Jan\u00a05,\u00a02025.",
     );
   });
 

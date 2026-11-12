@@ -134,8 +134,8 @@ describe("ScenarioFactsheetChart — equity + drawdown share ONE window (38-03 Q
     // The brush window edges are rendered as date labels driven by xRange. At
     // full range the right edge is the LAST scenario date.
     const fullRangeLabel = brushSection.textContent ?? "";
-    expect(fullRangeLabel).toContain("Jan 1, 2024"); // first scenario date
-    expect(fullRangeLabel).toContain("Apr 29, 2024"); // last (index 119) scenario date
+    expect(fullRangeLabel).toContain("Jan\u00a01,\u00a02024"); // first scenario date
+    expect(fullRangeLabel).toContain("Apr\u00a029,\u00a02024"); // last (index 119) scenario date
     expect(fullRangeLabel).not.toMatch(/\d{4}-\d{2}-\d{2}/);
 
     // Drive the window from the body's FIRST chart (the cumulative equity panel)

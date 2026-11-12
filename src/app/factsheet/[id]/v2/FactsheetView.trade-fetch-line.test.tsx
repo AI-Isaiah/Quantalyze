@@ -148,7 +148,7 @@ describe("FactsheetView - TradeFetchLine (D-06, D-10, F2)", () => {
     const { container } = renderFactsheet(withFacts("2026-10-09T07:00:00Z", "okx"));
     const line = tradeFetchLine(container);
     expect(line, "trade-fetch line did not render").not.toBeNull();
-    expect(line!.textContent).toBe("Last trades fetched less than a day ago · Oct 9, 2026");
+    expect(line!.textContent).toBe("Last trades fetched less than a day ago · Oct\u00a09,\u00a02026");
     expect(line!.className).toContain("text-text-muted");
     expect(line!.className).toContain("text-caption");
     expect(line!.className).toContain("mt-1");
@@ -159,7 +159,7 @@ describe("FactsheetView - TradeFetchLine (D-06, D-10, F2)", () => {
     const { container } = renderFactsheet(withFacts("2026-09-30T12:00:00Z", "okx"));
     const line = tradeFetchLine(container);
     expect(line).not.toBeNull();
-    expect(line!.textContent).toBe("Stale: last trades fetched 9 days ago · Sep 30, 2026");
+    expect(line!.textContent).toBe("Stale: last trades fetched 9 days ago · Sep\u00a030,\u00a02026");
     expect(line!.className).toContain("text-negative");
     expect(line!.className).not.toContain("text-text-muted");
   });
@@ -167,28 +167,28 @@ describe("FactsheetView - TradeFetchLine (D-06, D-10, F2)", () => {
   it("D-10: a published disconnected key (venue okx, seeded stamp) reads stale, not silent", () => {
     const { container } = renderFactsheet(withFacts("2026-09-20T03:15:00Z", "okx"));
     const line = tradeFetchLine(container);
-    expect(line!.textContent).toBe("Stale: last trades fetched 19 days ago · Sep 20, 2026");
+    expect(line!.textContent).toBe("Stale: last trades fetched 19 days ago · Sep\u00a020,\u00a02026");
     expect(line!.className).toContain("text-negative");
   });
 
   it("fetched exactly 1 day before now: singular `1 day`", () => {
     const { container } = renderFactsheet(withFacts("2026-10-08T12:00:00Z", "bybit"));
     expect(tradeFetchLine(container)!.textContent).toBe(
-      "Last trades fetched 1 day ago · Oct 8, 2026",
+      "Last trades fetched 1 day ago · Oct\u00a08,\u00a02026",
     );
   });
 
   it("48 h exactly is still current and reads 2 days", () => {
     const { container } = renderFactsheet(withFacts("2026-10-07T12:00:00Z", "okx"));
     const line = tradeFetchLine(container);
-    expect(line!.textContent).toBe("Last trades fetched 2 days ago · Oct 7, 2026");
+    expect(line!.textContent).toBe("Last trades fetched 2 days ago · Oct\u00a07,\u00a02026");
     expect(line!.className).toContain("text-text-muted");
   });
 
   it("48 h + 1 min is stale while the day count still reads 2: the verdict is not re-derived from the count", () => {
     const { container } = renderFactsheet(withFacts("2026-10-07T11:59:00Z", "okx"));
     const line = tradeFetchLine(container);
-    expect(line!.textContent).toBe("Stale: last trades fetched 2 days ago · Oct 7, 2026");
+    expect(line!.textContent).toBe("Stale: last trades fetched 2 days ago · Oct\u00a07,\u00a02026");
     expect(line!.className).toContain("text-negative");
   });
 

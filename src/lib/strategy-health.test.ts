@@ -31,7 +31,7 @@ describe("strategyHealthOf — tracer", () => {
   it("reads a stale row through the Phase 197 list verdict, dated by the series end", () => {
     const health = strategyHealthOf(input({ seriesEnd: "2026-10-03" }));
     expect(health).toEqual({ kind: "stale", staleSince: "2026-10-03" });
-    expect(healthWord(health)).toBe("Stale (no data since Oct 3, 2026)");
+    expect(healthWord(health)).toBe("Stale (no data since Oct\u00a03,\u00a02026)");
     expect(HEALTH_TONE[health.kind]).toBe("text-warning");
   });
 
@@ -140,7 +140,7 @@ describe("strategyHealthOf — per-asset-class series boundaries (R-05, now 2026
 
   it("the Stale word names the series end day for every class", () => {
     expect(healthWord(strategyHealthOf(input({ assetClass: "traditional", seriesEnd: "2026-10-29" })))).toBe(
-      "Stale (no data since Oct 29, 2026)",
+      "Stale (no data since Oct\u00a029,\u00a02026)",
     );
   });
 

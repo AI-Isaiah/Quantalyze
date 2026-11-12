@@ -7,9 +7,9 @@ import { formatDay } from "@/lib/utils";
 // against `formatDay` and against hand-typed strings, never against this module's own code.
 describe("formatIsoDate delegates to formatDay", () => {
   it("prints the full day, in UTC, for a date and for a timestamp", () => {
-    expect(formatIsoDate("2026-10-09")).toBe("Oct 9, 2026");
+    expect(formatIsoDate("2026-10-09")).toBe("Oct\u00a09,\u00a02026");
     // 00:30 UTC is still Oct 9: the instant decides the day, not the runtime time zone.
-    expect(formatIsoDate("2026-10-09T00:30:00Z")).toBe("Oct 9, 2026");
+    expect(formatIsoDate("2026-10-09T00:30:00Z")).toBe("Oct\u00a09,\u00a02026");
   });
 
   it("agrees with formatDay on every input, including one that does not parse", () => {

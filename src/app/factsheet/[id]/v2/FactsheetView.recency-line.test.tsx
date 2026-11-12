@@ -103,7 +103,7 @@ Object.defineProperty(window, "localStorage", {
 // rendering are typed literally — the expected string is NEVER produced by
 // calling the component's formatter.
 const SERIES_END = "2026-05-06";
-const SERIES_END_RENDERED = "May 6, 2026";
+const SERIES_END_RENDERED = "May\u00a06,\u00a02026";
 const RECENCY_PREFIX = "Track record through ";
 const RECENCY_LINE = `${RECENCY_PREFIX}${SERIES_END_RENDERED}`;
 // A `computed_at` on the SAME calendar day as the series end. This is what
@@ -236,7 +236,7 @@ describe("FactsheetView — series-recency line (HONEST-02 / D-162-2 / UI-SPEC C
     const line = recencyLine(container);
     expect(line, "recency line did not render").not.toBeNull();
     expect(line!.textContent).toBe(RECENCY_LINE);
-    expect(line!.textContent).not.toContain("Aug 20, 2026");
+    expect(line!.textContent).not.toContain("Aug\u00a020,\u00a02026");
   });
 
   it("F-2: renders the date BYTE-IDENTICALLY to the chip's date line one row above", () => {

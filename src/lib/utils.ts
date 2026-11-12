@@ -133,6 +133,10 @@ export const MONTH_ABBR = [
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ] as const;
 
+/** U+00A0, the no-break space. The date helpers print it inside a date so a
+ *  line never breaks between month and day or before the year (Phase 201.1 / D-04). */
+const NBSP = "\u00a0";
+
 /**
  * The one UI date (Phase 201 / D-11): `Oct 9, 2026`. en-US short month,
  * unpadded day, four-digit year, or `—` when the value is null, undefined,
@@ -143,36 +147,43 @@ export const MONTH_ABBR = [
  * with `toLocaleDateString`), and the instant decides the day, not the offset
  * the string happens to carry. No locale argument and no `Date.now()` (D-21).
  *
- * Outside it by design (D-11, D-21, U-15): chart axis ticks, a time of day
- * printed alone, relative ages ("3d ago"), and machine values (ISO in a
- * data attribute, a CSV, an API field).
+ * The spaces inside the date are U+00A0, so a date never breaks before its
+ * year (Phase 201.1 / D-04); only a range's own separator spaces stay U+0020.
+ *
+ * Outside it by design (D-11, D-21, U-15): chart axis ticks (the compare chart's
+ * x-axis is the exception, inside the rule since Phase 201.1 D-02, which narrows
+ * 201 D-21), a time of day printed alone, relative ages ("3d ago"), and machine
+ * values (ISO in a data attribute, a CSV, an API field).
  */
 export function formatDay(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+  return `${MONTH_ABBR[d.getUTCMonth()]}${NBSP}${d.getUTCDate()},${NBSP}${d.getUTCFullYear()}`;
 }
 
-/** Month and year, `Oct 2026` (D-11). Same guards and UTC reading as
- *  `formatDay`; `—` for null, undefined, empty or unparseable input. */
+/** Month and year, `Oct 2026` (D-11), joined by U+00A0 (Phase 201.1 / D-04).
+ *  Same guards and UTC reading as `formatDay`; `—` for null, undefined, empty
+ *  or unparseable input. */
 export function formatMonth(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  return `${MONTH_ABBR[d.getUTCMonth()]}${NBSP}${d.getUTCFullYear()}`;
 }
 
 /** Day with time, `Oct 9, 2026, 14:05 UTC` (U-13). Both parts are read in UTC
  *  and the zone is named, so the string means one instant everywhere. Same
- *  guards as `formatDay`. */
+ *  guards as `formatDay`. The one ordinary space, after the year's comma, is
+ *  the only break opportunity; the time and `UTC` are joined by U+00A0
+ *  (Phase 201.1 / D-04, U-07). */
 export function formatDayTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   const hh = String(d.getUTCHours()).padStart(2, "0");
   const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${formatDay(iso)}, ${hh}:${mm} UTC`;
+  return `${formatDay(iso)}, ${hh}:${mm}${NBSP}UTC`;
 }
 
 /** Minute-bucket key used to gate relative-time re-renders. Callers

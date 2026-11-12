@@ -82,17 +82,17 @@ describe("188 D-02, D-06 - the factsheet names the days left out on a nearly emp
     [
       "two consecutive days read as one run",
       ["2026-10-27", "2026-10-28"],
-      "We leave out 2 days on which an account was nearly empty (under 5% of its highest balance over the previous 30 days): Oct 27, 2026 – Oct 28, 2026.",
+      "We leave out 2 days on which an account was nearly empty (under 5% of its highest balance over the previous 30 days): Oct\u00a027,\u00a02026 – Oct\u00a028,\u00a02026.",
     ],
     [
       "one day reads singular",
       ["2026-10-27"],
-      "We leave out 1 day on which an account was nearly empty (under 5% of its highest balance over the previous 30 days): Oct 27, 2026.",
+      "We leave out 1 day on which an account was nearly empty (under 5% of its highest balance over the previous 30 days): Oct\u00a027,\u00a02026.",
     ],
     [
       "a run and a lone day are joined by a semicolon, every run listed",
       ["2026-10-27", "2026-10-28", "2026-11-02"],
-      "We leave out 3 days on which an account was nearly empty (under 5% of its highest balance over the previous 30 days): Oct 27, 2026 – Oct 28, 2026; Nov 2, 2026.",
+      "We leave out 3 days on which an account was nearly empty (under 5% of its highest balance over the previous 30 days): Oct\u00a027,\u00a02026 – Oct\u00a028,\u00a02026; Nov\u00a02,\u00a02026.",
     ],
   ])("%s", (_name, days, expected) => {
     const { container } = renderBody(tinyBasePayload(days));

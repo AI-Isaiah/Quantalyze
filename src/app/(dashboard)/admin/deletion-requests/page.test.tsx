@@ -96,7 +96,7 @@ describe("/admin/deletion-requests - dates (D-11)", () => {
 
     const row = screen.getByText("Jane").closest("tr") as HTMLElement;
     const cells = within(row).getAllByRole("cell");
-    expect(cells[2].textContent).toBe("Oct 9, 2026, 14:05 UTC");
+    expect(cells[2].textContent).toBe("Oct\u00a09,\u00a02026, 14:05\u00a0UTC");
     expect(cells[3].textContent).toBe("—");
   });
 });

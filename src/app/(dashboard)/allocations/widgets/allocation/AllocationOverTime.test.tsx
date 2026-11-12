@@ -257,7 +257,7 @@ describe("tooltip labelFormatter - a non-finite hover value (201 R2-SFH-01)", ()
   it("formats a finite ms as a day and a non-finite one as a dash", () => {
     render(<AllocationOverTime points={ALLOC_POINTS} gaps={[]} />);
     const fmt = captured.labelFormatter!;
-    expect(fmt(utc("2026-03-01"))).toBe("Mar 1, 2026");
+    expect(fmt(utc("2026-03-01"))).toBe("Mar\u00a01,\u00a02026");
     expect(() => fmt(undefined)).not.toThrow();
     expect(fmt(undefined)).toBe("\u2014");
     expect(fmt("not-a-number")).toBe("\u2014");

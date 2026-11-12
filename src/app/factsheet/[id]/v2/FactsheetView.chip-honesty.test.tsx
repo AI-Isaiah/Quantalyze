@@ -101,7 +101,7 @@ function isoHoursAgo(n: number): string {
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 function usDate(iso: string): string {
   const d = new Date(iso);
-  return `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+  return `${MONTH_NAMES[d.getUTCMonth()]}\u00a0${d.getUTCDate()},\u00a0${d.getUTCFullYear()}`;
 }
 
 /** n daily-return points whose LAST point falls exactly on `endYmd`. */

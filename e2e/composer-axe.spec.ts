@@ -263,14 +263,15 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     await expect(windowControl).toBeVisible({ timeout: 15_000 });
 
     // The window value must be a REAL derived range, rendered as
-    // "{Mon D, YYYY} → {Mon D, YYYY}" (two formatDay calls; F-11, review R2-02
-    // fix 9ec81739d moved it off raw ISO days and this pin was left behind;
-    // plan 201-37) — proves the WINDOW-01 intersection default derived
-    // from the seeded series (coverageSpanOf), not merely that the container
-    // mounted with its "All history" fallback.
+    // "{Mon D, YYYY} – {Mon D, YYYY}" with a spaced en dash (two formatDay calls;
+    // F-11, review R2-02 fix 9ec81739d moved it off raw ISO days, Phase 201.1 D-03
+    // moved it off the arrow; each date carries a U+00A0 that `\s` also matches) —
+    // proves the WINDOW-01 intersection default derived from the seeded series
+    // (coverageSpanOf), not merely that the container mounted with its "All history"
+    // fallback.
     await expect(
       page.locator('[data-testid="scenario-coverage-window-value"]'),
-    ).toHaveText(/[A-Z][a-z]{2} \d{1,2}, \d{4}\s*→\s*[A-Z][a-z]{2} \d{1,2}, \d{4}/, {
+    ).toHaveText(/[A-Z][a-z]{2}\s\d{1,2},\s\d{4} – [A-Z][a-z]{2}\s\d{1,2},\s\d{4}/, {
       timeout: 10_000,
     });
 

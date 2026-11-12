@@ -195,6 +195,6 @@ describe("PreferencesPanel - mandate copy (D-06)", () => {
       mandate_edited_at: "2026-10-09T23:30:00Z",
       edited_by_user_id: null,
     } as unknown as AllocatorPreferences);
-    expect(screen.getByText(/Mandate last edited by:/).textContent).toContain("Oct 9, 2026");
+    expect(screen.getByText(/Mandate last edited by:/).textContent).toContain("Oct\u00a09,\u00a02026");
   });
 });
