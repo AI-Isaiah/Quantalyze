@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.133.39.2] - 2026-11-13 — records: start milestone v1.18 MT5-VERIFY & founder confirmations
+
+Records PR. It resumes milestone v1.18 "MT5-VERIFY & founder confirmations", parked since 2026-08-20, and carries it through research, requirements and roadmap. Seven commits on `records/start-v1.18`, all under `.planning/`, no source change. It also records how the gsd-tools upstream drafts were filed.
+
+### Added
+- **Milestone v1.18 started (d3f6dcef5).** PROJECT.md has a Current Milestone section. The goal: the numbers Quantalyze renders for the three live funded MT5 accounts are proven true against the terminal's own figures, and the observations only the founder can make are made. STATE.md and `state.json` are reset to v1.18 `planning`. The founder's resume call (2026-11-13) is quoted: agents plan and pre-build the parity harness and pre-verify every agent-checkable item first, then the founder gives one short scripted terminal session on the next trading day. Gate 1 is recorded as cleared, measured on PROD on 2026-11-13: all three keys read `sync_status='complete'` with a `last_sync_at` that morning (UTC), so the new investor passwords are in. Gate 2, the founder at the terminal on a trading day, still stands.
+- **v1.18 project research (3a2b3990e, 84a79fb44).** New `ARCHITECTURE.md`, `FEATURES.md`, `PITFALLS.md` and `STACK.md` under `.planning/research/`, plus `SUMMARY.md`. The orchestrator wrote the summary because the runtime refused the synthesizer subagent's own write.
+- **v1.18 requirements, 15 of them (40ff7161c).** `.planning/REQUIREMENTS.md` (MT5-06 to MT5-10, MT5-15, the umbrella MT5-GOAL-01, and the Phase 157 confirmations), with the founder's decisions of 2026-11-13:
+  - **D-A, pre-mark history:** "Accept, judge closed P&L". Days before a key's first stored NAV mark are judged against the terminal's closed-trade balance history (Gate A), with no backfill.
+  - **D-B, the 1%:** a return gap in points, checked separately for cumulative return, start level and end level, held in one named constant `MT5_PARITY_TOLERANCE = 0.01`.
+  - **D-C, statements:** the founder provides broker statements in the session as the historical-equity oracle.
+  - **D-D, clock read:** "Allow narrow read". One named, tick-time-only `Mt5Client` method is admitted. The forbidden list in the contract test stays, and a test pins the exception.
+  - **D-E, weekend reading:** "Yes, this weekend". The founder reads frozen terminal Balance and Equity on 2026-11-14 or 2026-11-15, as one Gate B edge.
+- **v1.18 roadmap, 4 phases (490910ebb).** ROADMAP.md lists Phase 155 PARITYHARNESS (an agent-built harness that can prove our MT5 numbers wrong before the founder sits down), 155.1 SERVERCLOCK (the worker reads the MT5 server clock live and keeps every reading), 155.2 LIVEPARITY (on a trading day our numbers match the terminal's and the broker's within 1%) and 157 FOUNDER-CONFIRM. Traceability maps 15/15 requirements, and STATE.md points at Phase 155.
+
+### Changed
+- **The v1.20 research is archived (fd023a192).** The five v1.20 research files moved unchanged to `.planning/research/_archive-v1.20/` before the v1.18 research replaced them.
+- **The gsd-tools upstream drafts are resolved (5266c20c9).** `.planning/research/gsd-tools-upstream-bugs.md` records an outcome per item against gsd-core 1.21.0. Nine issues were filed on `open-gsd/gsd-core` (#6168 to #6176), and one comment with a synthetic repro was added to the parallel-phases ledger-writer issue (#6019). Four were not filed: two already fixed upstream in 1.19.0, one declined upstream as by design (the verifier's `covered_digest` demotion), and the refused synthesizer write, which is intended behaviour.
+
+### Notes
+- Every number above comes from the planning files, not from a new measurement. Gate 2 and every terminal reading are still open.
+- Checked locally before push: the vitest files that read `.planning`, `npm run lint` (planning hygiene rules 6d, 6e and 7) and `npm run typecheck`.
+
 ## [0.133.39.1] - 2026-11-13 — records: close 201.1 POLISHRESIDUALS and milestone v1.21 UX
 
 Records PR. It closes Phase 201.1 (shipped as PR #1256, v0.133.39.0) and milestone v1.21 "UX — trustworthy, navigable, lean". Eleven commits on `records/close-201.1`, no source change. The v1.21 audit reads `tech_debt`: 32/32 requirements, 18/18 phases verified `passed`, 10/10 integration seams and 3/3 flows, with the debt carried by owner.
