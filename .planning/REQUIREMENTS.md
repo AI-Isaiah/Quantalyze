@@ -50,7 +50,7 @@
 
 | Feature | Reason |
 |---------|--------|
-| A public "verified" badge or advertising MT5 | MT5 is not advertised until Phase 155 passes; a claim is a later product decision |
+| A public "verified" badge or advertising MT5 | MT5 is not advertised until Phase 155.2 passes; a claim is a later product decision. ⚠️ Re-pointed 2026-11-13 at roadmap creation: this row said "until Phase 155 passes", and 155 is now the parity harness, which proves nothing about our numbers by passing |
 | Using our own gateway read as an oracle | Self-referential (research C1, Pitfall 1) |
 | Spreading today's open P&L back over pre-mark history | Invents data (D-A) |
 | Widening the 1% to pass | Settled tolerance; a gap is a finding |
@@ -60,11 +60,29 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| PARITY-01 | Phase 155 | Pending |
+| PARITY-02 | Phase 155 | Pending |
+| PARITY-03 | Phase 155 | Pending |
+| PARITY-04 | Phase 155 | Pending |
+| MT5-06 | Phase 155.1 | Pending |
+| MT5-07 | Phase 155.2 | Pending |
+| MT5-08 | Phase 155.2 | Pending |
+| MT5-09 | Phase 155.2 | Pending |
+| MT5-10 | Phase 155.2 | Pending |
+| MT5-15 | Phase 155.2 | Pending |
+| MT5-GOAL-01 | Phase 155.2 | Pending |
+| FCONF-01 | Phase 157 | Pending |
+| FCONF-02 | Phase 157 | Pending |
+| FCONF-03 | Phase 157 | Pending |
+| FCONF-04 | Phase 157 | Pending |
+
+Status cells stay a bare `Pending`, because `phase complete` flips only an exact `Pending`, `In Progress` or `Gaps Found` to `Complete`. Earlier parts in another phase, named in that phase's success criteria: MT5-06's near-midnight last leg is read in the 155.2 session; MT5-09's data layer and MT5-15's flag classification are pre-verified in 155.
 
 **Coverage:**
 - v1.18 requirements: 15 total
-- Mapped to phases: 0 (filled by the roadmapper)
+- Mapped to phases: 15 (each to exactly one phase)
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-11-13*
-*Last updated: 2026-11-13 at v1.18 resume*
+*Last updated: 2026-11-13 at v1.18 roadmap creation (traceability filled; advertising row re-pointed to Phase 155.2)*
