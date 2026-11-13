@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.133.40.0] - 2026-11-14 — Phase 207 RETRYPROP: every error page's Try again button works
+
+Nine of the app's ten error boundaries read a prop called `unstable_retry`. The installed Next 16.4.2 never passes it, so their Try again button threw `unstable_retry is not a function` and the page could not recover. They now call the `retry` prop Next actually passes (`{ error, reset, retry }`). A new test mounts every boundary inside Next's own `ErrorBoundary`, so the props come from Next and not from the test. Closes TODOS `196-ERROR-BOUNDARY-UNSTABLE-RETRY-01`.
+
+### Fixed
+- **Try again works on every error page that has a boundary.** The root `error.tsx`, `global-error.tsx`, `(auth)`, `(dashboard)`, `(dashboard)/admin`, allocations, compare, strategies and the new-strategy wizard boundaries now destructure `retry` and call `retry()`. Next's `retry` refreshes the router and then clears the boundary, so a Server Component throw is re-fetched rather than re-rendered from the same failed result. `factsheet/[id]/error.tsx` (Phase 196) already did this. Each boundary changes only those three identifier sites. Copy, links, log tags, Sentry capture and digest-only rendering are unchanged.
+- **The boundary header comments no longer tell the next reader to use `unstable_retry`.** Five headers (admin, allocations, compare, strategies, wizard) said "`unstable_retry` — Next 16.2.0, NOT `reset`". They now name `retry`.
+
+### Tests
+- **New `src/__tests__/error-boundaries-retry.test.tsx`.** It finds every `error.tsx` and `global-error.tsx` under `src/app` on the filesystem, pins the count at 10, and mounts each one in Next's real `ErrorBoundary` under an `AppRouterContext` whose `refresh` is a spy. A click on Try again must call `refresh` once. A self-check arm proves a button wired to `reset()` does not reach `refresh`, and a static arm fails if any file under `src/app` still names the old prop.
+- **The test can fail, and was seen to.** It was RED on the untouched code (10 failed, 3 passed, nine with `unstable_retry is not a function`). With one boundary reverted from a byte backup it went RED again, naming that boundary. That happened twice, for compare and then for allocations, and the boundary was restored byte-identical each time. Wiring a boundary to `reset()` also goes RED.
+- **The eight colocated boundary tests pass `retry` in place of `unstable_retry`.** They used to hand each component the wrong prop, which is why they stayed green while the button was broken. Their digest-only, escape-link and logging arms are unchanged.
+
+### Removed
+- `TODOS.md` entry `196-ERROR-BOUNDARY-UNSTABLE-RETRY-01`, now closed.
+
+### Notes
+- The fix was confirmed against the installed Next source, not reproduced in a running app. Next itself contains `unstable_retry` only in its docs version table: added in v16.2.0, with `retry` stable from v16.3.0.
+- Review: one round, with gsd-code-reviewer and silent-failure-hunter. Nothing came back at MEDIUM or above. Three LOW/INFO notes are recorded rather than fixed:
+  - The per-boundary arm would also pass a handler that only calls `router.refresh()`.
+  - Discovery skips `.js`/`.jsx`/`error.ts` boundaries, though none exist today.
+  - The factsheet boundary still declares an unused `reset` prop.
+- The new test imports two Next-internal module paths. A Next upgrade that moves them fails the test at import, loudly. Re-read `next/dist/client/components/error-boundary.js` on any `next` upgrade.
+- Checked locally before push:
+  - `npx vitest run src/app --project jsdom`: 469 files, 8481 tests passed.
+  - The new test: 13 passed.
+  - `npx tsc --noEmit -p .`, `npm run lint` and `next build`.
+- The full local vitest run also showed two `compute.conventions.test.ts` snapshot failures. These are last-digit float differences in `skew` from local Node 25 against CI's Node 22, in a file this change does not touch.
+
 ## [0.133.39.4] - 2026-11-13 — records: book Phases 207–211 from the TODOS prune
 
 Records-only PR. After the TODOS prune (#1259) the founder booked five follow-up phases into the current milestone. Each runs independently of the v1.18 MT5 phases and of each other. No source or test change.

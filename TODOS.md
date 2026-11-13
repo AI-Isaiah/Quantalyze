@@ -1264,14 +1264,6 @@ Stale mentions, comment-only or in generated maps: `.planning/codebase/STACK.md`
 
 **What closing it means.** The route budget is pinned below the cron's fetch timeout by a test, and `tearsheet.pdf` reads `[data-testid="tearsheet-pending"]` and answers it with a non-retryable 409 and no error-level event.
 
-### 196-ERROR-BOUNDARY-UNSTABLE-RETRY-01 — the repo's other error boundaries read `unstable_retry`, which Next 16.4.2 does not pass (booked 2026-11-09, found in Phase 196 review round 1)
-
-**Why it is open.** `node_modules/next/dist/client/components/error-boundary.js` (Next 16.4.2) renders the error component with `{ error, reset, retry }` only. The root `error.tsx`, `(auth)`, `(dashboard)/admin`, strategies, allocations, compare and the wizard boundaries still destructure `unstable_retry`, so their Try again button would call `undefined`. Read from the installed Next source; not reproduced in a running app. Phase 196's own factsheet boundary uses `retry`. Pre-existing on main, out of Phase 196's diff.
-
-**Owner:** unrouted. **Trigger:** now (user-facing on every error page that has one).
-
-**What closing it means.** Every boundary uses the prop the installed Next passes, with a test that renders each boundary through Next's own error-boundary props.
-
 ### 202-KIT-RESIDUALS-01 — four review survivors in Phase 202's untracked capture kit, to fix before the kit is reused (booked 2026-11-07, Phase 202 review round 3)
 
 **Why it is open.** Phase 202's capture and attribution kit lives untracked under `~/.cache/quantalyze/residchurn/bin/`. After three review rounds, four findings survive. None changes a Phase 202 number, because every c1 job is `done` and every judge TABLE entry has kind None. Each one would mislead a future capture:
