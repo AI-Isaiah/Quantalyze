@@ -51,7 +51,6 @@ import inspect
 import logging
 import math
 import os
-import re
 import textwrap
 import threading
 from contextlib import asynccontextmanager
@@ -4434,101 +4433,32 @@ async def test_ESCALATION_no_house_credentials_ends_nothing_deletes_nothing_and_
     assert again is not None and len(conn.scrub_calls) == 1
 
 
-#: The ledger entry that owns the job path's `delete_trades` flip.
-_TRADES_SCRUB_TODO_HEADING = "### MT5-JOB-TERMINAL-TRADES-SCRUB-01"
-
-#: A REAL `History wait shipped:` line: the phrase followed by an actual date,
-#: through optional bold or code markup. ⛔ The entry quotes the line's TEMPLATE
-#: in backticks with `<date>`, which must never count, and it does not, because
-#: `<date>` is not a date. ⛔ Not line-anchored and backticks admitted: the
-#: template SHOWS the line in backticks, so a real line copied in that shape
-#: must count, or the pin stays green on 0 forever.
-_HISTORY_WAIT_SHIPPED_RE = re.compile(
-    r"History wait shipped:[\s*`]*\d{4}-\d{2}-\d{2}"
-)
-
-
-def _trades_scrub_entry_dictates(todos_text: str) -> int:
-    """The `delete_trades` value `MT5-JOB-TERMINAL-TRADES-SCRUB-01` dictates:
-    1 once its own entry carries a real `History wait shipped:` line, else 0.
-    Searched inside that entry only (heading to the next `##`/`###` heading). A
-    missing heading FAILS by name: a renamed or deleted entry must not silently
-    pin 0 forever."""
-    lines = todos_text.splitlines()
-    starts = [i for i, ln in enumerate(lines) if ln.startswith(_TRADES_SCRUB_TODO_HEADING)]
-    if len(starts) != 1:
-        pytest.fail(
-            f"TODOS.md carries {len(starts)} `{_TRADES_SCRUB_TODO_HEADING}` headings; "
-            "the trades pin needs exactly one to read who owns the flip"
-        )
-    end = len(lines)
-    for j in range(starts[0] + 1, len(lines)):
-        if re.match(r"^#{2,3} ", lines[j]):
-            end = j
-            break
-    entry = "\n".join(lines[starts[0] : end])
-    return 1 if _HISTORY_WAIT_SHIPPED_RE.search(entry) else 0
-
-
-def test_SCRUB_the_trades_ledger_reader_counts_only_a_REAL_History_wait_line() -> None:
-    """⛔ The pin below is only as good as this reader. A regex that never
-    matches keeps the pin green on 0 forever, and that silently defeats the
-    merge-order guard. A substring match takes the entry's own backticked
-    template for the real line and invites a wrong flip. Both directions are
-    pinned here."""
-    template_only = (
-        f"{_TRADES_SCRUB_TODO_HEADING} — kept until Finding C is fixed\n"
-        "- **164.6.6.3 ships its history wait** and appends one line to this entry:\n"
-        "  `History wait shipped: <date>, <sha>`. If the constant is already on main\n"
-        "\n### NEXT-ENTRY\n"
-    )
-    assert _trades_scrub_entry_dictates(template_only) == 0
-    shipped = template_only.replace(
-        "\n### NEXT-ENTRY", "History wait shipped: 2026-10-09, 0123abcd\n\n### NEXT-ENTRY"
-    )
-    assert _trades_scrub_entry_dictates(shipped) == 1
-    bulleted = template_only.replace(
-        "\n### NEXT-ENTRY", "- **History wait shipped:** 2026-10-09, 0123abcd\n\n### NEXT-ENTRY"
-    )
-    assert _trades_scrub_entry_dictates(bulleted) == 1
-    # Copied in the shape the template shows it: backticked, but dated.
-    backticked = template_only.replace(
-        "\n### NEXT-ENTRY", "`History wait shipped: 2026-10-09, 0123abcd`\n\n### NEXT-ENTRY"
-    )
-    assert _trades_scrub_entry_dictates(backticked) == 1
-    # A real line in ANOTHER entry is not this entry's.
-    elsewhere = template_only + "History wait shipped: 2026-10-09, 0123abcd\n"
-    assert _trades_scrub_entry_dictates(elsewhere) == 0
-    with pytest.raises(pytest.fail.Exception):
-        _trades_scrub_entry_dictates("### SOME-OTHER-ENTRY\n")
-
-
-async def test_SCRUB_the_job_path_keeps_trades_until_MT5_JOB_TERMINAL_TRADES_SCRUB_01(
+async def test_SCRUB_the_job_path_deletes_trades_now_that_the_history_wait_is_on_main(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """⛔ T-164.6.6.1-30 — PINS `_JOB_TERMINAL_DELETE_TRADES`, owned by `TODOS.md`
-    `MT5-JOB-TERMINAL-TRADES-SCRUB-01` (CONTEXT D-04: the per-account `trades`
-    caches are deleted "only after Phase 164.6.6.3 fixes finding C").
+    """⛔ T-164.6.6.1-30 — PINS `_JOB_TERMINAL_DELETE_TRADES` at 1.
 
-    Deleting them before the bounded history wait ships makes every MT5 account
-    new to the jobs terminal on its next derive, and `read_mt5_deal_ledger`
-    reads deals before a fresh login's history has downloaded: a permanent
-    "<2 usable daily-return days" failure on every MT5 strategy.
+    The jobs terminal's per-account `trades` caches may be deleted on every
+    `ipc_fault` recycle only because both callers of `read_mt5_deal_ledger` wait
+    for a fresh login's deal history to settle (`services/mt5_read.py`,
+    `_settle_deal_history`, Phase 164.6.6.3 D-04). Without that wait every MT5
+    account would be new to the jobs terminal on its next derive and read a
+    partial deal history: a permanent "<2 usable daily-return days" failure on
+    every MT5 strategy.
 
-    ⛔ ANY change of the constant must first turn THIS test RED. The expected
-    value is read from the ledger AT TEST RUN TIME, not fixed when plan 08 ran:
-    0 while the entry carries no real `History wait shipped:` line, 1 once it
-    does. That is what makes the ownership hold in every merge order. Whichever
-    of 164.6.6.1 and 164.6.6.3 merges SECOND is forced to flip, because once the
-    line is on `main` this pin is RED on the 0 until the constant reads 1. A red
-    pin after a rebase is that designed signal, not a flake."""
-    todos = Path(__file__).resolve().parents[2] / "TODOS.md"
-    if not todos.is_file():
-        pytest.fail(
-            "TODOS.md is missing, so MT5-JOB-TERMINAL-TRADES-SCRUB-01 cannot say "
-            "whether the jobs terminal's trades caches may be deleted"
-        )
-    expected = _trades_scrub_entry_dictates(todos.read_text(encoding="utf-8"))
+    Until 2026-11-14 the expected value was read from the TODOS.md entry
+    `MT5-JOB-TERMINAL-TRADES-SCRUB-01`, so the constant flipped in whichever
+    merge order 164.6.6.1 and 164.6.6.3 landed. Both have shipped and the flip
+    to 1 is done, so the entry was closed (TODOS sweep 2) and this pin now
+    asserts the invariant itself: the wait exists, and while it does the flag
+    stays 1 on both the constant and the scrub call that sends it."""
+    from services import mt5_read
+
+    assert callable(getattr(mt5_read, "_settle_deal_history", None)), (
+        "services/mt5_read.py no longer defines _settle_deal_history: the bounded "
+        "history wait that makes deleting the jobs terminal's trades caches safe "
+        "is gone, so _JOB_TERMINAL_DELETE_TRADES must go back to 0 with it"
+    )
 
     _set_full_env(monkeypatch)
     fake, _c = _install_client(
@@ -4545,17 +4475,14 @@ async def test_SCRUB_the_job_path_keeps_trades_until_MT5_JOB_TERMINAL_TRADES_SCR
 
     scrub_calls = fake._MetaTrader5__conn.scrub_calls
     assert len(scrub_calls) == 1, scrub_calls
-    assert mt5_relogin._JOB_TERMINAL_DELETE_TRADES == expected, (
-        f"_JOB_TERMINAL_DELETE_TRADES is {mt5_relogin._JOB_TERMINAL_DELETE_TRADES} "
-        f"but MT5-JOB-TERMINAL-TRADES-SCRUB-01 dictates {expected}: "
-        + (
-            "the history wait has shipped, so this phase owns the flip to 1"
-            if expected
-            else "the history wait has not shipped, so the trades caches stay"
-        )
+    assert mt5_relogin._JOB_TERMINAL_DELETE_TRADES == 1, (
+        f"_JOB_TERMINAL_DELETE_TRADES is {mt5_relogin._JOB_TERMINAL_DELETE_TRADES}, "
+        "but the history wait is on main, so the jobs terminal's scrub deletes the "
+        "trades caches (1)"
     )
-    assert scrub_calls[0][1] == expected, (
-        "the job path's scrub sent a delete_trades flag the ledger does not allow"
+    assert scrub_calls[0][1] == 1, (
+        "the job path's scrub did not send delete_trades=1 although the history "
+        "wait that makes it safe is on main"
     )
 
 

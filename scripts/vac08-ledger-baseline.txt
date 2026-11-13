@@ -153,3 +153,6 @@
 #    is `<migration_basename>  # <what it does, and why it has no TEST ledger
 #    row>`; the disposition is enforced only by the contract test named above.
 # Owner: [VAC08-LEDGER-32] in TODOS.md.
+# ⛔ CORRECTED 2026-11-14: [VAC08-LEDGER-32] closed 2026-09-09 (31 -> 0 entries) and its
+#    TODOS.md entry was deleted in TODOS sweep 2, so it owns nothing now. The file
+#    still only shrinks, and grows only by founder decision.
