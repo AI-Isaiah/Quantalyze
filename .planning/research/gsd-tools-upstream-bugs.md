@@ -1,10 +1,15 @@
-# gsd-tools upstream bug reports (drafts, NOT filed)
+# gsd-tools upstream bug reports (filed 2026-11-13; outcomes per item)
 
 Drafted 2026-10-15 after the founder's decision "Fix our format + report upstream". This repo
 reshaped `.planning/ROADMAP.md` and `.planning/STATE.md` so the handlers stop corrupting them,
 and added lint rules 6d, 6e and 7 to `scripts/check-planning-hygiene.ts`. The tool defects
 underneath are still there, and each one is drafted below as an issue. Nothing here has been
 filed. File each one as its own issue.
+
+**Filing outcome, 2026-11-13.** Re-verified on installed gsd-core **1.20.1** (run) and upstream
+**v1.21.0** (source read; released 2026-11-13) and filed to `open-gsd/gsd-core`. Each item below
+carries its own `**Upstream outcome.**` line; the extra GSD friction items not drafted above are
+listed in the section "Further items (filed 2026-11-13)" at the end.
 
 **Versions.** Measured on gsd-core **1.16.0** (the installed copy). The same code is in
 **1.17.0**: every line cited below is identical there, except `state-transition.cjs`, where the
@@ -51,6 +56,9 @@ wrote anyway.
 on every `data.error` path in `state-transition.cjs`. Alternatively, have
 `readModifyWriteStateMd`'s callers return `content` when `result.data?.error` is set. Add a test
 that runs each `*Core` error path on a non-canonical document and asserts it stays byte-identical.
+
+
+**Upstream outcome.** Filed as https://github.com/open-gsd/gsd-core/issues/6168 . Still present in 1.20.1 and 1.21.0, but narrower than drafted: only `advancePlanCore`'s `plan_position_unreadable` and `ambiguous_plan_position` returns write (the latter also writes one of the two refused `current_plan` values); the comment line is not dropped.
 
 ---
 
@@ -105,6 +113,9 @@ past it), or drop the trailing capture altogether: the replacement only needs to
 append to the same line. Add a regression test with a plan bullet whose prose says "after Phase N
 (tag)" and is followed by another bullet.
 
+
+**Upstream outcome.** Fixed in 1.19.0 (#5545, PR #5577: line-anchored `phaseChecklistBullet`). Not filed.
+
 ---
 
 ## 3. A phase section ends at ANY `#{1,4}` heading, so a `Plans:` list after an in-phase heading is invisible
@@ -149,6 +160,9 @@ above the phase heading's own level. Either way, an H2 inside an H3 phase must n
 "next heading that is itself a phase heading or a milestone heading" satisfies that case without
 cutting off in-phase sub-headings. Make the scan fence-aware, as `updateBullet` already is.
 
+
+**Upstream outcome.** Filed as https://github.com/open-gsd/gsd-core/issues/6169 . Still present in 1.20.1 and 1.21.0 (insertion only; missing-row detection is level-bounded, so detection and insertion disagree).
+
 ---
 
 ## 4. `phase complete` overwrites the Progress table's Status prose; `update-plan-progress` keeps it (#4925)
@@ -177,6 +191,9 @@ The deleted prose was a recorded founder decision.
 gets the token, a leading token is rewritten with its tail kept, and freeform prose is untouched.
 Better still, extract it into one shared helper so the two verbs cannot drift apart again.
 
+
+**Upstream outcome.** Filed as https://github.com/open-gsd/gsd-core/issues/6170 . Narrowed in 1.19.0 (#5165, PR #5571): a cell already starting with `Complete` is now kept, so the repro above no longer reproduces; a first completion still drops the prose after any other leading token.
+
 ---
 
 ## 5. `_normalizeMd` rewrites the whole file on every write
@@ -201,6 +218,9 @@ ROADMAP.md once").
 side. Or normalise only on files the tool created itself, never on a document an operator
 maintains. Failing both, make it opt-in per command. In all three cases a command that edits one
 line should produce a one-line diff.
+
+
+**Upstream outcome.** Fixed in 1.19.0 (#5165, PR #5571): markdown writes normalise only the changed lines (whole-file only above 400 changed lines or 2 MiB). Not filed.
 
 ---
 
@@ -234,6 +254,9 @@ The row lands first, above the blank line that separates `Plans:` from its list.
 before the first existing row whose id sorts after it. Append at the end only when no existing row
 sorts later. Keep the existing list's own spacing.
 
+
+**Upstream outcome.** Filed as https://github.com/open-gsd/gsd-core/issues/6171 (cross-linked with #6169). Still present in 1.20.1 and 1.21.0.
+
 ---
 
 ## 7. The inserted-phase stub carries the words the completion regex matches
@@ -252,6 +275,9 @@ also contradicts the real plan list.
 
 **Proposed fix.** Write `- [ ] TBD — plans not listed yet` (no "phase N"), and have plan-phase
 replace the stub when it writes the plan rows. Fixing issue 2 alone also removes the match.
+
+
+**Upstream outcome.** The regex match is fixed in 1.19.0 by the same #5545 change. The leftover (rows are inserted beside a stub that is never removed) was folded into https://github.com/open-gsd/gsd-core/issues/6171 . Not filed separately.
 
 ---
 
@@ -284,6 +310,9 @@ read, or at least read archived reports leniently: report an out-of-set status a
 naming the file and keep scanning instead of throwing. The active `.planning/phases` root can keep
 the strict closed set.
 
+
+**Upstream outcome.** Filed as https://github.com/open-gsd/gsd-core/issues/6172 . Reproduced on 1.20.1; code path unchanged in 1.21.0. New finding in the issue: the #5291 / PR #5584 repair path (W030, `--repair`) does not reach archived reports and maps only `pass_with_caveats`.
+
 ---
 
 ## What this repo changed instead (for the issue text)
@@ -299,3 +328,32 @@ the strict closed set.
 - After the reshape: `update-plan-progress 159` is a no-op. `170` and `164.4.2.1` change only
   their `**Plans:**` count and real plan ticks. `state.advance-plan` changes `Plan: 8 of 9` to
   `9 of 9` plus frontmatter sync. The issues above remain for any project that has not reshaped.
+
+---
+
+## Further items (filed 2026-11-13)
+
+From this repo's CLAUDE.md, memory and the 2026-11-13 milestone close. Checked on 1.20.1 and v1.21.0.
+
+- **`phase complete` moves STATE to the next phase in roadmap order, wrong under parallel phases.**
+  Comment with a synthetic repro on the parallel-phases ledger-writer issue:
+  https://github.com/open-gsd/gsd-core/issues/6019#issuecomment-6855251005 (the #5165
+  `stateAlreadyPast` guard only covers an already-complete phase).
+- **`/gsd-phase --insert` writes the `- [ ] TBD (run /gsd-plan-phase N …)` stub.** See items 2 and 7:
+  match fixed in 1.19.0, leftover folded into #6171.
+- **Verifier `covered_files` + `covered_digest` demotes a passed verification to `stale`.** Not filed:
+  declined upstream as by design (#5851 closed not-planned 2026-11-04, #4953 before it; recorded in
+  upstream `.out-of-scope/stale-verification-completion-split.md`, re-opens only with an ADR replacing
+  ADR-5057). Our `verified_at_sha` + `drift_subjects` convention stays the local answer.
+- **`ship.md` `track_shipping` writes a CI-skip token into a branch commit and commits under `.planning`.**
+  Filed as https://github.com/open-gsd/gsd-core/issues/6173 (the token rides a squash or rebase merge
+  into the default branch; the `.planning` commit is noted as a minor point in the same issue).
+- **`state.milestone-switch` drops non-template lines from `## Current Position`** (and custom
+  frontmatter keys). Filed as https://github.com/open-gsd/gsd-core/issues/6174 .
+- **`milestone complete` dumps raw accomplishments into MILESTONES.md.** Filed as
+  https://github.com/open-gsd/gsd-core/issues/6175 .
+- **`milestone complete` regresses `state.json`'s next action** (smart-entry does not recognise
+  "Awaiting next milestone"). Filed as https://github.com/open-gsd/gsd-core/issues/6176 .
+- **Synthesizer subagent's Write to `SUMMARY.md` is refused.** Not filed: intended behaviour since
+  #5449 / PR #5450 (the runtime really refuses a subagent Write to that basename; the synthesizer
+  returns the document inline and the orchestrator writes it). #222 is the older, unrelated prompt fix.
