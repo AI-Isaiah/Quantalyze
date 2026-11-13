@@ -2,20 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
-current_phase: 201.1
-current_phase_name: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed
-status: planning
-stopped_at: Phases 200 and 201 closed on the 2026-11-12 UAT; 201.1 booked, not planned yet
-last_updated: "2026-11-12T07:09:24.180Z"
-last_activity: 2026-11-12
-last_activity_desc: Phases 200 and 201 closed, Phase 201.1 POLISHRESIDUALS booked
-state_head: 2561250d3a0546d0056b74d7591ad3a79bce4f47
+status: Awaiting next milestone
+stopped_at: v1.21 archived; next milestone not started (/gsd-new-milestone)
+last_updated: "2026-11-13T12:09:08.643Z"
+last_activity: 2026-11-13
+last_activity_desc: Milestone v1.21 completed and archived
+state_head: 9d40e7fd72a8ca23e6701ace323f4996cb6d6f50
 progress:
   total_phases: 18
-  completed_phases: 17
-  total_plans: 201
-  completed_plans: 201
-  percent: 94
+  completed_phases: 18
+  total_plans: 217
+  completed_plans: 217
+  percent: 100
 ---
 
 ## ⭐ STATE lineage
@@ -30,9 +28,9 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-11-06)
+See: .planning/PROJECT.md (updated 2026-11-13)
 
-**Current focus:** Phase 201.1 — POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed
+**Current focus:** Planning next milestone (v1.21 closed 2026-11-13)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -176,17 +174,17 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 201.1 (POLISHRESIDUALS) booked, the only open phase of v1.21
-Plan: 201.1: not planned yet
-Status: 200 and 201 closed on the founder-authorized UAT of 2026-11-12 (shipped v0.133.37.2 PR #1253, v0.133.38.0 PR #1254); 201.1 ready to plan
-Last activity: 2026-11-12 — Phases 200 MANAGERKEYS and 201 PLAINWORDS closed, Phase 201.1 POLISHRESIDUALS booked
-Progress: [█████████░] 94% (17 of 18 phases)
+Phase: Milestone v1.21 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-11-13 — Milestone v1.21 completed and archived
+Progress: [██████████] 100%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
 ## Current Focus
 
-**Next: `/gsd-plan-phase 192` (v1.21 PUBLICTRUTH).** The v1.21 roadmap was written 2026-11-06: 11 phases, 192–202; order and dependencies are in ROADMAP.md § Current Milestone. 202 RESIDCHURN is a parallel track that starts now. v1.20 closed 2026-11-06; archive in `.planning/milestones/v1.20-*`. The v1.17 sequencing below is lineage.
+**Next: `/gsd-new-milestone`.** v1.21 UX closed 2026-11-13 (audit `tech_debt`, 32/32); archive in `.planning/milestones/v1.21-*`. The next milestone carries the composer range-as-dates fix (`TODOS.md` `201.1-COMPOSER-RANGE-AS-DATES`) and TERMS-01/02. v1.20 closed 2026-11-06; archive in `.planning/milestones/v1.20-*`. The v1.17 sequencing below is lineage.
 
 **Next: `/gsd:plan-phase 147`.** v1.17 phase order 147 → 148 → 149 → 150 → 151 → 152 → 153 → 154 → 155.
 Load-bearing sequencing (real dependencies, do not reorder):
@@ -1767,9 +1765,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-11-07T17:42:15.306Z
-**Stopped At:** Phases 200 and 201 closed on the 2026-11-12 UAT; 201.1 booked, not planned yet
-**Resume File:** None
+**Last Date:** 2026-11-12T07:54:54.622Z
+**Stopped At:** Phase 201.1 complete — all phases complete
+**Resume File:** .planning/phases/201.1-polishresiduals-the-residual-ui-defects-found-in-the-phase-2/201.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md
@@ -2039,5 +2037,4 @@ and by name if the `VAC04-ZERO-PATH-FAILS-CLOSED` marker is deleted.
 
 ## Operator Next Steps
 
-- Plan 192 PUBLICTRUTH with /gsd-plan-phase 192
-- Start 202 RESIDCHURN in parallel: book its capture window around the next deploy-free 00:40Z nightly
+- Start the next milestone with /gsd-new-milestone

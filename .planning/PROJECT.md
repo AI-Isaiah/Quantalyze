@@ -16,6 +16,9 @@ read-only MT5 account sync, and get the same factsheet surface. There is also an
 Since v1.20 the numbers on every one of those surfaces carry their basis: published rankings
 exclude failed computations, annualization follows the attested venue, a refused or truncated
 read says so by name instead of publishing a partial curve, and a share link is revocable.
+Since v1.21 the app reads as one product: each role lands on its own page, a strategy has one page
+(the factsheet), a figure means the same thing on every page and is withheld on a short record,
+viewing writes nothing, and the public site tells one true story with the demo retired.
 
 ## Core Value
 
@@ -23,20 +26,32 @@ Allocators act on Bridge recommendations and see whether those suggestions
 actually worked — and can model the impact of composition changes before they
 make them.
 
-## Current Milestone: v1.21 UX — trustworthy, navigable, lean
+## ✅ Shipped: v1.21 UX — trustworthy, navigable, lean (2026-11-06 → 2026-11-13)
 
-**Goal:** An allocator or a manager, new or experienced, can trust what every page says, reach the
-next step without a dead end, and is not buried in duplicate surfaces.
+**Closed 2026-11-13 with audit `tech_debt`** (`.planning/milestones/v1.21-MILESTONE-AUDIT.md`): requirements
+**32/32** satisfied, phases **18/18** verified `passed`, integration 10/10 seams and 3/3 flows, app version
+v0.133.24.0 through v0.133.39.0. Phases 192 to 206 with inserted decimals (194.1, 194.2, 201.1).
 
-**Target features** (from the five-persona UX review, 2026-11-06; order is trust first, founder 2026-11-06):
-- **Trust:** public claims made true and consistent (key storage, TLS, access, fees, encryption, exchange count); chart scrolling no longer silently persists a clipped range; developer and demo text off factsheets; one value per metric across pages; impossible figures gated; a page view writes nothing.
-- **Navigation:** a landing page per role, Compare startable from the UI, factsheet back-navigation and a next step, signed-in users not treated as visitors, "+ Allocation" going to the right place, "how is my book doing?" answered, safer manager key handling, clear naming, degrade warnings that say what to do.
-- **Screening clarity:** column periods and units, stale strategies flagged in ranking, tooltips and a glossary, one name per concept, a shared-account notice, the small consistency fixes.
-- **Bloat:** merge duplicate pages, cut `/portfolios`, hide Decks and Compare until they work, slim the factsheet and My allocation, remove leftover panels.
-- **Carried:** the Phase 188 SC-4 residual follow-up (D-13): a control capture across a nightly with no deploy in between.
+**Delivered** (from the five-persona UX review of 2026-11-06; trust first, fix and trim only):
+- **Trust (192, 193, 194, 194.1, 194.2, 205)** — public claims made true and consistent and the public demo
+  retired (D-11); a wheel never changes a chart's range and a narrowed range is never restored; no developer or
+  demo text on a factsheet; one figure gate (`figure-gate.ts`, D-15 total-record rule) on every figure path;
+  opening a page writes nothing.
+- **Navigation (196, 197, 198, 199, 200)** — a landing page per role (`/home`); a strategy has one page, the
+  factsheet, with a back link and a next step; Compare from a discovery selection; My allocation in three tabs that
+  answer "how is my book doing?"; one key panel showing what each key feeds, with confirmed re-pointing and one
+  rename place.
+- **Clarity (197, 201, 201.1)** — discovery columns state period and basis, stale strategies flagged, a glossary
+  behind specialist terms, one name per concept, one date format, and the residual UAT polish.
+- **Lean (195, 196, 198, 199, 200)** — `/portfolios`, the dark-mode option and leftover panels gone and Decks hidden; one
+  strategies list; the factsheet opens as a summary with the rest under Advanced.
+- **Residual (202, 203)** — the 188 SC-4 value churn attributed or named unexplained (1142 of 1214 attributed, 72 unexplained), and book b3's reasons explained.
+- **Hardening (204, 206)** — the intro path's database-side authorization matches the route; a revoked but
+  unexpired session cookie no longer loops the signed-in bounce.
 
-**Scope decision (founder 2026-11-06):** fix and trim only. New allocator data (fee, terms and thesis
-fields that managers fill in) is not in v1.21; the empty "— on request" rows are hidden instead.
+**Close notes:** the pre-close `audit-open` check was skipped by founder decision because it refuses on archived
+history (seven older VERIFICATION statuses outside its closed set); recorded in the audit and MILESTONES.md. The
+composer's range-as-dates fix is decided and booked for the next milestone (`201.1-COMPOSER-RANGE-AS-DATES`).
 
 ## ✅ Shipped: v1.20 Backlog Burndown (2026-08-20 → 2026-11-06)
 
@@ -259,13 +274,21 @@ options MTM smoothing.
 - ✓ LEDGER-01..04 — recurring strategy refresh for ledger-backed venues, shipped dormant behind two locks — v1.20
 - ✓ VAC-01..08 — mutation runner, disposable-PostgreSQL lane, SQL gate linter, repo-vs-PROD/TEST drift gates, plan-anchor verification, concurrent csv-finalize spec — v1.20
 
+- ✓ **UX — trustworthy, navigable, lean (v1.21, Phases 192–206, 32 of 32 requirements)**, recorded by requirement group:
+- ✓ TRUST-01..06 — one true public story (demo retired), quiet charts and session-local ranges, no foreign or developer text, one value per metric, figures withheld on a short total record (D-05: implausible values shown, not flagged), page views write nothing — v1.21
+- ✓ ROUTE-01..11 — role landing pages, signed-in users never treated as visitors, factsheet back link and next step, Compare from discovery, the allocator's "+ Allocation", My allocation answers how the book is doing, correct Holdings labels, key feeds and confirmed re-pointing, one rename place, actionable degrade warnings with a chip legend — v1.21
+- ✓ CLAR-01..06 — discovery columns state period and basis, stale strategies flagged and not ranked as current, glossary tooltips, one name per concept, shared-account notice, factsheet consistency fixes — v1.21
+- ✓ LEAN-01..07 — one strategies list, one strategy page, `/portfolios` removed and Decks hidden, one entry point each for adding a strategy, keys and renaming, a summary-first factsheet, three-tab My allocation, leftovers removed — v1.21
+- ✓ RESID-01..02 — the 188 value churn attributed or named unexplained (control capture across a quiet nightly; 1142 of 1214 attributed, 72 unexplained), book b3's `out_of_window_flow` and `window_truncated` explained as intended behaviour — v1.21
+
 ### Active
 
-<!-- Carried out of v1.20 (closed 2026-11-06). The next milestone is a UX milestone (founder 2026-11-06); its requirements are defined at its start. -->
+<!-- Carried out of v1.21 (closed 2026-11-13). The next milestone's requirements are defined at its start. -->
 
-- **Phase 188 SC-4 residual (founder D-13, 2026-11-06)** — follow-up phase in v1.21: measure why 1214 stored values changed between two nightlies (control capture across a nightly with no deploy between), and book b3's earlier untrustworthy reasons. Not a requirement ID; owned by the audit's tech-debt list.
+- **Composer range as dates (founder 2026-11-13, "Book a fix")** — save the composer's selected range as dates so presets like 12M always end on the latest day, and re-pin "kept when the series grows" to mean the same dates are kept. Next milestone; `TODOS.md` `201.1-COMPOSER-RANGE-AS-DATES`.
+- **TERMS-01, TERMS-02** (deferred out of v1.21 by the fix-and-trim scope) — manager-entered fees, terms and thesis on the factsheet; net vs gross, base currency and "Data source" for every strategy.
 - **HONEST-07** — still deferred (no site at HEAD, no traceback); revisit only if the failure reappears.
-- **v1.21 UX** (started 2026-11-06) — requirements in `.planning/REQUIREMENTS.md`; see `## Current Milestone` above.
+- The v1.21 audit's tech-debt list (`milestones/v1.21-MILESTONE-AUDIT.md`) and the 52 open `WINDOWS.md` entries.
 
 <!-- v1.8 Flow-Aware Time-Weighted Returns — Phases 73+. See ## Current Milestone above + .planning/REQUIREMENTS.md. -->
 
@@ -372,11 +395,19 @@ layer. Full per-phase detail: `.planning/MILESTONES.md` + `milestones/v1.6-*`.
 | **v1.20: Deribit flows are booked at the flow's time, not end of day (Phase 185, founder 2026-11-01 "Book the fix now")** | End-of-day netting turned an intraday deposit into a phantom return on the capital that was actually there. | ✓ Good (v1.20 Phase 185, verified) |
 | **v1.20: a bad read holds last good and names it; a failing key affects only itself (Phase 186 D-02/D-03/D-05/D-07)** | Nothing partial is ever published. Bybit internal transfers are flows (reverses 180 D-02); a dead key leaves the book that day instead of blocking everyone. | ✓ Good (v1.20 Phase 186, verified 7/7, security 36/36) |
 | **v1.20: a day on a tiny base is left out, not shown as performance (Phase 188 D-01..D-08)** | Key C's +47% and -53% days were correct arithmetic on about 0.4% of the account. Under 5% of the 30-day peak the day is null; zero base stays out of the rule; the scenario readers were fixed in the same phase. | ✓ Good (v1.20 Phase 188; key C's rows absent, `key_inputs_mismatch` cleared) |
-| **v1.20: 188 closes on what passed; the SC-4 residual goes to the next milestone (D-13, founder 2026-11-06)** | The re-reading read NOT CONFIRMED under its strict rule (1214 stored values moved between nightlies, cause unmeasured). The founder first chose a control capture, then closed 188 and moved the rest. | ⚠️ Revisit (follow-up phase in the next milestone) |
+| **v1.20: 188 closes on what passed; the SC-4 residual goes to the next milestone (D-13, founder 2026-11-06)** | The re-reading read NOT CONFIRMED under its strict rule (1214 stored values moved between nightlies, cause unmeasured). The founder first chose a control capture, then closed 188 and moved the rest. | ✓ Good (v1.21 Phases 202 and 203: 1142 of 1214 values attributed, 72 named unexplained; b3's reasons explained) |
 | **v1.20: a re-run never un-publishes a computed factsheet (Phase 190 D-02/D-03)** | A pending or computing re-run used to fail the strategy gate and drop the strategy from allocators. It stays published with a quiet "Updating" line. | ✓ Good (v1.20 Phase 190, verified) |
 | **v1.20: the refusal-marker race closes in two PRs, migration first, and the marker counts only on a confirmed write (Phase 191 D-06/D-07)** | Migrations auto-apply on merge and the Vercel deploy is not ordered against the apply; a zero-row update must fail TRANSIENT, not pass silently. | ✓ Good (v1.20 Phase 191, verified 5/5; PROD did not exercise the race in the window, the live two-connection CI probe carries the proof) |
 | **v1.20: venue-specific phases (Binance income 187, Deribit option replay 189) leave the milestone (founder 2026-11-03)** | Not delivered; `TODOS.md` carries them (`187-BINANCEINCOME-NEXT-MILESTONE`, `189-OPTIONREPLAY-NEXT-MILESTONE`). | — Pending (owned by TODOS until re-booked) |
-| **v1.20 close: the next milestone is a UX milestone (founder 2026-11-06)** | v1.20 was correctness and integrity; the product surface comes next, carrying the 188 SC-4 residual follow-up. | — Pending (scope defined at new-milestone) |
+| **v1.20 close: the next milestone is a UX milestone (founder 2026-11-06)** | v1.20 was correctness and integrity; the product surface comes next, carrying the 188 SC-4 residual follow-up. | ✓ Good (v1.21 shipped 2026-11-13) |
+| **v1.21: trust first; fix and trim only (founder 2026-11-06)** | The five-persona review found false claims, dead ends and duplicate surfaces; new manager-entered data (TERMS-01/02) waits, empty "on request" rows are hidden instead. | ✓ Good (v1.21; 32/32) |
+| **v1.21: retire the public demo instead of repairing it (Phase 192 D-11, founder 2026-11-07)** | "Retire the whole demo part": a demo that needs constant upkeep is a standing source of false claims. ROUTE-03 amended to match. | ✓ Good (v1.21 Phase 192) |
+| **v1.21: show, don't flag; withhold only on a short total record (Phase 194 D-05, D-15)** | No plausibility bound is set. A crypto record under 90 days or another under 60 observations withholds an annualised figure; a window under a year is qualified. One `figure-gate.ts` verdict on every path (194.1, 194.2, 205). | ✓ Good (v1.21) |
+| **v1.21: a strategy has one page, the factsheet (Phase 196 D-03)** | `/strategy/<id>`, `/v2` and the discovery detail routes 308-redirect to `/factsheet/<id>` with origin parameters for the back link; the tearsheet is its print view. | ✓ Good (v1.21) |
+| **v1.21: real name everywhere a strategy is visible; managers stay pseudonymous (Phase 201 D-09, founder 2026-11-10)** | One resolver decides name, then codename, then `Strategy #<id>` by the caller's visibility. | ✓ Good (v1.21) |
+| **v1.21: b3's `window_truncated` is intended behaviour (Phase 203)** | The token is one boolean over unequal member windows, classed benign and outside the blocking set; recorded with evidence, not fixed. | ✓ Good (v1.21 RESID-02) |
+| **v1.21: composer range stored as dates (founder 2026-11-13, "Book a fix")** | Indices drift when the axis grows at the front; the "kept when the series grows" contract is re-pinned to mean the same dates are kept. | — Pending (next milestone, `201.1-COMPOSER-RANGE-AS-DATES`) |
+| **v1.21 close: skip gsd-tools' `audit-open` pre-close check, record it (founder 2026-11-13)** | It refuses on seven archived VERIFICATION statuses outside its closed set; rewriting historical verdicts is not acceptable. Upstream issue drafted. | — Pending (until gsd-core reads archived reports leniently) |
 
 ## Evolution
 
@@ -396,6 +427,10 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ## Current State
+
+**v1.21 UX — trustworthy, navigable, lean shipped and closed 2026-11-13** (audit `tech_debt`, 32/32
+requirements, 18/18 phases `passed`). See the `## ✅ Shipped: v1.21` section above. The next milestone is not
+started; it carries the composer range-as-dates fix and TERMS-01/02.
 
 **v1.20 Backlog Burndown shipped and closed 2026-11-06** (audit `tech_debt`, 62/64 requirements, 142/142
 phases `passed`; DEPS-01 descoped with Phase 165, HONEST-07 still deferred). See the
@@ -468,4 +503,4 @@ the WCAG-AA floor stay green.
 </details>
 
 ---
-*Last updated: 2026-11-06 at the v1.21 UX milestone start (trust first; fix and trim only). v1.20 closed with audit tech_debt; v1.18 remains parked founder-gated. Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.*
+*Last updated: 2026-11-13 after v1.21 milestone (audit tech_debt, 32/32). v1.18 remains parked founder-gated. Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.*
