@@ -10,7 +10,7 @@ last_activity: 2026-11-13
 last_activity_desc: Milestone v1.18 started
 state_head: 40ff7161c075113187162a407a6cb51c502da5a5
 progress:
-  total_phases: 4
+  total_phases: 9
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -684,6 +684,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 204 added (2026-11-10, /gsd-phase add, founder "Eigene Folgephase"): INTROAUTH, security follow-up of 194.2, runs first; tracked text neutral until the fix is live
 - Phase 205 added (2026-11-10, /gsd-phase add, founder 2026-11-10 routing): ONEVERDICT, 194.2 R3 WR-01..03
 - Phase 206 added (2026-11-10, /gsd-phase add): SESSIONLOOP, 199 R3 WR-01-R3 (proxy signed-in bounce confirms the user with getUser; pre-existing, user-facing)
+- Phase 207 added (2026-11-13, /gsd-phase add, founder "Retry button only" after the TODOS prune, PR #1259): RETRYPROP, closes TODOS 196-ERROR-BOUNDARY-UNSTABLE-RETRY-01 (error boundaries read `unstable_retry`, which Next 16.4.2 does not pass)
+- Phase 208 added (2026-11-13, /gsd-phase add, founder "Quick UI fixes" after the TODOS prune, PR #1259): UIQUICK
+- Phase 209 added (2026-11-13, /gsd-phase add, founder "Error-report leaks" after the TODOS prune, PR #1259): SCRUBLEAKS
+- Phase 210 added (2026-11-13, /gsd-phase add, founder "Public factsheet truth" after the TODOS prune, PR #1259): PUBLICTRUTH
+- Phase 211 added (2026-11-13, /gsd-phase add, founder "Sync and jobs correctness" after the TODOS prune, PR #1259): SYNCJOBS
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 
 ### Decisions
