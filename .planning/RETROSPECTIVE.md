@@ -173,7 +173,7 @@
 - **A persona review as the requirement source.** Five personas produced 32 concrete, testable requirements, and all 32 closed in one week.
 - **Founder decisions taken early and written down** (D-05 "show, don't flag", D-11 retire the demo, D-15 total-record rule, D-09 real name everywhere). Each one removed a whole class of work or argument.
 - **A census that goes RED on an ungated site** turned "every page" from a claim into a check, so 194.1 and 194.2 could close the residuals mechanically.
-- **The control capture planned up front** for the 188 residual (202) answered in two nightlies what v1.20 could not.
+- **The control capture planned up front** for the 188 residual (202) settled in two captures what v1.20 could not: stored values do move across a deploy-free nightly, 1142 of 1214 attributed and 72 named unexplained.
 
 ### What Was Inefficient
 - **Figure gating took four phases** (194, 194.1, 194.2, 205). The first plan named pages, not every reader of a figure, so the census found the rest afterwards.

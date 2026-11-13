@@ -43,9 +43,9 @@ v0.133.24.0 through v0.133.39.0. Phases 192 to 206 with inserted decimals (194.1
   rename place.
 - **Clarity (197, 201, 201.1)** — discovery columns state period and basis, stale strategies flagged, a glossary
   behind specialist terms, one name per concept, one date format, and the residual UAT polish.
-- **Lean (195, 196, 198, 199, 200)** — `/portfolios`, Decks, the dark-mode option and leftover panels gone; one
+- **Lean (195, 196, 198, 199, 200)** — `/portfolios`, the dark-mode option and leftover panels gone and Decks hidden; one
   strategies list; the factsheet opens as a summary with the rest under Advanced.
-- **Residual (202, 203)** — the 188 SC-4 value churn attributed, and book b3's reasons explained.
+- **Residual (202, 203)** — the 188 SC-4 value churn attributed or named unexplained (1142 of 1214 attributed, 72 unexplained), and book b3's reasons explained.
 - **Hardening (204, 206)** — the intro path's database-side authorization matches the route; a revoked but
   unexpired session cookie no longer loops the signed-in bounce.
 
@@ -279,7 +279,7 @@ options MTM smoothing.
 - ✓ ROUTE-01..11 — role landing pages, signed-in users never treated as visitors, factsheet back link and next step, Compare from discovery, the allocator's "+ Allocation", My allocation answers how the book is doing, correct Holdings labels, key feeds and confirmed re-pointing, one rename place, actionable degrade warnings with a chip legend — v1.21
 - ✓ CLAR-01..06 — discovery columns state period and basis, stale strategies flagged and not ranked as current, glossary tooltips, one name per concept, shared-account notice, factsheet consistency fixes — v1.21
 - ✓ LEAN-01..07 — one strategies list, one strategy page, `/portfolios` removed and Decks hidden, one entry point each for adding a strategy, keys and renaming, a summary-first factsheet, three-tab My allocation, leftovers removed — v1.21
-- ✓ RESID-01..02 — the 188 value churn attributed (control capture across a quiet nightly), book b3's `out_of_window_flow` and `window_truncated` explained as intended behaviour — v1.21
+- ✓ RESID-01..02 — the 188 value churn attributed or named unexplained (control capture across a quiet nightly; 1142 of 1214 attributed, 72 unexplained), book b3's `out_of_window_flow` and `window_truncated` explained as intended behaviour — v1.21
 
 ### Active
 
@@ -395,7 +395,7 @@ layer. Full per-phase detail: `.planning/MILESTONES.md` + `milestones/v1.6-*`.
 | **v1.20: Deribit flows are booked at the flow's time, not end of day (Phase 185, founder 2026-11-01 "Book the fix now")** | End-of-day netting turned an intraday deposit into a phantom return on the capital that was actually there. | ✓ Good (v1.20 Phase 185, verified) |
 | **v1.20: a bad read holds last good and names it; a failing key affects only itself (Phase 186 D-02/D-03/D-05/D-07)** | Nothing partial is ever published. Bybit internal transfers are flows (reverses 180 D-02); a dead key leaves the book that day instead of blocking everyone. | ✓ Good (v1.20 Phase 186, verified 7/7, security 36/36) |
 | **v1.20: a day on a tiny base is left out, not shown as performance (Phase 188 D-01..D-08)** | Key C's +47% and -53% days were correct arithmetic on about 0.4% of the account. Under 5% of the 30-day peak the day is null; zero base stays out of the rule; the scenario readers were fixed in the same phase. | ✓ Good (v1.20 Phase 188; key C's rows absent, `key_inputs_mismatch` cleared) |
-| **v1.20: 188 closes on what passed; the SC-4 residual goes to the next milestone (D-13, founder 2026-11-06)** | The re-reading read NOT CONFIRMED under its strict rule (1214 stored values moved between nightlies, cause unmeasured). The founder first chose a control capture, then closed 188 and moved the rest. | ✓ Good (v1.21 Phases 202 and 203: churn attributed, b3's reasons explained) |
+| **v1.20: 188 closes on what passed; the SC-4 residual goes to the next milestone (D-13, founder 2026-11-06)** | The re-reading read NOT CONFIRMED under its strict rule (1214 stored values moved between nightlies, cause unmeasured). The founder first chose a control capture, then closed 188 and moved the rest. | ✓ Good (v1.21 Phases 202 and 203: 1142 of 1214 values attributed, 72 named unexplained; b3's reasons explained) |
 | **v1.20: a re-run never un-publishes a computed factsheet (Phase 190 D-02/D-03)** | A pending or computing re-run used to fail the strategy gate and drop the strategy from allocators. It stays published with a quiet "Updating" line. | ✓ Good (v1.20 Phase 190, verified) |
 | **v1.20: the refusal-marker race closes in two PRs, migration first, and the marker counts only on a confirmed write (Phase 191 D-06/D-07)** | Migrations auto-apply on merge and the Vercel deploy is not ordered against the apply; a zero-row update must fail TRANSIENT, not pass silently. | ✓ Good (v1.20 Phase 191, verified 5/5; PROD did not exercise the race in the window, the live two-connection CI probe carries the proof) |
 | **v1.20: venue-specific phases (Binance income 187, Deribit option replay 189) leave the milestone (founder 2026-11-03)** | Not delivered; `TODOS.md` carries them (`187-BINANCEINCOME-NEXT-MILESTONE`, `189-OPTIONREPLAY-NEXT-MILESTONE`). | — Pending (owned by TODOS until re-booked) |
