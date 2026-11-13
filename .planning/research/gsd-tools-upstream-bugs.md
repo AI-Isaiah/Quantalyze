@@ -255,6 +255,37 @@ replace the stub when it writes the plan rows. Fixing issue 2 alone also removes
 
 ---
 
+## 8. `audit-open` refuses on an archived report's status, so a milestone cannot close
+
+Added 2026-11-13 at the v1.21 close (founder decision "Skip check, record it"). Measured on
+gsd-core **1.20.1**.
+
+**Where.** `gsd-core/bin/lib/audit.cjs` scans `.planning/phases` AND every archived
+`.planning/milestones/vX.Y-phases/` root (the scanners documented at `:800`, `:874` and `:940`;
+the archived read is deliberate since #3458, per the comment at about `:741`). Every VERIFICATION
+report it meets goes through the closed-set status reader, which throws `VerificationStatusError`
+(`gsd-core/bin/lib/verification.cjs`, the class at about `:183`) on any status outside
+`passed | gaps_found | human_needed`.
+
+**Effect.** One archived report with an older status aborts the whole scan, and
+`/gsd-complete-milestone`'s first step (`pre_close_artifact_audit`) cannot run. On this repo:
+
+```
+Error: Verification report ".planning/milestones/v1.17-phases/153-wizform-form-errors-belong-on-the-form-mt5-declarable/153-VERIFICATION.md" has status "failed", which is outside the closed set — accepted values: passed | gaps_found | human_needed. Recovery: set the report's frontmatter `status:` to one of passed | gaps_found | human_needed, or delete the report and re-run the phase's verification.
+```
+
+Seven archived reports here carry statuses written before the closed set existed: `resolved`
+(five), `verified` (one) and `failed` (one). The suggested recovery is to rewrite or delete a
+closed milestone's verdict, which history should never need. `milestone.complete --dry-run` is
+unaffected; only `audit-open` refuses.
+
+**Proposed fix.** `audit-open` should ignore `.planning/milestones/*` for the verification-status
+read, or at least read archived reports leniently: report an out-of-set status as one info line
+naming the file and keep scanning instead of throwing. The active `.planning/phases` root can keep
+the strict closed set.
+
+---
+
 ## What this repo changed instead (for the issue text)
 
 - ROADMAP: the in-phase headings became bold fields (`**Success Criteria** (what must be
