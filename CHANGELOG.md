@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.133.39.4] - 2026-11-13 — records: book Phases 207–211 from the TODOS prune
+
+Records-only PR. After the TODOS prune (#1259) the founder booked five follow-up phases into the current milestone. Each runs independently of the v1.18 MT5 phases and of each other. No source or test change.
+
+### Added
+- **Phase 207 RETRYPROP:** every error boundary's Try again button uses the `retry` prop Next 16.4.2 actually passes instead of `unstable_retry`. Closes `196-ERROR-BOUNDARY-UNSTABLE-RETRY-01`.
+- **Phase 208 UIQUICK:** the alert-digest email link, the browse page's error-vs-empty state, and the logging and copy for share-link failures. Closes `195-ALERT-DIGEST-LINK-TARGET`, `195-BROWSE-EMPTY-VS-ERROR` and `170.6.1-SFH2-SHARE-FAILURES-UNLOGGED`.
+- **Phase 209 SCRUBLEAKS:** no raw PostgREST details in Sentry, a `beforeSend` that cannot throw, the OG route's id guard, and a coded 400 on validate-and-encrypt. Closes `204-SENTRY-RAW-SUPABASE-ERRORS`, `SHARE-QA-07` and `170.3-OG-MALFORMED-ID`.
+- **Phase 210 PUBLICTRUTH:** closed key windows on the published-venues read, no invented demo payloads, and gap-record parse failures reported. Closes `170.6.1-VENUES-CLOSED-KEY-WINDOWS`, `193-DEMO-PAYLOAD-PRODUCERS` and `167.1.2.2.2-GAP-RECORD-SILENT-PARSE`.
+- **Phase 211 SYNCJOBS:** the trade-fetch seed, enqueue-dedup metadata and composite failure stamping. Closes `167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED`, `161.1-D11` and `161.1-D5`.
+
+### Changed
+- `.planning/STATE.md` `total_phases` goes from 4 to 9. ROADMAP gains five overview bullets, five phase sections and five Progress rows.
+
 ## [0.133.39.3] - 2026-11-13 — prune solved TODOS entries
 
 Backlog-only PR. `TODOS.md` loses the entries that are already solved at HEAD (`a720bf3ee`): 3,075 lines removed (14,070 to 10,995), nothing added or reworded. No source, test or `.planning/` file changes.

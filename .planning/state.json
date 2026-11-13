@@ -1,12 +1,58 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.18 — MT5-VERIFY & founder confirmations (Phases 155, 157) — founder-gated",
-  "phases": [],
+  "milestone": "v1.18 — MT5-VERIFY & founder confirmations",
+  "phases": [
+    {
+      "number": "155",
+      "name": "PARITYHARNESS",
+      "status": "pending"
+    },
+    {
+      "number": "155.1",
+      "name": "SERVERCLOCK",
+      "status": "pending"
+    },
+    {
+      "number": "155.2",
+      "name": "LIVEPARITY",
+      "status": "pending"
+    },
+    {
+      "number": "157",
+      "name": "FOUNDER-CONFIRM",
+      "status": "pending"
+    },
+    {
+      "number": "207",
+      "name": "RETRYPROP",
+      "status": "pending"
+    },
+    {
+      "number": "208",
+      "name": "UIQUICK",
+      "status": "pending"
+    },
+    {
+      "number": "209",
+      "name": "SCRUBLEAKS",
+      "status": "pending"
+    },
+    {
+      "number": "210",
+      "name": "PUBLICTRUTH",
+      "status": "pending"
+    },
+    {
+      "number": "211",
+      "name": "SYNCJOBS",
+      "status": "pending"
+    }
+  ],
   "next": {
-    "command": "/gsd-discuss-phase",
-    "label": "Discuss the first phase",
-    "reason": "Project initialized — plan your first phase"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step (plan phase 1)",
+    "reason": "Phase ? of 4 — needs a plan"
   },
-  "updated_at": "2026-11-13T12:53:57.357Z"
+  "updated_at": "2026-11-13T21:34:23.396Z"
 }

@@ -136,6 +136,11 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [ ] **Phase 155.1: SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading** - One narrow tick-time read, asserted against the configured rule inside the leased derive and persisted write-once by a pure-DDL migration; parallel with 155, no trading day needed
 - [ ] **Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%** - The founder's scripted session on MM2, MM3 and FX-AI_V, Gate A and Gate B per account, every surface the same, every gap fixed at its root or ruled on; after 155, session after the 155.1 deploy
 - [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
+- [ ] **Phase 207: RETRYPROP — every error page's Try again button works** - Boundaries use Next's real `retry` prop; independent of the MT5 phases
+- [ ] **Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth** - Quick UI fixes; independent of the MT5 phases
+- [ ] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases
+- [ ] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases
+- [ ] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
 
@@ -224,6 +229,11 @@ Plans:
 | 155.1. SERVERCLOCK | 0/? | Not started | - |
 | 155.2. LIVEPARITY | 0/? | Not started | - |
 | 157. FOUNDER-CONFIRM | 0/? | Not started | - |
+| 207. RETRYPROP | 0/? | Not started | - |
+| 208. UIQUICK | 0/? | Not started | - |
+| 209. SCRUBLEAKS | 0/? | Not started | - |
+| 210. PUBLICTRUTH | 0/? | Not started | - |
+| 211. SYNCJOBS | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.18)
 
@@ -282,6 +292,80 @@ Plans:
 ⭐ **v1.20 Backlog Burndown — CLOSED 2026-11-06.** Its Phase 188 SC-4 residual (D-13) was closed by 202 RESIDCHURN and 203 B3TRUNC in v1.21.
 
 🚧 **v1.18 MT5-VERIFY & founder confirmations (Phases 155, 155.1, 155.2, 157)** — RESUMED 2026-11-13 and roadmapped; nothing started. Gate 1 (new investor passwords) cleared on PROD 2026-11-13. Gate 2 (the founder at the terminal on a trading day) blocks only the 155.2 session and 157. 155 and 155.1 start first, in parallel. Parked from 2026-08-20 to 2026-11-13; the parked text is in [`milestones/v1.21-ROADMAP.md`](milestones/v1.21-ROADMAP.md) as lineage.
+
+### Phase 207: RETRYPROP — every error page's Try again button works
+
+**Goal:** Every error boundary's Try again button calls the `retry` prop Next 16.4.2 actually passes (`{ error, reset, retry }`), not `unstable_retry`, which is undefined at runtime. Closes TODOS `196-ERROR-BOUNDARY-UNSTABLE-RETRY-01` (booked by founder 2026-11-13 from the TODOS prune, PR #1259).
+**Requirements**: TBD
+**Depends on:** Nothing. Independent of the v1.18 MT5 phases; runs in parallel with them.
+**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+1. No error boundary under `src/app` reads `unstable_retry`.
+2. A test renders every boundary through the props Next's own `error-boundary.js` passes and proves Try again calls `retry`; it goes RED when one boundary is reverted.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 207 to break down)
+
+### Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth
+
+**Goal:** Three user-facing lies are fixed: the alert digest email's "View in dashboard" link lands where alerts are shown, the browse page tells a failed read apart from an empty one, and share-link failures are logged and tell the user what happened. Closes TODOS `195-ALERT-DIGEST-LINK-TARGET`, `195-BROWSE-EMPTY-VS-ERROR`, `170.6.1-SFH2-SHARE-FAILURES-UNLOGGED` and the R2 ShareableLink dialog-copy entries. Booked by the founder 2026-11-13 ("Quick UI fixes") from the TODOS prune, PR #1259.
+**Requirements**: TBD
+**Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
+**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+1. The digest link (`src/lib/email.ts`) targets a page that renders the alerts it announces.
+2. `getPopulatedCategorySlugs` distinguishes error from empty, and browse renders each state distinctly.
+3. Every `ShareableLink.tsx` catch logs, a 401/403 says what it is, and the manual-copy fallback shows the URL.
+4. Each fix carries a test that goes RED when it is reverted.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 208 to break down)
+
+### Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost
+
+**Goal:** Error reports never carry raw PostgREST `details`/`hint` and are never lost: scrub at the capture boundary, a `beforeSend` that cannot throw, a UUID guard on the signed-out OG route, and a coded 400 for malformed JSON on validate-and-encrypt. Closes TODOS `204-SENTRY-RAW-SUPABASE-ERRORS`, `SHARE-QA-07`, `170.3-OG-MALFORMED-ID` and the validate-and-encrypt bare `req.json()` entry; `SHARE-D-164-C` (`create_scenario_share` in the audit RPC list) rides along. Booked by the founder 2026-11-13 ("Error-report leaks") from the TODOS prune, PR #1259.
+**Requirements**: TBD
+**Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
+**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+1. `scrubCaptureInput` scrubs non-Error objects, so no capture site can forward `details`/`hint`.
+2. `scrubRecordStrings` survives frozen and getter-only objects without losing the report.
+3. A malformed id on the OG route returns early without spending the Sentry slot.
+4. Malformed JSON on validate-and-encrypt returns a coded 400.
+5. Each fix has a test that goes RED when it is reverted.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 209 to break down)
+
+### Phase 210: PUBLICTRUTH — public factsheet cues come from real data only
+
+**Goal:** Public factsheet cues come only from real data: the published-venues read ignores closed key windows, demo producers no longer ship made-up `peerPercentile`/`allocatorPortfolios` to the client, and a malformed gap record is reported, not shown as "no gaps". Closes TODOS `170.6.1-VENUES-CLOSED-KEY-WINDOWS`, `193-DEMO-PAYLOAD-PRODUCERS` and `167.1.2.2.2-GAP-RECORD-SILENT-PARSE`. Booked by the founder 2026-11-13 ("Public factsheet truth") from the TODOS prune, PR #1259.
+**Requirements**: TBD
+**Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
+**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+1. `get_published_trade_venues` filters closed key windows, so a key rotation does not raise a false venue-mismatch cue (migration reviewed by migration-reviewer and rls-policy-auditor).
+2. No public payload carries invented peer or allocator data.
+3. A malformed gap record reaches Sentry and the tear sheet withholds instead of claiming no gaps.
+4. Each fix has a test that goes RED when it is reverted.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 210 to break down)
+
+### Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status
+
+**Goal:** Sync and job bookkeeping are correct on every path: a user-triggered trade fetch no longer seeds from the poll-overwritten `last_sync_at`, the enqueue dedup no longer drops the caller's metadata, and composite `_stamp_failed` stops reading status live. Closes TODOS `167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED`, `161.1-D11` and `161.1-D5`; the design for D11 is settled at discuss-phase. Booked by the founder 2026-11-13 ("Sync and jobs correctness") from the TODOS prune, PR #1259.
+**Requirements**: TBD
+**Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
+**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+1. A user-triggered fetch cannot skip trades that the daily poll's `last_sync_at` write would otherwise hide.
+2. An enqueue that dedups onto an existing job keeps or merges the caller's metadata by a recorded rule.
+3. Composite failure stamping uses the status captured at job start, like Phase 161.1's other paths.
+4. Each fix has a test that goes RED when it is reverted.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 211 to break down)
 
 ---
 
