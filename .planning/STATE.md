@@ -1,19 +1,20 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.21
-milestone_name: UX — trustworthy, navigable, lean
-status: Awaiting next milestone
-stopped_at: v1.21 archived; next milestone not started (/gsd-new-milestone)
-last_updated: "2026-11-13T12:09:08.643Z"
+milestone: v1.18
+milestone_name: MT5-VERIFY & founder confirmations
+current_phase_name: defining requirements
+status: planning
+stopped_at: context exhaustion at 75% (2026-11-13)
+last_updated: "2026-11-13T13:51:21.090Z"
 last_activity: 2026-11-13
-last_activity_desc: Milestone v1.21 completed and archived
-state_head: 9d40e7fd72a8ca23e6701ace323f4996cb6d6f50
+last_activity_desc: Milestone v1.18 started
+state_head: 40ff7161c075113187162a407a6cb51c502da5a5
 progress:
-  total_phases: 18
-  completed_phases: 18
-  total_plans: 217
-  completed_plans: 217
-  percent: 100
+  total_phases: 4
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 ## ⭐ STATE lineage
@@ -174,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: Milestone v1.21 complete
+Phase: Not started (roadmap created)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-11-13 — Milestone v1.21 completed and archived
-Progress: [██████████] 100%
+Status: v1.18 roadmap awaiting founder approval; 155 PARITYHARNESS and 155.1 SERVERCLOCK start first, in parallel, then 155.2 LIVEPARITY with 157 FOUNDER-CONFIRM in its session
+Last activity: 2026-11-13 — v1.18 roadmap created (4 phases, 15/15 requirements mapped)
+Progress: [░░░░░░░░░░] 0%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1765,8 +1766,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-11-12T07:54:54.622Z
-**Stopped At:** Phase 201.1 complete — all phases complete
+**Last Date:** 2026-11-13T13:51:21.051Z
+**Stopped At:** context exhaustion at 75% (2026-11-13)
 **Resume File:** .planning/phases/201.1-polishresiduals-the-residual-ui-defects-found-in-the-phase-2/201.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z

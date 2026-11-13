@@ -1,366 +1,269 @@
 # Project Research Summary
 
-**Project:** Quantalyze
-**Domain:** Targeted backlog burndown on a live, continuously-deployed platform (Next.js 16 App Router on Vercel + Supabase Postgres/RLS with auto-apply-on-merge migrations + FastAPI worker on Railway + GitHub Actions against a SHARED remote TEST Supabase project, **no branch protection** — every CI gate is advisory at merge)
-**Researched:** 2026-08-20
-**Confidence:** HIGH
+**Project:** Quantalyze, milestone v1.18 MT5-VERIFY & founder confirmations (Phases 155 and 157)
+**Domain:** Proving an existing MT5 ingestion pipeline's rendered numbers against an external oracle (the founder's terminal and broker statements)
+**Researched:** 2026-11-13
+**Confidence:** MEDIUM. Repo facts are HIGH, read at HEAD. MT5 terminal, report and statement behaviour is LOW, from web sources only, and nothing has been measured live yet.
 
-> **Scope note.** This is NOT ecosystem research. All four files are targeted passes over specific
-> v1.20 items (groups RANK / SHARE / WIZERR / HONEST / OPS / SEC / DEPS per `.planning/REQUIREMENTS.md`).
-> Nearly every claim was read from source at HEAD `ca3f0c5c` or measured from a registry / CI log.
-> Where TODOS.md's own description of a problem was found to be wrong, the research says so — and in
-> three cases (#686, #606, the concurrency remedy) **TODOS.md is wrong and the plan must not inherit it.**
+> Public repo: this file names account labels only (MM2, MM3, FX-AI_V). No login, server name, amount or PROD id.
 
 ## Executive Summary
 
-v1.20 is not a feature milestone; it is a burndown of ~50 verified-open items whose difficulty is
-concentrated in **four traps that all ship green**. The research's single most valuable output is that
-the "obvious" fix for each of the four is measurably the wrong one: (1) the SHARELINK-01 token cannot
-be threaded through the factsheet `cacheKey` string — the wrapper splits at `"::"` and discards the
-tail, so the intuitive fix silently publishes a private strategy to every anonymous visitor for a
-3600s TTL, strictly worse than the bug being fixed; (2) the ranking filter must not be
-`.eq("computation_status","complete")` — that drops `complete_with_warnings`, a terminal *success*,
-and re-forks a predicate two migrations were spent unifying; (3) "shrink the `shared-test-db`
-concurrency group", the remedy TODOS.md proposes, does not address the eviction rule at all, because
-the bug is concurrent **run count**, not member count; (4) the pip dependabot PR #685 **silently
-downgrades production pandas 3.0.3 → 2.3.3** because `requirements.in` has been lying since PR #604.
+v1.18 builds no product. It verifies one. MT5 already ingests, reconstructs and renders on every surface. The milestone has to show that what Quantalyze renders for three live funded accounts matches the broker's own figures to within 1%. It also has to explain every divergence and fix each one at its root, with no cap (MT5-10). Practitioners use the broker's **raw ledger** as the oracle: balance at an instant, deal-row sums and flows. Verifier percentages such as Myfxbook Gain or the terminal's Growth % are used only as a secondary cross-check. Every retail verifier's headline gain is on a balance basis, with equity shown beside it. Their methods also differ on deposits and withdrawals. Comparing our TWR with their Growth % would therefore mix method error with data error.
 
-The recommended approach is therefore ordering-first, and the ordering is forced by measured
-dependencies rather than by preference. **OPS must be the first phase** — the concurrency eviction
-makes main-branch CI conclude `cancelled` (grey, not red), which makes Railway silently skip the
-analytics deploy (issue #616); running a 9-PR dependency campaign against an unfixed group
-*guarantees* at least one silently-skipped deploy, and #685 is 100% `analytics-service/`, so it is
-exactly the PR that would sit undeployed. **RANK is early** because it is pure read-path, zero DDL,
-zero deploy ordering, trivially revertible, and it front-loads the cheap PROD census. **SHARE is its
-own late phase** because it is the only item introducing a new public, anonymous, unauthenticated
-surface, with its own migration, its own token module, its own cache invariant and two unresolved
-product decisions — it should not share a PR with anything. **DEPS is last**, strictly after OPS, one
-PR at a time.
+The approach the research converges on is **capture once, compare offline**:
+- Our side comes from persisted PROD rows, read through MCP SELECTs only, with the marker query first: `strategy_analytics`, `strategy_analytics_series`, `api_key_nav_marks` and the stored `portfolio_analytics`.
+- The oracle side comes from the founder's terminal. That means an All-History Report export plus a short worksheet of readings, and broker statements if any exist.
+- A pure engine with no DB, socket or gateway access compares the two. It sorts every delta into a closed taxonomy that fails closed and has a named `MT5_PARITY_TOLERANCE = 0.01` constant.
+- The harness itself never touches the gateway. The only new gateway read is the MT5-06 server-clock reading. It is built as a product capability inside the worker's leased derive and persisted write-once.
+- No runtime package is added.
 
-The risks are mitigated by four disciplines the research names explicitly: bypass-don't-re-key on the
-share cache (with an *ordered adversarial* test — token request first, then anon 404 — demonstrated
-RED with the bypass neutered); `isComputedAnalytics()` never a status literal, plus a PROD
-before/after population snapshot as a gate rather than a nicety; an external FIFO mutex plus a
-`cancelled`-conclusion watcher instead of a smaller group; and a prerequisite one-line commit fixing
-`requirements.in` to `pandas==3.0.3` *before* #685 is touched at all. Two of the nine dependabot PRs
-should never land: **#614 (TypeScript 7) close, do not merge** — TS 7 is the Go port whose root export
-is `version.cjs`, and this repo consumes the compiler API in the error-classification coverage-law
-gate; **#606 close as stale** — three of its four booked claims are false at HEAD.
+Agents build and dry-run all of this before a single scripted founder session on a trading day (gate 2).
+
+The risks are mostly definitional, not technical. **Four facts at HEAD contradict the 2026-08-14 framing:**
+1. **NAVMTM marks** (Phase 167.2.1.1.1) put every day from a key's first mark day `S` on an equity basis. Days before `S` are realized (balance) basis by design and cannot carry "including open P&L" without inventing marks.
+2. **MT5-06's carrier** (`MT5_SOAK_SERVER_OFFSET_MIN`) has been replaced by Phase 175's `MT5_SERVER_TIME_RULE`.
+3. **The `Mt5Client` contract test forbids** the `symbol_info_tick` read a live clock check needs.
+4. **MT5-09's surface list is stale.** The portfolio PDF was retired in Phase 195 and `scenario-blend-panels.ts` was deleted in v0.43.0.0.
+
+The other hard risks:
+- **A tautological oracle.** `mt5_soak.reconcile_parity` and our own gateway reads both fall into this class.
+- **One worker-wide clock rule across three accounts** that may sit on different servers.
+- **Unverified fold and classification rules:** assumption A3 on commission and swap, and BALANCE deals that are not really deposits.
+- **A truncated ledger**, which the backward anchor absorbs silently.
+- **Losing a week if this weekend's frozen-equity reading is missed.**
 
 ## Key Findings
 
 ### Recommended Stack
 
-No new technology is required anywhere in v1.20. Every gap closes with code already idiomatic here
-(`unstable_cache` + `revalidateTag`, hash-in-Node share tokens, SECURITY DEFINER RPCs,
-`createAdminClient()` writers, `withPublishedOnly`, `isComputedAnalytics`). The only genuinely new
-*dependency-shaped* decision in the milestone is an external GitHub Actions mutex to replace the
-native concurrency group. The stack research is therefore a **dependency-campaign verdict table**, not
-a selection exercise: six of the nine PRs are cheap, one is a trap, one is a silent production
-downgrade, one must not land.
+Add nothing at runtime. Everything is already in `analytics-service/requirements.txt`, the Python stdlib, or reachable through the `mt5linux` 0.1.9 RPyC bridge. (STACK.md, HIGH from the lock and the unpacked wheel.)
 
-**Core decisions:**
-- **`typescript` stays at 6.0.3** — 6.0.3 is already the newest 6.x; TS 7.0.2's root export is
-  `./lib/version.cjs` (measured via `npm view`), so `ts.SyntaxKind` / `createSourceFile` are
-  unreachable, breaking `src/lib/seam-log-coverage.test.ts` (the WIZFORM-02 coverage law) at *import*;
-  and `typescript-eslint@8.58.0`'s peer range is `>=4.8.4 <6.1.0`. Close #614, do not shim.
-- **`pandas` stays at 3.0.3 in `requirements.txt`** — the *lock* is right and `requirements.in` (still
-  `2.2.3`) is the file that is wrong. Prerequisite commit on `main` fixes the `.in`; then re-run
-  `cd analytics-service && make lock` (a `uv pip compile --universal` artifact — Dependabot's edit does
-  not match the format).
-- **#686 (29 npm updates) needs a rebase + `npm install`, not a bisect** — all nine red checks fail at
-  the same `npm ci` EUSAGE (missing `proxy-agent` subtree Dependabot mis-materialised);
-  `npm ci --dry-run` on `main` is clean, so the desync is PR-introduced.
-- **Retarget two PRs before landing:** `@testing-library/jest-dom` **7.0.1** (not 7.0.0) and `jsdom`
-  **30.0.1** (not 30.0.0 — 30.0.0 regressed `getComputedStyle()` with `calc()`). jsdom 30's only
-  breaking change is `engines` excluding **local Node 25** (CI Node 22 is fine) — an inversion of the
-  repo's usual hazard, to be decided explicitly, not discovered as a flake. Bonus: jsdom 30 moves
-  `undici` to ^8, clearing a standing high advisory.
-- **`supabase/setup-cli` 3.0.0 changes the install source GitHub→npm** on the four workflows that
-  auto-apply migrations to PROD. Lands **alone**, validated on `migration-drift-check.yml` first, with
-  `supabase --version` == `2.98.2` confirmed in the plan job log.
-- **One-line free win:** bump the `fast-uri` override `^3.1.4` → `^3.1.5` (the current override pins to
-  the last *vulnerable* version).
+**Core technologies:**
+- **Python 3.12, `mt5linux` 0.1.9 (`--no-deps`), `rpyc` 5.3.1:** the validated gateway path. Do not move to rpyc 6.x (wire-incompatible) or mt5linux 0.1.10 and later (regressed).
+- **`Mt5Client` facade:** every read goes through it, so the login bracket, timeouts and scrubbing stay in force. Any new read is a named method backed by one committed remote expression in the `_REMOTE_SESSION_SNAPSHOT_SRC` style, evaluated in one RPyC crossing. Iterating netrefs costs about 60 ms per element.
+- **`Mt5ServerClock` (Phase 175):** the only broker-time-to-UTC conversion. Do not use runtime `zoneinfo`/`tzdata`, `pytz` or `dateutil`.
+- **`broker_dailies._fold_mt5_deals`, `nav_marks_apply`, the `parity_diff.py` taxonomy pattern:** the engine reuses them and never forks them.
+- **Stdlib `json` + `hashlib` (canonical JSON, `allow_nan=False`, sha256):** seals captures. **Stdlib `html.parser` + `codecs`** parses the HTML Report. Do not support XLSX.
+- **`@playwright/test` and the founder's signed-in Chrome:** MT5-09's render layer. Add `unpdf` 2.1.0 as an optional dev dependency only if the PDF bytes themselves must be read.
+
+**Do not use:** a second raw `mt5linux` connection; `conn.execute("import …")` on the far side; `symbol_select` (it mutates the shared Market Watch); the `mt5linux` `copy_rates_range` wrapper; a generic attribute passthrough on `Mt5Client`; `positions_get` (`equity − balance` and `account_info().profit` already cover open P&L).
 
 ### Expected Features
 
-Feature research covered SHARE (SHARELINK-01) only — revocable capability-URL sharing of a private,
-unpublished factsheet, benchmarked against Google Docs / Notion / Figma / Dropbox / DocSend.
+The "features" are verification checks and evidence artifacts (FEATURES.md, MEDIUM).
 
 **Must have (table stakes):**
-- **Copy Link always produces a link that works** — this IS the founder-hit defect; the fix is
-  mint-on-copy, not hide-the-button.
-- **Mint-or-REUSE across sessions** — the in-repo scenario-share precedent **cannot deliver this**:
-  it stores only `sha256(raw)` and `create_scenario_share` unconditionally revokes the prior share, so
-  reuse works only within one browser session. A verbatim port regenerates the original bug in slow
-  motion. Requires a deliberate choice: **(A) store the raw token** (lowest cost, a stated deviation
-  from hash-only discipline) or **(B) HMAC over a stored generation counter** (recomputable forever,
-  revoke = `generation += 1`, nothing secret at rest — but needs a **new Vercel env secret**, a
-  prod-only failure mode this repo has already been bitten by via `RESEND_API_KEY`).
-- **Immediate, unconditional revoke** — soft (`revoked_at`), never DELETE; 404-not-403; double-revoke
-  = convergence. Port the precedent's semantics wholesale.
-- **A distinct recipient page for a revoked/unknown token** — **410 Gone**, content-free, `no-store`.
-  The 410 applies to the **TOKEN lane ONLY**; the bare-id lane keeps its uniform 404 (T-148-04) or the
-  id becomes an existence oracle.
-- **Owner sees whether a live link exists** (`has_active_share` shape) + inline revoke confirm.
-- **Token-lane render must never populate the id-keyed cache** — a *correctness* table stake.
-- **Recipient chrome suppression** — found during research, not in TODOS.md: a *recipient* of a token
-  link currently sees the Share button, and `ShareLinkButton` rebuilds the URL as `?share=1`,
-  **stripping the token** — a second instance of the same false-affordance class, on the recipient side.
-- **`OwnerUnpublishedNotice` copy correction** — it currently states "anyone else who opens this link
-  sees a 404", which becomes **factually false** the moment tokens ship. A phase that ships tokens
-  without touching this component is incomplete.
+- TS-1 and TS-2: the live offset is asserted per server, plus a near-midnight regression on a **real** deal, chosen from a DST divergence week (2026-10-25..11-01) so it also pins `eu` versus `us`.
+- TS-3: **raw-money window parity**, the core oracle. Balance at both window edges, the flows and the net closed P&L come from the terminal export, with the identity `B_E − B_S = closed P&L + flows` checked on both sides. Parse columns by header name, never by index.
+- TS-4: a captured-instant check plus a measured wedge. The founder reads the terminal at instant T, and the harness checks it on D+1 after a re-anchoring sync.
+- TS-6: proof the account is real. Record trade mode (real or demo), the server, and that the run is on a trading day.
+- TS-7: cross-surface consistency on the **re-mapped** MT5-09 list (see Conflict C7).
+- TS-8: MT5-15 warnings read from the stored `data_quality_flags`, not guessed.
+- TS-9: the uncapped root-cause loop (MT5-10).
+- TS-10: basis disclosure. A realized-basis curve must not read as equity.
+- TS-11 and TS-12: Phase 157 confirmations and MT5-GOAL-01.
+- Additional checks from PITFALLS.md that belong in the same set:
+  - an inception identity (the balance rolled back past the first deal is about 0);
+  - a deal census by type and cost column;
+  - a BALANCE, CREDIT and BONUS deal census, with labels the founder confirms;
+  - a provenance enum on every expected value;
+  - a self-RED proof of the harness.
 
-**Should have (competitive):**
-- **"Replace link" as a control distinct from "Revoke"** — two different intents; conflating them is
-  what makes reuse impossible.
-- **`last_viewed_at`** — one column, answers the only question an allocator has, with no surveillance
-  apparatus.
+**Should have:**
+- D-2: weekend or Friday-close window boundaries, asserted per account. They are void if an account trades a weekend-quoted symbol.
+- D-3: a re-runnable harness that exits non-zero on breach.
+- D-1: a per-deal running-balance replay, used if TS-3 fails and the cause is not obvious.
+- D-5: broker daily statements, the only historical-equity oracle, if the brokers send them.
+- TS-5: a Growth % cross-check, labelled secondary. It shares our blind spot on BALANCE dividends.
 
-**Defer (v2+):**
-- **Link expiry** — tier-gated across Notion/Dropbox/Figma; that is the tell it is not table stakes.
-- **Multiple named tokens per strategy** — the right end-state; keep the schema compatible
-  (partial-unique `WHERE revoked_at IS NULL`), defer the UI.
-- **Anti-features, explicitly:** per-view analytics / notify-on-open (a surveillance beacon aimed at
-  named allocators, plus GDPR surface); link passwords; **hiding or disabling** the Share button
-  (hiding removes the capability the founder wants; the repo's UAT direction bans disabled buttons);
-  appending the token to the cacheKey.
+**Defer:**
+- D-4: equity-basis history going forward. NAVMTM marks may already cover most of this (Conflict C2). Re-check before booking it.
+- A public "verified" claim or badge, and a proof-of-control check like Myfxbook's.
+
+**Anti-features:**
+- comparing the run day's equity;
+- using Myfxbook or FX Blue Gain as the primary oracle (FX Blue's method was never retrieved, so never cite it);
+- spreading today's floating P&L back over history;
+- widening the 1%;
+- hardcoding an offset;
+- committing raw exports;
+- fixes scoped to `exchange === 'mt5'`.
 
 ### Architecture Approach
 
-Three items were designed in place. **C (ranking)** is read-path only: hoist the gate marker at the
-*projection* site (`PERCENTILE_GATE_COLUMN`), leave `PERCENTILE_ANALYTICS_COLUMNS` byte-unchanged (the
-csv-finalize `CLOCK_SAFETY_KPI_COLUMNS` mirror and the 146.2-03/G1 ruling both depend on it), and apply
-`isComputedAnalytics` once through a shared helper so the two callers cannot diverge. **B (venue
-provenance)** extends the *already-applied* Phase-156 SECDEF-writer pattern with its deploy-first /
-revoke-second discipline (B-1 writer → B-2 route+components → B-3 REVOKE → B-4 stamp). **A (share
-token)** is mostly a transposition of the complete `/scenario-share` spine — token lib, migration with
-owner-coherence RLS + partial unique index + body-shape DO-block, SECDEF reader, INVOKER writer, mint
-and revoke routes.
+The structure is a capture/compare split (ARCHITECTURE.md; HIGH for the backend, MEDIUM for the surface tracing). A versioned capture-SQL set in `docs/runbooks/mt5-parity/` sits behind a vitest write-keyword gate and feeds an untracked `/.mt5-parity/` directory. The founder's worksheet and Report HTML feed an oracle intake. Both go into a pure engine in `services/mt5_parity.py` that emits a redacted verdict with ordinals and ratios only. MT5-09 is one series checked at two layers. The data layer runs each TS surface function on its own input column, which is diagnostic. The render layer is the founder's Chrome and acts as the gate, bound to `computed_at`.
+
+**Two gate legs:**
+- **Gate A (pre-mark realized):** our `returns_series` against the TWR of the terminal's realized-balance path, over a Friday-to-Friday window before `S`. It needs no statement. It is the only leg that can catch fold, classification and bucketing bugs, because those shape only the pre-`S` days, which are most of the record.
+- **Gate B (marks era, open P&L):** Friday-close edges, with an equity oracle at both edges.
 
 **Major components:**
-1. **Token lane on the factsheet** — a *third* arm alongside published/owner that calls
-   `fetchAndBuildPayload` **directly** (zero cache reads, zero cache writes at the id key), exactly as
-   the owner lane already does. `force-dynamic`, `runtime = "nodejs"`, `publicIpLimiter`,
-   `Cache-Control: private, no-store`, `Referrer-Policy: no-referrer` per-route, generic metadata.
-2. **`strategy_shares` migration + two RPCs** — SECDEF reader `get_shared_factsheet(p_token_hash)`,
-   SECURITY **INVOKER** writer `create_strategy_share`. The precedent's body-shape assertion pins
-   `status = 'published'` — the factsheet share's whole purpose is the opposite, so the assertion must
-   be **re-authored**, not copied (copying aborts the apply; deleting leaves the reader unpinned).
-3. **The share-affordance class fix** — all **three** sites (`FactsheetView.tsx:1565`,
-   `strategies/page.tsx:175`, `discovery/[slug]/[strategyId]/page.tsx:187`) derive from ONE predicate,
-   not three literals.
-4. **Percentile projection + a single filter helper** in `queries.ts` / `percentile-core.ts`.
-5. **Server-authoritative connect writer** — `validate-and-encrypt` (which already knows the canonical
-   venue) writes the row and returns `{ api_key_id }`; the three client components stop inserting;
-   then `REVOKE INSERT ON api_keys FROM authenticated`.
-6. **OPS: external FIFO mutex + a `cancelled`-conclusion watcher** replacing the native concurrency
-   group, plus the structlog two-artifact fix (source-scan gate + behavioral redaction test).
+1. Capture SQL and loader, plus a window picker. The picker refuses unsafe windows: any trading deal in an edge's [rollover, UTC midnight) gap, edges before `S`, or a weekend-quoted symbol.
+2. Oracle intake: the worksheet YAML and the Report parser, tested on a synthetic UTF-16 fixture.
+3. A pure compare engine with a closed taxonomy: `within_tolerance`, `pre_mark_realized_basis`, `edge_instant_mismatch`, `flow_placement`, `annualization_convention`, `withheld_by_gate`, `unexplained`. Only `within_tolerance`, and a `withheld_by_gate` applied consistently on every surface, pass on their own. Every other named bucket needs a recorded founder ruling. An empty `unexplained` list is not the exit condition.
+4. MT5-06 server-clock reading, a product change:
+   - a narrow `Mt5Client` tick-time method;
+   - `assert_reading` in `mt5_server_clock.py`, which stays a stdlib-only leaf;
+   - a call inside `read_mt5_deal_ledger`'s leased session;
+   - a write-once `mt5_server_clock_readings` table with pure DDL, RLS and no data-reading DO block, because it auto-applies to TEST and then to PROD with no human gate;
+   - on mismatch, a named refusal plus an `ops_alert`.
+5. MT5-15 flag explainer and the MT5-09 surface matrix.
 
 ### Critical Pitfalls
 
-1. **Token render poisons the id-keyed cache (SL-1).** The `cacheKey` string is split at `"::"` and the
-   tail discarded — a suffix is not a key; and `keyParts`-with-token, while it "works", puts the secret
-   in the cache namespace and grows unbounded. **Bypass, don't re-key.** The failure is *silent and
-   TTL-long*: the poisoning request is the owner's own, renders correctly, and no error or Sentry event
-   fires. Never add a visibility parameter to `buildFactsheetPayloadCached`. Never make
-   `/api/og/factsheet/[id]` token-aware (a CDN-cached, un-revocable public image of a private strategy
-   behind a 7-day `stale-while-revalidate`). Test: **ordered adversarial**, extended into
-   `phase-148-owner-lane-cache-isolation.test.ts`, demonstrated RED with the bypass neutered.
-2. **The concurrency remedy in TODOS.md is wrong.** A group holds at most one RUNNING + one PENDING
-   entry *globally*; a third request **evicts** the pending one, which concludes `cancelled` with
-   `steps: []` (grey — nobody triages grey), and Railway then skips the analytics deploy. Membership
-   count changes only how fast you reach three simultaneous *runs*. Do NOT "finish the chain" with
-   more `needs:` edges — the `if:` conditions diverge on `workflow_dispatch` and it would disable
-   `e2e-seeded` on every manual run (a trap a `/ship` review already caught once).
-3. **The naive percentile filter has three failure modes.** `.eq(...,"complete")` drops
-   `complete_with_warnings` (a terminal success, deliberately written by the v1.8 uPnL DQ decision);
-   the `< 5` floors (and the SQL RPC's min-N **20**) make filtering a **rank-disappearance** event in
-   thin categories, catalog-wide, in one day, with no explanation available to a manager; and embed
-   `!inner` vs post-fetch land on *different* early-return gates. Also: `get_verified_cohort_rank`
-   claims parity-by-construction and *also* does not filter status — move both engines or record the
-   decision.
-4. **#685 silently reverts a shipped production migration.** pandas 3.0.3 → 2.3.3 installs cleanly on
-   Python 3.12 and fails *quietly* at behaviour (copy-on-write, string-dtype defaults). **A green
-   pytest run is not proof of safety here; the pin itself is the assertion.**
-5. **The null-attestation √252 trap (B-ii).** TODOS.md calls the `apiKeyExchange → attestedVenue` swap
-   "a one-identifier change" — **that framing is dangerously incomplete.** `isCryptoExchange(null)` is
-   `false`, so a null attestation stamps `'traditional'` ⟹ **√252 on a crypto strategy** ⟹ ~1.20×
-   Sharpe inflation, and the worker reads `strategies.asset_class` directly as the annualization clock.
-   The swap **must move with its guard**: extend `skipAssetClassWrite` so a null attestation SKIPS.
-6. **structlog's two failure modes look identical.** Mode A (module-scope `.bind()`) is *not* fixed by
-   dropping `cache_logger_on_first_use`; Mode B (first use before `configure_logging()`) is *not* fixed
-   by a source scan. Fixing one and closing the audit is false closure — and the leak class is ccxt HMAC
-   signatures and MT5 passwords. Ship **both** artifacts, both demonstrated RED when neutered.
+1. **The oracle is our pipeline in disguise.** Every expected value carries provenance `terminal_reading`, `terminal_report_export` or `broker_statement`, and the harness refuses anything else. The founder reads cold, with none of our numbers in view. `mt5_soak.reconcile_parity` is an internal check only. The harness must be shown RED on a neutered input (a reclassified BALANCE deal, a one-hour clock shift, a dropped oldest deal) and then restored from a byte backup.
+2. **Basis mismatch at `S`, and the window-end trap.** Measure each key's first `mark_day` first. Report cumulative return, start level and end level separately, because error accrues backward and is largest at the window start. Put edges on market-closed instants. A level within 1% can hide a 20% error in the return.
+3. **One clock for three accounts, and a forbidden tick read.** Group the keys by `account_info().server`. If the rules differ, a per-server clock is the fix (check the parked `164.6.6.3.6 MT5SERVERLEARN` branch first). A per-key override bolted on would be a band-aid. Re-cut the contract pin deliberately: admit one named read-only method and never delete the forbidden list.
+4. **Cost fold and flow classification are unverified.** A3 (commission as a field versus a separate row) and plan 136-05 (DEAL_TYPE verify) were never executed. BALANCE-typed dividends and rebates silently leave the return. Credit sits in the `equity − balance` wedge. Fix: a per-column (profit, swap, commission, fee) per-day diff against the statement deal rows, a founder-labelled balance-operation census, and reading `credit` separately.
+5. **A truncated ledger, a lease bypass, and the timeout arms.**
+   - Assert the inception identity.
+   - Require an All-History export.
+   - Never run a second process against the gateway: the lease is in-process only, and a stray login fails the nightly with `Mt5AccountMismatchError`.
+   - Use `mt5_derive_read_bound_s`, and let the named errors through unchanged.
+   - Never raise a bound to turn a run green.
+   - Tune timeout findings #8 and #10 only from percentiles over several nightlies, with fresh and cached logins split.
+
+## Conflicts Between the Research Files (resolved here, not averaged)
+
+| # | Topic | Disagreement | Pick and why |
+|---|---|---|---|
+| C1 | **What the oracle may be** | STACK's preferred pair includes **Oracle A, a gateway snapshot** captured by the harness, taken over `railway ssh` or a new internal route. ARCH (Anti-Pattern 1, F4) and PITFALLS (Pitfall 1, provenance enum) rule out any gateway-read oracle, and ARCH says the harness makes **no gateway call at all**. | **ARCH/PITFALLS.** STACK itself concedes that A has "temporal independence only" and shares the ingest pipe. Drop Oracle A and the internal-route or `railway ssh` capture channel. Keep STACK's B (Report) and C (live founder reading). |
+| C2 | **Does the history have an equity-basis era?** | STACK and FEATURES say every reconstructed interior day is balance basis and build their "two checks" (TS-3/TS-4) on that. ARCH (F1) and PITFALLS (Pitfall 4) read `nav_marks_apply` and find that days from the first mark `S` onward are stored **equity** marks. | **ARCH/PITFALLS** read more of the code (NAVMTM closed 2026-11-02). TS-3/TS-4 still stand as the pre-`S` check (Gate A) and the instant check. Gate B over the marks era is the only leg where "including open P&L" can actually match. D-4 is largely superseded. |
+| C3 | **Where the clock read runs and what it reads** | STACK: an on-demand probe through the harness channel, the max `time_msc` over **visible Market Watch** symbols, rounded to 900 s with a 120 s refusal bound. ARCH: **inside the nightly derive** under the lease, ticks for **the account's own deal symbols**, 60 s residual bound, persisted. PITFALLS: one liquid symbol, rounded to 30 min. | **ARCH placement** (continuous and leased, and it catches the 2027-03-14 transition). **STACK's symbol set** (visible symbols reproduce MQL5 `TimeCurrent`, and ARCH's deal symbols may not be in Market Watch without `symbol_select`), with 900 s rounding. Both carry the same unverified spike. |
+| C4 | **Report parser library** | ARCH says `bs4` is "already in `requirements.txt`". STACK read the lock and found `bs4` only as a transitive dependency of yfinance. | **STACK:** use stdlib `html.parser`. A direct import of a transitive dependency can vanish on a quantstats or yfinance bump. |
+| C5 | **Window shape** | PITFALLS: end several trading days before the run, straddle 10-25..11-01, **include** a flow, a month-end and a triple-swap Wednesday. ARCH: `W0 = Fri 10-30`, `W1 = Fri 11-13` (today), and **prefer flow-free** because a two-edge oracle cannot give a TWR across a flow. | **Both, per leg.** Gate A (realized, deal-level, no statement needed) takes PITFALLS' rich window, because a flow is a ledger row there. Gate B (equity at two edges only) takes ARCH's flow-free Friday-close window, and compares money ΔE if no flow-free window fits. PITFALLS' "several days before" concern is answered for Gate B by the edges being marks, not the anchor. |
+| C6 | **Founder reading at an instant** | FEATURES TS-4: founder reads Balance/Equity/Floating at T, harness checks on D+1. ARCH: frozen weekend equity, or statements, attest edges. | Compatible. Keep both. TS-4 becomes the in-session item and the weekend reading the Gate B edge. |
+| C7 | **MT5-09 surface list** | FEATURES TS-7 still names `scenario-blend-panels.ts` and the portfolio PDF. ARCH F6/F7 verify both are gone. ARCH also cites `_compute_portfolio_analytics` at `routers/portfolio.py:653`, not `:628`. | **ARCH.** Re-map MT5-09 with a dated correction, keep the old text as lineage, and cite by symbol. |
+| C8 | **Rotation timing** | FEATURES puts the `MT5_SPIKE_INVESTOR_PASSWORD` rotation at the end of the session. PITFALLS says rotate only after S2's reads are done, then re-check gate 1. | **PITFALLS.** It is the same moment, but treat rotation as re-running gate 1. |
+
+## Founder Decisions Needed (de-duplicated, top priority first)
+
+1. **Pre-mark history: realized basis or "including open P&L".** Before each key's first mark day `S`, the rendered record is realized (balance) basis by design (NAVMTM D-09: no backfill). No code fix reaches the open-P&L error there without inventing marks. Choose one: (a) accept realized basis for pre-`S` history, judged by Gate A; (b) caveat it on the surfaces; or (c) withhold it. The harness measures the gap (open P&L at `S`) but must not decide. *(ARCH Pattern 2, PITFALLS 4, FEATURES Conflict 1, STACK §1.)*
+2. **What the 1% measures.** It could mean window return in absolute percentage points (`|ΔE_ours − ΔE_oracle| / E(W0)`, ARCH's recommendation), relative error of the level, or relative error of P&L (which blows up on a quiet window). Decide too whether it applies to cumulative return, start level and end level separately (PITFALLS 2). Keep it one named constant.
+3. **The weekend reading, which is time-critical.** Today (Fri 2026-11-13) is the candidate `W1`. A frozen-equity reading on Sat 11-14 or Sun 11-15 secures one Gate B edge with no statement. With no statements, Gate B needs **two** such weekends, and missing this one costs a week. Ask today. ✅ **Founder 2026-11-13: "Yes, this weekend."**
+4. **Statements.** Do the brokers email daily statements (some send them only on days with activity) or month-end statements for MM2, MM3 and FX-AI_V? They are the only historical-equity oracle (D-5). An October month-end statement would attest `W0 = 10-30`.
+5. **The MT5-06 day-boundary wording.** "Lands on the day the terminal shows" conflicts with UTC-day bucketing, because the terminal shows server days. Proposed restatement: "lands on the UTC day of (terminal-displayed server time − the offset in force)", checked as per-day placement. Matching the server day instead would be a bucketing change across every MT5 series. Also record that Phase 175's configured rule is the carrier and the live reading **asserts** it, never written back as config.
+6. **The tick-read contract re-cut.** `test_read_only_surface_no_trade_methods` forbids `symbol_info_tick`. Approve one narrow read-only method that returns tick times only (the precedent is `terminal_info`, 153.3/D-31). It touches the `api_verified` read-only trust story. If declined, MT5-06 falls back to a one-off founder clock reading (the 175 precedent), and the continuous check is booked for later.
+7. **Clock-mismatch behaviour.** When a live reading disagrees with `Mt5ServerClock`, either refuse that key's persist with an `ops_alert` (the fail-loud default, after 175 D-04) or alert only.
+8. **Whether the three accounts share a server.** This may not be readable by SELECT, because the server travels inside the encrypted credential. Either the founder answers, or a worker-side `account_info().server` read records a hash in the reading row. If the servers differ, the single `MT5_SERVER_TIME_RULE` is wrong for at least one account, and a per-server clock comes before parity.
+9. **MT5-09: the stale surface list, plus the published-only gap.** Approve the re-mapped list: the portfolio PDF is dropped (retired in Phase 195 TRIM, D-03), `scenario-blend-panels.ts` is dropped (deleted in `32494ba25`), and the factsheet PDF stays. Say where "strategy detail" lives now, since `(dashboard)/strategies/[id]/` holds only `edit/`. Rule on the factsheet PDF, browse and the catalog composer, which show only published strategies while MT5 is "not advertised": publish, use a book or admin view, or scope them out.
+10. **Smaller rulings that surface during S1 and S2:** any non-zero **Credit** (is it in the denominator or not); a swap-free account's admin-fee posting; labels for BALANCE-typed non-capital deals; and, if the ledger is truncated, whether the series starts later with an honest marker.
 
 ## Implications for Roadmap
 
-Suggested phase structure. Item letters below map to ARCHITECTURE.md (A = SHARE, B = provenance,
-C = ranking).
+Phase numbers **155 and 157 are reserved**. ARCH proposes splitting 155 three ways so that the founder gate blocks only the last part. Book the extra phases with `/gsd-phase --insert`, never by hand. The numbering is the roadmapper's call: for example, keep 155 for the founder-gated verification and insert the harness and the clock capability ahead of it.
 
-### Phase 1: OPS — CI concurrency, deploy-skip detection, structlog redaction
-**Rationale:** **Hard predecessor of DEPS** (named independently by both PITFALLS and STACK). Nine
-dependabot PRs against an unfixed group *guarantees* main-branch eviction and therefore a silently
-skipped analytics deploy — and #685 is 100% `analytics-service/`, so it is exactly the PR that would
-sit undeployed behind a grey main. Also drains the TEST `compute_jobs` backlog that otherwise reddens
-**exactly 10** claim-path tests deterministically and will masquerade as dependency breakage.
-**Delivers:** external FIFO mutex (with a TTL/steal path and a documented manual-unlock runbook — a
-*requirement of adoption*, not a follow-up); a `workflow_run` watcher that treats a `cancelled` main
-run as a loud signal; the structlog source-scan gate + behavioral redaction test; TEST backlog drained
-with a named drain owner; #616 closed by *mechanism*, not by symptom convergence.
-**Avoids:** Pitfalls 1 and 5.
-**Verification:** simulate **three** concurrent runs (not two); assert a forced `cancelled` main run
-produces an issue or rerun; plant a module-scope `.bind()` and observe the gate go RED.
-Run `mypy --strict` before shipping any `analytics-service/` change — the GSD flow runs pytest only.
+**ARCH build order:**
+- 0: pre-flight MCP reads and the founder questions.
+- 1: the MT5-09 data and render layers, plus MT5-15.
+- 2: the engine.
+- 3: the our-side extractor.
+- 4: oracle intake.
+- 5: the MT5-06 capability. It has the longest lead time (deploy and review gates), so start it in parallel with step 1.
+- 6: a dress rehearsal on synthetic oracle files plus a real PROD capture.
+- 7: the founder session.
+- 8: the comparison run, then MT5-10, then a re-run.
 
-### Phase 2: RANK — public-ranking integrity (`getPercentiles`)
-**Rationale:** Zero DDL, zero deploy ordering, one file plus tests, purely read-path — so it can land,
-be observed on PROD, and be reverted trivially. It is a public-trust correctness item and should land
-**before anything that publishes new strategies**, so the population delta is measured against a stable
-cohort. It also front-loads the cheapest owed measurement (C-M1).
-**Delivers:** `PERCENTILE_GATE_COLUMN` appended at the projection site with `PERCENTILE_ANALYTICS_COLUMNS`
-byte-unchanged; one shared `isComputedAnalytics` filter helper used by both callers; a decision on
-`get_verified_cohort_rank` (move it or record leaving it); a PROD before/after per-strategy percentile
-snapshot **in the phase artifact** (a gate, not a nicety — it is the only way "why did my rank change?"
-is ever answerable).
-**Avoids:** Pitfall 3. **Keep out (logged):** `StrategyTable`'s ungated KPI cells (C-D2).
-**Note:** a failed published strategy's own percentile panel disappears — the honest outcome, but a
-visible change to a live page: it belongs in UAT, not a footnote. Any test asserting "ranks improve" is
-wrong; direction is not uniform.
+### Phase A: Parity harness and agent-only pre-verification (ARCH split i: steps 0–4 and 6)
+**Rationale:** It has no founder dependency, so MT5-09 and MT5-15 findings can start MT5-10 fixes weeks early.
+**Delivers:**
+- the pre-flight census, read through MCP with the marker query first:
+  - mark day `S` per key;
+  - open P&L at the candidate Fridays;
+  - `data_quality_flags`;
+  - account unit;
+  - published status;
+  - record length against the `figure-gate.ts` bound;
+  - `computed_at`;
+- the engine and taxonomy, with RED proofs;
+- the capture SQL and its write-keyword gate;
+- the window picker;
+- the worksheet and Report parser, against a synthetic fixture;
+- the MT5-09 surface matrix on the re-mapped list;
+- the MT5-15 explainer;
+- `founder-session.md`, with a live completeness check of the founder's sheet;
+- the dress rehearsal.
 
-### Phase 3: HONEST / WIZERR / SEC — the remaining small items
-**Rationale:** Sequenced between the two ordering-constrained anchors; low individual risk. One
-cross-group coupling to plan rather than discover: the SEC group's `MUTATING_RPC_NAMES` gap and the
-SHARE phase's new mint/revoke RPCs are **two REQ groups, one edit** — a new RPC missing from that list
-means the mutation gate silently does not cover the new surface.
+**Addresses:** TS-3, TS-5, TS-7, TS-8, TS-10 (design), D-2, D-3, the inception identity, the deal and cost census (where it can be read from stored data), the provenance enum.
+**Avoids:** Pitfalls 1, 2, 7, 10, 11, 12, 14, 15, 16 and 17. Raw files stay in the gitignored `/.mt5-parity/`.
 
-### Phase 4: PROVENANCE (B) — server-authoritative venue
-**Rationale:** Extends a pattern **already applied to PROD** (`20260813150106` + `20260814120000`), so
-the risky design work is done; what remains is sequencing discipline. It must not be last because B-3's
-REVOKE needs a full deploy-then-migrate cycle with soak time.
-**Delivers:** B-M1 census → B-4 (stamp swap **+ null-guard**) as the small, high-value cut; optionally
-B-1 → B-2 → B-3 (writer → deploy → revoke) as the larger provenance close.
-**Discipline:** deploy-first, revoke-second, never migration-first; `CREATE OR REPLACE` never
-`DROP+CREATE`; role gate on `auth.role()` not `current_user`; post-verify asserting the *comparison*.
-Before B-3, grep **every** `.from("api_keys")` mutation — DELETE is also a live client path.
-**If the milestone runs short, B-4-alone is the correct minimal cut** — but only *with* the null-guard.
+### Phase B: Live server-clock reading (ARCH split ii: step 5; MT5-06)
+**Rationale:** It is a data-integrity product change with a migration and a contract widening, so it needs its own review gates (migration-reviewer and rls-policy-auditor clean), plus a confirmed Railway deploy and at least one weekday PROD reading row **before** the founder session.
+**Delivers:**
+- the narrow tick-time method and the re-cut contract test;
+- `assert_reading`;
+- the derive integration under the lease;
+- the `mt5_server_clock_readings` migration (pure DDL plus RLS);
+- the mismatch behaviour from founder decision 7;
+- per-key readings that expose a server split.
 
-### Phase 5: SHARE (A) — revocable share links
-**Rationale:** Last of the feature work. The only item introducing a NEW public, anonymous,
-unauthenticated surface; its own migration, token module, cache invariant and adversarial test; the
-largest "ships green and leaks" surface; and two unresolved product decisions. Full
-plan → discuss → execute → red-team treatment. **Must not share a PR with anything else.**
-Do not start on `feat/phase-156-connect-refactor` — Phase 156's Migration B is pending against
-`strategies`, and two concurrent migrations on one table on an auto-apply-to-PROD path is an ordering
-surprise waiting to happen.
-**Delivers:** the MVP list in FEATURES.md § "Launch With", including the `OwnerUnpublishedNotice` copy
-correction, recipient chrome suppression, and the three-site class fix.
-**Avoids:** Pitfalls 1 (SL-1) and the token-leakage channels (Sentry `beforeSend` scrub verified
-against a *real captured event*, not the config file; `no-referrer` per-route; generic metadata).
+**Avoids:** Pitfalls 3, 8 and 9, and Anti-Pattern 3 (never write the offset back as config).
+**Blocked by:** founder decisions 5, 6, 7 and 8, and a live spike.
 
-### Phase 6: DEPS — the 9-PR dependabot campaign
-**Rationale:** LAST, strictly after OPS. Landing dependency churn before the correctness work would
-make every red ambiguous.
-**Prerequisite (a commit on `main`, not a PR):** `requirements.in` `pandas==2.2.3` → `3.0.3` with its
-comment corrected; `requirements.txt` untouched.
-**Order:** #643 → (#627, #626) → #612 *alone*, drift-check first → #685 (rebased, pandas dropped from
-the diff, `make lock` re-run) → #686 (rebased + `npm install`) → #645 @7.0.1 → #646 @30.0.1.
-**Close, do not land:** #614 (TypeScript 7) with a comment citing the `exports`-map read and the
-typescript-eslint peer range, so the next Dependabot reopen is pre-answered; **#606 as stale** (3 of its
-4 booked claims are false at HEAD; `@lhci/cli` 0.15.1 IS latest, `extract-zip`'s vulnerable range is
-`*`, `npm audit fix --force` would *downgrade* lhci nine minors, and `nightly.yml`'s `--omit=dev`
-already encodes the policy). Do **not** add an audit-allowlist file.
-**Discipline:** **Never two PRs at a time** — shared-TEST-DB contention makes an attributed red
-impossible. Assert `conclusion == "success"`, never "not failure" (with no branch protection, a grey
-run merges). Update each action's SHA **and** its version comment together (C-0293). Verify lint runs
-with `--no-cache`.
+### Phase C: Founder-gated verification and the uncapped fix loop (ARCH split iii: steps 7–8; MT5-07, 08, 09 render gate, 10, 15, GOAL-01)
+**Rationale:** This is the only part the founder gate blocks. One scripted trading-day session: the clock reading, an All-History Report per account, the Summary block at instant T, the preselected near-midnight deal times, statement figures, and the Phase 157 browser items bundled in. Then the comparison run, TS-4 on D+1, and MT5-10 until every delta is `within_tolerance`, a consistent `withheld_by_gate`, or a named bucket with a recorded founder ruling.
+**Also carries:** timeout findings #8 and #10, from percentile data collected across nightlies (Pitfall 13).
+**Avoids:** Pitfalls 4, 5, 6 and 14. Fixes go to the shared root, never to `exchange === 'mt5'`.
+
+### Phase 157: FOUNDER-CONFIRM
+**Rationale:** Human-only observations: the wizard-resume restart is gone, the amber recomputing block has been seen, the four 153.7 copy members render with no Retry on `SEAM_INTERNAL_FAULT`, and the rotation is done. Run them in the same sitting as Phase C. Rotate `MT5_SPIKE_INVESTOR_PASSWORD` **after** the live reads, then re-check gate 1.
 
 ### Phase Ordering Rationale
-
-- **OPS → DEPS is a hard, measured dependency**, asserted independently by both PITFALLS (concurrency
-  eviction ⟹ guaranteed skipped deploy across 9 PRs) and STACK (#616 is a prerequisite of landing #685,
-  which is 100% analytics-service).
-- **RANK early** because it is the only purely-read-path item — trivially revertible, observable on
-  PROD, and it must precede new publications so the population delta is measured against a stable cohort.
-- **SHARE late and alone** because it is the only new anonymous public surface, and because its failure
-  mode is silent, TTL-long disclosure.
-- **B before A** because B-3's REVOKE needs a full deploy-then-soak cycle and cannot be last.
-- **No file-level collisions** between A, B and C — they *can* be planned in parallel. They should
-  **not** be executed in parallel by concurrent agents (`feedback_concurrent_agents_share_git_index_race`;
-  B and C both touch `supabase/tests/`).
+- Founder decisions 1–4 come first, ideally today, because decision 3 expires this weekend.
+- A and B run in parallel. B has the longest lead time.
+- C needs A's dress rehearsal green, plus B deployed with a PROD reading row.
+- 157 rides along with C's session.
 
 ### Research Flags
+Need `/gsd-plan-phase --research-phase`:
+- **Phase B:** a live spike on whether `symbol_info_tick` answers for visible or non-Market-Watch symbols through mt5linux on Wine, whether its time is in the same encoding as deal `time`, what an investor session's Market Watch holds, and how fresh ticks are during session breaks. Also check what the parked `MT5SERVERLEARN` branch holds.
+- **Phase A, parser slice:** the Report's encoding, separators, column headers and whether a per-deal Balance column exists are all undocumented (LOW). Write the parser against one real export and make it fail loud on unknown headers.
+- **Phase A, surface slice:** re-locate "strategy detail" and confirm the factsheet loader (*inferred* in ARCH).
 
-Phases likely needing deeper research during planning:
-- **Phase 5 (SHARE):** the payload-builder seam is the one un-measured integration question —
-  extracting the *build* half of `fetchAndBuildPayload` touches the composite arm and the single-key
-  basis arm, so its diff is wider than it looks (ARCHITECTURE confidence: MEDIUM). Budget for it;
-  don't discover it.
-- **Phase 4 (PROVENANCE):** blocked on the **B-M1 PROD census** — reachability of un-attested rows
-  through `finalize-wizard` is not inferable from source (confidence LOW without it).
-
-Phases with standard patterns (skip research-phase):
-- **Phase 2 (RANK):** the fix location, the correct predicate and the csv-finalize mirror constraint are
-  all read directly from source; only a cheap census (C-M1) remains.
-- **Phase 6 (DEPS):** every verdict is registry- or log-measured; STACK.md is effectively the plan.
-- **Phase 1 (OPS):** the mechanism is understood and the repo already carries the dedup'd-issue pattern
-  to copy (`analytics-deploy-verify.yml`).
+Standard patterns, skip research: the engine and taxonomy (the `parity_diff.py` precedent), the capture SQL and write-keyword gate (the marksource census precedent), the migration shape (the `api_key_nav_marks` precedent), and Phase 157.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | **HIGH** | Everything measured locally or read from a vendor release API / npm+PyPI registries. MEDIUM only on the TS7 ecosystem narrative (one WebSearch pass corroborating a primary `exports`-map read) and on FastAPI 0.140.0's changelog (page truncated on fetch). |
-| Features | **HIGH / MEDIUM** | HIGH on every in-repo claim (read at HEAD `ca3f0c5c`, cited file:line). MEDIUM on comparable-product conventions (cross-checked across ≥2 products) and on the W3C TAG capability-URL rules (a 2014 Note, not a REC). |
-| Architecture | **HIGH** | Every claim read from live source at HEAD with file:line; nothing inferred from training data. MEDIUM on the payload-builder seam's true diff width; LOW on two items pending PROD censuses (B-M1, C-M1). |
-| Pitfalls | **HIGH / MEDIUM** | HIGH on the four repo-verified areas. MEDIUM on GitHub Actions concurrency semantics — GitHub does not document the pending-eviction rule in its reference page; verified against community docs plus this repo's own measured evidence (hotfix `861a4d91`, CI run 31273384829). |
+| Stack | HIGH | Read from the lock, the Dockerfile and the unpacked mt5linux wheel. Its Oracle A recommendation is overruled (C1). |
+| Features | MEDIUM | Code facts HIGH. External verifier methods MEDIUM to LOW. FX Blue not retrieved. Its basis framing predates the NAVMTM reading (C2). |
+| Architecture | MEDIUM | Backend HIGH. Surface tracing partly inferred. The flow table for in-window flows (`_key_inputs_payload["flows"]`) is inferred. |
+| Pitfalls | HIGH (repo) / LOW (broker) | Every broker-behaviour claim is paired with a live measurement. No PROD census was taken. |
 
-**Overall confidence:** **HIGH**
+**Overall confidence:** MEDIUM. The approach is solid. The definitions and live behaviour are not yet measured.
 
 ### Gaps to Address
-
-**Measurements owed (block planning, not just execution):**
-- **B-M1 (PROD census, blocks B-4):** count `api_keys` rows with `attested_venue IS NULL AND created_at >= '2026-08-11'`, split by `exchange` and by whether a `strategies` row links them; of those, how many carry a `wizard_session_id`. If non-zero, those strategies' `asset_class` changes — a re-annualization event needing golden-parity treatment. Copy the count-pinned, abort-on-drift census discipline from `20260811210000`.
-- **C-M1 (PROD census, blocks only the copy decision):** per `discovery_categories.slug`, published-with-analytics counts before and after the `isComputedAnalytics` filter. Any slug crossing **5 → 4** is the decision surface for C-D1. Also compute the resulting `cohort_n` against the SQL RPC's **min-N 20**.
-- **Percentile before/after snapshot per published strategy** — a phase-artifact gate.
-
-**Decisions owed (founder / human calls, not research):**
-- **A-D1 — route vs query param. The two research files disagree, deliberately.** FEATURES treats the founder's `?s=` on `/factsheet/[id]` as settled INPUT and calls a separate route an anti-feature (it forks a 664-line page for a second render path). ARCHITECTURE recommends `/factsheet-share/[token]` because SL-1 enforcement becomes *structural* rather than behavioural, the id leaves the URL, and `/scenario-share` is a complete CI-pinned in-repo precedent. **Surface this to the founder; do not let a planner pick silently.**
-- **A-D2 — `status='private'` has zero UI actions** (`StrategyActions` falls through to `return null`), and contribution-flow strategies are minted exactly there. This is on A's critical path because the revoke control needs a home. Two options: (a) permanently private by design — put revoke on the factsheet itself; (b) `private` needs a publish path — **its own phase.** Do not let a publish flow grow inside a share-link phase.
-- **A-D3 — does the token lane extend to `/factsheet/[id]/tearsheet` and the PDF routes?** Scoping to the HTML factsheet only is defensible and smaller; deciding it *implicitly* is how a second unguarded surface appears.
-- **A — token model A (raw at rest) vs B (HMAC + stored generation counter).** Must be written into the plan with the deviation from `scenario-share-token.ts`'s hash-only discipline **argued, not assumed** — a reviewer will otherwise read B as contradicting a documented decision. B's real cost is a new required Vercel env var (a prod-only 500).
-- **B-D1 — scope:** all of B-1..B-4, or B-4 alone gated on B-M1?
-- **B-D2 — the oracle** for √365 vs √252: must pin the *economics* (a null attestation annualizes on nothing — it skips), never re-derive the implementation's own expression.
-- **C-D1 — the `< 5` cliff.** Recommend **accept the disappearance** (honest, matches the existing convention) and say so in the UAT.
-- **C-D2 — `StrategyTable`'s ungated KPI cells.** Recommend **out**, logged.
-- **jsdom 30 vs local Node 25** — accept the `EBADENGINE` warning and treat CI Node 22 as authority, or run that PR's verification under `PATH=/opt/homebrew/opt/node@22/bin`. Decide, don't discover.
-- **Link-unfurl degradation is real and measured** (`generateMetadata` and the OG route are both `withPublishedOnly`, so a token link unfurls as "Strategy" with a 404 image). Recommend **accept it explicitly** — a private link *should* be dull in a chat preview, and an unfurl bot's cache is a leak amplifier.
-
-**Unresolved / adjacent — log rather than absorb:**
-- `/api/scenario/peer-rank`'s `get_verified_cohort_rank` may carry the same status defect — a *sibling* item.
-- `knip` 6.25 → 6.32 spans seven minors, changelogs unread; if #686 reds after a clean `npm ci`, knip is the highest-prior suspect and its findings may be **legitimate**, not regressions.
-- The whole DEPS campaign is **predicted, not executed** — no PR was rebased, no lock regenerated, no suite run.
+- **Unmeasured PROD state:** `S` per key, open P&L at the candidate Fridays, current `data_quality_flags`, credit per account, server per account, and record lengths. Pre-flight MCP reads settle all of these.
+- **Live gateway behaviour:** the tick read and Market Watch contents (Phase B spike).
+- **Report format:** encoding, headers and the Balance column. Confirm on the first real export.
+- **Broker statements:** whether they exist. Ask the founder.
+- **Whether a weekend-quoted symbol exists on any account.** If one does, the Friday-close alignment is void for that account.
+- **A3 and 136-05:** the fold and DEAL_TYPE rules close only for the patterns the census actually observes.
+- **Where in-window flows are stored** on our side (ARCH inference). Verify when planning.
 
 ## Sources
 
-### Primary (HIGH confidence)
-- **This repository at HEAD `ca3f0c5c`**, cited file:line throughout all four research files — `factsheet/[id]/v2/page.tsx` (the cache-key reality, the owner-lane bypass, `force-dynamic`), `FactsheetView.tsx`, `lib/queries.ts`, `lib/percentile-core.ts`, `lib/closed-sets.ts`, `csv-finalize/route.ts`, `finalize-wizard/route.ts`, `validate-and-encrypt/route.ts`, `logging_config.py`, `mt5_client.py`, `.github/workflows/{ci,supabase-migrate,migration-policy,migration-drift-check,analytics-deploy-verify}.yml`, `next.config.ts`, `package.json`, `.nvmrc`
-- **Supabase migrations read in full** — `20260622120000` (the revocable-token precedent), `20260813150106` + `20260814120000` (Phase 156), `20260811210000` (attested venue + the dated backfill cutoff), `20260626120000` (`get_verified_cohort_rank`), `20260405061912`
-- **npm / PyPI registries** — `npm view typescript@7.0.2 exports dependencies`, `typescript-eslint@8.58.0` peer range, `jsdom@30.0.1`, `supabase@2.98.2`, PyPI `requires_dist` for fastapi 0.139.0 vs 0.141.1
-- **Measured locally / from CI** — `npm ci --dry-run` at `main` HEAD, `gh run view --log-failed` (run 32365605203), `gh pr diff 685`, `npm audit --json`, `git log -S`
-- **Vendor release APIs** — GitHub Releases for `jsdom/jsdom`, `testing-library/jest-dom`, `actions/setup-node`, `actions/setup-python`, `supabase/setup-cli`, `actions/checkout`
+### Primary (HIGH, repo at HEAD 2026-11-13)
+- `analytics-service/services/`: `broker_dailies.py`, `nav_marks.py`, `nav_marks_apply.py`, `nav_twr.py`, `mt5_client.py`, `mt5_read.py`, `mt5_concurrency.py`, `mt5_server_clock.py`, `mt5_deals.py`, `parity_diff.py`, `account_unit.py`, `routers/portfolio.py::_compute_portfolio_analytics`
+- `tests/test_mt5_client_contract.py`, `tests/test_mt5_deal_timing.py`, `tests/test_mt5_server_clock.py`
+- `scripts/mt5offset_dry_run.py`, `mt5_spike.py`, `mt5_soak.py`, `tools/mt5/`
+- `src/lib/factsheet/compute.ts`, `scenario.ts`, `portfolio-stats.ts`, `figure-gate.ts`, `src/app/portfolio-pdf/[id]/page.tsx`
+- `.planning/PROJECT.md` (v1.18), milestone archives (MT5-06..10 text, the Phase 175 and NAVMTM closures), `175-06-SUMMARY.md`, `136-05-SUMMARY.md`, `TODOS.md`
+- `requirements.txt` lock, the `mt5linux` 0.1.9 wheel source
 
-### Secondary (MEDIUM confidence)
-- [Good Practices for Capability URLs — W3C TAG](https://www.w3.org/2001/tag/doc/capability-urls/) — entropy, https, referrer, expiry, revocation, rate limiting, 410-or-404 (a 2014 Note, not a REC)
-- Notion / Figma / Dropbox / Google Docs / DocSend help docs — share-link conventions, expiry tier-gating, "this link is expired" vs generic 404
-- [structlog configuration + performance docs](https://github.com/hynek/structlog) — the lazy proxy, never-bind-at-module-scope rule, `cache_logger_on_first_use`
-- GitHub community discussions [#12835](https://github.com/orgs/community/discussions/12835) and [#32376](https://github.com/orgs/community/discussions/32376) — the pending-eviction rule GitHub does not document
-- [ben-z/gh-action-mutex](https://github.com/ben-z/gh-action-mutex) · [softprops/turnstyle](https://github.com/marketplace/actions/action-turnstyle) — FIFO alternatives
-- MDN / PortSwigger / Cobalt — `Referer` leakage channels; [410 Gone — MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/410)
+### Secondary (MEDIUM)
+- MT5 Trading Report and History Report help pages (Summary values are computed at report generation; Growth excludes flows)
+- Myfxbook verification and Gain help, GIPS TWR/MWR material
+- PyPI and npm registry JSON, used for versions
 
-### Tertiary (LOW confidence — flagged, not relied upon)
-- SitePoint / Medium / InfoQ TypeScript 7 migration write-ups — used only to corroborate the primary `exports`-map read, never standing alone
+### Tertiary (LOW)
+- MQL5 `TimeCurrent` / `symbol_info_tick` docs, MQL5 forum posts on growth, swap and commission timing
+- broker help pages (Vantage statements, VT Markets dividend balance entries, Pepperstone and OANDA retention)
+- a third-party Report parser, which suggests a per-deal Balance column
+- B2Broker return method, NFA/CFTC material
 
 ---
-*Research completed: 2026-08-20*
-*Ready for roadmap: yes*
+*Research completed: 2026-11-13*
+*Ready for roadmap: yes, once founder decisions 1–4 are asked (decision 3 is time-critical)*

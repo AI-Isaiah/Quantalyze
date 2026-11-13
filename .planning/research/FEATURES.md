@@ -1,297 +1,269 @@
-# Feature Research: Revocable Share Links for Private Factsheets (v1.20 / SHARE — SHARELINK-01)
+# Feature Research
 
-**Domain:** Capability-URL ("secret link") sharing of a private, unpublished institutional
-document, in a product where the document's own id is deliberately a NON-secret. Comparable
-products: Google Docs/Drive link sharing, Notion "Share to web", Figma public links, Dropbox/Box
-shared links, and the fund-document niche (DocSend, virtual data rooms).
-**Researched:** 2026-08-20
-**Confidence:** **HIGH** on everything grounded in this repo (every code claim below was read at
-HEAD `ca3f0c5c` and is cited file:line); **MEDIUM** on the comparable-product conventions
-(WebSearch-tier, cross-checked across ≥2 products before being called a convention); **MEDIUM** on
-the W3C TAG capability-URL rules (fetched from the W3C source, but a 2014 Note, not a REC).
+**Domain:** Live verification of an MT5/forex track record against the broker's own figures (v1.18 MT5-VERIFY, Phases 155 and 157)
+**Researched:** 2026-11-13
+**Confidence:** MEDIUM overall. Codebase facts are HIGH (read at HEAD). External verifier methods are MEDIUM where two or more sources agree and LOW where only one does. FX Blue's own method was not retrieved at all.
 
-**Scope discipline:** the founder decision of 2026-08-13 (revocable per-strategy token, `?s=<token>`,
-Copy Link mints-or-reuses, revoke regenerates, bare `/factsheet/<id>` stays owner-only, id stays a
-non-secret) is **INPUT, not a question**. Nothing below re-litigates it. This file answers only
-*"given that decision, what does the surrounding feature set have to contain to not be a second
-founder-hit defect?"*
+The build is done. MT5 sync, deal-ledger reconstruction and every surface already exist and are out of scope here. So the "features" below are **verification checks and evidence artifacts**. Each one is mapped to a requirement (MT5-06..10, MT5-15, MT5-GOAL-01, Phase 157), given a complexity, and tied to the existing code it depends on, cited by symbol.
 
 ---
 
-## Critical Finding — "mint-or-reuse" is NOT free, and the in-repo precedent CANNOT deliver it
+## Read this first: two blocking definitional conflicts
 
-The founder's shape says **"Copy Link mints-or-reuses"**. The obvious move is to copy the scenario
-share lane (migration `20260622120000`) verbatim. **That copy would not satisfy the requirement**,
-and the precedent's own code says so.
+These must be settled at `/gsd-discuss-phase 155`, before the harness is planned. Both come from reading the code at HEAD, and both change what "pass" means.
 
-`src/lib/scenario-share-token.ts:14` stores **only** `sha256(raw)`; the raw token is externalised
-exactly once, in the mint response. Consequence, documented in the precedent's own UI at
-`src/app/(dashboard)/allocations/components/SavedScenariosList.tsx:191-197`:
+### Conflict 1: realized basis vs "parity including open P&L" (MT5-07)
 
-> *"The generate route externalises the raw token EXACTLY ONCE (only its hash is persisted,
-> T-25-12), so the URL can never be re-fetched. Caching it for the session lets 'Copy link' hand out
-> the SAME link without re-minting … **Empty after a reload** / for a share generated in a prior
-> session."*
+- **What the code does (HIGH, `services/broker_dailies.py`, the MT5 combiner and `reconstruct_mt5_nav_levels`):**
+  - It anchors to live `account_info().equity`.
+  - It subtracts the floating wedge `equity − balance` **before** the backward roll.
+  - So every reconstructed interior day is **realized (balance) basis**.
+  - A material wedge raises the `unrealized_pnl_in_anchor` flag and is never spread back over history. The docstring says historical open-position marks "are not retrievable on a read-only key".
+- **What MT5-07 asks for:** parity within 1% *including open P&L*, over a window that ends *before* the run day.
+- **Why they collide:** the terminal also has no historical equity. The History report shows equity and floating P/L only *at the moment the report is generated* (MEDIUM, metatrader5.com help). Equity at a past instant E cannot be read on the run day from the terminal, or from our pipeline either.
+- **The deciding fact:** how large `(equity − balance) / equity` is on each of MM2, MM3 and FX-AI_V on the run day, and on the window-end day. Below roughly 0.3%, the 1% band absorbs the wedge and the conflict is academic. A held-open book can sit at several percent, and then the founder needs to make a call.
+- **Recommendation:** make "including open P&L" mean **two checks with stated bases**:
+  - (a) **Realized parity:** our window-end realized NAV against the terminal's balance at E, to within 1%. This is the strict check.
+  - (b) **Captured-instant balance parity plus a wedge reading:** the founder reads terminal Balance, Equity and Floating P/L at a stated instant T on day D. On D+1 or later, after a sync has re-anchored to a *later* equity, the harness rolls our ledger back to T (by deal instants, not to the end of the UTC day) and compares it with the terminal's **balance** at T. That makes T a backward-reconstructed point, so the check can fail. The founder's equity reading only *measures* the wedge at T. Our series cannot match it, because every reconstructed point is balance basis by construction.
+  - **Only two things cover historical open P&L:** broker daily statements (D-5), if they exist, or a founder ruling that "including open P&L" means "the 1% band must absorb the measured wedge". Neither the terminal nor our pipeline can produce past equity.
+  - Do not quietly redefine the requirement. Record the founder's wording in CONTEXT.md and the ROADMAP.
 
-So in the precedent, "reuse" works **only within one browser session**. After a reload,
-`copyExistingShare` (line 299) hits a cache miss and can only offer an explicit **"replace link"**
-confirm — i.e. rotate-and-kill. Additionally `create_scenario_share`
-(`supabase/schema/functions/create_scenario_share.sql`) **unconditionally revokes the prior active
-share** before inserting. A verbatim port therefore gives: *every* Copy Link click after a reload
-either rotates the token (killing the link the founder already emailed) or dead-ends into a scary
-confirm dialog. That is a **new** version of SHARELINK-01, not a fix for it.
+### Conflict 2: UTC-day bucketing vs "the day the terminal shows" (MT5-06)
 
-**Three ways out — the phase must pick one deliberately:**
+- **What the code does (HIGH, `services/mt5_deals.py` `deal_utc_day` → `_utc_day_of_server_epoch`):** a deal is bucketed by **UTC calendar day**. The server offset in force at that deal is removed first, from `Mt5ServerClock`'s `eu`/`us` rule in `services/mt5_server_clock.py`.
+- **What the terminal shows:** deal times in **server time**. For a UTC+2/+3 broker, a deal at 01:30 server time sits on server day N and UTC day N−1. So under the current code it lands on a *different* day than the terminal shows. That is by design, not a bug.
+- **Consequence for the oracle:** the terminal's Trading Report monthly table uses server-time months, so a deal in the first 2–3 server hours of a month moves months between the two views.
+- **Recommendation:** read MT5-06 as "**the measured live offset equals the offset `Mt5ServerClock` applies at that instant**, and a chosen near-midnight deal lands on the UTC day that offset implies". The founder confirms the deal's server time on screen, and the harness confirms the UTC day.
+  - If the founder actually means "match the server day", that is a bucketing change that touches every MT5 series. It is a decision, not a fix.
+  - Either way, **set window boundaries inside the weekend gap.** Between the Friday close and the Monday open no deals occur, apart from balance operations, so server-day vs UTC-day cannot move the boundary.
 
-| Option | How reuse works | Cost | Notes |
-|---|---|---|---|
-| **A. Store the raw token** | `SELECT token FROM strategy_shares WHERE …` on every Copy Link | LOWEST | Breaks the precedent's hash-only discipline: a DB read-leak yields *live* links. Acceptable-ish here (the capability is read of one factsheet, not a book) but it must be a stated, reviewed deviation, not a silent one. |
-| **B. HMAC-over-a-stored-generation-counter** | `token = HMAC(SECRET, strategy_id ‖ generation)`; store only `generation` (int) + optionally the digest | MEDIUM | Recomputable forever ⇒ true mint-or-reuse across sessions; **revoke = `generation += 1`**, which is *literally* the founder's "a revoke control regenerates the token". Nothing secret at rest. In-repo precedent exists: `src/lib/demo-pdf-token.ts` (HMAC-SHA256 + `timingSafeEqual`). ⚠ Needs a **new required env var on Vercel** — see the RESEND_API_KEY class of failure; an unset secret makes Copy Link 500 in prod only. |
-| **C. Encrypt the token at rest** | decrypt on Copy Link | HIGHEST | Adds a KMS/crypto seam for no gain over B. Not recommended. |
+---
 
-The scenario lib's comment (`scenario-share-token.ts:9-12`) rejects "the keyed-MAC model of
-`demo-pdf-token.ts`" because *"the revocation requirement is … impossible with a stateless HMAC
-token."* That reasoning is correct **for a stateless MAC** and does not apply to option B, which is
-a *stateful* MAC (the counter lives in the DB). This is a genuine distinction, not a loophole — but
-the phase plan must say so explicitly, because a reviewer will otherwise read option B as
-contradicting a documented decision.
+## How the outside world does this (the reference set)
+
+| Verifier | What it actually checks | Return method | Basis | Confidence |
+|---|---|---|---|---|
+| **Myfxbook "Track Record Verified"** | Account number, investor password, broker and server are valid. History is pulled from the broker's server rather than uploaded. | Gain = TWR, "not affected by deposits or withdrawals". Absolute gain is reported separately. | The help text notes balance moves only when trades close, so Gain is effectively **balance basis**. Equity and equity drawdown are shown separately. | MEDIUM (several forum and vendor sources agree; the help page returned 403, so this is snippet-only) |
+| **Myfxbook "Trading Privileges Verified"** | A pending order matching a generated code proves control of the account. Stops a stranger publishing someone else's account. | n/a | n/a | MEDIUM |
+| **MT5 terminal Trading Report / MQL5 Signals** | Built from the account's own history. | Growth % "excluding withdrawals and deposits". Community reverse-engineering: chain-linked **balance** between balance operations. Known to misbehave when a deposit lands while trades are open. | Balance | MEDIUM (official help for the definition; forum for the formula) |
+| **MT5 History report** (History tab, right-click, Report) | Orders, Deals with closed P/L, open Positions with floating P/L, and a Summary (Balance, Credit, Floating P/L, Equity, Margin) **at generation time**. Balance-drawdown figures are included. | None. It is raw money. | Raw | MEDIUM (official help). The per-deal running-Balance column is inferred from one third-party parser (LOW), so confirm it at the terminal. |
+| **B2Broker / copy-trading platforms** | Equity just after one balance operation to equity just before the next, chain-linked. | Equity TWR | Equity | LOW (single vendor doc) |
+| **GIPS / institutional allocators** | TWR where the client controls flows. Value at least monthly **and on every large external flow**; daily valuation is best practice. MWR/IRR only where the manager controls flow timing. Operational due diligence takes statements **directly from the broker**, never from the manager. | TWR sub-period `(EV − BV − CF)/(BV + CF)`, chain-linked | Full valuation (equity) | MEDIUM (secondary study sources agree; GIPS text not read directly) |
+| **NFA / CFTC (forex CTAs)** | Performance must be supported by trading records. Brokers must make monthly and confirmation statements available. Regulators found newly enrolled forex CTAs publishing figures the records did not support. | n/a | n/a | LOW (press plus one CFTC letter) |
+| **FX Blue** | **Not retrieved.** Its Publisher EA uploads MT history, with start-date and magic-number filters. Its return and banked-vs-floating method is unknown. | unknown | unknown | GAP. Do not cite FX Blue's method anywhere. |
+
+**Takeaways for us:**
+
+1. **Every retail verifier's headline gain is balance basis.** Equity is shown beside it, and equity drawdown is where allocators look for hidden risk: the classic MT4/MT5 track-record trick is to hold losing positions open so the balance curve stays smooth. Our realized-basis series has that same blind spot, so it must say so.
+2. **"Verified" in the market means three things:**
+   - the history came from the broker's server, not the user;
+   - the account is real (live, not demo);
+   - the numbers are recomputed by the verifier.
+
+   It never means "the strategy is good", and Myfxbook's own FAQ concedes that verified accounts can carry inaccuracies.
+3. **The deposit/withdrawal method is where implementations diverge,** even when they all say "TWR". Comparing *our* return to *their* growth % mixes data error with method error. That is why the primary oracle below is raw money, not someone else's percentage.
+
+### Balance vs equity vs flows, time-weighted vs money-weighted: the positions to take
+
+- **Return type: TWR, not MWR.** The allocator judges the manager's skill, and the account holder controls deposits and withdrawals. This is the GIPS rule and what every retail verifier uses. MWR would reward or punish the timing of a deposit.
+  - The code already does flow-in-numerator TWR: `r_t = (NAV_t − NAV_{t−1} − F_t)/NAV_{t−1}`, through `nav_twr.reconstruct_nav_and_twr`.
+  - FLOWTIMING (164.6.6.2.3) adds intraday position-level timing on flow days. That goes beyond GIPS, which only requires revaluing on large-flow days.
+- **Flows: an allow-list.** `classify_deal` treats BALANCE=2, CREDIT=3 and BONUS=6 as external flows. Trading is BUY/SELL plus the COMMISSION family 7–11. CHARGE, CORRECTION, INTEREST, the CANCELED types, DIVIDEND and TAX **fail loud**.
+  - ⚠️ Live index-CFD books routinely receive **dividend adjustments** (DIVIDEND 15/16).
+  - ⚠️ Swap-free accounts receive **admin charges** (CHARGE=4).
+  - If any of the three accounts carries either, the sync refuses by name rather than mis-classifying. That is correct, and it would surface as a finding during the session.
+- **CREDIT as a flow:** some funded and prop programmes fund part of the account as broker credit. Credit is in equity (MT5's formula: `Balance + Credit − Commission ± Floating − Blocked`) but it is not the trader's capital.
+  - Check whether any of the three accounts shows a non-zero **Credit** on the terminal Summary.
+  - If one does, the denominator question (with or without credit) needs a founder call.
 
 ---
 
 ## Feature Landscape
 
-### Table Stakes (recipients and owners assume these exist)
+### Table Stakes (a "verified" claim is not credible without these)
 
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| **Copy Link always produces a link that works for the recipient** | This IS the founder-hit defect. `FactsheetView.tsx:1565` gates the Share button on `!scenarioMode` only, then flashes "Link copied" for a URL that 404s. Every comparable product (Docs, Notion, Figma, Dropbox) treats "the copy button hands out a working URL" as the contract. | **MEDIUM** (mint route + token lane) | The fix is *mint-on-copy*, not *hide-the-button*. See "Honest affordances" below for why hiding (the `strategies/page.tsx:174` pattern) is the wrong half of the class fix. |
-| **Immediate, unconditional revoke** | Universal: Docs ("Restricted"), Notion ("Remove"), Dropbox (disable), DocSend markets *"revoke access at any time, even after sharing"* as a headline. In the fund-document niche it is the single most-cited control. | **LOW** (mirror `share/revoke/route.ts`) | Precedent is complete and good: owner-scoped UPDATE setting `revoked_at`, **never a hard DELETE** (audit trail), 0 rows → 404 not 403 (no existence oracle), and 404-on-double-revoke is treated as *convergence to revoked*, not failure (`SavedScenariosList.tsx:333-341`). Copy that semantics verbatim. |
-| **The revoked/invalid-token page is DISTINCT from the app 404** | Dropbox deliberately splits *"This link is expired"* (link dead) from the generic 404 (file gone). Google Docs shows a "You need access" interstitial, not a 404. A bare 404 reads as *"the product is broken"* — which is exactly the failure mode the founder hit. | **LOW-MEDIUM** | ⭐ **Explicit spec (quality gate):** on `?s=<unknown-or-revoked>` the recipient must land on a page that says, in substance, *"This link is no longer active. The person who shared it turned it off. Ask them for a new link."* — with **no strategy name, no metrics, no id, no owner identity** on it, and `no-store`. HTTP status **410 Gone** (W3C TAG: *"servers should respond … with either a 410 Gone or a 404 Not Found"*; 410 is the semantically correct one for deliberate revocation). |
-| **⛔ The 410 applies to the TOKEN lane ONLY — the bare id lane keeps its uniform 404** | The repo's existing invariant: *"a non-owner authed viewer, an anonymous viewer and a genuinely missing id are indistinguishable from the outside (T-148-04)"* (`page.tsx:487`). | **LOW** (a branch) | Safe asymmetry: telling a holder of an unguessable 256-bit token that it *was* valid leaks nothing (they already had it); telling a holder of a **structurally leaky id** that the id exists is an existence oracle. Keep both behaviours, and pin both with tests. |
-| **Owner can see whether a live link exists** | Every comparable product shows share state in the share affordance itself. Without it, "did I already send this?" is unanswerable and the owner rotates by accident. | **LOW** | Precedent: `has_active_share` on the row + a local override (`SavedScenariosList.tsx:45-51, 199-203`). State machine: *none → `Share`; active → `Copy link` + `Revoke`*. Reuse this shape. |
-| **Revoke is confirmed before it fires** | Revoke is irreversible-in-effect (recipients lose access). Precedent already does this: inline confirm reading *"Revoke this share link? Anyone with the link will lose…"* (`SavedScenariosList.tsx:598-615`). | **LOW** | Do NOT use a `window.confirm`. Match the inline-confirm precedent. |
-| **Unguessable token, HTTPS-only, `noindex`, rate-limited** | W3C TAG capability-URL rules: ≥120 bits entropy or UUIDv4; `https` only; robots exclusion; *"access to the URL space in which capability URLs reside should be rate limited"* (enumeration defence). | **LOW** (all four already precedented) | `mintShareToken()` = 256-bit `randomBytes(32)` base64url ✅. `generateMetadata` already returns `robots: "noindex"` (`page.tsx:362`) ✅. `publicIpLimiter` + `getClientIp` is the pattern used by `scenario-share/[token]/page.tsx` ✅. There is **no `robots.txt` in the repo** — the meta tag is the only exclusion; that is adequate but worth stating. |
-| **⛔ The token render must never populate the id-keyed cache** | The founder-flagged landmine, and it is worse than it looks. | **MEDIUM** | See "Cache landmine" below — this is a *correctness* table stake, not a nicety. |
-| **Recipient chrome is suppressed** | A recipient must not be handed controls that don't apply to them. | **LOW** | ⭐ **Found while researching, not in TODOS.md:** `?share=1` already suppresses the outbound "Compare strategies" link (`FactsheetView.tsx:1566`) but does **NOT** suppress the Share button (line 1565 is gated on `!scenarioMode` alone). So a *recipient* of a token link currently sees "Copy share link", clicks it, and gets `?share=1` — the token is **stripped** by `ShareLinkButton`'s URL rebuild (line 1312: `pathname}?share=1`) — and hands out a **dead link**. This is a second instance of the same false-affordance class, on the recipient side. It must be in the same phase. |
-| **Rate-limited mint** | An unlimited mint route on an authed surface is a quota/DoS surface. | **LOW** | `userActionLimiter` + B15 ordering (validate → limit → write), misconfig → 503 not a misleading 429. Copy from `share/route.ts:110-125`. |
+| Check / artifact | Req | Why expected | Complexity | Depends on (existing) |
+|---|---|---|---|---|
+| **TS-1 Live offset measurement per server.** The live server clock is compared with UTC at connect. The harness asserts it equals the offset `Mt5ServerClock` applies at that instant, for **each** of the three servers, which may follow different `eu`/`us` rules. | MT5-06 | A wrong offset moves P&L across days and months, and no oracle shows it unaided. ⚠️ A live reading checks the **offset**, not the **rule**: `eu` and `us` share the same offsets (UTC+2 standard, UTC+3 daylight) and differ only in transition dates, and in mid-November both are in standard time. A mis-set rule shows only on deals inside the divergence weeks (2026-10-25 to 2026-11-01, and 2026-03-08 to 2026-03-29), so TS-2 must cover that. | LOW–MEDIUM | `mt5_server_clock.resolve_mt5_server_clock`, `Mt5ServerClock.day_offset_s`, the gateway's `account_info`/terminal time read |
+| **TS-2 Near-midnight deal regression.** One real deal near the server or UTC day boundary is pinned. A test asserts the UTC day it lands on, from that deal's real `time` and the offset in force at that instant. **Pick it from a DST divergence week** (2026-10-25 to 2026-11-01 if the account traded then), where `eu` and `us` give different offsets, so the deal also pins which rule the server follows. Otherwise the rule stays unverified, and that is recorded as such. | MT5-06 | The one failure MT5-07's oracle cannot see (per the success criterion). It needs a real deal, not a synthetic one, so the expected values come from the terminal. | LOW | `mt5_deals.deal_utc_day`, `deal_utc_instant_ms` |
+| **TS-3 Raw-money window parity (primary oracle).** For a window [S, E] with E in the weekend gap before the run day, the terminal's own export gives balance at S, balance at E, the sum of deposits and withdrawals in the window, and net closed P&L (profit + swap + commission + fee) in the window. Balance at S and E come from the Deals table's running Balance column **if present** (LOW confidence). Otherwise they are derived from the terminal's current balance (Summary block, step 2 of the script) rolled back through the exported deals. That derivation is still the terminal's data, but it is weaker: it relies on the export being complete. The harness compares these with our reconstructed realized NAV at S and E and our flow sum. **Identity check:** `B_E − B_S = closed P&L + flows` on both sides. | MT5-07, MT5-08 | It separates *data* error (a missing deal, a mis-typed deal, a wrong day) from *method* error, which comparing our TWR % to the terminal's Growth % cannot do. This is what an operational due-diligence analyst does with a broker statement. | MEDIUM (the export parser plus the diff; parse by **header name**, never column index, because the column set varies between builds and a Fee column may be present) | `broker_dailies.reconstruct_mt5_nav_levels` (the levels reader, kept apart from the returns reader on purpose), `_fold_mt5_deals`, `mt5_deals.deal_cash_effect` |
+| **TS-4 Captured-instant balance parity plus a wedge reading.** The founder records terminal Balance, Equity, Floating P/L and Credit at a stated instant T on day D. **On D+1 or later**, after the next sync has re-anchored to a later equity, the harness rolls our ledger back to T using deal instants, not our end-of-UTC-day value, and compares it with the terminal's **balance** at T against the named 1% constant. The equity reading is recorded as the measured wedge `(equity − balance)/equity` at T. It is not compared with our series, which is balance basis at every reconstructed point. | MT5-07 | It turns a fresh terminal reading into a backward-reconstructed check that can fail. Comparing the run day's own figures is tautological, because the anchor *is* that equity. The wedge reading is the fact the founder needs to rule on Conflict 1. It does **not** prove historical open-P&L parity; only D-5 or a founder ruling covers that. | LOW (the founder's reading plus a harness assertion) | `reconstruct_nav_and_twr` anchor roll, `unrealized_pnl_in_anchor` meta, the next scheduled sync |
+| **TS-5 Return-level spot check against the terminal's Growth %.** Monthly returns for 2–3 complete months from the Trading Report, against our chain-linked monthly TWR for the same months. A difference is explained, not merely tolerated: flows while trades were open, month-boundary shift from server time vs UTC, or balance vs realized basis. | MT5-07 | Allocators read percentages, not dollars. It is a second, independent implementation (MetaQuotes' code), so agreement means something. It is a **secondary** check because of method divergence. | LOW | Stored `strategy_analytics` monthly returns. The terminal Growth table is the founder's screenshot. |
+| **TS-6 Live funded account, trading day, real server.** The account type (real, not demo), the server name, a trading day (not a weekend) and a recent deal timestamp are all recorded. | MT5-08 | Myfxbook's verified badge rests on this exact property, and fake broker servers exist. The roadmap says outright that a demo account, the soak account or a weekend run does not count. | LOW | `account_info` (trade-mode field), `api_keys` labels for the three accounts |
+| **TS-7 Cross-surface consistency.** For each of the three strategies, one window and one metric set (total return, CAGR, max DD, vol, Sharpe, last date) is captured from strategy detail, public factsheet, scenario composer, portfolio PDF and browse, and diffed against one stored source. Any divergence is a finding. | MT5-09 | "One number everywhere" is the minimum allocators expect. The roadmap names the backbone-bypass surfaces to check. | MEDIUM (five surfaces × three strategies, partly automatable through the existing e2e and read paths) | `_compute_portfolio_analytics`, `equity_reconstruction.py`, `portfolio-stats.ts`, `scenario-blend-panels.ts`, `health-score.ts`, `figure-gate.ts` (the v1.21 single figure gate) |
+| **TS-8 Warning explained per strategy.** For each of the three PROD strategies, read which `NAV_TWR_GUARD_KEYS` member fired, from the persisted data-quality flags. Then fix it at its root, or accept it in writing with the measured magnitude. | MT5-15 | Our own pipeline flagged itself. External parity does not explain why (the roadmap says MT5-07 does not close MT5-15). Hypothesis (LOW, unmeasured): `unrealized_pnl_in_anchor` or `flow_coverage_incomplete`. | LOW to read, unknown to fix | `transforms._merge_status_meta`, `nav_twr.NAV_TWR_GUARD_KEYS`, `strategy_analytics` data-quality flags |
+| **TS-9 Root-cause fix loop, uncapped.** Every divergence from TS-3 to TS-8 is fixed where its root lives, including shared backbone money-math, and re-measured with the same harness. | MT5-10 | A founder decision: the phase does not close while the terminal and the UI disagree. | HIGH (unbounded by decision) | Whatever TS-3 to TS-8 surface |
+| **TS-10 Basis disclosure.** Each MT5 factsheet states its basis (realized/balance, with floating P/L not in the history) and the anchor date. | MT5-07 framing | Every retail verifier labels balance gain apart from equity. An unlabelled realized-basis curve can understate drawdown for a book that holds open losses. | LOW, if a basis or provenance label already exists to extend; MEDIUM if not | `api_verified` provenance stamp (Phase 111 tiers), TERMS-02 "Data source" (deferred; do not pull it in wholesale) |
+| **TS-11 Founder confirmations.** The wizard-resume restart is gone; the amber recomputing block has been seen; the four 153.7 copy members render, with no Retry on `SEAM_INTERNAL_FAULT`; `MT5_SPIKE_INVESTOR_PASSWORD` has been rotated. | Phase 157 | These observations rest on a human. They belong in the same sitting. | LOW | Phase 153.7 and 154 surfaces |
+| **TS-12 Umbrella acceptance.** The founder confirms that an MT5 strategy ingests, projects in a scenario and has a viewable factsheet. | MT5-GOAL-01 | Stops "ingested" being mistaken for "works". | LOW | SCEN-01 (Phase 147), OWN-02 (Phase 148) |
 
-### Differentiators (worth building, not assumed)
+### Differentiators (beyond what Myfxbook-style verification offers)
 
-| Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| **Stable, re-copyable link across sessions (true mint-or-reuse)** | The founder's literal requirement, and the thing the precedent *cannot* do. An allocator who copies the same link twice in two sessions should get the same URL both times — anything else silently kills links they already sent. | **MEDIUM** | Requires option A or B from the Critical Finding. This is the highest-value item in the whole phase: without it the feature regenerates the original bug in slow motion. |
-| **"Replace link" as a control SEPARATE from "Revoke"** | Two different intents: *"kill it"* vs *"the old one leaked, give me a new one"*. Conflating them (the precedent's mint-always-revokes) is what makes reuse impossible. | **LOW** once reuse exists | Owner-side triad: `Copy link` (idempotent) · `Replace link` (rotate, confirm) · `Revoke` (kill, confirm). This is also the founder's phrasing: *"a revoke control regenerates the token and kills old links."* |
-| **A link-scoped disclosure banner on the recipient's page** | The recipient is looking at an **unpublished, unreviewed** track record. `OwnerUnpublishedNotice` (`FactsheetView.tsx:690`) currently says *"only you can see this … anyone else who opens this link sees a 404"* — which becomes **factually false** the moment tokens ship. | **LOW-MEDIUM** | ⚠ **Hard dependency:** that banner's copy MUST change in this phase, or the product ships a false statement. Recipient-side needs its own variant: *"Shared privately by its owner. Not published or reviewed by Quantalyze."* Owner-side needs: *"Unpublished — visible to you and anyone holding your share link."* Notion's precedent of surfacing link-state **to the recipient** (the expiry banner) supports this. |
-| **Optional link expiry** | Notion (any plan), Dropbox (paid), Figma (**Enterprise only**), DocSend. The tier-gating across three products is the tell: **expiry is NOT table stakes for a first release.** | **MEDIUM** | W3C TAG says capability URLs *"should expire"*, but that is a security-purist position that three mass-market products treat as premium. **Recommendation: defer.** If built later, copy Notion's honesty move — show the expiry date **to the recipient**, in a banner, so nobody is surprised by a link dying mid-diligence. |
-| **A single "last opened" timestamp on the owner's share control** | Answers the one question an allocator actually has (*"did they look at it?"*) with one column and no surveillance apparatus. | **LOW** | Deliberately NOT the DocSend model (see anti-features). One `last_viewed_at` write, no per-page dwell, no notifications, no recipient identification. |
-| **Multiple named tokens per strategy** | W3C TAG's targeted-revocation recommendation: *"enabling users to generate multiple URLs for the same capability … allowing targeted revocation when a particular URL is compromised."* One link per LP ⇒ revoke one without breaking the rest. | **HIGH** | Genuinely the *right* end-state for fund-document sharing, and genuinely too much for this milestone. The schema should not **preclude** it: model the table as N rows with a partial-unique `WHERE revoked_at IS NULL` (exactly the precedent's index) and the door stays open. **Defer the UI.** |
+| Feature | Value proposition | Complexity | Notes |
+|---|---|---|---|
+| **D-1 Per-deal running-balance replay.** The full History export, from inception to E, is parsed. Our ledger fold is replayed deal by deal against the terminal's per-deal Balance column (if present), so the **first** diverging deal is named. | Turns "off by 0.7%" into "deal #N, a DIVIDEND, classified as X". This is the fastest root-causing tool for TS-9. | MEDIUM | Confirm at the terminal that the Deals table carries a running Balance column (LOW confidence it does in this build). If it does not, fall back to TS-3 at weekly checkpoints. |
+| **D-2 Weekend-gap window boundaries.** All windows start and end inside the Friday-close to Monday-open gap. | Removes the server-vs-UTC day ambiguity from every comparison by construction, without arguing about MT5-06's semantics. | LOW | The weekend gap is an **assumption, not a fact**: crypto CFDs and BTC-unit MT5 accounts (see PROJECT.md, native-unit accounts) can trade through the weekend. The harness asserts zero trading deals in the chosen gap for each account, and refuses the window by name if any exist. |
+| **D-3 One harness, re-runnable on any account.** The parity harness takes a terminal export and a strategy id, prints a verdict per check, and exits non-zero on breach, with the tolerance as a **named constant** (the roadmap's rule). | The same harness re-verifies after every TS-9 fix and works for a future MT5 account without the founder writing anything. | MEDIUM | Raw exports are **never committed**: the repo is public, and they carry the account number, holder name and broker. Keep them in a gitignored local path. Tracked evidence records only derived numbers and a sha256 of the export. |
+| **D-4 Equity-basis history going forward.** Each sync stores the `account_info` balance, equity and credit with a timestamp, so true equity-basis history builds up from now on. This is what Myfxbook does after you connect. | Closes Conflict 1 for the future without fabricating past marks. Lets equity drawdown be shown later. | MEDIUM (storage plus a writer) | **Not v1.18 scope.** The milestone verifies; it does not build. Book it if Conflict 1 turns out to be material. |
+| **D-5 Broker daily statements as a historical equity oracle.** If the broker emails end-of-day statements (balance, equity, floating P/L at server close), they are exact historical equity readings, including open P&L, for a window that ends before the run day. | The only source that answers "including open P&L" over a *past* window. | LOW to use | LOW confidence that these brokers send them, since MT5 support for this is broker-configured. Ask the founder to check their inbox before the session. |
 
-### Anti-Features (requested or precedented, but wrong here)
+### Anti-Features (look like rigour, cause harm)
 
-| Feature | Why Requested | Why Problematic | Alternative |
-|---------|---------------|-----------------|-------------|
-| **Per-view analytics / notify-on-open (the DocSend model)** | It is *the* selling point in the fund-document niche: page-by-page dwell, completion %, a ping on every open. | Turns a share link into a surveillance beacon aimed at **named allocators** — reputational risk far exceeding the feature's value pre-revenue. Also drags in consent/GDPR surface the repo has no home for (the `sanitize_user` deletion path would need to reach it), and inflates a 1-column feature into a subsystem. | The single `last_viewed_at` differentiator above. Nothing more. |
-| **Password-protecting the link** | Dropbox/Figma both offer it. | A password sent through the same channel as the link (email, Slack) adds ~zero real security and 100% of the support burden ("what was the password?"). The 256-bit token already IS the secret. | Revoke + (later) expiry. |
-| **Appending the token to the existing cache key** | Looks like the one-line fix. | ⛔ **It silently does nothing.** `page.tsx:66-69`: *"The `cacheKey` string the page passes in is split at `::` and everything after the id is DISCARDED … the effective `unstable_cache` key is id-ONLY."* The file spells out the corollary at line 76: *"viewer/lane separation can NEVER be expressed through the cacheKey string. Appending a suffix yields the SAME entry."* A token render written through `buildFactsheetPayloadCached` publishes a private strategy to every anonymous visitor for the full 3600 s TTL — **strictly worse than the bug being fixed.** | Branch **before** the cached wrapper, exactly as the owner lane already does (`page.tsx:529-536`: the owner arm calls `fetchAndBuildPayload` directly — *"no cache read, no cache write"*). The token lane is a third arm of that same `if`. |
-| **A separate `/share/[token]` route (the scenario-share pattern)** | It is the *cleaner* architecture and it is what `scenario-share/[token]/page.tsx` does. | Contradicts the settled `?s=<token>` URL shape, and forks the entire 664-line factsheet page for a second render path. | Keep `?s=` on the existing route and reuse the owner-lane bypass. Borrow only `scenario-share`'s **discipline** (`force-dynamic`, `no-store`, service-role transport, IP rate limit) — the factsheet page is already `force-dynamic` (`page.tsx:33`), so the residual hazard is the *data* cache only. |
-| **Hiding the Share button on unpublished strategies** | It is the "correct rule … one screen over" (`strategies/page.tsx:174`) that TODOS.md names, and it is half the class fix. | Hiding it **also removes the capability the founder wants**. Hidden-vs-disabled UX research: *"hide if the value is currently irrelevant"* — but here it is highly relevant, the owner genuinely wants to share. Hiding trades a lying button for a missing feature. | Keep the button **always visible and always enabled**; make it mint. The strategies-page site converges *up* to the token lane, not the factsheet site converging *down* to hidden. That is the honest reading of "fix the CLASS". |
-| **A greyed-out/disabled Share button** | The intuitive middle ground. | The repo's own UAT direction is explicit: **no disabled buttons — a blocked button becomes a clickable remedy.** A disabled control with no explanation is the same false affordance in a different colour. | Always-enabled mint. If a state genuinely cannot mint (see the open question below), the click opens a one-line explanation with the next step — never a dead grey rectangle. |
-| **Auto-minting a token on factsheet page load** | Makes Copy Link instant. | Mints a live capability for every strategy the owner merely *looks at*, including ones they never intended to share. Silent capability creation is the opposite of revocable. | Mint on the copy click (first time), reuse thereafter. |
-| **410 Gone on the bare `/factsheet/<id>` lane** | Symmetry with the token lane. | Converts the id into an existence oracle, defeating the founder's whole reason for the token model (*"the id must stay a NON-secret"*, and ids leak via history / `Referer` / `/compare?ids=`). | 410 for tokens, 404 for ids. Pin both. |
+| Feature | Why requested | Why problematic | Alternative |
+|---|---|---|---|
+| **Comparing the run day's equity** | It is the easiest number to read off the terminal. | It is tautological, because the anchor is that equity. The roadmap says so. | TS-3 (a past window) and TS-4 (captured on D, checked on D+1). |
+| **Myfxbook or FX Blue Gain % as the primary oracle** | "Third-party verified" sounds stronger. | It is a different method: balance-basis chain-linking with their own handling of flows during open trades. A gap mixes method error with data error, and it adds a dependency on the accounts being connected there. FX Blue's method is unknown. | The terminal's raw money (TS-3) is primary. Growth % (TS-5) is a secondary cross-check. |
+| **Spreading today's floating P&L back over history** to "include open P&L" | It makes the parity number pass. | It fabricates marks. The code explicitly refuses this (`reconstruct_mt5_nav_levels` docstring), and the project rule is never to invent data. | Disclose the basis (TS-10). Equity-basis history going forward (D-4). |
+| **Widening the tolerance to absorb a gap** | It closes the phase. | It averages away the defect TS-9 exists to fix. The 1% is a founder call. | A named constant. Any change is a recorded founder decision. |
+| **Hardcoding the observed offset** | It is quick. | It breaks at the next DST transition and is wrong for other brokers. The success criterion forbids it. | Measure and assert (TS-1). |
+| **An internal-consistency test as "parity"** | It is automatable. | It is the self-referential oracle that let three money bugs survive six passes. | Only terminal or broker figures count as the oracle. |
+| **Committing statement exports or screenshots** | Evidence in the repo. | The repo is public and the files carry the account number, holder name and broker. | Gitignored local storage. Commit derived figures plus a sha256. |
+| **A "Verified" badge or marketing claim from this milestone** | It is the payoff. | "Do not advertise MT5 until Phase 155 passes" stays in force until the umbrella closes, and even then the claim must state its basis. | Decide the claim's wording after MT5-GOAL-01, as a separate decision. |
+| **Fixes scoped to `exchange === 'mt5'`** | They are fast. | The v1.17 lesson: almost nothing on these surfaces is an MT5 defect. | Fix at the shared root (TS-9). |
+
+---
+
+## The founder session: one short script on a trading day
+
+The goal is about 20–25 minutes for all three accounts, and the founder never has to interpret anything. Agents pre-verify everything agent-checkable first (Gate 1 is cleared: all three keys synced 2026-11-13). The script is ordered so the most valuable captures come first, in case the session is cut short.
+
+**Before the session (agent-side, no founder needed):**
+- The harness is built and dry-run on the current stored series.
+- The parser has been tested on a sample export layout.
+- The cross-surface diff (TS-7) has run.
+- The guard flags (TS-8) have been read on PROD.
+- Window E has been chosen as the most recent weekend gap before the run day.
+- Ask the founder by message whether the brokers email daily statements (D-5).
+
+**At the terminal, per account (MM2, then MM3, then FX-AI_V), logged in with the investor password, the same view our gateway has:**
+
+1. **(1 min) Clock.** Screenshot Market Watch showing server time next to a UTC clock, for example time.is/UTC. This gives TS-1.
+2. **(1 min) Account identity.** Screenshot the account header (server name, real/demo) and the Summary block: Balance, Credit, Floating P/L, Equity. Write down the exact time. This gives TS-4 (the capture at instant T, plus the wedge), TS-6, and the current balance that TS-3 falls back on.
+3. **(3 min) History export.** In the History tab, choose "All history" (or a period from before inception to now), right-click, Report, save as HTML or XLSX, whichever this build offers, to the agreed gitignored local folder. This gives TS-3 and D-1. ⚠️ Confirm on screen that the Deals table shows a Balance column. If custom-period or XLSX is not offered, take whatever exists; the parser handles it.
+4. **(1 min) Near-midnight deal.** In the Deals list, find the agent-preselected deal by ticket number and screenshot its time as the terminal shows it. Agents preselect it from a DST divergence week where one exists. This gives TS-2.
+5. **(1 min) Growth table.** Open the Trading Report, Summary, Growth by month, and screenshot it. This gives TS-5.
+
+**Once, after all three accounts (about 5 min):**
+
+6. Walk through the Phase 157 items (TS-11) and the MT5-GOAL-01 path (TS-12) on one account.
+7. Rotate `MT5_SPIKE_INVESTOR_PASSWORD`.
+
+**Next day (agent-side):** after the next scheduled sync re-anchors, run TS-4. A failed check goes to TS-9; the founder is not needed again unless a fix needs a new terminal reading.
 
 ---
 
 ## Feature Dependencies
 
 ```
-[Token model choice: raw-at-rest | HMAC+counter]
-    └──enables──> [Mint-or-reuse (stable link)]
-                      └──enables──> [Copy link is idempotent]
-                                        └──enables──> ["Replace link" ≠ "Revoke"]
+TS-1 offset measured ──> TS-2 near-midnight regression
+        │
+        └──> TS-3 raw-money window parity ──> D-1 per-deal replay (root-causing)
+                    │                               │
+                    ├──> TS-5 Growth % cross-check  │
+                    └──> TS-4 captured-instant balance parity + wedge (needs a sync on D+1)
+                                    │
+TS-7 cross-surface diff ────────────┤
+TS-8 guard-flag read ───────────────┤
+                                    v
+                         TS-9 root-cause fix loop (uncapped) ──> re-run TS-3/4/5/7
+                                    │
+                                    v
+                         TS-12 MT5-GOAL-01 umbrella ──> (later) claim wording / badge
 
-[strategy_shares table + partial-unique WHERE revoked_at IS NULL]
-    └──requires──> [Phase 156 Migration B settled against `strategies`]   ⛔ HARD BLOCKER
-    └──enables──> [Revoke]  ──enables──> [410 recipient page]
-    └──enables──> [has_active_share → owner "link is live" state]
-    └──leaves-door-open-for──> [Multiple named tokens]   (defer UI)
-
-[Token read lane in factsheet/[id]/v2/page.tsx]
-    └──requires──> [Bypass of buildFactsheetPayloadCached]   ⛔ the landmine
-    └──requires──> [searchParams added to the page props]     (not currently declared)
-    └──requires──> [Recipient chrome suppression]             (?s= must imply shareMode)
-    └──conflicts──> [OwnerUnpublishedNotice's current copy]   ⛔ becomes FALSE on ship
-    └──degrades-with──> [generateMetadata + /api/og/factsheet/[id]]  (both withPublishedOnly)
-
-[FactsheetView.tsx:1565 Share button]  ──same class as──>  [strategies/page.tsx:174 ShareableLink]
-[FactsheetView.tsx:1312 ShareLinkButton URL rebuild]  ──strips the token──>  [recipient re-share = dead link]
+D-2 weekend-gap boundaries ──enhances──> TS-3, TS-5
+TS-10 basis disclosure ──resolves──> Conflict 1 (presentation half)
+D-4 equity history forward ──conflicts──> v1.18 "verify, don't build" scope (defer)
 ```
 
-### Dependency Notes
+### Dependency notes
 
-- **⛔ Blocker, restated from TODOS.md:** do not start on `feat/phase-156-connect-refactor` —
-  Phase 156's Migration B is still pending against `strategies`. Two concurrent migrations touching
-  the same table is how you get an ordering surprise on the auto-apply-to-PROD path.
-- **`OwnerUnpublishedNotice` becomes a false statement.** Its body currently reads *"Anyone else who
-  opens this link sees a 404 until Quantalyze review publishes it."* Once tokens ship that is wrong.
-  The component is deliberately single-sourced (`page.tsx` renders the same component on the
-  payload-pending arm — see the WR-02 note at `FactsheetView.tsx:686`), so one edit fixes both
-  sites. **A phase that ships the token lane without touching this component is incomplete.**
-- **Link-unfurl degradation is real and measured.** `generateMetadata` reads through
-  `withPublishedOnly` (`page.tsx:336`) and `/api/og/factsheet/[id]/route.tsx:40` does too. So a
-  token link pasted into Slack/WhatsApp/email unfurls as *"Strategy — Quantalyze Factsheet"* with a
-  **404 image**. Two honest options: (a) accept it and say so (a private link *should* be dull in a
-  chat preview — an unfurl bot's cache is a leak amplifier), or (b) resolve metadata through the
-  token. **Recommend (a), explicitly**, so it is a decision rather than a bug report later.
-- **A new env secret is a prod-only failure mode.** If the phase picks the HMAC option, the secret
-  must be set on Vercel **and redeployed** before the feature is reachable, or Copy Link 500s in
-  production while working perfectly everywhere else. This repo has been bitten by exactly this
-  (`RESEND_API_KEY`). Option A (raw token at rest) has no such dependency — that is its real
-  advantage, not the code size.
-- **`?s=` must imply the existing `shareMode`.** `useShareMode()` currently keys on `?share=1`
-  (`FactsheetView.tsx:1300`). Recipient-mode chrome suppression should key on *either*, so the token
-  lane inherits the suppression that already exists instead of growing a second flag.
+- **TS-3 requires TS-1:** a wrong offset moves deals across the S and E boundaries. Weekend-gap boundaries (D-2) make TS-3 robust to it, but TS-1 must still pass on its own.
+- **TS-4 requires a sync after the capture:** the D+1 run is what makes day D backward-reconstructed. Plan for the founder session and the TS-4 verdict landing on different days.
+- **TS-9 depends on everything above, and its size is unknowable until they run.** Phase planning should budget the harness and session as fixed, and TS-9 as an open loop with re-measurement.
+- **TS-7 and TS-8 need no founder.** Run them before the session so any finding they produce is already in TS-9 when the terminal readings arrive.
+- **The founder call on Conflicts 1 and 2 blocks TS-3, TS-4 and TS-2's assertion wording.** Settle them at discuss-phase.
 
 ---
 
 ## MVP Definition
 
-### Launch With (the SHARE phase)
+### Launch with (v1.18 / Phase 155 and 157)
 
-- [ ] **`strategy_shares` table** — `strategy_id`, `created_by`, token material, `created_at`,
-      `revoked_at`; owner RLS with the **CR-01 owner-coherence `EXISTS` clause** (a plain
-      `created_by = auth.uid()` lets an authed user mint a share for *another tenant's*
-      strategy_id — the FK only proves existence); `REVOKE ALL … FROM anon`; partial-unique
-      `(strategy_id) WHERE revoked_at IS NULL`; index the lookup column.
-- [ ] **Token model decision (A or B) written down in the plan**, with the deviation from
-      `scenario-share-token.ts`'s hash-only discipline argued, not assumed.
-- [ ] **Mint-or-reuse route** (`POST`, owner-scoped, `userActionLimiter`, B15 ordering, redacted
-      DB-error envelope, `NO_STORE_HEADERS` on every response, `logAuditEvent`).
-- [ ] **Revoke route** — port `share/revoke/route.ts` semantics wholesale (soft revoke, 404-not-403,
-      double-revoke = convergence).
-- [ ] **Token read lane in `factsheet/[id]/v2/page.tsx`** — a third arm alongside public/owner that
-      **bypasses `buildFactsheetPayloadCached` entirely**, plus `searchParams` on the page props and
-      an IP rate limit on the token lookup.
-- [ ] **410 recipient page** for unknown/revoked tokens — content-free, `no-store`, distinct from the
-      app 404; the bare-id lane's 404 unchanged.
-- [ ] **`FactsheetView.tsx:1565` Share button becomes mint-or-reuse**, never flashes success on
-      failure (`ShareableLink.tsx` already models the honest copy-failure branch — reuse it).
-- [ ] **Recipient chrome suppression** — `?s=` implies `shareMode`; the recipient does **not** get a
-      Share button (today they'd copy a token-stripped, dead URL).
-- [ ] **`OwnerUnpublishedNotice` copy corrected** for both owner and recipient variants.
-- [ ] **`strategies/page.tsx:174` converged onto the same lane** — the class fix, both sites.
-- [ ] **Tests that can fail:** (1) an anon request for the id right after a **token** render still
-      404s — the phase-148 cache-poison pin, extended to the token arm; (2) revoke → next token load
-      is 410 with no strategy content in the HTML; (3) two Copy Link clicks **across a simulated
-      reload** return the *same* URL (the anti-regression pin for the precedent's session-only
-      reuse); (4) a token minted for strategy X does not open strategy Y; (5) the id lane still
-      returns a uniform 404 for anon / non-owner / missing.
+- [ ] Founder decisions on Conflict 1 (basis) and Conflict 2 (day semantics), recorded in CONTEXT.md and the ROADMAP.
+- [ ] TS-1, TS-2: offset measured on all three servers, plus one real-deal regression.
+- [ ] TS-3: raw-money parity over a weekend-gap window. **This is the core oracle.**
+- [ ] TS-4: balance at a captured instant checked on D+1, plus the measured wedge.
+- [ ] TS-6, TS-7, TS-8: live-account proof, cross-surface diff, warning explained.
+- [ ] TS-9: every divergence fixed at its root and re-measured.
+- [ ] TS-11, TS-12: founder confirmations and umbrella acceptance.
+- [ ] D-2, D-3: weekend-gap convention (asserted per account) and a re-runnable harness (no raw exports committed).
+- [ ] TS-10: basis disclosure on every MT5 factsheet. Without it, a correct realized-basis drawdown reads as an equity drawdown, which is a correctness problem on the surfaces MT5-09 covers. Extend an existing provenance label rather than building TERMS-02.
 
-### Add After Validation (v1.2x)
+### Add after validation (v1.x)
 
-- [ ] **`last_viewed_at`** on the share row — trigger: the founder asks "did they open it?" once.
-- [ ] **Optional expiry** with a recipient-visible banner — trigger: a real LP conversation needs a
-      time-boxed link.
+- [ ] D-1 per-deal replay, if TS-3 fails and the cause is not obvious.
+- [ ] D-4 equity-basis history going forward. Trigger: the wedge is material on any account.
 
-### Future Consideration
+### Future consideration
 
-- [ ] **Multiple named tokens per strategy** (per-recipient revocation) — defer until there is a
-      second recipient to revoke *from*. Keep the schema compatible.
-- [ ] **Owner-facing share audit list** ("minted 3 Aug, revoked 12 Aug") — the `revoked_at`
-      soft-delete already retains the data; this is presentation only.
+- [ ] A public "verified against broker" claim with a stated basis and as-of date, after MT5-GOAL-01.
+- [ ] A Myfxbook-style "trading privileges" proof of control. It is irrelevant while the founder owns all three accounts, and only matters once third-party managers onboard MT5.
 
 ---
 
 ## Feature Prioritization Matrix
 
-| Feature | User Value | Implementation Cost | Priority |
-|---------|------------|---------------------|----------|
-| Copy Link produces a working link (mint) | HIGH | MEDIUM | **P1** |
-| Cache-poison bypass (token lane never writes the id key) | HIGH (correctness) | LOW | **P1** |
-| Mint-or-**reuse** across sessions | HIGH | MEDIUM | **P1** |
-| Revoke + confirm | HIGH | LOW | **P1** |
-| Distinct 410 recipient page | HIGH | LOW | **P1** |
-| Owner "link is live" state | MEDIUM | LOW | **P1** |
-| `OwnerUnpublishedNotice` copy correction | MEDIUM (honesty) | LOW | **P1** |
-| Recipient chrome suppression (`?s=` ⇒ shareMode) | MEDIUM | LOW | **P1** |
-| Both share sites on one lane (class fix) | MEDIUM | LOW | **P1** |
-| "Replace link" distinct from Revoke | MEDIUM | LOW | **P2** |
-| `last_viewed_at` | MEDIUM | LOW | **P2** |
-| Link expiry | LOW (for now) | MEDIUM | **P3** |
-| Multiple named tokens | LOW (today) | HIGH | **P3** |
-| View analytics / notify-on-open | LOW | HIGH | **anti-feature** |
-| Link password | LOW | MEDIUM | **anti-feature** |
-
----
+| Feature | User value | Implementation cost | Priority |
+|---|---|---|---|
+| Conflict 1 and 2 decisions | HIGH | LOW | P1 |
+| TS-3 raw-money parity | HIGH | MEDIUM | P1 |
+| TS-1/TS-2 offset and regression | HIGH | LOW | P1 |
+| TS-4 captured-instant balance + wedge | HIGH | LOW | P1 |
+| TS-7 cross-surface diff | HIGH | MEDIUM | P1 |
+| TS-8 warning explained | MEDIUM | LOW | P1 |
+| TS-9 fix loop | HIGH | HIGH (unbounded) | P1 |
+| TS-6, TS-11, TS-12 | MEDIUM | LOW | P1 |
+| TS-5 Growth % cross-check | MEDIUM | LOW | P2 |
+| D-2 weekend-gap boundaries | MEDIUM | LOW | P1 (free) |
+| D-3 re-runnable harness | MEDIUM | MEDIUM | P1 |
+| D-1 per-deal replay | MEDIUM | MEDIUM | P2 |
+| TS-10 basis disclosure | MEDIUM | LOW–MEDIUM | P1 |
+| D-5 daily-statement oracle | MEDIUM | LOW | P2 (if available) |
+| D-4 equity history forward | MEDIUM | MEDIUM | P3 (defer) |
 
 ## Competitor Feature Analysis
 
-| Behaviour | Google Docs | Notion | Figma | Dropbox | DocSend | **Quantalyze (recommended)** |
-|---|---|---|---|---|---|---|
-| Link is a rotatable token? | ✗ (permanent file id; access is a *mode*) | ✗ (page id) | ✗ (file id) | ✓ (link id) | ✓ | **✓ — rotatable token, id stays non-secret** |
-| Copy is idempotent (same link twice) | ✓ | ✓ | ✓ | ✓ | ✓ | **✓ (needs option A or B — the precedent gives only session-scoped reuse)** |
-| Revoke | ✓ (→ Restricted) | ✓ (Remove) | ✓ | ✓ (disable) | ✓ (headline feature) | **✓ (soft, `revoked_at`)** |
-| Recipient sees a *specific* message | ✓ "You need access" | ✓ (expiry banner) | ✗ (link just stops) | ✓ "This link is expired" | ✓ | **✓ 410 "this link was turned off" — content-free** |
-| Owner sees link-live state | ✓ | ✓ | ✓ | ✓ | ✓ | **✓ (`has_active_share` pattern)** |
-| Expiry | ✗ | ✓ any plan | Enterprise only | Paid tiers | ✓ | **defer (P3)** |
-| Password | ✗ | ✗ | ✓ | ✓ | ✓ | **anti-feature** |
-| Per-view analytics | ✗ | ✗ | ✗ | ✗ | ✓ (core) | **anti-feature; `last_viewed_at` only** |
-| Targeted (per-recipient) revocation | ✓ (email invites) | ✗ | ✗ | ✗ | ✓ | **schema-compatible, UI deferred** |
-
----
-
-## ⚠️ Open Product Question — surface, do NOT decide in this phase
-
-**`status='private'` strategies have zero UI actions.** `StrategyActions.tsx` branches
-`draft` → `pending_review` (line 113: `return null`) → `published` → `archived`, then falls through
-to `return null` (line 162). `private` matches nothing, so it renders **no actions at all**. The
-contribution flow lands strategies exactly there:
-`finalize-wizard/route.ts:1000` sets `terminalStatus = entryContext === "contribution" ? "private" : "pending_review"`.
-
-Consequence: a contribution-flow strategy **can never leave `private` from the UI**.
-
-This is adjacent to SHARELINK-01 (both are "an unpublished strategy has no honest path forward"),
-and the share token *partially* relieves it — with a token, a `private` strategy at least becomes
-shareable, which may be all a contribution record ever needed. But whether contribution records are
-**meant** to be permanently private, or need a publish path, is a **product decision the founder
-owns**. The phase should:
-
-1. Ship the token lane so `private` is *shareable* (removes the acute pain), and
-2. Surface the question in the phase's UAT/close notes with the two options stated —
-   **(a)** permanently private by design, leave it; **(b)** `private` needs a publish/submit-for-review
-   action, which is its own phase.
-
-Do not let a planner quietly pick (b) and grow a publish flow inside a share-link phase.
-
----
+| Feature | Myfxbook | MT5 terminal / MQL5 Signals | Our approach |
+|---|---|---|---|
+| Source of history | Broker server through the investor password | The account's own server history | Same as Myfxbook: read-only investor password through our gateway |
+| Headline return | TWR "Gain", balance basis; absolute gain separate | Growth %, chain-linked balance, excluding flows | Flow-in-numerator TWR on realized basis, with position-level flow-day timing |
+| Open P&L | Shown as equity beside the balance gain; equity history only from the moment of connection | Equity and floating only at report time; equity graph computed from history | Anchor includes it. History excludes it and says so (flag now, label in TS-10). Forward equity history deferred (D-4). |
+| Proof the account is real | "Track Record Verified" (credentials plus server) | n/a | TS-6: real/demo trade mode plus server, recorded |
+| Proof of control | "Trading Privileges Verified" (pending-order code) | n/a | Not needed now (founder-owned accounts) |
+| Independent recomputation | Yes: their own engine | Yes: MetaQuotes' engine | TS-3 (raw money) as primary, TS-5 (their engine) as secondary |
+| Admitted limits | FAQ admits inaccuracies; fake servers possible | Growth misbehaves on flows during open trades | Fail loud on unknown deal types; uncapped root-cause fixes |
 
 ## Sources
 
-**Codebase (HIGH — read at HEAD `ca3f0c5c`, cited file:line inline)**
-- `src/app/factsheet/[id]/v2/page.tsx` — the two lanes, the owner-lane cache bypass, the
-  cacheKey-is-id-only correction (lines 33, 66-81, 362, 425-540)
-- `src/app/factsheet/[id]/v2/FactsheetView.tsx` — the mis-gated Share button (1565), `ShareLinkButton`
-  token-stripping URL rebuild (1308-1338), `useShareMode` (1293-1305), `OwnerUnpublishedNotice` (690)
-- `src/app/(dashboard)/strategies/page.tsx:174` + `src/components/strategy/ShareableLink.tsx` — the
-  correctly-gated sibling, and the honest copy-failure branch worth reusing
-- `src/components/strategy/StrategyActions.tsx:113,162` — the `private` dead end
-- `supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql`,
-  `supabase/schema/functions/{create_scenario_share,get_shared_scenario}.sql` — the revocable-share precedent
-- `src/lib/scenario-share-token.ts` (hash-only) vs `src/lib/demo-pdf-token.ts` (keyed MAC) — the two token models in-repo
-- `src/app/api/allocator/scenario/share/{route.ts,revoke/route.ts}`,
-  `src/app/(dashboard)/allocations/components/SavedScenariosList.tsx` — mint/revoke route + UX state machine
-- `src/app/scenario-share/[token]/page.tsx` — the public token-lane security boundary comment
-- `src/app/api/og/factsheet/[id]/route.tsx:40` — published-only OG image (unfurl degradation)
+Codebase (HIGH, primary, read at HEAD 2026-11-13):
+- `analytics-service/services/mt5_deals.py`: `classify_deal`, `deal_cash_effect`, `deal_utc_day`, `_utc_day_of_server_epoch`, `deal_utc_instant_ms`
+- `analytics-service/services/mt5_server_clock.py`: `Mt5ServerClock`, the `eu`/`us` rules and the 2026 transition dates
+- `analytics-service/services/broker_dailies.py`: the MT5 combiner and `reconstruct_mt5_nav_levels` docstrings (realized basis, `unrealized_pnl_in_anchor`)
+- `analytics-service/services/transforms.py`: `_merge_status_meta` (how a run reaches `complete_with_warnings`)
+- `.planning/PROJECT.md` (v1.18 section), `.planning/ROADMAP.md`, `.planning/milestones/v1.17-ROADMAP.md` (Phase 155 success criteria)
 
-**External (MEDIUM — WebSearch/WebFetch tier, cross-checked)**
-- [Good Practices for Capability URLs — W3C TAG](https://www.w3.org/2001/tag/doc/capability-urls/) — entropy, https, referrer, expiry, revocation, robots, rate limiting, 410-or-404
-- [Sharing & permissions settings in Notion](https://www.notion.com/help/sharing-and-permissions) and [Notion link expiration rules](https://www.metomic.io/resource-centre/how-to-use-notions-new-expiry-rules) — recipient-visible expiry banner
-- [Set an expiration on public links in design files — Figma](https://help.figma.com/hc/en-us/articles/16142157359255-Set-an-expiration-on-public-links-in-design-files) — expiry is Enterprise-gated
-- [Troubleshoot shared links — Dropbox](https://help.dropbox.com/share/shared-link-stopped-working) and [set link permissions](https://help.dropbox.com/share/set-link-permissions) — "This link is expired" vs generic 404
-- [How to Unshare a Google Doc](https://www.howtogeek.com/760665/how-to-unshare-a-google-doc/) / [Remove "Anyone with the link" sharing](https://www.patronum.io/remove-anyone-link-sharing-google-drive) — mode toggle, all-or-nothing, "you need access"
-- [DocSend document tracking and analytics](https://www.docsend.com/features/analytics/) / [Revoke Access — Peony](https://www.peony.ink/features/revoke-access) — the fund-document niche's revoke + analytics expectations
-- [410 Gone — MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/410) — deliberate-removal semantics
-- [Hidden vs. Disabled In UX — Smashing Magazine](https://www.smashingmagazine.com/2024/05/hidden-vs-disabled-ux/) / [Disabled Buttons UX](https://uxdworld.com/disabled-buttons-ux/) — why hiding *and* disabling are both wrong here
+External (tiers from the classify-confidence seam: one web source = LOW, cross-checked = MEDIUM):
+- [MT5 Trading Report help](https://www.metatrader5.com/en/terminal/help/trading/report): Growth excludes deposits and withdrawals, the equity formula, HTML/PDF export (MEDIUM)
+- [MT5 History report help](https://www.metatrader5.com/en/terminal/help/trading_advanced/history_report): sections, Summary fields at generation time, balance-drawdown definitions (MEDIUM)
+- [MT5 signal monitoring help](https://www.metatrader5.com/en/terminal/help/signals/signal_monitoring.md) and [MQL5 forum: growth explained](https://www.mql5.com/en/forum/168666): balance chain-linking, flows during open trades (MEDIUM for the definition, LOW for the formula)
+- [Third-party MT5 report parser](https://huggingface.co/algorembrant/mt5-analyzer/blob/main/server/utils/parser.js): Deals table with a Balance column (LOW, so confirm at the terminal)
+- [Myfxbook: Why Verify?](https://www.myfxbook.com/help/verification), [babypips guide](https://forums.babypips.com/t/a-guide-to-using-and-recognising-myfxbook-accounts/52656), [MQL5 blog: reading a Myfxbook record](https://www.mql5.com/en/blogs/post/779425): the two verification badges and their limits (MEDIUM)
+- [Myfxbook gain help (403, snippet only)](https://www.myfxbook.com/help/?p=271), [fxnx guide](https://fxnx.com/en/blog/reading-myfxbook-track-record-gain-drawdown-verified-badges): TWR Gain vs absolute gain (MEDIUM)
+- [B2Broker return calculation](https://b2broker.com/products/b2copy/knowledge-base/concepts/return-calculation/): equity chain-linked between balance operations (LOW)
+- [Acadifi: GIPS TWR vs MWR](https://www.acadifi.com/community/gips-performance-calculation-time-weighted-money-weighted), [GIPS Q&A](https://www.gipsstandards.org/?GIPSID=436): monthly valuation plus valuation on large flows, TWR vs MWR by who controls flows (MEDIUM)
+- [Euromoney: NFA oversight of currency CTAs](https://euromoney.com/article/b12kjbvfqxpcks/nfa-boosts-oversight-of-currency-ctas), [CFTC letter 12-01](https://cftc.gov/csl/12-01/download): performance must be supported by records; broker statements available (LOW)
+- FX Blue: **no primary source retrieved**, so it is a gap.
 
 ---
-*Feature research for: revocable share links on private factsheets (v1.20 SHARE / SHARELINK-01)*
-*Researched: 2026-08-20*
+*Feature research for: live MT5 track-record verification (v1.18 MT5-VERIFY)*
+*Researched: 2026-11-13*
