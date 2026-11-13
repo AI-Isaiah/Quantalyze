@@ -28,9 +28,9 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-11-06)
+See: .planning/PROJECT.md (updated 2026-11-13)
 
-**Current focus:** Phase 201.1 — POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed
+**Current focus:** Planning next milestone (v1.21 closed 2026-11-13)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
