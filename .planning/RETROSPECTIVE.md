@@ -158,6 +158,44 @@
 
 ---
 
+## Milestone: v1.21 — UX: trustworthy, navigable, lean
+
+**Shipped:** 2026-11-13 (v0.133.24.0 → v0.133.39.0, PRs #1210–#1256)
+**Phases:** 18 (192–206, with 194.1, 194.2 and 201.1 inserted) | **Plans:** 217 | **Timeline:** 2026-11-06 → 2026-11-13, 44 commits on main over 8 days
+
+### What Was Built
+- One true public story with the demo retired (192), and quiet factsheets that show only their own content and write nothing on a view (193).
+- One figure verdict on every path: stored VaR/CVaR and 3M/6M on one rule in Python and TypeScript, and `figure-gate.ts` withholding annualised figures on a short total record, closed out by a census that fails on an ungated site (194, 194.1, 194.2, 205).
+- Navigation without dead ends and less to wade through: role landing pages, one strategy page, Compare from discovery, three-tab My allocation, one key panel, and the leftover surfaces gone (195–200).
+- Plain screening and one vocabulary (197, 201, 201.1), plus the 188 residual attributed (202, 203) and two hardening fixes (204, 206).
+
+### What Worked
+- **A persona review as the requirement source.** Five personas produced 32 concrete, testable requirements, and all 32 closed in one week.
+- **Founder decisions taken early and written down** (D-05 "show, don't flag", D-11 retire the demo, D-15 total-record rule, D-09 real name everywhere). Each one removed a whole class of work or argument.
+- **A census that goes RED on an ungated site** turned "every page" from a claim into a check, so 194.1 and 194.2 could close the residuals mechanically.
+- **The control capture planned up front** for the 188 residual (202) answered in two nightlies what v1.20 could not.
+
+### What Was Inefficient
+- **Figure gating took four phases** (194, 194.1, 194.2, 205). The first plan named pages, not every reader of a figure, so the census found the rest afterwards.
+- **UAT-driven polish phases** (201.1) followed 200/201. A UI-SPEC premise check (measured widths) before planning would have caught two false premises earlier.
+- **The milestone close hit a tool refusal on archived history** (gsd-tools `audit-open` and seven older VERIFICATION statuses), which stopped the close for a founder decision.
+
+### Patterns Established
+- Withhold on the record, never flag a value: one shared verdict module and its Python mirror, with a census per surface.
+- Retire rather than repair a surface that cannot be kept true (the demo), with a test that fails if a retired route or link returns.
+- A founder decision that changes scope is recorded in the requirement itself (amended text kept as lineage), so traceability stays honest.
+
+### Key Lessons
+- Name every reader of a value in the first plan, not every page; a page list misses the share card, intros and the SQL rank.
+- Archived history must stay readable by tools; a tool that refuses on it blocks every future close.
+
+### Cost Observations
+- Model mix: the orchestrator and code review on the large model; executors, fixers, verifiers and security auditors on the mid model.
+- Sessions: many, with phases run in parallel by phase agents.
+- Notable: a one-week milestone of 18 phases; UI and copy phases moved faster than v1.20's nightly-bound PROD readings.
+
+---
+
 ## Cross-Milestone Trends
 
 ### Process Evolution
@@ -165,3 +203,4 @@
 - Frozen-engine discipline survived its first deliberate unfreeze: re-baseline as a reviewed act with independent re-derivation, then re-freeze. The mechanism (spine guards + zero-diff checks) works in both directions.
 - v1.10: the per-phase **fresh-context Fable red team** graduated from optional to standard — it caught real defects the opus review + opus verifier missed on multiple phases, confirming that model diversity (not just pass count) is what closes the gap. The recurring miss is the reverse: verification-ledger bookkeeping drift keeps resurfacing at close (v1.5 → v1.10).
 - v1.20: verification became a historical fact with drift as a separate report, and gates must be seen RED before they count. The recurring cost moved from review passes to nightly-bound PROD readings.
+- v1.21: a persona review became the requirement source and closed 32/32 in a week; record-based withholding with a per-surface census replaced per-page fixes. The close exposed a tool refusal on archived history, recorded and drafted upstream.
