@@ -118,14 +118,33 @@ cleared from every book).
 (RESEND key, Zavara activation, sFOX/Nautilus go-live, MT5 live parity = v1.18) and founder-decision
 items (AUM basis, retunes). Full detail: `MILESTONES.md` + `milestones/v1.20-*`.
 
-## ⏸️ PARKED Milestone: v1.18 MT5-VERIFY & founder confirmations (started 2026-08-14, parked 2026-08-20 — founder-gated)
+## Current Milestone: v1.18 MT5-VERIFY & founder confirmations (started 2026-08-14, parked 2026-08-20, RESUMED 2026-11-13)
 
-⛔ **Every phase in v1.18 is founder-gated** — Phase 155 (live trading-day parity against the
-terminal's own figures) and Phase 157 (the observations only the founder can make). Blocked on new
-MT5 investor passwords AND the founder at the terminal on a trading day. The former v1.16 carry
-(Phases 143–146) shipped and closed as **v1.19 on 2026-08-20** (audit `tech_debt`, 9/9
-requirements; archive at `.planning/milestones/v1.19-ROADMAP.md`), so **no agent-deliverable
-phase is currently open** — new work starts with a new milestone.
+**Goal:** The numbers Quantalyze renders for the live funded MT5 accounts **MM2, MM3 and FX-AI_V**
+are proven true against the terminal's own figures, and the handful of observations only the
+founder can make are made.
+
+**Target features:**
+- **Phase 155 MT5-VERIFY:** server-UTC offset measured live with a near-midnight deal regression
+  (MT5-06); external-oracle parity against the terminal within 1% including open P&L over a window
+  ending before the run day (MT5-07, MT5-08); the same numbers on strategy detail, factsheet,
+  composer, PDF and browse (MT5-09); every divergence fixed at its root, uncapped, and the
+  `complete_with_warnings` flags explained (MT5-10, MT5-15); umbrella acceptance MT5-GOAL-01.
+- **Phase 157 FOUNDER-CONFIRM:** the wizard-resume restart gone, the amber recomputing block seen,
+  the four 153.7 copy members rendering (no Retry on `SEAM_INTERNAL_FAULT`), and
+  `MT5_SPIKE_INVESTOR_PASSWORD` rotated.
+
+**Resumed 2026-11-13 (founder):** "New milestone v1.18", accounts MM2, MM3 and FX-AI_V, and
+"Later, after planning": agents plan and pre-build the parity harness and pre-verify every
+agent-checkable item first, then the founder gives one short scripted terminal session on the next
+trading day. ⭐ **Gate 1 is cleared, measured on PROD 2026-11-13:** all three keys show
+`sync_status='complete'` with `last_sync_at` 01:02–01:09 UTC that day, so the new investor
+passwords are in. Gate 2 (the founder at the terminal on a trading day) still stands, for the
+terminal readings only. Carried context for Phase 155 from `TODOS.md`: timeout findings #8 and #10
+(need the real latency data) and the product call on MT5 as a composite member.
+
+The former v1.16 carry (Phases 143–146) shipped and closed as **v1.19 on 2026-08-20** (audit
+`tech_debt`, 9/9 requirements; archive at `.planning/milestones/v1.19-ROADMAP.md`).
 
 ⭐ **Parity tolerance is settled at 1%, INCLUDING open P&L** (founder call 2026-08-14). The
 measurement window MUST end before the day of the run: `broker_dailies` anchors to today
@@ -284,6 +303,10 @@ options MTM smoothing.
 ### Active
 
 <!-- Carried out of v1.21 (closed 2026-11-13). The next milestone's requirements are defined at its start. -->
+
+- **v1.18 (current):** MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15 and the umbrella MT5-GOAL-01 (Phase 155), plus the Phase 157 founder confirmations. See `.planning/REQUIREMENTS.md`.
+
+The items below stay carried for a later milestone; they are not v1.18 scope.
 
 - **Composer range as dates (founder 2026-11-13, "Book a fix")** — save the composer's selected range as dates so presets like 12M always end on the latest day, and re-pin "kept when the series grows" to mean the same dates are kept. Next milestone; `TODOS.md` `201.1-COMPOSER-RANGE-AS-DATES`.
 - **TERMS-01, TERMS-02** (deferred out of v1.21 by the fix-and-trim scope) — manager-entered fees, terms and thesis on the factsheet; net vs gross, base currency and "Data source" for every strategy.
@@ -503,4 +526,4 @@ the WCAG-AA floor stay green.
 </details>
 
 ---
-*Last updated: 2026-11-13 after v1.21 milestone (audit tech_debt, 32/32). v1.18 remains parked founder-gated. Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.*
+*Last updated: 2026-11-13 at v1.18 resume (after v1.21 closed, audit tech_debt, 32/32). Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.*

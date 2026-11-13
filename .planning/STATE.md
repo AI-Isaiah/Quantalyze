@@ -1,19 +1,16 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.21
-milestone_name: UX — trustworthy, navigable, lean
-status: Awaiting next milestone
-stopped_at: v1.21 archived; next milestone not started (/gsd-new-milestone)
-last_updated: "2026-11-13T12:09:08.643Z"
+milestone: v1.18
+milestone_name: MT5-VERIFY & founder confirmations
+status: planning
+last_updated: "2026-11-13T12:53:57.352Z"
 last_activity: 2026-11-13
-last_activity_desc: Milestone v1.21 completed and archived
-state_head: 9d40e7fd72a8ca23e6701ace323f4996cb6d6f50
 progress:
-  total_phases: 18
-  completed_phases: 18
-  total_plans: 217
-  completed_plans: 217
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 ## ⭐ STATE lineage
@@ -174,11 +171,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: Milestone v1.21 complete
+Phase: Not started (defining requirements)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-11-13 — Milestone v1.21 completed and archived
-Progress: [██████████] 100%
+Status: Defining requirements
+Last activity: 2026-11-13 — Milestone v1.18 started
+Progress: [░░░░░░░░░░] 0%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 

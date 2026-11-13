@@ -1,103 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.21 — UX — trustworthy, navigable, lean",
-  "phases": [
-    {
-      "number": "192",
-      "name": "PUBLICTRUTH",
-      "status": "complete"
-    },
-    {
-      "number": "193",
-      "name": "QUIETVIEW",
-      "status": "complete"
-    },
-    {
-      "number": "194",
-      "name": "FIGURETRUTH",
-      "status": "complete"
-    },
-    {
-      "number": "194.1",
-      "name": "D04SWEEP (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "194.2",
-      "name": "FIGURERESIDUALS (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "195",
-      "name": "TRIM",
-      "status": "complete"
-    },
-    {
-      "number": "196",
-      "name": "ONESTRATEGYPAGE",
-      "status": "complete"
-    },
-    {
-      "number": "197",
-      "name": "SCREEN",
-      "status": "complete"
-    },
-    {
-      "number": "198",
-      "name": "MYBOOK",
-      "status": "complete"
-    },
-    {
-      "number": "199",
-      "name": "MANAGERHOME",
-      "status": "complete"
-    },
-    {
-      "number": "200",
-      "name": "MANAGERKEYS",
-      "status": "complete"
-    },
-    {
-      "number": "201",
-      "name": "PLAINWORDS",
-      "status": "complete"
-    },
-    {
-      "number": "201.1",
-      "name": "POLISHRESIDUALS (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "202",
-      "name": "RESIDCHURN",
-      "status": "complete"
-    },
-    {
-      "number": "203",
-      "name": "B3TRUNC",
-      "status": "complete"
-    },
-    {
-      "number": "204",
-      "name": "INTROAUTH",
-      "status": "complete"
-    },
-    {
-      "number": "205",
-      "name": "ONEVERDICT",
-      "status": "complete"
-    },
-    {
-      "number": "206",
-      "name": "SESSIONLOOP",
-      "status": "complete"
-    }
-  ],
+  "milestone": "v1.18 — MT5-VERIFY & founder confirmations (Phases 155, 157) — founder-gated",
+  "phases": [],
   "next": {
-    "command": "/gsd-new-milestone",
-    "label": "Start a new milestone",
-    "reason": "All phases complete — start a new milestone"
+    "command": "/gsd-discuss-phase",
+    "label": "Discuss the first phase",
+    "reason": "Project initialized — plan your first phase"
   },
-  "updated_at": "2026-11-12T22:24:46.882Z"
+  "updated_at": "2026-11-13T12:53:57.357Z"
 }
