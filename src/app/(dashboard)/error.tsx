@@ -11,10 +11,10 @@ import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
  */
 export default function DashboardError({
   error,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
-  unstable_retry: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[dashboard-error]", error);
@@ -37,7 +37,7 @@ export default function DashboardError({
           </p>
         )}
         <div className="mt-6 flex items-center justify-center gap-3">
-          <Button onClick={() => unstable_retry()}>Try again</Button>
+          <Button onClick={() => retry()}>Try again</Button>
           <Link href={ROLE_HOME_ROUTE}>
             <Button variant="ghost">Go to your home page</Button>
           </Link>

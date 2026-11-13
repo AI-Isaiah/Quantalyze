@@ -41,7 +41,7 @@ describe("[OBSERV-04] src/app/error.tsx Sentry capture with correlation_id tag",
     document.head.appendChild(meta);
     const err = Object.assign(new globalThis.Error("boom"), { digest: "d-1" });
     await act(async () => {
-      render(<Error error={err} unstable_retry={vi.fn()} />);
+      render(<Error error={err} retry={vi.fn()} />);
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -54,7 +54,7 @@ describe("[OBSERV-04] src/app/error.tsx Sentry capture with correlation_id tag",
   it("captures with correlation_id null when meta absent", async () => {
     const err = Object.assign(new globalThis.Error("boom"), { digest: "d-2" });
     await act(async () => {
-      render(<Error error={err} unstable_retry={vi.fn()} />);
+      render(<Error error={err} retry={vi.fn()} />);
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -69,7 +69,7 @@ describe("[OBSERV-04] src/app/error.tsx Sentry capture with correlation_id tag",
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const err = Object.assign(new globalThis.Error("boom"), { digest: "d-3" });
     expect(() => {
-      render(<Error error={err} unstable_retry={vi.fn()} />);
+      render(<Error error={err} retry={vi.fn()} />);
     }).not.toThrow();
     await act(async () => {
       await Promise.resolve();
@@ -84,7 +84,7 @@ describe("[OBSERV-04] src/app/error.tsx Sentry capture with correlation_id tag",
   it("escape link goes to Discovery, never back into /home, Try again stays first", async () => {
     const err = Object.assign(new globalThis.Error("boom"), { digest: "d-4" });
     const { getAllByRole, getByRole } = render(
-      <Error error={err} unstable_retry={vi.fn()} />,
+      <Error error={err} retry={vi.fn()} />,
     );
     await act(async () => {
       await Promise.resolve();

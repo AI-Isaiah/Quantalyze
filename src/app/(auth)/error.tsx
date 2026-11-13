@@ -10,10 +10,10 @@ import { Button } from "@/components/ui/Button";
  */
 export default function AuthError({
   error,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
-  unstable_retry: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[auth-error]", error);
@@ -30,7 +30,7 @@ export default function AuthError({
           Something went wrong. Please try again.
         </p>
         <div className="mt-6 flex items-center justify-center gap-3">
-          <Button onClick={() => unstable_retry()}>Try again</Button>
+          <Button onClick={() => retry()}>Try again</Button>
           <Link href="/login">
             <Button variant="ghost">Back to login</Button>
           </Link>

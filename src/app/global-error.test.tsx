@@ -36,7 +36,7 @@ describe("[OBSERV-04] src/app/global-error.tsx Sentry capture with correlation_i
     document.head.appendChild(meta);
     const err = Object.assign(new globalThis.Error("boom"), { digest: "g-1" });
     await act(async () => {
-      render(<GlobalError error={err} unstable_retry={vi.fn()} />);
+      render(<GlobalError error={err} retry={vi.fn()} />);
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -49,7 +49,7 @@ describe("[OBSERV-04] src/app/global-error.tsx Sentry capture with correlation_i
   it("captures with correlation_id null when meta absent", async () => {
     const err = Object.assign(new globalThis.Error("boom"), { digest: "g-2" });
     await act(async () => {
-      render(<GlobalError error={err} unstable_retry={vi.fn()} />);
+      render(<GlobalError error={err} retry={vi.fn()} />);
       await Promise.resolve();
       await Promise.resolve();
     });
