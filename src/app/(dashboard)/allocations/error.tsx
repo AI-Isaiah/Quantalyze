@@ -12,7 +12,7 @@ import { DISCOVERY_LANDING_ROUTE } from "@/lib/routing/default-route";
  * working retry — without losing the dashboard chrome above it.
  *
  * Mirrors the `(dashboard)/error.tsx` shape verbatim:
- *   - `unstable_retry` (Next 16.2.0 — NOT the legacy `reset`); re-fetches and
+ *   - `retry` (NOT `reset`); re-fetches and
  *     re-renders the segment's children on click.
  *   - **digest-only** — renders `error.digest` (the server-log correlation id)
  *     but NEVER the raw error text. Next strips RSC error messages in production
@@ -22,10 +22,10 @@ import { DISCOVERY_LANDING_ROUTE } from "@/lib/routing/default-route";
  */
 export default function AllocationsError({
   error,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
-  unstable_retry: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[allocations-error]", error);
@@ -48,7 +48,7 @@ export default function AllocationsError({
           </p>
         )}
         <div className="mt-6 flex items-center justify-center gap-3">
-          <Button onClick={() => unstable_retry()}>Try again</Button>
+          <Button onClick={() => retry()}>Try again</Button>
           {/* Leaves the failing surface: the role home would redirect back into it (199 WR-01). */}
           <Link href={DISCOVERY_LANDING_ROUTE}>
             <Button variant="ghost">Go to Discovery</Button>

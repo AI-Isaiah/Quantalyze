@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/Button";
  * sibling catches a throw from the list page's server-fetch.
  *
  * Same boundary CONTRACT as the canonical `(dashboard)/error.tsx` (client
- * component, `unstable_retry` — Next 16.2.0, NOT `reset` — digest-ONLY), but
+ * component, `retry` — NOT `reset` — digest-ONLY), but
  * using the Phase 53 type-tiers (`text-h2`/`text-small`/`text-caption`) where
  * the canonical still uses raw `text-2xl`/`text-sm`/`text-xs`. Never renders the
  * thrown message text: for a Server-Component throw that text is the original
@@ -20,10 +20,10 @@ import { Button } from "@/components/ui/Button";
  */
 export default function StrategiesError({
   error,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
-  unstable_retry: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[strategies-error]", error);
@@ -46,7 +46,7 @@ export default function StrategiesError({
           </p>
         )}
         <div className="mt-6 flex items-center justify-center gap-3">
-          <Button onClick={() => unstable_retry()}>Try again</Button>
+          <Button onClick={() => retry()}>Try again</Button>
           {/* Leaves the failing surface for a page every approved role can open. The role home redirects back into /strategies, and Discovery is allocator-only: requireRolePage bounces a manager straight back here (199 WR-01-R2). */}
           <Link href="/profile">
             <Button variant="ghost">Go to your profile</Button>
