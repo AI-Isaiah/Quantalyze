@@ -8,7 +8,7 @@ import { DISCOVERY_LANDING_ROUTE } from "@/lib/routing/default-route";
 /**
  * Route-level error boundary for the WHOLE /admin subtree (STATE-05 / ASVS V7 /
  * T-53-09). Same boundary CONTRACT as the canonical `(dashboard)/error.tsx`
- * (client component, `unstable_retry` — Next 16.2.0, NOT `reset` — digest-ONLY),
+ * (client component, `retry` — NOT `reset` — digest-ONLY),
  * but using the Phase 53 design type-tiers (`text-h2`/`text-small`/`text-caption`)
  * where the canonical still uses raw `text-2xl`/`text-sm`/`text-xs`.
  *
@@ -22,10 +22,10 @@ import { DISCOVERY_LANDING_ROUTE } from "@/lib/routing/default-route";
  */
 export default function AdminError({
   error,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
-  unstable_retry: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[admin-error]", error);
@@ -48,7 +48,7 @@ export default function AdminError({
           </p>
         )}
         <div className="mt-6 flex items-center justify-center gap-3">
-          <Button onClick={() => unstable_retry()}>Try again</Button>
+          <Button onClick={() => retry()}>Try again</Button>
           {/* Leaves the failing surface: the role home would redirect back into it (199 WR-01). */}
           <Link href={DISCOVERY_LANDING_ROUTE}>
             <Button variant="ghost">Go to Discovery</Button>

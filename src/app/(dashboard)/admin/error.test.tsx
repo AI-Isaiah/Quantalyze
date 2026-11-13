@@ -8,7 +8,7 @@
  *
  * Tests:
  *  1. heading + body copy render
- *  2. "Try again" invokes unstable_retry() exactly once
+ *  2. "Try again" invokes retry() exactly once
  *  3. digest renders only when present
  *  4. the thrown error.message is NEVER rendered (info-leak guard)
  *  5. console.error fires with the per-surface tag on mount
@@ -34,7 +34,7 @@ afterEach(() => cleanup());
 describe("(dashboard)/admin/error.tsx — digest-only boundary", () => {
   it("renders heading + body copy", () => {
     const err = Object.assign(new Error("boom"), { digest: "d-1" });
-    render(<AdminError error={err} unstable_retry={vi.fn()} />);
+    render(<AdminError error={err} retry={vi.fn()} />);
     expect(
       screen.getByRole("heading", { name: /something went wrong/i }),
     ).toBeTruthy();
@@ -43,21 +43,21 @@ describe("(dashboard)/admin/error.tsx — digest-only boundary", () => {
     ).toBeTruthy();
   });
 
-  it("retry button invokes unstable_retry() exactly once", () => {
+  it("retry button invokes retry() exactly once", () => {
     const retry = vi.fn();
-    render(<AdminError error={new Error("boom")} unstable_retry={retry} />);
+    render(<AdminError error={new Error("boom")} retry={retry} />);
     fireEvent.click(screen.getByRole("button", { name: /try again/i }));
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
   it("renders the digest when present", () => {
     const err = Object.assign(new Error("boom"), { digest: "abc-123" });
-    render(<AdminError error={err} unstable_retry={vi.fn()} />);
+    render(<AdminError error={err} retry={vi.fn()} />);
     expect(screen.getByText(/error id: abc-123/i)).toBeTruthy();
   });
 
   it("omits the Error ID line when no digest exists", () => {
-    render(<AdminError error={new Error("boom")} unstable_retry={vi.fn()} />);
+    render(<AdminError error={new Error("boom")} retry={vi.fn()} />);
     expect(screen.queryByText(/error id:/i)).toBeNull();
   });
 
@@ -65,7 +65,7 @@ describe("(dashboard)/admin/error.tsx — digest-only boundary", () => {
     const secret = "DB connection string leaked at host db.internal:5432";
     const err = Object.assign(new Error(secret), { digest: "d-leak" });
     const { container } = render(
-      <AdminError error={err} unstable_retry={vi.fn()} />,
+      <AdminError error={err} retry={vi.fn()} />,
     );
     expect(container.textContent).not.toContain(secret);
     expect(screen.queryByText(secret)).toBeNull();
@@ -74,7 +74,7 @@ describe("(dashboard)/admin/error.tsx — digest-only boundary", () => {
   it("logs to console.error with the [admin-error] tag on mount", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const err = Object.assign(new Error("paint failed"), { digest: "d-5" });
-    render(<AdminError error={err} unstable_retry={vi.fn()} />);
+    render(<AdminError error={err} retry={vi.fn()} />);
     expect(spy).toHaveBeenCalledWith("[admin-error]", err);
     spy.mockRestore();
   });
@@ -82,7 +82,7 @@ describe("(dashboard)/admin/error.tsx — digest-only boundary", () => {
   // Phase 199 WR-01: /home redirects an admin back to /admin, the surface this
   // boundary caught, so the escape link leaves to Discovery; Try again stays first.
   it("escape link targets Discovery, never the role home that redirects back here", () => {
-    render(<AdminError error={new Error("boom")} unstable_retry={vi.fn()} />);
+    render(<AdminError error={new Error("boom")} retry={vi.fn()} />);
     const escape = screen.getByRole("link", { name: "Go to Discovery" });
     expect(escape.getAttribute("href")).toBe(DISCOVERY_LANDING_ROUTE);
     expect(escape.getAttribute("href")).not.toBe(ROLE_HOME_ROUTE);

@@ -11,10 +11,10 @@ import { DISCOVERY_LANDING_ROUTE } from "@/lib/routing/default-route";
  */
 export default function Error({
   error,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
-  unstable_retry: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[error-boundary]", error);
@@ -54,7 +54,7 @@ export default function Error({
           </p>
         )}
         <div className="mt-6 flex items-center justify-center gap-3">
-          <Button onClick={() => unstable_retry()}>Try again</Button>
+          <Button onClick={() => retry()}>Try again</Button>
           {/* Leaves the failing surface: the role home would redirect back into it (199 WR-01). */}
           <Link href={DISCOVERY_LANDING_ROUTE}>
             <Button variant="ghost">Go to Discovery</Button>

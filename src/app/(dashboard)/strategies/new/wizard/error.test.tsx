@@ -33,7 +33,7 @@ import WizardError from "./error";
 describe("wizard error.tsx — STATE-05 / T-53-01 boundary contract", () => {
   it("renders heading + body copy + a Try again CTA", () => {
     const err = Object.assign(new Error("server-prep boom"), { digest: "d-1" });
-    render(<WizardError error={err} unstable_retry={vi.fn()} />);
+    render(<WizardError error={err} retry={vi.fn()} />);
 
     expect(
       screen.getByRole("heading", { name: /something went wrong/i }),
@@ -43,10 +43,10 @@ describe("wizard error.tsx — STATE-05 / T-53-01 boundary contract", () => {
     ).toBeTruthy();
   });
 
-  it("Try again button invokes unstable_retry() once", async () => {
+  it("Try again button invokes retry() once", async () => {
     const retry = vi.fn();
     const err = Object.assign(new Error("boom"), { digest: "d-2" });
-    render(<WizardError error={err} unstable_retry={retry} />);
+    render(<WizardError error={err} retry={retry} />);
 
     await userEvent.click(screen.getByRole("button", { name: /try again/i }));
     expect(retry).toHaveBeenCalledTimes(1);
@@ -54,7 +54,7 @@ describe("wizard error.tsx — STATE-05 / T-53-01 boundary contract", () => {
 
   it("renders the digest as Error ID when present", () => {
     const err = Object.assign(new Error("boom"), { digest: "abc-123" });
-    render(<WizardError error={err} unstable_retry={vi.fn()} />);
+    render(<WizardError error={err} retry={vi.fn()} />);
 
     expect(screen.getByText(/error id: abc-123/i)).toBeTruthy();
   });
@@ -63,7 +63,7 @@ describe("wizard error.tsx — STATE-05 / T-53-01 boundary contract", () => {
     const secret = "INTERNAL-PG-ERROR-leaked-secret";
     const err = Object.assign(new Error(secret), { digest: "d-3" });
     const { container } = render(
-      <WizardError error={err} unstable_retry={vi.fn()} />,
+      <WizardError error={err} retry={vi.fn()} />,
     );
 
     expect(container.textContent).not.toContain(secret);
@@ -71,7 +71,7 @@ describe("wizard error.tsx — STATE-05 / T-53-01 boundary contract", () => {
 
   it("links the fallback to the strategies list", () => {
     const err = new Error("boom");
-    render(<WizardError error={err} unstable_retry={vi.fn()} />);
+    render(<WizardError error={err} retry={vi.fn()} />);
 
     const link = screen.getByTestId("next-link");
     expect(link.getAttribute("href")).toBe("/strategies");
@@ -80,7 +80,7 @@ describe("wizard error.tsx — STATE-05 / T-53-01 boundary contract", () => {
   it("logs to console.error with the [wizard-error] tag on mount", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const err = Object.assign(new Error("server-prep boom"), { digest: "d-4" });
-    render(<WizardError error={err} unstable_retry={vi.fn()} />);
+    render(<WizardError error={err} retry={vi.fn()} />);
     expect(spy).toHaveBeenCalledWith("[wizard-error]", err);
     spy.mockRestore();
   });

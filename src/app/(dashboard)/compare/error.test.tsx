@@ -4,7 +4,7 @@
  * The route's error boundary is a client component that renders when the
  * compare server component throws. These tests pin the STATE-01 / T-52-09
  * contract: it renders the heading + recovery copy, the retry button invokes
- * `unstable_retry`, the digest (not the message) is the only error detail
+ * `retry`, the digest (not the message) is the only error detail
  * surfaced, and the thrown error is logged on mount.
  *
  * Modeled on src/app/strategy/[id]/v2/error.test.tsx (route-file render test).
@@ -33,7 +33,7 @@ import { ROLE_HOME_ROUTE } from "@/lib/routing/default-route";
 describe("compare/error.tsx — STATE-01 boundary contract", () => {
   it("Test 1: renders the 'Something went wrong' heading + recovery body copy", () => {
     const err = Object.assign(new Error("boom"), { digest: "d-1" });
-    render(<CompareError error={err} unstable_retry={vi.fn()} />);
+    render(<CompareError error={err} retry={vi.fn()} />);
 
     expect(
       screen.getByRole("heading", { name: /Something went wrong/i }),
@@ -43,10 +43,10 @@ describe("compare/error.tsx — STATE-01 boundary contract", () => {
     ).toBeTruthy();
   });
 
-  it("Test 2: the 'Try again' button invokes unstable_retry()", () => {
+  it("Test 2: the 'Try again' button invokes retry()", () => {
     const retry = vi.fn();
     const err = Object.assign(new Error("boom"), { digest: "d-2" });
-    render(<CompareError error={err} unstable_retry={retry} />);
+    render(<CompareError error={err} retry={retry} />);
 
     fireEvent.click(screen.getByRole("button", { name: /Try again/ }));
     expect(retry).toHaveBeenCalledTimes(1);
@@ -56,7 +56,7 @@ describe("compare/error.tsx — STATE-01 boundary contract", () => {
     const err = Object.assign(new Error("SENSITIVE-server-stack-detail"), {
       digest: "d-3",
     });
-    render(<CompareError error={err} unstable_retry={vi.fn()} />);
+    render(<CompareError error={err} retry={vi.fn()} />);
 
     // The digest is surfaced as the only diagnostic …
     expect(screen.getByText(/Error ID: d-3/)).toBeTruthy();
@@ -68,14 +68,14 @@ describe("compare/error.tsx — STATE-01 boundary contract", () => {
 
   it("Test 4: no digest → no Error ID line (digest-only, gracefully absent)", () => {
     const err = new Error("boom"); // no digest
-    render(<CompareError error={err} unstable_retry={vi.fn()} />);
+    render(<CompareError error={err} retry={vi.fn()} />);
     expect(screen.queryByText(/Error ID:/)).toBeNull();
   });
 
   it("Test 5: console.error fires with the [compare-error] tag + the thrown error on mount", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const err = Object.assign(new Error("paint failed"), { digest: "d-5" });
-    render(<CompareError error={err} unstable_retry={vi.fn()} />);
+    render(<CompareError error={err} retry={vi.fn()} />);
 
     expect(errSpy).toHaveBeenCalledWith("[compare-error]", err);
     errSpy.mockRestore();
@@ -84,7 +84,7 @@ describe("compare/error.tsx — STATE-01 boundary contract", () => {
   // Phase 199 CD-01 / UI-SPEC: the home link reaches the one role-home route
   // under the one label; Try again stays first.
   it("home link targets the role-home route with the shared label", () => {
-    render(<CompareError error={new Error("boom")} unstable_retry={vi.fn()} />);
+    render(<CompareError error={new Error("boom")} retry={vi.fn()} />);
     const home = screen.getByRole("link", { name: "Go to your home page" });
     expect(home.getAttribute("href")).toBe(ROLE_HOME_ROUTE);
     expect(screen.getAllByRole("button")[0].textContent).toBe("Try again");

@@ -34,7 +34,7 @@ describe("[M-0021] src/app/(auth)/error.tsx — root-only Sentry contract", () =
       digest: "auth-d-1",
     });
     await act(async () => {
-      render(<AuthError error={err} unstable_retry={vi.fn()} />);
+      render(<AuthError error={err} retry={vi.fn()} />);
       await Promise.resolve();
     });
     expect(errSpy).toHaveBeenCalledWith("[auth-error]", err);
@@ -47,7 +47,7 @@ describe("[M-0021] src/app/(auth)/error.tsx — root-only Sentry contract", () =
       digest: "auth-d-2",
     });
     await act(async () => {
-      render(<AuthError error={err} unstable_retry={vi.fn()} />);
+      render(<AuthError error={err} retry={vi.fn()} />);
       // Flush any microtasks a Sentry lazy-import would have scheduled.
       await Promise.resolve();
       await Promise.resolve();
@@ -62,7 +62,7 @@ describe("[M-0021] src/app/(auth)/error.tsx — root-only Sentry contract", () =
       digest: "auth-d-3",
     });
     expect(() => {
-      render(<AuthError error={err} unstable_retry={vi.fn()} />);
+      render(<AuthError error={err} retry={vi.fn()} />);
     }).not.toThrow();
     errSpy.mockRestore();
   });
