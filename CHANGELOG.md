@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.133.39.1] - 2026-11-13 — records: close 201.1 POLISHRESIDUALS and milestone v1.21 UX
+
+Records PR. It closes Phase 201.1 (shipped as PR #1256, v0.133.39.0) and milestone v1.21 "UX — trustworthy, navigable, lean". Eleven commits on `records/close-201.1`, no source change. The v1.21 audit reads `tech_debt`: 32/32 requirements, 18/18 phases verified `passed`, 10/10 integration seams and 3/3 flows, with the debt carried by owner.
+
+### Added
+- **Phase 201.1 planning artifacts on `main`.** Plans, summaries, review, verification (7/7) and security (verified), which lived only on the phase branch until now. The phase is marked closed in ROADMAP and STATE.
+- **The v1.21 milestone audit** (`.planning/milestones/v1.21-MILESTONE-AUDIT.md`). It cross-references all 32 requirements against traceability, each phase's VERIFICATION and SUMMARY frontmatter. Two rows needed more than the first match: TRUST-05, whose OG card was deferred to 194.1 and gated there, and RESID-02, partial in 202 under D-17 and closed by 203. A static cross-phase check (`gsd-integration-checker`, no browser run, no database) found no blocker and four low warnings (INT-W1 to INT-W4). Nyquist: all 18 VALIDATION files are `draft`, which is discovery only. One debt line was dropped after it was measured false: the 201.1 UI-SPEC premises it named were already corrected. A second pass matched the close records to their sources: Decks is hidden, not gone (LEAN-03), and 72 of the 1214 values from 188 stay named unexplained (RESID-01).
+- **TODOS `201.1-COMPOSER-RANGE-AS-DATES`** under FIX MID-TERM, with an owner, a trigger and the founder's decision quoted (see Notes).
+- **Upstream draft, item 8 of `.planning/research/gsd-tools-upstream-bugs.md`.** `audit-open` should ignore `.planning/milestones/*`, or read archived reports leniently. Drafted, not filed.
+
+### Changed
+- **v1.21 is archived.** `.planning/milestones/v1.21-ROADMAP.md`, `v1.21-REQUIREMENTS.md` and `v1.21-MILESTONE-AUDIT.md` are written. The 18 phase directories moved to `.planning/milestones/v1.21-phases/`, leaving `.planning/phases/` with only its `.gitkeep`, so `verify-plan-anchors --pending` reads measured-zero. `.planning/REQUIREMENTS.md` is removed for the next milestone.
+- **ROADMAP collapsed** to the milestone index with a v1.21 summary block. **MILESTONES.md** has a curated v1.21 entry. **PROJECT.md** got its full evolution review: v1.21 requirements moved to Validated, eight v1.21 decisions added to Key Decisions, the 188 D-13 row resolved. **RETROSPECTIVE.md** has a v1.21 section. **STATE.md** reads "Milestone v1.21 complete" with one field per line in Current Position.
+- **No test, script or workflow needed repointing.** Unlike the v1.20 close (#1208), nothing outside `.planning` names a v1.21 phase path or `.planning/REQUIREMENTS.md`. The 27 vitest files that read `.planning` pass locally (1442 passed, 14 skipped: the env-gated anon live probe). `classify-changed-paths --self-test` is 25/25, and `npm run lint` (planning hygiene rules 6d, 6e and 7) and `npm run typecheck` are clean.
+
+### Notes
+- **The pre-close artifact check was skipped by founder decision (2026-11-13, "Skip check, record it").** `/gsd-complete-milestone` starts with `gsd-tools query audit-open`, which refused with: `Verification report ".planning/milestones/v1.17-phases/153-wizform-form-errors-belong-on-the-form-mt5-declarable/153-VERIFICATION.md" has status "failed", which is outside the closed set — accepted values: passed | gaps_found | human_needed.`
+  - The check scans archived milestones. Seven archived reports predate its closed set: `resolved` x5, `verified` x1 and `failed` x1.
+  - Rewriting them would rewrite historical verdicts, so they were not edited. Every v1.21 phase was checked directly instead.
+  - The skip is recorded in the audit, MILESTONES.md and PROJECT.md.
+- **Composer range, decided (founder 2026-11-13, "Book a fix").** The composer will save its selected range as dates, so presets like 12M always end on the latest day. The "kept when the series grows" contract is re-pinned to mean the same dates are kept. This is next-milestone work and did not block the close.
+- **Recorded rather than fixed, carried in the audit:**
+  - 201.1's 320px KpiStrip overflow (`deferred-items-201.1-14.md`).
+  - 201.1 LOW items: other "→" ranges in StressWindowsPanel, BatchDPanels and SyncPreviewStep; raw ISO dates in gap `<title>`s; a stale ScenarioFooter comment.
+  - The 202 kit residuals, 199 WR-01-R3 and SFH-R2-02, 198's two warnings, 197's three TODOS ids, and the locally flaky `skew` snapshot.
+  - `.planning/WINDOWS.md` carries **52 open entries**, recorded, not resolved.
+- Deliberate deviations from the generic close workflow, per the brief: no git tag is created, and branches are kept (`branching_strategy` is `none`). The next milestone is not started.
+
 ## [0.133.39.0] - 2026-11-13 — POLISHRESIDUALS: the residual UI defects from the 200/201 UAT are fixed
 
 Phase 201.1. The seven residual defects the 2026-11-12 UAT routed out of Phases 200 and 201 are fixed: a failed key row keeps a readable label, no ISO date is left in the composer timeline or the compare chart, the composer uses one range separator, a date never breaks before its year, the correlation matrix prints "My allocation" whole, the composer sticky bar keeps its sentence on one line at 390px, and the composer no longer opens on a one-day range. 16 plans in 4 waves, one review fixer round (re-review clean). 39 code commits on `feat/201.1-polishresiduals` ship as one filtered commit.
