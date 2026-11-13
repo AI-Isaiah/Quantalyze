@@ -2,13 +2,12 @@
 gsd_state_version: "1.0"
 milestone: v1.21
 milestone_name: UX — trustworthy, navigable, lean
-current_phase: "201.1"
-status: completed
-stopped_at: Phase 201.1 complete — all phases complete
-last_updated: "2026-11-12T22:24:46.853Z"
+status: Awaiting next milestone
+stopped_at: v1.21 archived; next milestone not started (/gsd-new-milestone)
+last_updated: "2026-11-13T12:09:08.643Z"
 last_activity: 2026-11-13
-last_activity_desc: Phase 201.1 complete
-state_head: b7326d9901480a9697cbb6b64447046876f8fb8a
+last_activity_desc: Milestone v1.21 completed and archived
+state_head: 9d40e7fd72a8ca23e6701ace323f4996cb6d6f50
 progress:
   total_phases: 18
   completed_phases: 18
@@ -175,17 +174,17 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 201.1
-Plan: 16 of 16
-Status: All phases complete
-Last activity: 2026-11-13 — Phase 201.1 complete
-Progress: [██████████] 100% (18 of 18 phases)
+Phase: Milestone v1.21 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-11-13 — Milestone v1.21 completed and archived
+Progress: [██████████] 100%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
 ## Current Focus
 
-**Next: `/gsd-plan-phase 192` (v1.21 PUBLICTRUTH).** The v1.21 roadmap was written 2026-11-06: 11 phases, 192–202; order and dependencies are in ROADMAP.md § Current Milestone. 202 RESIDCHURN is a parallel track that starts now. v1.20 closed 2026-11-06; archive in `.planning/milestones/v1.20-*`. The v1.17 sequencing below is lineage.
+**Next: `/gsd-new-milestone`.** v1.21 UX closed 2026-11-13 (audit `tech_debt`, 32/32); archive in `.planning/milestones/v1.21-*`. The next milestone carries the composer range-as-dates fix (`TODOS.md` `201.1-COMPOSER-RANGE-AS-DATES`) and TERMS-01/02. v1.20 closed 2026-11-06; archive in `.planning/milestones/v1.20-*`. The v1.17 sequencing below is lineage.
 
 **Next: `/gsd:plan-phase 147`.** v1.17 phase order 147 → 148 → 149 → 150 → 151 → 152 → 153 → 154 → 155.
 Load-bearing sequencing (real dependencies, do not reorder):
@@ -2038,5 +2037,4 @@ and by name if the `VAC04-ZERO-PATH-FAILS-CLOSED` marker is deleted.
 
 ## Operator Next Steps
 
-- Plan 192 PUBLICTRUTH with /gsd-plan-phase 192
-- Start 202 RESIDCHURN in parallel: book its capture window around the next deploy-free 00:40Z nightly
+- Start the next milestone with /gsd-new-milestone
