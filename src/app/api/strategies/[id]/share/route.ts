@@ -143,15 +143,14 @@ type CreateShareRow = {
 };
 
 /**
- * The cast-through-unknown pattern (csv-finalize / scenario-share precedent):
+ * The cast-through-unknown pattern (csv-finalize precedent):
  * `database.types.ts` has NOT been regenerated for `create_strategy_share`, so a
  * typed `.rpc()` literal would fail compilation. Delete this when the types
  * regeneration lands.
  *
  * ⭐ THE CAST IS ON THE CLIENT, NOT ON `.rpc` ITSELF, AND THAT IS DELIBERATE.
- * The scenario route casts the METHOD —
- * `(supabase.rpc as unknown as …)("create_scenario_share", …)` — which leaves no
- * literal `.rpc("create_scenario_share"` in the source, and
+ * A method cast, the kind csv-finalize still uses for
+ * `finalize_csv_strategy_with_returns`, leaves no literal call in the source, and
  * `src/__tests__/audit-coverage.test.ts` anchors its mutating-RPC detector on
  * exactly that literal (`MUTATING_RPC_RE`). `create_strategy_share` IS listed in
  * that file's `MUTATING_RPC_NAMES`, and the listing is what is supposed to bring

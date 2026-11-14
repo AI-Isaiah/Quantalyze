@@ -8,6 +8,7 @@ import {
   SEAM_PRESERVE_TOKENS,
   SEAM_SECRET_ENV_NAMES,
   scrubSeamError,
+  scrubSeamErrorForCapture,
   scrubSeamString,
 } from "./seam-redaction";
 
@@ -501,6 +502,56 @@ describe("[SEAMCORE-06] scrubSeamError covers the shapes undici and the core pro
   });
 });
 
+describe("[209 SC1] scrubSeamErrorForCapture is the Sentry-path renderer", () => {
+  // Hand-typed on purpose: a literal read out of the module cannot disagree with it.
+  const PLACEHOLDER = "[non-Error object withheld from the capture]";
+  const pg = {
+    code: "42501",
+    message: "permission denied",
+    details: "DETAILS-SENTINEL-row-values",
+    hint: "HINT-SENTINEL-row-values",
+  };
+
+  it("renders the same PostgREST-shaped object with details in log mode and without them in capture mode", () => {
+    // D-03: the seam log path keeps the operator-facing fields.
+    expect(scrubSeamError(pg)).toContain("DETAILS-SENTINEL");
+    expect(scrubSeamError(pg)).toContain("HINT-SENTINEL");
+    const captured = scrubSeamErrorForCapture(pg);
+    expect(captured).not.toContain("DETAILS-SENTINEL");
+    expect(captured).not.toContain("HINT-SENTINEL");
+    expect(captured).toContain("code=42501 message=");
+  });
+
+  it("renders an object with no allowlisted field as a serialisation in log mode and as the placeholder in capture mode", () => {
+    const opaque = { status: 503, row: { email: "row-value@example.test" } };
+    expect(scrubSeamError(opaque)).toContain("row-value@example.test");
+    expect(scrubSeamErrorForCapture(opaque)).toBe(PLACEHOLDER);
+  });
+
+  it("keeps capture mode through an Error -> Error -> plain-object chain", () => {
+    // A direct pin on the recursion flag: without it the nested cause renders in
+    // log mode and the sentinel leaks.
+    const chain = new Error("outer", { cause: new Error("inner", { cause: pg }) });
+    const rendered = scrubSeamErrorForCapture(chain);
+    expect(rendered).not.toContain("DETAILS-SENTINEL");
+    expect(rendered).not.toContain("HINT-SENTINEL");
+    expect(rendered).toContain("code=42501");
+  });
+
+  it("is total: it returns a string and never throws for any thrown shape", () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const hostileToString = {
+      toString(): string {
+        throw new Error("hostile toString");
+      },
+    };
+    for (const input of [undefined, null, circular, hostileToString]) {
+      expect(typeof scrubSeamErrorForCapture(input)).toBe("string");
+    }
+  });
+});
+
 describe("[SEAMCORE-06 / SC6-a] seam-redaction.ts is a dependency-free leaf", () => {
   const LEAF_PATH = "src/lib/seam-redaction.ts";
 
@@ -632,6 +683,9 @@ describe("[SEAMCORE-06 / SC6-a] seam-redaction.ts is a dependency-free leaf", ()
         "SEAM_PRESERVE_TOKENS",
         "SEAM_SECRET_ENV_NAMES",
         "scrubSeamError",
+        // Phase 209 SC1: the Sentry path needs its own renderer, because D-03
+        // forbids narrowing the shared log renderer. This census moves on purpose.
+        "scrubSeamErrorForCapture",
         "scrubSeamString",
       ].sort(),
     );

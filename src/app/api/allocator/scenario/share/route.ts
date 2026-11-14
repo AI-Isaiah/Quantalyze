@@ -228,17 +228,8 @@ export const POST = withAllocatorAuth(
     // created_by can never reach the row (T-25-08), and the RLS WITH CHECK
     // (created_by = auth.uid() AND the caller owns the scenario, CR-01) is the
     // DB-level backstop.
-    // The cast-through-unknown pattern (csv-finalize/route.ts precedent):
-    // `database.types.ts` has NOT been regenerated for create_scenario_share
-    // (the migration is unshipped), so a typed `.rpc()` call would fail
-    // compilation. Centralise the cast here; delete it when the types
-    // regeneration lands. The RPC returns the new share row id (UUID) as `data`.
-    const { data: shareId, error } = await (
-      supabase.rpc as unknown as (
-        fn: "create_scenario_share",
-        args: { p_scenario_id: string; p_token_hash: string },
-      ) => Promise<{ data: string | null; error: { code?: string; message?: string } | null }>
-    )("create_scenario_share", {
+    // The RPC returns the new share row id (UUID) as `data`.
+    const { data: shareId, error } = await supabase.rpc("create_scenario_share", {
       p_scenario_id: scenarioId,
       p_token_hash: hash,
     });

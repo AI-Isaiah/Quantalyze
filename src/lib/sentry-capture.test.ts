@@ -393,3 +393,140 @@ describe("[SEAMRIM-04] captureToSentry returns its import chain", () => {
     );
   });
 });
+
+/**
+ * Phase 209 / SC1 (TODOS 204-SENTRY-RAW-SUPABASE-ERRORS) — the Sentry path never
+ * forwards a PostgREST error's `details` or `hint`.
+ *
+ * WHY. A non-throwing PostgREST error is a plain object whose `details` is a
+ * failing-row dump and whose `hint` can echo values. Sentry is a third party, so
+ * those values must not leave the app through `captureToSentry`. The seam LOG
+ * path still renders both fields (D-03); only this capture path drops them.
+ *
+ * THE ORACLE. `dispatchedText` joins name + message + stack for an Error and
+ * `String()` for anything else, then appends the dispatched options. It never
+ * uses `JSON.stringify` on an Error: that serialises to `{}` and can never fail.
+ * Every positive control is asserted too, because over-redaction is the same
+ * TRAP-1 failure as under-redaction (see the header).
+ */
+const DETAILS_SENTINEL = "DETAILS-SENTINEL-row-values";
+const HINT_SENTINEL = "HINT-SENTINEL-row-values";
+
+function dispatchedText(captured: (typeof capturedExceptions)[number]): string {
+  const payload = captured.err;
+  const body =
+    payload instanceof Error
+      ? [payload.name, payload.message, payload.stack ?? ""].join("\n")
+      : String(payload);
+  return `${body}\n${JSON.stringify(captured.options)}`;
+}
+
+describe("[209 SC1] captureToSentry never forwards PostgREST details or hint", () => {
+  const CAPTURE_OPTIONS = { tags: { route: "api/test" }, extra: { note: "x" } };
+
+  it("drops details and hint from a plain-object PostgREST error and keeps code and message", async () => {
+    captureToSentry(
+      {
+        code: "42501",
+        message: "permission denied",
+        details: DETAILS_SENTINEL,
+        hint: HINT_SENTINEL,
+      },
+      CAPTURE_OPTIONS,
+    );
+
+    const captured = await nextCapture();
+    const text = dispatchedText(captured);
+    expect(text).not.toContain("DETAILS-SENTINEL");
+    expect(text).not.toContain("HINT-SENTINEL");
+    // Positive control: the diagnosis survives, in the same key=value shape.
+    expect(String(captured.err)).toContain("code=42501");
+    expect(String(captured.err)).toContain("message=permission denied");
+  });
+
+  it("drops details even when the object carries no code (the gate is non-Error object, not code)", async () => {
+    captureToSentry({ message: "m", details: DETAILS_SENTINEL }, CAPTURE_OPTIONS);
+
+    const captured = await nextCapture();
+    expect(dispatchedText(captured)).not.toContain("DETAILS-SENTINEL");
+    expect(String(captured.err)).toContain("message=m");
+  });
+
+  it("never reads the details field: a throwing getter on it still captures", async () => {
+    const hostile = {
+      code: "42501",
+      message: "permission denied",
+      get details(): string {
+        throw new Error("hostile details getter");
+      },
+    };
+
+    captureToSentry(hostile, CAPTURE_OPTIONS);
+
+    const captured = await nextCapture();
+    // A fail-safe placeholder here would mean the renderer READ the field.
+    expect(String(captured.err)).toContain("code=42501");
+  });
+
+  it("scrubs a plain-object cause folded into an Error, rendered as code and message only", async () => {
+    const pg = {
+      code: "42501",
+      message: "permission denied",
+      details: DETAILS_SENTINEL,
+      hint: HINT_SENTINEL,
+    };
+
+    captureToSentry(new Error("intro insert failed", { cause: pg }), CAPTURE_OPTIONS);
+
+    const captured = await nextCapture();
+    const text = dispatchedText(captured);
+    expect(text).not.toContain("DETAILS-SENTINEL");
+    expect(text).not.toContain("HINT-SENTINEL");
+    expect((captured.err as Error).message).toContain("[cause: code=42501");
+  });
+
+  it("scrubs a plain-object cause two Errors deep", async () => {
+    const pg = {
+      code: "42501",
+      message: "permission denied",
+      details: DETAILS_SENTINEL,
+      hint: HINT_SENTINEL,
+    };
+
+    captureToSentry(
+      new Error("outer", { cause: new Error("inner", { cause: pg }) }),
+      CAPTURE_OPTIONS,
+    );
+
+    const captured = await nextCapture();
+    const text = dispatchedText(captured);
+    expect(text).not.toContain("DETAILS-SENTINEL");
+    expect(text).not.toContain("HINT-SENTINEL");
+    expect((captured.err as Error).message).toContain("code=42501");
+  });
+
+  it.each([
+    ["a plain object with no allowlisted field", { status: 503, row: { email: "row-value@example.test" } }],
+    ["an array", ["row-value@example.test"]],
+    ["a URL whose query carries a value", new URL("https://example.test/?email=row-value@example.test")],
+  ])("renders %s as the fixed placeholder, never a serialisation", async (_label, input) => {
+    captureToSentry(input, CAPTURE_OPTIONS);
+
+    const captured = await nextCapture();
+    expect(String(captured.err)).toBe("[non-Error object withheld from the capture]");
+    expect(dispatchedText(captured)).not.toContain("row-value@example.test");
+  });
+
+  it("renders an opaque-object cause as the fixed placeholder inside the folded message", async () => {
+    captureToSentry(
+      new Error("wrapper", { cause: { status: 503, row: { email: "row-value@example.test" } } }),
+      CAPTURE_OPTIONS,
+    );
+
+    const captured = await nextCapture();
+    expect((captured.err as Error).message).toContain(
+      "[cause: [non-Error object withheld from the capture]]",
+    );
+    expect(dispatchedText(captured)).not.toContain("row-value@example.test");
+  });
+});

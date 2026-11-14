@@ -46,7 +46,8 @@
  */
 export const SHARE_ROUTE_PREFIX = "/factsheet-share";
 
-/** What every share-route segment collapses to. Mirrors the Next.js dynamic
+/** What every FACTSHEET share-route segment collapses to (the scenario lane
+ *  collapses to `/scenario-share/[token]`, built from the matched prefix). Mirrors the Next.js dynamic
  *  segment name so a scrubbed Sentry URL reads as the ROUTE it was, which is
  *  the diagnostic value we actually want to keep. */
 export const SHARE_PATH_PLACEHOLDER = `${SHARE_ROUTE_PREFIX}/[token]`;
@@ -72,10 +73,20 @@ export const SHARE_PATH_PLACEHOLDER = `${SHARE_ROUTE_PREFIX}/[token]`;
  * MORE than the token, never less — over-matching costs a trailing comma in a
  * log line, under-matching would leak the capability. The asymmetry decides it.
  *
+ * Phase 209 (review WR-04): `/scenario-share/<token>` is a SECOND capability lane
+ * (`src/proxy.ts` serves it publicly; the mint is
+ * `src/app/api/allocator/scenario/share/route.ts`), so it is scrubbed by the
+ * same rule, to its own `/scenario-share/[token]` placeholder. `isSharePath`
+ * below is the factsheet-lane predicate shared by the Plausible gate and the
+ * PostHog no-op and is deliberately NOT widened (that would also change
+ * PostHog behaviour); the scenario lane has its own `isScenarioSharePath`,
+ * which only the Plausible gate uses (WR-09).
+ *
  * Global: one string can carry the URL more than once (a Sentry event's
  * `request.url` and its `transaction` commonly both do).
  */
-const SHARE_PATH_RE = /\/factsheet-share\/[A-Za-z0-9._~%!$&'()*+,;=:@-]+/g;
+const SHARE_PATH_RE =
+  /\/(factsheet-share|scenario-share)\/[A-Za-z0-9._~%!$&'()*+,;=:@-]+/g;
 
 /**
  * Replace every share-route segment in `value` with the `[token]` placeholder.
@@ -85,7 +96,7 @@ const SHARE_PATH_RE = /\/factsheet-share\/[A-Za-z0-9._~%!$&'()*+,;=:@-]+/g;
  * corruption. Strings with no share path pass through byte-identical.
  */
 export function scrubSharePath(value: string): string {
-  return value.replace(SHARE_PATH_RE, SHARE_PATH_PLACEHOLDER);
+  return value.replace(SHARE_PATH_RE, "/$1/[token]");
 }
 
 /**
@@ -110,5 +121,21 @@ export function isSharePath(pathname: string): boolean {
   return (
     pathname === SHARE_ROUTE_PREFIX ||
     pathname.startsWith(`${SHARE_ROUTE_PREFIX}/`)
+  );
+}
+
+/**
+ * Is this pathname on the scenario recipient share lane (`/scenario-share/<token>`)?
+ *
+ * Phase 209 (review WR-09): Plausible posts `location.href` with every event, and
+ * on this lane the token is the pathname, so `PlausibleScript` withdraws the
+ * tracker here exactly as it does on the factsheet lane. Separate from
+ * `isSharePath` on purpose: `factsheet-analytics.ts` also consumes that one and
+ * its scenario-lane behaviour is not part of this finding. Same fail-closed
+ * shape (bare prefix counts) and the same PATHNAME-not-URL contract.
+ */
+export function isScenarioSharePath(pathname: string): boolean {
+  return (
+    pathname === "/scenario-share" || pathname.startsWith("/scenario-share/")
   );
 }

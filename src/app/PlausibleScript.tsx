@@ -3,7 +3,7 @@
 import Script from "next/script";
 import { usePathname } from "next/navigation";
 
-import { isSharePath } from "@/lib/scrub-share-path";
+import { isScenarioSharePath, isSharePath } from "@/lib/scrub-share-path";
 
 /**
  * Phase 164 / SHARE-01 — the site-wide Plausible tag, WITHDRAWN on the
@@ -84,7 +84,11 @@ export function PlausibleScript({ domain }: { domain: string }) {
   const pathname = usePathname();
   // Fail-closed on an unknown pathname: `usePathname` is typed non-null, but a
   // null here would otherwise sail through `isSharePath` and load the tracker.
-  if (!pathname || isSharePath(pathname)) return null;
+  // Both capability lanes (factsheet-share, scenario-share): the token is the
+  // pathname on each, and Plausible posts the pathname (WR-09).
+  if (!pathname || isSharePath(pathname) || isScenarioSharePath(pathname)) {
+    return null;
+  }
 
   return (
     <Script

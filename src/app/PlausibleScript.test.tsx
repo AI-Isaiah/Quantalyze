@@ -50,6 +50,9 @@ describe("[164 SHARE-01] Plausible is withdrawn on the share lane", () => {
     `/factsheet-share/${TOKEN}`,
     "/factsheet-share/gone",
     "/factsheet-share",
+    // WR-09: the scenario lane is a second capability lane (token = pathname).
+    `/scenario-share/${TOKEN}`,
+    "/scenario-share",
   ])("renders NO script element at all on %j", (pathname) => {
     pathnameMock.mockReturnValue(pathname);
 
@@ -74,8 +77,8 @@ describe("[164 SHARE-01] Plausible still loads everywhere else", () => {
     "/",
     "/browse",
     "/factsheet/44444444-4444-4444-8444-444444444444/v2",
-    "/scenario-share/abcdef",
     "/factsheet-shareholders",
+    "/scenario-shared/abc", // prefix-adjacent, must NOT be suppressed
   ])("emits the tracker script on %j", (pathname) => {
     pathnameMock.mockReturnValue(pathname);
 
