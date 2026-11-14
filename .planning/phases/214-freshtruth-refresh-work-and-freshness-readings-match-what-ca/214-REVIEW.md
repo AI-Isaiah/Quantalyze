@@ -317,3 +317,29 @@ _Depth: standard_
 - **SFH-F5 (LOW, recorded).** Retraction faults can now fail the enqueue for the two finalize routes. Both paths are loud: finalize-wizard throws, and csv-finalize logs and reports to Sentry.
 
 Fixer round 1 scope: WR-01, WR-02, SFH-F1, SFH-F3.
+
+## Fix round 1 (2026-11-14, gsd-code-fixer)
+
+Scope: WR-01, WR-02, SFH-F1, SFH-F3. Nothing else was touched. All proof ran on the throwaway pg-lane and the
+subset mutation runner (no FULL run: disk); the migration is unmerged and was edited in place. VAC-04's
+`prod-body-ack` line is byte-unchanged. Snapshot regenerated (`schema:functions:check`: current, 133 functions).
+
+| Finding | Commit | Evidence |
+|---|---|---|
+| WR-01 | `d684c4b58` | Arm NA5 (fixture: analytics status failed, series 20 days old, done compute and derive a day old; expects the 20-hour window, 1 job). Twin replaces the first `lrs.stale_reason = 'series_behind'` (occurrences 2, nth 1): `arm NA5  exit 3  RED (identity ok)`. |
+| SFH-F1 | `372d1439b` | Candidate cooldown signal and skip-count read both gain an `EXISTS` on a done `derive_broker_dailies` job created on or after `last_return_date + 5` (alias `cj4`). Arm NA6 (done compute tail only, no derive; expects 1 job). Twin points the first derive test at the compute kind: `arm NA6  exit 3  RED (identity ok)`. NA2's fixture gained the done derive its age twin needs (`arm NA2 ... RED (identity ok)`); NA4's twin occurrences 2 to 4 (`arm NA4 ... RED (identity ok)`). |
+| WR-02 | `608f7bf81` | Checks 8 and 12 search `substr(v_def, 1, <first unlock>)`. Scratch copies of the migration: with the candidate's lifecycle filter removed, or its seven-day branch swapped for 20 hours, the PRE-fix migration applied (the `Migration 20261114152300: ... re-based` NOTICE printed, the gate then failed later on an arm) and the fixed migration refuses at apply (`ERROR: P0001: Migration 20261114152300: ... no longer filters candidates on the strategy lifecycle column (looked for "AND s.status IN (" in the candidate query ...` and `... no longer carries the marks-paused attempt window in the candidate query ...`, lane exit 3). |
+| SFH-F3 | `188412c9e` | STEP 2 needle 15 (`EXCEPTION WHEN OTHERS`, searched after the skip needle). Scratch copy with the handler's condition changed: apply refuses (`... has no exception handler after it (looked for "EXCEPTION WHEN OTHERS")`). Arm SK4 (lane-only trigger refuses the skip row; tick returns 1, keeps the job, raises nothing, writes no skip row; lane log shows `skip-count write failed (SQLSTATE LRSK4)` once). Twin turns the handler's warning into a bare re-raise: `arm SK4  exit 3  RED (identity ok)`. |
+| census | `134beaca7` | Sentinel `ALL 41 ARMS EXECUTED` (3 occurrences, 38 to 41), ci.yml sql-tests row 38 to 41 and its `ARMS_FLOOR` 477 to 480, `scripts/mutation-floors.mjs` `ARMS_FLOOR` 864 to 867, annotation-parser `armsSeen` 867 / `stepsSeen` 984 / `needles.length` 984, floors fixtures and the gate-family-meta key. Neuter drill: ci.yml fan-out row set to 40 gave `ci.yml's derivation credits test_ledger_refresh_fanout.sql with 40 arms; the file declares 41`; restored from a byte backup, `cmp` clean. |
+
+Gate readings on the final tree:
+- Lane: `ALL 41 ARMS EXECUTED`, exit 0.
+- Subset mutation run over the fan-out gate: `arms: 47/47/0`, `biting: 47`, `lane-invocations: 47`, `file test_ledger_refresh_fanout.sql: sections 47 / judged 47 / annotated 47 / waived 0 / biting 47`, `No defects in the SUBSET`, exit 0.
+- `--parse-only`: `arms: 0/867/0`, `No static defects`.
+- All 44 edit-kind twins recounted against the migration's raw bytes: 0 mismatches.
+- Lints (sql-gates 7 rules, app-guc, migration-data-dependence 0 NEW): clean.
+- pytest `test_ledger_refresh_gates.py` + `test_sql_gate_scoped_updates.py`: 41 passed.
+- vitest (anti-skip contract 33, drift-check-scripts, annotation parser, runner floors, gate-family-meta, lint-sql-gates): all passed.
+
+Not done, by instruction: LOW/INFO items, SFH-F2/F4/F5. The census landed as one closing commit rather than per finding, so the
+four fix commits each leave only the census tests behind by their own arm count until `134beaca7`.
