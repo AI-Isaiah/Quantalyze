@@ -1465,16 +1465,15 @@ export async function getPopulatedCategorySlugs(): Promise<string[]> {
       .select("discovery_categories!inner(slug)"),
   );
 
-  // NEW-C03-06: split error vs empty so a transient DB failure is logged
-  // rather than silently appearing as "no published strategies anywhere",
-  // which renders the discovery navigation empty with no ops signal.
-  // captureToSentry ensures ops alerting fires even when no one is tailing
-  // Vercel logs (empty discovery nav would look like a data problem otherwise).
-  if (error) {
-    console.error("[queries.getPopulatedCategorySlugs] supabase error:", error.message ?? error);
-    captureToSentry(error, { tags: { op: "getPopulatedCategorySlugs" }, level: "error" });
-    return [];
-  }
+  // NEW-C03-06 / Phase 208 D-02: a read error is logged, captured to Sentry and
+  // THROWN through the shared `failAnonRead` contract, so `/browse` can tell an
+  // outage from an empty catalogue. Both callers already catch (the dashboard
+  // layout keeps its nav hint undefined; `getBrowseCategories` reports the error
+  // state). Two side effects: the Sentry tags now carry `code`, and the thrown
+  // message embeds `error.message` exactly as the three anonymous readers
+  // already do (scrubbing raw PostgREST detail at the capture boundary is
+  // Phase 209's scope).
+  if (error) failAnonRead("getPopulatedCategorySlugs", "published", error);
   if (!data) return [];
 
   const slugs = new Set<string>();

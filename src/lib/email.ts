@@ -1000,7 +1000,7 @@ export async function sendAlertDigest(
       </table>
       <p style="margin-top:24px;">
         <a href="${APP_URL}/allocations" style="color:${BRAND_COLOR};font-weight:500;">
-          View in dashboard →
+          Open your allocation →
         </a>
       </p>
       ${SIGNATURE}

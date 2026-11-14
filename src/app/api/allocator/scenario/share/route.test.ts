@@ -9,7 +9,9 @@
  *   T_SH2  Invalid body (missing / malformed scenario_id)                   → 400, limiter NOT called, no token minted
  *   T_SH3  Rate-limit denied                                               → 429 + Retry-After + Cache-Control
  *   T_SH4  Rate-limit misconfigured                                        → 503 + Retry-After + Cache-Control
- *   T_SH5  Success → 200, returns { url } built from NEXT_PUBLIC_APP_URL
+ *   T_SH5  Success → 200, returns { url } on the request origin, ahead of NEXT_PUBLIC_APP_URL (D-16)
+ *   T_SH5b With neither Origin nor Referer, the url is built on NEXT_PUBLIC_APP_URL
+ *   T_SH5c With neither header and no NEXT_PUBLIC_APP_URL, the localhost literal answers
  *   T_SH6  HASH-NOT-RAW: the create RPC's p_token_hash === hashShareToken(raw),
  *          and the raw token NEVER appears in the persisted payload
  *   T_SH7  created_by sourced from auth — never the body (the atomic RPC sets it
@@ -157,11 +159,16 @@ import { POST } from "./route";
 // ---------------------------------------------------------------------------
 
 const SCENARIO_ID = "11111111-1111-1111-1111-111111111111";
+/** A non-production deployment host, on the `.test` TLD so it can never be real. */
+const PREVIEW_ORIGIN = "https://quantalyze-preview-208.vercel.test";
 
-function mkPost(body: unknown) {
+/** `origin` of `null` sends no Origin header at all. */
+function mkPost(body: unknown, origin: string | null = "http://localhost") {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (origin !== null) headers.origin = origin;
   return new NextRequest(new URL("http://localhost/api/allocator/scenario/share"), {
     method: "POST",
-    headers: { "content-type": "application/json", origin: "http://localhost" },
+    headers,
     body: JSON.stringify(body),
   });
 }
@@ -216,15 +223,40 @@ describe("POST /api/allocator/scenario/share (Plan 25-03 SHARE-01)", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
-  it("T_SH5 — 200 success returns a { url } built from NEXT_PUBLIC_APP_URL", async () => {
-    const res = await POST(mkPost({ scenario_id: SCENARIO_ID }));
+  it("T_SH5 — 200 success returns a { url } on the request origin, ahead of NEXT_PUBLIC_APP_URL (D-16)", async () => {
+    // This arm pinned the env-first order until founder decision D-16
+    // (2026-11-14) reversed it: a preview deploy minted production-host links
+    // (TODOS SHARE-HOST-01). NEXT_PUBLIC_APP_URL is `share.example.com` here
+    // (beforeEach), so a request origin that differs from it tells the two
+    // orders apart. The wrapper is mocked, so `route.csrf-integration.test.ts`
+    // proves on the real chain that this origin was validated.
+    const res = await POST(mkPost({ scenario_id: SCENARIO_ID }, PREVIEW_ORIGIN));
     expect(res.status).toBe(200);
     const json = (await res.json()) as { url: string };
-    expect(json.url).toMatch(/^https:\/\/share\.example\.com\/scenario-share\/.+/);
+    expect(json.url).toMatch(
+      /^https:\/\/quantalyze-preview-208\.vercel\.test\/scenario-share\/.+/,
+    );
     // The ownership probe ran against `scenarios`; the mint went through the RPC.
     expect(fromSpy).toHaveBeenCalledWith("scenarios");
     expect(rpcSpy).toHaveBeenCalledWith("create_scenario_share", expect.any(Object));
     expect(checkLimitMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("T_SH5b — with neither Origin nor Referer, NEXT_PUBLIC_APP_URL is the next answer (D-16 env rung)", async () => {
+    // The wrapper is mocked, so a header-less request reaches the handler; the
+    // real gate would 403 it. That is the only way to reach this rung.
+    const res = await POST(mkPost({ scenario_id: SCENARIO_ID }, null));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { url: string };
+    expect(json.url.startsWith("https://share.example.com/scenario-share/")).toBe(true);
+  });
+
+  it("T_SH5c — with neither header and no NEXT_PUBLIC_APP_URL, the localhost literal answers (D-16 last rung)", async () => {
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    const res = await POST(mkPost({ scenario_id: SCENARIO_ID }, null));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { url: string };
+    expect(json.url.startsWith("http://localhost:3000/scenario-share/")).toBe(true);
   });
 
   it("T_SH6 — HASH-NOT-RAW: the create RPC's p_token_hash is hashShareToken(raw), the raw token is never persisted", async () => {

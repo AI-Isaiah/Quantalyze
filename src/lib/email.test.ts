@@ -543,10 +543,12 @@ describe("email.ts — notification_dispatches audit trail", () => {
   });
 
   // Phase 195 TRIM (D-01), 2026-11-07: the portfolios surface is retired, so the
-  // alert digest's "View in dashboard" link must land on My Allocation. A link to
-  // the retired route would send every alerted allocator through a redirect (and
-  // would silently rot if the redirect rule were ever dropped).
-  it("alert digest 'View in dashboard' link targets /allocations, not the retired portfolios route", async () => {
+  // alert digest's link must land on My Allocation, not the retired route.
+  // Phase 208 (founder decision D-01, 2026-11-14) keeps that target and drops the
+  // claim: /allocations shows only critical alerts, one at a time, and nothing on
+  // a phone, while the digest sends every severity, so a label promising the
+  // dashboard shows these alerts was untrue.
+  it("alert digest link reads 'Open your allocation →', targets /allocations and makes no dashboard claim (D-01)", async () => {
     vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.example.test");
     vi.resetModules();
     const { sendAlertDigest } = await import("./email");
@@ -563,7 +565,9 @@ describe("email.ts — notification_dispatches audit trail", () => {
     expect(state.sendCalls).toHaveLength(1);
     const html = state.sendCalls[0].html as string;
     expect(html).toContain('href="https://app.example.test/allocations"');
-    expect(html).toContain("View in dashboard →");
+    expect(html).toContain("Open your allocation →");
+    expect(html).not.toContain("View in dashboard");
+    expect(html).not.toMatch(/dashboard/i);
     expect(html).not.toContain("/portfolios");
   });
 

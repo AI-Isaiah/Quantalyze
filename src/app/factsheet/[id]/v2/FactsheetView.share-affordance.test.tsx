@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, fireEvent, waitFor } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
@@ -374,6 +374,36 @@ describe("T-164-15 — NO success flash for a link that cannot work", () => {
 
     await waitFor(() => expect(shareButton(container).textContent).toBe(LABEL_FAILED));
     expect(container.textContent).not.toContain(LABEL_COPIED);
+  });
+
+  it("D-08: a clipboard that NEVER settles ends in the failure label with the button enabled, not stuck working", async () => {
+    // The mint succeeds and the write hangs. Before the shared bounded helper
+    // the bare `await writeText` never returned and the button stayed disabled
+    // on its working label for good.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      fetchMock.mockResolvedValue(jsonResponse(200, { url: MINTED_URL }));
+      writeText = vi.fn(() => new Promise<void>(() => {}));
+      Object.defineProperty(navigator, "clipboard", {
+        value: { writeText },
+        configurable: true,
+      });
+      const { container } = renderBody({
+        ownerShare: { hasActiveShare: false },
+        viewerNotice: "owner_unpublished",
+      });
+
+      fireEvent.click(shareButton(container));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+
+      expect(shareButton(container).textContent).toBe(LABEL_FAILED);
+      expect(shareButton(container).disabled).toBe(false);
+      expect(container.textContent).not.toContain(LABEL_COPIED);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

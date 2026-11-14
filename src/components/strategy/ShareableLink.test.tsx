@@ -27,16 +27,26 @@
  * clipboard failure, and neither may reach the success badge.
  */
 
-import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from "vitest";
 import {
   act,
   fireEvent,
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
-import { ShareableLink } from "./ShareableLink";
+import { ShareableLink, ShareMintError } from "./ShareableLink";
 
 // Phase 164.6.6.3.1 D-05: the "Manage private link" Modal mounts the REAL
 // OwnerUnpublishedPanel (row and panel must share one state), which lives in
@@ -102,6 +112,16 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// `OwnerUnpublishedPanel` loads through `next/dynamic`, which in Next 16.4.2 is
+// a react-loadable singleton, so the first mount in this file pays the whole
+// `FactsheetView` import. Under CPU load that exceeded `findByRole`'s 1 s
+// default on CI (TODOS `170.6.2-SHAREABLELINK-D05-RED`). Warming it once at file
+// level covers every describe, including ones added later. Never raise a global
+// timeout instead (D-11).
+beforeAll(async () => {
+  await import("@/app/factsheet/[id]/v2/FactsheetView");
+}, 30_000);
+
 describe("ShareableLink — Audit #43 copyFailed regression", () => {
   it("writes the factsheet URL to navigator.clipboard and shows 'Link copied!' on success", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -147,13 +167,14 @@ describe("ShareableLink — Audit #43 copyFailed regression", () => {
     render(<ShareableLink strategyId={STRATEGY_ID} published />);
     fireEvent.click(screen.getByRole("button"));
 
-    await waitFor(() =>
-      expect(screen.getByRole("button").textContent).toMatch(
-        /Copy failed — copy the URL manually/,
-      ),
-    );
+    // Phase 208 (D-10): the published lane now opens a Public link dialog on
+    // this failure, so a bare `getByRole("button")` would see several buttons.
+    // Name the row button instead.
+    const row = await screen.findByRole("button", {
+      name: /Copy failed — copy the URL manually/,
+    });
     // Belt-and-suspenders: success copy must NOT be visible.
-    expect(screen.getByRole("button").textContent).not.toMatch(/Link copied!/);
+    expect(row.textContent).not.toMatch(/Link copied!/);
   });
 
   it("renders 'Copy failed' when clipboard rejects and execCommand throws", async () => {
@@ -167,11 +188,12 @@ describe("ShareableLink — Audit #43 copyFailed regression", () => {
     render(<ShareableLink strategyId={STRATEGY_ID} published />);
     fireEvent.click(screen.getByRole("button"));
 
-    await waitFor(() =>
-      expect(screen.getByRole("button").textContent).toMatch(
-        /Copy failed — copy the URL manually/,
-      ),
-    );
+    // Named query: the published lane's dialog adds its own buttons (D-10).
+    expect(
+      await screen.findByRole("button", {
+        name: /Copy failed — copy the URL manually/,
+      }),
+    ).toBeTruthy();
   });
 
   it("removes the temporary <input> from document.body after the execCommand fallback runs", async () => {
@@ -305,6 +327,197 @@ describe("ShareableLink — the share predicate (SHARE-04)", () => {
       ),
     );
     expect(writeText).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Phase 208 (SC-3, SC-4; D-05..D-07, D-13) — a share-mint failure is logged with
+ * the strategy id, says what actually happened, and is announced.
+ *
+ * WHY: every mint failure used to read "Couldn't create the link — try again",
+ * so a signed-out owner, or one who lost the strategy, retried for ever while
+ * the catch discarded the error and support saw nothing.
+ */
+describe("ShareableLink — share failures say what happened (Phase 208, D-05..D-07, D-13)", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let writeText: Mock<(s: string) => Promise<void>>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    writeText = vi.fn<(s: string) => Promise<void>>().mockResolvedValue(undefined);
+    setClipboard({ writeText });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function loggedErr(): unknown {
+    const call = warnSpy.mock.calls.find(
+      (c: unknown[]) => c[0] === "[ShareableLink] share mint failed",
+    );
+    expect(call, "the mint catch must log").toBeDefined();
+    return (call as unknown[])[1];
+  }
+
+  it("a 404 mint says the owner can't share here, logs { strategyId, err } with the status, and announces it", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
+
+    render(<ShareableLink strategyId={STRATEGY_ID} published={false} />);
+    fireEvent.click(screen.getByRole("button"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toContain(
+        "You can't share this strategy here",
+      ),
+    );
+    const text = screen.getByRole("button").textContent ?? "";
+    expect(text).not.toMatch(/Link copied!/);
+    expect(text).not.toMatch(/try again/i);
+    expect(text).not.toMatch(/retry/i);
+    expect(writeText).not.toHaveBeenCalled();
+
+    const logged = loggedErr() as { strategyId: string; err: unknown };
+    expect(logged.strategyId).toBe(STRATEGY_ID);
+    expect(logged.err).toBeInstanceOf(ShareMintError);
+    expect((logged.err as ShareMintError).status).toBe(404);
+    // The message carries a status only: the minted URL is a capability and
+    // this error is logged (T-208-06).
+    expect((logged.err as ShareMintError).message).toBe("share mint failed: 404");
+
+    expect(screen.getByRole("status").textContent).toBe(
+      "You can't share this strategy here",
+    );
+  });
+
+  const SIGNED_OUT = "Signed out — sign in again to share";
+  const FORBIDDEN = "You can't share this strategy here";
+  const TRY_AGAIN = "Couldn't create the link — try again";
+
+  async function clickAndSettle(): Promise<string> {
+    render(<ShareableLink strategyId={STRATEGY_ID} published={false} />);
+    fireEvent.click(screen.getByRole("button"));
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).not.toMatch(
+        /Get private link|Creating link/,
+      ),
+    );
+    return screen.getByRole("button").textContent ?? "";
+  }
+
+  it("a 401 mint reads signed out, never 'try again', and the region carries the same text", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 401, json: async () => ({}) });
+    const text = await clickAndSettle();
+    expect(text).toContain(SIGNED_OUT);
+    expect(text).not.toMatch(/try again/i);
+    expect(text).not.toMatch(/retry/i);
+    expect(screen.getByRole("status").textContent).toBe(SIGNED_OUT);
+    expect(((loggedErr() as { err: ShareMintError }).err).status).toBe(401);
+  });
+
+  it("D-13: a fetch redirected to /login (the proxy's answer to a signed-out POST) is a 401, not 'try again'", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      redirected: true,
+      url: "https://example.test/login",
+      json: async () => {
+        throw new Error("html");
+      },
+    });
+    const text = await clickAndSettle();
+    expect(text).toContain(SIGNED_OUT);
+    expect(text).not.toMatch(/try again/i);
+    const err = (loggedErr() as { err: ShareMintError }).err;
+    expect(err).toBeInstanceOf(ShareMintError);
+    expect(err.status).toBe(401);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("a redirect to a path other than /login is not read as signed out", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      redirected: true,
+      url: "https://example.test/elsewhere",
+      json: async () => {
+        throw new Error("html");
+      },
+    });
+    const text = await clickAndSettle();
+    expect(text).toContain(TRY_AGAIN);
+    expect(text).not.toContain(SIGNED_OUT);
+  });
+
+  it("a 403 mint reads the shared non-revealing string, never 'try again'", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 403, json: async () => ({}) });
+    const text = await clickAndSettle();
+    expect(text).toContain(FORBIDDEN);
+    expect(text).not.toMatch(/try again/i);
+    expect(text).not.toMatch(/retry/i);
+    expect(screen.getByRole("status").textContent).toBe(FORBIDDEN);
+  });
+
+  it.each([
+    ["a 500", { ok: false, status: 500, json: async () => ({}) }],
+    ["a 429", { ok: false, status: 429, json: async () => ({}) }],
+    ["a 503", { ok: false, status: 503, json: async () => ({}) }],
+    [
+      "a 200 whose body is unparseable",
+      {
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error("not json");
+        },
+      },
+    ],
+    ["a 200 with no url", { ok: true, status: 200, json: async () => ({}) }],
+    ["a rejected fetch", new TypeError("Failed to fetch")],
+  ])("%s keeps the retryable label, logs once and writes nothing to the clipboard", async (_name, outcome) => {
+    if (outcome instanceof Error) fetchMock.mockRejectedValue(outcome);
+    else fetchMock.mockResolvedValue(outcome);
+    const text = await clickAndSettle();
+    expect(text).toContain(TRY_AGAIN);
+    expect(screen.getByRole("status").textContent).toBe(TRY_AGAIN);
+    const logs = warnSpy.mock.calls.filter(
+      (c: unknown[]) => c[0] === "[ShareableLink] share mint failed",
+    );
+    expect(logs).toHaveLength(1);
+    expect((logs[0][1] as { strategyId: string }).strategyId).toBe(STRATEGY_ID);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("the row region announces the copy failure too (published lane, both clipboard paths refuse)", async () => {
+    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error("blocked")) });
+    setExecCommand(() => false);
+    render(<ShareableLink strategyId={STRATEGY_ID} published />);
+    fireEvent.click(screen.getByRole("button"));
+    const row = await screen.findByRole("button", {
+      name: /Copy failed — copy the URL manually/,
+    });
+    // The row's region is the row button's next sibling. Phase 208 (D-10): the
+    // published lane's dialog carries a status region of its own, so
+    // `getByRole("status")` would find two.
+    const region = row.nextElementSibling;
+    expect(region?.getAttribute("role")).toBe("status");
+    await waitFor(() =>
+      expect(region?.textContent).toBe("Copy failed — copy the URL manually"),
+    );
+  });
+
+  it("the region is mounted and empty before any click, and success is not announced", async () => {
+    render(<ShareableLink strategyId={STRATEGY_ID} published />);
+    expect(screen.getByRole("status").textContent).toBe("");
+    fireEvent.click(screen.getByRole("button"));
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(/Link copied!/),
+    );
+    expect(screen.getByRole("status").textContent).toBe("");
   });
 });
 
@@ -445,15 +658,6 @@ describe("ShareableLink — Manage private link (164.6.6.3.1 D-05)", () => {
 
   let fetchMock: ReturnType<typeof vi.fn>;
 
-  // The Modal mounts OwnerUnpublishedPanel through `next/dynamic`, so the first
-  // test to open it would otherwise pay the cold import of FactsheetView.tsx
-  // inside findBy's 1 s budget, and under CPU load that import alone exceeds
-  // it. Load the module once here, under its own timeout, so each test's
-  // dynamic import resolves from the module cache.
-  beforeAll(async () => {
-    await import("@/app/factsheet/[id]/v2/FactsheetView");
-  }, 30_000);
-
   beforeEach(() => {
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -482,7 +686,13 @@ describe("ShareableLink — Manage private link (164.6.6.3.1 D-05)", () => {
 
     expect(await screen.findByText(MODAL_TITLE)).toBeTruthy();
     expect(
-      await screen.findByRole("button", { name: "Copy share link" }),
+      // The button lives in the lazily loaded panel: on a cold module graph
+      // this await, and no global setting, carries the budget (D-11).
+      await screen.findByRole(
+        "button",
+        { name: "Copy share link" },
+        { timeout: 5000 },
+      ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Revoke link" })).toBeTruthy();
     expect(
@@ -525,7 +735,12 @@ describe("ShareableLink — Manage private link (164.6.6.3.1 D-05)", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: MANAGE }));
-    await screen.findByRole("button", { name: "Copy share link" });
+    // Lazy panel button: this await carries the budget, not a global (D-11).
+    await screen.findByRole(
+      "button",
+      { name: "Copy share link" },
+      { timeout: 5000 },
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
 
@@ -545,7 +760,12 @@ describe("ShareableLink — Manage private link (164.6.6.3.1 D-05)", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: MANAGE }));
-    await screen.findByRole("button", { name: "Revoke link" });
+    // Lazy panel button: this await carries the budget, not a global (D-11).
+    await screen.findByRole(
+      "button",
+      { name: "Revoke link" },
+      { timeout: 5000 },
+    );
   }
 
   function confirmRevoke(): void {
@@ -662,12 +882,6 @@ describe("ShareableLink — a minted private link is never left invisible (170.6
   const MINTED_URL = "https://quantalyze.xyz/factsheet-share/tok-en-visible";
   const FIELD = "Private link URL";
   let fetchMock: ReturnType<typeof vi.fn>;
-
-  beforeAll(async () => {
-    // The dialog mounts the panel through `next/dynamic`; warm the module once
-    // so no test pays the cold import inside a waitFor budget.
-    await import("@/app/factsheet/[id]/v2/FactsheetView");
-  }, 30_000);
 
   beforeEach(() => {
     fetchMock = vi.fn(async (input: unknown) => {
@@ -836,7 +1050,14 @@ describe("ShareableLink — a minted private link is never left invisible (170.6
     expect((await findField()).value).toBe(MINTED_URL);
 
     // Revoke it: the link is dead, so the URL must not survive in the row.
-    fireEvent.click(await screen.findByRole("button", { name: "Revoke link" }));
+    // Lazy panel button: this await carries the budget, not a global (D-11).
+    fireEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: "Revoke link" },
+        { timeout: 5000 },
+      ),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Get private link" })).toBeTruthy(),
@@ -854,7 +1075,283 @@ describe("ShareableLink — a minted private link is never left invisible (170.6
       { timeout: 4000 },
     );
     fireEvent.click(screen.getByRole("button", { name: "Manage private link" }));
-    await screen.findByRole("button", { name: "Revoke link" });
+    // Lazy panel button: this await carries the budget, not a global (D-11).
+    await screen.findByRole(
+      "button",
+      { name: "Revoke link" },
+      { timeout: 5000 },
+    );
     expect(screen.queryByLabelText(FIELD)).toBeNull();
   }, 20_000);
+});
+
+/**
+ * Phase 208 plan 03 (D-05, D-08, D-09, D-15) — the copy-failed dialog has its
+ * own Copy link button, and the URL it shows is already on screen.
+ *
+ * WHY: the dialog's only copy control used to be the panel's mint-and-copy,
+ * which minted AGAIN over the network and then awaited a bare `writeText`; on a
+ * phone the tap's user activation has expired by then, so it failed a second
+ * time. The button here copies the URL that is already shown, straight from the
+ * tap, through the same bounded helper the row uses.
+ */
+describe("ShareableLink — the copy-failed dialog copies the URL on screen (Phase 208, D-05, D-08, D-09, D-15)", () => {
+  const MINTED_URL = "https://quantalyze.xyz/factsheet-share/tok-en-on-screen";
+  const FIELD = "Private link URL";
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ url: MINTED_URL }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  function mount() {
+    return render(<ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />);
+  }
+
+  /** Row click that fails both copy paths, so the dialog opens with the URL. */
+  async function openDialogAfterRowFailure(): Promise<HTMLInputElement> {
+    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error("blocked")) });
+    setExecCommand(() => false);
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Get private link" }));
+    const field = (await screen.findByLabelText(FIELD)) as HTMLInputElement;
+    // The dialog opens and the field takes focus from passive effects (see the
+    // comment in the "never left invisible" describe above): await both.
+    await waitFor(() => {
+      expect(field.closest("dialog")?.open).toBe(true);
+      expect(document.activeElement).toBe(field);
+    });
+    return field;
+  }
+
+  /** Serialize every logged argument; an Error contributes its message. */
+  function loggedText(): string {
+    return JSON.stringify(warnSpy.mock.calls, (_k, v) =>
+      v instanceof Error ? v.message : v,
+    );
+  }
+
+  it("the dialog Copy link copies the URL on screen with no second mint, then reads Copied", async () => {
+    await openDialogAfterRowFailure();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setClipboard({ writeText });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Copy link" }));
+
+    await screen.findByRole("button", { name: "Copied" });
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(MINTED_URL);
+    // The URL is already on screen: copying it must not touch the network.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed dialog copy reads Copy failed, refocuses and reselects the field, and the dialog region announces it", async () => {
+    const field = await openDialogAfterRowFailure();
+    const copyBtn = await screen.findByRole("button", { name: "Copy link" });
+    // A real tap moves focus to the button first.
+    copyBtn.focus();
+    expect(document.activeElement).toBe(copyBtn);
+
+    fireEvent.click(copyBtn);
+
+    await screen.findByRole("button", { name: "Copy failed" });
+    await waitFor(() => expect(document.activeElement).toBe(field));
+    expect(field.selectionStart).toBe(0);
+    expect(field.selectionEnd).toBe(MINTED_URL.length);
+    const dialog = field.closest("dialog") as HTMLDialogElement;
+    expect(within(dialog).getByRole("status").textContent).toBe("Copy failed");
+  });
+
+  it("D-09: iOS ignores focus() outside a gesture, so a failed dialog copy still reselects with an explicit setSelectionRange", async () => {
+    await openDialogAfterRowFailure();
+    const copyBtn = await screen.findByRole("button", { name: "Copy link" });
+    // iOS Safari drops `focus()` here: no focus event, so the field's onFocus
+    // never runs and only an explicit range call can reselect the URL.
+    vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(() => {});
+    const selectSpy = vi.spyOn(HTMLInputElement.prototype, "setSelectionRange");
+    selectSpy.mockClear();
+
+    fireEvent.click(copyBtn);
+
+    await screen.findByRole("button", { name: "Copy failed" });
+    expect(selectSpy).toHaveBeenCalledWith(0, MINTED_URL.length);
+  });
+
+  it("D-09: opening the dialog selects the whole URL with an explicit setSelectionRange even when focus() is ignored", async () => {
+    vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(() => {});
+    const selectSpy = vi.spyOn(HTMLInputElement.prototype, "setSelectionRange");
+    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error("blocked")) });
+    setExecCommand(() => false);
+    mount();
+
+    fireEvent.click(screen.getByRole("button", { name: "Get private link" }));
+
+    const field = (await screen.findByLabelText(FIELD)) as HTMLInputElement;
+    await waitFor(() => expect(field.closest("dialog")?.open).toBe(true));
+    await waitFor(() =>
+      expect(selectSpy).toHaveBeenCalledWith(0, MINTED_URL.length),
+    );
+    expect(field.selectionStart).toBe(0);
+    expect(field.selectionEnd).toBe(MINTED_URL.length);
+  });
+
+  it("D-05: both copy catches log { strategyId, err } and no logged argument carries the URL", async () => {
+    const blocked = new Error("blocked");
+    const unsupported = new Error("execCommand unsupported");
+    setClipboard({ writeText: vi.fn().mockRejectedValue(blocked) });
+    setExecCommand(() => {
+      throw unsupported;
+    });
+    mount();
+
+    fireEvent.click(screen.getByRole("button", { name: "Get private link" }));
+    await screen.findByLabelText(FIELD);
+
+    const clip = warnSpy.mock.calls.find(
+      (c: unknown[]) => c[0] === "[ShareableLink] clipboard write failed",
+    );
+    expect(clip).toBeTruthy();
+    expect(clip?.[1]).toEqual({ strategyId: STRATEGY_ID, err: blocked });
+    expect((clip?.[1] as { err: unknown }).err).toBe(blocked);
+    const exec = warnSpy.mock.calls.find(
+      (c: unknown[]) => c[0] === "[ShareableLink] execCommand copy failed",
+    );
+    expect(exec).toBeTruthy();
+    expect((exec?.[1] as { strategyId: string; err: unknown }).strategyId).toBe(STRATEGY_ID);
+    expect((exec?.[1] as { err: unknown }).err).toBe(unsupported);
+    // The minted URL is a capability and console.warn feeds Sentry breadcrumbs.
+    expect(loggedText()).not.toContain(MINTED_URL);
+    expect(loggedText()).not.toContain("tok-en-on-screen");
+  });
+
+  it("D-05: an execCommand that returns false is still logged, with err null", async () => {
+    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error("blocked")) });
+    setExecCommand(() => false);
+    mount();
+
+    fireEvent.click(screen.getByRole("button", { name: "Get private link" }));
+    await screen.findByLabelText(FIELD);
+
+    const exec = warnSpy.mock.calls.find(
+      (c: unknown[]) => c[0] === "[ShareableLink] execCommand copy failed",
+    );
+    expect(exec).toBeTruthy();
+    expect(exec?.[1]).toEqual({ strategyId: STRATEGY_ID, err: null });
+    expect(loggedText()).not.toContain("tok-en-on-screen");
+  });
+
+  it("D-15: the fallback's temporary input lives in the body for the row and inside the open dialog for the dialog button", async () => {
+    const hosts: Array<{ parent: Element | null; inOpenDialog: boolean }> = [];
+    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error("blocked")) });
+    setExecCommand(() => {
+      // The temporary input is the one that is not read-only and holds the URL.
+      const temp = Array.from(document.querySelectorAll("input")).find(
+        (i) => !i.readOnly && i.value === MINTED_URL,
+      );
+      hosts.push({
+        parent: temp?.parentElement ?? null,
+        inOpenDialog: temp?.closest("dialog[open]") != null,
+      });
+      return false;
+    });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Get private link" }));
+    await screen.findByLabelText(FIELD);
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0].parent).toBe(document.body);
+    expect(hosts[0].inOpenDialog).toBe(false);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Copy link" }));
+    await screen.findByRole("button", { name: "Copy failed" });
+
+    expect(hosts).toHaveLength(2);
+    // WebKit fails `execCommand("copy")` for an input in the inert body while a
+    // modal dialog is open (RESEARCH Pitfall 2); inside the dialog it succeeds.
+    expect(hosts[1].inOpenDialog).toBe(true);
+    // And it is always removed again.
+    expect(
+      Array.from(document.querySelectorAll("input")).filter((i) => !i.readOnly),
+    ).toHaveLength(0);
+  });
+
+  const PUBLIC_URL = `https://example.test/factsheet/${STRATEGY_ID}`;
+
+  it("D-10: a published strategy whose two copies both fail opens a Public link dialog holding the public URL, with no owner panel and no fetch", async () => {
+    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error("blocked")) });
+    setExecCommand(() => false);
+    render(<ShareableLink strategyId={STRATEGY_ID} published />);
+
+    fireEvent.click(screen.getByRole("button"));
+
+    const field = (await screen.findByLabelText("Public link URL")) as HTMLInputElement;
+    expect(field.value).toBe(PUBLIC_URL);
+    // Await the open dialog: queries for ABSENT controls inside a closed
+    // <dialog> would pass for the wrong reason.
+    await waitFor(() => expect(field.closest("dialog")?.open).toBe(true));
+    expect(await screen.findByRole("button", { name: "Copy link" })).toBeTruthy();
+    expect(screen.getByText("Public link")).toBeTruthy();
+    expect(screen.queryByText("Private link")).toBeNull();
+    expect(
+      screen.getByText(
+        "This browser would not copy the link for you. Use Copy link, or select the link and copy it yourself.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create share link" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy share link" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Revoke link" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Copy failed — copy the URL manually/ }),
+    ).toBeTruthy();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("the published lane stays synchronous: writeText runs inside the click, before any await", () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setClipboard({ writeText });
+    render(<ShareableLink strategyId={STRATEGY_ID} published />);
+
+    fireEvent.click(screen.getByRole("button"));
+
+    // No `await` between the click and this assertion: a microtask in front of
+    // the clipboard call is where Safari drops transient user activation.
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(PUBLIC_URL);
+  });
+
+  it("D-08: a dialog copy whose clipboard never settles ends as Copy failed after the 3 s bound, button enabled", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error("blocked")) });
+    setExecCommand(() => false);
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Get private link" }));
+    const field = (await screen.findByLabelText(FIELD)) as HTMLInputElement;
+    await waitFor(() => expect(field.closest("dialog")?.open).toBe(true));
+    const copyBtn = await screen.findByRole("button", { name: "Copy link" });
+    setClipboard({ writeText: vi.fn().mockReturnValue(new Promise<void>(() => {})) });
+
+    fireEvent.click(copyBtn);
+
+    const working = screen.getByRole("button", { name: "Copying link…" }) as HTMLButtonElement;
+    expect(working.disabled).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3500);
+    });
+    const failed = screen.getByRole("button", { name: "Copy failed" }) as HTMLButtonElement;
+    expect(failed.disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: "Copying link…" })).toBeNull();
+  });
 });
