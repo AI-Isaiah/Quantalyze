@@ -2,7 +2,7 @@
 phase: 214-freshtruth-refresh-work-and-freshness-readings-match-what-ca
 verified: 2026-11-14T21:20:00Z
 status: passed
-score: 8/8 success criteria resolved (SC-4 deferred-by-design to the post-merge PROD read; SC-5 closed by founder amendment option A)
+score: 8/8 success criteria resolved (SC-4 measured on PROD 2026-11-14 after the apply, see "SC-4 PROD reading"; SC-5 closed by founder amendment option A)
 verified_at_sha: 07a673b653b83a33a5a409550d13e7dd4b2762a0
 drift_subjects:
   - supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql
@@ -40,8 +40,20 @@ deferred:
 
 **Phase Goal:** Refresh work goes only where data can actually advance, and every freshness reading tells the truth about why a series has stopped (36-day MT5 case, closed Deribit composites, chip overflow, uncorrelated finalize senders).
 **Verified:** 2026-11-14 at HEAD 07a673b653b83a33a5a409550d13e7dd4b2762a0
-**Status:** passed (SC-4 deferred-by-design to the post-merge PROD read)
+**Status:** passed (SC-4 deferred-by-design to the post-merge PROD read; measured 2026-11-14, see "SC-4 PROD reading" below)
 **Re-verification:** Yes, after the founder amended SC-5 (2026-11-14, option A) and commit 07a673b65 made the chip-width spec a passing regression pin. The first verification at 1d78c911b ended `gaps_found` on SC-5 alone; every other row was re-checked by regression only (nothing else changed between the two SHAs).
+
+## SC-4 PROD reading (2026-11-14, records PR, after the apply)
+
+Supabase Migrate run `43651289345` for merge commit `2d1020dd5` concluded `success` (`apply-test`, `apply`, `redump-dump` and `redump-pr` all green), so both migrations are applied on PROD. The read went through the Supabase MCP. The marker query ran first and named PRODUCTION. Only counts, ages, reasons and flags are recorded here; no ids.
+
+- `ledger_refresh_staleness`: 13 rows, 2 stale, 2 closed, 2 composites.
+- Both Deribit composites: `is_closed = true`, `closed_through = 2026-04-29`, `last_return_date = 2026-04-29`, `is_stale = false`, `stale_reason` NULL (199 days since the last return). Matches the expectation.
+- Stale row 1: MT5, 81 days behind (`last_return_date = 2026-08-25`), `stale_reason = series_behind`. Its key is disconnected (`disconnected_at` set), so key eligibility keeps it out of the candidate set; it is not a refresh problem. Matches the expectation.
+- Stale row 2: MT5, 36 days behind (`last_return_date = 2026-10-09`), `stale_reason = series_behind`, key connected. It is the 214-DIAGNOSIS H1 case, now held to a weekly attempt. It stays stale until its ledger has activity. Matches the expectation.
+- Not yet observed: no `cron_runs` row with cause `no_advance_weekly_cap` in the 3 hours after the apply. The fan-out had not written one by the time of the read, so the skip count is not yet measured on PROD. This is recorded, not a gap: the SQL gate arms pin the row's shape.
+
+Verdict: the expectation holds. The stale count is 2, and each remaining row is named with its reason.
 
 ## Orchestrator-owned facts (recorded as stated, not re-derived)
 
@@ -56,7 +68,7 @@ deferred:
 | SC-1 diagnosis recorded | VERIFIED | `214-DIAGNOSIS.md` exists: verdict H1 (a ledger-complete MT5 series ends on its last ledger-activity day; gap fill reindexes to [first, last] of the series, so an idle account's daily derive cannot move `last_return_date`), PROD evidence, the inferred (explicitly not proven) flag reconciliation, two open residuals each with its confirming read, and what SC-4 should find. Executable pin `analytics-service/tests/test_mt5_series_end_is_last_ledger_day.py` (5 cases) PASSES at HEAD (pytest below). No production code changed. The attribution of the dust/tiny-base flags to the July-August window is honestly labelled inferred. |
 | SC-2 cap plus skip count | VERIFIED | Migration `20261114152300` (read in full at the relevant regions): the candidate CASE gains an `OR (...)` after the marks-paused `EXISTS` close paren: `stale_reason = 'series_behind'`, age >= 8, a done `compute_analytics_from_csv` job AND a done `derive_broker_dailies` job created on/after `last_return_date + 5`, giving `INTERVAL '7 days'` instead of 20 hours. It is a cap, never an exclusion (keyed on the attempt; admitted again after 7 days), as SC-2 allows ("excludes or caps"). Skip count: a best-effort block after the last advisory unlock re-spells the cohort and writes ONE `cron_runs` row (`cron_name 'ledger_refresh_fanout'`, `status 'ok'`, `error NULL`, `metadata.cause 'no_advance_weekly_cap'`, `skipped_count`, `skipped_targets` with `days_unmoved`), inside its own `EXCEPTION WHEN OTHERS` (SQLSTATE only in the warning); a tick with no skip writes nothing. Matched-pair arms NA1-NA6 and SK1-SK4 each carry a `RED-UNDER-M` twin (counted in the file: 47 twins, `ALL 41 ARMS EXECUTED`). The signal matches the PROD reading (three daily chains `done`/`publish_warned`: `publish_warned` is job metadata, the job status is `done`). |
 | SC-3 closed composites | VERIFIED | Migration `20261114151700`: `ledger_refresh_staleness` gains lateral `cl`; `is_closed` = members > 0 AND every member has a `window_end` AND `max(window_end) <= CURRENT_DATE` AND `last_return_date >= max(window_end) - 1`, `COALESCE`d so it is never NULL; `closed_through = max(window_end) - 1`. `AND NOT cl.is_closed` is added to exactly the `series_behind` disjunct and CASE branch, so `no_analytics_row`, `status_not_success`, `no_return_date` still read stale. Columns appended after the verdict END marker; `security_invoker`, REVOKE and GRANT restated and asserted by a catalogue-only apply block. The composite fan-out is untouched and unscheduled (no schedule verb in the migration, per SUMMARY greps; CONTEXT manifest reading). The composite arm reads `lrs.is_stale`, so a closed composite stops being a candidate (arm CL). Staleness arms I-N and composite arm CL each carry a twin (counted). The PROD reading in CONTEXT (series ending on the last day the windows allow) fits the predicate. Manual rollback restores the 11-column view. |
-| SC-4 PROD drain read | DEFERRED-BY-DESIGN (post-merge) | Cannot be measured pre-merge. Expected remaining rows: the 81-day MT5 strategy with a disconnected key, and the capped 36-day MT5 strategy. Both Deribit composites should read `is_stale = false`, `is_closed = true`. |
+| SC-4 PROD drain read | VERIFIED 2026-11-14 post-merge (see "SC-4 PROD reading"; this row was DEFERRED-BY-DESIGN at verification and is kept as lineage) | Cannot be measured pre-merge. Expected remaining rows: the 81-day MT5 strategy with a disconnected key, and the capped 36-day MT5 strategy. Both Deribit composites should read `is_stale = false`, `is_closed = true`. |
 | SC-5 chip label (AMENDED: does not reproduce at HEAD, measured at 1485px plus a 1485-to-360px sweep) | VERIFIED (against the amended wording) | ROADMAP.md SC-5 line carries the dated founder amendment and CONTEXT records it. `FactsheetView.tsx` and `SyncBadge.tsx` are untouched (no class change, founder wrap decision intact). `e2e/freshness-chip-width.spec.ts` test (a) now asserts row height <= 1.5 x computed line height, `scrollWidth <= clientWidth`, and children inside the column, with the seeded long-name pressure kept; the by-design-red narrow-column precondition is removed (diff read). The spec is in ci.yml `e2e-seeded` (one list line) and `e2e-seeded-hydration-guard.test.ts` pins 26 (PASSES, 30 tests); it self-skips without the seed env (two-place rule). `tsc --noEmit` is clean. Measurement and RED drill are orchestrator-attested. |
 | SC-6 migration-reviewer and rls-policy-auditor clean | VERIFIED (orchestrator fact) | Both CLEAN, 0 findings, on the current HEAD's two migrations. |
 | SC-7 each fix RED when reverted | VERIFIED | See the SC-7 table. SC-5 now has a regression pin that can fail (row height bound), RED-drilled by tightening the bound to 0.5 x lineH. |
