@@ -11,6 +11,11 @@ filed. File each one as its own issue.
 carries its own `**Upstream outcome.**` line; the extra GSD friction items not drafted above are
 listed in the section "Further items (filed 2026-11-13)" at the end.
 
+**Triage, 2026-11-14.** All nine issues were triaged and confirmed upstream the same day. No fix has
+merged or been released, and no maintainer asked us anything. The per-issue status and the places
+where the maintainer's ruling differs from what we asked are in the section "Upstream triage status
+(checked 2026-11-14)" at the end.
+
 **Versions.** Measured on gsd-core **1.16.0** (the installed copy). The same code is in
 **1.17.0**: every line cited below is identical there, except `state-transition.cjs`, where the
 error return sits at line 1445 instead of 1411. Paths are relative to the package root
@@ -357,3 +362,44 @@ From this repo's CLAUDE.md, memory and the 2026-11-13 milestone close. Checked o
 - **Synthesizer subagent's Write to `SUMMARY.md` is refused.** Not filed: intended behaviour since
   #5449 / PR #5450 (the runtime really refuses a subagent Write to that basename; the synthesizer
   returns the document inline and the orchestrator writes it). #222 is the older, unrelated prompt fix.
+
+---
+
+## Upstream triage status (checked 2026-11-14)
+
+Read with `gh issue view <n> -R open-gsd/gsd-core --comments`, plus a branch compare against `next`.
+Every issue below is **open**, labelled `bug` + `confirmed-bug`, and carries a maintainer-triaged
+Diagnosis and Agent Brief dated 2026-11-13, reproduced on upstream `6bb51fb9f7`. None has a pull
+request. The bot created fix branches for #6171, #6173 and #6174, but at the time of this check each
+was **0 commits ahead** of `next`, so a branch is not a fix. v1.21.0 was released on 2026-11-13 at
+04:05Z, ten hours before we filed, so it fixes none of these.
+
+| Issue | Item | Status | Where the ruling differs from our ask |
+|---|---|---|---|
+| #6168 | 1, `state.advance-plan` writes on refusal | Confirmed, brief written, no PR | None. All refusals must leave the file byte-identical. |
+| #6169 | 3, insert scope stops at a sub-heading or fenced `#` | Confirmed, brief written, no PR. Bot's duplicate flag against #6171 vetoed. | None. Insertion and the count rewrite move to the level-bounded, fence-aware scope. |
+| #6170 | 4, `phase complete` drops Status prose | Confirmed, brief written, no PR | Wider than asked. A token-less prose cell becomes `Complete - <prose>`. `Deferred - x` becomes `Complete - x`. `Completed` counts as Complete and is kept. |
+| #6171 | 6 + 7, rows inserted at the top; `TBD` stub kept | Confirmed, brief written, fix branch with no commits | None. Rows merge in numeric plan order, and the stub is dropped once a real row exists. |
+| #6172 | 8, `audit-open` aborts on an archived status | Confirmed, brief written, no PR | Narrower than asked. An archived out-of-set status becomes one reported `verification_gaps` item. Widening `validate.health` W030 / `--repair` to archived roots is **out of scope**. |
+| #6173 | `track_shipping` ship-note carries the skip token | Confirmed, brief written, fix branch with no commits | The skip token and the empty recovery commit are removed. One docs-only pipeline on the PR branch is accepted. The `.planning`-path note in our issue is **out of scope**. |
+| #6174 | `milestone-switch` drops lines and keys | Confirmed, brief written, fix branch with no commits | Wider than asked. Non-template Current Position lines move under `## Accumulated Context` and are listed in the JSON result. `milestone complete` gets the same handling. |
+| #6175 | raw accomplishments in MILESTONES.md | Confirmed, brief written, no PR | New flag (`--accomplishments-file <path>`, modelled on `--release-map`), which the workflow passes. Without it, exact repeats are dropped. |
+| #6176 | "Awaiting next milestone" classed as unknown | Confirmed, brief written, no PR | None. The status is added to the shared normalization vocabulary, and smart-entry consumes it. |
+| #6019 comment | `phase complete` moves STATE under parallel phases | No response. Our comment is still the last activity. | Not applicable. |
+
+**Local workarounds stay in place until a release carries these fixes:** hygiene rules 6d, 6e and 7,
+the `git diff` after every handler run, hand-correcting STATE's position after `phase complete`, and
+never writing the skip token.
+
+**Dispatch-isolation guard in a phase worktree (checked 2026-11-14, not filed).** Phase agents in
+their own worktrees had every `gsd-executor` dispatch refused with "dispatch isolation resolves to
+"harness-worktree" ... missing isolation="worktree"". The cause is that the guard resolves its
+record from the hook payload's `cwd`, which is the session's main checkout, while the workflow wrote
+the record into the phase worktree's `.gsd/`. This is already reported. It is the root-resolution half
+of #6010 (approved child of #5969), and our field reproduction comment of 2026-11-10 is on it. The
+maintainer's note there says #4908 owns the root resolver. The guard line
+(`hooks/gsd-agent-isolation-guard.js`, `const cwd = data.cwd || process.cwd();`) is unchanged at
+`v1.21.0` and at `next`. The collision half is already fixed: keyed per-plan records (#5682 / #5891)
+are present at the `v1.20.1` tag, so parallel agents now overwrite only the single fallback slot. A
+short recurrence comment for #6010 is drafted and waits for founder approval.
+
