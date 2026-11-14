@@ -142,6 +142,9 @@ vi.mock("@/lib/supabase/client", () => ({
           eq: (_col: string, val: unknown) =>
             table === "strategies"
               ? {
+                  // The REAL SyncProgress (212 plan 06 case) reads the venue label
+                  // with `.single()`; no linked key means it skips the second read.
+                  single: () => Promise.resolve({ data: null, error: null }),
                   maybeSingle: () =>
                     Promise.resolve(
                       linkedReadMock(val) ?? {
@@ -250,7 +253,12 @@ let capturedOnStatusChange:
   | null = null;
 // Phase 200 R2-01: the panel's Retry, so a case can press it after a rerender.
 let capturedOnRetry: (() => void) | null = null;
-vi.mock("./SyncProgress", () => ({
+// Phase 212 plan 06: one case renders the REAL panel so the contact-form link on a
+// sync-start failure is asserted where the user sees it, not on this stub.
+const realSyncProgress = vi.hoisted(() => ({ on: false }));
+vi.mock("./SyncProgress", async () => {
+  const actual = await vi.importActual<typeof import("./SyncProgress")>("./SyncProgress");
+  return {
   SyncProgress: (props: {
     syncStatus?: string;
     stopReason?: string | null;
@@ -263,6 +271,9 @@ vi.mock("./SyncProgress", () => ({
   }) => {
     capturedOnStatusChange = props.onStatusChange ?? null;
     capturedOnRetry = props.onRetry ?? null;
+    if (realSyncProgress.on) {
+      return <actual.SyncProgress {...(props as React.ComponentProps<typeof actual.SyncProgress>)} />;
+    }
     // 140.3-08 / SEAMUX-05: render the two props ApiKeyManager drives on a sync
     // failure. The real SyncProgress renders both (a status label and the
     // syncError detail line), and without them in the DOM a test cannot tell
@@ -278,7 +289,8 @@ vi.mock("./SyncProgress", () => ({
       </div>
     );
   },
-}));
+  };
+});
 
 // Polyfill jsdom's missing HTMLDialogElement methods so the <Modal> the
 // component renders doesn't throw on mount.
@@ -1177,9 +1189,9 @@ describe("ApiKeyManager — SEAMUX-05: both sync call sites observe the HTTP out
   // that imported it could not detect it changing.
   const BREAKER_SENTENCE =
     "The analytics service is temporarily unavailable. Please try again in a moment.";
-  // Hand-typed. The component-owned sentence that REPLACED the env-var lie.
+  // Hand-typed (UI-SPEC row 7). The component-owned sentence that REPLACED the env-var lie.
   const SYNC_UNAVAILABLE_SENTENCE =
-    "We couldn't start the sync. Your key is saved — retry in a moment, and contact support if it keeps failing.";
+    "We couldn't start the sync. Your key is saved — retry in a moment, and use the contact form if it keeps failing.";
 
   function keyRow() {
     return {
@@ -1346,6 +1358,31 @@ describe("ApiKeyManager — SEAMUX-05: both sync call sites observe the HTTP out
     expect(document.body.textContent).not.toMatch(/SUPABASE/);
     // … and no SyntaxError text leaked into the DOM in its place.
     expect(document.body.textContent).not.toMatch(/JSON|SyntaxError|Unexpected token/);
+  });
+
+  it("links 'contact form' in the sync-start failure to the support topic for this strategy, same tab (212 SC6)", async () => {
+    realSyncProgress.on = true;
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation(freshResponse(
+          new Response("<html><body>502 Bad Gateway</body></html>", {
+            status: 502,
+            headers: { "content-type": "text/html; charset=utf-8" },
+          }),
+        )),
+      );
+
+      await clickResync();
+
+      const link = await screen.findByRole("link", { name: "contact form" });
+      // Hand-typed href: the panel holds strategy id `strat-1`.
+      expect(link.getAttribute("href")).toBe("/contact?topic=support&strategy=strat-1");
+      expect(link.getAttribute("target")).toBeNull();
+      expect(link.parentElement?.textContent).toBe(SYNC_UNAVAILABLE_SENTENCE);
+    } finally {
+      realSyncProgress.on = false;
+    }
   });
 
   it("renders the route's breaker sentence rather than a generic fallback (human_message, not error)", async () => {

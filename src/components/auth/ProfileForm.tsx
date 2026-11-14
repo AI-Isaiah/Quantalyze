@@ -8,6 +8,8 @@ import { Input } from "@/components/ui/Input";
 import { Card } from "@/components/ui/Card";
 import { ROLES, type Profile } from "@/lib/types";
 import { Textarea } from "@/components/ui/Textarea";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 
 export function ProfileForm({ profile }: { profile: Profile }) {
   const [displayName, setDisplayName] = useState(profile.display_name);
@@ -113,7 +115,11 @@ export function ProfileForm({ profile }: { profile: Profile }) {
             {roleLabel}
           </span>
           <span className="text-xs text-text-muted">
-            Set at signup. Contact support to change it.
+            <ContactPointerText
+              text="Set at signup. Use the contact form to have it changed."
+              href={contactHref({ topic: "support" })}
+              newTab
+            />
           </span>
         </div>
       </Card>

@@ -660,7 +660,12 @@ export function SyncProgress({
       {syncStatus === "error" && (
         <div className="mt-1.5 ml-6">
           {syncError && (
-            <p className="text-xs text-text-secondary mb-2">{syncError}</p>
+            <p className="text-xs text-text-secondary mb-2">
+              <ContactPointerText
+                text={syncError}
+                href={contactHref({ topic: "support", strategy: strategyId })}
+              />
+            </p>
           )}
           <Button size="sm" variant="secondary" onClick={onRetry}>
             Retry

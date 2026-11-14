@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   checkStrategyGate,
   StrategyGateUnevaluableError,
+  isSeriesExaminedButRefused,
   STRATEGY_GATE_MIN_TRADES,
   STRATEGY_GATE_MIN_DAYS,
   STRATEGY_GATE_MIN_CSV_ROWS,
@@ -1062,6 +1063,35 @@ describe("[161-07 / WIZERR-10] examined-but-refused verdicts get their own truth
     const b = checkStrategyGate(dailyReturnsInput("sampled_gapped"));
     expect(a.reason).not.toBe(b.reason);
   });
+});
+
+/**
+ * [212-02 / SC1] `isSeriesExaminedButRefused` is the wizard composite arm's one
+ * read of the gate's examined-but-refused map. The predicate under test is the
+ * only import; every verdict is a HAND-TYPED literal, so widening the map by
+ * hand is what moves these rows.
+ */
+describe("[212-02 / SC1] isSeriesExaminedButRefused", () => {
+  it.each(["sampled_gapped", "fill_derived_unproven"])(
+    "%s is examined-and-refused",
+    (verdict) => {
+      expect(isSeriesExaminedButRefused(verdict)).toBe(true);
+    },
+  );
+
+  it.each([
+    ["null", null],
+    ["the empty string", ""],
+    ["ledger_complete", "ledger_complete"],
+    ["composite_stitched", "composite_stitched"],
+    ["user_supplied", "user_supplied"],
+    ["an unknown future verdict", "some_future_verdict"],
+  ])(
+    "%s is NOT examined-and-refused, so it falls to the provenance refusal",
+    (_label, verdict) => {
+      expect(isSeriesExaminedButRefused(verdict)).toBe(false);
+    },
+  );
 });
 
 /**

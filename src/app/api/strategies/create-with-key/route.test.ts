@@ -1752,7 +1752,10 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     });
   });
 
-  it("an ORPHANED key (no strategy hangs off it) falls through to the RPC rather than inventing a pair", async () => {
+  it("an ORPHANED key (no strategy hangs off it) is refused 409 KEY_ORPHANED before validate and the RPC, never paired with an unrelated strategy", async () => {
+    // 212-03 / SC5 reverses the 161-05 order this case used to pin (it
+    // expected 200 and one RPC call). The orphan is a fact about the caller's
+    // own stored key, so the refusal no longer waits out the 120 s validate.
     venueKeyLookupMock.mockResolvedValue({
       data: { id: EXISTING_KEY_ID },
       error: null,
@@ -1762,12 +1765,14 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     const POST = await importPost();
     const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-    expect(res.status).toBe(200);
-    expect(rpcMock).toHaveBeenCalledTimes(1);
-    const json = await res.json();
-    expect(json.deduped).toBeUndefined();
-    // ⛔ And it must never pair the orphaned key with an unrelated strategy.
-    expect(json.api_key_id).toBe(API_KEY_ID);
+    expect(res.status).toBe(409);
+    // Byte-wise, and equal to the 23505-arm body the other case pins: both arms
+    // come from the one `keyOrphanedResponse()`.
+    expect(await res.text()).toBe(
+      '{"code":"KEY_ORPHANED","error":"This key is already stored, but no strategy uses it."}',
+    );
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
   });
 
   it("a fence READ FAULT falls through to the RPC and never 500s (the DB index still dedups)", async () => {
@@ -2087,10 +2092,12 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(venueOwnerLookupMock).not.toHaveBeenCalled();
     });
 
-    it("an ORPHANED key is still an orphan — 'no strategy at all' must not become a refusal", async () => {
-      // The other side of the discrimination this plan adds. Both reads find
-      // nothing, so we claim nothing: fall through and let the DB index be the
-      // backstop, exactly as before.
+    it("an ORPHANED key — 'no strategy at all' — is refused 409 KEY_ORPHANED up front, not resumed and not submitted", async () => {
+      // The other side of the discrimination this plan adds. Both reads
+      // SUCCEEDED and found nothing, so the key is an orphan and says so. 212-03
+      // / SC5 reversed what this case pinned (200 and one RPC call: "fall
+      // through and let the DB index be the backstop"). A read that FAULTED is
+      // still not this case: the "OWNER read faulting" case below keeps it.
       venueKeyLookupMock.mockResolvedValue({
         data: { id: EXISTING_KEY_ID },
         error: null,
@@ -2101,9 +2108,12 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       const POST = await importPost();
       const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-      expect(res.status).toBe(200);
-      expect(rpcMock).toHaveBeenCalledTimes(1);
-      expect((await res.json()).deduped).toBeUndefined();
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"KEY_ORPHANED","error":"This key is already stored, but no strategy uses it."}',
+      );
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
     });
 
     it("the OWNER read faulting falls through to the RPC — a refusal is never invented from an error", async () => {
@@ -2315,6 +2325,13 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
    * collapsing "we could not tell" into "nothing holds it". A read that FAULTED
    * has observed nothing, and answering `KEY_ORPHANED` from it would be the same
    * unearned claim in the other direction. Both fault directions are pinned.
+   *
+   * ⛔ CORRECTED 2026-11-14 (Phase 212 SC5): the pre-RPC half of this block used
+   * to pin "the credentials speak first" (validate and the RPC both ran for an
+   * orphaned MT5 login). That order is reversed: the MT5 fence now answers
+   * KEY_ORPHANED before `validateKey`. The 23505 arm still carries the ccxt and
+   * race orphans, and the faults and the wizard-session constraint still reach
+   * the byte-pinned fence 409. The original reasoning is kept in `route.ts`.
    */
   describe("[161-05 / WIZERR-03] the orphan answers KEY_ORPHANED, and only the orphan does", () => {
     beforeEach(() => {
@@ -2403,6 +2420,14 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       // branch had been written to fire on DB state. This one seeds the exact
       // orphan shape and still demands the fence sentence, because the
       // constraint Postgres named is the wizard-session one.
+      //
+      // 212-03 / SC5 RE-FIXTURE: the pre-RPC fence now refuses an orphan it can
+      // SEE, so a persistent orphan seed would be answered KEY_ORPHANED before
+      // the RPC ran and this control would stop reaching the 23505 arm at all.
+      // The FIRST `api_keys` read (the fence's) therefore sees no key, and the
+      // orphan shape appears only for the race arm's re-read after the RPC
+      // collided, the [154.1] race-arm fixture shape.
+      venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
       seedOrphanedKey();
       rpcMock.mockResolvedValue({
         data: null,
@@ -2422,21 +2447,43 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       );
     });
 
-    it("the PRE-RPC fence lets the orphan through to validate — the credentials speak first", async () => {
-      // 161-05 recorded this ordering as a decision at the fence, so it is
-      // pinned rather than left to be re-derived. The two other refusable
-      // resolutions (`draft`, `connected`) short-circuit before the charged seam
-      // calls; the orphan does NOT, because the credentials in THIS request are
-      // still unauthenticated and a wrong secret is the user's real first
-      // problem. Refusing early would hand them the orphan to chase while a bad
-      // secret sat unmentioned.
+    it("the PRE-RPC fence refuses the orphan BEFORE validate — the refusal does not wait on the credentials", async () => {
+      // 212-03 / SC5 REVERSES the ordering 161-05 recorded here ("the
+      // credentials speak first": validate and the RPC were both expected to
+      // run). The orphan is true whatever the credentials are, so it is said at
+      // once instead of after a validation of up to 120 s. The two other
+      // refusable resolutions (`draft`, `connected`) already short-circuited
+      // before the charged seam calls; the orphan now joins them.
       seedOrphanedKey();
 
       const POST = await importPost();
-      await POST(makeReq(MT5_RECONNECT_BODY));
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-      expect(validateKeyMock).toHaveBeenCalled();
-      expect(rpcMock).toHaveBeenCalled();
+      expect(res.status).toBe(409);
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+    });
+
+    it("the orphan refusal wins even when the credentials are WRONG — validateKey is never called", async () => {
+      // 212-03 / SC5. The sharpest form of the reversal: 161-05 let a bad secret
+      // speak first, so this exact request used to surface the credential
+      // failure. The refusal is now independent of the credentials. It is true
+      // either way (the right password would be refused identically) and it
+      // discloses nothing: the resolver is scoped by `user.id`, so the caller
+      // learns only about their own stored key. A validator that would have
+      // rejected is wired to prove the call never happens.
+      seedOrphanedKey();
+      validateKeyMock.mockRejectedValue(new Error("wrong investor password"));
+
+      const POST = await importPost();
+      const res = await POST(makeReq({ ...MT5_RECONNECT_BODY, api_secret: "wrong-password" }));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"KEY_ORPHANED","error":"This key is already stored, but no strategy uses it."}',
+      );
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
     });
   });
 
@@ -2537,6 +2584,28 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(res.status).toBe(409);
       const text = await res.text();
       expect(JSON.parse(text).code).toBe("KEY_ORPHANED");
+      expect(text).not.toContain(OKX_UID);
+    });
+
+    it("an ORPHANED ccxt key still VALIDATES FIRST and resolves through the 23505 arm (212-03 / SC5 leaves ccxt unchanged)", async () => {
+      // The early orphan refusal is MT5-only: a ccxt venue's identity is read
+      // by the validator, so it is unknown until after validation. This pins
+      // that the arm did not widen. The orphan row is already stored, yet the
+      // fence read is never issued before validate, validate runs, the RPC runs
+      // and trips the index, and only then does the race arm say KEY_ORPHANED.
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(validateKeyMock).toHaveBeenCalledTimes(1);
+      expect(rpcMock).toHaveBeenCalledTimes(1);
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(text).toBe(
+        '{"code":"KEY_ORPHANED","error":"This key is already stored, but no strategy uses it."}',
+      );
       expect(text).not.toContain(OKX_UID);
     });
 

@@ -148,6 +148,16 @@ const SOURCE_ALLOWLIST: ReadonlyArray<{ file: string; literal: string; reason: s
     literal: "jane@acme.com",
     reason: "the lowercased half of the same Zod docblock example; never rendered",
   },
+  {
+    file: "src/components/auth/SignupForm.tsx",
+    literal: "you@example.com",
+    reason: "the email input placeholder: an example of what a visitor types, not an address we publish",
+  },
+  {
+    file: "src/app/api/admin/match/send-intro/route.ts",
+    literal: "local@host.tld",
+    reason: "a format description in a code comment (the shape the validator accepts); never rendered, not an address we publish",
+  },
 ];
 
 const USER_FACING_SOURCES = [
@@ -165,6 +175,20 @@ const USER_FACING_SOURCES = [
   "src/app/(dashboard)/strategies/new/wizard/steps/MetadataStep.tsx",
   "src/app/api/for-quants-lead/route.ts",
   "src/app/api/strategies/csv-finalize/route.ts",
+  // Phase 212 WIZTRUTH (plan 09): every module the SC6 plans touched, and the
+  // two SC3 dashboard key forms.
+  "src/components/auth/ProfileForm.tsx",
+  "src/components/auth/SignupForm.tsx",
+  "src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.tsx",
+  "src/app/(dashboard)/allocations/components/WeightOptimizerSection.tsx",
+  "src/components/strategy/ApiKeyManager.tsx",
+  "src/components/strategy/SyncProgress.tsx",
+  "src/app/api/strategies/finalize-wizard/route.ts",
+  "src/app/api/account/export/route.ts",
+  "src/app/api/admin/match/send-intro/route.ts",
+  "src/app/api/admin/partner-import/route.ts",
+  "src/components/strategy/StrategyForm.tsx",
+  "src/components/exchanges/AllocatorExchangeManager.tsx",
 ] as const;
 
 function sourceHits(
@@ -202,6 +226,64 @@ describe("D-01 arm 2 - user-facing source files carry no email-shaped literal", 
     expect(sourceHits("x.tsx", text, [{ file: "x.tsx", literal: planted }])).toEqual([]);
     expect(sourceHits("y.tsx", text, [{ file: "x.tsx", literal: planted }])).toEqual([
       `y.tsx: ${planted}`,
+    ]);
+  });
+});
+
+/**
+ * Phase 212 WIZTRUTH SC6/SC8 - the ten source files that carried the thirteen
+ * legacy support-pointer strings at 2026-11-14 (hand-typed on purpose: a list
+ * derived by grep would shrink silently when a file regained the phrase and
+ * lost the match). The whole-src census is the regenerate command; this arm is
+ * the permanent pin for the server strings that have no route-level test.
+ * Comment lines are exempt: two documented comments elsewhere in src keep the
+ * words as prose, and a comment is not copy a user reads.
+ */
+const LEGACY_PHRASE_FILES = [
+  "src/components/auth/ProfileForm.tsx",
+  "src/components/auth/SignupForm.tsx",
+  "src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.tsx",
+  "src/app/(dashboard)/allocations/components/WeightOptimizerSection.tsx",
+  "src/components/strategy/ApiKeyManager.tsx",
+  "src/app/api/strategies/finalize-wizard/route.ts",
+  "src/app/api/account/export/route.ts",
+  "src/app/api/admin/match/send-intro/route.ts",
+  "src/app/api/admin/partner-import/route.ts",
+  "src/app/api/strategies/csv-finalize/route.ts",
+] as const;
+
+/** Case-insensitive; the two words are joined here so this file never carries the phrase in a string. */
+const LEGACY_PHRASE_RE = new RegExp(["contact", "support"].join("\\s+"), "i");
+
+function legacyPhraseHits(file: string, text: string): string[] {
+  return text.split("\n").flatMap((line, i) => {
+    const t = line.trim();
+    if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) return [];
+    return LEGACY_PHRASE_RE.test(line) ? [`${file}:${i + 1}: ${t}`] : [];
+  });
+}
+
+describe("SC6 - rewritten user-facing sources carry no legacy support pointer", () => {
+  it.each(LEGACY_PHRASE_FILES)("%s", (file) => {
+    const text = readFileSync(resolve(process.cwd(), file), "utf8");
+    expect(text.length, `${file} is empty`).toBeGreaterThan(200);
+    expect(legacyPhraseHits(file, text)).toEqual([]);
+  });
+
+  it("covers exactly the ten files that carried the thirteen census strings", () => {
+    expect(LEGACY_PHRASE_FILES).toHaveLength(10);
+  });
+
+  it("the scanner flags a planted non-comment line and ignores a planted comment line", () => {
+    const phrase = ["Contact", "support"].join(" ");
+    const text = [
+      `// ${phrase} to change it (comment, ignored)`,
+      ` * ${phrase} in a docblock (ignored)`,
+      `/* ${phrase} (ignored) */`,
+      `const copy = "Import failed. ${phrase.toLowerCase()}.";`,
+    ].join("\n");
+    expect(legacyPhraseHits("x.ts", text)).toEqual([
+      `x.ts:4: const copy = "Import failed. ${phrase.toLowerCase()}.";`,
     ]);
   });
 });

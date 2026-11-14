@@ -12,6 +12,10 @@ import { Modal } from "@/components/ui/Modal";
 import { STRATEGY_NAMES, STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import type { Strategy } from "@/lib/types";
 import { venueLabel } from "@/lib/display-labels";
+import { ErrorEnvelope } from "@/components/error/ErrorEnvelope";
+import { buildEnvelope, type ErrorEnvelope as ErrorEnvelopeShape } from "@/lib/envelope";
+import { recogniseValidateAndEncryptCode } from "@/lib/wizardErrors";
+import { newCorrelationId } from "@/lib/correlation-id-client";
 import {
   readCredentialInput,
   CREDENTIAL_KEY_INPUT_PROPS,
@@ -45,6 +49,9 @@ function toUserFacingStrategyError(error: { code?: string; message?: string }): 
   }
   return "Couldn't save your strategy. Please try again.";
 }
+
+/** Sentinel: the response body was not JSON (distinct from a JSON `null`). */
+const PARSE_FAILED = Symbol("parse-failed");
 
 interface StrategyFormProps {
   strategy?: Strategy;
@@ -105,6 +112,10 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
   const [apiPassphrase, setApiPassphrase] = useState("");
   const [apiLoading, setApiLoading] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  // 212-08 / SC3 — the validate-and-encrypt `!res.ok` arm renders from the
+  // route's `code`, as an envelope. `apiError` keeps carrying every other
+  // message this modal shows (a 2xx with no id, a network throw).
+  const [apiEnvelope, setApiEnvelope] = useState<ErrorEnvelopeShape | null>(null);
   const [apiConnected, setApiConnected] = useState(!!strategy?.api_key_id);
   // KEYLINK-01: the id of the `api_keys` row the SERVER minted for this
   // session's connect. Before this state existed the id was destructured off the
@@ -122,9 +133,23 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
     setter(list.includes(item) ? list.filter((x) => x !== item) : [...list, item]);
   }
 
+  // ⭐ 212 review IN-01 — closing or cancelling the connect modal clears the
+  // previous refusal (and its correlation id), matching AllocatorExchangeManager.
+  // Left set, reopening the modal showed the last failure and an id that belongs
+  // to a request the user is no longer looking at.
+  function closeApiModal() {
+    setShowApiModal(false);
+    setApiEnvelope(null);
+    setApiError(null);
+  }
+
   async function handleApiKeySubmit() {
     setApiLoading(true);
     setApiError(null);
+    setApiEnvelope(null);
+    // 212-08 — minted BEFORE the request and SENT on it, so the id the envelope
+    // prints is one the route logged (`getCorrelationId()` prefers this header).
+    const correlationId = newCorrelationId("key-validate");
     try {
       // F4 (Phase 122): canonicalize the exchange to lowercase at the ONE point
       // it enters the validate path — the api_keys DB CHECK and the Python
@@ -140,7 +165,10 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
       const exchangeCanonical = apiExchange.trim().toLowerCase();
       const res = await fetch("/api/keys/validate-and-encrypt", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Correlation-Id": correlationId,
+        },
         body: JSON.stringify({
           exchange: exchangeCanonical,
           api_key: apiKey,
@@ -157,13 +185,51 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
         }),
       });
       if (!res.ok) {
-        // The route's error bodies are CURATED on every arm — the persist arm
+        // 212-08 / SC3 — DISCRIMINATE ON THE CODE, NOT THE PROSE.
+        //
+        // The route's error bodies are CURATED on every arm (the persist arm
         // scrubs the raw PostgREST message at both log sinks and never places
-        // it in the response (160-02, route.ts). The H-0405 leak this component
-        // used to guard against was its OWN browser-composed insert error;
-        // that writer, and with it that error, no longer exists here.
-        const err = await res.json().catch(() => ({ error: "Validation failed" }));
-        throw new Error(err.error || "Key validation failed");
+        // it in the response, 160-02). The wire `code` picks the envelope
+        // through the one shared recogniser; the `error` sentence is only ever
+        // the CAUSE of the UNKNOWN shell, never a bare paragraph.
+        //
+        // A body we cannot parse is logged by STATUS and statusText only:
+        // credentials ride this request and an error body may echo them.
+        const parsed: unknown = await res.json().catch(() => PARSE_FAILED);
+        if (parsed === PARSE_FAILED) {
+          console.error(
+            `[StrategyForm] validate-and-encrypt: response body was not JSON — ` +
+              `HTTP ${res.status} (${res.statusText || "no body"})`,
+          );
+        }
+        const body = parsed === PARSE_FAILED ? null : parsed;
+        const { code, recognised } = recogniseValidateAndEncryptCode(body, res.status);
+        const curated =
+          typeof body === "object" && body !== null
+            ? (body as { error?: unknown }).error
+            : undefined;
+        const base = buildEnvelope(code, correlationId);
+        // Fallback (UI-SPEC SC3 rule 5): an unrecognised code with a curated
+        // sentence keeps that sentence, inside the UNKNOWN shell.
+        //
+        // ⭐ 212 review WR-02 — rule 5 limits that fallback to a 4xx (or a body
+        // with no code / the route's own `UNKNOWN`, which is the persist-INSERT
+        // 500's specific sentence). A 5xx carrying a FORWARDED service code
+        // (`KEK_UNAVAILABLE`, `SERVICE_KEY_UNCONFIGURED`, ...) is an operator
+        // fault: the route's static "Key validation failed" sentence would read
+        // as the user's key failing, so UNKNOWN's own cause renders instead.
+        const wireCode =
+          typeof body === "object" && body !== null
+            ? (body as { code?: unknown }).code
+            : undefined;
+        const curatedAllowed =
+          res.status < 500 || typeof wireCode !== "string" || wireCode === "UNKNOWN";
+        setApiEnvelope(
+          !recognised && curatedAllowed && typeof curated === "string" && curated.length > 0
+            ? { ...base, cause: curated }
+            : base,
+        );
+        return;
       }
       const { api_key_id: newKeyId } = await res.json();
 
@@ -354,7 +420,7 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
 
       {/* API Key Modal: create only (D-03 / D-07, 200-12) */}
       {mode === "create" && (
-        <Modal open={showApiModal} onClose={() => setShowApiModal(false)} title="Connect Exchange API Key">
+        <Modal open={showApiModal} onClose={closeApiModal} title="Connect Exchange API Key">
           <div className="space-y-4">
             <Select
               label="Exchange"
@@ -390,9 +456,14 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
             <p className="text-xs text-text-muted">
               Only read-only keys are accepted. Keys with trading or withdrawal permissions will be rejected.
             </p>
+            {apiEnvelope && (
+              <div className="mt-4">
+                <ErrorEnvelope envelope={apiEnvelope} />
+              </div>
+            )}
             {apiError && <p className="text-sm text-negative">{apiError}</p>}
             <div className="flex gap-3">
-              <Button variant="secondary" type="button" onClick={() => setShowApiModal(false)}>Cancel</Button>
+              <Button variant="secondary" type="button" onClick={closeApiModal}>Cancel</Button>
               <Button type="button" onClick={handleApiKeySubmit} disabled={apiLoading || !apiKey || !apiSecret}>
                 {apiLoading ? "Validating..." : "Connect Key"}
               </Button>

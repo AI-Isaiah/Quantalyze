@@ -243,6 +243,24 @@ export function isDailyReturnsSourced(input: {
 }
 
 /**
+ * The one public reader of `SERIES_EXAMINED_BUT_REFUSED`, for a caller that has
+ * a verdict but not a whole gate input (the wizard's composite arm evaluates
+ * `isDailyReturnsSourced`, never `checkStrategyGate`, because a composite has
+ * zero trades by construction). It exists so that caller never keeps a second,
+ * hand-typed list of the two refused verdicts that could drift from this map.
+ *
+ * The safe direction is the same as `isDailyReturnsSourced`'s: anything not in
+ * the map, including a null verdict and a verdict this build has never heard
+ * of, answers false, so the caller falls to the provenance refusal rather than
+ * claiming an examination nobody recorded.
+ */
+export function isSeriesExaminedButRefused(
+  seriesCompleteness: string | null,
+): boolean {
+  return SERIES_EXAMINED_BUT_REFUSED.has(seriesCompleteness ?? "");
+}
+
+/**
  * Thrown when `checkStrategyGate` is handed an input it cannot evaluate.
  *
  * WHY THIS IS A REFUSAL AND NOT A VERDICT (C-3). `StrategyGateInput` documents

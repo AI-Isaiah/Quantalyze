@@ -486,6 +486,27 @@ function venueAlreadyConnectedResponse(strategyName: string | null): NextRespons
 }
 
 /**
+ * 212-03 / SC5 — the KEY_ORPHANED 409, held ONCE and called from both emitting
+ * sites: the pre-validation fence (MT5, identity known before `validateKey`)
+ * and the 23505 race arm (ccxt venues and any race, identity known only after
+ * validation). Same shape as `venueAlreadyConnectedResponse`, for the same
+ * reason: two copies of one body is how TWIN-8 happened.
+ *
+ * ⛔ IT TAKES NO PARAMETERS, WHICH IS THE STRUCTURAL REASON NO VENUE ID CAN
+ * LEAK INTO IT (T-154-06-C / T-212-04). `code` FIRST, as a literal: the order
+ * the invariant scanner and the byte-pin in `route.test.ts` both read.
+ */
+function keyOrphanedResponse(): NextResponse {
+  return NextResponse.json(
+    {
+      code: "KEY_ORPHANED",
+      error: "This key is already stored, but no strategy uses it.",
+    },
+    { status: 409, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
  * ── 162-05 / D-162-3 — THE USE-EXISTING-KEY ARM ────────────────────────────
  *
  * WHAT IT CLOSES. `my-strategies` renders an orphaned key as a "No strategy
@@ -1273,8 +1294,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // must not first burn a Railway probe and the venue's validate quota.
       return venueAlreadyConnectedResponse(venueMatch.strategyName);
     }
-    // 167.1.2 REVIEW WR-04: `held` falls through here on the same reasoning as
-    // `orphaned` below, and is answered by the race arm's own `held` branch.
+    if (venueMatch.kind === "orphaned") {
+      // 212-03 / SC5 — REFUSE BEFORE THE UP-TO-120 s `validateKey`. The identity
+      // is known here (MT5 only), and the refusal is a fact about the caller's
+      // OWN stored key that no credential check can change. The comment block
+      // below records the 161-05 order this reverses.
+      return keyOrphanedResponse();
+    }
+    // 167.1.2 REVIEW WR-04: `held` falls through here and is answered by the
+    // race arm's own `held` branch.
+    // ⛔ CORRECTED 2026-11-14 (Phase 212 SC5) — THE `orphaned` ARM ABOVE REVERSES
+    // THE 161-05 / WIZERR-03 ORDER RECORDED HERE; the original reasoning is kept
+    // below as lineage.
     // 161-05 / WIZERR-03 — `orphaned` DELIBERATELY DOES NOT SHORT-CIRCUIT HERE,
     // unlike the two arms above, and the asymmetry is a decision rather than an
     // oversight. Both of those answer a fact about the user's OWN existing
@@ -1282,15 +1313,31 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // does not: the credentials in this request have not been authenticated
     // yet, and if they are wrong the user's real first problem is the
     // credentials. Refusing here would hand them the orphan to chase while a
-    // bad secret sat unmentioned — the "sends them looking for a different
-    // problem" class this phase exists to remove. Falling through lets
-    // `validateKey` speak first, and the RPC's INSERT then trips the index and
-    // reaches the orphan arm in the 23505 block below.
+    // bad secret sat unmentioned. Falling through lets `validateKey` speak
+    // first, and the RPC's INSERT then trips the index and reaches the orphan
+    // arm in the 23505 block below.
     // ⚠️ THE COST IS LATENCY, AND IT IS REAL: this fence only runs for MT5
     // (`venueAccountId` is non-null for mt5 alone), whose validate budget is
     // 120 s, so an orphaned MT5 user waits out a full validation before the
-    // refusal. Recorded in the phase's deferred items rather than traded away
-    // here for the ordering above.
+    // refusal. Recorded in the phase's deferred items rather than traded away.
+    //
+    // ⭐ PHASE 212 SC5 TOOK THE OTHER SIDE, because a 120 s wait to hear a
+    // refusal that was already knowable is the worse failure. Why it is sound:
+    // the orphan is a fact about the caller's OWN stored key. Right credentials
+    // would be refused identically, so telling the orphan first is TRUE; and it
+    // discloses nothing, because `resolveByVenueIdentity` is scoped by
+    // `user.id` and `keyOrphanedResponse()` carries no identity. THE TRUTHFULNESS
+    // COST, stated rather than hidden: a user with an orphaned key AND a wrong
+    // password hears the orphan first and learns about the password only after
+    // they have dealt with the orphan.
+    // THE ARMS, named. Identity known BEFORE validation: this fence, the MT5
+    // credential arm only, now refuses. Identity known only AFTER validation:
+    // ccxt venues (the id comes from the validator response), sFOX (no id),
+    // and any 23505 race, all unchanged and answered by the race arm. No
+    // validation at all: the `reuse_api_key_id` arm (`handleReuseExistingKey`),
+    // where an orphan is the very case it resumes, unchanged.
+    // `composite/add-key` mints no `KEY_ORPHANED`. `held` keeps the latency
+    // (its refusal needs the race arm's re-read) and is out of scope here.
   }
 
   // validate + encrypt are TOCTOU-safe back-to-back on the server side.
@@ -1642,13 +1689,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // coverage law cannot see a 409, so `KNOWN_CREATE_WITH_KEY_CODES`
             // gaining `KEY_ORPHANED` in this commit is what stops ConnectKeyStep
             // rejecting it as unrecognised and rendering UNKNOWN.
-            return NextResponse.json(
-              {
-                code: "KEY_ORPHANED",
-                error: "This key is already stored, but no strategy uses it.",
-              },
-              { status: 409, headers: NO_STORE_HEADERS },
-            );
+            return keyOrphanedResponse();
           }
           // Unresolvable: the resolver is dark — a read faulted, or the
           // service-role credential is missing — so we could not establish

@@ -1431,6 +1431,47 @@ describe("partial-commit detection — over-recorded direction (server bug)", ()
 
     vi.unstubAllGlobals();
   });
+
+  it("SC6 row 4: the over-recorded banner links the contact form in a new tab", async () => {
+    vi.useRealTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ recorded: 5, results: [], errors: [] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={vi.fn()}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    const err = screen.getByTestId("commit-drawer-error");
+    // Hand-typed; the sr-only suffix sits inside the link text.
+    expect(err.textContent).toBe(
+      "Server reported 5 of 1 recorded (over-recorded — single-transaction contract violated). Do NOT retry from this drawer — retrying would compound the discrepancy. Use the contact form (opens in a new tab) — the server reported committing more decisions than were submitted, which needs investigation."
+    );
+    expect(err.textContent).not.toContain("@");
+    const link = err.querySelector("a")!;
+    expect(link.getAttribute("href")).toBe("/contact?topic=support");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+
+    vi.unstubAllGlobals();
+  });
 });
 
 // ===========================================================================
@@ -1629,6 +1670,47 @@ describe("partial-commit detection (server returned ok with recorded < diffs.len
     expect(err.textContent).toMatch(/do NOT retry/i);
     expect(err.textContent).toMatch(/1 of 3/i);
     expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("SC6 row 5: the under-recorded banner links the contact form in a new tab", async () => {
+    vi.useRealTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ recorded: 1, results: [{ index: 0 }], errors: [] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF, VA_DIFF, VM_DIFF]}
+        onSubmitSuccess={vi.fn()}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF, VA_DIFF, VM_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    const err = screen.getByTestId("commit-drawer-error");
+    // Hand-typed; the sr-only suffix sits inside the link text.
+    expect(err.textContent).toBe(
+      "Server reported 1 of 3 recorded (partial — single-transaction contract violated). Do NOT retry from this drawer — retrying would compound the discrepancy. Review the Outcomes timeline and record any missing decisions there, or use the contact form (opens in a new tab)."
+    );
+    expect(err.textContent).not.toContain("@");
+    const link = err.querySelector("a")!;
+    expect(link.getAttribute("href")).toBe("/contact?topic=support");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
 
     vi.unstubAllGlobals();
   });

@@ -553,10 +553,14 @@ _EXPECTED_EXTERNAL_API_BLOCKED = (
     "capability cannot be proven. This needs an operator, not a retry — see "
     "docs/runbooks/mt5-go-live.md."
 )
+# ⛔ 212-01 (2026-11-14, Phase 212 WIZTRUTH, founder-approved copy): the generic
+# arm no longer names a cause. It used to assert the external-Python-API option
+# was in force, which is arm 2's cause and is only known when the terminal
+# reports it. This arm is reached when the terminal names no cause at all, so the
+# sentence now says that. Still hand-typed, never imported.
 _EXPECTED_GENERIC = (
-    "MT5 gateway refuses automated trading (the 'Disable automatic trading "
-    "through the external Python API' option is in force), so read-only "
-    "capability cannot be proven. This needs an operator, not a retry — see "
+    "The MT5 gateway would not let us prove read-only capability, and it did not "
+    "report why. This needs an operator, not a retry — see "
     "docs/runbooks/mt5-go-live.md."
 )
 

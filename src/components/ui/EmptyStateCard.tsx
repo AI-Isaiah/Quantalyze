@@ -13,11 +13,13 @@
  * (UI-SPEC Color).
  */
 
+import type { ReactNode } from "react";
+
 interface EmptyStateCardProps {
   /** Reason heading (UI-SPEC Copywriting Contract) — names what's missing. */
   heading: string;
   /** Body copy — names the SPECIFIC reason so the allocator knows what to fix. */
-  body: string;
+  body: ReactNode;
 }
 
 export function EmptyStateCard({ heading, body }: EmptyStateCardProps) {

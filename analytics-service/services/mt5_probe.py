@@ -77,14 +77,17 @@ logger = logging.getLogger("quantalyze.analytics")
 #: :func:`mt5_gateway_misconfigured_detail`, and the default-argument value that
 #: keeps raw remote text out of the exception by omission.
 #:
-#: ⚠️ 161-02 RESIDUAL, stated honestly. This sentence names a SPECIFIC option, so
-#: it is only truthful where a cause is genuinely unknown — which is why the
-#: builder reaches it ONLY when the terminal names no cause at all, and why both
-#: raise sites (which reach the operator arm only via
-#: ``terminal_trade_permission_off``) can no longer emit it. 161-UI-SPEC
-#: § Copy Spec WIZERR-01 arm 3 holds this constant unchanged; re-wording it to a
-#: cause-free fallback is a copy decision for the phase owner, not an executor
-#: improvisation, and is recorded in 161-02-SUMMARY.
+#: ⛔ CORRECTED 2026-11-14 (Phase 212 WIZTRUTH, founder decision): this sentence
+#: names NO cause any more. The block that stood here said the sentence named a
+#: SPECIFIC option, so it was only truthful where a cause is genuinely unknown,
+#: and that re-wording it to a cause-free fallback was "a copy decision for the
+#: phase owner" (161-02 RESIDUAL). The founder made that decision on 2026-11-14:
+#: the sentence now says the gateway would not let us prove read-only capability
+#: and did not report why, which is true for every path that reaches it. The
+#: builder reaches it ONLY when the terminal names no cause at all, and both raise
+#: sites (which reach the operator arm only via ``terminal_trade_permission_off``)
+#: can no longer emit it from a flagged terminal. 161-UI-SPEC § Copy Spec
+#: WIZERR-01 arm 3 is amended to this sentence in the same change.
 #:
 #: ⛔ HAND-WRITTEN, and deliberately NOT derived from any exception text. It is
 #: rendered to a human (``job_worker.classify_exception`` persists it as
@@ -105,9 +108,8 @@ logger = logging.getLogger("quantalyze.analytics")
 #:      rule — NARROWER, not gone, and the gate asserts the verdict rather than
 #:      word-absence so it cannot go vacuous when the table changes shape.
 MT5_GATEWAY_MISCONFIGURED_DETAIL: Final[str] = (
-    "MT5 gateway refuses automated trading (the 'Disable automatic trading "
-    "through the external Python API' option is in force), so read-only "
-    "capability cannot be proven. This needs an operator, not a retry — see "
+    "The MT5 gateway would not let us prove read-only capability, and it did "
+    "not report why. This needs an operator, not a retry — see "
     "docs/runbooks/mt5-go-live.md."
 )
 
@@ -142,9 +144,10 @@ MT5_GATEWAY_TRADE_PERMISSION_OFF_DETAIL: Final[str] = (
     "the account — see docs/runbooks/mt5-go-live.md."
 )
 
-#: 161-02 / WIZERR-01 arm 2 — the case the constant at the top of this block
-#: actually describes: the named external-API option IS in force, reported by
-#: ``terminal_info()['tradeapi_disabled']``.
+#: 161-02 / WIZERR-01 arm 2 — the case where the named external-API option IS in
+#: force, reported by ``terminal_info()['tradeapi_disabled']``. ⛔ CORRECTED
+#: 2026-11-14 (Phase 212): this said the constant at the top of this block "actually
+#: describes" it; that constant is cause-free now, so only this arm names the option.
 #:
 #: ⚠️ A1 (UNVERIFIED): that key was founder-measured ONCE (2026-08-13) with zero
 #: production readers. The builder below therefore reads it defensively and an

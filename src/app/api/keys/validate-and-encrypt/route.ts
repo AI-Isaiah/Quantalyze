@@ -14,7 +14,12 @@ import { seamErrorCode } from "@/lib/seam-discriminator";
 // the one copy table rather than retyped, so it cannot drift from what the
 // envelope renders. `recogniseSeamErrorCode` is the same seam→wizard
 // translation the client applies to this body's `code`.
-import { WIZARD_ERROR_COPY, recogniseSeamErrorCode } from "@/lib/wizardErrors";
+import {
+  UPSTREAM_STATUS_TO_SEAM_CODE,
+  WIZARD_ERROR_COPY,
+  classifyKeyValidationError,
+  recogniseSeamErrorCode,
+} from "@/lib/wizardErrors";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
@@ -81,64 +86,6 @@ const MAX_KEY_LABEL_LENGTH = 120;
 // reads. The leaf's header carries the constraint that matters most on THIS
 // route: the copy must never blame the user's key for an outage in which no
 // request to the exchange was ever issued.
-
-/**
- * 164.2-05 / WIZFORM-02 — a BARE upstream 4xx status, classified.
- *
- * ── THE MEASUREMENT ─────────────────────────────────────────────────────────
- *
- * PRODUCTION, 2026-08-25: this route answered a key-connect attempt with
- *
- *     {"error":"Unauthorized","code":"UNKNOWN"}
- *
- * The Railway analytics service rejected OUR service key and answered a bare
- * 401 — no seam envelope, so `AnalyticsUpstreamError.seamCode` was `null` and
- * the 4xx-forward arm's `err.seamCode ?? "UNKNOWN"` had nothing left to read.
- * WIZFORM-02's criterion is *"no wizard failure renders UNKNOWN when the server
- * DID classify it"*, and a 401 IS a classification. It was discarded one line
- * before it could be used, because the only channel that arm consulted was the
- * envelope's.
- *
- * ⛔ NO ROSTER ROW CAN CLOSE THIS. Every roster, alias table and coverage law
- * in this repo operates on a code that already exists; here the wire literally
- * carried the string `"UNKNOWN"`. The status is the only classification present
- * on the path, so the status is what has to be read.
- *
- * ── WHY 401/403 IS OURS ─────────────────────────────────────────────────────
- *
- * The credential on THIS hop is the analytics service key held in our own
- * environment (PYAPI-06). The user's exchange credentials are the request BODY,
- * never the authorization. So a 401 or 403 here means our own service rejected
- * our own key — a configuration fault on our side, which is exactly what
- * `SEAM_MISCONFIGURED`'s copy already says (*"We could not send this request —
- * our own configuration is wrong"*). Reading it as "your key was rejected"
- * would be a fresh false attribution, the class this phase exists to close.
- *
- * 422 is the service's own shape refusal → `VALIDATION_FAILED`, whose copy was
- * deliberately authored to name NO producer so it serves both that 422 and our
- * own 400. 429 is a throttle on that hop → `RATE_LIMITED`.
- *
- * ⛔ 400 IS DELIBERATELY ABSENT. A bare 400 from the validator is a verdict
- * about the USER's key whose specific sentence we did not receive, and
- * `VALIDATION_FAILED`'s copy (*"The fault is in our software, not in your key
- * or your data"*) would be FALSE for it. An unmapped 4xx is genuinely
- * unclassified and still answers `UNKNOWN` — that residue is honest, not a hole
- * to be filled by widening this table.
- *
- * ⛔ EVERY VALUE MUST BE A KEY OF `SEAM_CODE_TO_WIZARD_CODE`. The client's
- * `recogniseSeamErrorCode` answers `UNKNOWN` for anything outside that table,
- * so a row minting a code it does not carry would buy nothing at the surface
- * while reading like a fix here. `wizardErrors.invariant.test.ts` asserts it.
- */
-const UPSTREAM_STATUS_TO_SEAM_CODE: ReadonlyMap<number, string> = new Map<
-  number,
-  string
->([
-  [401, "SEAM_MISCONFIGURED"],
-  [403, "SEAM_MISCONFIGURED"],
-  [422, "VALIDATION_FAILED"],
-  [429, "RATE_LIMITED"],
-]);
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Phase 209 SC4 / D-13 — a malformed, `null` or non-object JSON body answers
@@ -353,7 +300,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // limiter keys on two statements down.
     console.error(
       "[keys/validate-and-encrypt] STALE_CLIENT refusal — caller sent no persist discriminator",
-      { userId: user.id },
+      // ⭐ 212 review WR-01 — the id the form sent (`X-Correlation-Id`), so the
+      // "send the correlation id" remedy joins to this line.
+      { userId: user.id, correlationId: await getCorrelationId() },
     );
     // ⭐ 161-09 / WIZERR-08 — KEY ORDER IS LOAD-BEARING, NOT COSMETIC, and this
     // arm is the receipt. Every coverage law in this repo derives its
@@ -615,6 +564,14 @@ async function legacyValidateAndEncryptHandler(args: {
   label?: unknown;
 }): Promise<NextResponse> {
   const { exchange, api_key, api_secret, passphrase, userId, label } = args;
+  // ⭐ 212 review WR-01 — THE ID THE FORM SENT, read once and carried on every
+  // failure log below. Both dashboard forms mint `newCorrelationId("key-validate")`,
+  // send it as `X-Correlation-Id` and print it in the envelope; the envelope's
+  // "send the correlation id below through the contact form" remedy can only work
+  // if that exact id appears in a log line. (`getCorrelationId()` prefers the
+  // header and falls back to a fresh UUID.) The seam hop mints its own id per
+  // call (`analytics-client`), so this id is NOT threaded to Python.
+  const correlationId = await getCorrelationId();
   try {
     // Validate and encrypt atomically to prevent TOCTOU race
     const validation = await validateKey(exchange, api_key, api_secret, passphrase, { userId });
@@ -692,10 +649,11 @@ async function legacyValidateAndEncryptHandler(args: {
       const perRequestSecrets = [api_key, api_secret, passphrase];
       console.error(
         "[keys/validate-and-encrypt] persist arm unavailable — no service credential:",
+        { correlationId },
         scrubSeamError(adminErr, perRequestSecrets),
       );
       captureToSentry(adminErr, {
-        tags: { route: "api/keys/validate-and-encrypt", arm: "persist" },
+        tags: { route: "api/keys/validate-and-encrypt", arm: "persist", correlation_id: correlationId },
         secrets: perRequestSecrets,
       });
       return NextResponse.json(
@@ -845,6 +803,7 @@ async function legacyValidateAndEncryptHandler(args: {
         // The response copy names no id and is venue-neutral.
         console.error(
           "[keys/validate-and-encrypt] persist INSERT failed — venue-identity collision:",
+          { correlationId },
           scrubSeamError(insertError, [api_key, api_secret, passphrase, venueAccountId]),
         );
         return NextResponse.json(
@@ -869,10 +828,11 @@ async function legacyValidateAndEncryptHandler(args: {
         insertError ?? new Error("api_keys insert returned no row");
       console.error(
         "[keys/validate-and-encrypt] persist INSERT failed:",
+        { correlationId },
         scrubSeamError(insertFault, perRequestSecrets),
       );
       captureToSentry(insertFault, {
-        tags: { route: "api/keys/validate-and-encrypt", arm: "persist" },
+        tags: { route: "api/keys/validate-and-encrypt", arm: "persist", correlation_id: correlationId },
         secrets: perRequestSecrets,
       });
       return NextResponse.json(
@@ -917,6 +877,7 @@ async function legacyValidateAndEncryptHandler(args: {
     if (err instanceof CircuitOpenError) {
       console.error(
         `[keys/validate-and-encrypt] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
+        { correlationId },
       );
       // 140.3-G4 / SEAMUX-03 — CIRCUIT_OPEN, the wire token process-key-client
       // emits for this fact and the client-side map already recognises. The
@@ -957,13 +918,15 @@ async function legacyValidateAndEncryptHandler(args: {
       // carries less. `UNKNOWN` remains the terminal for an unmapped status.
       //
       // ⭐ 164.2 review B2 — WHEN THE CODE COMES FROM THE STATUS MAP, THE
-      // MESSAGE MUST NOT COME FROM THE UPSTREAM. Every consumer of this route
-      // renders `error` and ignores `code`
-      // (`AllocatorExchangeManager.tsx`, `ApiKeyManager.tsx`,
-      // `StrategyForm.tsx`), so the PROD reproduction shipped a body whose two
-      // fields contradicted each other: `code: "SEAM_MISCONFIGURED"` (our own
-      // service key is stale) beside `error: "Unauthorized"` — which on a
-      // key-connect form reads as THEIR key being refused. That is the
+      // MESSAGE MUST NOT COME FROM THE UPSTREAM. The PROD reproduction shipped
+      // a body whose two fields contradicted each other:
+      // `code: "SEAM_MISCONFIGURED"` (our own service key is stale) beside
+      // `error: "Unauthorized"` — which on a key-connect form reads as THEIR key
+      // being refused. Since Phase 212 the two browser consumers
+      // (`StrategyForm.tsx`, `AllocatorExchangeManager.tsx`) render from `code`
+      // through `recogniseValidateAndEncryptCode`, but the `error` field stays
+      // the sentence of record for any caller that reads it: 5xx bodies stay
+      // static and only the code is forwarded. The contradiction is the
       // misattribution this phase exists to eliminate, so on the mapped arm the
       // upstream's bare status text is replaced with the curated sentence the
       // mapped code already owns, read from `WIZARD_ERROR_COPY` rather than
@@ -976,17 +939,42 @@ async function legacyValidateAndEncryptHandler(args: {
       const mappedCode = err.seamCode
         ? null
         : (UPSTREAM_STATUS_TO_SEAM_CODE.get(err.status) ?? null);
+      // ⭐ 212 review WR-03 — A BARE 400 THAT CARRIED NO SEAM CODE (wrong
+      // credentials: `AUTH_FAILED_DETAIL`) is still a classified fact. The
+      // classifier already names it (`KEY_AUTH_FAILED`, 400), so the wire says
+      // so instead of the literal "UNKNOWN". Third in the `??` order, after the
+      // upstream's own code and the status map; only a 400-status verdict (a
+      // caller fault) is forwarded, and the specific sentence still rides in
+      // `error`.
+      const classified = classifyKeyValidationError(err);
+      const classifiedCode =
+        classified.status === 400 && classified.code !== "UNKNOWN"
+          ? classified.code
+          : null;
+      const forwardedCode = err.seamCode ?? mappedCode ?? classifiedCode ?? "UNKNOWN";
+      // ⭐ 212 review WR-01 — status and code only, NEVER the message or the
+      // request (credentials ride this request). No Sentry capture, by the
+      // stance above; the line exists so the id the user was told to send joins
+      // to something.
+      const forwardedStatus = err.status;
+      console.warn("[keys/validate-and-encrypt] upstream 4xx forwarded:", {
+        correlationId,
+        status: forwardedStatus,
+        code: forwardedCode,
+      });
       return NextResponse.json(
         {
           error: mappedCode
             ? WIZARD_ERROR_COPY[recogniseSeamErrorCode(mappedCode)].title
             : err.message,
-          code: err.seamCode ?? mappedCode ?? "UNKNOWN",
+          code: forwardedCode,
         },
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
     if (err instanceof AnalyticsTimeoutError) {
+      // ⭐ 212 review WR-01 — the id the user is told to send, joined to a line.
+      console.error("[keys/validate-and-encrypt] upstream timeout:", { correlationId });
       // 140.3-G4 / SEAMUX-03 — UPSTREAM_TIMEOUT (the wire token for OUR analytics
       // hop timing out; NOT KEY_NETWORK_TIMEOUT, which asserts the EXCHANGE was
       // unreachable — a fact not observed here).
@@ -1004,10 +992,11 @@ async function legacyValidateAndEncryptHandler(args: {
     const perRequestSecrets = [api_key, api_secret, passphrase];
     console.error(
       "[keys/validate-and-encrypt] validation failed:",
+      { correlationId },
       scrubSeamError(err, perRequestSecrets),
     );
     captureToSentry(err, {
-      tags: { route: "api/keys/validate-and-encrypt" },
+      tags: { route: "api/keys/validate-and-encrypt", correlation_id: correlationId },
       secrets: perRequestSecrets,
     });
     // 140.3-G4 / SEAMUX-03 — UNKNOWN, the repo's terminal/unclassified fallback

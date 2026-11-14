@@ -32,89 +32,6 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    Re-homed from the deleted 0.01 "Phase 164.1 scope" wrapper.
    **Owner:** Phase 215 TESTREACH (booked 2026-11-14)
 
-0.012. **`[D-161-05-B]` An orphaned MT5 connect waits out the full 120 s validate before refusing.**
-   Phase 161's deferred error-surface item. Re-measured live 2026-11-14: the orphan verdict is
-   reached only after validation in `src/app/api/strategies/create-with-key/route.ts`. Where the
-   key's identity is known before validation, the refusal should come first.
-   Re-homed from the deleted 0.01 "Phase 164.1 scope" wrapper.
-   **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
-
-0.013. **WIZFORM-02 — server-classified codes still render `code: UNKNOWN` on the dashboard key surfaces. RECORDED OPEN**
-   (Phase 153 span verification FAILED 2026-08-13). It GATES other work (see the entry near the
-   `GATED ON WIZFORM-02 CLOSING` marker: a new code cannot be minted until the coverage-law
-   population is honest). Re-homed from the deleted 0.01 wrapper's §D.
-   - ⭐ **FRESH EVIDENCE 2026-08-25, measured on PROD, not inherited:** `/api/keys/validate-and-encrypt`
-     returned `{"error":"Unauthorized","code":"UNKNOWN"}` — a server-classified upstream fault
-     reaching the client with NO code, exactly the defect. This is a live reproduction, so plan
-     against it rather than re-verifying whether the gate is still open.
-   - ⛔ **STILL OPEN after Phase 164.2 — FOUNDER DECISION 2026-09-06, taken at the plan-06 gate:
-     accept criterion 3 on FOUR of the five locked surfaces and book the fifth's wiring.** Phase
-     164.2 plan 09 built a RENDER sweep (`src/lib/wizardErrors.roster-render.test.tsx`, 96 tests)
-     that asserts the rendered DOM rather than roster membership, and it was observed RED under
-     two neuters applied to files OTHER than the test — see `164.2-09-SUMMARY.md` →
-     `## Anti-vacuity observations` (Neuter 1, deleting the `["SEAM_MISCONFIGURED",
-     "SEAM_MISCONFIGURED"]` alias row at `wizardErrors.ts:4995`, → `4 failed | 92 passed (96)`;
-     Neuter 2, deleting `"VENUE_ALREADY_CONNECTED"` from `KNOWN_CREATE_WITH_KEY_CODES`).
-     **The fifth surface, `keys/validate-and-encrypt`, has NO code→copy render path at HEAD** —
-     `164.2-09-SUMMARY.md` → `## Surfaces not rendered` re-measured all three consumers
-     (`ApiKeyManager.tsx`, `StrategyForm.tsx`, `AllocatorExchangeManager.tsx`) and **none reads
-     `code`**; a row there could only pass by feeding the expected title in as wire prose and
-     reading it back, which is the proof-by-adjacent-signal that let WIZFORM-02 be *believed*
-     closed in Phase 153. The wiring is booked as **`[WIZFORM-02-VE-CODECHANNEL]`** (🟡 FIX
-     MID-TERM). ⛔ Therefore **the `GATED ON WIZFORM-02 CLOSING` marker STAYS DOWN** — plan 10's
-     W4 precondition required that section to be ABSENT and it is PRESENT, which is the
-     revision-round-2 guard working as designed, not a shortfall.
-     ⭐ The 2026-08-25 PROD reproduction above is nonetheless closed AT THE ROUTE by 164.2 plan 05
-     (`UPSTREAM_STATUS_TO_SEAM_CODE`: 401/403 → `SEAM_MISCONFIGURED`), so a *wizard step* now
-     receives `SEAM_MISCONFIGURED` and the sweep proves `connect-key` renders it as itself. The
-     unproven half is that the three DASHBOARD consumers show it — because they cannot.
-   **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
-
-0.07. **⚠️ The composite arm tells a `sampled_gapped` series a false provenance sentence.** Found and
-   deliberately left live by Phase 161 (`161-07`, D-161-07-A) — it fell outside that task's declared
-   file scope, so it was booked rather than silently widened into.
-   - `SyncPreviewStep.tsx:1306` / `:1311` hardcode `GATE_SERIES_PROVENANCE_UNVERIFIED` for **every**
-     inadmissible composite verdict. A `sampled_gapped` composite is therefore told *"nothing on our
-     side recorded how that series was built"* — which is false: the series' provenance IS recorded;
-     it simply has a gap (`nav_gap_days > 0`). Reachable via the FIX-2 downgrade, and currently
-     pinned by a 142.2 test.
-   - Same defect class Phase 161 exists to eliminate — a sentence that names a blocker other than the
-     real one — so this is unfinished business of that phase, not new scope.
-   - **Fix shape:** branch the composite arm's code on the actual verdict instead of hardcoding one,
-     mapping `sampled_gapped` to its own reason. One-line fix recorded in
-     `.planning/milestones/v1.20-phases/161-wizerr-honest-error-surfaces/deferred-items.md`; the 142.2 pin moves with it.
-   **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
-
-0.09. **⚠️ MT5 generic fallback names a cause it has NOT proven — a false sentence in the arm that
-   exists for "cause unknown".** Found 2026-08-24 during Phase 161 (WIZERR-01) execution; the plan
-   deliberately did not touch it, and `161-UI-SPEC.md` holds arm 3 unchanged, so this is a scoped
-   follow-up, not a regression.
-   - `MT5_GATEWAY_MISCONFIGURED_DETAIL` (`analytics-service/services/mt5_probe.py`) reads:
-     *"MT5 gateway refuses automated trading (the 'Disable automatic trading through the external
-     Python API' option is in force), so read-only capability cannot be proven…"*
-   - That parenthetical is **arm 2's specific claim** (`MT5_GATEWAY_EXTERNAL_API_BLOCKED_DETAIL`
-     asserts the same option, legitimately, because arm 2 *is* that case). Arm 3 is the fallback
-     used when **no cause is provable** — the A1 absent-key path and `classify_exception`'s
-     allow-list degradation target. Asserting a specific option there is exactly the
-     names-a-blocker-it-cannot-establish defect WIZERR-01 exists to eliminate.
-   - **Currently low-urgency:** structurally unreachable from both raise sites (they enter the
-     operator arm only via `terminal_trade_permission_off`, which forces arm 1 or 2). It survives as
-     `Mt5GatewayMisconfigured()`'s default argument and as the allow-list's degradation target — so
-     it CAN still surface.
-   - **Fix shape:** amend `161-UI-SPEC.md` arm 3 to a cause-free sentence, re-run the 14-token fence
-     check, change the constant, and re-run `test_mt5_validate_parity.py` (the default-argument pin
-     `str(Mt5GatewayMisconfigured()) == MT5_GATEWAY_MISCONFIGURED_DETAIL` binds it). Founder call on
-     the wording, since the UI-SPEC copy contract is an approved artifact.
-   **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
-
-0.51. **Phase 153.5 finding #10 — the 20 s interactive lease wait is shorter than one in-flight derive.**
-   `_MT5_LEASE_WAIT_S` is 20 s, while the worker's derive holds the terminal for a 40 s read plus a
-   10 s restart (`services/mt5_concurrency.py`, re-measured 2026-11-14). So an interactive validate
-   can never wait out one in-flight derive. Size the wait from measured hold times (D-32 made them
-   collectable), or tell the user the terminal is busy and when to retry. Kept from the deleted
-   0.5 "Phase 153.5 complete" entry; finding #8 moved to TRIGGER-GATED.
-   **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
-
 0.12. **🎨 FreshnessChip's longest label overflows its masthead column — measured in a real browser.**
    Found 2026-08-26 during the phase-162 browser pass on localhost/TEST (the first time this phase
    was rendered outside jsdom). Measured on the factsheet v2 masthead at 1485px viewport:
@@ -476,6 +393,15 @@ founder can take.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[212-CONTACT-SUPPORT-SURVIVORS]` The SQL error copy and five Python strings still say "contact support", a channel that does not exist** (logged 2026-11-14, Phase 212 WIZTRUTH ship; user-facing)
+  - **What:** Phase 212 replaced every in-app "contact support" pointer in `src` with the contact form. Two places sit outside that census:
+    the `computation_error_copy` arms in `supabase/schema/functions/computation_error_copy.sql` (the permanent, transient, unknown and ELSE arms),
+    and five Python strings: `services/exchange.py` (the `VALIDATION_UNEXPECTED` message), `services/csv_validator.py`,
+    `services/job_worker.py` (two), and `routers/portfolio.py` (`_fail_vr` "Verification failed").
+  - **Why open:** the SQL change needs a migration, which Phase 212's SC7 ruled out. So csv-finalize's `ENQUEUE_LOST_RACE_USER_COPY` and the SQL ELSE arm are deliberately NOT in byte parity now
+    (`csv-finalize/route.test.ts` uses a hand-typed oracle). When the migration lands, restore the parity test against the SQL arm.
+  - **Owner:** a later migration phase (not yet booked). Trigger: the next phase that writes a migration touching analytics error copy.
+
 - [ ] **[209-SENTRY-DIRECT-CAPTURE-DETAILS]** (logged 2026-11-14, Phase 209 SCRUBLEAKS review residual, CONTEXT `<deferred>`; MEDIUM, security/data-integrity; owner: unassigned, book a phase when taken up) **Direct `Sentry.captureException` call sites bypass `scrubCaptureInput`, so a plain PostgREST error object captured there still carries `details` and `hint` to Sentry under `extra.__serialized__`.**
   - **Why:** Phase 209 scrubbed the `captureToSentry` chokepoint and made `beforeSend` total; the SDK serialises a non-Error capture into `extra.__serialized__`, which `scrubSentryEvent` scrubs for share tokens only. Measured in review: `alert-digest` (two sites) ships `details`/`hint` this way.
   - **Candidate sites:** `alert-digest` (2), `admin.ts`, `founder-lp-report`, `ops-alert`, `for-quants-lead`, `error.tsx`/`global-error.tsx`, plus `audit.ts`, `for-quants-leads-admin.ts`, `preferences.ts`. Find them with `grep -rn -a 'Sentry.captureException' src --include=*.ts --include=*.tsx`, excluding tests.
@@ -684,55 +610,6 @@ typography stays one tier per role.
   - **R3-WR-01 (MEDIUM) FIXED in `514805e66`:** the Monthly Returns heatmap's last month cell (the month holding the record's last date) IS the Month-to-date figure the Returns panel dashes (same dates, same compounding; in January also the Year-to-date figure). Under the heatmap's existing full-history verdict it reads "—" with no tint and a figure-free title (`YYYY-MM: withheld`). Earlier month cells keep their figures. Round 3's assertion that every month cell stays was flipped for that one cell only, deliberately. Seen RED.
   - **R3-WR-02 (MEDIUM) FIXED in `6add59aa7`:** the rolling charts' avg gate decided "zoomed" from `useWindowedView` (the held or deferred range) while the label is computed over the chart's live range, so a zoom-out gesture reaching the whole record printed the whole-record avg until the hold released. The gate now reads `resolveRangeScope(useXRange().xRange, ...)`. Seen RED with a real wheel tick and a faked settle timer, and RED again with the old gate restored from a byte backup.
   - LOW fixed in `b97080820`: the zoom test now proves the zoom took effect on the Withheld render before it asserts the copies stay dashed.
-
-### CONTACT-SUPPORT-POINTERS-01 — fifteen user-facing strings tell a user to "contact support" without saying how (booked 2026-10-07, Phase 164.6.6.3.5)
-
-**Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
-
-**Why it is open.** These strings send a user to "contact support" and name no channel. Before Phase
-164.6.6.3.5 that was an unspoken email address; after its D-01 the only channel is the contact form
-(`/contact`), so each string should become the `contact form` pointer, rendered through
-`ContactPointerText` (the phrase `contact form` is the link). Phase 164.6.6.3.5 (D-16, an
-orchestrator-taken research recommendation, not a founder decision) booked them instead of changing
-them, because they sit outside `wizardErrors.ts`, the surface it rewrites. None was changed.
-
-**The list (measured 2026-10-07 at the phase worktree HEAD: 24 raw matching lines, 15 after the
-exclusions below).** Excluded: three comments (`gdpr-export.ts`, `fetch-and-build-payload.ts`, one
-doc comment in `key-card-copy.ts`), `key-card-copy.ts`'s four address-bearing constants and
-`csv-finalize`'s two address-bearing messages (all rewritten by Phase 164.6.6.3.5 plan 07), test
-files and `wizardErrors.ts`. Research counted about 17, which is these 15 plus the two
-`csv-finalize` address-bearing messages (inferred, not re-derived).
-
-- `src/app/api/strategies/csv-finalize/route.ts`: `ENQUEUE_LOST_RACE_USER_COPY` ("Analytics could not
-  complete for this strategy. Retry the sync, or contact support if this persists."). Plan 07 does
-  not touch it (orchestrator ruling I7).
-- `src/app/api/strategies/finalize-wizard/route.ts`: the `computation_error` written for composite
-  strategies on the unified-backbone path ("... Contact support."), around line 2601.
-- `src/app/api/admin/match/send-intro/route.ts`: `audit_warning` (operator-facing), around line 627.
-- `src/app/api/admin/partner-import/route.ts`: `audit_warning` (operator-facing), around line 1037.
-- `src/app/api/account/export/route.ts`: the export-limit message (around line 509) and the
-  "Export manifest drift" error (around line 540).
-- `src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.tsx`: the two commit-outcome
-  remedies, around lines 371 and 372.
-- `src/app/(dashboard)/allocations/components/WeightOptimizerSection.tsx`: the unreadable-optimizer
-  body, around line 119.
-- `src/components/auth/ProfileForm.tsx`: the locked-field help text, around line 116.
-- `src/components/auth/SignupForm.tsx`: the generic signup failure (around line 148) and the
-  locked-after-signup help text (around line 212).
-- `src/components/strategy/ApiKeyManager.tsx`: the sync-start failure copy (around line 86), the
-  delete-failure constant (around line 271) and the still-connected delete failure (around line 1098).
-
-**Owner: unrouted.** Founder to assign.
-
-**What closing it means.** Each string is in a pointer shape (the `contact form` phrase linking to
-`contactHref(...)` with the right topic and reference), the tests that pin the old wording move in the
-same change, the no-email-in-copy sweep that Phase 164.6.6.3.5 added is extended to the touched
-modules, and the regenerate command below returns only comments and fixtures. Server-side strings
-(`audit_warning`, `computation_error`, route error bodies) need the rendering host decided first,
-because `ContactPointerText` is a React component and a JSON field is not.
-
-Regenerate the census with `grep -rni 'contact support' src --include='*.ts' --include='*.tsx' | grep -v 'wizardErrors.ts' | grep -v '[.]test[.]'`
-and drop comments by hand.
 
 ### SECURITY-TXT-EXPIRES-01 — `security.txt` Expires lapses on 2027-04-10 and nothing renews it (booked 2026-10-07, Phase 164.6.6.3.5)
 
@@ -1006,26 +883,6 @@ per-metric decision.
       - **Severity: not user-facing-broken, not data-integrity — does not block.** Filed as a
         founder feature request, not a review finding. No phase owns strategy-list presentation
         today; per the severity rule this entry IS the complete routing unless one appears.
-
-- [ ] **`[WIZFORM-02-VE-CODECHANNEL]` `keys/validate-and-encrypt` has no code→copy render path,
-      so criterion 3's fifth surface cannot be rendered (booked 2026-09-06, Phase 164.2 plan 09,
-      FOUNDER DECISION at the plan-06 gate: accept 4-of-5 and book the wiring).**
-      **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
-      Measured at HEAD by reading all three consumers: `ApiKeyManager.tsx`, `StrategyForm.tsx` and
-      `AllocatorExchangeManager.tsx` each read `err.error` / `result.error` — the PROSE — and
-      **none reads `code`**. So a row for that surface in `src/lib/wizardErrors.roster-render.test.tsx`
-      could only pass by feeding the expected title in as wire prose and reading it back, which is the
-      tautology plan 09 forbids. It is recorded as PLANNING INCONCLUSIVE under
-      `## Surfaces not rendered` in `164.2-09-SUMMARY.md`, with two live assertions that go RED the
-      day a consumer starts reading `code`.
-      ⛔ **WIZFORM-02 therefore does NOT close on Phase 164.2** and the `GATED ON WIZFORM-02 CLOSING`
-      marker stays down — plan 10's W4 precondition checks for exactly that section's absence, and it
-      is present. This is the guard added in revision round 2 working as designed, not a shortfall.
-      **The work:** wire the three consumers onto the code channel (roster + `WIZARD_ERROR_COPY`
-      lookup, as `ConnectKeyStep.tsx`'s `recogniseCreateWithKeyCode` does), then add the fifth surface
-      to the render sweep
-      and raise `EXPECTED_POPULATION_MIN` off the new measurement. Touches live components, not just
-      tests — which is why it is its own item rather than a stretch of 164.2.
 
 - [ ] **`[SYNCTRADES-ENQUEUE-DONE]` `run_sync_trades_job` returns DONE after recording an
       analytics failure, so the bridge erases the record one RPC later — and the F1 remedy
@@ -1394,26 +1251,6 @@ per-metric decision.
       drift that is really just this pending apply. ⚠️ Sequence with
       `[164.2-TYPES-REGEN-CHECK]`: both wait on the same PROD apply.
 
-- [ ] **`[164.2-WIZARD-BARE401]` A bare upstream 401/403 with no seam envelope still answers
-      `code: "UNKNOWN"` on the two routes the wizard actually calls (booked 2026-09-06, Phase
-      164.2 ship review).**
-      **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
-      `create-with-key/route.ts:1731` and `composite/add-key/route.ts:710` both funnel the
-      upstream error through `classifyKeyValidationError`, which reads `seamCode` — **null** on
-      the middleware's bare `{"detail": "Unauthorized"}` body (`analytics-service/main.py:868`) —
-      never reads `.status`, and carries no 401 needle in its substring cascade. So the honest
-      "our credential to the analytics service is wrong" case lands as `UNKNOWN`.
-      The `UPSTREAM_STATUS_TO_SEAM_CODE` map added by this phase closes exactly this hole, but it
-      was added ONLY to `keys/validate-and-encrypt` (`route.ts:123`, consulted at `:879`), whose
-      three consumers read `err.error` and ignore `code` — so the fix currently reaches no user.
-      **Fix:** read the status in the classifier's null-`seamCode` branch, or consult a shared
-      map from both key routes before the cascade; then add a route test on BOTH twins with
-      `new AnalyticsUpstreamError("Unauthorized", 401)`.
-      **Why booked, not fixed at ship time:** it is not a regression — `UNKNOWN` is what these
-      routes answered before this phase too — and `UNKNOWN`'s copy does not blame the user for
-      our own misconfiguration. It fails the blast-radius bar for blocking, not the bar for
-      being real.
-
 - [ ] **`[164.2-RECLAIM-PROVENANCE]` `reclaim_stuck_compute_jobs` requeues without resetting the
       provenance markers, so a crash-recovered job can lose its curated sentence (booked
       2026-09-06, Phase 164.2 ship review).**
@@ -1437,16 +1274,16 @@ per-metric decision.
 - [ ] **`[164.2-SEAMCODE-UNION]` `UPSTREAM_STATUS_TO_SEAM_CODE`'s "every value is a key of
       `SEAM_CODE_TO_WIZARD_CODE`" law is enforced by a source-text scan, not by the compiler
       (booked 2026-09-06, Phase 164.2 ship review).**
-      The map is typed `ReadonlyMap<number, string>`
-      (`src/app/api/keys/validate-and-encrypt/route.ts:123`). Nothing in the type system stops a
-      value that no wizard code answers to; what stops it is the SOURCE-TEXT scan in
-      `src/lib/wizardErrors.invariant.test.ts:2681-2755` (`deriveStatusMap` at `:2681`, the
-      no-more-no-less assertion at `:2741`, the every-code-is-a-key assertion at `:2757`), which
-      parses the declaration out of the route file's source text.
+      The map is typed `ReadonlyMap<number, string>` and, since Phase 212 (2026-11-14), is
+      declared and exported in `src/lib/wizardErrors.ts` (`export const UPSTREAM_STATUS_TO_SEAM_CODE`);
+      the route imports it. Nothing in the type system stops a value that no wizard code answers
+      to; what stops it is the SOURCE-TEXT scan in `src/lib/wizardErrors.invariant.test.ts`
+      (`deriveStatusMap` and its no-more-no-less and every-code-is-a-key assertions; cite them by
+      symbol, the line numbers this entry carried until 2026-11-14 had drifted).
       A `SeamWireCode` union in place of `string` would make the same law compile-time.
       ⚠️ **Why it is booked rather than done:** that scan is guarded by a SELF-TEST that
-      byte-pins the declaration's exact opening line at `:2724` (its sibling for
-      `SEAM_CODE_TO_WIZARD_CODE` at `:1602` does the same). Narrowing the annotation changes
+      byte-pins the declaration's exact opening line (its sibling for `SEAM_CODE_TO_WIZARD_CODE`
+      does the same). Narrowing the annotation changes
       those bytes, so the pins must move in the SAME commit or the suite reds on the type change
       alone — which makes this a small, coupled edit rather than a one-line improvement.
 
@@ -5243,6 +5080,9 @@ Items stay open HERE until 146.1 ships; close them here when it does.
 
 - [ ] ⛔ **OPTION `CSV_FINALIZE_MOVED` — a dedicated error code for the tombstone arm.
   GATED ON WIZFORM-02 CLOSING. Do not pick this up before that gate opens.**
+  ⭐ **GATE OPEN 2026-11-14 (Phase 212 WIZTRUTH):** WIZFORM-02 closed — the validate-and-encrypt
+  code channel renders server codes (`recogniseValidateAndEncryptCode`, the fifth roster-render
+  surface). The paragraph below is lineage; this option is now pickable, not picked up.
   **What it is:** replace the `MISSING_STRATEGY_ID` code on the
   `flow_type='csv' + step='finalize'` arm with a code that names the actual refusal, so a
   caller can branch on the code rather than parse the sentence.

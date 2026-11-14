@@ -201,6 +201,22 @@ vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => null,
 }));
 
+// 212 review WR-01 — the real `getCorrelationId()` reads `next/headers`, which
+// throws outside a request scope, so the header store is stubbed. The helper
+// itself (shape check, UUID fallback) still runs against it.
+const INBOUND_HEADERS = vi.hoisted(() => ({ correlationId: null as string | null }));
+vi.mock("next/headers", () => ({
+  headers: async () =>
+    new Headers(
+      INBOUND_HEADERS.correlationId === null
+        ? {}
+        : { "x-correlation-id": INBOUND_HEADERS.correlationId },
+    ),
+}));
+beforeEach(() => {
+  INBOUND_HEADERS.correlationId = null;
+});
+
 function makeReq(body: Record<string, unknown> = {}): NextRequest {
   return new NextRequest("http://localhost:3000/api/keys/validate-and-encrypt", {
     method: "POST",
@@ -391,7 +407,8 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     expect(captureSpy).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({
-        tags: { route: "api/keys/validate-and-encrypt" },
+        // 212 review WR-01 — the capture also carries the inbound correlation id.
+        tags: { route: "api/keys/validate-and-encrypt", correlation_id: expect.any(String) },
       }),
     );
     expect(mockEncryptKey).not.toHaveBeenCalled();
@@ -414,6 +431,82 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     expect(body.error).toBe("Invalid API credentials for this exchange");
     expect(captureSpy).not.toHaveBeenCalled();
     expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  // ⭐ 212 review WR-01 — the correlation id both dashboard forms mint, send and
+  // print is the one the "send the correlation id below" remedy asks the user to
+  // quote. It must reach a log line on every failure arm, or the remedy cannot
+  // be joined to anything. Each arm is driven with the header set to a known id.
+  describe("WR-01 — the inbound X-Correlation-Id reaches the failure logs", () => {
+    const CID = "key-validate:11111111-2222-4333-8444-555555555555";
+
+    function loggedWith(spy: { mock: { calls: unknown[][] } }): boolean {
+      return spy.mock.calls.some((c) =>
+        c.some(
+          (a) =>
+            typeof a === "object" &&
+            a !== null &&
+            (a as { correlationId?: unknown }).correlationId === CID,
+        ),
+      );
+    }
+
+    it("the terminal 500 arm logs the id and tags the Sentry capture with it", async () => {
+      INBOUND_HEADERS.correlationId = CID;
+      mockValidateKey.mockRejectedValue(new Error("boom"));
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(VALID_BODY));
+      expect(res.status).toBe(500);
+      expect(loggedWith(errSpy), "no console.error carried the inbound correlation id").toBe(true);
+      expect(captureSpy).toHaveBeenCalledTimes(1);
+      expect(captureSpy.mock.calls[0][1].tags.correlation_id).toBe(CID);
+      errSpy.mockRestore();
+    });
+
+    it("the 4xx-forward arm (bare-401 SEAM_MISCONFIGURED) logs the id, with no message and no Sentry capture", async () => {
+      INBOUND_HEADERS.correlationId = CID;
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      mockValidateKey.mockRejectedValue(new AnalyticsUpstreamError("Unauthorized", 401));
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(VALID_BODY));
+      expect(res.status).toBe(401);
+      expect(loggedWith(warnSpy), "no console.warn carried the inbound correlation id").toBe(true);
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain("Unauthorized");
+      expect(captureSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it("the 504 arm and the breaker arm log the id", async () => {
+      INBOUND_HEADERS.correlationId = CID;
+      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { POST } = await import("./route");
+      mockValidateKey.mockRejectedValue(new AnalyticsTimeoutError("/api/validate-key", 30000));
+      expect((await POST(makeReq(VALID_BODY))).status).toBe(504);
+      expect(loggedWith(errSpy), "504 arm did not log the id").toBe(true);
+
+      errSpy.mockClear();
+      mockValidateKey.mockRejectedValue(new CircuitOpenError(7));
+      expect((await POST(makeReq(VALID_BODY))).status).toBe(503);
+      expect(loggedWith(errSpy), "breaker arm did not log the id").toBe(true);
+      errSpy.mockRestore();
+    });
+
+    it("a request with no header still logs a fresh id rather than none", async () => {
+      mockValidateKey.mockRejectedValue(new Error("boom"));
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { POST } = await import("./route");
+      await POST(makeReq(VALID_BODY));
+      const ids = errSpy.mock.calls
+        .flat()
+        .filter((a) => typeof a === "object" && a !== null && "correlationId" in (a as object))
+        .map((a) => (a as { correlationId: unknown }).correlationId);
+      expect(ids.length).toBeGreaterThan(0);
+      expect(typeof ids[0]).toBe("string");
+      errSpy.mockRestore();
+    });
   });
 
   // ── (4c) validateKey times out → 504 STATIC, no Sentry ─────────────
@@ -1099,7 +1192,8 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/keys/validate-and-encrypt — a machi
   // This case used to construct `AnalyticsUpstreamError("Key has IP
   // restrictions", 403)` and assert `UNKNOWN`, because a bare status carried no
   // classification at all. 164.2-05 gave the route
-  // `UPSTREAM_STATUS_TO_SEAM_CODE`, and **403 is now a mapped status** —
+  // `UPSTREAM_STATUS_TO_SEAM_CODE` (now in `src/lib/wizardErrors.ts`, moved there
+  // by 212-04), and **403 is now a mapped status** —
   // `SEAM_MISCONFIGURED`, asserted in the `[164.2-05]` describe at the foot of
   // this file. Leaving the old fixture here would have made this case assert
   // the opposite of the route's behaviour; changing only the expectation would
@@ -1942,6 +2036,32 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     consoleErr.mockRestore();
   });
 
+  // 212 review R2-WR-01 — KEY_VENUE_ALREADY_CONNECTED's third bullet asks the
+  // user to send the correlation id, so this arm's one log line must carry it.
+  it("the venue-identity collision arm (409) logs the inbound correlation id", async () => {
+    const CID = "key-validate:11111111-2222-4333-8444-555555555555";
+    INBOUND_HEADERS.correlationId = CID;
+    PERSIST_STATE.insertResult = {
+      data: null,
+      error: {
+        message:
+          'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq" (SQLSTATE 23505)',
+        code: "23505",
+      },
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+    expect(res.status).toBe(409);
+    const logged = errSpy.mock.calls.some((c) =>
+      c.some(
+        (a) => typeof a === "object" && a !== null && (a as { correlationId?: unknown }).correlationId === CID,
+      ),
+    );
+    expect(logged, "venue-collision arm did not log the id").toBe(true);
+    errSpy.mockRestore();
+  });
+
   it("a 23505 naming a DIFFERENT/unparseable constraint keeps the existing generic UNKNOWN/500 fallback, unchanged", async () => {
     const RAW_PG =
       'duplicate key value violates unique constraint ' +
@@ -2482,6 +2602,53 @@ describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream 
         "inventing a sentence for it is the false-attribution class this phase " +
         "exists to close. ⛔ Do not 'fix' this by widening the fallback.",
     ).toBe("UNKNOWN");
+  });
+
+  // ⭐ 212 review WR-03 — wrong credentials arrive as a BARE 400 with no seam
+  // code (the Python `AUTH_FAILED_DETAIL` arm). The route used to answer the
+  // literal "UNKNOWN", so both forms rendered "Something went wrong." beside
+  // the fixable cause. The classifier names it, the wire now says so, and the
+  // client recogniser resolves the route's ACTUAL body to the specific entry.
+  it("a bare 400 AUTH_FAILED_DETAIL answers KEY_AUTH_FAILED, which the client recogniser resolves to that entry", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    const { recogniseValidateAndEncryptCode } = await import("@/lib/wizardErrors");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError(
+        "Authentication failed. Check your API key and secret.",
+        400,
+      ),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(
+      body.code,
+      "a bare 400 AUTH_FAILED_DETAIL went back to the literal UNKNOWN: wrong " +
+        "credentials render the generic shell again.",
+    ).toBe("KEY_AUTH_FAILED");
+    expect(body.error).toBe("Authentication failed. Check your API key and secret.");
+    expect(recogniseValidateAndEncryptCode(body, res.status)).toEqual({
+      code: "KEY_AUTH_FAILED",
+      recognised: true,
+    });
+  });
+
+  it("a bare 4xx the classifier cannot name still answers UNKNOWN, and a 424 AUTH_FAILED keeps its own code", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("Some curated detail nobody classified", 400),
+    );
+    const { POST } = await import("./route");
+    expect((await (await POST(makeReq(VALID_BODY))).json()).code).toBe("UNKNOWN");
+
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("The exchange rejected these credentials", 424, "AUTH_FAILED"),
+    );
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(424);
+    expect((await res.json()).code).toBe("AUTH_FAILED");
   });
 
   it.each(MAPPED)(

@@ -27,6 +27,7 @@
 import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SyncPreviewStep } from "./SyncPreviewStep";
+import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 
 // Mutable module-level client factory (mirrors the frozen render test).
 let currentClientFactory: () => unknown = () => ({
@@ -1777,12 +1778,16 @@ describe("[142.2 FIX 3] SyncPreviewStep — composite preview agrees with the pu
     expect(screen.queryByTestId("error-envelope")).not.toBeInTheDocument();
   });
 
-  it("REFUSES a composite carrying a verdict the gate does not trust", async () => {
+  it("REFUSES a composite whose verdict the gate examined and refused, and names that cause", async () => {
     // FIX 2 downgrades a composite to `sampled_gapped` when any member carried a
     // MEASURED coverage hole. That verdict is not in the allow-list, so the
     // admin path refuses it — and this arm must agree rather than previewing a
     // known-holed track record as passed. Pins that the arm evaluates the
     // ALLOW-LIST and not merely "is the column non-null".
+    //
+    // 212 / SC1: the refusal is now the examined-and-refused envelope, not the
+    // provenance sentence. "Nothing recorded how this was built" is false of a
+    // series whose builder recorded `sampled_gapped`.
     await renderComposite({
       analyticsRow: defaultAnalyticsRow({
         series_completeness: "sampled_gapped",
@@ -1791,7 +1796,97 @@ describe("[142.2 FIX 3] SyncPreviewStep — composite preview agrees with the pu
 
     const envelope = screen.getByTestId("error-envelope");
     expect(envelope.getAttribute("data-error-code")).toBe(
-      "GATE_SERIES_PROVENANCE_UNVERIFIED",
+      "GATE_SERIES_EXAMINED_REFUSED",
+    );
+  });
+
+  // ── 212 / SC1: EVERY VERDICT CLASS, THE REMEDY CONTROL AND THE TELEMETRY ──
+  //
+  // ⚠️ THE CASES ARE ONE TEST. "Always say examined" satisfies the two examined
+  // rows; "always say provenance" (the pre-212 arm) satisfies the null and
+  // unknown rows. Only both pin the discrimination. Every verdict string is
+  // hand-typed here, never read from the gate's map, so widening the map
+  // without editing this file fails a row instead of following it silently.
+  describe("[212-02 / SC1] the composite names the real cause", () => {
+    beforeEach(() => {
+      vi.mocked(trackForQuantsEventClient).mockClear();
+    });
+
+    /** Last `wizard_error` analytics code, read off the call log, not the DOM. */
+    function lastTrackedWizardErrorCode(): string | undefined {
+      const calls = vi
+        .mocked(trackForQuantsEventClient)
+        .mock.calls.filter((c) => c[0] === "wizard_error");
+      return calls[calls.length - 1]?.[1]?.code as string | undefined;
+    }
+
+    async function renderWithVerdict(
+      verdict: string,
+      onReviewKeys: () => void,
+    ) {
+      installCompositeSupabaseMock({
+        pollOutcome: () => ({ kind: "row", status: "complete_with_warnings" }),
+        analyticsRow: defaultAnalyticsRow({ series_completeness: verdict }),
+      });
+      render(<SyncPreviewStep {...baseProps} onReviewKeys={onReviewKeys} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000);
+      });
+    }
+
+    it("fill_derived_unproven renders GATE_SERIES_EXAMINED_REFUSED (unreachable from today's stitch, mapped fail-closed)", async () => {
+      await renderWithVerdict("fill_derived_unproven", vi.fn());
+      expect(
+        screen.getByTestId("error-envelope").getAttribute("data-error-code"),
+      ).toBe("GATE_SERIES_EXAMINED_REFUSED");
+    });
+
+    it("a verdict this build has never heard of keeps the provenance refusal AND its kickoff Retry", async () => {
+      // The over-refusal control. An unknown string must fall to the generic,
+      // fail-closed refusal, whose remedy (re-run the sync) is the one that can
+      // change an unstamped or unrecognised verdict.
+      await renderWithVerdict("some_future_verdict", vi.fn());
+      expect(
+        screen.getByTestId("error-envelope").getAttribute("data-error-code"),
+      ).toBe("GATE_SERIES_PROVENANCE_UNVERIFIED");
+      expect(lastTrackedWizardErrorCode()).toBe(
+        "GATE_SERIES_PROVENANCE_UNVERIFIED",
+      );
+      expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    });
+
+    it.each(["sampled_gapped", "fill_derived_unproven"])(
+      "%s: telemetry equals the rendered code, no kickoff Retry, and Review your keys is a pure step transition",
+      async (verdict) => {
+        const onReviewKeys = vi.fn();
+        await renderWithVerdict(verdict, onReviewKeys);
+
+        const rendered = screen
+          .getByTestId("error-envelope")
+          .getAttribute("data-error-code");
+        expect(rendered).toBe("GATE_SERIES_EXAMINED_REFUSED");
+        // Two channels, one value: the analytics payload cannot diverge from
+        // what the user was shown.
+        expect(lastTrackedWizardErrorCode()).toBe(rendered);
+
+        // A Retry re-runs the kickoff and re-reads the SAME verdict. It must
+        // not be offered as a remedy for a refusal it cannot change.
+        expect(
+          screen.queryByRole("button", { name: "Retry" }),
+        ).not.toBeInTheDocument();
+
+        const reviewBtn = screen.getByTestId("wizard-try-another-key");
+        expect(reviewBtn).toHaveAccessibleName(/review your keys/i);
+        fireEvent.click(reviewBtn);
+        expect(onReviewKeys).toHaveBeenCalledTimes(1);
+        expect(
+          baseProps.onTryAnotherKey,
+          "'Review your keys' must not reach onTryAnotherKey.",
+        ).not.toHaveBeenCalled();
+      },
     );
   });
 });

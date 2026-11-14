@@ -1445,6 +1445,42 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/composite/add-key — Sen
   });
 
   /**
+   * ⭐ 212-04 / SC3 — a BARE upstream 401/403 (our own service key refused, no
+   * seam envelope, `seamCode` null) answers SEAM_MISCONFIGURED/500 on this
+   * route too, the twin of `create-with-key/route.bare-401.test.ts`. Before this
+   * the classifier's cascade ended in UNKNOWN for it while
+   * `validate-and-encrypt` alone read the status. 212 review WR-04: this answer
+   * IS captured. SEAM_MISCONFIGURED is a member of `OUR_DEFECT_KEY_ERROR_CODES`,
+   * because a stale service key or internal token must keep paging now that its
+   * verdict no longer lands on the paged terminal UNKNOWN.
+   */
+  it.each([401, 403])(
+    "[212-04] a bare upstream %i answers SEAM_MISCONFIGURED/500, writes nothing, and IS captured (212 WR-04)",
+    async (upstreamStatus) => {
+      validateKeyMock.mockRejectedValue(
+        Object.assign(new Error("Unauthorized"), {
+          name: "AnalyticsUpstreamError",
+          status: upstreamStatus,
+          seamCode: null,
+        }),
+      );
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(500);
+      const json = await res.json();
+      expect(json.code).toBe("SEAM_MISCONFIGURED");
+      expect(json.code).not.toBe("UNKNOWN");
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+      const { options } = await nextCapture();
+      expect(options.tags?.surface).toBe("strategies-composite-add-key");
+      expect(options.tags?.step).toBe("unclassified-key-error");
+    },
+  );
+
+  /**
    * ⭐ 153.7 review WR-02, ON THIS ROUTE — the TWIN of the case at the same arm
    * in `create-with-key/route.test.ts`, and duplicated for the same reason every
    * other pair in these two files is: the predicate lives in ONE shared set, but

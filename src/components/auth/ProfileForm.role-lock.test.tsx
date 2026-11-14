@@ -75,6 +75,23 @@ describe("ProfileForm — role lock (2026-05-20 regression)", () => {
     expect(queryByText(/set at signup/i)).not.toBeNull();
   });
 
+  it("the locked-role helper links the contact form in a new tab (SC6 row 1)", () => {
+    const { container, getByRole } = render(<ProfileForm profile={BASE_PROFILE} />);
+    const helper = container.querySelector(
+      '[data-testid="profile-role-readonly"] span.text-xs',
+    );
+    expect(helper).not.toBeNull();
+    // Hand-typed: the sr-only suffix is part of the link's text content.
+    expect(helper!.textContent).toBe(
+      "Set at signup. Use the contact form (opens in a new tab) to have it changed.",
+    );
+    expect(helper!.textContent).not.toContain("@");
+    const link = getByRole("link", { name: /^contact form\s?\(opens in a new tab\)$/ });
+    expect(link.getAttribute("href")).toBe("/contact?topic=support");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
   it("omits `role` from the UPDATE payload when the form submits", async () => {
     const { getByText } = render(<ProfileForm profile={BASE_PROFILE} />);
     fireEvent.click(getByText("Save changes"));

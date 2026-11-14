@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { StrategyForm } from "./StrategyForm";
 import type { Strategy } from "@/lib/types";
 
@@ -414,6 +414,198 @@ describe("StrategyForm — 160-03 server-side persist (no client api_keys INSERT
       screen.queryByText("Read-only API key verified and connected."),
     ).not.toBeInTheDocument();
     expect(apiKeysInsertArg).toBeNull();
+  });
+});
+
+/**
+ * 212-08 / SC3 — the connect-key modal renders the validate-and-encrypt
+ * refusal from the route's `code`, as an ErrorEnvelope, and never shows the
+ * wire prose as a bare paragraph.
+ *
+ * WHY these shapes (Rule 9): the defect was a client that read `error` and
+ * ignored `code`, so the failure it enables is a refusal whose TRUE cause (a
+ * key that is not read-only, our own configuration, a venue throttle versus our
+ * limiter) is replaced by whatever sentence the server happened to send. Each
+ * case therefore asserts the DOM oracle (`data-error-code`) for the code the
+ * route emitted, with the codes and statuses typed by hand from the route's
+ * documented answers, never read back from the table under test.
+ */
+describe("StrategyForm — 212-08 validate-and-encrypt renders from code", () => {
+  function submitWith(response: Response) {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+    render(<StrategyForm mode="create" />);
+    fireEvent.click(screen.getByRole("button", { name: /connect api key/i }));
+    fireEvent.change(screen.getByPlaceholderText(/your read-only api key/i), {
+      target: { value: "kkkkkkkk" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/your api secret/i), {
+      target: { value: "ssssssss" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect Key" }));
+    return fetchSpy;
+  }
+
+  function jsonResponse(status: number, body: unknown) {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  it("(a) a 400 KEY_NOT_READ_ONLY renders that envelope, not the wire prose as a bare paragraph", async () => {
+    submitWith(
+      jsonResponse(400, {
+        error: "WIRE-PROSE-THAT-MUST-NOT-RENDER-BARE",
+        code: "KEY_NOT_READ_ONLY",
+      }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "KEY_NOT_READ_ONLY");
+    expect(
+      screen.getByText("We could not verify this key as read-only."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("WIRE-PROSE-THAT-MUST-NOT-RENDER-BARE"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("(b) a 424 RATE_LIMITED is the venue's throttle and renders KEY_RATE_LIMIT", async () => {
+    submitWith(jsonResponse(424, { error: "x", code: "RATE_LIMITED" }));
+    expect(await screen.findByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "KEY_RATE_LIMIT",
+    );
+  });
+
+  it("(b) a 429 RATE_LIMITED renders RATE_LIMITED", async () => {
+    submitWith(jsonResponse(429, { error: "x", code: "RATE_LIMITED" }));
+    expect(await screen.findByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "RATE_LIMITED",
+    );
+  });
+
+  it("(c) a 503 SEAM_MISCONFIGURED renders that envelope with no Retry control", async () => {
+    submitWith(jsonResponse(503, { error: "x", code: "SEAM_MISCONFIGURED" }));
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "SEAM_MISCONFIGURED");
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("(d) a 424 MT5_TERMINAL_BUSY (unrecognised here) keeps the route's curated sentence as the cause of the UNKNOWN shell", async () => {
+    submitWith(
+      jsonResponse(424, {
+        error: "Our MetaTrader connection was busy. CURATED-CAUSE-SENTENCE",
+        code: "MT5_TERMINAL_BUSY",
+      }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(
+      screen.getByText(/CURATED-CAUSE-SENTENCE/),
+    ).toBeInTheDocument();
+  });
+
+  // ⭐ 212 review WR-03 — the most common refusal on this form is a wrong key or
+  // secret. It must render ITS entry (a remedy that can work: re-copy the
+  // values), never the UNKNOWN shell's "Try the last action again.".
+  it.each([
+    [424, "AUTH_FAILED", "KEY_AUTH_FAILED"],
+    [400, "KEY_AUTH_FAILED", "KEY_AUTH_FAILED"],
+    [424, "MISSING_SCOPE", "KEY_MISSING_READ_SCOPE"],
+    [424, "WITHDRAW_SCOPE", "KEY_HAS_WITHDRAW_PERMS"],
+  ])("(h) a %i %s renders %s, not the UNKNOWN shell", async (status, wire, expected) => {
+    submitWith(jsonResponse(status, { error: "CURATED-DETAIL", code: wire }));
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", expected);
+    expect(screen.queryByText("Try the last action again.")).not.toBeInTheDocument();
+  });
+
+  // ⭐ 212 review WR-02 — a 5xx carrying a forwarded operator-fault code must
+  // not wear the route's static "Key validation failed" sentence as its cause:
+  // that reads as the user's key failing, and no retry clears these faults.
+  it.each([
+    "SERVICE_KEY_UNCONFIGURED",
+    "KEK_UNAVAILABLE",
+    "EGRESS_PROXY_MISCONFIGURED",
+    "MT5_VALIDATION_UNCONFIGURED",
+  ])("(i) a 500 %s renders UNKNOWN's own cause, not the route's curated key-failure sentence", async (wire) => {
+    submitWith(
+      jsonResponse(500, {
+        error: "Key validation failed. Please try again.",
+        code: wire,
+      }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(
+      screen.queryByText("Key validation failed. Please try again."),
+    ).not.toBeInTheDocument();
+  });
+
+  // ⭐ 212 review IN-01 — Cancel must clear the refusal and its correlation id, so
+  // reopening the modal does not show the last failure (AllocatorExchangeManager
+  // already does this).
+  it("(j) Cancel clears the envelope: reopening the modal shows no stale refusal", async () => {
+    submitWith(jsonResponse(400, { error: "x", code: "KEY_NOT_READ_ONLY" }));
+    expect(await screen.findByTestId("error-envelope")).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: /connect api key/i }));
+    expect(screen.queryByTestId("error-envelope")).not.toBeInTheDocument();
+  });
+
+  it("(e) the persist-INSERT 500 sentence stays findable by text, inside the envelope shell", async () => {
+    submitWith(
+      jsonResponse(500, {
+        error: "Your key was verified but couldn't be saved. Please try again.",
+        code: "UNKNOWN",
+      }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(
+      screen.getByText(
+        "Your key was verified but couldn't be saved. Please try again.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("(f) an unparseable body renders UNKNOWN and logs status and statusText only, never the body", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    submitWith(
+      new Response("<html>SECRET-ECHOED-BODY api_key=kkkkkkkk</html>", {
+        status: 502,
+        statusText: "Bad Gateway",
+        headers: { "content-type": "text/html" },
+      }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(errSpy).toHaveBeenCalled();
+    const logged = errSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+    expect(logged).toContain("HTTP 502");
+    expect(logged).toContain("Bad Gateway");
+    expect(logged).not.toContain("SECRET-ECHOED-BODY");
+    expect(logged).not.toContain("kkkkkkkk");
+  });
+
+  it("(g) the request carries an X-Correlation-Id equal to the envelope's correlation id", async () => {
+    const fetchSpy = submitWith(
+      jsonResponse(400, { error: "x", code: "KEY_NOT_READ_ONLY" }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    const call = (fetchSpy.mock.calls as [string, RequestInit][]).find(
+      (c) => c[0] === "/api/keys/validate-and-encrypt",
+    );
+    const sent = (call![1].headers as Record<string, string>)["X-Correlation-Id"];
+    expect(sent).toBeTruthy();
+    expect(within(card).getByText(sent)).toBeInTheDocument();
+  });
+
+  it("(h) no case renders 'Your draft is saved.' (this form has no draft)", async () => {
+    submitWith(jsonResponse(424, { error: "x", code: "MT5_TERMINAL_BUSY" }));
+    await screen.findByTestId("error-envelope");
+    expect(screen.queryByText(/your draft is saved/i)).not.toBeInTheDocument();
   });
 });
 

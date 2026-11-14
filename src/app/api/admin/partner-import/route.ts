@@ -1036,7 +1036,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       managers_rows_skipped: managersRowsSkipped,
       allocators_rows_skipped: allocatorsRowsSkipped,
       partial_completion: false,
-      audit_warning: "Import succeeded but the audit record could not be written. Contact support. Do NOT re-run the import.",
+      audit_warning: "Import succeeded but the audit record could not be written. Add the audit entry by hand. Do NOT re-run the import.",
     }, { status: 500, headers: NO_STORE_HEADERS });
   }
 

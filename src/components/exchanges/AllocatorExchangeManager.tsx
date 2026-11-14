@@ -70,6 +70,12 @@ import {
 } from "@/lib/factsheet/returns-unit";
 import { KEY_STORAGE_LINK, KEY_STORAGE_SENTENCE } from "@/lib/status-surface-copy";
 import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
+import { buildEnvelope, type ErrorEnvelope } from "@/lib/envelope";
+import { recogniseValidateAndEncryptCode } from "@/lib/wizardErrors";
+import { newCorrelationId } from "@/lib/correlation-id-client";
+
+/** Sentinel: the validate-and-encrypt body was not JSON (distinct from JSON `null`). */
+const PARSE_FAILED = Symbol("parse-failed");
 
 interface ExchangeConnection {
   id: string;
@@ -783,6 +789,9 @@ export function AllocatorExchangeManager({
   );
   const [showForm, setShowForm] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  // 212-08 / SC3 — the validate-and-encrypt `!ok` arm renders from the route's
+  // `code` as an envelope; `formError` keeps carrying every other message.
+  const [formEnvelope, setFormEnvelope] = useState<ErrorEnvelope | null>(null);
   const [formLoading, setFormLoading] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -1532,7 +1541,11 @@ export function AllocatorExchangeManager({
     passphrase: string;
   }) {
     setFormError(null);
+    setFormEnvelope(null);
     setFormLoading(true);
+    // 212-08 — minted BEFORE the request and SENT on it, so the id the envelope
+    // prints is one the route logged.
+    const correlationId = newCorrelationId("key-validate");
     // F6 (phase-119 fold-in): the server validate route normalizes the exchange
     // (WR-01), but a mixed-case value ("sFOX") reaching the wire is still worth
     // preventing at the source. Canonicalize once here.
@@ -1552,7 +1565,10 @@ export function AllocatorExchangeManager({
       // the verdict only: no ciphertext returns to the browser on this path.
       const response = await fetch("/api/keys/validate-and-encrypt", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Correlation-Id": correlationId,
+        },
         body: JSON.stringify({
           exchange,
           api_key: data.apiKey,
@@ -1562,9 +1578,42 @@ export function AllocatorExchangeManager({
           label: data.label,
         }),
       });
-      const result = await response.json();
+      // GUARDED parse. A non-JSON body is logged by STATUS and statusText only:
+      // credentials ride this request and an error body may echo them.
+      const parsed: unknown = await response.json().catch(() => PARSE_FAILED);
+      if (parsed === PARSE_FAILED) {
+        console.error(
+          `[AllocatorExchangeManager] validate-and-encrypt: response body was not JSON — ` +
+            `HTTP ${response.status} (${response.statusText || "no body"})`,
+        );
+      }
+      const result: Record<string, unknown> =
+        typeof parsed === "object" && parsed !== null
+          ? (parsed as Record<string, unknown>)
+          : {};
       if (!response.ok) {
-        setFormError(result.error ?? "Validation failed");
+        // 212-08 / SC3 — DISCRIMINATE ON THE CODE, NOT THE PROSE. The curated
+        // `error` sentence is only ever the CAUSE of the UNKNOWN shell, for a
+        // code this surface cannot name (UI-SPEC SC3 rule 5).
+        const { code, recognised } = recogniseValidateAndEncryptCode(
+          parsed === PARSE_FAILED ? null : parsed,
+          response.status,
+        );
+        const curated = result.error;
+        const base = buildEnvelope(code, correlationId);
+        // ⭐ 212 review WR-02 — the curated fallback is a 4xx rule (UI-SPEC SC3
+        // rule 5). A 5xx carrying a FORWARDED service code (`KEK_UNAVAILABLE`,
+        // ...) is an operator fault: the static "Key validation failed" sentence
+        // would read as the user's key failing, so UNKNOWN's own cause renders.
+        // The route's own `UNKNOWN` (the persist-INSERT 500) keeps its sentence.
+        const wireCode = result.code;
+        const curatedAllowed =
+          response.status < 500 || typeof wireCode !== "string" || wireCode === "UNKNOWN";
+        setFormEnvelope(
+          !recognised && curatedAllowed && typeof curated === "string" && curated.length > 0
+            ? { ...base, cause: curated }
+            : base,
+        );
         setFormLoading(false);
         return;
       }
@@ -2071,6 +2120,7 @@ export function AllocatorExchangeManager({
           onClose={() => {
             setShowForm(false);
             setFormError(null);
+            setFormEnvelope(null);
           }}
           title="Connect exchange"
         >
@@ -2079,9 +2129,11 @@ export function AllocatorExchangeManager({
             onCancel={() => {
               setShowForm(false);
               setFormError(null);
+              setFormEnvelope(null);
             }}
             loading={formLoading}
             error={formError}
+            errorEnvelope={formEnvelope}
           />
         </Modal>
       ) : null}

@@ -467,6 +467,10 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     };
     // Stable code so clients can branch on the kind of refusal.
     expect(body.code).toBe("export_truncated");
+    // Phase 212 SC6: the refusal names the contact form (a real channel).
+    expect(body.error).toBe(
+      "Your data exceeds export limits and a complete bundle cannot be produced automatically. Use the contact form to request the complete bundle — GDPR Art. 15 requires a complete bundle.",
+    );
     expect(typeof body.request_id).toBe("string");
     expect(body.request_id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
@@ -580,8 +584,11 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     const { POST } = await loadRoute();
     const res = await POST(makeRequest());
     expect(res.status).toBe(500);
-    const body = (await res.json()) as { code?: string };
+    const body = (await res.json()) as { code?: string; error?: string };
     expect(body.code).toBe("export_truncated");
+    expect(body.error).toBe(
+      "Your data exceeds export limits and a complete bundle cannot be produced automatically. Use the contact form to request the complete bundle — GDPR Art. 15 requires a complete bundle.",
+    );
 
     // Gate runs before storage — no URL minted, no upload cost.
     expect(uploadMock).not.toHaveBeenCalled();
@@ -684,6 +691,9 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
     expect(res.status).toBe(500);
     const body = (await res.json()) as { code?: string; error?: string };
     expect(body.code).toBe("export_manifest_drift");
+    expect(body.error).toBe(
+      "Export manifest drift — use the contact form to have it resolved.",
+    );
     // Token refund fires so the user isn't locked out by a deploy bug.
     expect(resetUsedTokensMock).toHaveBeenCalledTimes(1);
     expect(resetUsedTokensMock.mock.calls[0][0]).toBe("export:user-ttl");

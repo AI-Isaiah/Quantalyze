@@ -424,7 +424,8 @@ const ROUTES: readonly RouteUnderTest[] = [
     //
     // ⚠️ 164.2-05 ALSO NARROWED THE FORWARDED HALF ON THE 4xx ARM, and the
     // narrowing is worth stating because this note is the signpost for it.
-    // `UPSTREAM_STATUS_TO_SEAM_CODE` now classifies a BARE 401/403/422/429 —
+    // `UPSTREAM_STATUS_TO_SEAM_CODE` (exported from `src/lib/wizardErrors.ts`
+    // since 212-04) now classifies a BARE 401/403/422/429 —
     // an upstream 4xx that carried no seam envelope at all — into
     // `SEAM_MISCONFIGURED` / `VALIDATION_FAILED` / `RATE_LIMITED`, all three of
     // which are rostered or alias-translated. That closes the PROD-measured
@@ -2471,9 +2472,11 @@ describe("[164.2-04] create-with-key's 429 refusals clear ConnectKeyStep's roste
  *     Omit this row and a real throttle renders the UNKNOWN card. It is a COPY
  *     guard, and `MultiKeyConnectStep.test.tsx`'s `[140.5-03]` set-members case
  *     is what renders it end to end.
- *   · `KNOWN_VALIDATE_AND_ENCRYPT_CODES` — neither, and its own docblock says
- *     so: none of that route's three consumers reads the `code` field. The row
- *     buys "typed, and has copy", which is what the 4th ROUTES entry enforces.
+ *   · `KNOWN_VALIDATE_AND_ENCRYPT_CODES` — neither: since Phase 212 the route's
+ *     TWO browser consumers (`StrategyForm`, `AllocatorExchangeManager`) read the
+ *     `code` field through `recogniseValidateAndEncryptCode`. The row means "a
+ *     client renders it", which the 4th ROUTES entry and
+ *     `wizardErrors.roster-render.test.tsx`'s fifth surface enforce.
  *
  * ⛔ `KEY_RATE_LIMIT` STAYS IN ALL THREE ROSTERS. On `KNOWN_ADD_KEY_CODES` it
  * is still reachable through `classifyKeyValidationError` (a GENUINE venue
@@ -2566,9 +2569,10 @@ describe("[164.2-05] the other three userActionLimiter routes answer RATE_LIMITE
        */
       keepsKeyRateLimit: false,
       guard:
-        "VOCABULARY — none of this route's three consumers reads the `code` " +
-        "field (measured, and recorded in the roster's own docblock), so the " +
-        "row buys 'typed, and has copy' rather than 'a client renders it'.",
+        "VOCABULARY — this route's two consumers (StrategyForm, " +
+        "AllocatorExchangeManager) read the `code` field through " +
+        "recogniseValidateAndEncryptCode (Phase 212), so the row buys 'a " +
+        "client renders it' as well as 'typed, and has copy'.",
     },
   ] as const;
 
@@ -2691,8 +2695,10 @@ describe("[164.2-05] the other three userActionLimiter routes answer RATE_LIMITE
 });
 
 /**
- * [164.2-05 / WIZFORM-02] `keys/validate-and-encrypt`'s bare-status map may only
- * mint codes the seam vocabulary already knows.
+ * [164.2-05 / WIZFORM-02] the bare-status map (`UPSTREAM_STATUS_TO_SEAM_CODE`, now
+ * exported from `src/lib/wizardErrors.ts`; it lived in
+ * `keys/validate-and-encrypt/route.ts` until Phase 212-04) may only mint codes
+ * the seam vocabulary already knows.
  *
  * ── THE DEFECT THE MAP CLOSES ───────────────────────────────────────────────
  *
@@ -2717,8 +2723,6 @@ describe("[164.2-05] the other three userActionLimiter routes answer RATE_LIMITE
  * the map and both sides go empty together.
  */
 describe("[164.2-05 / WIZFORM-02] the bare-status map mints only known seam codes", () => {
-  const VE_ROUTE = join(REPO, "src/app/api/keys/validate-and-encrypt/route.ts");
-
   /**
    * `[status, code]` pairs of the named `ReadonlyMap` literal, from source.
    *
@@ -2787,11 +2791,11 @@ describe("[164.2-05 / WIZFORM-02] the bare-status map mints only known seam code
   });
 
   it("the map is the hand-typed table — no more, no less", () => {
-    const derived = deriveStatusMap(stripped(VE_ROUTE));
+    const derived = deriveStatusMap(stripped(UNION_SOURCE));
     expect(
       derived.length,
       "UPSTREAM_STATUS_TO_SEAM_CODE was not found or parsed empty in " +
-        "keys/validate-and-encrypt/route.ts. Every assertion in this describe " +
+        "src/lib/wizardErrors.ts. Every assertion in this describe " +
         "is then vacuous, and the 2026-08-25 PROD body is back.",
     ).toBeGreaterThan(0);
     expect(
