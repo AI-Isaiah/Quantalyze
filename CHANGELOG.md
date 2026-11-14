@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.133.42.2] - 2026-11-14 — records: close 155 PARITYHARNESS, 207 RETRYPROP, 209 SCRUBLEAKS
+
+Records-only PR. The code for all three phases is already on `main` (#1263, #1261, #1264). This lands their phase records and closes them in the ledgers in one PR. No source or test change.
+
+### Added
+- **Phase records** for 155 PARITYHARNESS (11 plans), 207 RETRYPROP (1 plan) and 209 SCRUBLEAKS (5 plans): plans, summaries, reviews, verification, security and validation reports, copied whole from each phase's records branch. Each VERIFICATION is `status: passed` and already uses `verified_at_sha` + `drift_subjects`, so no conversion was needed.
+
+### Changed
+- **`ROADMAP.md`:** the three overview bullets are ticked with `(completed 2026-11-14)`, each phase section lists its plan rows (all ticked) and its `**Plans:**` count, and the Progress rows read `11/11`, `1/1` and `5/5 | Complete | 2026-11-14`.
+- **`REQUIREMENTS.md`:** PARITY-01..04 are ticked and `Complete` in the traceability table (Phase 155).
+- **`STATE.md`:** `completed_phases` 0 → 3 of 9 (33%), plans 17/17, the per-plan metrics rows and execution-time decisions the phases recorded, and a hand-written Current Position for parallel work. `phase complete` had moved the position to the next roadmap phase, which is wrong while several phases run at once. 155.1 SERVERCLOCK waits for the founder's 2026-11-16 live gateway spike. 208, 210 and 211 are in progress. 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session.
+- **`state.json`:** phases 155, 207 and 209 are `complete`.
+
+### Notes
+- Each records branch forked from an older `main`, so its ROADMAP, STATE, REQUIREMENTS and state.json were not copied whole. The bookkeeping was re-applied by hand on top of `main`.
+
 ## [0.133.42.1] - 2026-11-14 — TODOS sweep 2: LOW/Info, partly-done, cited-solved
 
 Backlog PR, the second TODOS prune the founder asked for on 2026-11-14. `TODOS.md` goes from 10,994 to 7,071 lines. Three readers that kept closed entries alive now pin the invariant itself, CLAUDE.md gets dated corrections for the closed ids it still called open, and a new CLAUDE.md section stops both kinds of leftover from coming back. Nothing under `.planning/` changes.
