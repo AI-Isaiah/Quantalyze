@@ -392,20 +392,10 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  // ⭐ 2026-11-14: Phase 211 SYNCJOBS plan 03 adds one `snapshot-only` row, for the
-  // new service-role-only helper that records an enqueue dedup's caller metadata and
-  // retracts an inherited refresh marker. Its clearing condition is the re-dump taken
-  // after the migration has applied to PROD; that act turns the row into
-  // `ratchet-stale` and it is DELETED, as the Phase 191 rows below were.
-  {
-    name: "_record_enqueue_dedup",
-    side: "snapshot-only",
-    capturedAt: "2026-11-14",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after 20261114130000_enqueue_dedup_record_retract.sql applies to PROD",
-    reason:
-      "Phase 211 D11 defines the function in a forward migration that is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
+  // ⭐ 2026-11-14: the Phase 211 SYNCJOBS plan 03 row (`_record_enqueue_dedup`,
+  // `snapshot-only`, captured 2026-11-14) is DELETED: its clearing condition, a
+  // re-dump taken after 20261114130000_enqueue_dedup_record_retract.sql applied to
+  // PROD, was met by the re-dump after the PROD apply of aabe7427.
   // ⭐ 2026-11-05: the two Phase 191 REFUSALRACE plan 02 rows
   // (`retract_ledger_refresh_marker` and `mark_compute_job_kept_figures`,
   // `snapshot-only`, captured 2026-11-04) are DELETED: their clearing condition, a

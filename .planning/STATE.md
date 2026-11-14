@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155, 207 and 209 complete; 208, 210 and 211 in progress)
+current_phase_name: parallel phases (155, 207, 208, 209, 210 and 211 complete; 155.1, 155.2 and 157 wait on the founder; 212-215 booked)
 status: executing
-stopped_at: Phases 155, 207 and 209 complete; records landed together
-last_updated: "2026-11-14T07:30:26.000Z"
+stopped_at: Phases 208, 210 and 211 complete; records landed together
+last_updated: "2026-11-14T12:36:33.104Z"
 last_activity: 2026-11-14
-last_activity_desc: Phases 155, 207 and 209 complete
-state_head: 40ff7161c075113187162a407a6cb51c502da5a5
+last_activity_desc: Phases 208, 210 and 211 complete
+state_head: 3ac730ef960ea5a03d58a5a3bd36bd0ce2bd2c62
 progress:
   total_phases: 13
-  completed_phases: 3
-  total_plans: 17
-  completed_plans: 17
-  percent: 23
+  completed_phases: 6
+  total_plans: 34
+  completed_plans: 34
+  percent: 46
 ---
 
 ## ⭐ STATE lineage
@@ -175,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 155 PARITYHARNESS, 207 RETRYPROP and 209 SCRUBLEAKS complete; 208 UIQUICK, 210 PUBLICTRUTH and 211 SYNCJOBS in progress
+Phase: parallel — 155 PARITYHARNESS, 207 RETRYPROP, 208 UIQUICK, 209 SCRUBLEAKS, 210 PUBLICTRUTH and 211 SYNCJOBS complete; 212 WIZTRUTH, 213 KEYFLOW, 214 FRESHTRUTH and 215 TESTREACH booked, not started
 Plan: per phase (see each phase directory)
 Status: 155.1 SERVERCLOCK waits for the founder's Monday 2026-11-16 live gateway spike; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session
-Last activity: 2026-11-14 — Phases 155, 207 and 209 complete (records landed in one PR)
-Progress: [███░░░░░░░] 33%
+Last activity: 2026-11-14 — Phases 208, 210 and 211 complete (records landed in one PR)
+Progress: [█████░░░░░] 46%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -711,6 +711,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 214 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): FRESHTRUTH, refresh work and freshness readings match what can actually change (0.3: closed records)
 - Phase 215 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): TESTREACH, CI-only: every test guarding money math or error contracts runs and test apps match production
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
+- Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
 
 ### Decisions
 
@@ -1806,7 +1807,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-14T07:30:26.000Z
-**Stopped At:** Phases 155, 207 and 209 complete; records landed together
+**Stopped At:** Phases 208, 210 and 211 complete; records landed together
 **Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z

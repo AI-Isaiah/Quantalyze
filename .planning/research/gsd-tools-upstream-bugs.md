@@ -423,3 +423,27 @@ Formerly TODOS FIX NOW `### Phase 153.3 (WIZFORM-GW) — recorded residuals`. Up
   2026-11-14 booking Phases 212-215: four runs changed only `next.label`, `next.reason` and
   `updated_at` (and overwrote the hand-written `next.label` prose). The entries were added by hand.
   Not yet filed.
+
+---
+
+## Fix PRs opened 2026-11-14 against open-gsd/gsd-core `next`
+
+One fix PR per confirmed issue, all opened 2026-11-14 against `next`. None is merged at the time of
+writing, so the local workarounds listed above stay in place.
+This supersedes the "no PR" and "fix branch with no commits" readings in the triage status table
+above, which are kept as the earlier reading.
+
+| PR | Fixes |
+|---|---|
+| #6186 | #6168 |
+| #6187 | #6169 |
+| #6188 | #6170 |
+| #6189 | #6171 |
+| #6190 | #6172 |
+| #6191 | #6173 |
+| #6192 | #6174 |
+| #6193 | #6175 |
+| #6194 | #6176 |
+
+⚠️ **#6187 and #6189 conflict in one hunk of `src/roadmap.cts`.** Whichever lands second needs a
+rebase onto the first before it can merge.

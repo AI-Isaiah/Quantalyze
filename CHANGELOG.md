@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.133.45.1] - 2026-11-14 — records: close 208 UIQUICK, 210 PUBLICTRUTH, 211 SYNCJOBS; D11-9 into 214; baseline re-dump
+
+Records PR for three phases whose code is already on `main` (208 as #1270, 210 as #1268, 211 as #1271). It carries their phase artifacts, the founder's 2026-11-14 answers to the open verification items, the `phase complete` runs, and the baseline re-dump that turns `main`'s `sql-gate-lint` green again. The only non-records change is that re-dump's one cleared `NAME_SET_RATCHET` row; there is no source or test change.
+
+### Added
+- **Phase artifacts for 208, 210 and 211** (plans, summaries, context, research, review, security, validation and verification) under `.planning/phases/`, copied from the phase branches.
+- **ROADMAP plan lists** for 208 (5 plans, three waves), 210 (5 plans, two waves) and 211 (7 plans, three waves), all ticked.
+- **Phase 214 FRESHTRUTH gains criterion 8 and a closes entry (founder decision 2026-11-14).** The Phase 211 D11-9 residual, TODOS `211-D11-RESIDUAL-UNCORRELATED-SENDERS`, goes into 214: the finalize-wizard `stitch_composite` and csv-finalize `compute_analytics_from_csv` enqueues send a `correlation_id`, or a founder decision widens `_record_enqueue_dedup`'s predicate. A SQL gate arm that is RED on today's code must prove it. Edited through `/gsd-phase --edit 214`.
+- **`.planning/research/gsd-tools-upstream-bugs.md`:** the nine fix PRs opened 2026-11-14 against open-gsd/gsd-core `next` (#6186-#6194 for #6168-#6176), and the one-hunk conflict between #6187 and #6189 in `src/roadmap.cts`, which means the second to land needs a rebase.
+
+### Changed
+- **208 VERIFICATION `human_needed` -> `passed`.** The founder answered both open items on 2026-11-14. WR-01, "Accept and record" (review option A): a share link minted on production's own per-deployment `NEXT_PUBLIC_VERCEL_URL` host, or on an extra `NEXT_PUBLIC_ALLOWED_ORIGINS` host, comes back on that host. It is recorded in `208-CONTEXT.md` D-16 and as an accepted consequence under ROADMAP 208 SC-5. The D-09 WebKit check, "Accept the simulation": the recorded Playwright WebKit iPhone reading stands, with its "not iOS Safari" limit kept. No code change.
+- **ROADMAP Phase 208** carries the branch's edits: the Goal and SC-1 reworded per founder decision D-01 (the digest email stops claiming the dashboard shows its alerts; the original criterion kept as lineage), and the SC-4 carve-out for `170.6.2-SHAREABLELINK-D05-RED` (D-11).
+- **211 VERIFICATION `human_needed` -> `passed`.** The founder decided WR-01 on 2026-11-14: "Merge on the code check". The lock-order safety of `_record_enqueue_dedup` rests on the argument in the migration header, and the two-session test is not built (`behavior_unverified: 1` stays as a fact about the evidence). The CI item is recorded from PR #1271's head `0bd3deb37`. A dated currency note marks the report's `ARMS_FLOOR 846` and the gate's 15 arms as readings taken before the ship moved them (16 arms, `ci.yml` `ARMS_FLOOR` 461) and points to the symbols.
+- **`211-REVIEW-FIX.md`:** a local absolute home path to the 211 worktree now reads as a sibling checkout (`../quantalyze-211`), so the planning-hygiene public-repo rule stays at zero.
+- **TODOS `211-D11-RESIDUAL-UNCORRELATED-SENDERS`:** the owner is now Phase 214 FRESHTRUTH, no longer "unrouted".
+- **`phase complete` for 208, 210 and 211.** STATE progress reads 6 of 13 phases, 34 of 34 plans, 46%, by the tool's own count. Each run padded its Progress-table Status cell to `Complete    `, which was normalised to `Complete` to match 207 and 209. No prose was lost, because the cells read `Not started`. The handler also moved STATE to "ready to plan Phase 155.1". `## Current Position`, the frontmatter and `state.json` `next` were hand-corrected for the parallel phases: done 155, 207-211; 155.1, 155.2 and 157 wait on the founder; 212-215 booked.
+- **Baseline re-dump after the PROD apply of `aabe7427`.** `supabase/schema/baseline.sql`, `baseline-carried-migrations.txt` and `BASELINE.md` are byte-identical to the redump bot's commit `382304d23`, from Supabase Migrate run `43594887781`. That run applied migration `20261114130000` to TEST and PROD before dumping. sha256 `10799455…` → `559fe7c0…`. Tables 66 → 67, policies 153 → 154, function statements 134 → 135, 0 data statements. Newly carried: `20261114120000_get_published_trade_venues_open_windows.sql` and `20261114130000_enqueue_dedup_record_retract.sql`. Re-checked locally on this branch: the `## Regenerating` secret grep has no hit; the marker equals the `aabe7427` migration tree; `baseline-currency: defects=0`, `carried=321 replay=0 marker-sha=match`; `baseline-content-drift: functions compared 135 — MATCH 132, DRIFT 3` (all three allowlisted), `findings 0`.
+
+- **`scripts/dump-sql-functions.ts`:** the Phase 211 `NAME_SET_RATCHET` row for `_record_enqueue_dedup` (`snapshot-only`, captured 2026-11-14) is deleted. The re-dump met its clearing condition, and `snapshot-drift` reported it `ratchet-stale` on this PR's first CI run. A dated comment records the deletion, as was done for the Phase 191 rows. `dump-sql-functions.ts --check` now reports `133 vs 133 names, 0 ratcheted disagreements`.
+
+### Notes
+- The re-dump lands through this PR, not the bot's #1269, so that it gets a full CI run (every #1269 run is waiting on workflow approval). #1269 claims the same version and is superseded. It should be closed unmerged.
+- The validation reports of 208 and 210 are still `draft` (`phase complete` warned). This is recorded, not changed.
+
 ## [0.133.45.0] - 2026-11-14 — Phase 211 SYNCJOBS: trade fetches skip nothing, the enqueue dedup keeps the caller's intent, and a failed composite keeps its real status
 
 This phase fixes three bookkeeping defects in the sync and job paths:

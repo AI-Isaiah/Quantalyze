@@ -31,7 +31,7 @@
     {
       "number": "208",
       "name": "UIQUICK",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "209",
@@ -41,12 +41,12 @@
     {
       "number": "210",
       "name": "PUBLICTRUTH",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "211",
       "name": "SYNCJOBS",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "212",
@@ -71,8 +71,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (phases 208, 210 and 211 in progress; 212-215 booked 2026-11-14; 155.1 waits for the 2026-11-16 gateway spike)",
-    "reason": "Phases 155, 207 and 209 complete; 3 of 13"
+    "label": "Advance to the next step (212-215 booked 2026-11-14; 155.1 waits for the 2026-11-16 gateway spike; 155.2 and 157 wait for the founder's trading-day session)",
+    "reason": "Phases 155, 207, 208, 209, 210 and 211 complete; 6 of 13"
   },
-  "updated_at": "2026-11-14T08:30:24.293Z"
+  "updated_at": "2026-11-14T12:36:33.133Z"
 }

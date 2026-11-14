@@ -137,10 +137,10 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [ ] **Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%** - The founder's scripted session on MM2, MM3 and FX-AI_V, Gate A and Gate B per account, every surface the same, every gap fixed at its root or ruled on; after 155, session after the 155.1 deploy
 - [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
 - [x] **Phase 207: RETRYPROP — every error page's Try again button works** - Boundaries use Next's real `retry` prop; independent of the MT5 phases (completed 2026-11-14)
-- [ ] **Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth** - Quick UI fixes; independent of the MT5 phases
+- [x] **Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth** - Quick UI fixes; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases (completed 2026-11-14)
-- [ ] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases
-- [ ] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases
+- [x] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases (completed 2026-11-14)
+- [x] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases (completed 2026-11-14)
 - [ ] **Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work** - Wizard and key-screen truth; independent of the MT5 phases
 - [ ] **Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out** - Key and draft flow, four founder decisions; independent of the MT5 phases
 - [ ] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases
@@ -253,10 +253,10 @@ Plans:
 | 155.2. LIVEPARITY | 0/? | Not started | - |
 | 157. FOUNDER-CONFIRM | 0/? | Not started | - |
 | 207. RETRYPROP | 1/1 | Complete | 2026-11-14 |
-| 208. UIQUICK | 0/? | Not started | - |
+| 208. UIQUICK | 5/5 | Complete | 2026-11-14 |
 | 209. SCRUBLEAKS | 5/5 | Complete | 2026-11-14 |
-| 210. PUBLICTRUTH | 0/? | Not started | - |
-| 211. SYNCJOBS | 0/? | Not started | - |
+| 210. PUBLICTRUTH | 5/5 | Complete | 2026-11-14 |
+| 211. SYNCJOBS | 7/7 | Complete | 2026-11-14 |
 | 212. WIZTRUTH | 0/? | Not started | - |
 | 213. KEYFLOW | 0/? | Not started | - |
 | 214. FRESHTRUTH | 0/? | Not started | - |
@@ -335,19 +335,28 @@ Plans:
 
 ### Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth
 
-**Goal:** Three user-facing lies are fixed: the alert digest email's "View in dashboard" link lands where alerts are shown, the browse page tells a failed read apart from an empty one, and share-link failures are logged and tell the user what happened. Closes TODOS `195-ALERT-DIGEST-LINK-TARGET`, `195-BROWSE-EMPTY-VS-ERROR`, `170.6.1-SFH2-SHARE-FAILURES-UNLOGGED`, the R2 ShareableLink dialog-copy entries and `SHARE-HOST-01` (added 2026-11-14 from the FIX NOW triage). Booked by the founder 2026-11-13 ("Quick UI fixes") from the TODOS prune, PR #1259.
+**Goal:** Three user-facing lies are fixed: the alert digest email stops claiming the dashboard shows its alerts (founder decision D-01, 2026-11-14; booked as "the link lands where alerts are shown"), the browse page tells a failed read apart from an empty one, and share-link failures are logged and tell the user what happened. Closes TODOS `195-ALERT-DIGEST-LINK-TARGET`, `195-BROWSE-EMPTY-VS-ERROR`, `170.6.1-SFH2-SHARE-FAILURES-UNLOGGED`, the R2 ShareableLink dialog-copy entries and `SHARE-HOST-01` (added 2026-11-14 from the FIX NOW triage). Booked by the founder 2026-11-13 ("Quick UI fixes") from the TODOS prune, PR #1259.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
-**Plans:** 0 plans
+**Plans:** 5/5 plans complete
 **Success Criteria** (what must be TRUE):
-1. The digest link (`src/lib/email.ts`) targets a page that renders the alerts it announces.
+1. The digest email (`src/lib/email.ts`) no longer claims the dashboard shows the alerts it lists: its link reads "Open your allocation →" and still targets `/allocations`. ⛔ CORRECTED 2026-11-14 by founder decision D-01 (`208-CONTEXT.md`, "Fix the email wording"); the original criterion, "targets a page that renders the alerts it announces", is kept here as lineage.
 2. `getPopulatedCategorySlugs` distinguishes error from empty, and browse renders each state distinctly.
 3. Every `ShareableLink.tsx` catch logs, a 401/403 says what it is, and the manual-copy fallback shows the URL.
-4. Each fix carries a test that goes RED when it is reverted.
-5. Both share routes (`strategies/[id]/share`, `allocator/scenario/share`) build the URL from the CSRF-validated request origin ahead of `NEXT_PUBLIC_APP_URL`; a test minting on a non-production host gets that host back. (added 2026-11-14, `SHARE-HOST-01`)
+4. Each fix carries a test that goes RED when it is reverted. ⭐ Carve-out (2026-11-14, `208-CONTEXT.md` D-11): `170.6.2-SHAREABLELINK-D05-RED` is test hardening for a CI-only flake that does not reproduce locally. It closes by the cited mechanism, an explicit per-await timeout and repeated green runs both quiet and under load, and no neuter-RED is claimed for it.
+5. Both share routes (`strategies/[id]/share`, `allocator/scenario/share`) build the URL from the CSRF-validated request origin ahead of `NEXT_PUBLIC_APP_URL`; a test minting on a non-production host gets that host back. (added 2026-11-14, `SHARE-HOST-01`) ⭐ Accepted consequence (founder decision 2026-11-14, WR-01 "Accept and record", `208-CONTEXT.md` D-16): a link minted on production's own per-deployment `NEXT_PUBLIC_VERCEL_URL` host, or on an extra `NEXT_PUBLIC_ALLOWED_ORIGINS` host, comes back on that host. The D-09 WebKit check stands on the recorded Playwright WebKit iPhone simulation (founder, "Accept the simulation").
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 208 to break down)
+**Wave 1**
+- [x] 208-01-PLAN.md — /browse tells a failed category read from an empty one; the alert digest link reads "Open your allocation →"
+- [x] 208-02-PLAN.md — share-link mint failures are logged, say what happened (401, 403/404, signed-out redirect) and are announced
+- [x] 208-05-PLAN.md — both share routes build the link on the CSRF-validated request host, so a link minted on a preview host comes back on that host (D-16)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 208-03-PLAN.md — the copy-failed dialog has its own Copy link and shows the URL on both lanes; hanging copies end visibly failed
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 208-04-PLAN.md — one WebKit iPhone check of the copy-failed dialog and the binding loaded-run reading of the private-link test
 
 ### Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost
 
@@ -374,7 +383,7 @@ Plans:
 **Goal:** Public factsheet cues come only from real data: the published-venues read ignores closed key windows, demo producers no longer ship made-up `peerPercentile`/`allocatorPortfolios` to the client, and a malformed gap record is reported, not shown as "no gaps". Closes TODOS `170.6.1-VENUES-CLOSED-KEY-WINDOWS`, `193-DEMO-PAYLOAD-PRODUCERS` and `167.1.2.2.2-GAP-RECORD-SILENT-PARSE`. Booked by the founder 2026-11-13 ("Public factsheet truth") from the TODOS prune, PR #1259.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
-**Plans:** 0 plans
+**Plans:** 5/5 plans complete
 **Success Criteria** (what must be TRUE):
 1. `get_published_trade_venues` filters closed key windows, so a key rotation does not raise a false venue-mismatch cue (migration reviewed by migration-reviewer and rls-policy-auditor).
 2. No public payload carries invented peer or allocator data.
@@ -382,14 +391,21 @@ Plans:
 4. Each fix has a test that goes RED when it is reverted.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 210 to break down)
+**Wave 1**
+- [x] 210-01-PLAN.md — venues: `get_published_trade_venues` ignores closed `strategy_keys` windows (new migration, rollback, gate arms, mutation census, badge and reader pins) (wave 1)
+- [x] 210-02-PLAN.md — demo payload: the api arm stops shipping `peerPercentile` and `allocatorPortfolios` (wave 1)
+- [x] 210-03-PLAN.md — the no-op `hideAllocatorSection` prop and its callers removed (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 210-04-PLAN.md — dead producers `peer-cohort.ts` and `allocator.ts` deleted, census rows dropped (wave 2)
+- [x] 210-05-PLAN.md — gap record: a malformed `unrecovered_gaps` reaches Sentry and the page says unavailable; the phase's one cache-key bump (wave 2)
 
 ### Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status
 
 **Goal:** Sync and job bookkeeping are correct on every path: a user-triggered trade fetch no longer seeds from the poll-overwritten `last_sync_at`, the enqueue dedup no longer drops the caller's metadata, and composite `_stamp_failed` stops reading status live. Closes TODOS `167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED`, `161.1-D11` and `161.1-D5`; the design for D11 is settled at discuss-phase. Booked by the founder 2026-11-13 ("Sync and jobs correctness") from the TODOS prune, PR #1259.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
-**Plans:** 0 plans
+**Plans:** 7/7 plans complete
 **Success Criteria** (what must be TRUE):
 1. A user-triggered fetch cannot skip trades that the daily poll's `last_sync_at` write would otherwise hide.
 2. An enqueue that dedups onto an existing job keeps or merges the caller's metadata by a recorded rule.
@@ -397,7 +413,18 @@ Plans:
 4. Each fix has a test that goes RED when it is reverted.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 211 to break down)
+**Wave 1**
+- [x] 211-01-PLAN.md — tracer: the fetch-trades route seeds from the stored daily high-water (shared helper `services/trade_resume.py`, moved out of the cron router), never from `last_sync_at` (Wave 1)
+- [x] 211-02-PLAN.md — composite `_stamp_failed` reads the status captured at job start (D5), the failed-row read narrowed to its flags (Wave 1)
+- [x] 211-03-PLAN.md — D11 migration: side table `compute_job_dedup_events` and helper `_record_enqueue_dedup` at both return sites of both overloads, SITE-A gate arm, snapshots, rollback, proven on the throwaway lanes (no `db push`) (Wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 211-04-PLAN.md — the queued sync job seeds both reads from the stored high-water; the fills cursor governs the fills read only (Wave 2)
+- [x] 211-05-PLAN.md — D11 gate breadth: SITE-B forced race, the predicate matrix, guards, ACLs and the 7-arg body pin, 15 arms each with a biting twin (Wave 2; the review fix WR-01 later added the DPC-SKIP arm, so the shipped gate has 16)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 211-06-PLAN.md — mutation-runner and anti-skip censuses moved once on the measured corpus, each guard shown able to fail (Wave 3)
+- [x] 211-07-PLAN.md — marker-set parity of the new helper in Python and TS, and the D-02 comments brought up to date (Wave 3)
 
 ### Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work
 
@@ -443,7 +470,7 @@ Plans:
 
 ### Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change
 
-**Goal:** Refresh work goes only where data can actually advance, and every freshness reading tells the truth about why a series has stopped. One live MT5 strategy has had its series stuck at 36 days while its key syncs daily and its derive finishes `publish_warned` every day. The fan-out re-derives it daily for nothing. The two Deribit composites read stale in `ledger_refresh_staleness`, although every member window ended by 2026-04-30. Founder decision 2026-11-14 (0.3, "Yes, closed records"): they read as closed records, not stale, and the composite fan-out stays unscheduled. The freshness chip's `TRACK RECORD · FUTURE — CHECK DATA` label overflows its masthead column at 1485px (297.9px in 204.2px). Closes TODOS `0.1`, `0.12` and `0.3`. Booked by the founder 2026-11-14 from the FIX NOW triage.
+**Goal:** Refresh work goes only where data can actually advance, and every freshness reading tells the truth about why a series has stopped. One live MT5 strategy has had its series stuck at 36 days while its key syncs daily and its derive finishes `publish_warned` every day. The fan-out re-derives it daily for nothing. The two Deribit composites read stale in `ledger_refresh_staleness`, although every member window ended by 2026-04-30. Founder decision 2026-11-14 (0.3, "Yes, closed records"): they read as closed records, not stale, and the composite fan-out stays unscheduled. The freshness chip's `TRACK RECORD · FUTURE — CHECK DATA` label overflows its masthead column at 1485px (297.9px in 204.2px). Closes TODOS `0.1`, `0.12`, `0.3` and `211-D11-RESIDUAL-UNCORRELATED-SENDERS` (added by founder decision 2026-11-14: the Phase 211 D11-9 residual, where the finalize-wizard `stitch_composite` and csv-finalize `compute_analytics_from_csv` enqueues send no `correlation_id`, so the SQL enqueue dedup cannot retract an inherited `ledger-refresh` marker for them). Booked by the founder 2026-11-14 from the FIX NOW triage.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of the other FIX NOW phases.
 **Plans:** 0 plans
@@ -455,6 +482,7 @@ Plans:
 5. The freshness chip's "future" label fits at 1485px, measured in a real browser.
 6. It touches migrations, so migration-reviewer and rls-policy-auditor are both clean before merge.
 7. Each fix has a test that goes RED when it is reverted.
+8. The finalize-wizard `stitch_composite` and csv-finalize `compute_analytics_from_csv` enqueues send a `correlation_id`, or a founder decision widens `_record_enqueue_dedup`'s predicate, so an enqueue from either that dedups onto a marked refresh job no longer stays on the quiet refresh path. A SQL gate arm that is RED on the Phase 211 code (an uncorrelated csv-finalize dedup onto a marked job leaves the marker) proves it. (added 2026-11-14, founder decision, TODOS `211-D11-RESIDUAL-UNCORRELATED-SENDERS`)
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 214 to break down)
