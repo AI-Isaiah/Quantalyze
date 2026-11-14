@@ -2,11 +2,11 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261030120000_ledger_fanout_marks_paused_weekly.sql
+-- source migration: 20261114152300_ledger_fanout_no_advance_weekly_cap.sql
 -- --------------------------------------------------------------------------
 -- STEP 1: the single-key fan-out, re-based with one edit
 -- --------------------------------------------------------------------------
--- Re-based on the single-key body of 20260924120000 (its first dollar-quoted block),
+-- Re-based on the single-key body of 20261030120000 (its dollar-quoted block),
 -- which the committed snapshot supabase/schema/functions/
 -- enqueue_ledger_refresh_for_strategies.sql carries. The ONE edit enumerated in
 -- the RE-BASE DISCIPLINE section above and nothing else; every other line of the
@@ -375,6 +375,33 @@ BEGIN
                             WHERE sa.strategy_id = lrs.strategy_id
                               AND (sa.data_quality_flags ->> 'marks_trailing_since') ~ '^\d{4}-\d{2}-\d{2}$'
                               AND sa.data_quality_flags ->> 'marks_trailing_since' <= to_char(CURRENT_DATE - 3, 'YYYY-MM-DD')
+                         )
+                         -- Phase 214 FRESHTRUTH (SC-2, founder Q1 = A, "Weekly cap,
+                         -- never exclude"): a strategy whose completed refresh
+                         -- cannot move its series gets the same weekly window. The
+                         -- signal is three conjuncts: the view reads it stale
+                         -- because its series is behind; its last return date is
+                         -- 8 or more days old (the view reads stale from age 5, so
+                         -- this is unmoved for 3 or more days after going stale);
+                         -- and a compute job of the chain TAIL reached done on or
+                         -- after the day it went stale. The tail is the completion
+                         -- marker because a derive can finish while its compute
+                         -- fails. Joined by OR AFTER the close paren above: an OR
+                         -- before it would land inside the analytics-row filter and
+                         -- give every strategy with an analytics row the week.
+                         -- Still keyed on the ATTEMPT, and still a throttle: with
+                         -- no attempt in the week it is admitted again.
+                         OR (
+                           lrs.stale_reason = 'series_behind'
+                           AND (CURRENT_DATE - lrs.last_return_date) >= 8
+                           AND EXISTS (
+                             SELECT 1
+                               FROM public.compute_jobs cj3
+                              WHERE cj3.strategy_id = lrs.strategy_id
+                                AND cj3.kind = 'compute_analytics_from_csv'
+                                AND cj3.status = 'done'
+                                AND cj3.created_at >= (lrs.last_return_date + 5)::timestamptz
+                           )
                          ) THEN INTERVAL '7 days'
                          ELSE INTERVAL '20 hours'
                        END
