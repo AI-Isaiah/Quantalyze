@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.133.48.1] - 2026-11-14 — records: close 212 WIZTRUTH, 213 KEYFLOW, 214 FRESHTRUTH; baseline re-dump
+
+Records PR for three phases whose code is already on `main`: 212 as #1274 (v0.133.46.0), 213 as #1273 (v0.133.47.0) and 214 as #1275 (v0.133.48.0). It carries their phase artifacts, the founder's 2026-11-14 answers, the `phase complete` runs, the Phase 214 SC-4 PROD reading, and the baseline re-dump that turns `main`'s `sql-gate-lint` green again. There is no source, test or script change.
+
+### Added
+- **Phase artifacts for 212, 213 and 214** (plans, summaries, context, discussion logs, research, patterns, UI specs, reviews, security, validation and verification, plus 212's SC4 measurement and 214's diagnosis) under `.planning/phases/`, copied from the phase branches. All three VERIFICATIONs are `passed` and carry `verified_at_sha` and `drift_subjects`, with no `covered_*` keys.
+- **ROADMAP plan lists:** 212 (9 plans) and 213 (12 plans in four waves) from their branches, and 214 (7 plans), written here because the 214 branch left the `TBD` stub. All ticked.
+- **214 VERIFICATION: the SC-4 PROD reading.** Supabase Migrate run `43651289345` for `2d1020dd5` succeeded. The read went through the Supabase MCP, with the marker query first. `ledger_refresh_staleness` holds 13 rows: 2 stale, 2 closed. Both Deribit composites read `is_closed = true` and are not stale. The two stale rows are both MT5 and `series_behind`: one is 81 days behind on a disconnected key, the other 36 days behind (the capped H1 case). This matches the expectation. Not yet observed: no `no_advance_weekly_cap` `cron_runs` row had been written in the 3 hours after the apply.
+
+### Changed
+- **212: the founder's answers (2026-11-14) are recorded** in `212-CONTEXT.md` under "Founder answers", in the VERIFICATION notes, and in the ROADMAP 212 CORRECTED note. They are: keep "Try again in a minute." for `KEY_MT5_TERMINAL_BUSY`; keep the WR-04 paging (`SEAM_MISCONFIGURED` stays in `OUR_DEFECT_KEY_ERROR_CODES`); accept that the csv-finalize copy differs from the SQL `computation_error_copy` ELSE arm until TODOS `[212-CONTACT-SUPPORT-SURVIVORS]` restores parity. Two stale VERIFICATION notes get dated corrections: the CONTEXT "pending" label, and the survivors entry, which #1274 did write.
+- **213 and 214: the founder's answers were already on the branches** and are carried as they were: 213 CR-02 option (1), honest copy, with the agent's other items accepted as defaults; 214 SC-5 option A, which says it does not reproduce, keeps the guard, and closes TODOS `0.12` as "does not reproduce".
+- **The branch-side planning edits for 212 are carried:** `WINDOWS.md` entry 12 (D-161-05-B) is now `fixed`, the `161-UI-SPEC.md` arm-3 amendment, and the dated `PITFALLS.md` Finding #10 correction.
+- **`phase complete` for 212, 213 and 214.** STATE progress reads 9 of 13 phases, 62 of 62 plans, 69%, by the tool's own count. Each run padded its Progress-table Status cell to `Complete    `, which was normalised to `Complete`. No prose was lost, because the cells read `Not started`. The handler also moved STATE to "ready to plan Phase 155.1". The frontmatter, `## Current Position` and `state.json` `next` were hand-corrected for the parallel phases: done 155 and 207-214; 215 TESTREACH not started, held by the founder; 155.1 waits on the founder (weekend spike run 1 done 2026-11-14 with verdict GO, the market-hours run scheduled for Monday 2026-11-16), as do 155.2 and 157.
+- **Baseline re-dump after the PROD apply of `2d1020dd`.** `supabase/schema/baseline.sql`, `baseline-carried-migrations.txt` and `BASELINE.md` are byte-identical to the redump bot's commit `582994da3`, from Supabase Migrate run `43651289345`. sha256 `559fe7c0…` → `e8a2f5e3…`. Tables 67, policies 154, function statements 135, all unchanged; 0 data statements. Newly carried: `20261114151700_ledger_staleness_closed_composites.sql` and `20261114152300_ledger_fanout_no_advance_weekly_cap.sql`. Re-checked locally: `dump-sql-functions.ts --check` reports 133 vs 133 names with 0 ratcheted disagreements, so no `NAME_SET_RATCHET` row needed deleting.
+
+### Notes
+- #1273's squash subject says `v0.133.46.0` because its PR title was not updated after the version was re-picked. Its `VERSION` and its CHANGELOG entry are `0.133.47.0`, which is the version Phase 213 shipped as.
+- The re-dump lands through this PR, not the bot's #1276, so that it gets a full CI run. #1276 claims the same version and is superseded. It should be closed unmerged.
+- The validation reports of 212, 213 and 214 are still `draft` (`phase complete` warned). This is recorded, not changed.
+
 ## [0.133.48.0] - 2026-11-14 — Phase 214 FRESHTRUTH: refresh work and freshness readings match what can actually change
 
 The ledger-refresh fan-out and the staleness view now tell apart a strategy whose data can still move from one that cannot. A closed composite stops reading as stale, a strategy whose series has not advanced is retried weekly instead of daily (never excluded), and both finalize routes send the correlation id the enqueue dedup needs. Two migrations.
