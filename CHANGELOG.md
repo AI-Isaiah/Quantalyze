@@ -1,6 +1,6 @@
 # Changelog
 
-## [VERSION_PLACEHOLDER] - 2026-11-14 — Phase 214 FRESHTRUTH: refresh work and freshness readings match what can actually change
+## [0.133.48.0] - 2026-11-14 — Phase 214 FRESHTRUTH: refresh work and freshness readings match what can actually change
 
 The ledger-refresh fan-out and the staleness view now tell apart a strategy whose data can still move from one that cannot. A closed composite stops reading as stale, a strategy whose series has not advanced is retried weekly instead of daily (never excluded), and both finalize routes send the correlation id the enqueue dedup needs. Two migrations.
 
