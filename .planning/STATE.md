@@ -5,11 +5,11 @@ milestone_name: MT5-VERIFY & founder confirmations
 current_phase: "155.1"
 current_phase_name: SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading
 status: planning
-stopped_at: Phase 208 complete, ready to plan Phase 155.1
-last_updated: "2026-11-14T12:36:15.434Z"
+stopped_at: Phase 210 complete, ready to plan Phase 155.1
+last_updated: "2026-11-14T12:36:26.702Z"
 last_activity: 2026-11-14
-last_activity_desc: Phase 208 complete, transitioned to Phase 155.1
-state_head: 485226c9578071ec61034c136e2fb91ad21b9ac0
+last_activity_desc: Phase 210 complete, transitioned to Phase 155.1
+state_head: 6ee0bfc8a840419aaa2355aca5e6e662b61b4f6d
 progress:
   total_phases: 13
   completed_phases: 6
@@ -179,7 +179,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: 155.1 — SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-11-14 — Phase 208 complete, transitioned to Phase 155.1
+Last activity: 2026-11-14 — Phase 210 complete, transitioned to Phase 155.1
 Progress: [█████░░░░░] 46%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -1808,7 +1808,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-14T07:30:26.000Z
-**Stopped At:** Phase 208 complete, ready to plan Phase 155.1
+**Stopped At:** Phase 210 complete, ready to plan Phase 155.1
 **Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z

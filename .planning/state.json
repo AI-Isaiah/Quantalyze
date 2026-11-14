@@ -41,7 +41,7 @@
     {
       "number": "210",
       "name": "PUBLICTRUTH",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "211",
@@ -74,5 +74,5 @@
     "label": "Advance to the next step (plan phase 155.1)",
     "reason": "Phase 2 of 13 — needs a plan"
   },
-  "updated_at": "2026-11-14T12:36:15.462Z"
+  "updated_at": "2026-11-14T12:36:26.729Z"
 }

@@ -139,7 +139,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 207: RETRYPROP — every error page's Try again button works** - Boundaries use Next's real `retry` prop; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth** - Quick UI fixes; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases (completed 2026-11-14)
-- [ ] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases
+- [x] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases (completed 2026-11-14)
 - [ ] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases
 - [ ] **Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work** - Wizard and key-screen truth; independent of the MT5 phases
 - [ ] **Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out** - Key and draft flow, four founder decisions; independent of the MT5 phases
@@ -255,7 +255,7 @@ Plans:
 | 207. RETRYPROP | 1/1 | Complete | 2026-11-14 |
 | 208. UIQUICK | 5/5 | Complete | 2026-11-14 |
 | 209. SCRUBLEAKS | 5/5 | Complete | 2026-11-14 |
-| 210. PUBLICTRUTH | 0/? | Not started | - |
+| 210. PUBLICTRUTH | 5/5 | Complete | 2026-11-14 |
 | 211. SYNCJOBS | 0/? | Not started | - |
 | 212. WIZTRUTH | 0/? | Not started | - |
 | 213. KEYFLOW | 0/? | Not started | - |
@@ -383,7 +383,7 @@ Plans:
 **Goal:** Public factsheet cues come only from real data: the published-venues read ignores closed key windows, demo producers no longer ship made-up `peerPercentile`/`allocatorPortfolios` to the client, and a malformed gap record is reported, not shown as "no gaps". Closes TODOS `170.6.1-VENUES-CLOSED-KEY-WINDOWS`, `193-DEMO-PAYLOAD-PRODUCERS` and `167.1.2.2.2-GAP-RECORD-SILENT-PARSE`. Booked by the founder 2026-11-13 ("Public factsheet truth") from the TODOS prune, PR #1259.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
-**Plans:** 0 plans
+**Plans:** 5/5 plans complete
 **Success Criteria** (what must be TRUE):
 1. `get_published_trade_venues` filters closed key windows, so a key rotation does not raise a false venue-mismatch cue (migration reviewed by migration-reviewer and rls-policy-auditor).
 2. No public payload carries invented peer or allocator data.
