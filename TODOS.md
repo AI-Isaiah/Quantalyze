@@ -4282,7 +4282,7 @@ a caller that sends a `correlation_id` and no refresh marker, it also retracts a
 
 Widening either caller changes TypeScript callers, so it was out of Phase 211's scope (D11-9).
 
-**Owner:** unrouted; the first phase that edits either enqueue call.
+**Owner:** Phase 214 FRESHTRUTH (founder decision 2026-11-14: D11-9 goes into Phase 214; ROADMAP Phase 214 carries it as a success criterion). Until 214 ships, the trigger below still applies.
 **Trigger:** any edit to the finalize-wizard or csv-finalize enqueue, or a user CSV finalize whose
 failure is reported quietly because it inherited a refresh marker.
 **Gate (what closes it):** both callers send a `correlation_id`, or a founder decision widens the helper's
