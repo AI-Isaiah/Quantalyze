@@ -32,13 +32,13 @@ routed, not fixed here); scheduling the composite fan-out; widening `_record_enq
 
 ### SC-2 — fan-out treatment of a strategy whose refresh cannot advance (founder, Q1 = A)
 - Weekly cap, never exclude. Trigger on the generic signal, not on the dust flag: a completed derive + compute run happened after the strategy went stale and `last_return_date` has stayed unmoved for 3 or more days. Then the single-key fan-out's attempt cooldown goes from 20 hours to 7 days. — **Reversibility:** costly — it redefines the live hourly SECURITY DEFINER `enqueue_ledger_refresh_for_strategies` through an auto-applying migration (TEST then PROD on merge, no human gate).
-- The throttle lives in the fan-out's candidate cooldown, never in the staleness view (Phase 174 D-01/D-04 precedent: the view's verdict fails toward stale and its static gate bans time columns in the verdict region).
+- The throttle lives in the fan-out's candidate cooldown, never in the staleness view (Phase 174 decisions 01 and 04 precedent: the view's verdict fails toward stale and its static gate bans time columns in the verdict region).
 - Each skip is counted per tick with its reason in `public.cron_runs`, under an error/cause tag that cannot collide with `candidate_enqueue_failed` (the prober's `cron-obs` arm counts that tag and the fan-out's own failed-attempt cooldown reads it).
 
 ### SC-8 — the two uncorrelated enqueue callers (founder, Q2 = A)
-- Both routes send their request's `correlation_id` in `p_metadata`: finalize-wizard `stitch_composite` and csv-finalize `compute_analytics_from_csv`. No SQL widening of `_record_enqueue_dedup`. — **Reversibility:** costly — it changes what lands in `compute_jobs.metadata` / `compute_job_dedup_events` and turns on the Phase 211 D11-2 retraction for those callers.
+- Both routes send their request's `correlation_id` in `p_metadata`: finalize-wizard `stitch_composite` and csv-finalize `compute_analytics_from_csv`. No SQL widening of `_record_enqueue_dedup`. — **Reversibility:** costly — it changes what lands in `compute_jobs.metadata` / `compute_job_dedup_events` and turns on the Phase 211 decision D11 item 2 retraction for those callers.
 - Proof: a TypeScript test that goes RED when either route stops sending the id, plus a SQL gate arm pinning both routes' exact payloads (with `correlation_id`) retracting an inherited marker. The SQL is unchanged, so the "RED on Phase 211 code" clause of SC-8 is met by the TS test (founder accepted this).
-- Consistent with Phase 211 D11-8: a `correlation_id` means user-initiated; no background path retracts.
+- Consistent with Phase 211 decision D11 item 8: a `correlation_id` means user-initiated; no background path retracts.
 
 ### SC-5 — chip label overflow (founder, Q3 = a)
 - Let the label row wrap at that width and keep the full `Track record · future — check data` sentence. No copy change. Measure at 1485px in a real browser, per DESIGN.md.
