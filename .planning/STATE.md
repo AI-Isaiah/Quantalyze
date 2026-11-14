@@ -10,11 +10,11 @@ last_activity: 2026-11-14
 last_activity_desc: Phases 155, 207 and 209 complete
 state_head: 40ff7161c075113187162a407a6cb51c502da5a5
 progress:
-  total_phases: 9
+  total_phases: 13
   completed_phases: 3
   total_plans: 17
   completed_plans: 17
-  percent: 33
+  percent: 23
 ---
 
 ## ⭐ STATE lineage
@@ -706,6 +706,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 209 added (2026-11-13, /gsd-phase add, founder "Error-report leaks" after the TODOS prune, PR #1259): SCRUBLEAKS
 - Phase 210 added (2026-11-13, /gsd-phase add, founder "Public factsheet truth" after the TODOS prune, PR #1259): PUBLICTRUTH
 - Phase 211 added (2026-11-13, /gsd-phase add, founder "Sync and jobs correctness" after the TODOS prune, PR #1259): SYNCJOBS
+- Phase 212 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): WIZTRUTH, the wizard and key screens name the real cause and every remedy they offer can work
+- Phase 213 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): KEYFLOW, a key and its draft can never be silently mixed up and every key state has a way out (four founder decisions)
+- Phase 214 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): FRESHTRUTH, refresh work and freshness readings match what can actually change (0.3: closed records)
+- Phase 215 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): TESTREACH, CI-only: every test guarding money math or error contracts runs and test apps match production
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 
 ### Decisions

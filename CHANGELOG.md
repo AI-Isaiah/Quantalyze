@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.133.42.3] - 2026-11-14 — records: book WIZTRUTH, KEYFLOW, FRESHTRUTH, TESTREACH; FIX NOW cleanup
+
+Records PR from the founder's FIX NOW triage (every decision approved 2026-11-14 through AskUserQuestion). It books four phases, adds a criterion to Phase 208, and restructures the `TODOS.md` FIX NOW section. `TODOS.md` goes from 7,016 to 6,694 lines. No source or test change. The pre-cleanup file is `git show 3f52d473a:TODOS.md`.
+
+### Added
+- **Phase 212 WIZTRUTH:** the wizard and key screens name the real cause, and every remedy they offer can work. Closes `0.07` (`D-161-07-A`), `0.09`, `D-161-05-B`, Phase 153.5 finding #10, the WIZFORM-02 §D entry, `WIZFORM-02-VE-CODECHANNEL`, `164.2-WIZARD-BARE401` and `CONTACT-SUPPORT-POINTERS-01`. No migration.
+- **Phase 213 KEYFLOW:** a key and its draft can never be silently mixed up, and every key state has a way out. It carries four founder decisions, one criterion each: (a) "Refuse when unknown": an unknown incoming key does not resume a draft, and create-with-key returns a `deduped` flag. This supersedes Phase 164.2.1's D-01/D-02 for that case. (b) "Add Disconnect" on the manager's "No strategy yet" row. (c) "Block it": MT5 cannot be a composite member. (d) "Hold and show pending" in the scenario composer. No migration expected.
+- **Phase 214 FRESHTRUTH:** refresh work and freshness readings match what can actually change. Closes `0.1`, `0.12` and `0.3` (founder: the two Deribit composites read as closed records; the composite fan-out stays unscheduled). It touches migrations, so migration-reviewer and rls-policy-auditor must both be clean.
+- **Phase 215 TESTREACH (CI-only):** every test that guards money math or error contracts runs, and test apps match production. Closes the 140.1 "tests in no environment", bare-`FastAPI()`, worker-`HTTPException`, 403-vs-422 and teaser-bucket entries, plus `ROSTER-DERIVE-01` and `D-161-01`. No migration.
+- **Phase 208 UIQUICK, criterion 5:** both share routes build the URL from the CSRF-validated request origin ahead of `NEXT_PUBLIC_APP_URL`. `SHARE-HOST-01` is added to its closes list.
+- Every booked phase has its overview bullet, its Progress row, a STATE Roadmap Evolution line and a `state.json` entry. STATE `total_phases` goes from 9 to 13 (23%).
+
+### Removed
+- **13 FIX NOW items the triage found gone at HEAD:** DEC-1 (dropped by the 2026-09-05 repartition), DEC-3 / `161.1-D13` (closed in 164.6), DEC-4 (Phase 164.5.2 BRIDGELOCK), `D-161-02`, `D-161-03`, `0.04` PYAPI-06 (shipped in 164.1), `0.06` (the key-scope chips no longer render on a probe failure), the whole `0.4` Phase 153.6 entry (its OUT line is now KEYFLOW decision c), the `0.5` Phase 153.5 entry (finding #10 kept for WIZTRUTH, #8 moved to TRIGGER-GATED), item 0's fail-open, shared-session and first-call-empty sub-points, and `0.2` (the ccxt cron's D-02 arm derives every strategy daily).
+- **Four DECISION items the founder answered**, now carried by their phases in `ROADMAP.md`: `0.08` and `164.2.1-INCOMING-NULL-CONFLATION` (KEYFLOW), `0e` `159-BASIS-FLIP` (KEYFLOW), and `0.3` (FRESHTRUTH).
+- **The 0.01 "Phase 164.1 scope" wrapper heading.** Its live sub-items were re-homed as their own entries (`0.011` `D-161-01`, `0.012` `D-161-05-B`, `0.013` WIZFORM-02).
+- **TRAP-9 class B2** (a planning-template process note, not repo work).
+- **The expired-Bybit-keys sub-note under `0.1`.**
+
+### Changed
+- **`TODOS.md` FIX NOW now holds only live items, each with an `**Owner:** Phase N NAME (booked 2026-11-14)` line:** `SHARE-HOST-01` (208), `0.07`, `0.09`, `0.012`, `0.013`, `0.51` (finding #10) (212), `0.1`, `0.12` (214), and `0.011`, `ROSTER-DERIVE-01` and the five 140.1 findings (215). The FIX MID-TERM entries `WIZFORM-02-VE-CODECHANNEL`, `164.2-WIZARD-BARE401` and `CONTACT-SUPPORT-POINTERS-01` got Owner lines for Phase 212. `0.1` gained the 2026-11-14 PROD reading: one MT5 strategy is stuck at 36 days while its derive runs daily.
+- **New section `## ⏳ TRIGGER-GATED — not work until the trigger fires`**, each item with an explicit **Trigger:** line: `0.02` (OKX entity), `0` (MT5 architecture decision record, trimmed), `0.52` (Phase 153.5 finding #8), `0.10`, `0.014` `D-161-04`, `0.015` `D-161-07-B`, GLB-1, and "No branch protection on `main`".
+- **New section `## 👤 FOUNDER OPS — founder actions, not phase work`:** item 1 (`RESEND_API_KEY` / `FOUNDER_LP_REPORT_TO`), item 2 (Zavara activation), item 3 (sFOX vs Nautilus), and the "Founder sign-offs pending" section, which moved under it.
+- **The GSD-verbs residual moved to `.planning/research/gsd-tools-upstream-bugs.md`**, together with a new note: `phase.add` does not append the new phase to `state.json` `phases[]`. That was measured on this booking, and the entries were added by hand.
+- **`docs/runbooks/ledger-refresh-go-live.md`:** dated notes where it cites the removed `TODOS.md` items 0.2 and 0.3.
+- **PROD action, 2026-11-14 08:30:49Z (coordinator, done separately from this PR):** the 5 revoked Bybit `api_keys` rows were disconnected (`disconnected_at` set; same write as the `disconnect_allocator_api_key` RPC body; marker query first). No data was deleted, and the one healthy Bybit key is untouched.
+
+### Notes
+- Phases 213-215 were added with `gsd-tools query phase.add` directly, the same handler the `/gsd-phase` add workflow calls. Phase 212 went through the skill.
+
 ## [0.133.42.2] - 2026-11-14 — records: close 155 PARITYHARNESS, 207 RETRYPROP, 209 SCRUBLEAKS
 
 Records-only PR. The code for all three phases is already on `main` (#1263, #1261, #1264). This lands their phase records and closes them in the ledgers in one PR. No source or test change.
