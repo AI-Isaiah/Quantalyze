@@ -23,7 +23,7 @@ created: "2026-11-14"
 | **Config file** | {path or "none — Wave 0 installs"} |
 | **Quick run command** | `{quick command}` |
 | **Full suite command** | `{full command}` |
-| **Estimated runtime** | ~214 seconds |
+| **Estimated runtime** | (planner fills) |
 
 ---
 
