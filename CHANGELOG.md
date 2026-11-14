@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.133.44.0] - 2026-11-14 — Phase 208 UIQUICK: alert-digest link, browse error state and share-link failures tell the truth
+
+Four user-facing claims that were not true are fixed: the alert digest no longer says the dashboard lists its alerts, `/browse` tells a failed category read from an empty one, the strategy share button says what went wrong and always leaves the URL on screen when a copy did not land, and a share link now comes back on the host it was minted on.
+
+### Fixed
+- **Alert digest wording (D-01, founder decision).** The `sendAlertDigest` email link still points at `/allocations` and now reads "Open your allocation →". The email makes no claim that the dashboard lists the alerts, because `/allocations` shows only critical alerts, one at a time, and nothing on a phone.
+- **`/browse` error vs empty (D-02..D-04, D-14).** `getPopulatedCategorySlugs` throws after its existing log and Sentry capture, and returns `[]` only for a real empty result. `getBrowseCategories` reports `ok`, `empty` or `error`. An empty read shows "No strategies published yet", which could not render before. A failed read shows a `role="alert"` block with a Try again link and no category cards, since a card claims the category has strategies. The one-category redirect and the Browse crumb rule stay gated on `ok`. An `ok` read whose slugs match no known category renders `empty`.
+- **Share mint failures (D-05..D-07, D-13).** `mintShareUrl` throws a `ShareMintError` carrying the HTTP status. A signed-out mint, which the proxy answers with a redirect to `/login`, now counts as 401. The button reads "Signed out — sign in again to share" on 401, "You can't share this strategy here" on 403 and 404 (lost ownership answers 404), and keeps "Couldn't create the link — try again" for everything else. The failure is also announced in a polite live region. Every catch logs `{ strategyId, err }` under a `[ShareableLink]` tag; no URL or token is logged.
+- **Copy-failed dialog (D-08, D-09, D-15).** The copy-failed URL field has its own Copy link button, which copies the URL already on screen with no network call first, shows copied or failed, and re-selects the field with an explicit `setSelectionRange` for iOS. The bounded clipboard write and the `execCommand` fallback are one exported helper, `copyTextBounded`, which places its fallback input inside an open dialog. The factsheet `mintAndCopy` uses the same helper, so a hanging clipboard write ends visibly failed instead of "working" for good.
+- **Published lane shows its URL (D-10).** When both copy paths fail for a published strategy, a "Public link" dialog opens with the URL and its Copy button, without the owner-unpublished panel.
+- **Share link host (D-16, founder decision).** Both share routes (`/api/strategies/[id]/share` and `/api/allocator/scenario/share`) build the link from the request origin that `assertSameOrigin` already validated, ahead of `NEXT_PUBLIC_APP_URL`, with the localhost literal kept as the last rung. A link minted on `quantalyze.xyz` or a preview host now points there. The scenario route reaches the origin gate through `withAllocatorAuth` → `withAuth`; a new real-chain test pins that a forged or missing origin gets a 403.
+
+### Tests
+- Every fix has an arm that goes RED when the fix is reverted (neutered from a byte backup and restored): digest wording, browse helper and page states, each ShareableLink catch log, the 401 and 403/404 wording, the live regions, the dialog Copy button without a fetch, hanging copies in the dialog and in `mintAndCopy`, the published-lane URL, and the D-16 host order in both routes.
+- The `170.6.2` Private-link panel arm (D-11) gets a file-level warm-up of the lazy `FactsheetView` import and explicit, commented 5 s timeouts on its five lazy-panel awaits. No global timeout was raised. It passed 3 quiet and 3 loaded runs; no neuter-RED is claimed, because the 1 s CI failure does not reproduce locally.
+- D-09 was checked once in Playwright WebKit on an iPhone 15 profile (local, no CI project added): the field is fully selected on open and after a failed copy, and the URL scrolls rather than truncates.
+
+### Notes
+- Closes TODOS `195-ALERT-DIGEST-LINK-TARGET`, `195-BROWSE-EMPTY-VS-ERROR`, `170.6.1-SFH2-SHARE-FAILURES-UNLOGGED`, `170.6.1-R2-DIALOG-COPY-BUTTON`, `170.6.1-R2-IOS-SELECT`, `170.6.1-SFH2-PUBLISHED-LANE-NO-URL`, `170.6.2-SHAREABLELINK-D05-RED` and `SHARE-HOST-01`; all eight entries are deleted.
+- ⚠️ Open review item WR-01 (MEDIUM, awaiting a founder decision): production's own per-deployment `vercel.app` host, and any `NEXT_PUBLIC_ALLOWED_ORIGINS` host, are allow-listed by CSRF but not redirected, so a mint made on one of those hosts returns a link pinned to that host. The strategies route's comment now names this case. No product path sends users to those hosts.
+- Known limits recorded, not fixed (LOW): the origin's scheme is not checked for a non-browser caller (self-only), share-button reset timers are not cleared, and a `createClient` throw on `/browse` shows the error state without its own log.
+
 ## [0.133.43.0] - 2026-11-14 — Phase 210 PUBLICTRUTH: public factsheet cues come from real data only
 
 Three fixes to what a public factsheet and Discovery show. Each one removes a cue that real data did not back. The phase has one migration, and it changes no live output when it deploys: PROD had 0 closed `strategy_keys` windows on published strategies on 2026-11-14. Its value is the first key rotation.

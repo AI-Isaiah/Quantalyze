@@ -58,13 +58,46 @@ import type { ScenarioDraft } from "@/app/(dashboard)/allocations/lib/scenario-s
 
 export const runtime = "nodejs";
 
-// The origin the share URL is built from. Sourced from NEXT_PUBLIC_APP_URL
-// (the demo-pdf precedent, portfolio-pdf/[id]/route.ts:17) — NEVER a hardcoded
-// host. Read per-request (not captured at module load) so the resolved origin
-// always reflects the running environment. Falls back to localhost only in dev
-// where the env var is unset.
-function resolveAppUrl(): string {
-  return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+// The origin the share URL is built on, read per-request (never captured at
+// module load, never a hardcoded host). Founder decision D-16 (2026-11-14), in
+// this order:
+//   1. the origin of `Origin ?? Referer` - the deployment the owner is using;
+//   2. NEXT_PUBLIC_APP_URL;
+//   3. the `http://localhost:3000` literal.
+// A share link has to land on the deployment it was minted on, so a preview
+// link stays on preview; with the environment variable first, a preview deploy
+// minted production-host links (TODOS SHARE-HOST-01). This is the twin of
+// `resolveAppUrl` in `src/app/api/strategies/[id]/share/route.ts`.
+//
+// WHY THE ORIGIN IS VALIDATED EVEN THOUGH THIS FILE NEVER CALLS THE ORIGIN
+// GATE. POST below is `withAllocatorAuth(...)`, which composes `withAuth`, which
+// runs `assertSameOrigin` on every non-GET/HEAD/OPTIONS request before the
+// handler. So every request that reaches here presented an `Origin ?? Referer`
+// that parses and whose host is in `ALLOWED_HOSTS` (`src/lib/csrf.ts`, which
+// admits `localhost` only outside production). This route therefore adds no
+// second call and no new 403 path, and `route.csrf-integration.test.ts` pins
+// that chain unmocked. `Host`, `x-forwarded-host` and `req.nextUrl` are never
+// read, and nothing derived from the origin is persisted.
+//
+// Rungs 2 and 3 are reachable only when the request carries neither header,
+// which the wrapper refuses; they stay for direct callers such as unit tests.
+// NEXT_PUBLIC_APP_URL itself is unchanged and remains PROD's app URL for the
+// PDF routes and `founder-lp-report` (D-16).
+function resolveAppUrl(req: NextRequest): string {
+  const source = req.headers.get("origin") ?? req.headers.get("referer");
+  if (source) {
+    try {
+      return new URL(source).origin;
+    } catch {
+      // Unreachable behind the wrapper's gate, which 403s an unparseable
+      // source. Fall through rather than throw.
+    }
+  }
+
+  const configured = process.env.NEXT_PUBLIC_APP_URL;
+  if (configured) return configured;
+
+  return "http://localhost:3000";
 }
 
 // The body carries ONLY the scenario_id (uuid). `created_by` is NEVER read from
@@ -262,7 +295,7 @@ export const POST = withAllocatorAuth(
     // The raw token appears ONLY here. No audit log carries the token or any
     // draft content (mirrors the saved-route privacy posture).
     return NextResponse.json(
-      { url: `${resolveAppUrl()}/scenario-share/${raw}` },
+      { url: `${resolveAppUrl(req)}/scenario-share/${raw}` },
       { status: 200, headers: NO_STORE_HEADERS },
     );
   },

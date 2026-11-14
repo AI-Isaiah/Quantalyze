@@ -79,44 +79,59 @@ import { deriveShareToken } from "@/lib/strategy-share-token";
 export const runtime = "nodejs";
 
 /**
- * The origin the share URL is built from — `NEXT_PUBLIC_APP_URL`, read
- * PER-REQUEST rather than captured at module load so the resolved origin always
- * reflects the running environment (the scenario mint route's `resolveAppUrl`
- * shape; never a hardcoded host).
+ * The origin the share URL is built on, read PER-REQUEST (never captured at
+ * module load, never a hardcoded host). Founder decision D-16 (2026-11-14), in
+ * this order:
  *
- * ⛔ WHY THIS TAKES `req` AND THE SCENARIO ROUTE'S TWIN DOES NOT (WR-03).
- * The scenario twin falls straight through to `http://localhost:3000` when the
- * env var is unset. For THIS route that fallback is a silent wrong answer with
- * a user-visible consequence: step (9) is a Copy Link, so a production deploy
- * missing `NEXT_PUBLIC_APP_URL` would put `http://localhost:3000/...` on the
- * owner's clipboard under a "Link copied" flash — a dead link, indistinguishable
- * from a working one until the recipient opens it. Same silent-misconfig class
- * D-02 closed for the secret; closing it here too.
+ *   1. the origin of `Origin ?? Referer` - the deployment the owner is using;
+ *   2. `NEXT_PUBLIC_APP_URL`;
+ *   3. the `http://localhost:3000` literal.
  *
- * The middle rung is the CSRF-validated request origin. It is safe to trust
- * precisely because step (1) already ran: `assertSameOrigin` returned null, so
- * `source` exists, parses, and its host is a member of the `ALLOWED_HOSTS`
- * allow-list (`src/lib/csrf.ts`) — which admits `localhost` ONLY when
- * `NODE_ENV !== "production"`. A spoofed Host header cannot reach here, and
- * nothing derived from it is persisted; it only shapes the URL handed back to
+ * ⛔ WHY THE REQUEST ORIGIN IS FIRST. A share link has to land on the
+ * deployment it was minted on, so a preview link stays on preview. With the
+ * environment variable first, a preview deploy minted production-host links
+ * (TODOS SHARE-HOST-01). The WR-03 reason for env-first, that an alias host is
+ * allow-listed by CSRF but is not the address we want on a link, is narrowed,
+ * not gone: the `quantalyze-rho.vercel.app` alias 308s to the canonical domain
+ * before any page on it can POST, and a Production build refuses a `vercel.app`
+ * value (`assertCanonicalAppUrl` in `next.config.ts`). ⚠️ Still open (208
+ * REVIEW WR-01, founder decision): production's own per-deployment
+ * `NEXT_PUBLIC_VERCEL_URL` host and any `NEXT_PUBLIC_ALLOWED_ORIGINS` host are
+ * allow-listed too, and the 308 does not cover them, so a mint made on one of
+ * those hosts returns a link on that host.
+ *
+ * ⛔ WHY THE ORIGIN IS SAFE TO TRUST. Step (1) of `POST` already ran
+ * `assertSameOrigin`, so `source` exists, parses, and its host is a member of
+ * the `ALLOWED_HOSTS` allow-list (`src/lib/csrf.ts`), which admits `localhost`
+ * ONLY when `NODE_ENV !== "production"`. The resolver reads the very same
+ * `Origin ?? Referer` expression the gate validated. The `Host` and
+ * `x-forwarded-host` headers and `req.nextUrl` are never read, and nothing
+ * derived from the origin is persisted: it only shapes the URL handed back to
  * the same authenticated caller who sent it.
  *
- * The literal stays as the last rung so a unit test or a script calling POST
- * with neither env var nor headers still gets a well-formed URL.
+ * Rungs 2 and 3 are reachable only when the request carries neither header,
+ * which step (1) refuses, so in a deployed environment the url is always the
+ * validated origin (whichever allow-listed host that is). They stay for direct callers such as unit tests, and so a
+ * header-less call still gets a well-formed URL rather than a 500. The WR-03
+ * lineage: an unset variable used to put `http://localhost:3000/...` on the
+ * owner's clipboard under a "Link copied" flash, a dead link that looks alive.
+ *
+ * `NEXT_PUBLIC_APP_URL` itself is unchanged and remains PROD's app URL for the
+ * PDF routes and `founder-lp-report` (D-16).
  */
 function resolveAppUrl(req: NextRequest): string {
-  const configured = process.env.NEXT_PUBLIC_APP_URL;
-  if (configured) return configured;
-
   const source = req.headers.get("origin") ?? req.headers.get("referer");
   if (source) {
     try {
       return new URL(source).origin;
     } catch {
       // Unreachable after assertSameOrigin, which 403s an unparseable source.
-      // Fall through rather than throw — a dead link beats a 500 on Copy Link.
+      // Fall through rather than throw - a dead link beats a 500 on Copy Link.
     }
   }
+
+  const configured = process.env.NEXT_PUBLIC_APP_URL;
+  if (configured) return configured;
 
   return "http://localhost:3000";
 }

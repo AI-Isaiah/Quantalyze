@@ -62,7 +62,7 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-import { getStrategiesByCategory, getFactsheetDetail } from "./queries";
+import { getStrategiesByCategory, getFactsheetDetail, getPopulatedCategorySlugs } from "./queries";
 
 const PERMISSION_DENIED = { code: "42501", message: "permission denied for table strategies" };
 // What PostgREST answers when a non-UUID string is compared to a uuid column.
@@ -100,6 +100,27 @@ describe("getStrategiesByCategory - a read error is not an empty category", () =
     seeded.error = null;
     // data: null with no error is the mock's "no rows" answer
     await expect(getStrategiesByCategory("crypto-sma")).resolves.toEqual([]);
+    expect(seeded.sentry).toHaveLength(0);
+  });
+});
+
+describe("getPopulatedCategorySlugs - a read error is not an empty category (Phase 208 D-02)", () => {
+  it("throws on a 42501 and reports it to Sentry with the op and the code", async () => {
+    seeded.error = PERMISSION_DENIED;
+    await expect(getPopulatedCategorySlugs()).rejects.toThrow(
+      /getPopulatedCategorySlugs.*failed/,
+    );
+    expect(seeded.sentry).toHaveLength(1);
+    expect(seeded.sentry[0].opts).toEqual({
+      tags: { op: "getPopulatedCategorySlugs", code: "42501" },
+      level: "error",
+    });
+  });
+
+  it("still returns [] and stays quiet for a genuinely empty read", async () => {
+    seeded.error = null;
+    // data: null with no error is the mock's "no rows" answer
+    await expect(getPopulatedCategorySlugs()).resolves.toEqual([]);
     expect(seeded.sentry).toHaveLength(0);
   });
 });

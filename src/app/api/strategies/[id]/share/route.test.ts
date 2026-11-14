@@ -218,6 +218,8 @@ const STRATEGY_ID = "cccccccc-0001-4000-8000-000000000001";
 const NONCE = "eeeeeeee-0001-4000-8000-0000000000ff";
 const GENERATION = 7;
 const APP_URL = "https://quantalyze.test";
+/** A non-production deployment host, on the `.test` TLD so it can never be real. */
+const PREVIEW_ORIGIN = "https://quantalyze-preview-208.vercel.test";
 const ROUTE_SRC = readFileSync(join(__dirname, "route.ts"), "utf8");
 
 function makeReq(): NextRequest {
@@ -620,18 +622,66 @@ describe("WR-03 — the origin the Copy Link url is built on", () => {
     expect(url.startsWith(`${APP_URL}/factsheet-share/`)).toBe(true);
   });
 
-  it("prefers the configured origin over the request's, so links stay canonical", async () => {
-    // A Vercel alias host is allow-listed by CSRF but is not the address we
-    // want on a link the owner forwards. The explicit config still wins.
-    const alias = "https://quantalyze-rho.vercel.test";
+  it("D-16: a link minted on a non-production host comes back on that host, ahead of NEXT_PUBLIC_APP_URL", async () => {
+    // Founder decision D-16 (2026-11-14) reversed the WR-03 env-first choice.
+    // The alias host it guarded against now 308s to the canonical domain and a
+    // Production build refuses a `vercel.app` value (`assertCanonicalAppUrl`),
+    // while env-first made a preview deploy mint production-host links (TODOS
+    // SHARE-HOST-01). NEXT_PUBLIC_APP_URL is `APP_URL` here (beforeEach), so
+    // only a request origin that differs from it tells the two orders apart.
     const res = await POST(
-      new NextRequest(`${alias}/api/strategies/${STRATEGY_ID}/share`, {
+      new NextRequest(`${PREVIEW_ORIGIN}/api/strategies/${STRATEGY_ID}/share`, {
         method: "POST",
-        headers: new Headers({ origin: alias }),
+        headers: new Headers({ origin: PREVIEW_ORIGIN }),
       }),
       makeCtx(),
     );
+    expect(res.status).toBe(200);
+    const { url } = (await res.json()) as { url: string };
+    expect(url.startsWith(`${PREVIEW_ORIGIN}/factsheet-share/`)).toBe(true);
+    expect(url).not.toContain(`${APP_URL}/`);
+  });
+
+  it("D-16: with no Origin the Referer's origin is used, and its path is stripped", async () => {
+    const res = await POST(
+      new NextRequest(`${PREVIEW_ORIGIN}/api/strategies/${STRATEGY_ID}/share`, {
+        method: "POST",
+        headers: new Headers({
+          referer: `${PREVIEW_ORIGIN}/strategies/${STRATEGY_ID}`,
+        }),
+      }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    const { url } = (await res.json()) as { url: string };
+    expect(url.startsWith(`${PREVIEW_ORIGIN}/factsheet-share/`)).toBe(true);
+    expect(url).not.toContain("/strategies/");
+  });
+
+  it("D-16 env rung: with neither header, NEXT_PUBLIC_APP_URL is the next answer", async () => {
+    // The CSRF mock admits a header-less request; the real gate would 403 it.
+    // That is the only way to reach this rung.
+    const res = await POST(
+      new NextRequest(`${APP_URL}/api/strategies/${STRATEGY_ID}/share`, {
+        method: "POST",
+      }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
     const { url } = (await res.json()) as { url: string };
     expect(url.startsWith(`${APP_URL}/factsheet-share/`)).toBe(true);
+  });
+
+  it("D-16 last rung: with neither header and no NEXT_PUBLIC_APP_URL, the localhost literal answers", async () => {
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    const res = await POST(
+      new NextRequest(`${APP_URL}/api/strategies/${STRATEGY_ID}/share`, {
+        method: "POST",
+      }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    const { url } = (await res.json()) as { url: string };
+    expect(url.startsWith("http://localhost:3000/factsheet-share/")).toBe(true);
   });
 });

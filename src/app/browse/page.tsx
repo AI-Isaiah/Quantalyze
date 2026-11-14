@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { buttonClassName } from "@/components/ui/Button";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { getBrowseCategories } from "./browse-categories";
 import { hasBrowseSession } from "./session";
@@ -12,7 +13,7 @@ export const metadata: Metadata = {
 };
 
 export default async function BrowsePage() {
-  const { categories, onlySlug } = await getBrowseCategories();
+  const { state, categories, onlySlug } = await getBrowseCategories();
 
   // D-08: one populated category makes the card grid a one-card menu, so go
   // straight to it (rule: ./browse-categories). redirect() throws, so there is
@@ -36,26 +37,53 @@ export default async function BrowsePage() {
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {categories.map((cat) => (
-          <Link
-            key={cat.slug}
-            href={`/browse/${cat.slug}`}
-            className="rounded-xl border border-border bg-surface p-5 shadow-card hover:border-accent/30 hover:shadow-md transition-all"
-          >
-            <h2 className="text-base font-semibold text-text-primary">
-              {cat.name}
-            </h2>
-            <p className="mt-1 text-sm text-text-secondary leading-relaxed">
-              {cat.description}
-            </p>
-          </Link>
-        ))}
-      </div>
+      {state === "ok" && (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {categories.map((cat) => (
+            <Link
+              key={cat.slug}
+              href={`/browse/${cat.slug}`}
+              className="rounded-xl border border-border bg-surface p-5 shadow-card hover:border-accent/30 hover:shadow-md transition-all"
+            >
+              <h2 className="text-base font-semibold text-text-primary">
+                {cat.name}
+              </h2>
+              <p className="mt-1 text-sm text-text-secondary leading-relaxed">
+                {cat.description}
+              </p>
+            </Link>
+          ))}
+        </div>
+      )}
 
-      {categories.length === 0 && (
+      {state === "empty" && (
         <div className="py-16 text-center text-text-muted">
           No strategies published yet. Check back soon.
+        </div>
+      )}
+
+      {state === "error" && (
+        <div
+          role="alert"
+          className="rounded-md border border-negative/30 bg-negative/5 px-4 py-3"
+        >
+          <p className="text-base font-semibold text-text-primary">
+            We couldn&apos;t load the strategy categories.
+          </p>
+          <p className="mt-2 text-sm text-text-secondary">
+            No categories are listed because the read failed, not because
+            nothing is published.
+          </p>
+          <Link
+            href="/browse"
+            prefetch={false}
+            className={buttonClassName({
+              size: "sm",
+              className: "mt-3 pointer-coarse:min-h-[44px]",
+            })}
+          >
+            Try again
+          </Link>
         </div>
       )}
 

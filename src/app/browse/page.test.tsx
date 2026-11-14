@@ -9,10 +9,19 @@
  *   TWO OR MORE — the cards, heading and sign-up block render as before; a
  *   redirect here would hide a real choice.
  *
- *   ZERO / FAILED — `getPopulatedCategorySlugs()` returns [] for both an
- *   empty result and a DB error (they are indistinguishable at HEAD), and the
- *   page then falls back to every category. A redirect is a claim made from
- *   data, and a failed read has no data: it must NEVER redirect.
+ *   EMPTY — the read succeeded with no rows: the empty line renders
+ *   ("No strategies published yet. Check back soon."), with no cards, and the
+ *   page never redirects.
+ *
+ *   FAILED — Phase 208 (D-02..D-04): `getPopulatedCategorySlugs()` now THROWS
+ *   on a read error and `getBrowseCategories()` reports "ok" | "empty" |
+ *   "error". A failed read renders the error block (role="alert", a Try again
+ *   link), no cards, no empty line, and never redirects.
+ *
+ *   The Phase 195 fallback-card arms ("renders the fallback cards ... when the
+ *   read returns empty" / "... rejects") were REPLACED ON PURPOSE by Phase 208
+ *   (D-04): a card is a claim that the category has strategies, and a failed
+ *   read has no data to make that claim from.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -70,22 +79,47 @@ describe("/browse category count (D-08)", () => {
     expect(html).toContain("Want full analytics and introductions?");
   });
 
-  it("renders the fallback cards and never redirects when the read returns empty", async () => {
+  it("renders the empty line, no cards and no redirect when the read returns empty", async () => {
     populatedMock.mockResolvedValue([]);
     const html = await render();
     expect(redirectMock).not.toHaveBeenCalled();
+    expect(html).toContain("No strategies published yet. Check back soon.");
     for (const c of DISCOVERY_CATEGORIES) {
-      expect(html).toContain(`href="/browse/${c.slug}"`);
+      expect(html).not.toContain(`href="/browse/${c.slug}"`);
     }
+    expect(html).not.toContain('role="alert"');
   });
 
-  it("renders the fallback cards and never redirects when the read rejects", async () => {
+  it("renders the error block, no cards, no empty line and no redirect when the read rejects", async () => {
     populatedMock.mockRejectedValue(new Error("db down"));
     const html = await render();
     expect(redirectMock).not.toHaveBeenCalled();
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("We couldn&#x27;t load the strategy categories.");
+    expect(html).toContain(
+      "No categories are listed because the read failed, not because nothing is published.",
+    );
+    expect(html).toMatch(/<a[^>]*href="\/browse"[^>]*>Try again<\/a>/);
     for (const c of DISCOVERY_CATEGORIES) {
-      expect(html).toContain(`href="/browse/${c.slug}"`);
+      expect(html).not.toContain(`href="/browse/${c.slug}"`);
     }
+    expect(html).not.toContain("No strategies published yet. Check back soon.");
+    // T-208-02: the thrown message never reaches the page.
+    expect(html).not.toContain("db down");
+    expect(html).toContain("Browse Verified Strategies");
+    expect(html).toContain("Want full analytics and introductions?");
+    expect(html).toContain("Not financial advice.");
+  });
+
+  it("a successful read whose slugs match no known category renders the empty state, never a card or the error block (D-14)", async () => {
+    populatedMock.mockResolvedValue(["not-a-known-category"]);
+    const html = await render();
+    expect(redirectMock).not.toHaveBeenCalled();
+    expect(html).toContain("No strategies published yet. Check back soon.");
+    for (const c of DISCOVERY_CATEGORIES) {
+      expect(html).not.toContain(`href="/browse/${c.slug}"`);
+    }
+    expect(html).not.toContain('role="alert"');
   });
 });
 

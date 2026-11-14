@@ -37,6 +37,7 @@ import { TINY_BASE_PERCENT, TINY_BASE_WINDOW_DAYS } from "@/lib/tiny-base-flag";
 import {
   shareAffordanceMode,
   mintShareUrl,
+  copyTextBounded,
   type ShareAffordanceMode,
 } from "@/components/strategy/ShareableLink";
 import type { CapitalOwnership } from "@/lib/capital-ownership";
@@ -2787,13 +2788,15 @@ function ShareLinkButton({
       // on the copy. Flipping here is what keeps the notice honest — a live
       // link is live even when the owner has to copy the URL by hand.
       onShareLiveChange?.(true);
-      // ⛔ NOT `navigator.clipboard?.writeText(url)`. Optional chaining on a
-      // missing clipboard yields `undefined`, and `await undefined` RESOLVES —
-      // which would flash "Link copied" having copied nothing at all.
-      if (typeof navigator.clipboard?.writeText !== "function") {
-        throw new Error("clipboard unavailable");
+      // Phase 208 (D-08) — the shared helper bounds the write at 3 s, tries the
+      // `execCommand` fallback inside the open dialog (this panel renders inside
+      // the open Private link Modal), and returns false for an absent, refused
+      // or hanging clipboard. So no path can flash "Link copied" for nothing, and
+      // none can stay on the working label. A false return throws into the
+      // catch below, which logs and sets `failed`.
+      if (!(await copyTextBounded(url, { strategyId }))) {
+        throw new Error("clipboard copy failed");
       }
-      await navigator.clipboard.writeText(url);
       setPhase("copied");
       window.setTimeout(() => setPhase("idle"), 1500);
     } catch (err) {
