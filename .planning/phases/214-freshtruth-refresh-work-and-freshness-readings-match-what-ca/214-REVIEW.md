@@ -30,11 +30,11 @@ files_reviewed_list:
   - supabase/tests/test_ledger_refresh_staleness.sql
 findings:
   critical: 0
-  warning: 2
-  info: 10
-  total: 12
+  warning: 0
+  info: 11
+  total: 11
   necessity: 1
-status: issues_found
+status: clean
 ---
 
 # Phase 214: Code Review Report
@@ -343,3 +343,46 @@ Gate readings on the final tree:
 
 Not done, by instruction: LOW/INFO items, SFH-F2/F4/F5. The census landed as one closing commit rather than per finding, so the
 four fix commits each leave only the census tests behind by their own arm count until `134beaca7`.
+
+## Re-review round 2 (2026-11-14, gsd-code-reviewer)
+
+Scope: `git diff 47f36c1fd..HEAD -- . ':!.planning'`, 9 files, commits `d684c4b58`, `372d1439b`, `608f7bf81`,
+`188412c9e` and `134beaca7`. Verdict: **clean, with no MEDIUM or higher finding open.** The
+frontmatter now counts what is still open: WR-01 and WR-02 are closed, IN-01 to IN-10 still stand,
+and IN-11 below is new.
+
+### Closure of the four findings
+
+| Finding | Closed? | What I checked |
+|---|---|---|
+| WR-01 | Yes | Arm NA5's fixture has analytics status `failed`, a series 20 days old, and a done derive and compute run from a day ago. It expects 1 job. Its twin replaces the first `lrs.stale_reason = 'series_behind'` (occurrences 2, nth 1, which lands on the candidate query at `:610`). Without the conjunct, NA5's strategy takes the weekly window and gets 0 jobs, so the arm can fail. |
+| SFH-F1 | Yes | The candidate CASE and the skip read both now carry `AND EXISTS (... cj4.kind = 'derive_broker_dailies' AND cj4.status = 'done' AND cj4.created_at >= (lrs.last_return_date + 5)::timestamptz)`. In the candidate it sits INSIDE the `OR ( ... )` group, before `THEN INTERVAL '7 days'`, so it narrows only the no-advance branch. The founder's trigger, "a completed derive+compute run", now requires both hops to be done. A strategy-mode derive returns DONE after it enqueues its compute (`job_worker.py`, near `:4769`), so a real chain does satisfy it. Arm NA6 (a compute tail only, expects 1 job) catches removal of the EXISTS through its kind twin. NA2's fixture gained the done derive its age twin needs. |
+| WR-02 | Yes | Checks 8 and 12 now search `substr(v_def, 1, v_first_unlock)`, where `v_first_unlock` is the first `pg_advisory_unlock(`, the lock block's handler at `:806`. The candidate query lies entirely before it, and the skip block's copies (after `:810`) are outside it. If the unlock went missing, `v_first_unlock` would be 0, the substring would be empty and the checks would refuse, which fails closed. No twin mutates the unlock needle's first occurrence. |
+| SFH-F3 | Yes | STEP 2 needle 15 requires `EXCEPTION WHEN OTHERS` after the skip needle in the comment-stripped body. Arm SK4 behaves as intended (details below). Its twin turns the handler's WARNING into a bare re-raise. |
+
+SK4 in detail:
+- It creates a `pg_temp` trigger function and a `BEFORE INSERT` trigger on `public.cron_runs`, filtered by `WHEN (NEW.metadata->>'cause' = 'no_advance_weekly_cap')`. The filter means failure and dormancy rows are never touched.
+- The tick runs inside its own exception scope. The arm asserts that the tick did not raise, returned 1, that the ordinary strategy got its job, and that no skip row was written.
+- It then drops both the trigger and the function before the next arm. The only residue would come from a failing arm, and a failing arm aborts the lane, which is private to the runner and thrown away. So nothing leaks into later arms or shared TEST.
+- The failure instrument's own path is unchanged. Its write and its re-raise on a tick that enqueued nothing are byte-identical to round 1.
+
+### Counts I re-measured
+
+- **Twins:** every `RED-UNDER-M` edit in the four touched gate files was re-counted by script against the raw migration text, with 0 mismatches.
+  - NA4 is now `occurrences 4, nth 1`, on cj3's cutoff at `:618`.
+  - NA5 is at `:610`, NA6 at `:624`, SK3 still at nth 2 in the skip block, and SK4 is unique.
+  - The fan-out gate has 47 twin sections.
+- **Census:** the sentinel reads `ALL 41 ARMS EXECUTED`. The `ARMS_FLOOR=480` table's 29 terms sum to 480, with the fan-out term at 41. `scripts/mutation-floors.mjs` reads `ARMS_FLOOR = 867`, which is 864 + 3.
+- **Re-runs:** vitest (the anti-skip contract, runner floors, annotation parser, gate-family-meta, drift-check) 5 files and 1226 tests passed. `schema:functions:check` reports current, and the snapshot is byte-identical to the migration body. `lint-migration-data-dependence` reports `0 NEW`, so the new DO-block checks read only the catalogue.
+
+### New in round 2 (LOW, recorded only)
+
+#### IN-11 (LOW): Inside the new done-derive EXISTS, two predicates have no twin, and the two EXISTS are not tied to one chain
+
+**File:** `supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql:620-626` (candidate) and the skip block's copy
+
+**Issue:**
+- NA6 pins the EXISTS as a whole through its kind. No twin mutates `cj4.status = 'done'` or cj4's `+ 5` cutoff, which is the second of the four `(lrs.last_return_date + 5)` occurrences.
+- The cj3 and cj4 EXISTS are independent. A done derive from one chain plus a done compute from another, both after going stale, also satisfies the signal.
+
+**Impact:** both are narrow. The worst case is that a strategy is throttled to weekly on slightly weaker evidence; it is never excluded.
