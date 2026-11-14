@@ -251,7 +251,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 38 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 39 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -500,6 +500,7 @@ DECLARE
   s_na2        UUID;     -- arm NA2: stale at age 7, one completed run (not yet 3 days unmoved)
   s_na3        UUID;     -- arm NA3: age 20, but its analytics job FAILED (not a completed run)
   s_na4        UUID;     -- arm NA4: age 20, its done analytics job PREDATES the stale day
+  s_na5        UUID;     -- arm NA5: age 20 with the whole done tail, but its analytics status is FAILED (reason status_not_success)
   -- ⛔ Arm SK1 (Phase 214 FRESHTRUTH plan 06), same rule as every DECLARE above.
   s_sk1        UUID;     -- arm SK1: capped no-advance strategy, the skip row must name it
   s_sk2        UUID;     -- arm SK2: no-advance, but its last attempt is 2 HOURS old (ordinary cooldown)
@@ -738,6 +739,7 @@ BEGIN
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf NA2', 'draft') RETURNING id INTO s_na2;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2,     'lrf NA3', 'draft') RETURNING id INTO s_na3;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf NA4', 'draft') RETURNING id INTO s_na4;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2,     'lrf NA5', 'draft') RETURNING id INTO s_na5;
   -- Arm SK1 (Phase 214 plan 06): a capped no-advance strategy. Parked like the rest.
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf SK1', 'draft') RETURNING id INTO s_sk1;
   -- Arms SK2 and SK3 (Phase 214 plan 06): the two strategies the skip count must NOT name.
@@ -919,6 +921,16 @@ BEGIN
          (s_na3, 'compute_analytics_from_csv', 'failed_final', now() - INTERVAL '1 day'),
          (s_na4, 'compute_analytics_from_csv', 'done',         (CURRENT_DATE - 17)::timestamptz),
          (s_na4, 'derive_broker_dailies',      'done',         now() - INTERVAL '2 days');
+  -- Arm NA5's rows (review WR-01): the signal's REASON conjunct. Age 20 and the whole done
+  -- tail a day old, exactly NA1a's shape, but the analytics row's status is failed, so the
+  -- view reads the strategy stale with the reason status_not_success and not series_behind.
+  -- Every other conjunct of the signal holds, so only the reason conjunct can free it.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_na5, 'failed', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 20, 'YYYY-MM-DD'), 'value', 0.002)));
+  INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
+  VALUES (s_na5, 'compute_analytics_from_csv', 'done', now() - INTERVAL '1 day'),
+         (s_na5, 'derive_broker_dailies',      'done', now() - INTERVAL '1 day');
   -- Arm SK1's rows (Phase 214 FRESHTRUTH plan 06). NA1a's shape: a returns series
   -- whose newest date is 20 days old (stale, series_behind, stale since 15 days ago),
   -- a done analytics job a day old (on or after the stale day, so the no-advance
@@ -1230,7 +1242,7 @@ BEGIN
   --    leaving every other line of it intact, and the APPLY SURVIVES (the
   --    deletion is not a migration needle) while this arm is the FIRST failure —
   --    `TEST FAILED (M2): … wrote 0 instrument row(s) …`, lane exit 3. Unmutated,
-  --    the same lane prints ALL 38 ARMS EXECUTED and exits 0.
+  --    the same lane prints ALL 39 ARMS EXECUTED and exits 0.
   -- ⛔ THE TWO PROSE MENTIONS ABOVE CARRY THE COUNT ON PURPOSE AND MUST MOVE
   -- WITH IT. The anti-skip gate reads this file's sentinel with a
   -- `grep -aoE "ALL [0-9]+ ARMS EXECUTED" | head -1`, so the FIRST match in
@@ -1864,6 +1876,31 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (NA4): a stale strategy whose only done analytics job PREDATES the day it went stale produced % new job(s), expected exactly 1 — a run from before the series fell behind was counted as proof that a refresh cannot move it, so the strategy is held to one attempt a week. Likely cause: the signal compares the job to a date earlier than the day the strategy went stale.', v_cnt;
   END IF;
   UPDATE strategies SET status = 'draft' WHERE id = s_na4;
+
+  -- ======================================================================
+  -- ARM NA5 — THE SIGNAL IS KEYED ON THE VIEW'S OWN REASON (review round 1, WR-01).
+  -- Age 20, a done analytics job and a done derive, both a day old, so the age, tail and
+  -- timing conjuncts of the signal all hold. But the analytics row's status is failed,
+  -- so the view reads the strategy stale because its latest run FAILED, not because its
+  -- series is behind. A failing strategy keeps the 20-hour retry: its day-old attempt is
+  -- outside that window, so it IS enqueued. Without NA5 the reason conjunct can be
+  -- deleted with every gate green, and every strategy whose latest analytics run failed
+  -- while an older done tail exists moves to one attempt a week.
+  -- ======================================================================
+  -- RED-UNDER: replace the signal's reason conjunct in 20261114152300 with a constant
+  --            truth (the FIRST occurrence in the text; the second is the skip
+  --            statement's copy). NA5's failed-status strategy then satisfies the
+  --            signal, gets the week, and its day-old attempt holds it. NA1-NA4 stay
+  --            green: each of them reads series_behind already.
+  -- RED-UNDER-M: {"arm":"NA5","apply":[{"kind":"edit","file":"supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql","find":"lrs.stale_reason = 'series_behind'","replace":"TRUE","occurrences":2,"nth":1}]}
+  UPDATE strategies SET status = 'published' WHERE id = s_na5;
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_na5 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (NA5): a strategy stale because its latest analytics run FAILED (reason status_not_success), whose series is 20 days old and which holds a done derive and compute run a day old, produced % new job(s), expected exactly 1 — the weekly cap reaches a failing strategy, so a strategy whose analytics keep failing is held to one attempt a week. Likely cause: the signal no longer requires the view reason to be series_behind.', v_cnt;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_na5;
 
   -- ======================================================================
   -- ARM G1 — the PER-VENUE CAP (D-09). Six stale eligible strategies on ONE
@@ -3017,7 +3054,7 @@ BEGIN
 
   UPDATE strategies SET status = 'draft' WHERE id IN (s_w1, s_w2, s_w3, s_w4);
 
-  RAISE NOTICE 'ALL 38 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, NA1, NA2, NA3, NA4, SK1, SK2, SK3, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
+  RAISE NOTICE 'ALL 39 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, NA1, NA2, NA3, NA4, NA5, SK1, SK2, SK3, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
 END $$;
 
 ROLLBACK;
