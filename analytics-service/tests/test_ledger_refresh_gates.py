@@ -139,8 +139,16 @@ _STALENESS_VIEW_SUPERSEDED_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
 # the composite one below stays at 20260924120000, still the live definition of
 # that function. The new file carries the $fanout$ and $verify$ tags and
 # deliberately NOT $composite$ (164.5.1.1 precedent).
+# ⛔ MOVED 2026-11-14 (Phase 214 FRESHTRUTH, plan 03), in the SAME COMMIT as the
+# migration that superseded the FAN-OUT body only. 20261114152300 re-creates the
+# single-key body alone (its cooldown CASE ORs a no-advance signal into the
+# marks-paused branch, so a strategy whose completed refresh cannot move its series
+# is re-derived weekly and never excluded), so the two pointers stay DIVERGED: the
+# composite one below stays at 20260924120000, still the live definition of that
+# function. The new file carries the $fanout$ and $verify$ tags and deliberately NOT
+# $composite$ (164.5.1.1 and 174 precedent).
 _FANOUT_MIGRATION_NAME: Final[str] = (
-    "20261030120000_ledger_fanout_marks_paused_weekly.sql"
+    "20261114152300_ledger_fanout_no_advance_weekly_cap.sql"
 )
 _COMPOSITE_MIGRATION_NAME: Final[str] = (
     "20260924120000_ledger_fanout_failure_count.sql"
@@ -161,6 +169,8 @@ _FANOUT_SUPERSEDED_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
     # It stays the live COMPOSITE definition, so it is named in
     # _COMPOSITE_MIGRATION_NAME as well.
     "20260924120000_ledger_fanout_failure_count.sql",
+    # Live until 2026-11-14, superseded by 20261114152300 (Phase 214). Same rule.
+    "20261030120000_ledger_fanout_marks_paused_weekly.sql",
 })
 _COMPOSITE_SUPERSEDED_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
     "20260907130000_ledger_refresh_switch_to_system_flags.sql",
@@ -364,6 +374,23 @@ _PHASE_MIGRATION_WINDOW_6_END: Final[str] = "20261030120001"
 # fan-out name. The range was written after that reading.
 _PHASE_MIGRATION_WINDOW_7_START: Final[str] = "20261114151700"
 _PHASE_MIGRATION_WINDOW_7_END: Final[str] = "20261114151701"
+
+# ⛔ AN EIGHTH DISJOINT RANGE, added in the SAME COMMIT as 20261114152300 (Phase 214
+# FRESHTRUTH plan 03) — never by widening range 7, which would swallow every
+# migration stamped between 20261114151701 and 20261114152300 into a raw
+# comments-included scan they were never reviewed against. Half-open and one
+# second wide, like its seven siblings.
+#
+# ⚠️ What this range ARMS, and it was measured before it was added: everything
+# inside it is scanned RAW by floor 4, comments included. MEASURED 2026-11-14 on
+# 20261114152300, with the commands below run on the final bytes of the file:
+#     grep -ac 'cron\.schedule' <file>                                   -> 0
+#     grep -ac 'cron\.unschedule' <file>                                 -> 0
+#     grep -acE 'PERFORM public\.enqueue_ledger_(refresh_for_strategies|composite_refresh)' <file> -> 0
+# i.e. 0 occurrences of the schedule verb, 0 of the unschedule verb, 0 of a
+# `PERFORM` on either fan-out. The range was written after that reading.
+_PHASE_MIGRATION_WINDOW_8_START: Final[str] = "20261114152300"
+_PHASE_MIGRATION_WINDOW_8_END: Final[str] = "20261114152301"
 
 # ⛔ THE FLOOR IS A SET, NOT A COUNT. `len(paths) >= 4` is satisfiable by any
 # four files that happen to land in the window; this names the exact migrations
@@ -599,6 +626,7 @@ _PHASE_MIGRATION_WINDOWS: Final[tuple[tuple[str, str], ...]] = (
     (_PHASE_MIGRATION_WINDOW_5_START, _PHASE_MIGRATION_WINDOW_5_END),
     (_PHASE_MIGRATION_WINDOW_6_START, _PHASE_MIGRATION_WINDOW_6_END),
     (_PHASE_MIGRATION_WINDOW_7_START, _PHASE_MIGRATION_WINDOW_7_END),
+    (_PHASE_MIGRATION_WINDOW_8_START, _PHASE_MIGRATION_WINDOW_8_END),
 )
 
 
