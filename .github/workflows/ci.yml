@@ -4921,6 +4921,17 @@ jobs:
           #   and ARMS_FLOOR moves 377 -> 378, read off the file's own `ALL N ARMS
           #   EXECUTED` sentinel. The mutation runner's own ARMS_FLOOR moved 807 -> 808
           #   in the same round, also +1.
+          # Re-measured 2026-11-14 (Phase 214 FRESHTRUTH, plan 07), FOUR moves, each read
+          #   off the file's own first `ALL N ARMS EXECUTED` sentinel:
+          #   test_enqueue_dedup_record_retract.sql 16 -> 18 (FINALIZE-WIZARD-SHAPE and
+          #   CSV-FINALIZE-SHAPE, the two finalize routes' marker shapes),
+          #   test_ledger_refresh_composite_arm.sql 23 -> 24 (CL, a closed composite is
+          #   not enqueued), test_ledger_refresh_fanout.sql 31 -> 38 (NA1-NA4, the
+          #   no-advance weekly cap, and SK1-SK3, its skip-count row) and
+          #   test_ledger_refresh_staleness.sql 8 -> 14 (I-N, the closed-series reading).
+          #   No file joined, so SENTINEL_FLOOR stays 29 and ARMS_FLOOR moves 461 -> 477
+          #   (+2 +1 +7 +6 = +16). The mutation runner's own ARMS_FLOOR moved 848 -> 864 in
+          #   the same plan, also +16.
           # ⚠️ Re-measured 2026-09-17 (164.5.1, arm R): the fan-out file goes
           # 15 -> 18. Its own closing sentinel had been stuck at 15 and did not
           # list arms P or Q although both run, so this table AGREED WITH A STALE
@@ -4940,14 +4951,14 @@ jobs:
           #   test_contact_requests_insert_intro_authz.sql   15
           #   test_create_wizard_strategy_for_key.sql         9
           #   test_cron_sync_tick.sql                         8
-          #   test_enqueue_dedup_record_retract.sql          16
+          #   test_enqueue_dedup_record_retract.sql          18
           #   test_enqueue_race_loss_40001.sql                3
           #   test_fan_in_failure_cascade.sql                     8
           #   test_fan_in_lock_order_race.sql                     8
           #   test_get_verified_cohort_rank_gate.sql         18
-          #   test_ledger_refresh_composite_arm.sql          23
-          #   test_ledger_refresh_fanout.sql                 31
-          #   test_ledger_refresh_staleness.sql               8
+          #   test_ledger_refresh_composite_arm.sql          24
+          #   test_ledger_refresh_fanout.sql                 38
+          #   test_ledger_refresh_staleness.sql              14
           #   test_okx_archive_rebuild.sql                   15
           #   test_ops_staleness_check.sql                   14
           #   test_prod_prober_cadence.sql                    7
@@ -5299,7 +5310,7 @@ jobs:
           #   and ARMS_FLOOR 386, re-derived by ci-anti-skip-gate.contract.test.ts on the merged tree, never
           #   by adding the moves.
           SENTINEL_FLOOR=29  # files declaring a sentinel
-          ARMS_FLOOR=461     # 8 + 13 + 8 + 11 + 14 + 8 + 8 + 13 + 15 + 9 + 8 + 16 + 3 + 8 + 8 + 18 + 23 + 31 + 8 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 35
+          ARMS_FLOOR=477     # 8 + 13 + 8 + 11 + 14 + 8 + 8 + 13 + 15 + 9 + 8 + 18 + 3 + 8 + 8 + 18 + 24 + 38 + 14 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 35
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
