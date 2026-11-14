@@ -722,7 +722,7 @@ const NUL_TEXT_EXTENSIONS = new Set([
 ]);
 
 /**
- * The ONE deliberate NUL in this repository. It is load-bearing: the file uses
+ * The deliberate NULs in this repository (Phase 155 added the UTF-16-LE Report fixture). It is load-bearing: the file uses
  * it as a phrase-boundary delimiter, and removing it would change behaviour.
  * ⛔ Do not "fix" it, and do not widen this map to clear a red — a new entry
  * here is a decision to make a file permanently invisible to grep.
@@ -731,6 +731,10 @@ const NUL_EXEMPT = new Map<string, string>([
   [
     "src/lib/wizardErrors.test.ts",
     "load-bearing: a deliberate NUL used as a phrase-boundary delimiter",
+  ],
+  [
+    "analytics-service/tests/fixtures/mt5_parity/report_synthetic.utf16le.html",
+    "load-bearing: the MT5 terminal exports its Report as UTF-16-LE, so the parser's BOM sniff needs real UTF-16 bytes; test_the_utf16le_twin_is_the_utf8_text_with_a_bom_byte_for_byte pins it equal to the greppable UTF-8 twin",
   ],
 ]);
 

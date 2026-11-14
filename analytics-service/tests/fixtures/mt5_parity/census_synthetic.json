@@ -1,0 +1,213 @@
+{
+  "census_accounts": [
+    {
+      "key_ordinal": "k1",
+      "keys_examined": null,
+      "account_currency": "USD",
+      "native_unit_marked": false,
+      "strategies_linked": 1,
+      "strategy_statuses": [
+        "draft"
+      ],
+      "asset_classes": [
+        "fx"
+      ],
+      "strategy_key_windows": 1,
+      "s_raw_marks": "2026-11-02",
+      "s_key_inputs": "2026-11-02",
+      "s_flags": "2026-11-02",
+      "s_agree": true,
+      "mark_count": 12,
+      "last_mark_day": "2026-11-13",
+      "first_return_date": "2026-10-05",
+      "last_return_date": "2026-11-13",
+      "returns_series_len": 11,
+      "daily_returns_len": 10,
+      "record_observations": "10",
+      "record_span_days": 39,
+      "computed_at": "2026-11-14 03:00:00.123456+00",
+      "computation_status": "complete",
+      "computation_warned": false,
+      "series_completeness": "complete",
+      "keys_sharing_login": 0,
+      "key_inputs_present": true,
+      "first_flow_present": true,
+      "identity_ratio": "0.0004",
+      "identity_days": 10,
+      "identity_flow_days": 2,
+      "flag_keys": [
+        "cumulative_method",
+        "marks_since"
+      ],
+      "server": "unmeasured (155.1 reading owns it)"
+    },
+    {
+      "key_ordinal": "k2",
+      "keys_examined": null,
+      "account_currency": "BTC",
+      "native_unit_marked": true,
+      "strategies_linked": 1,
+      "strategy_statuses": [
+        "published"
+      ],
+      "asset_classes": [
+        "fx"
+      ],
+      "strategy_key_windows": 1,
+      "s_raw_marks": "2026-11-02",
+      "s_key_inputs": "2026-11-02",
+      "s_flags": "2026-11-09",
+      "s_agree": false,
+      "mark_count": 3,
+      "last_mark_day": "2026-11-13",
+      "first_return_date": "2026-10-05",
+      "last_return_date": "2026-11-13",
+      "returns_series_len": 11,
+      "daily_returns_len": 10,
+      "record_observations": "10",
+      "record_span_days": 39,
+      "computed_at": "2026-11-14 03:00:00.123456+00",
+      "computation_status": "complete_with_warnings",
+      "computation_warned": false,
+      "series_completeness": "complete",
+      "keys_sharing_login": 1,
+      "key_inputs_present": true,
+      "first_flow_present": true,
+      "identity_ratio": 0.0234,
+      "identity_days": 10,
+      "identity_flow_days": 2,
+      "flag_keys": [
+        "cumulative_method",
+        "mark_gap_days",
+        "marks_since",
+        "native_unit"
+      ],
+      "server": "unmeasured (155.1 reading owns it)"
+    },
+    {
+      "key_ordinal": "k3",
+      "keys_examined": null,
+      "account_currency": "EUR",
+      "native_unit_marked": false,
+      "strategies_linked": 1,
+      "strategy_statuses": [],
+      "asset_classes": [
+        "fx"
+      ],
+      "strategy_key_windows": 1,
+      "s_raw_marks": "2026-11-02",
+      "s_key_inputs": "2026-11-02",
+      "s_flags": "2026-11-02",
+      "s_agree": true,
+      "mark_count": 12,
+      "last_mark_day": "2026-11-13",
+      "first_return_date": "2026-10-05",
+      "last_return_date": "2026-11-13",
+      "returns_series_len": 11,
+      "daily_returns_len": 10,
+      "record_observations": "10",
+      "record_span_days": 39,
+      "computed_at": "2026-11-14 03:00:00.123456+00",
+      "computation_status": "complete",
+      "computation_warned": false,
+      "series_completeness": "complete",
+      "keys_sharing_login": 0,
+      "key_inputs_present": true,
+      "first_flow_present": true,
+      "identity_ratio": null,
+      "identity_days": 10,
+      "identity_flow_days": 2,
+      "flag_keys": [
+        "cumulative_method",
+        "marks_since"
+      ],
+      "server": "unmeasured (155.1 reading owns it)"
+    },
+    {
+      "key_ordinal": "all",
+      "keys_examined": 3,
+      "account_currency": null,
+      "native_unit_marked": null,
+      "strategies_linked": null,
+      "strategy_statuses": null,
+      "asset_classes": null,
+      "strategy_key_windows": null,
+      "s_raw_marks": null,
+      "s_key_inputs": null,
+      "s_flags": null,
+      "s_agree": null,
+      "mark_count": null,
+      "last_mark_day": null,
+      "first_return_date": null,
+      "last_return_date": null,
+      "returns_series_len": null,
+      "daily_returns_len": null,
+      "record_observations": null,
+      "record_span_days": null,
+      "computed_at": null,
+      "computation_status": null,
+      "computation_warned": null,
+      "series_completeness": null,
+      "keys_sharing_login": null,
+      "key_inputs_present": null,
+      "first_flow_present": null,
+      "identity_ratio": null,
+      "identity_days": null,
+      "identity_flow_days": null,
+      "flag_keys": null,
+      "server": null
+    }
+  ],
+  "census_edges": [
+    {
+      "key_ordinal": "k1",
+      "friday": "2026-11-06",
+      "mark_present": true,
+      "open_pnl_ratio": "0.00312",
+      "marked_at": "2026-11-07 00:05:00+00",
+      "hours_after_utc_midnight": "0.0833333",
+      "rows_examined": null
+    },
+    {
+      "key_ordinal": "k2",
+      "friday": "2026-11-06",
+      "mark_present": true,
+      "open_pnl_ratio": -0.000412,
+      "marked_at": "2026-11-06T18:00:00Z",
+      "hours_after_utc_midnight": 18,
+      "rows_examined": null
+    },
+    {
+      "key_ordinal": "k2",
+      "friday": "2026-11-13",
+      "mark_present": false,
+      "open_pnl_ratio": null,
+      "marked_at": null,
+      "hours_after_utc_midnight": null,
+      "rows_examined": null
+    },
+    {
+      "key_ordinal": "k3",
+      "friday": "2026-11-06",
+      "mark_present": true,
+      "open_pnl_ratio": 0.5,
+      "marked_at": "2026-11-07T00:05:00Z",
+      "hours_after_utc_midnight": 0.0833,
+      "rows_examined": null
+    },
+    {
+      "key_ordinal": "all",
+      "friday": null,
+      "mark_present": null,
+      "open_pnl_ratio": null,
+      "marked_at": null,
+      "hours_after_utc_midnight": null,
+      "rows_examined": 4
+    }
+  ],
+  "labels": {
+    "k1": "SYN-A",
+    "k2": "SYN-B",
+    "k3": "excluded"
+  }
+}

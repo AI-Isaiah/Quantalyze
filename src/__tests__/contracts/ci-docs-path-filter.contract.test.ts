@@ -1440,6 +1440,14 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
         [".planning/phases/**", "message prose explaining why the record must not live there"],
       ],
     ],
+    [
+      "analytics-service/tests/test_mt5_parity_records_cli.py",
+      [[".planning", "a not-in assertion that the records CLI and its modules name no planning path"]],
+    ],
+    [
+      "analytics-service/tests/test_mt5_parity_findings.py",
+      [[".planning", "a not-in assertion that the findings module names no planning path"]],
+    ],
   ]);
 
   const TRACKED = new Set(

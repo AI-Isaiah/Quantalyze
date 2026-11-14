@@ -82,6 +82,11 @@ const TEST_ONLY_KEYS = new Set([
   "SUPABASE_TEST_ANON_KEY",
   "SUPABASE_TEST_SERVICE_ROLE_KEY",
   "TRADE_MIX_HAS_MAKER_TAKER",
+  // Added 2026-11-14 (Phase 155). Read ONLY by
+  // src/__tests__/mt5-parity-surfaces.test.ts: it points the surface matrix at
+  // a sealed local MT5 parity capture; unset, the real-mode block does not run.
+  // Test wiring, never app config.
+  "MT5_PARITY_CAPTURE_DIR",
 ]);
 
 // App config read via a computed accessor (`const E = "FOO"; process.env[E]`),

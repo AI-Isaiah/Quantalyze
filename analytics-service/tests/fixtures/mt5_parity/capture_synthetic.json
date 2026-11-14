@@ -1,0 +1,321 @@
+{
+  "bundle_version": 1,
+  "synthetic": true,
+  "labels": {"k1": "SYN-A", "k2": "excluded"},
+  "raw": {
+    "bind-before.json": [
+      {"key_ordinal": "k1", "api_key_id": "00000000-0000-4000-8000-000000000001", "analytics_rows": 1, "analytics_max_computed_at": "2026-11-14T03:00:00Z", "marks_count": 3, "marks_max_created_at": "2026-11-14T00:10:00Z", "key_inputs_computed_at": "2026-11-14T03:00:00Z", "returns_count": 10, "returns_max_updated_at": "2026-11-14T03:00:00Z", "equity_curve_computed_at": null, "holdings_max_updated_at": "2026-11-14T03:00:00Z"},
+      {"key_ordinal": "k2", "api_key_id": "00000000-0000-4000-8000-000000000002", "analytics_rows": 0, "analytics_max_computed_at": null, "marks_count": 0, "marks_max_created_at": null, "key_inputs_computed_at": null, "returns_count": 0, "returns_max_updated_at": null, "equity_curve_computed_at": null, "holdings_max_updated_at": null}
+    ],
+    "bind-after.json": [
+      {"key_ordinal": "k1", "api_key_id": "00000000-0000-4000-8000-000000000001", "analytics_rows": 1, "analytics_max_computed_at": "2026-11-14T03:00:00Z", "marks_count": 3, "marks_max_created_at": "2026-11-14T00:10:00Z", "key_inputs_computed_at": "2026-11-14T03:00:00Z", "returns_count": 10, "returns_max_updated_at": "2026-11-14T03:00:00Z", "equity_curve_computed_at": null, "holdings_max_updated_at": "2026-11-14T03:00:00Z"},
+      {"key_ordinal": "k2", "api_key_id": "00000000-0000-4000-8000-000000000002", "analytics_rows": 0, "analytics_max_computed_at": null, "marks_count": 0, "marks_max_created_at": null, "key_inputs_computed_at": null, "returns_count": 0, "returns_max_updated_at": null, "equity_curve_computed_at": null, "holdings_max_updated_at": null}
+    ],
+    "capture-keymap.json": [
+      {
+        "key_ordinal": "k1", "row_count": 1, "first_day": null, "last_day": null,
+        "slice_rows": [
+          {
+            "api_key_id": "00000000-0000-4000-8000-000000000001",
+            "allocator_id": "00000000-0000-4000-8000-0000000000a1",
+            "label": "SYN-A",
+            "account_currency": "USD",
+            "strategy_id": "00000000-0000-4000-8000-0000000000b1",
+            "strategy_status": "draft",
+            "asset_class": "crypto",
+            "key_created_at": "2026-09-30T12:00:00Z"
+          }
+        ]
+      },
+      {
+        "key_ordinal": "k2", "row_count": 1, "first_day": null, "last_day": null,
+        "slice_rows": [
+          {
+            "api_key_id": "00000000-0000-4000-8000-000000000002",
+            "allocator_id": "00000000-0000-4000-8000-0000000000a2",
+            "label": "SYN-X",
+            "account_currency": "USD",
+            "strategy_id": "00000000-0000-4000-8000-0000000000b2",
+            "strategy_status": "draft",
+            "asset_class": "crypto",
+            "key_created_at": "2026-10-01T12:00:00Z"
+          }
+        ]
+      }
+    ],
+    "capture-strategy.json": [
+      {
+        "key_ordinal": "k1", "row_count": 1, "first_day": null, "last_day": null,
+        "slice_rows": [
+          {
+            "id": "00000000-0000-4000-8000-0000000000b1",
+            "user_id": "00000000-0000-4000-8000-0000000000a1",
+            "category_id": null,
+            "api_key_id": "00000000-0000-4000-8000-000000000001",
+            "name": "Synthetic MT5",
+            "description": null,
+            "strategy_types": [],
+            "subtypes": [],
+            "markets": [],
+            "supported_exchanges": [],
+            "leverage_range": null,
+            "avg_daily_turnover": null,
+            "aum": null,
+            "max_capacity": null,
+            "start_date": null,
+            "status": "draft",
+            "is_example": false,
+            "benchmark": "BTC",
+            "created_at": "2026-09-30T12:05:00Z",
+            "review_note": null,
+            "organization_id": null,
+            "disclosure_tier": "exploratory",
+            "public_contact_email": null,
+            "tenant_id": null,
+            "codename": null,
+            "partner_tag": null,
+            "source": "legacy",
+            "fingerprint": null,
+            "wizard_session_id": null,
+            "returns_denominator_config": null,
+            "asset_class": "crypto",
+            "capital_ownership": null
+          }
+        ]
+      },
+      {"key_ordinal": "k2", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []}
+    ],
+    "capture-analytics.json": [
+      {
+        "key_ordinal": "k1", "row_count": 1, "first_day": null, "last_day": null,
+        "returns_series_len": [11],
+        "daily_returns_len": [10],
+        "slice_rows": [
+          {
+            "id": "00000000-0000-4000-8000-0000000000c1",
+            "strategy_id": "00000000-0000-4000-8000-0000000000b1",
+            "computed_at": "2026-11-14T03:00:00Z",
+            "computation_status": "complete",
+            "computation_error": null,
+            "benchmark": null,
+            "cumulative_return": 0.105883646941,
+            "cagr": 0.9,
+            "volatility": 0.12,
+            "sharpe": 3.1,
+            "sortino": null,
+            "calmar": null,
+            "max_drawdown": -0.0333861948084,
+            "max_drawdown_duration_days": null,
+            "six_month_return": null,
+            "sparkline_returns": null,
+            "sparkline_drawdown": null,
+            "metrics_json": {"record_observations": 10},
+            "returns_series": [
+              {"date": "2026-10-01", "value": 1.0},
+              {"date": "2026-10-05", "value": 0.9995},
+              {"date": "2026-10-07", "value": 1.029},
+              {"date": "2026-10-12", "value": 1.029},
+              {"date": "2026-10-15", "value": 1.04499178194},
+              {"date": "2026-10-20", "value": 1.04499178194},
+              {"date": "2026-10-26", "value": 1.09050139704},
+              {"date": "2026-10-27", "value": 1.05409370496},
+              {"date": "2026-10-30", "value": 1.06665435872},
+              {"date": "2026-11-06", "value": 1.08312883939},
+              {"date": "2026-11-13", "value": 1.10588364694}
+            ],
+            "drawdown_series": null,
+            "monthly_returns": null,
+            "daily_returns": [
+              {"date": "2026-10-05", "value": -0.0005},
+              {"date": "2026-10-07", "value": 0.0295147573787},
+              {"date": "2026-10-12", "value": 0},
+              {"date": "2026-10-15", "value": 0.0155410903173},
+              {"date": "2026-10-20", "value": 0},
+              {"date": "2026-10-26", "value": 0.043550213396},
+              {"date": "2026-10-27", "value": -0.0333861948084},
+              {"date": "2026-10-30", "value": 0.0119160694241},
+              {"date": "2026-11-06", "value": 0.0154450038399},
+              {"date": "2026-11-13", "value": 0.0210084033613}
+            ],
+            "rolling_metrics": null,
+            "return_quantiles": null,
+            "trade_metrics": null,
+            "data_quality_flags": {"cumulative_method": "geometric", "marks_since": "2026-11-02"},
+            "volume_metrics": null,
+            "exposure_metrics": null,
+            "computation_warned": false,
+            "metrics_json_by_basis": null,
+            "computing_started_at": null,
+            "series_completeness": null,
+            "computation_error_source": null,
+            "computation_error_job_id": null,
+            "trades_fetched_at": null,
+            "series_provenance": null
+          }
+        ]
+      },
+      {
+        "key_ordinal": "k2", "row_count": 0, "first_day": null, "last_day": null,
+        "returns_series_len": [], "daily_returns_len": [], "slice_rows": []
+      }
+    ],
+    "capture-series.json": [
+      {"key_ordinal": "k1", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []},
+      {"key_ordinal": "k2", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []}
+    ],
+    "capture-marks.json": [
+      {
+        "key_ordinal": "k1", "row_count": 3, "first_day": "2026-11-02", "last_day": "2026-11-13",
+        "slice_rows": [
+          {
+            "id": 1,
+            "api_key_id": "00000000-0000-4000-8000-000000000001",
+            "allocator_id": "00000000-0000-4000-8000-0000000000a1",
+            "mark_day": "2026-11-02",
+            "marked_at": "2026-11-03T00:05:00Z",
+            "venue": "mt5",
+            "nav_usd": 11719.00,
+            "open_pnl_usd": 0.00,
+            "nav_native": null,
+            "open_pnl_native": null,
+            "native_unit": null,
+            "price_day": null,
+            "native_detail": {"basis": "usd"},
+            "created_at": "2026-11-03T00:10:00Z"
+          },
+          {
+            "id": 2,
+            "api_key_id": "00000000-0000-4000-8000-000000000001",
+            "allocator_id": "00000000-0000-4000-8000-0000000000a1",
+            "mark_day": "2026-11-06",
+            "marked_at": "2026-11-07T00:05:00Z",
+            "venue": "mt5",
+            "nav_usd": 11900.00,
+            "open_pnl_usd": 120.00,
+            "nav_native": null,
+            "open_pnl_native": null,
+            "native_unit": null,
+            "price_day": null,
+            "native_detail": {"basis": "usd"},
+            "created_at": "2026-11-07T00:10:00Z"
+          },
+          {
+            "id": 3,
+            "api_key_id": "00000000-0000-4000-8000-000000000001",
+            "allocator_id": "00000000-0000-4000-8000-0000000000a1",
+            "mark_day": "2026-11-13",
+            "marked_at": "2026-11-14T00:05:00Z",
+            "venue": "mt5",
+            "nav_usd": 12150.00,
+            "open_pnl_usd": 80.00,
+            "nav_native": null,
+            "open_pnl_native": null,
+            "native_unit": null,
+            "price_day": null,
+            "native_detail": {"basis": "usd"},
+            "created_at": "2026-11-14T00:10:00Z"
+          }
+        ]
+      },
+      {"key_ordinal": "k2", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []}
+    ],
+    "capture-key-inputs.json": [
+      {
+        "key_ordinal": "k1", "row_count": 1, "first_day": null, "last_day": null,
+        "slice_rows": [
+          {
+            "allocator_id": "00000000-0000-4000-8000-0000000000a1",
+            "kind": "key_inputs:00000000-0000-4000-8000-000000000001",
+            "computed_at": "2026-11-14T03:00:00Z",
+            "payload": {
+              "realized_terminal_usd": 12150.00,
+              "realized_terminal_day": "2026-11-13",
+              "anchor_usd": 12150.00,
+              "venue": "mt5",
+              "marks_since": "2026-11-02",
+              "mark_gap_days": 0,
+              "nav_mark": {
+                "mark_day": "2026-11-13",
+                "nav_usd": 12150.00,
+                "open_pnl_usd": 80.00,
+                "marked_at": "2026-11-14T00:05:00Z"
+              },
+              "composed_day_pnl": [
+                {"utc_day_iso": "2026-10-01", "pnl_usd": 0.00},
+                {"utc_day_iso": "2026-10-05", "pnl_usd": -5.00},
+                {"utc_day_iso": "2026-10-07", "pnl_usd": 295.00},
+                {"utc_day_iso": "2026-10-12", "pnl_usd": 0.00},
+                {"utc_day_iso": "2026-10-15", "pnl_usd": 191.00},
+                {"utc_day_iso": "2026-10-20", "pnl_usd": 0.00},
+                {"utc_day_iso": "2026-10-26", "pnl_usd": 500.00},
+                {"utc_day_iso": "2026-10-27", "pnl_usd": -400.00},
+                {"utc_day_iso": "2026-10-30", "pnl_usd": 138.00},
+                {"utc_day_iso": "2026-11-06", "pnl_usd": 181.00},
+                {"utc_day_iso": "2026-11-13", "pnl_usd": 250.00}
+              ],
+              "composed_flows": [
+                {"utc_day_iso": "2026-10-01", "flow_usd": 10000.00},
+                {"utc_day_iso": "2026-10-12", "flow_usd": 2000.00},
+                {"utc_day_iso": "2026-10-20", "flow_usd": -1000.00}
+              ]
+            }
+          }
+        ]
+      },
+      {"key_ordinal": "k2", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []}
+    ],
+    "capture-returns.json": [
+      {
+        "key_ordinal": "k1", "row_count": 10, "first_day": "2026-10-05", "last_day": "2026-11-13",
+        "slice_rows": [
+          {"strategy_id": null, "date": "2026-10-05", "daily_return": -0.0005, "created_at": "2026-11-14T03:00:00Z", "updated_at": "2026-11-14T03:00:00Z", "id": 1, "api_key_id": "00000000-0000-4000-8000-000000000001", "allocator_id": "00000000-0000-4000-8000-0000000000a1"},
+          {"strategy_id": null, "date": "2026-10-07", "daily_return": 0.0295147573787, "created_at": "2026-11-14T03:00:00Z", "updated_at": "2026-11-14T03:00:00Z", "id": 2, "api_key_id": "00000000-0000-4000-8000-000000000001", "allocator_id": "00000000-0000-4000-8000-0000000000a1"},
+          {"strategy_id": null, "date": "2026-10-12", "daily_return": 0, "created_at": "2026-11-14T03:00:00Z", "updated_at": "2026-11-14T03:00:00Z", "id": 3, "api_key_id": "00000000-0000-4000-8000-000000000001", "allocator_id": "00000000-0000-4000-8000-0000000000a1"},
+          {"strategy_id": null, "date": "2026-10-15", "daily_return": 0.0155410903173, "created_at": "2026-11-14T03:00:00Z", "updated_at": "2026-11-14T03:00:00Z", "id": 4, "api_key_id": "00000000-0000-4000-8000-000000000001", "allocator_id": "00000000-0000-4000-8000-0000000000a1"},
+          {"strategy_id": null, "date": "2026-10-20", "daily_return": 0, "created_at": "2026-11-14T03:00:00Z", "updated_at": "2026-11-14T03:00:00Z", "id": 5, "api_key_id": "00000000-0000-4000-8000-000000000001", "allocator_id": "00000000-0000-4000-8000-0000000000a1"},
+          {"strategy_id": null, "date": "2026-10-26", "daily_return": 0.043550213396, "created_at": "2026-11-14T03:00:00Z", "updated_at": "2026-11-14T03:00:00Z", "id": 6, "api_key_id": "00000000-0000-4000-8000-000000000001", "allocator_id": "00000000-0000-4000-8000-0000000000a1"},
+          {"strategy_id": null, "date": "2026-10-27", "daily_return": -0.0333861948084, "created_at": "2026-11-14T03:00:00Z", "updated_at": "2026-11-14T03:00:00Z", "id": 7, "api_key_id": "00000000-0000-4000-8000-000000000001", "allocator_id": "00000000-0000-4000-8000-0000000000a1"},
+          {"strategy_id": null, "date": "2026-10-30", "daily_return": 0.0119160694241, "created_at": "2026-11-14T03:00:00Z", "updated_at": "2026-11-14T03:00:00Z", "id": 8, "api_key_id": "00000000-0000-4000-8000-000000000001", "allocator_id": "00000000-0000-4000-8000-0000000000a1"},
+          {"strategy_id": null, "date": "2026-11-06", "daily_return": 0.0154450038399, "created_at": "2026-11-14T03:00:00Z", "updated_at": "2026-11-14T03:00:00Z", "id": 9, "api_key_id": "00000000-0000-4000-8000-000000000001", "allocator_id": "00000000-0000-4000-8000-0000000000a1"},
+          {"strategy_id": null, "date": "2026-11-13", "daily_return": 0.0210084033613, "created_at": "2026-11-14T03:00:00Z", "updated_at": "2026-11-14T03:00:00Z", "id": 10, "api_key_id": "00000000-0000-4000-8000-000000000001", "allocator_id": "00000000-0000-4000-8000-0000000000a1"}
+        ]
+      },
+      {"key_ordinal": "k2", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []}
+    ],
+    "capture-holdings.json": [
+      {
+        "key_ordinal": "k1", "row_count": 1, "first_day": "2026-11-13", "last_day": "2026-11-13",
+        "slice_rows": [
+          {
+            "id": "00000000-0000-4000-8000-0000000000d1",
+            "allocator_id": "00000000-0000-4000-8000-0000000000a1",
+            "api_key_id": "00000000-0000-4000-8000-000000000001",
+            "venue": "mt5",
+            "symbol": "USD",
+            "asof": "2026-11-13",
+            "holding_type": "spot",
+            "side": "long",
+            "quantity": 12150.00,
+            "value_usd": 12150.00,
+            "entry_price": null,
+            "mark_price": 1.0,
+            "unrealized_pnl_usd": null,
+            "cost_basis_usd": null,
+            "quantity_unit": null,
+            "created_at": "2026-11-14T03:00:00Z",
+            "updated_at": "2026-11-14T03:00:00Z"
+          }
+        ]
+      },
+      {"key_ordinal": "k2", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []}
+    ],
+    "capture-equity-curve.json": [
+      {"key_ordinal": "k1", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []},
+      {"key_ordinal": "k2", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []}
+    ],
+    "capture-btc.json": [
+      {"key_ordinal": "k1", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []},
+      {"key_ordinal": "k2", "row_count": 0, "first_day": null, "last_day": null, "slice_rows": []}
+    ]
+  }
+}

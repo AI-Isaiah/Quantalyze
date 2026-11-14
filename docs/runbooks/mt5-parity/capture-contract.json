@@ -1,0 +1,86 @@
+{
+  "contract_version": 1,
+  "witness_columns": ["key_ordinal", "slice_rows", "row_count", "first_day", "last_day"],
+  "files": {
+    "capture-keymap.sql": {
+      "slice": "keymap",
+      "table": "api_keys",
+      "day_column": null,
+      "row_shape": "columns",
+      "columns": ["api_key_id", "allocator_id", "label", "account_currency", "strategy_id", "strategy_status", "asset_class", "key_created_at"],
+      "extra_witness": []
+    },
+    "capture-strategy.sql": {
+      "slice": "strategy",
+      "table": "strategies",
+      "day_column": null,
+      "row_shape": "whole_row",
+      "columns": [],
+      "extra_witness": []
+    },
+    "capture-analytics.sql": {
+      "slice": "analytics",
+      "table": "strategy_analytics",
+      "day_column": null,
+      "row_shape": "whole_row",
+      "columns": [],
+      "extra_witness": ["returns_series_len", "daily_returns_len"]
+    },
+    "capture-series.sql": {
+      "slice": "series",
+      "table": "strategy_analytics_series",
+      "day_column": null,
+      "row_shape": "whole_row",
+      "columns": [],
+      "extra_witness": []
+    },
+    "capture-marks.sql": {
+      "slice": "marks",
+      "table": "api_key_nav_marks",
+      "day_column": "mark_day",
+      "row_shape": "whole_row",
+      "columns": [],
+      "extra_witness": []
+    },
+    "capture-key-inputs.sql": {
+      "slice": "key_inputs",
+      "table": "allocator_equity_derived",
+      "day_column": null,
+      "row_shape": "whole_row",
+      "columns": [],
+      "extra_witness": []
+    },
+    "capture-returns.sql": {
+      "slice": "returns",
+      "table": "csv_daily_returns",
+      "day_column": "date",
+      "row_shape": "whole_row",
+      "columns": [],
+      "extra_witness": []
+    },
+    "capture-holdings.sql": {
+      "slice": "holdings",
+      "table": "allocator_holdings",
+      "day_column": "asof",
+      "row_shape": "columns",
+      "columns": ["id", "allocator_id", "api_key_id", "venue", "symbol", "asof", "holding_type", "side", "quantity", "value_usd", "entry_price", "mark_price", "unrealized_pnl_usd", "cost_basis_usd", "quantity_unit", "created_at", "updated_at"],
+      "extra_witness": []
+    },
+    "capture-equity-curve.sql": {
+      "slice": "equity_curve",
+      "table": "allocator_equity_derived",
+      "day_column": null,
+      "row_shape": "whole_row",
+      "columns": [],
+      "extra_witness": []
+    },
+    "capture-btc.sql": {
+      "slice": "btc",
+      "table": "benchmark_prices",
+      "day_column": "date",
+      "row_shape": "whole_row",
+      "columns": [],
+      "extra_witness": []
+    }
+  }
+}
