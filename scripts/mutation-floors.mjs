@@ -3446,7 +3446,26 @@ export const FILES_FLOOR = 82;
 // parse reading prints, an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA (a floors edit forces FULL) is the run that compares it with a real biting count.
 // WAIVED_CEILING stays 0 - no waiver was added.
 // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS ship, rebased on Phase 210 PUBLICTRUTH): combined with Phase 210's +2 arms (830 -> 832) and +8 file steps on origin/main, so arm counts read Phase 211's value +2 and step counts +8.
-export const ARMS_FLOOR = 848;
+// RAISED 848 -> 864 2026-11-14 (Phase 214 FRESHTRUTH plan 07: staleness I-N, composite CL, fan-out NA1-NA4 and SK1-SK3, dedup FINALIZE-WIZARD-SHAPE and CSV-FINALIZE-SHAPE; migrations
+// 20261114151700 and 20261114152300): +16 arms, each twinned, in four EXISTING gate files (no file joined, so FILES_FLOOR stays 82): test_ledger_refresh_staleness.sql +6 (11 -> 17 twin
+// sections), test_ledger_refresh_composite_arm.sql +1 (29 -> 30), test_ledger_refresh_fanout.sql +7 (37 -> 44) and test_enqueue_dedup_record_retract.sql +2 (16 -> 18). MEASURED on this
+// host by `node scripts/mutation-runner/run.mjs --parse-only`, exit 0: `coverage: files 82/109`, `arms: 0/864/0   (executed/annotated/waived)`, `No static defects`, and by the exit-0
+// SUBSET run over the four touched gate files (`--subset-from`): `arms: 109/109/0`, `biting: 109`, `lane-invocations: 109` (the two independent tallies AGREE), `No defects in the SUBSET`,
+// per-file lines `test_enqueue_dedup_record_retract.sql: sections 18 / judged 18 / annotated 18 / waived 0 / biting 18`, `test_ledger_refresh_composite_arm.sql: sections 30 / judged 30 /
+// annotated 30 / waived 0 / biting 30`, `test_ledger_refresh_fanout.sql: sections 44 / judged 44 / annotated 44 / waived 0 / biting 44` and `test_ledger_refresh_staleness.sql: sections 17 /
+// judged 17 / annotated 17 / waived 0 / biting 17`. The stale-low direction was observed first: `The corpus declares 864 twin(s) of which 0 are waivers, so a green run bites 864.
+// ARMS_FLOOR is 848.` NOT MEASURED by a FULL local run: the data volume had about 8.7 GB free against the roughly 15 GB a full run needs, so the FULL run is recorded as not-run and 864
+// is the static annotated-unwaived count that the parse reading prints, an upper bound on biting. The 16 added arms ARE measured biting (the subset run above); the other 78 annotated
+// files are unchanged by this phase. CI `sql-mutation` FULL on the PR head SHA (a floors edit forces FULL) is the run that compares it with a real biting count. WAIVED_CEILING stays 0 -
+// no waiver was added.
+// RAISED 864 -> 867 2026-11-14 (Phase 214 FRESHTRUTH review round 1 fix): +3 arms, each twinned, in the EXISTING gate test_ledger_refresh_fanout.sql (no file joined, so FILES_FLOOR stays 82):
+// NA5 (the no-advance signal's series_behind conjunct, WR-01), NA6 (its done-derive conjunct, SFH-F1) and SK4 (the skip block's own exception handler, SFH-F3), 44 -> 47 twin sections.
+// MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`, exit 0: `coverage: files 82/109`, `arms: 0/867/0   (executed/annotated/waived)`, `No static defects`, and by the
+// exit-0 SUBSET run over that one gate (`--subset-from`): `arms: 47/47/0`, `biting: 47`, `lane-invocations: 47` (the two independent tallies AGREE), `No defects in the SUBSET`, per-file line
+// `test_ledger_refresh_fanout.sql: sections 47 / judged 47 / annotated 47 / waived 0 / biting 47`, each of NA5, NA6 and SK4 `RED (identity ok)`. NOT MEASURED by a FULL local run (about 9 GB free
+// against the roughly 15 GB it needs), so 867 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA is the run that compares it with a real
+// biting count. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 867;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -2065,7 +2065,7 @@ function enqueueCsvAnalyticsAfter(
           admin.rpc("enqueue_compute_job", {
             p_strategy_id: strategyId,
             p_kind: "compute_analytics_from_csv",
-            p_metadata: { source: "csv-finalize", fmt },
+            p_metadata: { source: "csv-finalize", fmt, correlation_id: opts.correlationId },
           }),
         (first) => {
           retried = true;

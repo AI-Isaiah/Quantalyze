@@ -1,6 +1,8 @@
 -- Test: public.ledger_refresh_staleness — the LEDGER-03 freshness verdict.
 -- Guards migration 20260825120000_ledger_refresh_staleness_view.sql
--- (Phase 161.1 / D-03, D-04, D-05, D-06, T-161.1-04).
+-- (Phase 161.1 / D-03, D-04, D-05, D-06, T-161.1-04) and, since Phase 214, the
+-- view's closed-composite re-definition in
+-- 20261114151700_ledger_staleness_closed_composites.sql (SC-3).
 --
 -- What makes this gate worth having
 -- ---------------------------------
@@ -31,6 +33,29 @@
 --                             the view or EXECUTE the parser, and security_invoker
 --                             is still on. Mirrors the apply-time DO block, which
 --                             runs once and can be silently undone afterwards.
+--   I  Phase 214 SC-3       — a composite whose every member window has closed and
+--                             whose series reached the day before the latest
+--                             window_end reads is_stale FALSE, stale_reason NULL,
+--                             is_closed TRUE, closed_through = window_end - 1.
+--   J  closed needs ALL windows — one open (NULL) window keeps series_behind.
+--   K  closed needs the series to REACH the end — a series two days short of
+--                             the latest window_end (one day beyond the exclusive-end
+--                             allowance) keeps series_behind.
+--   L  closed needs a PAST end — a window_end in the future is a plan, not a fact.
+--   M  closed excuses ONLY series_behind — a failed analytics row on a closed
+--                             composite still reads status_not_success.
+--   N  never NULL           — is_stale and is_closed are NULL for no row, including
+--                             a closed composite with an EMPTY series, so the
+--                             fan-outs' filter on is_stale cannot drop a stale row.
+--
+-- ⭐ PHASE 214 NOTE ON THE TWINS. The view's text now lives in
+-- 20261114151700_ledger_staleness_closed_composites.sql, which re-defines the view
+-- over the one 20260825120000 created. So the RED-UNDER-M twins of arms A, B, C, D,
+-- E1, E2 (its view edit), F and G edit the NEW file: an edit to the old file's view
+-- is overwritten when the new migration applies, and the arm would never go RED.
+-- Where the prose RED-UNDER lines below say 20260825120000 for a view edit, read
+-- the new file. The parser function is still defined in 20260825120000, so E2's
+-- parser edit and E3 stay on it.
 --
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION on
 -- failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
@@ -70,7 +95,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 8 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 14 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -85,8 +110,9 @@
 -- was DISCOVERED, not guessed — plan 164.4-04 started from the sibling composite
 -- gate's proven 10-entry list and this gate was GREEN on the FIRST iteration (it
 -- exercises the view the other two read, so it names a strict subset of their
--- objects). Proven `ALL 8 ARMS EXECUTED (A-H)`, mean 1.03 s/lane over 3 timed runs.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql"]}
+-- objects). Proven `ALL 14 ARMS EXECUTED (A-N)` (the 1.03 s/lane mean over 3 timed runs was
+-- measured at the original eight arms; Phase 214 added the closed-composite arms).
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql"]}
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -112,6 +138,14 @@ DECLARE
   s_f4           UUID;  -- Arm F: age exactly 4 (largest legitimate age)
   s_f5           UUID;  -- Arm F: age exactly 5 (first stale age)
   s_g            UUID;  -- Arm G: okx, must be out of cohort
+  s_i            UUID;  -- Arm I: deribit composite, every member window closed
+  s_j            UUID;  -- Arm J: composite with one OPEN window
+  s_k            UUID;  -- Arm K: closed windows, series two days short of the end
+  s_l            UUID;  -- Arm L: latest window_end is in the FUTURE
+  s_m            UUID;  -- Arm M: closed windows, series at the end, status failed
+  s_n_empty      UUID;  -- Arm N: closed windows, EMPTY series
+  v_closed       BOOLEAN;
+  v_closed_thru  DATE;
   v_stale        BOOLEAN;
   v_stale2       BOOLEAN;
   v_reason       TEXT;
@@ -178,6 +212,57 @@ BEGIN
   INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
   VALUES (s_d, k_deribit_b, uid, CURRENT_DATE - 200, 1);
 
+  -- Arm I: a COMPOSITE whose every member window has CLOSED. window_end is
+  -- EXCLUSIVE, so the latest end is CURRENT_DATE - 199 and the last day the
+  -- series can carry is CURRENT_DATE - 200, which is where its series stops.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, NULL, 'lrs I') RETURNING id INTO s_i;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_i, k_deribit,   uid, CURRENT_DATE - 400, CURRENT_DATE - 200, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_i, k_deribit_b, uid, CURRENT_DATE - 300, CURRENT_DATE - 199, 1);
+
+  -- Arm J: TWO members, one window closed and one OPEN (window_end NULL). The
+  -- series stops on the day before the closed member's end, so everything but the
+  -- open window says closed.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, NULL, 'lrs J') RETURNING id INTO s_j;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_j, k_deribit,   uid, CURRENT_DATE - 400, CURRENT_DATE - 200, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_j, k_deribit_b, uid, CURRENT_DATE - 300, 1);
+
+  -- Arm K: every window closed, series two days short of the latest window_end
+  -- (the exclusive end allows the day before it, so this is one day too few).
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, NULL, 'lrs K') RETURNING id INTO s_k;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_k, k_deribit,   uid, CURRENT_DATE - 400, CURRENT_DATE - 200, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_k, k_deribit_b, uid, CURRENT_DATE - 300, CURRENT_DATE - 199, 1);
+
+  -- Arm L: the latest window_end is three days AHEAD, and the series (future-dated
+  -- too) has reached the day before it. Every other condition says closed.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, NULL, 'lrs L') RETURNING id INTO s_l;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_l, k_deribit,   uid, CURRENT_DATE - 400, CURRENT_DATE + 2, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_l, k_deribit_b, uid, CURRENT_DATE - 300, CURRENT_DATE + 3, 1);
+
+  -- Arm M: closed and at its end, but the analytics row is 'failed'. Seeded failed
+  -- by INSERT: this file adds no UPDATE of strategy_analytics.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, NULL, 'lrs M') RETURNING id INTO s_m;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_m, k_deribit,   uid, CURRENT_DATE - 400, CURRENT_DATE - 200, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_m, k_deribit_b, uid, CURRENT_DATE - 300, CURRENT_DATE - 199, 1);
+
+  -- Arm N: every window closed and a complete analytics row with an EMPTY series.
+  -- The closed test compares a NULL last_return_date, which is NULL rather than
+  -- FALSE unless the view coalesces it.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, NULL, 'lrs N') RETURNING id INTO s_n_empty;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_n_empty, k_deribit,   uid, CURRENT_DATE - 400, CURRENT_DATE - 200, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_n_empty, k_deribit_b, uid, CURRENT_DATE - 300, CURRENT_DATE - 199, 1);
+
   -- Analytics rows. Series elements are ordered NEWEST-FIRST on purpose: an
   -- implementation that reads the array TAIL instead of taking max() over every
   -- element would read the OLDEST day and fail these arms.
@@ -211,7 +296,24 @@ BEGIN
     (s_d, 'complete_with_warnings', now(), jsonb_build_array(
         jsonb_build_object('date', to_char(CURRENT_DATE - 36, 'YYYY-MM-DD'), 'value', 0.004))),
     (s_g, 'complete_with_warnings', now(), jsonb_build_array(
-        jsonb_build_object('date', to_char(CURRENT_DATE - 1, 'YYYY-MM-DD'), 'value', 0.004)));
+        jsonb_build_object('date', to_char(CURRENT_DATE - 1, 'YYYY-MM-DD'), 'value', 0.004))),
+    -- I: status 'complete', series ends the day before the latest window_end.
+    (s_i, 'complete', now(), jsonb_build_array(
+        jsonb_build_object('date', to_char(CURRENT_DATE - 200, 'YYYY-MM-DD'), 'value', 0.004))),
+    -- J: series ends the day before the CLOSED member's end; the other is open.
+    (s_j, 'complete', now(), jsonb_build_array(
+        jsonb_build_object('date', to_char(CURRENT_DATE - 201, 'YYYY-MM-DD'), 'value', 0.004))),
+    -- K: two days short of the latest end (CURRENT_DATE - 199): one too few.
+    (s_k, 'complete', now(), jsonb_build_array(
+        jsonb_build_object('date', to_char(CURRENT_DATE - 201, 'YYYY-MM-DD'), 'value', 0.004))),
+    -- L: future-dated, at the day before the future end.
+    (s_l, 'complete', now(), jsonb_build_array(
+        jsonb_build_object('date', to_char(CURRENT_DATE + 2, 'YYYY-MM-DD'), 'value', 0.004))),
+    -- M: at the day before the latest end, status failed.
+    (s_m, 'failed', now(), jsonb_build_array(
+        jsonb_build_object('date', to_char(CURRENT_DATE - 200, 'YYYY-MM-DD'), 'value', 0.004))),
+    -- N: complete, and an EMPTY series.
+    (s_n_empty, 'complete', now(), '[]'::jsonb);
 
   RAISE NOTICE 'Seed OK: uid=%', uid;
 
@@ -224,7 +326,7 @@ BEGIN
   --            CASE carries the same comparison and keeps its own copy), which
   --            is what makes the verdict — not the label — the thing this arm
   --            measures.
-  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"OR (CURRENT_DATE - lr.last_return_date) > 4","replace":"OR (CURRENT_DATE - lr.last_return_date) > 100","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"OR (CURRENT_DATE - lr.last_return_date) > 4","replace":"OR (CURRENT_DATE - lr.last_return_date) > 100","occurrences":1}]}
   SELECT is_stale, stale_reason, last_return_date, days_since_last_return, has_mt5_member
     INTO v_stale, v_reason, v_last, v_days, v_has_mt5
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_a;
@@ -266,7 +368,7 @@ BEGIN
   --            exists to refuse. Arm A above still reads TRUE, so without this
   --            arm the mutation would ship green — which is the whole argument
   --            for keeping a negative control.
-  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"    sa.strategy_id IS NULL\n    OR sa.computation_status IS NULL","replace":"    sa.strategy_id IS NOT NULL\n    OR sa.computation_status IS NULL","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"    sa.strategy_id IS NULL\n    OR sa.computation_status IS NULL","replace":"    sa.strategy_id IS NOT NULL\n    OR sa.computation_status IS NULL","occurrences":1}]}
   SELECT is_stale, stale_reason INTO v_stale, v_reason
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_b;
   IF v_stale IS DISTINCT FROM FALSE THEN
@@ -285,7 +387,7 @@ BEGIN
   --            healthy strategy at status=complete is marked broken. The
   --            stale_reason CASE keeps its own copy of the pair, so what reddens
   --            is the verdict.
-  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"OR sa.computation_status NOT IN ('complete', 'complete_with_warnings')\n    OR lr.last_return_date IS NULL","replace":"OR sa.computation_status NOT IN ('complete_with_warnings')\n    OR lr.last_return_date IS NULL","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"OR sa.computation_status NOT IN ('complete', 'complete_with_warnings')\n    OR lr.last_return_date IS NULL","replace":"OR sa.computation_status NOT IN ('complete_with_warnings')\n    OR lr.last_return_date IS NULL","occurrences":1}]}
   SELECT is_stale INTO v_stale FROM public.ledger_refresh_staleness WHERE strategy_id = s_c_complete;
   IF v_stale IS DISTINCT FROM FALSE THEN
     RAISE EXCEPTION 'TEST FAILED (C): fresh strategy at status=complete read is_stale=%, expected FALSE', v_stale;
@@ -321,7 +423,7 @@ BEGIN
   --            `exchanges` collapses to the empty array, the terminal venue
   --            conjunct drops it, and the ONLY live deribit strategy vanishes
   --            from the surface built to observe it.
-  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"\n          UNION ALL\n          SELECT ak_m.exchange\n            FROM public.strategy_keys sk_m\n            JOIN public.api_keys ak_m ON ak_m.id = sk_m.api_key_id\n           WHERE sk_m.strategy_id = s.id","replace":"","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"\n          UNION ALL\n          SELECT ak_m.exchange\n            FROM public.strategy_keys sk_m\n            JOIN public.api_keys ak_m ON ak_m.id = sk_m.api_key_id\n           WHERE sk_m.strategy_id = s.id","replace":"","occurrences":1}]}
   SELECT count(*) INTO v_cnt FROM public.ledger_refresh_staleness WHERE strategy_id = s_d;
   IF v_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (D): the deribit composite returned % rows, expected 1 — a view resolving venue only through strategies.api_key_id is blind to every composite', v_cnt;
@@ -357,7 +459,7 @@ BEGIN
   --    bare object — makes the VIEW raise 22023. That aborts the gate with no
   --    `TEST FAILED (…)` at all, which the runner scores NO-IDENTITY rather
   --    than as this arm biting. Mutate what the arm can observe.
-  -- RED-UNDER-M: {"arm":"E1","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"THEN 'no_return_date'","replace":"THEN 'no_return_date_drifted'","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"E1","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"THEN 'no_return_date'","replace":"THEN 'no_return_date_drifted'","occurrences":1}]}
   SELECT is_stale, stale_reason, last_return_date INTO v_stale, v_reason, v_last
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_e_object;
   IF v_stale IS DISTINCT FROM TRUE OR v_last IS NOT NULL THEN
@@ -374,7 +476,7 @@ BEGIN
   --            T-161.1-04 forbids: 'not-a-date' then yields a last_return_date
   --            of today. Arm E1's fixture is normalised to an empty array by
   --            guard 1 and is untouched, so this arm is the first failure.
-  -- RED-UNDER-M: {"arm":"E2","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"\n     AND (e.elem ->> 'date') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"EXCEPTION\n  WHEN invalid_datetime_format OR datetime_field_overflow THEN\n    RETURN NULL;","replace":"EXCEPTION\n  WHEN invalid_datetime_format OR datetime_field_overflow THEN\n    RETURN CURRENT_DATE;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"E2","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"\n     AND (e.elem ->> 'date') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"EXCEPTION\n  WHEN invalid_datetime_format OR datetime_field_overflow THEN\n    RETURN NULL;","replace":"EXCEPTION\n  WHEN invalid_datetime_format OR datetime_field_overflow THEN\n    RETURN CURRENT_DATE;","occurrences":1}]}
   SELECT is_stale, last_return_date INTO v_stale, v_last
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_e_garbage;
   IF v_stale IS DISTINCT FROM TRUE OR v_last IS NOT NULL THEN
@@ -404,7 +506,7 @@ BEGIN
   --            fixture stays fresh (so the arm's first half still passes) and
   --            the 5-day fixture stops reading stale, which is the drift past
   --            the derivation the arm's own message names.
-  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"OR (CURRENT_DATE - lr.last_return_date) > 4","replace":"OR (CURRENT_DATE - lr.last_return_date) > 5","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"OR (CURRENT_DATE - lr.last_return_date) > 4","replace":"OR (CURRENT_DATE - lr.last_return_date) > 5","occurrences":1}]}
   SELECT is_stale, days_since_last_return INTO v_stale, v_days
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_f4;
   IF v_days IS DISTINCT FROM 4 THEN
@@ -433,7 +535,7 @@ BEGIN
   --            arm above" case this arm exists for. The venue ARRAYS are left
   --            alone deliberately: check 6 of that migration asserts their
   --            cardinality, so editing them would abort the apply instead.
-  -- RED-UNDER-M: {"arm":"G","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"WHERE sv.exchanges && lv.venues;","replace":"WHERE TRUE;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"G","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"WHERE sv.exchanges && lv.venues;","replace":"WHERE TRUE;","occurrences":1}]}
   SELECT count(*) INTO v_cnt FROM public.ledger_refresh_staleness WHERE strategy_id = s_g;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (G): an okx strategy appears in ledger_refresh_staleness (% rows) — the cohort must be scoped to the ledger-backed venue set', v_cnt;
@@ -501,7 +603,143 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (H): role authenticated can EXECUTE ledger_refresh_parse_series_date — the REVOKE at 20260825120000:173 has been undone';
   END IF;
 
-  RAISE NOTICE 'ALL 8 ARMS EXECUTED (A-H) and passed — ledger_refresh_staleness verdict is falsifiable.';
+  -- ======================================================================
+  -- ARM I — Phase 214 SC-3: a CLOSED composite reads closed, not stale. Its
+  -- members all declare a window_end, the latest one is long past, and the series
+  -- stops on the day before it. Nothing is left to fetch, so a series that stopped
+  -- 200 days ago is the expected end of a finished composite, not a fault. This is
+  -- the arm for the two composites that read stale for 199 days after closing.
+  -- ======================================================================
+  -- RED-UNDER: in the NEW view migration (20261114151700), drop the `- 1` from the
+  --            series-reached-the-end conjunct, so the series must reach the
+  --            window_end itself. window_end is EXCLUSIVE, so a series ending the
+  --            day before it can never satisfy that and the closed composite
+  --            reads stale again. Earlier arms use no window_end and are
+  --            untouched, so this arm is the first failure.
+  -- RED-UNDER-M: {"arm":"I","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"lr.last_return_date >= max(sk.window_end) - 1","replace":"lr.last_return_date >= max(sk.window_end)","occurrences":1}]}
+  SELECT is_stale, stale_reason, is_closed, closed_through
+    INTO v_stale, v_reason, v_closed, v_closed_thru
+    FROM public.ledger_refresh_staleness WHERE strategy_id = s_i;
+  IF v_stale IS DISTINCT FROM FALSE THEN
+    RAISE EXCEPTION 'TEST FAILED (I): a composite whose every member window closed, with its series at the day before the latest window_end, read is_stale=% (reason=%), expected FALSE. Likely cause: the closed excuse is missing from the verdict, or the series-reached-the-end conjunct no longer allows for the exclusive window_end', v_stale, v_reason;
+  END IF;
+  IF v_reason IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (I): a closed composite carries stale_reason=%, expected NULL', v_reason;
+  END IF;
+  IF v_closed IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'TEST FAILED (I): is_closed=% for a composite whose windows have all closed, expected TRUE', v_closed;
+  END IF;
+  IF v_closed_thru IS DISTINCT FROM (CURRENT_DATE - 200) THEN
+    RAISE EXCEPTION 'TEST FAILED (I): closed_through=% but the latest window_end is % and window_end is EXCLUSIVE, so the last day a closed series can carry is %', v_closed_thru, (CURRENT_DATE - 199), (CURRENT_DATE - 200);
+  END IF;
+
+  -- ======================================================================
+  -- ARM J — closed needs EVERY window. One member with no window_end is still
+  -- active, whatever its series says, so the strategy keeps reading series_behind.
+  -- ======================================================================
+  -- RED-UNDER: in the NEW view migration, make the every-member-has-a-window_end
+  --            condition vacuous (replace it with TRUE). The open window then no
+  --            longer blocks closing and the composite reads closed. Arm I's
+  --            fixture has every window set, so it is unaffected.
+  -- RED-UNDER-M: {"arm":"J","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"count(*) = count(sk.window_end)","replace":"TRUE","occurrences":1}]}
+  SELECT is_stale, stale_reason, is_closed
+    INTO v_stale, v_reason, v_closed
+    FROM public.ledger_refresh_staleness WHERE strategy_id = s_j;
+  IF v_stale IS DISTINCT FROM TRUE OR v_reason IS DISTINCT FROM 'series_behind' THEN
+    RAISE EXCEPTION 'TEST FAILED (J): a composite with one OPEN window (window_end NULL) read is_stale=% (reason=%), expected TRUE/series_behind. Likely cause: the every-member-has-a-window_end condition is gone, so an unfinished composite reads closed', v_stale, v_reason;
+  END IF;
+  IF v_closed IS DISTINCT FROM FALSE THEN
+    RAISE EXCEPTION 'TEST FAILED (J): is_closed=% for a composite with an open window, expected FALSE', v_closed;
+  END IF;
+
+  -- ======================================================================
+  -- ARM K — closed needs the series to REACH the end. window_end is EXCLUSIVE, so
+  -- the series must reach the day before the latest window_end; one day less than
+  -- that is still behind.
+  -- ======================================================================
+  -- RED-UNDER: in the NEW view migration, widen the series-reached-the-end
+  --            allowance by one more day (`- 1` to `- 2`). The series two days
+  --            short then qualifies and reads closed. Arm I's series sits at the
+  --            day before the end and still qualifies, so this arm is the first
+  --            failure.
+  -- RED-UNDER-M: {"arm":"K","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"lr.last_return_date >= max(sk.window_end) - 1","replace":"lr.last_return_date >= max(sk.window_end) - 2","occurrences":1}]}
+  SELECT is_stale, stale_reason, is_closed, closed_through
+    INTO v_stale, v_reason, v_closed, v_closed_thru
+    FROM public.ledger_refresh_staleness WHERE strategy_id = s_k;
+  IF v_stale IS DISTINCT FROM TRUE OR v_reason IS DISTINCT FROM 'series_behind' THEN
+    RAISE EXCEPTION 'TEST FAILED (K): a composite with every window closed and a series one day SHORT of the exclusive-end allowance read is_stale=% (reason=%), expected TRUE/series_behind. Likely cause: the series-reached-the-end allowance was widened past one day', v_stale, v_reason;
+  END IF;
+  IF v_closed IS DISTINCT FROM FALSE OR v_closed_thru IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (K): is_closed=% closed_through=% for a series short of its window end, expected FALSE/NULL', v_closed, v_closed_thru;
+  END IF;
+
+  -- ======================================================================
+  -- ARM L — closed needs a PAST end. A window_end in the future is a plan, not a
+  -- fact: the member can still produce days, so the strategy is not closed. The
+  -- series here is future-dated, so the age rule cannot fire on it (a negative
+  -- age is never above 4) and this arm asserts on the closed columns alone.
+  -- ======================================================================
+  -- RED-UNDER: in the NEW view migration, make the latest-window_end-is-today-or-
+  --            earlier condition vacuous (replace it with TRUE). A composite whose
+  --            end is still ahead then reads closed.
+  -- RED-UNDER-M: {"arm":"L","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"max(sk.window_end) <= CURRENT_DATE","replace":"TRUE","occurrences":1}]}
+  SELECT is_closed, closed_through
+    INTO v_closed, v_closed_thru
+    FROM public.ledger_refresh_staleness WHERE strategy_id = s_l;
+  IF v_closed IS DISTINCT FROM FALSE OR v_closed_thru IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (L): a composite whose latest window_end is in the FUTURE read is_closed=% closed_through=%, expected FALSE/NULL. Likely cause: the latest-window_end-is-today-or-earlier condition is gone', v_closed, v_closed_thru;
+  END IF;
+
+  -- ======================================================================
+  -- ARM M — closed excuses ONLY series_behind. The windows are closed and the
+  -- series is at its end, but the analytics run FAILED: a closed window does not
+  -- make a failed run healthy, so it still reads stale with its own reason.
+  -- ======================================================================
+  -- RED-UNDER: in the NEW view migration, put the closed excuse on the WHOLE
+  --            verdict instead of on the age disjunct alone (prefix the opening
+  --            parenthesis of the is_stale expression with the excuse). A closed
+  --            composite then reads fresh whatever its status. The reason CASE is
+  --            untouched, so the reason is still status_not_success while the
+  --            verdict says fresh, which is what this arm measures.
+  -- RED-UNDER-M: {"arm":"M","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"  (\n    sa.strategy_id IS NULL","replace":"  NOT cl.is_closed AND (\n    sa.strategy_id IS NULL","occurrences":1}]}
+  SELECT is_stale, stale_reason, is_closed
+    INTO v_stale, v_reason, v_closed
+    FROM public.ledger_refresh_staleness WHERE strategy_id = s_m;
+  IF v_closed IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'TEST FAILED (M): the failed closed composite read is_closed=%, expected TRUE — the closed test does not depend on the analytics status, so this arm no longer measures the excuse', v_closed;
+  END IF;
+  IF v_stale IS DISTINCT FROM TRUE OR v_reason IS DISTINCT FROM 'status_not_success' THEN
+    RAISE EXCEPTION 'TEST FAILED (M): a closed composite whose analytics run FAILED read is_stale=% (reason=%), expected TRUE/status_not_success. Likely cause: the closed excuse covers the whole verdict instead of only series_behind', v_stale, v_reason;
+  END IF;
+
+  -- ======================================================================
+  -- ARM N — never NULL. The fan-outs filter on is_stale, and a NULL there drops a
+  -- row without any error. A closed composite with an EMPTY series is the one
+  -- shape where the closed test compares a NULL date, so it is the cohort that
+  -- would expose a missing coalesce. The cohort also holds a single-key row and
+  -- the open-window composite, and the check runs over EVERY row of the view.
+  -- ======================================================================
+  -- RED-UNDER: in the NEW view migration, remove the coalesce around the closed
+  --            test. The empty-series composite then yields is_closed NULL.
+  -- RED-UNDER-M: {"arm":"N","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"COALESCE(c.closed_raw, FALSE)","replace":"c.closed_raw","occurrences":1}]}
+  SELECT count(*) INTO v_cnt FROM public.ledger_refresh_staleness
+   WHERE strategy_id IN (s_b, s_j, s_n_empty);
+  IF v_cnt <> 3 THEN
+    RAISE EXCEPTION 'TEST FAILED (N): % of the 3 cohort rows (single-key, open-window composite, closed composite with an empty series) are visible, so the NULL check below would run over too little', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM public.ledger_refresh_staleness
+   WHERE is_stale IS NULL OR is_closed IS NULL;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (N): % row(s) of ledger_refresh_staleness have is_stale or is_closed NULL. A NULL is_stale is dropped by the fan-outs'' filter with no error. Likely cause: the closed test is no longer coalesced and a closed composite with an empty series yields NULL', v_cnt;
+  END IF;
+  SELECT is_stale, stale_reason, is_closed
+    INTO v_stale, v_reason, v_closed
+    FROM public.ledger_refresh_staleness WHERE strategy_id = s_n_empty;
+  IF v_stale IS DISTINCT FROM TRUE OR v_reason IS DISTINCT FROM 'no_return_date' OR v_closed IS DISTINCT FROM FALSE THEN
+    RAISE EXCEPTION 'TEST FAILED (N): a closed composite with an EMPTY series read is_stale=% reason=% is_closed=%, expected TRUE/no_return_date/FALSE — an empty series is never closed', v_stale, v_reason, v_closed;
+  END IF;
+
+  RAISE NOTICE 'ALL 14 ARMS EXECUTED (A-N) and passed — ledger_refresh_staleness verdict is falsifiable.';
 END $$;
 
 ROLLBACK;

@@ -1,5 +1,34 @@
 # Changelog
 
+## [VERSION_PLACEHOLDER] - 2026-11-14 — Phase 214 FRESHTRUTH: refresh work and freshness readings match what can actually change
+
+The ledger-refresh fan-out and the staleness view now tell apart a strategy whose data can still move from one that cannot. A closed composite stops reading as stale, a strategy whose series has not advanced is retried weekly instead of daily (never excluded), and both finalize routes send the correlation id the enqueue dedup needs. Two migrations.
+
+### Added
+- **A closed composite reads `is_closed`, not stale** (migration `20261114151700_ledger_staleness_closed_composites.sql`). `public.ledger_refresh_staleness` gains `is_closed` and `closed_through`. A composite is closed only when every window has an end date, the latest end is not in the future, and the series already reaches that end (one-day tolerance). Closed excuses only the age and `series_behind` arms, never any other stale reason, and `is_closed` is never NULL. The composite fan-out skips a closed composite. `security_invoker`, REVOKE and GRANT are restated.
+- **A no-advance strategy is held to a weekly refresh attempt, never excluded** (migration `20261114152300_ledger_fanout_no_advance_weekly_cap.sql`, founder decision Q1 = A). `enqueue_ledger_refresh_for_strategies()` applies a 7-day cooldown only when the stale reason is `series_behind`, the series is at least 8 days old, a `compute_analytics_from_csv` job has finished, and a `derive_broker_dailies` job created at least five days after the last return date has finished. Every other strategy keeps the daily cadence.
+- **A tick that holds strategies back says so.** The fan-out writes one best-effort `cron_runs` row with cause `no_advance_weekly_cap`, the skipped count and the skipped targets (status `ok`, no error). The runbook `docs/runbooks/ledger-refresh-go-live.md` says what a status `ok` fan-out row with that cause means.
+- Manual rollbacks under `supabase/migrations/down/` for both migrations, and the regenerated function snapshot `supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql`.
+
+### Changed
+- **Both finalize routes send a `correlation_id` to the enqueue** (founder decision Q2 = A, no SQL widening). `csv-finalize` sends the id its response returns, and `finalize-wizard`'s stitch enqueue sends its request's id. Phase 211's `_record_enqueue_dedup` can now retract an inherited `ledger-refresh` marker for both callers, so a user's finalize that dedups onto a marked refresh job no longer inherits the quiet refresh path. The JSDoc in `src/lib/ledger-refresh-marker.ts` no longer names them as the uncorrelated residual.
+
+### Tests
+- `test_ledger_refresh_staleness.sql`, `test_ledger_refresh_composite_arm.sql`, `test_ledger_refresh_fanout.sql` and `test_enqueue_dedup_record_retract.sql` gain arms for every conjunct of the closed and no-advance predicates (NA1 to NA6), for the skip row counting only the cap's own skips (SK1 to SK4, SK4 pinning the skip block's exception handler), and for an uncorrelated dedup leaving the marker while a correlated one retracts it. Each carries a `RED-UNDER` twin.
+- `analytics-service/tests/test_mt5_series_end_is_last_ledger_day.py` pins that an MT5 series ends on its last ledger-activity day.
+- The finalize route tests assert the exact enqueue metadata object, correlation id included.
+- `e2e/freshness-chip-width.spec.ts` is a seeded one-line fit check for the FreshnessChip label, the baseline label and the SyncBadge at 1485px, and joins the `e2e-seeded` list.
+- `ARMS_FLOOR` in `scripts/mutation-floors.mjs`, the `sql-tests` floor, the hydration-guard pin and the census tests count the new arms. ⚠️ No full mutation run was taken locally, so the raised `ARMS_FLOOR` is a static count of the added arms and CI's run is the measurement.
+
+### Notes
+- **The MT5 strategy whose series stopped advancing has no money-math defect.** Diagnosis on PROD: the account has been idle since 2026-10-09 and the derive emits days only between the first and last ledger day, so the series cannot advance. The weekly cap above stops the daily re-derive of it. The flag attribution is inferred, not measured.
+- **The FreshnessChip overflow does not reproduce at HEAD**, measured at 1485px plus a 1485px-to-360px sweep (founder decision, SC-5 amended). Nothing in the chip changed; the spec above pins that it stays on one line.
+- Review: four MEDIUM findings (WR-01, WR-02, SFH-F1, SFH-F3) were fixed in one round. The migration and RLS reviews came back clean.
+- SC-4 (the fan-out's behaviour on PROD after the migrations apply) is a post-merge PROD read and is not measured by this PR.
+
+### Removed
+- TODOS entries closed by this phase: `0.1` (ledger-backed venues had no recurring refresh; its MT5 no-advance residue is answered by the weekly cap and the diagnosis), `0.12` (FreshnessChip overflow: does not reproduce at HEAD, now pinned by a seeded spec), and `211-D11-RESIDUAL-UNCORRELATED-SENDERS` (both finalize routes now send a `correlation_id`).
+
 ## [0.133.47.0] - 2026-11-14 — Phase 213 KEYFLOW: a key and its draft can never be silently mixed up
 
 The wizard no longer resumes a stored key's draft onto a key it cannot identify, and it tells the truth whenever it continues with an existing draft. A key with no strategy now has a way out: you can Disconnect it from its "No strategy yet" row. MT5 can no longer be added as a composite member. The scenario composer holds every figure that depends on the annualization basis until each leg's asset class is known.

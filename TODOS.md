@@ -32,104 +32,6 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    Re-homed from the deleted 0.01 "Phase 164.1 scope" wrapper.
    **Owner:** Phase 215 TESTREACH (booked 2026-11-14)
 
-0.12. **🎨 FreshnessChip's longest label overflows its masthead column — measured in a real browser.**
-   Found 2026-08-26 during the phase-162 browser pass on localhost/TEST (the first time this phase
-   was rendered outside jsdom). Measured on the factsheet v2 masthead at 1485px viewport:
-   - `COMPUTED · FRESH` → 1 line, 204.2px — fits
-   - `TRACK RECORD · OLD` → 1 line, 204.2px — **fits** (this was the badge fixer's flagged worry; DISPROVED)
-   - `TRACK RECORD · FUTURE — CHECK DATA` → **297.9px in a 204.2px container** — overflows
-   The row is `flex … justify-end`, so it pushes left rather than wrapping.
-   **Reachable:** the `future` tone fires on a future-dated input, and the chip names whichever fact
-   carried the verdict — so a future-dated SERIES END produces exactly this string. That is the case
-   `NEW-C20-07` exists to catch, so it is not hypothetical.
-   **Severity: cosmetic.** The sentence is TRUE; only its width is wrong. Not user-deceiving, so
-   non-blocking per the stopping rule.
-   **Fix candidates:** shorten the future label on the series arm (e.g. `TRACK RECORD · FUTURE`), or
-   let the label row wrap at this breakpoint. Re-measure in a browser — jsdom cannot see this class.
-   **Owner:** Phase 214 FRESHTRUTH (booked 2026-11-14)
-
-0.1. **⛔ LEDGER-BACKED VENUES HAVE NO RECURRING STRATEGY REFRESH — MT5 factsheets go stale
-   silently, forever.** Founder-reported 2026-08-23 ("MT5 strategies are not being read out every
-   day, and data gets stale"); root-caused by measurement against PROD 2026-08-24.
-   - **Measured on PROD.** `strategy_analytics` for the 4 live MT5 strategies: newest
-     `2026-08-21 13:51`, oldest `2026-08-04 14:20` (17–20 days). Same query for okx:
-     `2026-08-23 21:44` (~2h). MT5 `api_keys.last_sync_at` is FRESH (`2026-08-23 04:09`).
-   - **Root cause.** `process_key_long` is the ONLY path that reaches `strategy_analytics` for a
-     ledger-backed venue. There is **no recurring enqueuer for it anywhere.** The two
-     daily strategy-keyed crons both gate on ccxt-only closed sets that exclude mt5:
-     `/api/cron/reconcile-strategies` (03:30) on `RECONCILABLE_EXCHANGES = FUNDING_EXCHANGES`
-     = binance/okx/bybit, and `/api/cron/sync-funding` (04:00) on the same set. The 15-min
-     `cron_sync` defers anything outside `EXCHANGE_CLASSES` (binance/okx/bybit/deribit) at
-     `routers/cron.py:182`. So after onboarding, an MT5 strategy is never recomputed again.
-   - ⚠️ **CORRECTED 2026-08-25 (re-measured at HEAD `57a407ea`).** Two refinements this entry
-     originally got wrong or left implicit:
-     1. **`process_key_long` is not enqueued from `api/strategies/finalize-wizard`** — that route's
-        own test asserts the opposite (`route.test.ts:1630`). At HEAD it is enqueued at two Python
-        sites: `analytics-service/routers/process_key.py:1517` and `:765`.
-     2. **The three ledger venues are ASYMMETRIC.** Only mt5 and sfox hit the `:182` deferral;
-        deribit is IN `EXCHANGE_CLASSES` (as this entry already notes) and instead falls to the
-        `stored > 0` fill-count filter at `routers/cron.py:471-472`, which is structurally wrong
-        for a settlement-ledger venue. Any fix scoped as "venues absent from `EXCHANGE_CLASSES`"
-        silently drops deribit — scope off `_LEDGER_BACKED_SOURCES` instead.
-     3. **Re-enqueuing `process_key_long` is a provable no-op**, so the naive fix ships green and
-        does nothing: `long_fetch.py:154` returns `DONE` on `published`, `:193` on the whole
-        `advanced_statuses` set, and every onboarded strategy is `published`.
-     Full detail in `.planning/phases/161.1-.../161.1-RESEARCH.md`.
-   - **Why it stayed invisible.** The two pg_cron KEY-scoped jobs that DO cover mt5 —
-     `poll_allocator_positions` (04:00) and `refresh_allocator_equity_daily` (05:00) — run clean
-     every day and advance `last_sync_at`. Key-mode `derive_broker_dailies` explicitly does NOT
-     stamp `strategy_analytics` (`job_worker.py:2366` docstring: the per-key series is "dark").
-     Net effect: the UI reads "synced 20h ago" on a factsheet that is weeks old. Zero errors,
-     zero failed jobs — 14-day `compute_jobs` census shows no MT5 failures at all.
-   - **⛔ Two fixes that look right and are NOT.** (a) Adding mt5 to `RECONCILABLE_EXCHANGES`:
-     `run_reconcile_strategy_job` calls `fetch_raw_trades` (ccxt) — mt5 is in
-     `_LEDGER_BACKED_SOURCES`, so this is the BYB-02 ccxt-fill class. (b) Re-registering the
-     `derive-allocator-key-dailies` cron: it is key-mode (never stamps `strategy_analytics`), it
-     was DELIBERATELY unscheduled at the v1.11 recovery, and
-     `docs/runbooks/flipretry-derived-equity-go-live.md:171` forbids re-registering it via a
-     migration — an auto-applying migration paired with a silently-skipped worker deploy recreates
-     the v1.11 wedge verbatim. A migration doing exactly this was written and DELETED unmerged
-     on 2026-08-24 after `migration-reviewer` caught it.
-     ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON, D-05):** the
-     `derive-allocator-key-dailies` cron is being re-registered by 167.1.2.2, see its runbook
-     `docs/runbooks/derivecron-go-live.md`, for allocator books (167.1.2 PR C2's reader accepts
-     only the version-2 row it produces). Item (b) remains correct as a statement about the
-     strategy-refresh problem it sits under: the job still does not stamp `strategy_analytics`.
-     The migration prohibition stands.
-   - **Shape of the real fix.** A recurring strategy-keyed enqueuer of `process_key_long` for
-     ledger-backed venues (mt5/sfox/deribit), which chains → `derive_broker_dailies` (strategy-mode)
-     → `compute_analytics_from_csv` → `strategy_analytics`. ⚠️ Carries the v1.11 worker-wedge risk
-     shape: MT5 serializes on ONE shared terminal (`services/mt5_concurrency.py`) at a 15-min
-     timeout per key. Founder-gated activation (schedule left unregistered, SFOX_ENABLED pattern)
-     is the safe landing. NOT yet built.
-   - ⚠️ **PROGRESS 2026-08-25 (Phase 161.1) — built, DORMANT, and this entry stays OPEN.**
-     Shipped: `supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql` (the
-     read-only freshness surface, keyed on the max date inside `returns_series` — a signal no
-     status transition can advance); `supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql`
-     (`enqueue_ledger_refresh_for_strategies()`, a staleness-gated, bounded fan-out on the chain
-     TAIL, fail-closed behind the `app.ledger_refresh_enabled` database setting); the D-15
-     non-destructive failure guard in `job_worker.py`; and the founder-gated activation runbook
-     `docs/runbooks/ledger-refresh-go-live.md`.
-     - **The A7 unknown is closed.** The recurring mt5 `derive_broker_dailies` →
-       `strategy_analytics` path had never run end-to-end. Executed on PROD 2026-08-25: PASS —
-       `last_return_date` 2026-08-21 → 2026-08-25 (+4 real bars), status held
-       `complete_with_warnings`, whole chain 44 s.
-     - ⛔ **NOT CLOSED, and not closable by merging.** The mechanism ships DORMANT by design: no
-       schedule is registered anywhere in the repo, and the fan-out returns 0 until a founder
-       executes the runbook's two LIVE ops. **A merged-but-dormant fix is not a fixed defect.**
-       Recording this closed at merge would put a green badge over strategies that are still going
-       stale — which is precisely the failure mode this phase exists to eliminate, committed by
-       the ledger that is supposed to track it. Close it only after the runbook has been executed
-       and the staleness view's stale count is observed to drain.
-   - **Re-measured on PROD 2026-11-14 (FIX NOW triage).** The fan-out has been live since
-     2026-09-17. `ledger_refresh_staleness` held 13 rows: 9 of 11 MT5 strategies fresh (1-4 days).
-     One MT5 strategy at 81 days has a disconnected key (expected). One MT5 strategy at 36 days has
-     a live key that synced the same day, and its daily derive and compute finish `publish_warned`
-     with flags `dust_nav_guard` / `twr_chain_broken` / `insufficient_window`, so its series cannot
-     advance while the fan-out re-derives it daily. That residue, not the whole venue class, is
-     what stays open here.
-   **Owner:** Phase 214 FRESHTRUTH (booked 2026-11-14)
-
 ### Phase 153.7 review + verification — findings routed onward (added 2026-08-14)
 
 The 153.7 fix round closed WR-01, WR-02, WR-03, W-153.7-1 (with a real guard, not a note),
@@ -4104,28 +4006,6 @@ Counts and ages only; no ids. Each entry below was recorded by plan 13 rather th
 fixing it would widen the phase past its six success criteria. The two earlier TRADESYNC bookings
 (`[167.1.2.2.2-CRON-TICK-RESIDUALS]` and `[167.1.2.2.2-PROVENANCE-GATE-RESIDUALS]`) sit above, under the
 DERIVECRON heading, where plans 01 and 02 appended them.
-
-### 211-D11-RESIDUAL-UNCORRELATED-SENDERS — two enqueue callers send no `correlation_id`, so the SQL dedup cannot retract an inherited refresh marker for them (booked 2026-11-14, Phase 211 SYNCJOBS D11-9)
-
-**Why it is open.** Phase 211 closed `161.1-D11` with founder option B ("Record + drop the flag"). On an
-enqueue dedup hit, `_record_enqueue_dedup` (migration `20261114130000`) records the caller's metadata. For
-a caller that sends a `correlation_id` and no refresh marker, it also retracts an inherited
-`ledger-refresh` marker. Two callers send no `correlation_id`, so the retraction never fires for them:
-
-- (a) The finalize-wizard `stitch_composite` enqueue sends `{source: "finalize-wizard"}`. The TypeScript
-  backstop retraction in `src/lib/ledger-refresh-marker.ts` still covers it.
-- (b) The csv-finalize `compute_analytics_from_csv` enqueue has no backstop. A user's CSV finalize that
-  dedups onto a marked refresh job therefore stays on the quiet refresh path.
-
-Widening either caller changes TypeScript callers, so it was out of Phase 211's scope (D11-9).
-
-**Owner:** Phase 214 FRESHTRUTH (founder decision 2026-11-14: D11-9 goes into Phase 214; ROADMAP Phase 214 carries it as a success criterion). Until 214 ships, the trigger below still applies.
-**Trigger:** any edit to the finalize-wizard or csv-finalize enqueue, or a user CSV finalize whose
-failure is reported quietly because it inherited a refresh marker.
-**Gate (what closes it):** both callers send a `correlation_id`, or a founder decision widens the helper's
-predicate. Either way it needs a SQL gate arm that fails first: on today's code, an uncorrelated
-csv-finalize dedup onto a marked job leaves the marker.
-
 
 ### 167.1.2.2.2-CRONOBS-SCOPE — the prober's `cron-obs` arm watches two named jobs and joins pg_net rows by time alone (booked 2026-10-10, Phase 167.1.2.2.2 SC-6)
 
