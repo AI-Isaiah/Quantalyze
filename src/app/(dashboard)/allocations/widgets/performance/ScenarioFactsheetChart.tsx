@@ -125,6 +125,13 @@ export interface ScenarioFactsheetChartProps {
    * payload. Wired by wave-3 from the active units' asset_class.
    */
   periodsPerYear?: number;
+  /**
+   * Phase 213 decision (d), SC-4: true while any blend leg's asset-class probe is
+   * open, so `periodsPerYear` is the interim basis. Forwarded to the builder, which
+   * holds every basis-dependent slot silently (its docblock carries the slot map).
+   * Optional, default false: every other caller renders today's payload.
+   */
+  basisPending?: boolean;
 }
 
 /**
@@ -202,6 +209,7 @@ export function ScenarioFactsheetChart({
   scenarioMandate,
   scenarioOwnBookDelta,
   periodsPerYear = 252,
+  basisPending = false,
 }: ScenarioFactsheetChartProps) {
   // Synthesize the minimal, valid FactsheetPayload (csv arm) the factsheet
   // TimeSeriesChart + MasterBrush consume verbatim. SINGLE full-res returns axis
@@ -222,8 +230,9 @@ export function ScenarioFactsheetChart({
         scenarioMandate,
         scenarioOwnBookDelta,
         periodsPerYear,
+        basisPending,
       }),
-    [benchmark, portfolioDaily, scenarioPeer, scenarioMandate, scenarioOwnBookDelta, periodsPerYear],
+    [benchmark, portfolioDaily, scenarioPeer, scenarioMandate, scenarioOwnBookDelta, periodsPerYear, basisPending],
   );
 
   const axisLength = synthPayload.dates.length;

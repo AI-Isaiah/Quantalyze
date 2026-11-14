@@ -146,6 +146,50 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   try {
     const supabase = await createClient();
+
+    // Phase 213 / KEYFLOW decision (c) (founder, 2026-11-14) — an MT5 key can
+    // NEVER be a composite member: the stitch job has no mt5 arm. `composite/
+    // add-key` refuses an mt5 MINT, but this route attaches EXISTING keys by id,
+    // so the same refusal is owed here, BEFORE the membership RPC (which makes
+    // "we stopped before saving anything" true on this emitter too).
+    //
+    // User-scoped read with the tenant filter explicit (never RLS alone). A
+    // member id the caller does not own simply returns no row and stays the
+    // RPC's own ownership answer: no distinguishable refusal, so no ownership
+    // oracle (T-213-07). A FAULTED read refuses 500 UNKNOWN and never passes
+    // (Rule 12: fail loud) — passing on a read we could not make would let an
+    // mt5 key through exactly when the table is least observable.
+    //
+    // ⚠️ A UX fence, not a database invariant: a direct PostgREST insert into
+    // `strategy_keys` or a direct `set_wizard_composite_members` call is not
+    // fenced here (bounded residual, CONTEXT "No SQL change").
+    const { data: owned, error: ownedError } = await supabase
+      .from("api_keys")
+      .select("id, exchange")
+      .in(
+        "id",
+        members.map((k) => k.api_key_id as string),
+      )
+      .eq("user_id", user.id);
+    if (ownedError) {
+      const correlationId = await getCorrelationId();
+      console.error(
+        `[strategies/composite/set-members] api_keys exchange read failed [correlation_id=${correlationId}]:`,
+        ownedError.message,
+        ownedError.code,
+      );
+      return NextResponse.json(
+        { code: "UNKNOWN" },
+        { status: 500, headers: NO_STORE_HEADERS },
+      );
+    }
+    if ((owned ?? []).some((row) => row.exchange?.toLowerCase() === "mt5")) {
+      return NextResponse.json(
+        { code: "COMPOSITE_MT5_UNSUPPORTED" },
+        { status: 400, headers: NO_STORE_HEADERS },
+      );
+    }
+
     const { data, error } = await supabase.rpc("set_wizard_composite_members", {
       p_user_id: user.id,
       p_strategy_id: strategy_id,

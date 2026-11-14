@@ -357,6 +357,24 @@ export function WizardClient({
    * where its visual donor, the session-expired strip, already lives.
    */
   const [dedupedExisting, setDedupedExisting] = useState(false);
+  /**
+   * 213 KEYFLOW / CR-02 (founder option 1, 2026-11-14). True when that dedup
+   * landed on the strategy THIS wizard session already held — the F6 session
+   * fence answering a resubmit (typically after "Try another key") with the
+   * original draft and its original key, without validating the credentials
+   * just typed. "These credentials are already connected" would be false there,
+   * so the strip says what happened instead. Set and cleared with
+   * `dedupedExisting`, from the same result.
+   */
+  const [dedupedKeptDraft, setDedupedKeptDraft] = useState(false);
+  /**
+   * 213 / R3-M2. True when the dedup is known only through the step's
+   * `heldSession` flag (an earlier attempt ended unanswered): the server
+   * answered with SOME existing strategy, which may be this setup's own draft
+   * or an earlier setup's, so the strip may not claim the specific "kept …
+   * original key" sentence. Mutually exclusive with `dedupedKeptDraft`.
+   */
+  const [dedupedHeldOnly, setDedupedHeldOnly] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [requestCallOpen, setRequestCallOpen] = useState(false);
   const wizardStartFiredRef = useRef(false);
@@ -509,6 +527,12 @@ export function WizardClient({
           } else if (loaded.apiKeyId !== incomingApiKeyId) {
             reason = "key_mismatch";
           }
+        } else if (source === "api" && typeof loaded.apiKeyId === "string") {
+          // Phase 213 / KEYFLOW decision (a) — this mount named NO key (no draft,
+          // no preselect) and the stored pointer holds one, so
+          // `deriveWizardResumeOverrides` declined its session id. Fixed string:
+          // never the key id.
+          reason = "incoming_key_unknown";
         }
         // COUNTABLE, not merely diagnosable. A console warning is a Sentry
         // breadcrumb; it cannot answer "how often does this fence fire in
@@ -1045,6 +1069,20 @@ export function WizardClient({
       // set and never cleared would eventually be a claim about a different
       // submit.
       setDedupedExisting(result.deduped === true);
+      // 213 / CR-02: `strategyId` is the id held BEFORE this result lands
+      // (the setStrategyId above is not applied yet in this tick).
+      const sameStrategy =
+        result.deduped === true &&
+        strategyId != null &&
+        result.strategyId === strategyId;
+      setDedupedKeptDraft(sameStrategy);
+      // 213 / WR-02 + R3-M2 — an earlier attempt ended unanswered (Stop
+      // waiting, the deadline, or a lost response): the server may hold a draft
+      // this session never learned the id of, so the id comparison cannot see
+      // it, and the dedup may equally be onto an earlier setup's strategy.
+      setDedupedHeldOnly(
+        result.deduped === true && !sameStrategy && result.heldSession === true,
+      );
       setStep("sync_preview");
       // 164.2.1 — `result.apiKeyId`, never the `apiKeyId` state: setApiKeyId
       // above has not been applied yet in this tick.
@@ -1055,7 +1093,7 @@ export function WizardClient({
         exchange: result.exchange,
       });
     },
-    [wizardSessionId, persistPointer],
+    [wizardSessionId, persistPointer, strategyId],
   );
 
   const handleSyncComplete = useCallback(
@@ -1345,8 +1383,11 @@ export function WizardClient({
             data-testid="wizard-dedup-notice"
             className="mb-4 rounded-md border border-border bg-page px-3 py-2 text-caption text-text-secondary"
           >
-            These credentials are already connected. We continued with your
-            existing strategy instead of creating a duplicate.
+            {dedupedKeptDraft
+              ? "We kept the strategy this setup already created, on its original key. To connect different credentials, delete this draft first."
+              : dedupedHeldOnly
+                ? "We continued with a strategy that already exists for these credentials or this setup instead of creating a duplicate. To connect different credentials, delete that draft first."
+                : "These credentials are already connected. We continued with your existing strategy instead of creating a duplicate."}
           </div>
         )}
 
@@ -1479,6 +1520,16 @@ export function WizardClient({
                   //   · DIFFERENT key ⇒ the normal create path runs. The old
                   //     draft ages into the existing ≥7-day nightly sweep or the
                   //     user's own explicit delete.
+                  //     ⛔ CORRECTED 2026-11-14 (213 KEYFLOW, CR-02) — the
+                  //     DIFFERENT-key bullet above is FALSE at HEAD. The F6
+                  //     session fence in create-with-key runs first, reads
+                  //     `strategies` by (user_id, wizard_session_id) only, and
+                  //     answers `deduped: true` with the original draft and key
+                  //     without validating the new credentials. The wizard now
+                  //     says so (`dedupedKeptDraft` strip: "We kept the strategy
+                  //     this setup already created, on its original key…").
+                  //     Kept as lineage; a DIFFERENT key in the same session
+                  //     does not connect until the draft is deleted.
                   // There is no silent divergence left to exploit, so there is
                   // nothing for an optimistic re-mint to close.
                   //

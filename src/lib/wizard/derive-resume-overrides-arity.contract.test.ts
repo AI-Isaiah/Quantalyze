@@ -11,12 +11,22 @@
  * nothing in the suite goes red — the failure is silent in exactly the way this
  * phase exists to remove.
  *
+ * ⛔ SUPERSEDED 2026-11-14 (Phase 213 decision (a)) for the API branch: an
+ * omitted or `null` 4th argument no longer fails OPEN there. Meeting a stored
+ * STRING `apiKeyId` it now fails CLOSED (the stored session id is declined,
+ * unless the stored draft is the one on screen). The CSV branch is unchanged:
+ * its literal `null` is "provably keyless" and still restores, so the production
+ * call sites must keep naming all four arguments. That is why the arity guard
+ * below stays exactly as it is, and why the sentences above are kept as lineage.
+ *
  * ⛔ MAKING THE PARAMETER REQUIRED IS NOT AVAILABLE, and it is worth recording
  * why rather than leaving the obvious fix looking un-considered: the phase's
- * success criterion 5 requires the ~25 existing three-argument unit pins to pass
- * UNMODIFIED, which is what proves the default did not change the gate's
- * behaviour for a caller that makes no key claim. Making it required would edit
- * every one of them and destroy that evidence. The default stays; this guard is
+ * success criterion 5 required the ~25 existing three-argument unit pins to pass
+ * UNMODIFIED, which proved the default did not change the gate's behaviour for a
+ * caller that makes no key claim. Measured at Phase 213: they still pass
+ * unmodified, because their payloads carry no `apiKeyId` (the unknown-key decline
+ * needs a stored string key), so the evidence survives. Making the parameter
+ * required would still edit every one of them. The default stays; this guard is
  * what stops it becoming a hole on the PRODUCTION side, where the fence is real.
  *
  * SO THE POPULATION IS SPLIT ON PURPOSE. Test files may (and do) call the

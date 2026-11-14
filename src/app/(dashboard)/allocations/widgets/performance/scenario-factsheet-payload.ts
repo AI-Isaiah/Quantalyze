@@ -56,6 +56,67 @@
  *     statistics are NaN (D7), which every renderer formats as "—".
  *   - The `csv` arm is correct by construction: a hypothetical scenario
  *     physically cannot carry peer-rank / portfolio panels (no-invented-data).
+ *
+ * PHASE 213 DECISION (d), SC-4 — the pending hold (`basisPending`).
+ * While any blend leg's asset-class probe is open, `periodsPerYear` is the INTERIM
+ * basis (the nullish => 365 rule), and a number computed on it would flip when the
+ * leg settles (traditional => 252). `basisPending: true` replaces ONLY the
+ * basis-dependent slots below, after the normal computation, with a form the real
+ * `FactsheetBody` renders SILENTLY (a dash, or nothing), never an empty or
+ * unavailable reason. Default false: the build is deep-equal to today's, so every
+ * other caller (the src/app/factsheet/[id]/v2 fixtures included) is unaffected.
+ *
+ * SLOT MAP (measured by reading `compute.ts`, `rolling.ts`, `bootstrap.ts` and the
+ * renderers, and by diffing a 252 build against a 365 build of the same series):
+ *
+ *   field                              pending form                      prints a caption?
+ *   strategyMetrics.ann_vol/sharpe/    NaN                               no: every renderer
+ *     sortino                                                              formats NaN as "—" (D7)
+ *   strategyMetrics.cagr, .calmar      NaN only when the 365 and 252     no (same NaN dash).
+ *                                      gate verdicts of this record      Invariant under the
+ *                                      differ, else untouched            default conventions;
+ *                                                                        see CAGR RULE below
+ *   figureRecord                       omitted: the gate's "null" state  no: "figures show, no
+ *                                      (MetricsColumn / BatchDPanels)     note"
+ *   strategyRolling{Vol,Sharpe,        []                                no: nothing is drawn
+ *     Sortino} (row window)
+ *   strategyRolling{Vol,Sharpe,        null (with rollingWindow1y null)  no: the 1y panel and the
+ *     Sortino}1y                                                          window choice are not mounted
+ *   rollingWindow.annualization        omitted (window and label kept)   no: absent verdict is
+ *                                                                        "figures as carried, no
+ *                                                                        note"; emptyBlendRollingWindow()
+ *                                                                        withheld/record WOULD print a
+ *                                                                        cause, so it is not used
+ *   bootstrapCI.sharpe / .sortino      NaN point and interval, empty     no: BootHist reads "—"
+ *                                      histogram, n_valid omitted         with no note. n_valid 0 or
+ *                                                                        emptyBootstrapCI() (n 0) WOULD
+ *                                                                        print "no resample has a
+ *                                                                        Sharpe" / "drawn from 0
+ *                                                                        observations", so neither is used
+ *   bootstrapCI.max_dd, n_resamples,   untouched (basis-invariant)       n/a
+ *     block_len, n
+ *   scenarioPeer, scenarioOwnBookDelta omitted: both panels print a            no: absent carve-out is the
+ *     (carve-outs, not metrics)         "sample/{N} basis" caption, and with   existing "silently absent"
+ *                                       no figureRecord that N reads the       path (the panels return
+ *                                       interim 365 (BatchDPanels)             null); they reappear on settle
+ *   everything else (equity, drawdowns, returns, heatmaps, streaks, quantiles,
+ *   rollingBetaWindow, calmarByYear, the other scalar metrics)            untouched
+ *
+ * CAGR RULE (UI-SPEC 4.3, founder review item 6): `compute()` moves CAGR and Calmar
+ * with `periodsPerYear` only under arithmetic conventions, which this builder never
+ * passes, so they are basis-invariant here. The rail would still show or withhold
+ * them by the gate's verdict, and that verdict reads the record at the basis. So
+ * they are held only when the gate verdict for this blend record at 365 differs
+ * from the one at 252 (a record the two clocks disagree on, e.g. 70 days: 252
+ * clears on observations, 365 needs a 90-day span). This preview is the only
+ * composer surface that paints a blend CAGR, so the rule lives here alone.
+ *
+ * ZOOMED RANGE (CR-01): the held payload still carries the interim `periodsPerYear`
+ * (omitting it would print the window's "needs an annualization basis" reason, which
+ * is worse), and `windowView` re-derives over any zoomed range on it. So the payload
+ * also carries `basisPending: true`, and `windowView` blanks the same annualized-risk
+ * slots (Ann. vol, Sharpe, Sortino, bootstrap Sharpe and Sortino) over the slice,
+ * whatever gesture set the range: a persisted range, the period control or the brush.
  */
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { compute, worstDrawdowns } from "@/lib/factsheet/compute";
@@ -69,7 +130,7 @@ import {
   ROLL_WINDOW_30D,
   ROLL_WINDOW_1Y_DAYS,
 } from "@/lib/factsheet/rolling";
-import { coveredDays, figureRecord, firstUnreadableDate, gateRollingWindow } from "@/lib/figure-gate";
+import { coveredDays, figureRecord, firstUnreadableDate, gateAnnualized, gateRollingWindow } from "@/lib/figure-gate";
 import type { FigureRecord } from "@/lib/figure-gate";
 import { streakLengths, streakHistogram } from "@/lib/factsheet/streak";
 import { calmarByYear } from "@/lib/factsheet/calmar-by-year";
@@ -138,6 +199,13 @@ export interface ScenarioFactsheetPayloadArgs {
    * √periodsPerYear; compute()'s CAGR rides the calendar clock and is invariant.
    */
   periodsPerYear?: number;
+  /**
+   * Phase 213 decision (d), SC-4: true while any blend leg's asset-class probe is
+   * open, so `periodsPerYear` is the interim basis. Holds every basis-dependent
+   * slot silently (see the slot map in the module docblock). Optional, default
+   * false: the payload then deep-equals today's for the same input.
+   */
+  basisPending?: boolean;
 }
 
 /**
@@ -334,9 +402,20 @@ type ReturnsBody = {
   quantiles: FactsheetCsvPayload["quantiles"];
 };
 
+/** The blend's TOTAL record as the gate would see it at a given basis (decision (d), CAGR rule). */
+function basisRecord(datesR: string[], observations: number, periodsPerYear: number): FigureRecord {
+  return figureRecord({
+    seriesStart: datesR[0],
+    seriesEnd: datesR[datesR.length - 1],
+    observations,
+    periodsPerYear,
+  });
+}
+
 function buildReturnsBody(
   portfolioDaily: DailyPoint[],
   periodsPerYear: number,
+  basisPending = false,
 ): ReturnsBody {
   const rets = portfolioDaily.map((p) => p.value);
   const datesR = portfolioDaily.map((p) => p.date);
@@ -445,23 +524,41 @@ function buildReturnsBody(
   const { wins, losses } = streakLengths(rets);
   const MAX_LEN = 14;
 
+  // Phase 213 decision (d): while a leg's probe is open the interim basis is live, so
+  // the basis-dependent slots take the silent forms in the module docblock's slot map.
+  // `held` is false on every default call, which leaves each field exactly as built.
+  const held = basisPending;
+  const bootstrap = bootstrapCI(rets, 2000, 5, 42, periodsPerYear);
+  const emptyRatioCI = { point: NaN, lo: NaN, hi: NaN, hist: { lo: 0, hi: 0, bins: [] as number[] } };
+  const clearsAtBothBases =
+    gateAnnualized(basisRecord(datesR, rets.length, 365)) === gateAnnualized(basisRecord(datesR, rets.length, 252));
+  const heldMetrics: ComputeSummary = {
+    ...strategyMetrics,
+    ann_vol: NaN,
+    sharpe: NaN,
+    sortino: NaN,
+    ...(clearsAtBothBases ? {} : { cagr: NaN, calmar: NaN }),
+  };
+  const { annualization: _verdict, ...pickWithoutVerdict } = rollingPick;
+
   return {
     dates: datesR,
     strategyEquity: eq,
     strategyDrawdowns: dd,
     strategyReturns: rets,
-    strategyRollingVol: rollingVol(rets, rollWindow.window, periodsPerYear),
-    strategyRollingSharpe: rollingSharpe(rets, rollWindow.window, periodsPerYear),
-    strategyRollingSortino: rollingSortino(rets, rollWindow.window, periodsPerYear),
-    rollingWindow: rollingPick,
-    rollingWindow1y: rolling1y.window,
-    strategyRollingVol1y: rolling1y.vol,
-    strategyRollingSharpe1y: rolling1y.sharpe,
-    strategyRollingSortino1y: rolling1y.sortino,
+    strategyRollingVol: held ? [] : rollingVol(rets, rollWindow.window, periodsPerYear),
+    strategyRollingSharpe: held ? [] : rollingSharpe(rets, rollWindow.window, periodsPerYear),
+    strategyRollingSortino: held ? [] : rollingSortino(rets, rollWindow.window, periodsPerYear),
+    rollingWindow: held ? pickWithoutVerdict : rollingPick,
+    rollingWindow1y: held ? null : rolling1y.window,
+    strategyRollingVol1y: held ? null : rolling1y.vol,
+    strategyRollingSharpe1y: held ? null : rolling1y.sharpe,
+    strategyRollingSortino1y: held ? null : rolling1y.sortino,
     rollingBetaWindow: rollBetaWindow,
-    figureRecord: record,
+    // Held: no record, the gate's "null" state (figures show, no note).
+    figureRecord: held ? null : record,
     strategyWorst10: worstDrawdowns(dd, 10),
-    strategyMetrics,
+    strategyMetrics: held ? heldMetrics : strategyMetrics,
     streaks: {
       winsByLength: streakHistogram(wins, MAX_LEN),
       lossesByLength: streakHistogram(losses, MAX_LEN),
@@ -474,7 +571,9 @@ function buildReturnsBody(
     calmarByYear: calmarByYear(rets, datesR),
     // periodsPerYear at build-payload.ts:237's positional slot; the 2000/5/42
     // resample/block/seed defaults are unchanged (byte-identical at 252).
-    bootstrapCI: bootstrapCI(rets, 2000, 5, 42, periodsPerYear),
+    bootstrapCI: held
+      ? { ...bootstrap, sharpe: { ...emptyRatioCI, hist: { ...emptyRatioCI.hist } }, sortino: { ...emptyRatioCI, hist: { ...emptyRatioCI.hist } } }
+      : bootstrap,
     monthlyReturns: monthlyReturnsMatrix(rets, datesR),
     dailyHeatmap: dailyReturnsByYear(rets, datesR),
     // D-4 / Pitfall 5: the blend has no separate benchmark daily series, so pass
@@ -517,13 +616,14 @@ export function buildScenarioFactsheetPayload(
     scenarioMandate,
     scenarioOwnBookDelta,
     periodsPerYear = 252,
+    basisPending = false,
   } = args;
   const id = strategyId ?? DEFAULT_SCENARIO_ID;
 
   // The single returns-derived body — chart line + scalars + panel arrays, all
   // on one full-res axis. Self-guards its returns-degenerate gate before any
   // compute() call (PAYLOAD-01..05, WR-01). Degenerate → every field safe-empty.
-  const body = buildReturnsBody(portfolioDaily ?? [], periodsPerYear);
+  const body = buildReturnsBody(portfolioDaily ?? [], periodsPerYear, basisPending);
   const { dates, strategyEquity, strategyDrawdowns } = body;
   const degenerate = dates.length === 0;
 
@@ -555,12 +655,18 @@ export function buildScenarioFactsheetPayload(
     // produces a byte-identical payload, and the type-field invariant holds
     // (scenarioPeer is a csv-only additive field; the three synthetic api
     // panels stay structurally absent).
-    ...(scenarioPeer ? { scenarioPeer } : {}),
+    // Phase 213 decision (d): while pending both carve-outs below are left off. The peer
+    // panel and the own-book panel each print "sample/{N} basis", and with `figureRecord`
+    // held back N would read the interim 365 and then flip to 252. An absent carve-out is
+    // the panels' existing silent path.
+    ...(scenarioPeer && !basisPending ? { scenarioPeer } : {}),
     // PEER-04 / PEER-05 (ADR-0025): same conditional-spread discipline — each key
     // is OMITTED (not undefined) when its arg is absent, so the bare-blend / real
     // factsheet call sites stay byte-identical and the carve-outs are blend-only.
     ...(scenarioMandate ? { scenarioMandate } : {}),
-    ...(scenarioOwnBookDelta ? { scenarioOwnBookDelta } : {}),
+    ...(scenarioOwnBookDelta && !basisPending ? { scenarioOwnBookDelta } : {}),
+    // CR-01: tells `windowView` to hold the same slots over a zoomed range. Omitted when false, and on the empty blend (nothing to window).
+    ...(basisPending && !degenerate ? { basisPending: true } : {}),
     strategyId: id,
     strategyName: SCENARIO_NAME,
     strategyTypes: [],

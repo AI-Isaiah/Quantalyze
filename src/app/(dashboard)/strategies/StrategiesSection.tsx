@@ -25,7 +25,7 @@
  * own; the overlay renders `null` while closed and portals to document.body.
  */
 
-import { useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
 import { useRouter } from "next/navigation";
 import { ContributionWizardOverlay } from "@/app/(dashboard)/allocations/components/ContributionWizardOverlay";
 import {
@@ -33,11 +33,24 @@ import {
   type PlaceholderKeyRow,
 } from "@/components/strategy/StrategyTable";
 import { MarkOwnershipDialog } from "@/components/strategy/MarkOwnershipDialog";
+import { Modal } from "@/components/ui/Modal";
+import { Button } from "@/components/ui/Button";
+import { LiveRegion } from "@/components/ui/LiveRegion";
+import {
+  deleteFeedsNote,
+  readKeyFeedsForConfirm,
+  type DeleteFeedsState,
+} from "@/components/exchanges/key-feeds-confirm";
+import { createClient } from "@/lib/supabase/client";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { CapitalOwnership } from "@/lib/capital-ownership";
 import type { FactsheetOrigin } from "@/lib/factsheet/origin";
 import type { PercentileMap, RankedStrategyRow } from "@/lib/queries";
 import type { SupportedExchange } from "@/lib/utils";
 import type { PreselectedKey } from "@/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep";
+
+/** What the Disconnect confirm needs of a row, and nothing more (see `markTarget`). */
+type DisconnectTarget = { id: string; exchangeLabel: string; keyLabel: string };
 
 /**
  * 162-06 / HONEST-06 — the placeholder row AS THIS SURFACE KNOWS IT.
@@ -52,6 +65,153 @@ import type { PreselectedKey } from "@/app/(dashboard)/strategies/new/wizard/ste
 export type OwnerPlaceholderKeyRow = PlaceholderKeyRow & {
   exchange: SupportedExchange;
 };
+
+/**
+ * Phase 213 plan 06 (decision (b), SC-2) — the Disconnect-only confirm for a
+ * "No strategy yet" row. It reuses the feeds read and wording the Profile key
+ * manager's confirm uses (`key-feeds-confirm.ts`, one implementation) and
+ * narrows it: exactly two buttons, Cancel and Disconnect, for every role.
+ * There is no Delete key button, no holdings read and no cascade box here, by
+ * construction: this host never imports a delete path. The RPC only stamps
+ * `disconnected_at`; the key row is kept, so the account can be connected again.
+ *
+ * Mounted only while a target is set and keyed by its id, so each open starts
+ * with its own feeds read and no state from the previous key.
+ */
+function DisconnectKeyConfirm({
+  target,
+  allocatorBody,
+  onClose,
+  onDisconnected,
+}: {
+  target: DisconnectTarget;
+  /** Allocator and `both` hear the source confirm's sentence; a manager-only page its own. */
+  allocatorBody: boolean;
+  onClose: () => void;
+  onDisconnected: () => void;
+}) {
+  const [feeds, setFeeds] = useState<DeleteFeedsState>({ state: "checking" });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const feedsSeqRef = useRef(0);
+
+  // The sequence drops an answer older than the newest read (a Retry, a
+  // closed confirm), the same idiom as the source confirm.
+  const targetId = target.id;
+  const startRead = useCallback(() => {
+    const seq = ++feedsSeqRef.current;
+    void readKeyFeedsForConfirm(targetId).then((answer) => {
+      if (feedsSeqRef.current !== seq) return;
+      setFeeds(answer === "unreadable" ? { state: "unchecked" } : { state: "ok", feeds: answer });
+    });
+  }, [targetId]);
+  useEffect(() => {
+    startRead();
+    return () => {
+      feedsSeqRef.current += 1;
+    };
+  }, [startRead]);
+
+  // Esc, the header close and Cancel are ignored while the request is in flight.
+  const close = () => {
+    if (loading) return;
+    feedsSeqRef.current += 1;
+    onClose();
+  };
+
+  async function disconnect() {
+    setLoading(true);
+    setError(null);
+    let failed = false;
+    // A returned error and a thrown rejection (a network fault) are the same failure to
+    // the owner and to the operator: logged, captured (tags only, no key id), shown.
+    const report = (err: unknown) => {
+      failed = true;
+      console.error("[StrategiesSection] disconnect_allocator_api_key failed:", err);
+      captureToSentry(err, { tags: { component: "DisconnectKeyConfirm", stage: "disconnect-rpc" } });
+    };
+    try {
+      const supabase = createClient();
+      const { error: rpcError } = await supabase.rpc("disconnect_allocator_api_key", {
+        p_api_key_id: target.id,
+      });
+      if (rpcError) report(rpcError);
+    } catch (err) {
+      report(err);
+    } finally {
+      setLoading(false);
+    }
+    if (failed) {
+      setError("Could not disconnect this key. Please try again.");
+      return;
+    }
+    feedsSeqRef.current += 1;
+    onDisconnected();
+  }
+
+  const note = deleteFeedsNote(feeds, false);
+  return (
+    <Modal
+      open
+      onClose={close}
+      // Esc fires `cancel` before `close`: keep the dialog open while the request is in
+      // flight, so a failure's alert line is visible and the row's Disconnect still opens.
+      onCancel={(e) => {
+        if (loading) e.preventDefault();
+      }}
+      title={`Disconnect ${target.exchangeLabel} · ${target.keyLabel}?`}
+    >
+      <p className="text-sm text-text-secondary">
+        {allocatorBody
+          ? "We'll stop syncing this key. Your historical holdings stay available for audit and are reflected in past performance."
+          : "We'll stop using this key. It stays on your account, marked disconnected, and you can connect this exchange account again."}
+      </p>
+      <p
+        data-testid="allocator-delete-feeds"
+        className={`mt-3 text-xs ${note.tone === "warning" ? "text-warning" : "text-text-muted"}`}
+      >
+        {note.text}
+      </p>
+      {feeds.state === "unchecked" ? (
+        <Button
+          variant="secondary"
+          size="sm"
+          className="mt-2"
+          data-testid="allocator-delete-retry"
+          disabled={loading}
+          onClick={() => {
+            setFeeds({ state: "checking" });
+            startRead();
+          }}
+        >
+          Retry
+        </Button>
+      ) : null}
+      {error ? (
+        <p
+          role="alert"
+          className="mt-3 text-xs text-negative bg-negative/5 border border-negative/20 rounded px-3 py-2"
+        >
+          {error}
+        </p>
+      ) : null}
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="secondary" disabled={loading} onClick={close}>
+          Cancel
+        </Button>
+        {/* An unreadable feeds read warns and does NOT hold Disconnect: it is reversible
+            (the key row is kept), unlike the delete this confirm never offers. */}
+        <Button
+          variant="danger"
+          disabled={loading || feeds.state === "checking"}
+          onClick={() => void disconnect()}
+        >
+          {loading ? "Disconnecting…" : "Disconnect"}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
 
 interface StrategiesSectionProps {
   /**
@@ -126,7 +286,36 @@ export function StrategiesSection({
     name: string;
     mark: CapitalOwnership | null;
   } | null>(null);
+  const [disconnectTarget, setDisconnectTarget] = useState<DisconnectTarget | null>(null);
+  // UI-SPEC 1.5 — what a finished Disconnect says (polite) and where focus goes next.
+  // `focusRequest` is a fresh object per success so the effect below runs once for each.
+  const [announcement, setAnnouncement] = useState<string | null>(null);
+  const [focusRequest, setFocusRequest] = useState<{ controlName: string | null } | null>(null);
   const router = useRouter();
+
+  // The confirm's dialog is gone by now, and the trigger row is about to be removed by the
+  // refresh, so the browser would drop focus to <body>. Land it on the next placeholder
+  // row's Disconnect control, else on the page heading. The neighbour is chosen from the
+  // list as it was, so it is a row that survives the refresh and focus stays put when the
+  // list re-renders. `PageHeader` exposes no id or tabIndex and is shared, so the heading
+  // is made focusable here rather than edited there.
+  useEffect(() => {
+    if (!focusRequest) return;
+    const control = focusRequest.controlName
+      ? Array.from(document.querySelectorAll<HTMLElement>("button[aria-label]")).find(
+          (el) => el.getAttribute("aria-label") === focusRequest.controlName,
+        )
+      : undefined;
+    if (control) {
+      control.focus();
+      return;
+    }
+    const heading = document.querySelector<HTMLElement>("h1");
+    if (heading) {
+      if (!heading.hasAttribute("tabindex")) heading.tabIndex = -1;
+      heading.focus();
+    }
+  }, [focusRequest]);
 
   return (
     <>
@@ -167,6 +356,19 @@ export function StrategiesSection({
           );
           setWizardOpen(true);
         }}
+        // Phase 213 decision (b): every role that lists an orphan can disconnect it. The
+        // target holds only the three fields the confirm shows, resolved against the SAME
+        // array that rendered the row; a miss (a row no longer in this array) opens nothing.
+        onDisconnect={(keyId) => {
+          const clicked = placeholderKeys.find((k) => k.id === keyId);
+          if (clicked) {
+            setDisconnectTarget({
+              id: clicked.id,
+              exchangeLabel: clicked.exchangeLabel,
+              keyLabel: clicked.keyLabel,
+            });
+          }
+        }}
         // D-02: wired ONLY for the allocator furniture. A manager-only page passes
         // no callback, so Mark ownership is absent from it by the props,
         // and the table's own `allocatorFurniture` gate is the second lock.
@@ -192,6 +394,29 @@ export function StrategiesSection({
           strategyId={markTarget.id}
           strategyName={markTarget.name}
           currentMark={markTarget.mark}
+        />
+      )}
+      {/* Mounted unconditionally: a live region that appears together with its text is missed. */}
+      <LiveRegion message={announcement} />
+      {disconnectTarget && (
+        <DisconnectKeyConfirm
+          key={disconnectTarget.id}
+          target={disconnectTarget}
+          allocatorBody={allocatorFurniture}
+          onClose={() => setDisconnectTarget(null)}
+          onDisconnected={() => {
+            const others = placeholderKeys.filter((k) => k.id !== disconnectTarget.id);
+            const removedAt = placeholderKeys.findIndex((k) => k.id === disconnectTarget.id);
+            const next = others[Math.min(Math.max(removedAt, 0), others.length - 1)];
+            setAnnouncement(
+              `${disconnectTarget.exchangeLabel} · ${disconnectTarget.keyLabel} is disconnected. You can connect this account again.`,
+            );
+            setFocusRequest({
+              controlName: next ? `Disconnect ${next.exchangeLabel} · ${next.keyLabel}` : null,
+            });
+            setDisconnectTarget(null);
+            router.refresh();
+          }}
         />
       )}
       {/* 162-06 / D-162-3 — "Finish setup" opens the wizard ON the key that was

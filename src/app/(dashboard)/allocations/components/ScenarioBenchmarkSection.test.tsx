@@ -504,3 +504,91 @@ describe("ScenarioBenchmarkSection D-15 gate on annualized active metrics", () =
     expect(screen.queryByTestId(NOTE)).toBeNull();
   });
 });
+
+/**
+ * Phase 213 decision (d), SC-4: while a blend leg's asset-class probe is open the
+ * basis is interim, so the annualized active-return slots are silent and no text
+ * names a basis. Beta is basis-invariant and keeps its value.
+ */
+describe("ScenarioBenchmarkSection decision (d): basisPending", () => {
+  const NOTE = "scenario-benchmark-annualization-note";
+
+  function denseDates(startDate: string, n: number): string[] {
+    const out: string[] = [];
+    const d = new Date(`${startDate}T00:00:00Z`);
+    for (let i = 0; i < n; i += 1) {
+      out.push(d.toISOString().slice(0, 10));
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    return out;
+  }
+  const alt = (i: number) => (i % 2 === 0 ? 0.012 : -0.006);
+  const btcAlt = (i: number) => (i % 3 === 0 ? 0.02 : -0.01);
+
+  // 400 paired days at 365 with the last 100 overlapping would carry a note; a
+  // 60-day dense series on 252 carries the short note. Both are used below.
+  it("decision (d): pending shows TE, IR and Alpha as the dash, Beta as a number, no note, no annualization sentence", () => {
+    const dates = denseDates("2023-01-01", 400);
+    const portfolioDaily = series(dates, alt);
+    const btc = btcClosesFromReturns(series(dates, btcAlt).slice(300));
+    const { container, rerender } = render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={portfolioDaily}
+        btc={btc}
+        periodsPerYear={365}
+      />,
+    );
+    // Control (non-vacuous): the settled render has numbers, a note and the sentence.
+    for (const m of ["tracking-error", "information-ratio", "alpha"]) {
+      expect(screen.getByTestId(`benchmark-value-${m}`).textContent).not.toBe("—");
+    }
+    expect(screen.getByTestId(NOTE)).toBeTruthy();
+    expect(container.textContent).toContain("365-day annualized active returns");
+
+    rerender(
+      <ScenarioBenchmarkSection
+        portfolioDaily={portfolioDaily}
+        btc={btc}
+        periodsPerYear={365}
+        basisPending
+      />,
+    );
+    for (const m of ["tracking-error", "information-ratio", "alpha"]) {
+      expect(screen.getByTestId(`benchmark-value-${m}`).textContent).toBe("—");
+    }
+    expect(screen.getByTestId("benchmark-value-beta").textContent).not.toBe("—");
+    expect(screen.queryByTestId(NOTE)).toBeNull();
+    expect(container.textContent).not.toMatch(/-day annualized active returns/);
+    // The methodology line itself survives.
+    expect(container.textContent).toContain("Historical realized · 100 overlapping days");
+    expect(screen.queryByText(EMPTY_HEADING)).toBeNull();
+  });
+
+  it("decision (d): pending never selects an empty state; the below-floor cause keeps its true body", () => {
+    const dates = denseDates("2024-01-01", 12);
+    render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={series(dates, alt)}
+        btc={btcClosesFromReturns(series(dates, btcAlt))}
+        periodsPerYear={365}
+        basisPending
+      />,
+    );
+    expect(screen.getByText(EMPTY_HEADING)).toBeTruthy();
+    expect(screen.getByText(/fewer than the 30 needed/)).toBeTruthy();
+  });
+
+  it("decision (d): pending over a healthy series does not render the empty state", () => {
+    const dates = denseDates("2023-01-01", 400);
+    render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={series(dates, alt)}
+        btc={btcClosesFromReturns(series(dates, btcAlt))}
+        periodsPerYear={365}
+        basisPending
+      />,
+    );
+    expect(screen.queryByText(EMPTY_HEADING)).toBeNull();
+    expect(screen.getByText(/vs BTC over \d+ overlapping days/)).toBeTruthy();
+  });
+});

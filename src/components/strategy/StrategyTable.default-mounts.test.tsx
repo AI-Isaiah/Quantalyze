@@ -372,6 +372,39 @@ describe("StrategyTable default mounts — byte identity with the post-170.2 hea
       />,
     );
   });
+
+  // Phase 213 plan 04 (decision (b)): the pinned owner mount above is untouched. This case is the
+  // ADDITIVE one: the same mount with `onDisconnect` passed changes ONLY the placeholder row's
+  // Actions cell, so a host that opts in cannot move any other byte of the table.
+  it("the owner mount with onDisconnect passed differs from the pinned mount only in the placeholder Actions cell", () => {
+    const owner = (extra: Record<string, unknown>) => (
+      <StrategyTable
+        strategies={OWNER_ROWS}
+        categorySlug="dm-owner"
+        origin={{ key: "strategies" }}
+        visibility="owner-all-statuses"
+        placeholderKeys={[{ id: "pk-1", exchangeLabel: "Binance", keyLabel: "Main key" }]}
+        onFinishSetup={() => {}}
+        onMarkOwnership={() => {}}
+        {...extra}
+      />
+    );
+    const rowsOf = (ui: ReactElement) => {
+      const { container, unmount } = render(ui);
+      const rows = Array.from(container.querySelectorAll("tbody tr")).map((tr) => normalise(tr.outerHTML));
+      unmount();
+      return rows;
+    };
+    const before = rowsOf(owner({}));
+    const after = rowsOf(owner({ onDisconnect: () => {} }));
+
+    expect(after).toHaveLength(before.length);
+    const changed = after.map((html, i) => (html === before[i] ? -1 : i)).filter((i) => i >= 0);
+    // Exactly one row moved, and it is the last one: the placeholder.
+    expect(changed).toEqual([before.length - 1]);
+    expect(after[before.length - 1]).toContain('aria-label="Disconnect Binance \u00b7 Main key"');
+    expect(before[before.length - 1]).not.toContain("Disconnect");
+  });
 });
 
 // Phase 196 / ROUTE-04 (D-01): the link INTO the factsheet says where it came from, and the

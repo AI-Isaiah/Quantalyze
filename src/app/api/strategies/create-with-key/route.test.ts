@@ -170,10 +170,17 @@ const assetClassUpdateMock = vi.fn((..._args: unknown[]) => ({
  * `api_key_id`. Both default to "nothing there", so every pre-existing test
  * keeps exercising the full Railway + RPC flow unchanged.
  */
-const venueKeyLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
-  data: { id: string } | null;
-  error: { code?: string; message?: string } | null;
-});
+// Phase 213 plan 07: the mock now RECEIVES the filters the route applied (the
+// `reuseKeyAdminLookupMock` idiom below), so a stateful fake can honour
+// `.is("disconnected_at", null)` by filtering rows. Every pre-existing case
+// ignores the argument and is unchanged.
+const venueKeyLookupMock = vi.fn(
+  async (_filters?: CapturedFilters) =>
+    ({ data: null, error: null }) as {
+      data: { id: string } | null;
+      error: { code?: string; message?: string } | null;
+    },
+);
 const venueStrategyLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
   data: { id: string } | null;
   error: { code?: string; message?: string } | null;
@@ -425,7 +432,7 @@ function makeSelectBuilder(
             ? reuseKeyAdminLookupMock(filters)
             : reuseKeyUserScopedLookupMock(filters);
         }
-        return venueKeyLookupMock();
+        return venueKeyLookupMock(filters);
       }
       // `strategies` is read THREE times: the F6 session fence keys on
       // wizard_session_id, and the venue fence issues two reads on api_key_id.
@@ -1534,7 +1541,7 @@ describe("POST /api/strategies/create-with-key — idempotency fence (F6 H-0304/
     });
   });
 
-  it("returns the existing draft and skips Railway validate+encrypt+RPC when a draft already exists for this (user, wizard_session_id)", async () => {
+  it("returns the existing draft and skips Railway validate+encrypt+RPC when a draft already exists for this (user, wizard_session_id), and answers deduped:true (Phase 213 decision (a), supersedes the byte-identical F6 arm)", async () => {
     draftLookupMock.mockResolvedValueOnce({
       data: { id: STRATEGY_ID, api_key_id: API_KEY_ID },
       error: null,
@@ -1549,6 +1556,9 @@ describe("POST /api/strategies/create-with-key — idempotency fence (F6 H-0304/
       ok: true,
       strategy_id: STRATEGY_ID,
       api_key_id: API_KEY_ID,
+      // Phase 213 decision (a), 2026-11-14: the F6 arm now flags the replay.
+      // Before it, this body carried no `deduped` (the venue-fence arm alone did).
+      deduped: true,
     });
     // The whole point: the expensive/charged work never ran on the replay.
     expect(validateKeyMock).not.toHaveBeenCalled();
@@ -2359,6 +2369,13 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     }
 
     it("a live key with no strategy behind it answers 409 KEY_ORPHANED — never the false fence sentence", async () => {
+      // ⭐ Phase 213 decision (b), 2026-11-14: this refusal is no longer a dead
+      // end. Its copy used to say that releasing the stored key was not
+      // something the user could do from any page we ship; the Strategies page's
+      // "No strategy yet" row now offers Disconnect for every key-creating role,
+      // and the way-out case below proves the same account is accepted once that
+      // key is disconnected. What this case pins (the refusal while the key is
+      // LIVE) is unchanged.
       seedOrphanedKey();
 
       const POST = await importPost();
@@ -2485,6 +2502,144 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(validateKeyMock).not.toHaveBeenCalled();
       expect(rpcMock).not.toHaveBeenCalled();
     });
+  });
+
+  /**
+   * [213 / decision (b)] THE WAY OUT OPENS — after Disconnect the same account
+   * is no longer refused as KEY_ORPHANED, and the key row is KEPT.
+   *
+   * The refusal above is only honest if the control its copy names does what it
+   * says. Disconnect sets `api_keys.disconnected_at` (the RPC keeps the row; it
+   * never deletes), and the venue-identity index is LIVE-scoped
+   * (`... WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL`), so a
+   * disconnected row stops holding the slot. The database-layer proof of that is
+   * `supabase/tests/test_api_keys_venue_identity_uniq.sql` arm 6b ("a
+   * DISCONNECTED row must NOT squat the slot"), run by CI `sql-tests`; this case
+   * proves the ROUTE half: its fence reads LIVE rows only, so it stops seeing
+   * the disconnected key.
+   *
+   * ⭐ THE FAKE IS STATEFUL AND IT MODELS BOTH HALVES INDEPENDENTLY OF THE ROUTE.
+   * The `api_keys` lookup filters real rows by the predicates the route actually
+   * applied (so deleting `.is("disconnected_at", null)` from
+   * `resolveByVenueIdentity` makes it hand back the disconnected row), and the
+   * RPC refuses with 23505 exactly while a live row holds the account, as the
+   * partial unique index does. A canned answer per call could not tell "the
+   * route stopped seeing the key" from "the test said so".
+   */
+  it("the way out opens: after Disconnect the same account is not refused as KEY_ORPHANED", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    writeAttempts.length = 0;
+
+    type FakeKeyRow = {
+      id: string;
+      user_id: string;
+      exchange: string;
+      venue_account_id: string;
+      disconnected_at: string | null;
+    };
+    const keyRows: FakeKeyRow[] = [
+      {
+        id: EXISTING_KEY_ID,
+        user_id: MOCK_USER.id,
+        exchange: "mt5",
+        venue_account_id: MT5_LOGIN,
+        disconnected_at: null,
+      },
+    ];
+    // A row is returned only if every predicate the ROUTE applied matches it.
+    venueKeyLookupMock.mockImplementation(async (filters) => {
+      const f = filters ?? {};
+      const hit = keyRows.find(
+        (r) =>
+          Object.entries(f).every(([col, val]) => {
+            if (!(col in r)) return false;
+            return (r as Record<string, unknown>)[col] === val;
+          }),
+      );
+      return { data: hit ? { id: hit.id } : null, error: null };
+    });
+    // The partial unique index: a second LIVE row on the account is refused.
+    rpcMock.mockImplementation(async () => {
+      const liveHolder = keyRows.some(
+        (r) =>
+          r.venue_account_id === MT5_LOGIN &&
+          r.exchange === "mt5" &&
+          r.user_id === MOCK_USER.id &&
+          r.disconnected_at === null,
+      );
+      if (liveHolder) {
+        return {
+          data: null,
+          error: {
+            code: "23505",
+            message:
+              'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+          },
+        };
+      }
+      keyRows.push({
+        id: API_KEY_ID,
+        user_id: MOCK_USER.id,
+        exchange: "mt5",
+        venue_account_id: MT5_LOGIN,
+        disconnected_at: null,
+      });
+      return {
+        data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+        error: null,
+      };
+    });
+
+    const POST = await importPost();
+
+    // BEFORE the disconnect: the live, strategy-less key refuses the account.
+    const before = await POST(makeReq(MT5_RECONNECT_BODY));
+    expect(before.status).toBe(409);
+    expect(JSON.parse(await before.text()).code).toBe("KEY_ORPHANED");
+    expect(keyRows).toHaveLength(1);
+
+    // What the Disconnect RPC does: stamp `disconnected_at`, keep the row.
+    keyRows[0].disconnected_at = "2026-11-14T12:00:00.000Z";
+    capturedSelects.length = 0;
+    venueStrategyLookupMock.mockClear();
+    venueOwnerLookupMock.mockClear();
+    keyMembershipLookupMock.mockClear();
+    rpcMock.mockClear();
+
+    // AFTER: the same credentials are not refused.
+    const after = await POST(makeReq(MT5_RECONNECT_BODY));
+    const afterBody = await after.json();
+    expect(
+      afterBody.code,
+      "a disconnected key must not refuse the account it used to hold",
+    ).not.toBe("KEY_ORPHANED");
+    expect(after.status).toBe(200);
+    expect(afterBody).toEqual({
+      ok: true,
+      strategy_id: STRATEGY_ID,
+      api_key_id: API_KEY_ID,
+    });
+    expect(rpcMock, "the route proceeded past the venue fence to create").toHaveBeenCalledTimes(1);
+
+    // The fence read LIVE rows only and so saw nothing: it never went on to
+    // classify a key it should not have found.
+    expect(
+      venueStrategyLookupMock,
+      "the fence found a disconnected key and went on to classify it",
+    ).not.toHaveBeenCalled();
+    expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+    expect(keyMembershipLookupMock).not.toHaveBeenCalled();
+    const keyRead = capturedSelects.find((s) => s.table === "api_keys");
+    expect(keyRead!.filters).toMatchObject({ disconnected_at: null });
+
+    // The key row is KEPT, never deleted: it is still there, still disconnected.
+    expect(keyRows.find((r) => r.id === EXISTING_KEY_ID)).toMatchObject({
+      disconnected_at: "2026-11-14T12:00:00.000Z",
+    });
+    expect(
+      writeAttempts.filter((w) => w.table === "api_keys"),
+      "no write verb is dialled on api_keys from this route",
+    ).toEqual([]);
   });
 
   /**
@@ -4107,6 +4262,12 @@ describe("[161-06 / WIZERR-05] create-with-key — the Retry-After relay", () =>
  * that releasing the stored key is not something any surface we ship lets them
  * do. That loop is measured (the `KEY_ORPHANED` docblock in wizardErrors.ts)
  * and this arm is the write that ends it.
+ *
+ * ⛔ CORRECTED 2026-11-14 (Phase 213 decision (b)): the release half is closed
+ * too. The `/strategies` "No strategy yet" row now offers Disconnect to every
+ * key-creating role, and the venue-fence describe's way-out case proves the
+ * account is accepted once the key is disconnected. The sentences above are kept
+ * as lineage.
  *
  * ⭐ THE HIGH-SEVERITY THREAT IS T-162-05-A — cross-tenant reuse of an
  * `api_keys` row the caller does not own. The route mitigates it in three

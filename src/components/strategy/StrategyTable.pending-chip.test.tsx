@@ -838,3 +838,110 @@ describe("StrategyTable Delta 5 — unranked placeholder rows for bare keys", ()
     }
   });
 });
+
+// =========================================================================
+// Phase 213 plan 04 (decision (b)) — placeholder row variants: a Disconnect
+// slot, Finish setup only where a draft could sync, the revoked pill.
+// =========================================================================
+
+const KEYFLOW_KEYS = [
+  { id: "kf-ok", exchangeLabel: "Deribit", keyLabel: "Main", finishSetupEligible: true, syncStatus: "connected" },
+  { id: "kf-revoked", exchangeLabel: "Bybit", keyLabel: "Old key", finishSetupEligible: false, syncStatus: "revoked" },
+  { id: "kf-inactive", exchangeLabel: "OKX", keyLabel: "Paused", finishSetupEligible: false, syncStatus: "connected" },
+  { id: "kf-bybit-2", exchangeLabel: "Bybit", keyLabel: "Second key", finishSetupEligible: true, syncStatus: "connected" },
+];
+
+function renderKeyflow(props: { onDisconnect?: (id: string) => void; keys?: typeof KEYFLOW_KEYS } = {}) {
+  return render(
+    <StrategyTable
+      strategies={[privateRow()]}
+      categorySlug="chip-spec"
+      visibility="owner-all-statuses"
+      placeholderKeys={props.keys ?? KEYFLOW_KEYS}
+      onFinishSetup={() => {}}
+      onDisconnect={props.onDisconnect}
+    />,
+  );
+}
+
+function placeholderFor(keyLabel: string): HTMLElement {
+  const row = placeholderRows().find((r) => (r.textContent ?? "").includes(keyLabel));
+  if (!row) throw new Error(`no placeholder row for ${keyLabel}`);
+  return row;
+}
+
+describe("StrategyTable Phase 213 (b) — placeholder row variants", () => {
+  it("an eligible key with onDisconnect shows Finish setup, then a Disconnect button named for the row", () => {
+    renderKeyflow({ onDisconnect: () => {} });
+    const row = placeholderFor("Main");
+    const finish = within(row).getByRole("button", { name: /Finish setup/ });
+    const disconnect = within(row).getByRole("button", { name: "Disconnect Deribit · Main" });
+    // The visible label is the fixed word, never the key label (long labels live in the accessible name).
+    expect(disconnect.textContent).toBe("Disconnect");
+    expect(finish.compareDocumentPosition(disconnect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("an ineligible key with onDisconnect shows Disconnect only, no Finish setup", () => {
+    renderKeyflow({ onDisconnect: () => {} });
+    for (const label of ["Old key", "Paused"]) {
+      const row = placeholderFor(label);
+      expect(within(row).queryByRole("button", { name: /Finish setup/ }), label).toBeNull();
+      expect(within(row).getAllByRole("button", { name: /^Disconnect / }), label).toHaveLength(1);
+    }
+  });
+
+  it("a revoked key carries the static key pill in its strategy cell; healthy and inactive-trusted keys carry none", () => {
+    renderKeyflow({ onDisconnect: () => {} });
+    expect(within(placeholderFor("Old key")).getByTestId("allocator-sync-pill-static")).toBeInTheDocument();
+    expect(within(placeholderFor("Main")).queryByTestId("allocator-sync-pill-static")).toBeNull();
+    expect(within(placeholderFor("Paused")).queryByTestId("allocator-sync-pill-static")).toBeNull();
+  });
+
+  it("a row that omits the new fields (public mounts, old fixtures) still offers Finish setup, and no Disconnect without onDisconnect", () => {
+    renderKeyflow({ keys: [{ id: "k1", exchangeLabel: "Deribit", keyLabel: "Zavara main" } as (typeof KEYFLOW_KEYS)[number]] });
+    const row = placeholderFor("Zavara main");
+    expect(within(row).getByRole("button", { name: /Finish setup/ })).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: /Disconnect/ })).toBeNull();
+    expect(within(row).queryByTestId("allocator-sync-pill-static")).toBeNull();
+  });
+
+  it("without onDisconnect an ineligible row renders no control at all (no Disconnect, no Finish setup)", () => {
+    renderKeyflow();
+    const row = placeholderFor("Old key");
+    expect(within(row).queryByRole("button")).toBeNull();
+  });
+
+  it("clicking Disconnect calls onDisconnect with that row's key id", () => {
+    const onDisconnect = vi.fn();
+    renderKeyflow({ onDisconnect });
+    fireEvent.click(within(placeholderFor("Old key")).getByRole("button", { name: /^Disconnect / }));
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+    expect(onDisconnect).toHaveBeenCalledWith("kf-revoked");
+  });
+
+  it("two keys on one venue stay distinguishable by accessible name", () => {
+    renderKeyflow({ onDisconnect: () => {} });
+    const names = screen
+      .getAllByRole("button", { name: /^Disconnect Bybit/ })
+      .map((b) => b.getAttribute("aria-label"));
+    expect(names.sort()).toEqual(["Disconnect Bybit · Old key", "Disconnect Bybit · Second key"]);
+  });
+
+  it("the Actions container keeps the row on one line (flex-nowrap whitespace-nowrap)", () => {
+    renderKeyflow({ onDisconnect: () => {} });
+    const button = within(placeholderFor("Main")).getByRole("button", { name: /^Disconnect / });
+    const container = button.parentElement as HTMLElement;
+    expect(container.className).toContain("flex-nowrap");
+    expect(container.className).toContain("whitespace-nowrap");
+  });
+
+  it("every variant keeps the placeholder td count equal to the th count", () => {
+    for (const onDisconnect of [undefined, () => {}]) {
+      const { unmount } = renderKeyflow({ onDisconnect });
+      const headerCount = document.querySelectorAll("thead th").length;
+      expect(placeholderRows()).toHaveLength(KEYFLOW_KEYS.length);
+      for (const p of placeholderRows()) expect(cells(p)).toHaveLength(headerCount);
+      unmount();
+    }
+  });
+});

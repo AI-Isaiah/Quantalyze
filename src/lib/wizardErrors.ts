@@ -902,6 +902,15 @@ export type WizardErrorCode =
   // codes emitted by another service; this one is minted by our own route, so
   // it is a wizard member outright.
   | "COMPOSITE_UNSUPPORTED_UNIFIED"
+  // Phase 213 / KEYFLOW decision (c) (2026-11-14) — an MT5 key cannot be a
+  // composite member. Emitted by `composite/add-key` (before its `MT5_ENABLED`
+  // gate, so the answer does not depend on the flag) and by
+  // `composite/set-members` (before the membership RPC). Both refuse before any
+  // write, so the copy's "we stopped before saving anything" is true on both.
+  //
+  // ⛔ NOT an alias in `SEAM_CODE_TO_WIZARD_CODE`, on `COMPOSITE_UNSUPPORTED_UNIFIED`'s
+  // reasoning: this is minted by our own routes, so it is a union member outright.
+  | "COMPOSITE_MT5_UNSUPPORTED"
   // Phase 94.1 / RT-FINDING-3 — the wizard connect step's on-mount rehydration
   // GET (/api/strategies/composite/members) failed transiently. NEUTRAL copy:
   // it fires for ANY api draft (the client can't yet know single-key vs
@@ -2641,6 +2650,13 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   //   · `my-strategies` DOES surface the orphan, as a "No strategy yet" row —
   //     but its only control is "Finish setup →", which reopens this same
   //     wizard and lands on this same refusal.
+  // ⛔ CORRECTED 2026-11-14 (Phase 213 decision (b)) — THE `allocatorOnly`
+  // BULLET ABOVE NO LONGER DECIDES ANYTHING. Profile → Exchanges is still
+  // allocator-only, and the copy still does not point there. But the control
+  // the refusal now names is not on that page: the `/strategies` "No strategy
+  // yet" row carries a Disconnect button for EVERY key-creating role (manager,
+  // allocator, `both`), so a manager standing in this wizard has a reachable
+  // release. The bullets above are kept as lineage.
   // Shipping that bullet verbatim would have shipped an UNWINNABLE remedy: the
   // D-17 class, and a direct breach of the principle (161-UI-SPEC § Copy
   // Principles 2) this very requirement exists to enforce. The bullets below
@@ -2666,9 +2682,35 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // filters only on `disconnected_at`, so a revoked-but-not-disconnected key is
   // refused here and listed nowhere. Both gaps land in the same bullet.
   //
+  // ⛔ CORRECTED 2026-11-14 (Phase 213 decision (b)) — BOTH GAPS ARE CLOSED, AND
+  // THE COPY MOVED WITH THEM. (1) The page is no longer allocator-guarded:
+  // `/my-strategies` now redirects (Phase 199 merged the lists at `/strategies`,
+  // and the copy names that page), and `/strategies` reads the strategyless keys for
+  // manager, allocator and `both` alike, so no role is redirected off it.
+  // (2) The list no longer filters on `is_active` or `sync_status !== "revoked"`:
+  // `deriveStrategylessKeys` keeps every key with `disconnected_at == null`,
+  // exactly the venue fence's live-key test, so a revoked-but-connected key is
+  // listed too (a revoked or inactive one offers Disconnect only, no Finish
+  // setup). The only key the fence refuses and the page does not list is one
+  // whose placeholder read failed, which is what `fix[3]` is for. The
+  // conditional wording above is kept as lineage.
+  //
   // ⚠️ THE RELEASE GAP IS STILL REAL AND IS STILL NOT CLOSED: nothing we ship
   // lets an owner of ANY role release their own stored key. 162-06 closed REUSE,
   // not release, and the last bullet keeps routing to us for it.
+  //
+  // ⛔ CORRECTED 2026-11-14 (Phase 213 decision (b)) — THE RELEASE GAP IS
+  // CLOSED. "Nothing we ship lets an owner of ANY role release their own stored
+  // key" is false: the "No strategy yet" row on `/strategies` offers
+  // "Disconnect", which stops using the key and keeps the `api_keys` row on
+  // record (`disconnected_at` is set, nothing is deleted), and the venue fence
+  // and its partial unique index read live rows only, so connecting the same
+  // account again then works (`create-with-key/route.test.ts`, "the way out
+  // opens"; SQL arm 6b of `test_api_keys_venue_identity_uniq.sql`). `fix[2]`
+  // names that control, `fix[3]` keeps the contact route only for a key the
+  // page does not list, and NO line points at Profile → API keys, which a
+  // manager cannot reliably reach (213-CONTEXT F3). The two sentences above are
+  // kept as lineage.
   //
   // ⚠️ 167.1.2 REVIEW-R2 IN-02 — THE CAUSE NAMES THE ACT THAT FAILS, NOT THE
   // OUTCOME. It said "a new strategy cannot be created over that key" while
@@ -2680,11 +2722,12 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   KEY_ORPHANED: {
     title: "This key is already stored, but no strategy uses it.",
     cause:
-      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again cannot build a new strategy over the saved key, and the saved key does not clear on its own.",
+      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again is refused until the saved key is disconnected.",
     fix: [
       "Connect this strategy with a different account — one whose key is not already stored here.",
-      "If your account includes the Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",
-      "If that page is not part of your account, or it does not list this key, send the correlation id below through the contact form: releasing the stored key is not something you can do from this page.",
+      "On the Strategies page, this account is listed at the end of the list, marked “No strategy yet”. Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
+      "To connect this account with new credentials instead, choose “Disconnect” on that row. The stored key is kept on record but no longer used, and connecting the account again then works.",
+      "If the Strategies page does not list this key, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
     // ⛔ `try_another_key` AND NOT `clear_and_retry`. Both are members of
@@ -3951,6 +3994,27 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // retry cannot change. `request_call` keeps a way out that can actually
     // resolve it; `expand_log` opens the id the first fix line asks for.
     actions: ["request_call", "expand_log"],
+  },
+
+  // Phase 213 / KEYFLOW decision (c) — copy as UI-SPEC 3.3 writes it (Claude's
+  // discretion, flagged for founder review). It names no flag and no single-key
+  // MT5 path: the refusal fires before the flag gate, so a promise like "connect
+  // it as its own strategy" would be false for a flag-off user.
+  COMPOSITE_MT5_UNSUPPORTED: {
+    title: "MT5 accounts can't be part of a multi-key strategy.",
+    cause:
+      "We can't combine an MT5 account's history with other keys into one record, so a multi-key strategy does not accept MT5 keys. We stopped before saving anything, so this strategy's keys are unchanged. Trying again gets the same answer.",
+    fix: [
+      "Remove the MT5 key from this list, then continue with your other keys.",
+      "Your keys from other exchanges in this list are not affected.",
+    ],
+    docsHref: "/security",
+    // ⚠️ NO `clear_and_retry` AND NO `try_another_key` — the two members of
+    // `RECOVERABLE_ACTIONS` — so `recoverable` derives false and no Retry
+    // renders: the refusal is a property of the venue, which a retry cannot
+    // change. NOT `request_call` either: the copy names no contact way out,
+    // because removing the key always works. `expand_log` opens the diagnostics.
+    actions: ["expand_log"],
   },
 
   WIZARD_KEYS_LOAD_FAILED: {

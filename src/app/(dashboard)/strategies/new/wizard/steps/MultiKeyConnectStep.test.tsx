@@ -1343,6 +1343,16 @@ describe("[SFOX-08] MultiKeyConnectStep — flag-gated sFOX panel (token-only)",
  * ⭐ THE BODY ASSERTION IS THE LOAD-BEARING ONE. Every other assertion here
  * (labels, the rendered field, an enabled submit) is satisfiable by a panel that
  * still posts `passphrase: null`.
+ *
+ * ⛔ SUPERSEDED 2026-11-14 (Phase 213 decision (c): "MT5 cannot be a composite
+ * member"). The premise above — an MT5 key reaching a member panel through the
+ * draft carry-over — is closed: the multi-key roster has no MT5 card, the footer
+ * shows a note instead of "+ Add another key window" while MT5 is selected, and
+ * `enterMulti` refuses an MT5 draft. The server refuses it too
+ * (`COMPOSITE_MT5_UNSUPPORTED`). The cases below are CONVERTED in place, each
+ * pinning the decision that replaced the behaviour it used to pin, with the old
+ * title kept after "[213 (c) supersedes]". The CLASS GUARD stays, with MT5 as its
+ * one named exception.
  */
 describe("[CR-03] MultiKeyConnectStep — a draft-carried MT5 panel keeps its broker server", () => {
   afterEach(() => {
@@ -1350,8 +1360,11 @@ describe("[CR-03] MultiKeyConnectStep — a draft-carried MT5 panel keeps its br
     vi.restoreAllMocks();
   });
 
-  /** Flag ON, State A on MT5 and filled, then "+ Add another key window". */
-  async function mt5Panel() {
+  const MT5_NOTE =
+    "MT5 accounts connect one key per strategy, so they can't be combined with other keys.";
+
+  /** Flag ON, State A on MT5 and filled. No "+ Add another key window" exists. */
+  async function mt5Draft() {
     vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
     vi.resetModules();
     const fetchSpy = vi
@@ -1377,81 +1390,135 @@ describe("[CR-03] MultiKeyConnectStep — a draft-carried MT5 panel keeps its br
     fireEvent.change(screen.getByLabelText("Broker server"), {
       target: { value: "MyBroker-Live" },
     });
-    fireEvent.click(screen.getByTestId("multi-add-key"));
     return { fetchSpy };
   }
 
-  it("⭐ the add-key POST carries the broker server the user typed, never null", async () => {
-    const { fetchSpy } = await mt5Panel();
-    const panel0 = screen.getByTestId("key-panel-0");
-    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
-      target: { value: "2024-01-01" },
-    });
-    fireEvent.click(within(panel0).getByTestId("key-0-validate"));
-
-    await waitFor(() =>
-      expect(screen.getByTestId("key-0-summary")).toBeInTheDocument(),
+  /** A legacy composite whose first member is MT5 (saved before decision (c)). */
+  async function rehydratedMt5Member() {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        if (String(input).includes("composite/members")) {
+          return jsonResponse(
+            {
+              ok: true,
+              members: [
+                {
+                  seq: 1,
+                  api_key_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                  exchange: "mt5",
+                  nickname: null,
+                  window_start: "2025-08-03",
+                  window_end: "2025-09-27",
+                  verified: true,
+                },
+                {
+                  seq: 2,
+                  api_key_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                  exchange: "binance",
+                  nickname: null,
+                  window_start: "2025-09-27",
+                  window_end: null,
+                  verified: true,
+                },
+              ],
+            },
+            200,
+          );
+        }
+        return jsonResponse({}, 200);
+      });
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
     );
-    const addCall = fetchSpy.mock.calls.find((c) =>
-      String(c[0]).includes("composite/add-key"),
+    await waitFor(() =>
+      expect(screen.getByTestId("multi-key-list")).toBeInTheDocument(),
+    );
+    return { fetchSpy };
+  }
+
+  it("[213 (c) supersedes] ⭐ the add-key POST carries the broker server the user typed, never null — with MT5 selected there is no add-key button, the note renders, and no add-key POST can be made", async () => {
+    const { fetchSpy } = await mt5Draft();
+    expect(
+      screen.queryByTestId("multi-add-key"),
+      "the single-key form offered '+ Add another key window' with MT5 selected, " +
+        "which carries the MT5 draft into a member panel the server refuses " +
+        "(Phase 213 decision (c); 153.4 CR-03 carry-over).",
+    ).toBeNull();
+    expect(screen.getByTestId("multi-add-key-mt5-note").textContent).toBe(MT5_NOTE);
+    expect(screen.queryByTestId("key-panel-0")).toBeNull();
+    expect(
+      fetchSpy.mock.calls.some((c) => String(c[0]).includes("composite/add-key")),
+    ).toBe(false);
+  });
+
+  it("[213 (c)] ⭐ a STALE '+ Add another key window' handler cannot carry an MT5 draft into a member panel", async () => {
+    // `enterMulti`'s own refusal, reached the one way a user cannot: the handler
+    // the button had BEFORE the user picked MT5. Without the early return it
+    // builds two panels and flips to State B, reopening 153.4 CR-03.
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    const staleButton = screen.getByTestId("multi-add-key");
+    const propsKey = Object.keys(staleButton).find((k) =>
+      k.startsWith("__reactProps$"),
     )!;
-    const body = JSON.parse((addCall[1] as RequestInit).body as string);
-    expect(body.exchange).toBe("mt5");
-    expect(body.api_key).toBe("5000123");
-    expect(body.api_secret).toBe("investor-pw-xxx");
+    const staleHandler = (
+      staleButton as unknown as Record<string, { onClick: () => void }>
+    )[propsKey].onClick;
+    expect(typeof staleHandler).toBe("function");
+
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    expect(screen.queryByTestId("multi-add-key")).toBeNull();
+    act(() => staleHandler());
+
     expect(
-      body.passphrase,
-      "the MT5 panel posted no broker server. MT5 collects three credentials " +
-        "into the {api_key, api_secret, passphrase} slots, and the third one is " +
-        "the server the user typed in State A — dropped here, the route can " +
-        "only reject the request or probe against no server at all, and the " +
-        "panel renders no field to put it back.",
-    ).toBe("MyBroker-Live");
+      screen.queryByTestId("key-panel-0"),
+      "a stale handler turned an MT5 draft into a member panel",
+    ).toBeNull();
+    expect(screen.queryByTestId("multi-key-list")).toBeNull();
+    expect(screen.getByTestId("multi-add-key-mt5-note")).toBeInTheDocument();
   });
 
-  it("the panel renders the third field, labelled and legible, and gates submit on it", async () => {
-    await mt5Panel();
-    const panel0 = screen.getByTestId("key-panel-0");
-    // Labelled for MT5, not "OKX Passphrase", and NOT masked: a broker server
-    // name is not a credential, and the helper tells the user to copy it exactly.
-    const server = within(panel0).getByTestId("key-0-passphrase");
-    expect(server).toHaveAttribute("type", "text");
-    expect(within(panel0).getByLabelText("Broker server")).toBe(server);
-    expect(within(panel0).getByLabelText("MT5 login")).toBeInTheDocument();
-    expect(within(panel0).getByLabelText("Investor password")).toBeInTheDocument();
-
-    // Emptying it blocks validate — `canValidate` must see requiresPassphrase.
-    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
-      target: { value: "2024-01-01" },
-    });
-    expect(within(panel0).getByTestId("key-0-validate")).not.toBeDisabled();
-    fireEvent.change(server, { target: { value: "" } });
-    expect(
-      within(panel0).getByTestId("key-0-validate"),
-      "submit stayed enabled for a request that cannot succeed — the panel does " +
-        "not know this venue needs a third field.",
-    ).toBeDisabled();
+  it("[213 (c) supersedes] the panel renders the third field, labelled and legible, and gates submit on it — with the flag ON, no member panel's exchange grid offers an MT5 card", async () => {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    // Vacuity floor: the flag really is on, so the single-key form DOES offer MT5.
+    expect(screen.getByTestId("wizard-exchange-mt5")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    for (const index of [0, 1]) {
+      const panel = screen.getByTestId(`key-panel-${index}`);
+      expect(
+        within(panel).getByTestId(`key-${index}-exchange-binance`),
+        "the grid did not render, so its MT5 absence below would be vacuous",
+      ).toBeInTheDocument();
+      expect(
+        within(panel).queryByTestId(`key-${index}-exchange-mt5`),
+        "a member panel offers an MT5 card with the flag on; the server refuses " +
+          "an MT5 member (Phase 213 decision (c)).",
+      ).toBeNull();
+    }
   });
 
-  it("the MT5 card is selected, named, and survives into the validated summary", async () => {
-    const { fetchSpy } = await mt5Panel();
-    const panel0 = screen.getByTestId("key-panel-0");
+  it("[213 (c) supersedes] the MT5 card is selected, named, and survives into the validated summary — a rehydrated legacy MT5 member shows its venue name and a Remove control", async () => {
+    await rehydratedMt5Member();
+    const summary = screen.getByTestId("key-0-summary");
+    // The FIRST span is `active?.name`; the nickname span below it also reads
+    // "MT5 key", so the whole summary's text cannot tell the fallback from a blank.
     expect(
-      within(panel0).getByTestId("key-0-exchange-mt5"),
-      "the composite roster offers no MT5 card, so the panel's own venue is not " +
-        "selectable and `EXCHANGES.find` misses for every lookup it feeds.",
-    ).toHaveAttribute("aria-pressed", "true");
-
-    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
-      target: { value: "2024-01-01" },
-    });
-    fireEvent.click(within(panel0).getByTestId("key-0-validate"));
-    await waitFor(() =>
-      expect(screen.getByTestId("key-0-summary")).toBeInTheDocument(),
-    );
-    // `active?.name` — empty when the lookup misses.
-    expect(screen.getByTestId("key-0-summary")).toHaveTextContent("MT5");
-    expect(fetchSpy).toHaveBeenCalled();
+      summary.firstElementChild!.textContent!.trim(),
+      "a rehydrated MT5 member has no roster entry, so its venue name rendered " +
+        "blank and the user could not see which key to remove.",
+    ).toBe("MT5");
+    expect(screen.getByTestId("key-0-remove")).toBeInTheDocument();
+    expect(screen.getByTestId("key-0-remove")).toHaveAccessibleName("Remove key 1");
   });
 
   it("flag OFF: no MT5 card, and every other venue's panel is untouched", async () => {
@@ -1474,13 +1541,18 @@ describe("[CR-03] MultiKeyConnectStep — a draft-carried MT5 panel keeps its br
     );
   });
 
-  it("⭐ THE CLASS GUARD: the two connect surfaces offer the SAME venue roster", async () => {
+  it("⭐ THE CLASS GUARD: the two connect surfaces offer the SAME venue roster — MT5 is the one named exception (Phase 213 decision (c))", async () => {
     // ⭐ THE ASSERTION THAT WOULD HAVE CAUGHT CR-03 BEFORE IT SHIPPED, and that
     // catches the NEXT venue added to one roster and not the other. This step
     // keeps a private copy of `ConnectKeyStep`'s `EXCHANGES` on purpose (State-A
     // neutrality), and the copy silently fell a venue behind. Neither array is
     // exported, so the rosters are compared through the ONE thing both render:
     // their exchange cards.
+    //
+    // ⛔ 2026-11-14 (Phase 213 decision (c)): MT5 IS THE ONE EXCEPTION, NAMED
+    // BELOW AND NOWHERE ELSE. The single-key form offers it; a composite member
+    // cannot be MT5, so the member roster never does. Any other venue present on
+    // one roster and missing from the other still reds this case.
     vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
     vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
     vi.resetModules();
@@ -1504,17 +1576,25 @@ describe("[CR-03] MultiKeyConnectStep — a draft-carried MT5 panel keeps its br
       .map((el) => el.getAttribute("data-testid")!.replace("key-0-exchange-", ""))
       .sort();
 
+    // THE ONE NAMED EXCEPTION (decision (c)): MT5 is single-key only.
+    const MT5_ONLY_SINGLE_KEY = ["mt5"];
+
     // Vacuity floor: the flags really are on and both rosters really were read.
     expect(singleKeyVenues).toContain("mt5");
     expect(singleKeyVenues.length).toBeGreaterThanOrEqual(6);
     expect(
       panelVenues,
+      "a member panel offers MT5. A composite member cannot be MT5 (Phase 213 " +
+        "decision (c)); the server refuses it with COMPOSITE_MT5_UNSUPPORTED.",
+    ).not.toContain("mt5");
+    expect(
+      panelVenues,
       "a member panel offers a DIFFERENT set of venues than the single-key form " +
-        "does. A venue present on one and missing from the other produces a " +
-        "panel whose `EXCHANGES.find` misses — no labels, no third field, and a " +
-        "POST that silently drops whatever that venue collects in the " +
-        "passphrase slot (153.4 review CR-03).",
-    ).toEqual(singleKeyVenues);
+        "does, beyond the one named MT5 exception. A venue present on one and " +
+        "missing from the other produces a panel whose `EXCHANGES.find` misses — " +
+        "no labels, no third field, and a POST that silently drops whatever that " +
+        "venue collects in the passphrase slot (153.4 review CR-03).",
+    ).toEqual(singleKeyVenues.filter((v) => !MT5_ONLY_SINGLE_KEY.includes(v)));
     unmount();
   });
 });
@@ -2412,6 +2492,31 @@ describe("[hotfix 2026-08-06] MultiKeyConnectStep — server-emitted SERVICE_UNR
  * component itself fires.
  */
 describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, per panel", () => {
+  // Phase 213 plans 08 and 12 — DECISION (c) ("MT5 cannot be a composite member"),
+  // test side. MT5 was the only serialized venue, so the cases that built an MT5
+  // member panel 0 (the old `mixedVenuePanels()` / `enterMultiFromMt5Draft()`)
+  // lost their premise when the component stopped admitting one. No member panel
+  // can be on MT5 after Phase 213, so each case went one of two ways:
+  //
+  // RE-SEATED by plan 08 onto `twoCcxtPanels()` (default 30 000 ms budget), titles
+  // unchanged, because the property is venue-independent:
+  //   - escalates at 40% and 75% of THAT panel's budget, and nothing goes red inside it
+  //   - a panel does NOT give up while the route is still encrypting and storing its key
+  //   - a panel past its budget ends in a STATED verdict, and its sibling is untouched
+  //   - the deadline path records EXACTLY ONE wizard_error, on this step's own funnel step
+  //   - the deadline verdict tells the user their key details are still on the page
+  //   - the panel's busy label stays ASCII `Validating...` for the whole wait
+  //
+  // CONVERTED by plan 12 to decision-(c) pins ("[213 (c) supersedes]", old title
+  // kept as the suffix), because each one IS the MT5-member behaviour itself and
+  // has no ccxt equivalent:
+  //   - a serialized member panel names what is happening and the deadline it was
+  //     granted: now the MT5 draft's exact footer note and no add-key button
+  //   - mixed venues: each panel's ladder is cut from ITS OWN venue's budget: now
+  //     leaving MT5 restores the add-key button and seeds panels on the ccxt venue
+  //   - a serialized member's failure never offers a remedy that presupposes
+  //     another venue (D-17): now a rehydrated legacy MT5 member shows its venue
+  //     name and the Remove control
   // ── The two live budgets, in ms, hand-typed ──────────────────────────────────
   const SERIALIZED_BUDGET_MS = 120_000;
   const DEFAULT_BUDGET_MS = 30_000;
@@ -2436,7 +2541,18 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
   /** The step's one interval period — the granularity every elapsed figure has. */
   const TICK_MS = 1_000;
   /**
-   * When the panel LOOP actually acts on that deadline, hand-typed.
+   * Phase 213 decision (c) ("MT5 cannot be a composite member") removes the
+   * serialized arm from this step, so the deadline cases are re-seated onto the
+   * default-budget arm. Hand-typed, never derived from the component:
+   * 30 000 + 30 000 + 25 500 + 15 000 = 100 500 ms.
+   */
+  const DEFAULT_DEADLINE_MS =
+    DEFAULT_BUDGET_MS +
+    ENCRYPT_BUDGET_MS +
+    BREAKER_STORE_FAILING_MS +
+    ABORT_GRACE_MS;
+  /**
+   * When the panel LOOP actually acts on a deadline, hand-typed.
    *
    * ⚠️ THIS STEP HAS NO PER-PANEL `setTimeout`. It enforces every panel's
    * deadline from the single 1 000 ms interval above, so a deadline that is not
@@ -2446,23 +2562,30 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
    * 153.6 / PARITY-03 moved the deadline off a round 165 000, and it is written
    * down rather than absorbed into a `+ 1` because the ROUNDING is a property of
    * this step that the single-key step does not share.
+   *
+   * On the default arm: 100 500 → 101 000. (Until Phase 213 decision (c) the
+   * serialized arm's 190 500 → 191 000 was the worked example.)
    */
-  const SERIALIZED_DEADLINE_TICK_MS = 191_000;
+  const DEFAULT_DEADLINE_TICK_MS = 101_000;
+  /**
+   * The slow rung of the default budget, hand-typed: 75% of 30 000 = 22 500 ms,
+   * which the 1 000 ms interval first acts on at the 23 000 ms tick.
+   */
+  const DEFAULT_SLOW_RUNG_TICK_MS = 23_000;
 
   // ── The copy, hand-typed ────────────────────────────────────────────────────
   const SIGNING_IN = "Signing in to your broker...";
   const CHECKING_BINANCE = "Checking your key with Binance...";
-  const WAIT_PROMISE_120 = "We wait up to 120s for your broker to answer.";
   const QUEUE_LINE =
     "Still signing in. MetaTrader allows one sign-in at a time, so your check may be waiting behind another.";
-  const SLOW_LINE_120 =
-    "This is slower than usual. We will wait until 120s, then tell you what we found.";
   const STOP_WAITING = "Stop waiting";
   const CANCELLED_LINE =
     "We stopped waiting for your broker. Your key details are still on this page — the check may still be finishing on our side, so give it a moment before validating this key again.";
   const BUSY_LABEL = "Validating...";
-  const DEADLINE_CAUSE_120 =
-    "We gave your broker 120 seconds to answer and it did not.";
+  const SLOW_LINE_30 =
+    "This is slower than usual. We will wait until 30s, then tell you what we found.";
+  const DEADLINE_CAUSE_30 =
+    "We gave your broker 30 seconds to answer and it did not.";
 
   afterEach(() => {
     vi.useRealTimers();
@@ -2497,11 +2620,10 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
   }
 
   /**
-   * Render a fresh step. `mt5` stubs the flag State A's MT5 card is gated on —
-   * this step's own `EXCHANGES` array has no MT5 card, so the ONLY way a member
-   * panel carries a serialized venue is the one a real user takes: pick MT5 on
-   * the single-key form, then click "+ Add another key window", which carries the
-   * in-progress draft (venue included) into panel 0 (UAT/F-4).
+   * Render a fresh step. `mt5` stubs the flag State A's MT5 card is gated on.
+   * Since Phase 213 decision (c) an MT5 draft can no longer be carried into a
+   * member panel (the footer shows a note, `enterMulti` refuses), so this is only
+   * used to reach the single-key form's MT5 state.
    */
   async function renderFresh(withMt5 = false) {
     if (withMt5) vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
@@ -2517,8 +2639,8 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     fireEvent.click(screen.getByTestId("multi-add-key"));
   }
 
-  /** State A (MT5 selected + filled) → State B, so panel 0 IS the MT5 key. */
-  function enterMultiFromMt5Draft() {
+  /** State A with MT5 selected and filled. Phase 213 decision (c): it stays State A. */
+  function fillMt5SingleKeyDraft() {
     fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
     fireEvent.change(screen.getByLabelText("MT5 login"), {
       target: { value: "5000123" },
@@ -2529,7 +2651,6 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     fireEvent.change(screen.getByLabelText("Broker server"), {
       target: { value: "MyBroker-Live" },
     });
-    fireEvent.click(screen.getByTestId("multi-add-key"));
   }
 
   function panelAt(index: number): HTMLElement {
@@ -2607,21 +2728,6 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     return { signals, ...rendered };
   }
 
-  /**
-   * Panel 0 on the serialized venue (carried from the single-key draft), panel 1
-   * on a ccxt venue. Both filled, neither validated. Timers are FAKE from here.
-   */
-  async function mixedVenuePanels() {
-    const signals = mockAbortableFetch();
-    const rendered = await renderFresh(true);
-    enterMultiFromMt5Draft();
-    fillWindow(0, "2024-01-01", "2024-03-01");
-    fillCredentials(1);
-    fillWindow(1, "2024-06-01");
-    vi.useFakeTimers();
-    return { signals, ...rendered };
-  }
-
   it("a sub-300ms answer never flashes a card — the gate is the step's TICK", async () => {
     // ⚠️ THE PLAN'S 299/301 ms BOUNDARY, RECONCILED WITH ITS OWN MECHANISM. This
     // step drives every panel from ONE 1s interval, so `waitElapsedMs` is 0 for
@@ -2648,19 +2754,21 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     expect(cardIn(1)).not.toBeNull();
   });
 
-  it("a serialized member panel names what is happening and the deadline it was granted", async () => {
-    await mixedVenuePanels();
-    validate(0);
-    await advance(TICK_MS);
+  it("[213 (c) supersedes] a serialized member panel names what is happening and the deadline it was granted — an MT5 draft shows the exact note and offers no add-key button, so no serialized member panel exists", async () => {
+    // MT5 was the only serialized venue. Decision (c) removes it from the member
+    // roster, so the "serialized member panel" this case used to drive can no
+    // longer be built; what a user with an MT5 draft sees instead is pinned here.
+    await renderFresh(true);
+    fillMt5SingleKeyDraft();
 
-    const shown = cardIn(0)!;
-    expect(shown).toHaveTextContent(SIGNING_IN);
+    expect(screen.getByTestId("multi-add-key-mt5-note").textContent).toBe(
+      "MT5 accounts connect one key per strategy, so they can't be combined with other keys.",
+    );
     expect(
-      shown,
-      "the panel promised no duration on the arm that waits two minutes. The " +
-        "figure must be the budget the seam will actually honour — read from " +
-        "the budget module, never typed into copy (UI-SPEC forbidden item #8).",
-    ).toHaveTextContent(WAIT_PROMISE_120);
+      screen.queryByTestId("multi-add-key"),
+      "an MT5 draft was offered '+ Add another key window'",
+    ).toBeNull();
+    expect(screen.queryByTestId("key-panel-0")).toBeNull();
   });
 
   it("a NON-serialized panel names the venue and promises no wait", async () => {
@@ -2677,22 +2785,29 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
   });
 
   it("escalates at 40% and 75% of THAT panel's budget, and nothing goes red inside it", async () => {
-    await mixedVenuePanels();
+    // re-seated onto ccxt panels: Phase 213 decision (c) removes MT5 member panels
+    // The ccxt arm has no queue sentence (that line is MetaTrader's), so its 40%
+    // rung is the `Stop waiting` control alone and its 75% rung is the amber
+    // slow line naming the 30s budget.
+    await twoCcxtPanels();
     validate(0);
     await advance(TICK_MS);
 
     expect(cardIn(0)).not.toHaveTextContent(QUEUE_LINE);
     expect(stopWaitingIn(0)).toBeNull();
 
-    // 40% of 120 000 ms = 48 000 ms.
-    await advance(SERIALIZED_BUDGET_MS * 0.4 - TICK_MS);
-    expect(cardIn(0)).toHaveTextContent(QUEUE_LINE);
+    // 40% of 30 000 ms = 12 000 ms.
+    await advance(DEFAULT_BUDGET_MS * 0.4 - TICK_MS);
     expect(stopWaitingIn(0)).not.toBeNull();
+    expect(
+      cardIn(0),
+      "a MetaTrader-only queue sentence reached a panel that is not on MetaTrader.",
+    ).not.toHaveTextContent(QUEUE_LINE);
     expect(allClasses(cardIn(0)!)).not.toContain("text-negative");
 
-    // 75% of 120 000 ms = 90 000 ms.
-    await advance(SERIALIZED_BUDGET_MS * 0.35);
-    const slow = within(panelAt(0)).getByText(SLOW_LINE_120, {
+    // 75% of 30 000 ms = 22 500 ms, acted on at the first whole tick: 23 000 ms.
+    await advance(DEFAULT_SLOW_RUNG_TICK_MS - DEFAULT_BUDGET_MS * 0.4);
+    const slow = within(panelAt(0)).getByText(SLOW_LINE_30, {
       ignore: "script, style, [role='status']",
     });
     expect(slow.getAttribute("class")).toContain("text-warning");
@@ -2729,30 +2844,29 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     );
   });
 
-  it("⭐ mixed venues: each panel's ladder is cut from ITS OWN venue's budget", async () => {
-    // ⭐ THE ASSERTION THAT PROVES THE BUDGET IS READ PER PANEL. A single
-    // step-level budget passes every other case in this file: with both panels on
-    // one venue the two arms are indistinguishable. At 12 000 ms the ccxt panel
-    // is past 40% of its 30 000 ms budget and the serialized one is nowhere near
-    // 40% of its 120 000 ms — and a shared budget cannot be both.
-    await mixedVenuePanels();
-    validate(0);
-    validate(1);
-    await advance(DEFAULT_BUDGET_MS * 0.4);
+  it("[213 (c) supersedes] ⭐ mixed venues: each panel's ladder is cut from ITS OWN venue's budget — leaving MT5 on the single-key form restores the add-key button, and the panels it seeds are on the ccxt venue", async () => {
+    // The per-panel budget property itself is still pinned by the ccxt cases
+    // above and below; what changed is that a panel can no longer be MT5. The
+    // path a user takes from an MT5 draft to a multi-key strategy is: pick a
+    // different venue, and the button returns.
+    await renderFresh(true);
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    expect(screen.queryByTestId("multi-add-key")).toBeNull();
+    expect(screen.getByTestId("multi-add-key-mt5-note")).toBeInTheDocument();
 
+    fireEvent.click(screen.getByTestId("wizard-exchange-okx"));
     expect(
-      stopWaitingIn(1),
-      "the ccxt panel reached 40% of its own 30 000 ms budget and offered no " +
-        "escape control — its ladder is being cut from another panel's budget.",
-    ).not.toBeNull();
-    expect(
-      stopWaitingIn(0),
-      "the serialized panel offered an escape control 36 seconds before 40% of " +
-        "its own budget — its ladder is being cut from another panel's budget.",
-    ).toBeNull();
-    // …and each card states its own venue's story.
-    expect(cardIn(0)).toHaveTextContent(SIGNING_IN);
-    expect(cardIn(1)).toHaveTextContent(CHECKING_BINANCE);
+      screen.getByTestId("multi-add-key"),
+      "selecting a ccxt venue did not bring '+ Add another key window' back",
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("multi-add-key-mt5-note")).toBeNull();
+
+    enterMulti();
+    expect(within(panelAt(0)).getByTestId("key-0-exchange-okx")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(panelAt(0)).queryByTestId("key-0-exchange-mt5")).toBeNull();
   });
 
   it("⭐ `Stop waiting` aborts ONE panel's request and leaves the other's running", async () => {
@@ -2908,40 +3022,52 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     // The browser aborts a ROUTE, not a seam call: `composite/add-key` spends
     // `validateKey` THEN `encryptKey` THEN the add RPC, and it reads no
     // `request.signal`, so the abort stops this tab listening and nothing else. A
-    // deadline of `budget + grace` (135 000 ms here) sits BELOW the route's own
+    // deadline of `budget + grace` (45 000 ms on this arm) sits BELOW the route's own
     // worst case, so it was reachable almost exclusively in the window where
     // validate had already SUCCEEDED and the route was minting the `api_keys`
     // row. The panel was then shown "Nothing was saved" — and re-validating
     // mints a SECOND stored credential for the same key, because this route has
     // no idempotency fence by construction.
-    await mixedVenuePanels();
+    // re-seated onto ccxt panels: Phase 213 decision (c) removes MT5 member panels
+    await twoCcxtPanels();
     validate(0);
-    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+    let elapsedSoFar = 0;
+    // Two probes: just past `budget + grace` (the shipped CR-01 deadline) and the
+    // last whole tick before the route's real worst case.
+    for (const target of [
+      DEFAULT_BUDGET_MS + ABORT_GRACE_MS + 1,
+      DEFAULT_DEADLINE_MS - TICK_MS,
+    ]) {
+      await advance(target - elapsedSoFar);
+      elapsedSoFar = target;
 
-    expect(
-      within(panelAt(0)).queryByTestId("error-envelope"),
-      "the panel gave up 30 seconds before the route it is waiting on does. " +
-        "Every second in this window is a request that has PASSED validate and " +
-        "is storing the key — and the verdict rendered here says nothing was " +
-        "saved, while a retry mints a duplicate credential.",
-    ).toBeNull();
-    expect(
-      wizardErrorCalls(),
-      "a seam deadline was reported to the funnel for a request still running " +
-        "INSIDE its route's budget.",
-    ).toEqual([]);
-    expect(cardIn(0)).not.toBeNull();
+      expect(
+        within(panelAt(0)).queryByTestId("error-envelope"),
+        "the panel gave up before the route it is waiting on does (the default " +
+          "arm's route runs to 100 500 ms). " +
+          "Every second in this window is a request that has PASSED validate and " +
+          "is storing the key — and the verdict rendered here says nothing was " +
+          "saved, while a retry mints a duplicate credential.",
+      ).toBeNull();
+      expect(
+        wizardErrorCalls(),
+        "a seam deadline was reported to the funnel for a request still running " +
+          "INSIDE its route's budget.",
+      ).toEqual([]);
+      expect(cardIn(0)).not.toBeNull();
+    }
     expect(panelAt(0).getAttribute("aria-busy")).toBe("true");
   });
 
   it("⭐ a panel past its budget ends in a STATED verdict, and its sibling is untouched", async () => {
-    await mixedVenuePanels();
+    // re-seated onto ccxt panels: Phase 213 decision (c) removes MT5 member panels
+    await twoCcxtPanels();
     validate(0);
     // The browser gives up LAST: after the whole ROUTE's budget (validate +
     // encrypt) plus its own grace, never at the validate budget itself —
     // aborting there could cut off a verdict already on the wire, or a key
     // already being stored (153.4 review CR-01).
-    await advance(SERIALIZED_DEADLINE_TICK_MS);
+    await advance(DEFAULT_DEADLINE_TICK_MS);
 
     expect(cardIn(0), "the card outlived the request it describes").toBeNull();
     const envelope = within(panelAt(0)).getByTestId("error-envelope");
@@ -2951,19 +3077,19 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     );
     // The budget WE granted THAT panel, named — hand-typed here, read from the
     // budget module there.
-    expect(envelope).toHaveTextContent(DEADLINE_CAUSE_120);
+    expect(envelope).toHaveTextContent(DEADLINE_CAUSE_30);
     expect(envelope).toHaveTextContent("Nothing was saved");
     // ⭐ THE ABSENCE IS THE FIX (PATTERNS Shared Pattern B). The code carries no
     // recoverable action, so `buildEnvelope` derives `recoverable: false` and no
-    // Retry renders. A Retry here would offer to re-run a two-minute wait that
-    // just proved it does not fit.
+    // Retry renders. A Retry here would offer to re-run a wait that just proved
+    // it does not fit.
     expect(
       within(panelAt(0)).queryByRole("button", { name: "Retry" }),
       "a Retry control was offered for a check that just spent its whole budget",
     ).toBeNull();
 
-    // The sibling panel never started a check, and a deadline two minutes deep
-    // in someone else's wait says nothing about it.
+    // The sibling panel never started a check, and a deadline deep in someone
+    // else's wait says nothing about it.
     expect(within(panelAt(1)).queryByTestId("error-envelope")).toBeNull();
     expect(cardIn(1)).toBeNull();
     expect(
@@ -2977,9 +3103,10 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     // SERVICE_UNREACHABLE, and the funnel is what an operator reads to decide
     // whether the seam is healthy. The step name is the COMPOSITE one — merging
     // it into `connect_key` is what made the multi-key path invisible before.
-    await mixedVenuePanels();
+    // re-seated onto ccxt panels: Phase 213 decision (c) removes MT5 member panels
+    await twoCcxtPanels();
     validate(0);
-    await advance(SERIALIZED_DEADLINE_TICK_MS);
+    await advance(DEFAULT_DEADLINE_TICK_MS);
 
     expect(wizardErrorCalls()).toEqual([
       {
@@ -2996,33 +3123,63 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     // emits this code without passing `surface: "connect"` renders an envelope
     // that is silent about the credentials the user just spent two minutes
     // typing — the worst outcome this phase can produce, and a silent one.
-    await mixedVenuePanels();
+    // re-seated onto ccxt panels: Phase 213 decision (c) removes MT5 member panels
+    await twoCcxtPanels();
     validate(0);
-    await advance(SERIALIZED_DEADLINE_TICK_MS);
+    await advance(DEFAULT_DEADLINE_TICK_MS);
 
     expect(within(panelAt(0)).getByTestId("error-envelope")).toHaveTextContent(
       "Your key details are still on this page.",
     );
   });
 
-  it("⭐ a serialized member's failure never offers a remedy that presupposes another venue (D-17)", async () => {
-    // The `venue` half of the same call site, PER PANEL. Absence renders the
-    // substitutable remedy unconditionally, so a user whose broker account IS
-    // the venue was told to "switch to a different exchange".
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse({ code: "KEY_NETWORK_TIMEOUT" }, 504),
+  it("[213 (c) supersedes] ⭐ a serialized member's failure never offers a remedy that presupposes another venue (D-17) — a rehydrated MT5 member shows its venue name and the Remove control, and offers no remedy naming another exchange", async () => {
+    // A legacy composite saved before decision (c) can still carry an MT5 member.
+    // The user must see which key it is and be able to remove it; the old D-17
+    // property (never tell a broker-account user to "switch to a different
+    // exchange") still holds for what that panel shows.
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        if (String(input).includes("composite/members")) {
+          return jsonResponse(
+            {
+              ok: true,
+              members: [
+                {
+                  seq: 1,
+                  api_key_id: API_KEY_ID,
+                  exchange: "mt5",
+                  nickname: null,
+                  window_start: "2025-08-03",
+                  window_end: null,
+                  verified: true,
+                },
+              ],
+            },
+            200,
+          );
+        }
+        return jsonResponse({}, 200);
+      },
     );
-    await renderFresh(true);
-    enterMultiFromMt5Draft();
-    fillWindow(0, "2024-01-01", "2024-03-01");
-    validate(0);
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("key-0-summary")).toBeInTheDocument(),
+    );
 
-    const envelope = await within(panelAt(0)).findByTestId("error-envelope");
-    expect(envelope).toHaveTextContent(
-      "This is your broker account, so there is no other venue to try.",
-    );
     expect(
-      envelope,
+      screen.getByTestId("key-0-summary").firstElementChild!.textContent!.trim(),
+    ).toBe("MT5");
+    expect(screen.getByTestId("key-0-remove")).toBeInTheDocument();
+    expect(screen.queryByTestId("error-envelope")).toBeNull();
+    expect(
+      document.body,
       "an unwinnable remedy reached a venue that IS the user's account",
     ).not.toHaveTextContent("switch to a different exchange");
   });
@@ -3033,13 +3190,15 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     // button MOUNTED and still reading it. The wait card renders BESIDE it, never
     // instead of it, and the spelling stays ASCII (D-21, and this file's own
     // recorded decision at the top).
-    await mixedVenuePanels();
+    // re-seated onto ccxt panels: Phase 213 decision (c) removes MT5 member panels
+    await twoCcxtPanels();
     validate(0);
 
+    // 1 s, then 12 s (40%), then 23 s (the slow rung's tick): all inside 30 s.
     for (const step of [
       TICK_MS,
-      SERIALIZED_BUDGET_MS * 0.4 - TICK_MS,
-      SERIALIZED_BUDGET_MS * 0.35,
+      DEFAULT_BUDGET_MS * 0.4 - TICK_MS,
+      DEFAULT_SLOW_RUNG_TICK_MS - DEFAULT_BUDGET_MS * 0.4,
     ]) {
       await advance(step);
       const button = within(panelAt(0)).getByTestId("key-0-validate");

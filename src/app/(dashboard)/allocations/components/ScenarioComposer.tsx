@@ -2702,9 +2702,23 @@ export function ScenarioComposer({
   // mechanism (no ref flag, no mount-once latch): the fetch function already
   // dedupes, and a parallel mechanism is exactly the drift this phase exists to
   // prevent.
+  //
+  // Phase 213 F5 — a FAILED probe is terminal for this effect. A failure writes
+  // only `addedMetricsById[id] = "unavailable"` and leaves `addedReturnsById[id]`
+  // undefined (WR-01, so remove + re-add retries), which the guard above reads as
+  // "not resolved" and would re-fetch whenever ANY dependency changed (another leg
+  // added or settled). A figure could then render on the nullish => 365 rule, blank
+  // when the silent retry put the leg back in flight, and return on a different
+  // basis. The extra conjunct reads state that already exists; it is not a second
+  // dedup mechanism. Removing the leg purges its `addedMetricsById` entry
+  // (handleRemoveAdded), so remove + re-add is still the retry.
   useEffect(() => {
     for (const a of scenario.draft.addedStrategies) {
-      if (!strategyById.has(a.id) && addedReturnsById[a.id] === undefined) {
+      if (
+        !strategyById.has(a.id) &&
+        addedReturnsById[a.id] === undefined &&
+        addedMetricsById[a.id] !== "unavailable"
+      ) {
         fetchAddedReturns(a.id);
       }
     }
@@ -2712,6 +2726,7 @@ export function ScenarioComposer({
     scenario.draft.addedStrategies,
     strategyById,
     addedReturnsById,
+    addedMetricsById,
     fetchAddedReturns,
   ]);
 
@@ -3741,6 +3756,30 @@ export function ScenarioComposer({
     [engineSet, engineState],
   );
 
+  // Phase 213 decision (d) / SC-4 — the ONE pending boolean. A leg is pending
+  // while its asset-class probe is open, so the basis above is still the interim
+  // nullish => 365 rule and any basis-dependent figure computed on it could flip
+  // under the user when the probe answers. EVERY leg of the engine set counts,
+  // selected or not (UI-SPEC 4.1, the literal reading of "until every leg's asset
+  // class resolves"). Only a drawer-added leg can be pending: a book leg arrives
+  // resolved from the SSR payload (`metricsState` "settled"). A settled probe is
+  // resolved whatever it answered: a class, null, or a failure ("unavailable"),
+  // and a null or failure keeps the nullish => 365 rule, so pending always ends.
+  // `loadingReturnsIds` stays in the predicate as a belt (F5). This reads the
+  // basis' inputs and never derives a 365/252 choice of its own (MD-01):
+  // `blendPeriodsPerYear` stays the single basis rule.
+  const legsPending = useMemo(
+    () =>
+      engineSet.strategies.some((s) => {
+        const meta = addedStrategyMetadataLookup[s.id];
+        return (
+          meta !== undefined &&
+          (loadingReturnsIds.has(s.id) || meta.metricsState === "pending")
+        );
+      }),
+    [engineSet.strategies, addedStrategyMetadataLookup, loadingReturnsIds],
+  );
+
   const scenarioMetrics = useMemo(
     () =>
       computeScenario(engineSet.strategies, engineState, dateMapCache, blendBasis),
@@ -4074,8 +4113,15 @@ export function ScenarioComposer({
   // EXPLICITLY REJECTED in #597. The blend DISPLAY metrics (KPIs, panels, own-
   // book delta, factsheet preview, benchmark) move to `blendBasis`; the peer-rank
   // inputs below stay exactly `scenarioMetrics.*` with NO basis factor.
-  const peerSharpe = scenarioMetrics.sharpe;
-  const peerSortino = scenarioMetrics.sortino;
+  //
+  // 2026-11-14, Phase 213 decision (d), UI-SPEC 4.3: while ANY leg's asset-class
+  // probe is open (`legsPending`) both ranked inputs are `null`, so
+  // `buildScenarioPeerRankRequest` returns null and no request is made: a rank built
+  // from the interim-basis Sharpe would be presented as the blend's. The hold only
+  // nulls the inputs, it NEVER applies a basis factor. When the last leg settles the
+  // inputs change and the effect below requests once, with the raw final values.
+  const peerSharpe = legsPending ? null : scenarioMetrics.sharpe;
+  const peerSortino = legsPending ? null : scenarioMetrics.sortino;
   const peerMaxDD = scenarioMetrics.max_drawdown;
   const peerN = scenarioMetrics.n;
   // 194 D-15 — the blend's record, built ONCE and read by both the annualised
@@ -4155,15 +4201,29 @@ export function ScenarioComposer({
   // a record under D-15's minimum shows `—` and the caption says why. Every
   // other consumer of `scenarioMetrics` (peer rank, commit, compare) keeps the
   // raw engine values: the gate is a display rule.
+  //
+  // Phase 213 decision (d) (2026-11-14), superseding Phase 159-04's "render on the
+  // interim basis": while ANY leg's asset-class probe is open (`legsPending`) the
+  // four basis-dependent figures are null, so the strip's Sharpe cell (the only
+  // one of these it paints; its cells are YTD TWR, Sharpe, Max DD 12m, Avg |rho|)
+  // reads the silent em-dash and no later consumer of this object can paint an
+  // interim-basis value. When the last leg settles Sharpe renders once, on the
+  // final basis. Max drawdown and the rest are basis-invariant and stay raw.
   const gatedBlendMetrics = useMemo<ComputedMetrics>(
     () => ({
       ...scenarioMetrics,
-      cagr: gatedValue(scenarioMetrics.cagr, blendGateState),
-      volatility: gatedValue(scenarioMetrics.volatility, blendGateState),
-      sharpe: gatedValue(scenarioMetrics.sharpe, blendGateState),
-      sortino: gatedValue(scenarioMetrics.sortino, blendGateState),
+      cagr: legsPending ? null : gatedValue(scenarioMetrics.cagr, blendGateState),
+      volatility: legsPending
+        ? null
+        : gatedValue(scenarioMetrics.volatility, blendGateState),
+      sharpe: legsPending
+        ? null
+        : gatedValue(scenarioMetrics.sharpe, blendGateState),
+      sortino: legsPending
+        ? null
+        : gatedValue(scenarioMetrics.sortino, blendGateState),
     }),
-    [scenarioMetrics, blendGateState],
+    [scenarioMetrics, blendGateState, legsPending],
   );
   // ONE muted caption: the withheld reason, or the short-track note. Absent for
   // a full record, an unknown record, and an empty blend (nothing to explain).
@@ -4337,23 +4397,34 @@ export function ScenarioComposer({
     // above, so both records read the same crypto flag.
     const bookFirst = baselineEquityDailyReturns[0].date;
     const bookLast = baselineEquityDailyReturns[baselineEquityDailyReturns.length - 1].date;
+    // Phase 213 decision (d), UI-SPEC 4.3: while ANY leg's asset-class probe is
+    // open (`legsPending`) the two annualized ratio deltas are read off the interim
+    // `blendBasis` and are blanked to null (the panel prints its "—"), and the two
+    // basis-built records (and the span they qualify) are not handed over, so no
+    // withheld cause is read off an interim verdict. `max_dd` is annualization-
+    // invariant and keeps rendering. Once the last leg settles every slot returns,
+    // once, on the final basis.
     return {
-      sharpe: sub(blendSharpe, book.sharpe),
-      sortino: sub(blendSortino, book.sortino),
+      sharpe: legsPending ? null : sub(blendSharpe, book.sharpe),
+      sortino: legsPending ? null : sub(blendSortino, book.sortino),
       max_dd: sub(blendMaxDD, book.max_drawdown),
       blend_n: scenarioMetrics.n,
       book_n: bookReturns.length,
-      span_days: shorterSpan(blendRecord.spanDays, coveredDays(bookFirst, bookLast)),
-      records: {
-        blend: blendRecord,
-        book: figureRecord({
-          seriesStart: bookFirst,
-          seriesEnd: bookLast,
-          headlineSince: null,
-          observations: bookReturns.length,
-          periodsPerYear: blendBasis,
-        }),
-      },
+      ...(legsPending
+        ? {}
+        : {
+            span_days: shorterSpan(blendRecord.spanDays, coveredDays(bookFirst, bookLast)),
+            records: {
+              blend: blendRecord,
+              book: figureRecord({
+                seriesStart: bookFirst,
+                seriesEnd: bookLast,
+                headlineSince: null,
+                observations: bookReturns.length,
+                periodsPerYear: blendBasis,
+              }),
+            },
+          }),
     };
   }, [
     baselineEquityDailyReturns,
@@ -4366,6 +4437,7 @@ export function ScenarioComposer({
     // BLEND-01 — the own-book leg is annualized at `blendBasis`, so a basis flip
     // (a crypto leg added/removed) must re-derive the like-for-like delta.
     blendBasis,
+    legsPending,
   ]);
 
   // CORR-01 — axis labels for the CorrelationHeatmap. Keyed on the SAME engine
@@ -4515,9 +4587,12 @@ export function ScenarioComposer({
   const gatedLiveMetrics = useMemo<ComputedMetrics>(
     () => ({
       ...liveMetricsForKpi,
-      sharpe: gatedValue(liveFigures.sharpe, liveSharpeState),
+      // Phase 213 decision (d), UI-SPEC 4.3: the "Current allocation" tooltip's book
+      // Sharpe reads the dash while a leg's probe is open (the delta it sits beside
+      // is held).
+      sharpe: legsPending ? null : gatedValue(liveFigures.sharpe, liveSharpeState),
     }),
-    [liveMetricsForKpi, liveFigures, liveSharpeState],
+    [liveMetricsForKpi, liveFigures, liveSharpeState, legsPending],
   );
 
   // -------------------------------------------------------------------------
@@ -4953,7 +5028,9 @@ export function ScenarioComposer({
       0.01,
       { dp: 2 },
       live.sharpe,
-      gatedValue(sc.sharpe, sharpeDeltaState),
+      // Phase 213 decision (d), UI-SPEC 4.3: no Sharpe delta item while a leg's
+      // probe is open (`pushDelta` skips a null operand).
+      legsPending ? null : gatedValue(sc.sharpe, sharpeDeltaState),
     );
     pushDelta(
       "Max DD",
@@ -4972,7 +5049,7 @@ export function ScenarioComposer({
       sc.twr,
     );
     return items;
-  }, [liveMetricsForKpi, scenarioMetrics, sharpeDeltaState]);
+  }, [liveMetricsForKpi, scenarioMetrics, sharpeDeltaState, legsPending]);
 
   // -------------------------------------------------------------------------
   // Build commit diffs and route to the ScenarioCommitDrawer (Plan 07).
@@ -6033,12 +6110,16 @@ export function ScenarioComposer({
           variant="panel"
           scenarioMetrics={gatedBlendMetrics}
           liveMetrics={gatedLiveMetrics}
+          sharpeDeltaHeld={legsPending}
           metrics={liveMetricsForStrip}
           analytics={{}}
           snapshotCount={snapshotCount}
           allKeysStale={allKeysStale}
         />
-        {blendGateNote !== null && (
+        {/* Phase 213 decision (d), UI-SPEC 4.3: the caption's verdict reads
+            `blendRecord`, built at `blendBasis`, so while any leg's probe is open its
+            text is basis-dependent. Silent until the last leg settles. */}
+        {blendGateNote !== null && !legsPending && (
           <p
             data-testid="scenario-figure-gate-note"
             className="px-4 pb-3 text-xs text-text-muted"
@@ -6107,6 +6188,10 @@ export function ScenarioComposer({
           // BLEND-01 — the factsheet-preview KPIs ride the same derived blend
           // basis (√365 if any selected leg is crypto, else 252).
           periodsPerYear={blendBasis}
+          // Phase 213 decision (d): while a leg's asset-class probe is open the basis
+          // is interim, so the preview's annualized-risk slots are held silently
+          // (a dash, no basis caption) and render once on the final basis.
+          basisPending={legsPending}
           // PEER-01: the live peer rank (or null below the sample floor / min-N)
           // flows onto the synth csv payload's scenarioPeer carve-out.
           scenarioPeer={scenarioPeer ?? undefined}
@@ -6190,6 +6275,10 @@ export function ScenarioComposer({
           // BLEND-01 — TE/IR/alpha ride the same derived blend basis
           // (√periodsPerYear); the correlation/beta terms are basis-invariant.
           periodsPerYear={blendBasis}
+          // Phase 213 decision (d): while a leg's asset-class probe is open the
+          // basis is interim, so TE/IR/alpha print the dash and no basis text
+          // is shown (beta and the empty-state causes are unaffected).
+          basisPending={legsPending}
         />
       </Card>
 
@@ -6556,7 +6645,17 @@ export function ScenarioComposer({
             ]}
           />
         </div>
-        {rollingVerdict.state === "withheld" ? (
+        {/* Phase 213 decision (d), UI-SPEC 4.2/4.3: while ANY leg's asset-class
+            probe is open (`legsPending`) `blendPanels` and `rollingVerdict` are
+            built on the interim `blendBasis`, so the panel holds its populated
+            layout (headings kept) with held data: RollingMetrics gets `{}` (it
+            returns null only for an EMPTY OBJECT; `{ sharpe_365d: [] }` still
+            draws), the volatility and Sortino charts get `[]`, and neither the
+            withheld EmptyState (it names a cause), the annualization note nor the
+            "{N}-day annualized" caption is rendered. The held form prints no
+            reason text. Once the last leg settles all of them return, once, on
+            the final basis. */}
+        {rollingVerdict.state === "withheld" && !legsPending ? (
           <PartialDataBanner
             heading="Awaiting more data"
             body={widenedWithheldReason(
@@ -6566,7 +6665,9 @@ export function ScenarioComposer({
           />
         ) : (
           <div className="space-y-6">
-            {rollingVerdict.state === "short" && rollingVerdict.days != null ? (
+            {!legsPending &&
+            rollingVerdict.state === "short" &&
+            rollingVerdict.days != null ? (
               <p
                 data-testid="blend-rolling-annualization-note"
                 className="text-xs text-text-muted"
@@ -6579,7 +6680,7 @@ export function ScenarioComposer({
                 Rolling Sharpe
               </h3>
               <RollingMetrics
-                data={blendPanels.rollingSharpe}
+                data={legsPending ? {} : blendPanels.rollingSharpe}
                 daysOfHistory={blendPanels.usableN}
                 // WR-01 — the series is keyed `sharpe_365d` ONLY so RollingMetrics
                 // resolves the CHART_ACCENT stroke; that key's default LABELS text
@@ -6595,19 +6696,21 @@ export function ScenarioComposer({
               <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
                 Rolling volatility
               </h3>
-              <RollingVolatilityChart data={blendPanels.rollingVol} />
+              <RollingVolatilityChart data={legsPending ? [] : blendPanels.rollingVol} />
             </div>
             <div>
               <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
                 Rolling Sortino
               </h3>
-              <RollingSortinoChart data={blendPanels.rollingSortino} />
+              <RollingSortinoChart data={legsPending ? [] : blendPanels.rollingSortino} />
             </div>
-            <p className="text-xs text-text-muted">
-              {rollingWindow === ROLLING_1Y_ID ? ROLL_WINDOW_1Y_DAYS : rollingWindow}
-              -day rolling window · {blendBasis}-day annualized ·{" "}
-              {scenarioMetrics.n} overlapping days · not a forecast.
-            </p>
+            {!legsPending && (
+              <p className="text-xs text-text-muted">
+                {rollingWindow === ROLLING_1Y_ID ? ROLL_WINDOW_1Y_DAYS : rollingWindow}
+                -day rolling window · {blendBasis}-day annualized ·{" "}
+                {scenarioMetrics.n} overlapping days · not a forecast.
+              </p>
+            )}
           </div>
         )}
       </Card>

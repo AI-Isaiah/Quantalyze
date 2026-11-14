@@ -210,8 +210,18 @@ const state = vi.hoisted(() => ({
   populationSize: 7,
   /** trust_tier per strategy id, as readPublicVerificationSignals answers it. */
   signals: new Map<string, { trust_tier: string | null; status: string | null }>(),
-  /** getStrategylessActiveKeys: the bare-key rows, or null for a failed read. */
-  bareKeys: [] as Array<{ id: string; exchange: string; label: string }> | null,
+  /**
+   * getStrategylessActiveKeys: the bare-key rows, or null for a failed read. The two Phase 213
+   * fields are optional so the older fixtures read as "eligible, no status", which is what the
+   * real read answers for a healthy key.
+   */
+  bareKeys: [] as Array<{
+    id: string;
+    exchange: string;
+    label: string;
+    finishSetupEligible?: boolean;
+    syncStatus?: string | null;
+  }> | null,
   /** getRealPortfolio: the viewer's real portfolio, or null when there is none. */
   portfolio: null as { id: string } | null,
   /** A wizard draft the companion read finds, or null. */
@@ -677,14 +687,52 @@ describe("allocator reads and the K sentence, by role (199-10 task 2, D-02)", ()
     }
   });
 
-  it("a manager's page makes neither allocator read and shows no placeholder or K sentence", async () => {
+  it("a manager's page reads the strategyless keys (superseded by Phase 213 decision (b)), renders their placeholder rows, and makes no portfolio read", async () => {
+    // Phase 213 decision (b) SUPERSEDES the Phase 199 plan 10 pin that said a
+    // manager's page "makes neither allocator read". A manager can create a key
+    // through the wizard and the venue fence refuses it as KEY_ORPHANED, so the
+    // "No strategy yet" row must exist for a manager too. The PORTFOLIO read stays
+    // allocator-only: only Simulate Impact scores against it.
     asRole("manager");
     state.bareKeys = TWO_KEYS;
     await renderPage();
 
-    expect(queries.getStrategylessActiveKeys).not.toHaveBeenCalled();
+    expect(queries.getStrategylessActiveKeys).toHaveBeenLastCalledWith("u-1");
     expect(queries.getRealPortfolio).not.toHaveBeenCalled();
+    expect(screen.getByText(/Bybit · Bybit Main/)).toBeTruthy();
+    expect(screen.getByText(/Deribit · Deribit Options/)).toBeTruthy();
+    expect(screen.getByTestId("comparison-set-note").textContent).toBe(
+      `${mapCopy(7)} ${kSentence(2)}`,
+    );
+  });
+
+  it("Phase 213 (b): a revoked orphan reaches the rendered table with the static key pill and no Finish setup; a healthy one beside it keeps Finish setup", async () => {
+    asRole("manager");
+    state.bareKeys = [
+      { id: "k-rev", exchange: "bybit", label: "Old key", finishSetupEligible: false, syncStatus: "revoked" },
+      { id: "k-ok", exchange: "deribit", label: "Deribit Options", finishSetupEligible: true, syncStatus: "connected" },
+    ];
+    await renderPage();
+
+    const revoked = screen.getByText(/Bybit · Old key/).closest("tr") as HTMLElement;
+    const healthy = screen.getByText(/Deribit · Deribit Options/).closest("tr") as HTMLElement;
+    // Vacuity fence: both rows really rendered, so the absence below is about the revoked row.
+    expect(revoked).toBeTruthy();
+    expect(healthy).toBeTruthy();
+    expect(within(revoked).getByTestId("allocator-sync-pill-static")).toBeTruthy();
+    expect(within(revoked).queryByText("Finish setup →")).toBeNull();
+    expect(within(healthy).getByText("Finish setup →")).toBeTruthy();
+    expect(within(healthy).queryByTestId("allocator-sync-pill-static")).toBeNull();
+  });
+
+  it("Phase 213 (b): a manager with zero orphans renders no placeholder row and no K sentence", async () => {
+    asRole("manager");
+    state.bareKeys = [];
+    await renderPage();
+
+    expect(queries.getStrategylessActiveKeys).toHaveBeenLastCalledWith("u-1");
     expect(screen.queryByText("Finish setup →")).toBeNull();
+    expect(screen.queryByText(PLACEHOLDER_KEYS_UNREADABLE)).toBeNull();
     expect(screen.getByTestId("comparison-set-note").textContent).toBe(mapCopy(7));
   });
 

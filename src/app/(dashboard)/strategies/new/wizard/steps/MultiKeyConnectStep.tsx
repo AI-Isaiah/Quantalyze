@@ -27,7 +27,7 @@ import {
 } from "@/lib/wizard/validate-budget";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
-import { SFOX_UI_ENABLED, MT5_UI_ENABLED, formatDay } from "@/lib/utils";
+import { SFOX_UI_ENABLED, formatDay } from "@/lib/utils";
 import {
   getWizardCorrelationId,
   wizardFetch,
@@ -87,6 +87,12 @@ import { KEY_STORAGE_LINK, KEY_STORAGE_SENTENCE } from "@/lib/status-surface-cop
  * fix (one shared option table both steps import, which the State-A neutrality
  * argument above does NOT forbid — it forbids ConnectKeyStep growing an export)
  * is logged in TODOS.md.
+ *
+ * ⛔ ONE NAMED EXCEPTION, 2026-11-14 (Phase 213 decision (c)): MT5. The single-key
+ * form offers an MT5 card (behind `MT5_UI_ENABLED`) and this roster never does,
+ * because MT5 cannot be a composite member — the server refuses it with
+ * `COMPOSITE_MT5_UNSUPPORTED`. The class guard names MT5 as that exception and
+ * nothing else; any OTHER venue on one roster and not the other still reds it.
  */
 
 function genId(): string {
@@ -174,42 +180,15 @@ const EXCHANGES: ExchangeOption[] = [
         },
       ]
     : []),
-  // 153.4 review CR-03 — THE MT5 CARD THIS ROSTER WAS MISSING, gated on the same
-  // flag as its single-key twin.
-  //
-  // ⚠️ ITS ABSENCE WAS NOT COSMETIC. An MT5 key reaches a member panel by exactly
-  // one route — the UAT/F-4 draft carry-over in `enterMulti`, which is the path
-  // plan 153.4-05's own tests drive. With no card, `EXCHANGES.find(e => e.id ===
-  // "mt5")` was `undefined` for that panel, so `requiresPassphrase` defaulted
-  // FALSE and `validatePanel` posted `passphrase: null` — silently dropping the
-  // broker server the user typed in State A — while `KeyPanel` rendered no field
-  // to put it back and `canValidate` did not gate on it. The submit control was
-  // enabled for a request that could not succeed. The same lookup miss also cost
-  // the panel its credential labels ("MT5 login" / "Investor password"), its
-  // investor-vs-master steer, its `aria-pressed` card and its validated summary
-  // name.
-  ...(MT5_UI_ENABLED
-    ? [
-        {
-          id: "mt5" as const,
-          name: "MT5",
-          caption: "Live investor (read-only) login. Forex & CFD.",
-          requiresPassphrase: true,
-          credentialLabels: { key: "MT5 login", secret: "Investor password" },
-          credentialPlaceholders: {
-            key: "Your MT5 account number",
-            secret: "Your read-only investor password",
-          },
-          passphraseLabel: "Broker server",
-          passphraseSecret: false,
-          passphrasePlaceholder: "Exactly as shown in your MT5 terminal",
-          passphraseHelper:
-            "Open your MT5 terminal's login window and copy the server name exactly as it appears there — it is broker-specific and often carries a region or Demo/Live suffix.",
-          secretHelper:
-            "Use your investor (read-only) password — not your master password. A master password can place trades, so we refuse it and store nothing.",
-        },
-      ]
-    : []),
+  // ⛔ SUPERSEDED 2026-11-14 (Phase 213 decision (c)): MT5 IS NOT A COMPOSITE
+  // MEMBER, so this roster carries NO MT5 card whatever `MT5_UI_ENABLED` says.
+  // The server refuses it too (`COMPOSITE_MT5_UNSUPPORTED` from composite/add-key
+  // and composite/set-members). What stood here from 153.4 review CR-03 was an MT5
+  // card added so a draft-carried MT5 panel could keep its broker server; the
+  // carry-over route that made such a panel reachable is closed in `enterMulti`
+  // (and the footer shows a note instead of the add-key button while MT5 is
+  // selected), so the card has nothing left to serve. The single-key MT5 card in
+  // `ConnectKeyStep` is unchanged.
 ];
 
 // F3 (Phase 122): honest structural note appended to the step-level "What we
@@ -317,6 +296,11 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "KEY_HAS_TRADING_PERMS",
     "KEY_HAS_WITHDRAW_PERMS",
     "DRAFT_ALREADY_EXISTS",
+    // Phase 213 / KEYFLOW decision (c) (2026-11-14) — `composite/add-key` refuses
+    // an `mt5` exchange with this code, ahead of its `MT5_ENABLED` gate. Omit the
+    // row and the step renders the generic UNKNOWN card for a refusal the server
+    // classified precisely.
+    "COMPOSITE_MT5_UNSUPPORTED",
     "KEY_RATE_LIMIT",
     // 164.2-05 / criterion 4 (2026-09-06) — BESIDE `KEY_RATE_LIMIT`, NOT
     // INSTEAD OF IT. The two stand for DIFFERENT facts and both are reachable
@@ -451,6 +435,11 @@ const KNOWN_SET_MEMBERS_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
     "MULTI_KEY_WINDOWS_INVALID",
     "GUARD_BLOCKED",
+    // Phase 213 / KEYFLOW decision (c) (2026-11-14) — `composite/set-members`
+    // refuses a member whose owned key's exchange is `mt5` with this code, before
+    // the membership RPC. A COPY GUARD on this roster: `handleContinue` does not
+    // translate, so without the row the code falls straight to UNKNOWN.
+    "COMPOSITE_MT5_UNSUPPORTED",
     // ⚠️ 164.2-05 (2026-09-06) — UNREACHABLE-BY-DESIGN, AND KEPT DELIBERATELY.
     //
     // Read this before treating the row as live. `set-members` answered its own
@@ -895,6 +884,12 @@ export function MultiKeyConnectStep({
   // Phase 94.1 / F2 — whether the State-A single-key form holds a typed but
   // un-submitted credential draft (dirty). Updated from onSingleDraftChange.
   const [singleDraftDirty, setSingleDraftDirty] = useState(false);
+  // Phase 213 decision (c) — the single-key form's currently selected exchange
+  // (typed or restored), so the footer can swap the add-key button for the MT5
+  // note. Set from onSingleDraftChange, which ConnectKeyStep calls on mount too.
+  const [singleDraftExchange, setSingleDraftExchange] = useState<ExchangeId | null>(
+    null,
+  );
 
   // Latest-panels ref for reads inside event handlers (validate / continue /
   // add) that must see current state without re-binding callbacks. Synced in a
@@ -1124,6 +1119,7 @@ export function MultiKeyConnectStep({
     // connect_key. Report it so a forward stepper jump is blocked until the
     // user either submits (single-key onSuccess) or clears the field.
     setSingleDraftDirty(!!draft.apiKey || !!draft.apiSecret);
+    setSingleDraftExchange(draft.exchange);
   }, []);
 
   const registerCardRef = useCallback(
@@ -1148,6 +1144,11 @@ export function MultiKeyConnectStep({
     // if the user typed anything, seed panel 1 with it (windows stay empty — the
     // single-key form has no window field, so the user fills them in multi mode).
     const draft = singleDraftRef.current;
+    // Phase 213 decision (c) (closes the 153.4 CR-03 carry-over): MT5 cannot be a
+    // composite member, so a draft on MT5 never becomes a member panel. The footer
+    // already shows a note instead of the button; this refusal is for a stale
+    // handler, and the server (COMPOSITE_MT5_UNSUPPORTED) is the backstop.
+    if (draft?.exchange === "mt5") return;
     const p1 = newPanel();
     if (draft) {
       p1.exchange = draft.exchange;
@@ -1990,14 +1991,26 @@ export function MultiKeyConnectStep({
           preselectKey={preselectKey}
           onUseDifferentKey={onUseDifferentKey}
           footerSlot={
-            <Button
-              type="button"
-              variant="ghost"
-              data-testid="multi-add-key"
-              onClick={enterMulti}
-            >
-              + Add another key window
-            </Button>
+            singleDraftExchange === "mt5" ? (
+              // Phase 213 decision (c), UI-SPEC 3.2: a stated limitation rather
+              // than a button that vanishes without a reason.
+              <p
+                data-testid="multi-add-key-mt5-note"
+                className="text-caption text-text-muted"
+              >
+                MT5 accounts connect one key per strategy, so they can&apos;t be
+                combined with other keys.
+              </p>
+            ) : (
+              <Button
+                type="button"
+                variant="ghost"
+                data-testid="multi-add-key"
+                onClick={enterMulti}
+              >
+                + Add another key window
+              </Button>
+            )
           }
         />
       </>
@@ -2369,7 +2382,11 @@ function KeyPanel({
             className="mt-3 flex flex-wrap items-center gap-2"
             data-testid={`key-${index}-summary`}
           >
-            <span className="text-body text-text-primary">{active?.name}</span>
+            <span className="text-body text-text-primary">
+              {/* Phase 213 decision (c): a legacy MT5 member rehydrates with no
+                  roster entry, so name its venue rather than render a blank. */}
+              {active?.name ?? venueLabel(p.exchange)}
+            </span>
             <span className="text-text-muted">·</span>
             <span className="text-caption text-text-secondary">
               {p.nickname.trim() || `${venueLabel(p.exchange)} key`}

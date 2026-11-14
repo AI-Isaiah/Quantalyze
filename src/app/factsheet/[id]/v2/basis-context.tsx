@@ -654,15 +654,26 @@ export function windowView(view: FactsheetPayload, startIdx: number, endIdx: num
   const slice = view.strategyReturns.slice(s, e + 1).map((value, i) => ({ date: view.dates[s + i], value }));
   const wb = deriveSeriesBundle(slice, rederiveArgs(view));
   const keepBase = (b: ComparatorBlock) => b.summary == null && b.joint == null;
+  // Phase 213 decision (d), SC-4 (CR-01): the composer preview sets `basisPending` while a
+  // leg's asset-class probe is open, so `periodsPerYear` is the interim basis. The slice's
+  // annualized-risk figures would be computed on it and flip on settle, so they take the
+  // same silent NaN forms the full-range hold uses (`buildScenarioFactsheetPayload`).
+  // Only the csv arm carries the flag; every other view reads it as absent.
+  const held = view.ingestSource === "csv" && view.basisPending === true;
+  const emptyRatioCI = () => ({ point: NaN, lo: NaN, hi: NaN, hist: { lo: 0, hi: 0, bins: [] as number[] } });
   const fields = {
     dates: wb.dates,
     strategyReturns: wb.strategyReturns,
     strategyEquity: wb.strategyEquity,
     strategyDrawdowns: wb.strategyDrawdowns,
-    strategyMetrics: wb.strategyMetrics,
+    strategyMetrics: held
+      ? { ...wb.strategyMetrics, ann_vol: NaN, sharpe: NaN, sortino: NaN }
+      : wb.strategyMetrics,
     strategyWorst10: wb.strategyWorst10,
     quantiles: wb.quantiles,
-    bootstrapCI: wb.bootstrapCI,
+    bootstrapCI: held
+      ? { ...wb.bootstrapCI, sharpe: emptyRatioCI(), sortino: emptyRatioCI() }
+      : wb.bootstrapCI,
     comparators: {
       btc: keepBase(view.comparators.btc) ? view.comparators.btc : wb.comparators.btc,
       spx: keepBase(view.comparators.spx) ? view.comparators.spx : wb.comparators.spx,

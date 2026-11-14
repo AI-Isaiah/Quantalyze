@@ -54,7 +54,8 @@ import { ReturnsUnitChip } from "./ReturnsUnitChip";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { signTone, drawdownTone } from "@/lib/factsheet/display-sign";
 import { formatPercent, formatNumber, formatCurrency, formatDay } from "@/lib/utils";
-import { isComputedAnalytics, deriveEmptySeriesState } from "@/lib/closed-sets";
+import { isComputedAnalytics, deriveEmptySeriesState, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
+import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import { rowChipStatus } from "@/lib/strategy-health";
 import { listSeriesVerdict, type ListSeriesVerdictResult } from "@/lib/freshness";
 import { gateAnnualized, gatedValue, notShownLine, recordStartDay, trackMonths } from "@/lib/figure-gate";
@@ -392,6 +393,16 @@ export type PlaceholderKeyRow = {
   id: string;
   exchangeLabel: string;
   keyLabel: string;
+  /**
+   * Phase 213 decision (b). Both OPTIONAL so the public mounts and old fixtures
+   * compile and render as they did. `finishSetupEligible: false` (an inactive or
+   * revoked orphan, which the list now includes so it can be disconnected) hides
+   * `Finish setup →`: a draft over such a key is skipped by every cron dispatcher
+   * and would never sync. Absent means eligible, which is today's behaviour.
+   */
+  finishSetupEligible?: boolean;
+  /** The stored key status. An untrusted one (revoked) shows the static key pill. */
+  syncStatus?: string | null;
 };
 
 interface StrategyTableProps {
@@ -554,6 +565,15 @@ interface StrategyTableProps {
    */
   onFinishSetup?: (keyId: string) => void;
   /**
+   * Phase 213 decision (b) — opens the Disconnect confirm for a placeholder row's key. A
+   * client→client function prop minted in the section that hosts this table, for the same
+   * RSC-boundary reason as `onFinishSetup`. ABSENT ⇒ the placeholder Actions cell renders
+   * exactly as it did before this prop existed (the public mounts and the pinned owner
+   * mount pass none). The control is never disabled: a row that cannot disconnect does not
+   * render it.
+   */
+  onDisconnect?: (keyId: string) => void;
+  /**
    * Phase 150 / OWN-03 — opens the Mark-ownership dialog for a row (the retro
    * path, D-09/D-11). Client→client function props, minted in
    * MyStrategiesSection for the same reason `onFinishSetup` is: a function is
@@ -668,6 +688,7 @@ export function StrategyTable({
   initialSort,
   placeholderKeys,
   onFinishSetup,
+  onDisconnect,
   onMarkOwnership,
   nowMs,
   selectable = false,
@@ -2255,6 +2276,24 @@ export function StrategyTable({
                             <span className={`${DATA_STATE_CHIP} ${PIPELINE_CHIPS.no_strategy_yet.tone}`}>
                               {PIPELINE_CHIPS.no_strategy_yet.label}
                             </span>
+                            {/* Phase 213 (b): an orphan the list newly includes can be
+                                revoked. The existing static key pill says so; it
+                                needs only the stored status, so `syncError` and
+                                `lastSyncAt` are null (the placeholder row carries
+                                neither). An inactive key without an untrusted
+                                status shows the chip alone. `exchange` is required
+                                by the props and only feeds the rate-limit helper,
+                                which `pillOnly` never renders. */}
+                            {isUntrustedKeySyncStatus(p.syncStatus) && (
+                              <AllocatorSyncStatus
+                                pillOnly
+                                subject="strategy-key"
+                                syncStatus={p.syncStatus ?? null}
+                                syncError={null}
+                                lastSyncAt={null}
+                                exchange={p.exchangeLabel}
+                              />
+                            )}
                           </div>
                         </td>
                         {/* 170.7 / D-01 — keeps the placeholder td count equal to
@@ -2311,19 +2350,48 @@ export function StrategyTable({
                         <td className="px-4 py-3" />
                         <td className="px-4 py-3" />
                         <td className="pl-4 pr-8 py-3 text-right">
-                          <button
-                            type="button"
-                            // 162-06 / HONEST-06 — THIS row's key id, read off
-                            // the row being rendered. The bare `onClick=
-                            // {onFinishSetup}` this replaces handed the click
-                            // event to a zero-arg callback, so every row said
-                            // the same thing: "open the wizard", with no way to
-                            // tell which key was clicked.
-                            onClick={() => onFinishSetup?.(p.id)}
-                            className="text-small text-accent underline underline-offset-2"
-                          >
-                            Finish setup →
-                          </button>
+                          {(() => {
+                            // Phase 213 (b): `Finish setup →` only where a draft over the
+                            // key could sync. Absent `finishSetupEligible` is eligible, so
+                            // the public mounts and old fixtures keep today's control.
+                            const finishSetup =
+                              p.finishSetupEligible !== false ? (
+                                <button
+                                  type="button"
+                                  // 162-06 / HONEST-06 — THIS row's key id, read off
+                                  // the row being rendered. The bare `onClick=
+                                  // {onFinishSetup}` this replaces handed the click
+                                  // event to a zero-arg callback, so every row said
+                                  // the same thing: "open the wizard", with no way to
+                                  // tell which key was clicked.
+                                  onClick={() => onFinishSetup?.(p.id)}
+                                  className="text-small text-accent underline underline-offset-2"
+                                >
+                                  Finish setup →
+                                </button>
+                              ) : null;
+                            // No `onDisconnect`: exactly the markup this cell had before
+                            // the prop existed (the pinned owner mount and every public
+                            // mount reach this branch).
+                            if (!onDisconnect) return finishSetup;
+                            // The ranked rows' Actions container: one line, so the row
+                            // keeps `--row-h`. The visible word is fixed; the key label
+                            // lives in the accessible name, so two keys on one venue stay
+                            // distinguishable and a long label never widens the cell.
+                            return (
+                              <div className="flex flex-nowrap items-center justify-end gap-3 whitespace-nowrap">
+                                {finishSetup}
+                                <button
+                                  type="button"
+                                  aria-label={`Disconnect ${p.exchangeLabel} · ${p.keyLabel}`}
+                                  className={`${GHOST_ROW_ACTION} inline-flex items-center pointer-coarse:min-h-[44px]`}
+                                  onClick={() => onDisconnect(p.id)}
+                                >
+                                  Disconnect
+                                </button>
+                              </div>
+                            );
+                          })()}
                         </td>
                       </tr>
                     ))}

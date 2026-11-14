@@ -1118,8 +1118,20 @@ export async function hasAnyOwnStrategies(
   return (data ?? []).length > 0;
 }
 
-/** Phase 149 (149-02) — an active key with no live strategy behind it. */
-export type StrategylessKey = { id: string; exchange: SupportedExchange; label: string };
+/**
+ * Phase 149 (149-02) — a connected key with no live strategy behind it.
+ *
+ * Phase 213 decision (b) widened it: `finishSetupEligible` is the
+ * `isPerKeyDailiesEligibleKey` verdict (a draft over the key could sync), and
+ * `syncStatus` is the stored status so a revoked orphan can carry its pill.
+ */
+export type StrategylessKey = {
+  id: string;
+  exchange: SupportedExchange;
+  label: string;
+  finishSetupEligible: boolean;
+  syncStatus: string | null;
+};
 
 /**
  * Phase 151 (151-02) — which of the owner's keys already feed a LIVE strategy
@@ -1193,6 +1205,16 @@ export function deriveStrategyLinkedKeyIds(
  * Eligibility reuses the exported `isPerKeyDailiesEligibleKey` predicate
  * (queries.ts) rather than re-deriving `is_active && sync_status !== "revoked"
  * && disconnected_at == null`.
+ *
+ * ⛔ CORRECTED 2026-11-14 (Phase 213 decision (b)): the sentence above is kept as
+ * lineage. The LIST no longer filters on that predicate. It filters on
+ * `disconnected_at == null`, the live-key test the create-with-key venue fence
+ * applies, so every key the fence refuses as KEY_ORPHANED (an inactive or
+ * revoked-but-connected one included) is listed and can be disconnected. The
+ * predicate rides each row as `finishSetupEligible`, because a draft over an
+ * inactive or revoked key is skipped by every cron dispatcher and never syncs.
+ * The predicate itself is untouched: it is the cross-language mirror of the
+ * Python backfill and also feeds `allActiveKeysHavePerKeyDailies`.
  */
 export function deriveStrategylessKeys(
   keys: Pick<
@@ -1205,12 +1227,14 @@ export function deriveStrategylessKeys(
   const covered = deriveStrategyLinkedKeyIds(ownStrategies, strategyKeyLinks);
 
   return keys
-    .filter(isPerKeyDailiesEligibleKey)
+    .filter((k) => k.disconnected_at == null)
     .filter((k) => !covered.has(k.id))
-    .map(({ id, exchange, label }) => ({
-      id,
-      exchange: exchange as SupportedExchange,
-      label,
+    .map((k) => ({
+      id: k.id,
+      exchange: k.exchange as SupportedExchange,
+      label: k.label,
+      finishSetupEligible: isPerKeyDailiesEligibleKey(k),
+      syncStatus: k.sync_status,
     }));
 }
 

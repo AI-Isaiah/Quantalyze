@@ -517,6 +517,14 @@ function keyOrphanedResponse(): NextResponse {
  * ends it: the user's OWN orphaned key becomes a draft strategy with zero
  * re-entered credentials.
  *
+ * ⛔ CORRECTED 2026-11-14 (Phase 213 decision (b)): "releasing the stored key is
+ * not something they can do from any page we ship" no longer holds. The
+ * `/strategies` "No strategy yet" row now offers Disconnect, which keeps the
+ * `api_keys` row and sets `disconnected_at`, and `resolveByVenueIdentity`'s
+ * `.is("disconnected_at", null)` filter then stops seeing it, so the account can
+ * be connected again (`route.test.ts`, "the way out opens"). The sentence above
+ * is kept as lineage.
+ *
  * ⛔ CREDENTIAL FIELDS ARE IGNORED HERE, AND THAT IS THE POINT. Nothing is
  * validated against a venue, nothing is encrypted, nothing touches `api_keys`.
  * The request carries SELECTION INTENT (which stored key) and nothing else, so
@@ -926,6 +934,10 @@ async function handleReuseExistingKey(
     );
   }
 
+  // ⚠️ F2 RESIDUAL (Phase 213): the RPC's internal replay returns the same
+  // (strategy_id, api_key_id) shape as a fresh mint, so no `deduped` can be set
+  // here without a RETURNS TABLE change (a migration, out of scope). Reachable
+  // only on an F6 read fault or a true concurrent double-submit of one session.
   return NextResponse.json(
     { ok: true, strategy_id: row.strategy_id, api_key_id: row.api_key_id },
     { headers: NO_STORE_HEADERS },
@@ -1189,11 +1201,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
   if (existingDraft?.id && existingDraft.api_key_id) {
+    // ⛔ CORRECTED 2026-11-14 (Phase 213 decision (a)): this arm answers
+    // `deduped: true` like every other route-owned arm that returns an existing
+    // draft, so the client is told it did not get a new strategy. A boolean
+    // only; no identifier crosses back (T-154-06-C).
     return NextResponse.json(
       {
         ok: true,
         strategy_id: existingDraft.id,
         api_key_id: existingDraft.api_key_id,
+        deduped: true,
       },
       { headers: NO_STORE_HEADERS },
     );
@@ -1267,6 +1284,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // the user cannot otherwise explain — they pressed Connect and did not
       // get a new strategy — so it is the one that earns a line on screen.
       // ⛔ The identity itself never crosses back (UI-SPEC / T-154-06-C).
+      // ⛔ CORRECTED 2026-11-14 (Phase 213 decision (a)): the session-fence arm
+      // above now ALSO answers `deduped: true` (decision (a): deduped whenever
+      // a route-owned arm returns an existing draft). The two sentences above
+      // are kept as lineage; they described the world before that decision.
       return NextResponse.json(
         {
           ok: true,
@@ -1835,6 +1856,11 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // create-with-key / finalize-wizard / keys-sync, matching the csv-finalize
     // envelope already on the wire. Error bodies keep their `{ code, error }`
     // shape and are discriminated by the absence of `ok` (res.ok / HTTP status).
+    // ⚠️ F2 RESIDUAL (Phase 213): the RPC's internal replay returns the same
+    // (strategy_id, api_key_id) shape as a fresh mint, so no `deduped` can be
+    // set here without a RETURNS TABLE change (a migration, out of scope).
+    // Reachable only on an F6 read fault or a true concurrent double-submit of
+    // one session.
     return NextResponse.json(
       {
         ok: true,

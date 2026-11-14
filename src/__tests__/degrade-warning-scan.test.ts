@@ -230,6 +230,12 @@ const SCAN_LEDGER: Record<string, LedgerRow> = {
     ids: ["strategies.empty-allocator"],
     reason: "empty: the allocator-only empty state, marker only on the shipped panel",
   },
+  [`${LIST_ROOT}/StrategiesSection.tsx`]: {
+    tripHits: 1,
+    ids: [],
+    reason:
+      "Phase 213 plan 06: the Disconnect confirm's one text-warning class, on the feeds note when the memberships read could not answer ('Could not check which strategies this key feeds.'). It is the shared key-feeds-confirm wording, the same line AllocatorExchangeManager's confirm renders, not registered by this plan; it warns only and never holds Disconnect, which is reversible",
+  },
   [STRATEGY_TABLE]: {
     tripHits: 2,
     ids: [],

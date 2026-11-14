@@ -1,15 +1,21 @@
 "use client";
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode, type SyntheticEvent } from "react";
 
 interface ModalProps {
   open: boolean;
   onClose: () => void;
+  /**
+   * The native `cancel` event, fired by Esc BEFORE `close`. A caller that must keep
+   * the dialog open (a request in flight) calls `preventDefault()` here; otherwise
+   * the browser closes the `<dialog>` in the DOM while React still holds `open`.
+   */
+  onCancel?: (e: SyntheticEvent<HTMLDialogElement>) => void;
   title: string;
   children: ReactNode;
 }
 
-export function Modal({ open, onClose, title, children }: ModalProps) {
+export function Modal({ open, onClose, onCancel, title, children }: ModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
@@ -23,6 +29,7 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
     <dialog
       ref={dialogRef}
       onClose={onClose}
+      onCancel={onCancel}
       className="backdrop:bg-black/40 bg-transparent p-0 m-auto"
     >
       <div className="bg-surface rounded-xl border border-border shadow-elevated w-full max-w-lg p-6">

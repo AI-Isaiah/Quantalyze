@@ -54,6 +54,7 @@ import {
   within,
 } from "@testing-library/react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { btcClosesFromReturns } from "../lib/btc-closes.test-utils";
 
 // --- next/navigation mock -------------------------------------------------
 
@@ -135,6 +136,12 @@ vi.mock("./StrategyBrowseDrawer", () => ({
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
+import { KpiStrip } from "./KpiStrip";
+import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
+import type { OwnBookDeltaPayload } from "@/lib/factsheet/types";
+import { RollingMetrics } from "@/components/charts/RollingMetrics";
+import { RollingVolatilityChart } from "@/components/charts/RollingVolatilityChart";
+import { RollingSortinoChart } from "@/components/charts/RollingSortinoChart";
 
 // --- localStorage ---------------------------------------------------------
 
@@ -1041,5 +1048,759 @@ describe("ScenarioComposer — BTC-unit rows (164.6.6.2 plan 11, UI-SPEC E1-E6)"
       .querySelector(`[data-scope-ref="${BOOK_ID}"]`)
       ?.remove();
     expect(clone.textContent ?? "").not.toMatch(/in BTC/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 213 decision (d) / F5 (SC-4, SC-6) - the strip holds its basis-dependent
+// figure while any leg's asset-class probe is open.
+//
+// WHY THIS DESCRIBE EXISTS. 159-04 (RANK-06) made an unanswered probe derive the
+// conservative 365 clock, and the strip used to render a Sharpe on it at once.
+// A traditional drawer leg then answered `traditional`, the blend flipped to the
+// 252 clock, and the Sharpe the user was reading changed under their eyes. That
+// "render on the interim basis" behaviour is SUPERSEDED by Phase 213 decision
+// (d): the strip's Sharpe cell (the only basis-dependent cell the strip paints;
+// its cells are YTD TWR, Sharpe, Max DD 12m and Avg |rho|) reads the silent
+// em-dash until every leg's probe settles, then shows one number on the final
+// basis.
+//
+// A REAL flip needs a TRADITIONAL book leg plus a drawer leg answered
+// traditional. A crypto drawer leg derives 365 before and after its answer and
+// exercises no flip, so the fixture is pinned to the one shape that can fail.
+// The strip is the REAL KpiStrip here (delegated to in each test below), so the
+// cell text is what the user reads, not a prop a mock was handed.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer - Phase 213 decision (d): a leg with an open probe holds the strip's Sharpe", () => {
+  const BOOK_ID = "213-book-traditional-leg";
+  const BOOK_NAME = "Traditional Book Leg";
+  const DAY_MS = 86_400_000;
+  const START = Date.UTC(2024, 0, 1);
+  const isoAt = (i: number) =>
+    new Date(START + i * DAY_MS).toISOString().slice(0, 10);
+  // 400 consecutive days each: clears the D-15 record bound on BOTH clocks, so a
+  // number is genuinely on offer and the held em-dash is not the figure gate's.
+  const bookSeries = Array.from({ length: 400 }, (_, i) => ({
+    date: isoAt(i),
+    value: [0.012, -0.008, 0.02, -0.006, 0.014, -0.011, 0.007][i % 7] + (i % 11) * 0.0004,
+  }));
+  const drawerSeries = Array.from({ length: 400 }, (_, i) => ({
+    date: isoAt(i),
+    value: [0.009, -0.012, 0.015, -0.004, 0.011, -0.007, 0.006][i % 7] + (i % 13) * 0.0003,
+  }));
+
+  /** The literals the harness produced, measured once and written here. */
+  const BOOK_ALONE_SHARPE = "8.36";
+  const INTERIM_365_SHARPE = "9.57";
+  const FINAL_252_SHARPE = "7.96";
+
+  function bookPayload(series = bookSeries): MyAllocationDashboardPayload {
+    return {
+      ...makePayload(),
+      strategies: [
+        {
+          strategy: {
+            id: BOOK_ID,
+            name: BOOK_NAME,
+            disclosure_tier: "verified",
+            asset_class: "traditional",
+            trust_tier: "api_verified",
+            strategy_analytics: { cagr: 0.2, sharpe: 1.1, daily_returns: series },
+          },
+        },
+      ],
+    } as unknown as MyAllocationDashboardPayload;
+  }
+
+  /** The real strip's Sharpe cell, the text the user reads. */
+  function sharpeCell(): string {
+    const group = screen.getByRole("group", { name: "Allocation KPIs" });
+    const label = within(group).getByText("Sharpe").closest("div");
+    return label?.nextElementSibling?.textContent ?? "";
+  }
+
+  /** What the composer handed the strip on every render so far. */
+  function stripSharpes(): Array<number | null> {
+    return vi
+      .mocked(KpiStrip)
+      .mock.calls.map(
+        (c) =>
+          (c[0] as { scenarioMetrics?: { sharpe: number | null } | null })
+            .scenarioMetrics?.sharpe ?? null,
+      );
+  }
+
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import("./KpiStrip")>("./KpiStrip");
+    vi.mocked(KpiStrip).mockClear();
+    vi.mocked(KpiStrip).mockImplementation(actual.KpiStrip as never);
+  });
+  afterEach(() => {
+    vi.mocked(KpiStrip).mockImplementation((() => (
+      <div data-testid="kpi-strip-mock" />
+    )) as never);
+  });
+
+  function mountWithBookLeg(series = bookSeries) {
+    render(
+      <ScenarioComposer
+        payload={bookPayload(series)}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The render count just before the book leg joins the scenario: before it the
+    // blend is empty, and an empty blend's null Sharpe is not a held figure.
+    const rendersBeforeBookAdd = vi.mocked(KpiStrip).mock.calls.length;
+    add(BOOK_ID, BOOK_NAME);
+    return rendersBeforeBookAdd;
+  }
+
+  const drawerAnswer = (assetClass: string | null) =>
+    returnsBody({
+      daily_returns: drawerSeries,
+      asset_class: assetClass,
+      cagr: 0.15,
+      sharpe: 0.9,
+    });
+
+  it("decision (d): a traditional drawer leg whose probe is held open reads the em-dash, then ONE number on the 252 clock", async () => {
+    const { fetchMock, answer } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    mountWithBookLeg();
+
+    // Non-vacuity: with only the book leg (always resolved) the strip DOES show a
+    // number, so the em-dash below is the hold and not an empty fixture.
+    expect(sharpeCell()).toBe(BOOK_ALONE_SHARPE);
+
+    const rendersBeforeAdd = vi.mocked(KpiStrip).mock.calls.length;
+    add();
+    expect(
+      fetchMock.mock.calls.some(
+        ([u]) => typeof u === "string" && u.includes("/returns"),
+      ),
+      "no /returns fetch was issued - the held state is not being observed",
+    ).toBe(true);
+    // HELD: the interim (nullish => 365) basis is live, and no number is shown.
+    expect(sharpeCell()).toBe("—");
+    const heldRenders = stripSharpes().slice(rendersBeforeAdd);
+    expect(heldRenders.length).toBeGreaterThan(0);
+    expect(
+      heldRenders.every((v) => v === null),
+      "a render between the add and the answer handed the strip a number",
+    ).toBe(true);
+
+    const rendersAtAnswer = vi.mocked(KpiStrip).mock.calls.length;
+    await answer(drawerAnswer("traditional"));
+    await waitFor(() => expect(sharpeCell()).toBe(FINAL_252_SHARPE));
+    // ONCE: every number the strip was ever handed after the answer is the same
+    // one, so it never showed a number first and changed it afterwards.
+    const afterAnswer = stripSharpes().slice(rendersAtAnswer);
+    const numbers = new Set(afterAnswer.filter((v): v is number => v !== null));
+    expect(numbers.size).toBe(1);
+  });
+
+  it("decision (d) control: the interim 365 clock and the final 252 clock give DIFFERENT Sharpe literals, so the case above proves a real flip", async () => {
+    // A drawer leg answered with a NULL class settles on the 365 rule (the
+    // interim basis, kept as final), so its Sharpe is the number the hold withholds.
+    const { fetchMock, answer } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    mountWithBookLeg();
+    add();
+    expect(sharpeCell()).toBe("—");
+    await answer(drawerAnswer(null));
+    await waitFor(() => expect(sharpeCell()).toBe(INTERIM_365_SHARPE));
+    expect(INTERIM_365_SHARPE).not.toBe(FINAL_252_SHARPE);
+  });
+
+  // -------------------------------------------------------------------------
+  // Plan 213-11, decision (d), UI-SPEC 4.3: the two strip-adjacent consumers of
+  // the blend basis that plan 05's strip hold did not reach.
+  // -------------------------------------------------------------------------
+
+  // 200 consecutive days, under one year: the blend record is `short`, so on a
+  // settled render the gate caption under the strip IS shown. The 400-day fixtures
+  // above clear the one-year bound and render no caption at all, so they cannot
+  // exercise this surface.
+  const bookSeriesShort = bookSeries.slice(0, 200);
+  const drawerSeriesShort = drawerSeries.slice(0, 200);
+  const GATE_NOTE = "scenario-figure-gate-note";
+
+  it("decision (d): the gate caption is silent while a drawer leg's probe is open, then returns once on the final basis", async () => {
+    const { fetchMock, answer } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    mountWithBookLeg(bookSeriesShort);
+
+    // Non-vacuity: with only the book leg (never pending) the 200-day record is
+    // short, so the caption IS on screen. The absence below is the hold.
+    const settledNote = screen.getByTestId(GATE_NOTE).textContent;
+    expect(settledNote).toMatch(/\S/);
+
+    add();
+    expect(
+      fetchMock.mock.calls.some(
+        ([u]) => typeof u === "string" && u.includes("/returns"),
+      ),
+      "no /returns fetch was issued - the held state is not being observed",
+    ).toBe(true);
+    // HELD: the caption's verdict is read off a record built at the interim basis.
+    expect(screen.queryByTestId(GATE_NOTE)).toBeNull();
+
+    await answer(
+      returnsBody({
+        daily_returns: drawerSeriesShort,
+        asset_class: "traditional",
+        cagr: 0.15,
+        sharpe: 0.9,
+      }),
+    );
+    await waitFor(() => expect(screen.queryByTestId(GATE_NOTE)).not.toBeNull());
+    expect(screen.getAllByTestId(GATE_NOTE)).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Plan 213-10 Task 1, decision (d), UI-SPEC 4.2/4.3: the "vs BTC" benchmark
+  // section is a child consumer of `blendBasis`. While a leg's probe is open its
+  // Tracking Error, Information Ratio and Alpha read the dash INSIDE the
+  // populated layout, no annualization note and no "{N}-day annualized" sentence
+  // is printed, Beta keeps its number, and the section never falls to its
+  // "Benchmark comparison unavailable" empty state because of pending.
+  // -------------------------------------------------------------------------
+  it("decision (d): the benchmark section blanks TE, IR and Alpha, names no basis and never shows its empty state while a leg's probe is open, then shows numbers once on the 252 clock", async () => {
+    const { fetchMock, answer } = deferredReturnsFetch();
+    const btcCloses = btcClosesFromReturns(
+      bookSeries.map((p, i) => ({
+        date: p.date,
+        value: [0.02, -0.01, 0.005, -0.015, 0.012, 0.0, -0.006][i % 7],
+      })),
+    );
+    // The BTC closes route answers at once; only `/returns` stays held open.
+    const wrapped = vi.fn(async (url: unknown) => {
+      if (typeof url === "string" && url.includes("/api/benchmark/btc/prices")) {
+        return { ok: true, status: 200, json: async () => btcCloses };
+      }
+      return fetchMock(url);
+    });
+    vi.stubGlobal("fetch", wrapped);
+    mountWithBookLeg();
+
+    const val = (m: string) => screen.getByTestId(`benchmark-value-${m}`).textContent;
+    // Non-vacuity: with only the book leg (never pending) the section is populated
+    // with real numbers on its 252-day basis, so the dashes below are the hold.
+    await waitFor(() => expect(val("tracking-error")).not.toBe("—"));
+    expect(val("information-ratio")).not.toBe("—");
+    expect(val("alpha")).not.toBe("—");
+    expect(screen.getByTestId("benchmark-row-beta")).toBeTruthy();
+    const betaSettled = val("beta");
+    expect(betaSettled).not.toBe("—");
+    expect(document.body.textContent).toContain("252-day annualized active returns");
+
+    add();
+    expect(
+      wrapped.mock.calls.some(([u]) => typeof u === "string" && u.includes("/returns")),
+      "no /returns fetch was issued - the held state is not being observed",
+    ).toBe(true);
+    // HELD: populated layout, dashes in the three basis-built slots, no basis text.
+    expect(val("tracking-error")).toBe("—");
+    expect(val("information-ratio")).toBe("—");
+    expect(val("alpha")).toBe("—");
+    expect(val("beta")).not.toBe("—");
+    expect(screen.queryByTestId("scenario-benchmark-annualization-note")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/-day annualized active returns/);
+    expect(screen.queryByText("Benchmark comparison unavailable")).toBeNull();
+
+    await answer(drawerAnswer("traditional"));
+    await waitFor(() => expect(val("tracking-error")).not.toBe("—"));
+    expect(val("information-ratio")).not.toBe("—");
+    expect(val("alpha")).not.toBe("—");
+    expect(document.body.textContent).toContain("252-day annualized active returns");
+    expect(document.body.textContent).not.toContain("365-day annualized active returns");
+  });
+
+  // -------------------------------------------------------------------------
+  // Plan 213-10 Task 2, decision (d): the factsheet preview receives the hold. The
+  // chart is a mock here, so the case pins the wire (the composer hands it
+  // `basisPending` from `legsPending`); what the real body then renders is pinned by
+  // scenario-factsheet-payload.pending.test.tsx.
+  // -------------------------------------------------------------------------
+  it("decision (d): the factsheet preview is handed basisPending while a leg's probe is open, and not before or after", async () => {
+    const { fetchMock, answer } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(ScenarioFactsheetChart).mockClear();
+    mountWithBookLeg();
+    const pendingFlags = () =>
+      vi
+        .mocked(ScenarioFactsheetChart)
+        .mock.calls.map((c) => (c[0] as { basisPending?: boolean }).basisPending);
+
+    // Non-vacuity: with the book leg alone (never pending) the chart rendered, and was
+    // never told to hold.
+    expect(pendingFlags().length).toBeGreaterThan(0);
+    expect(pendingFlags().every((v) => v === false)).toBe(true);
+
+    const before = pendingFlags().length;
+    add();
+    const held = pendingFlags().slice(before);
+    expect(held.length).toBeGreaterThan(0);
+    expect(held.every((v) => v === true), "a render between the add and the answer was not held").toBe(true);
+
+    const atAnswer = pendingFlags().length;
+    await answer(drawerAnswer("traditional"));
+    await waitFor(() => expect(pendingFlags().slice(atAnswer).at(-1)).toBe(false));
+  });
+
+  // -------------------------------------------------------------------------
+  // Plan 213-09 Task 1, decision (d), UI-SPEC 4.2/4.3: the rolling panels are fed
+  // by `deriveBlendPanels(..., blendBasis)`, so Rolling Sharpe, Rolling volatility
+  // and Rolling Sortino are all annualized on the interim clock while a leg's
+  // probe is open. The three charts are mocked in this file, so the assertion is
+  // on the `data` the composer hands each one: the REAL RollingMetrics returns
+  // null for exactly an empty object (an object holding an empty array still
+  // draws), and the real volatility and Sortino charts return null for [].
+  // -------------------------------------------------------------------------
+  const lastData = (m: unknown) => {
+    const calls = vi.mocked(m as never as (p: { data: unknown }) => null).mock.calls;
+    return calls[calls.length - 1]?.[0].data;
+  };
+  const ROLLING_CAPTION = /-day rolling window ·/;
+
+  it("decision (d): the rolling Sharpe, volatility and Sortino panels draw nothing, name no basis and state no cause while a leg's probe is open, then draw once on the final basis", async () => {
+    const { fetchMock, answer } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    mountWithBookLeg();
+    const rollCard = () =>
+      document.querySelector('[data-panel="blend-rolling"]') as HTMLElement;
+
+    // Non-vacuity: with only the always-resolved book leg the three panels DO
+    // draw and the caption IS on screen, so the silence below is the hold.
+    expect(Object.keys(lastData(RollingMetrics) as object).length).toBeGreaterThan(0);
+    expect((lastData(RollingVolatilityChart) as unknown[]).length).toBeGreaterThan(0);
+    expect((lastData(RollingSortinoChart) as unknown[]).length).toBeGreaterThan(0);
+    expect(rollCard().textContent).toMatch(ROLLING_CAPTION);
+
+    vi.mocked(RollingMetrics).mockClear();
+    vi.mocked(RollingVolatilityChart).mockClear();
+    vi.mocked(RollingSortinoChart).mockClear();
+    add();
+    expect(
+      fetchMock.mock.calls.some(
+        ([u]) => typeof u === "string" && u.includes("/returns"),
+      ),
+      "no /returns fetch was issued - the held state is not being observed",
+    ).toBe(true);
+
+    // HELD. Every render between the add and the answer handed the charts nothing.
+    expect(vi.mocked(RollingMetrics).mock.calls.length).toBeGreaterThan(0);
+    for (const c of vi.mocked(RollingMetrics).mock.calls) {
+      expect(c[0].data, "RollingMetrics was handed a series while held").toEqual({});
+    }
+    for (const c of vi.mocked(RollingVolatilityChart).mock.calls) {
+      expect(c[0].data, "the volatility chart was handed a series while held").toEqual([]);
+    }
+    for (const c of vi.mocked(RollingSortinoChart).mock.calls) {
+      expect(c[0].data, "the Sortino chart was handed a series while held").toEqual([]);
+    }
+    expect(within(rollCard()).getByText("Rolling Sharpe")).toBeInTheDocument();
+    expect(within(rollCard()).getByText("Rolling volatility")).toBeInTheDocument();
+    expect(within(rollCard()).getByText("Rolling Sortino")).toBeInTheDocument();
+    expect(rollCard().textContent).not.toMatch(/-day annualized/);
+    expect(rollCard().textContent).not.toMatch(ROLLING_CAPTION);
+    expect(within(rollCard()).queryByTestId("blend-rolling-annualization-note")).toBeNull();
+    expect(within(rollCard()).queryByText("Awaiting more data")).toBeNull();
+
+    await answer(drawerAnswer("traditional"));
+    await waitFor(() =>
+      expect(Object.keys(lastData(RollingMetrics) as object).length).toBeGreaterThan(0),
+    );
+    expect((lastData(RollingVolatilityChart) as unknown[]).length).toBeGreaterThan(0);
+    expect((lastData(RollingSortinoChart) as unknown[]).length).toBeGreaterThan(0);
+    // The caption carries the FINAL basis, once.
+    expect(rollCard().textContent).toMatch(/126-day rolling window · 252-day annualized/);
+    expect(rollCard().textContent).not.toMatch(/365-day annualized/);
+    expect(within(rollCard()).getAllByText(/-day annualized/)).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Plan 213-09 Task 2, decision (d), UI-SPEC 4.3: the Sharpe delta against the
+  // live book (footer item, the strip's pill and its "Current allocation"
+  // tooltip) and the own-book delta slots are all built on the blend's interim
+  // Sharpe / basis, so they are held while a leg's probe is open.
+  // -------------------------------------------------------------------------
+  const ownBookReturns = Array.from({ length: 300 }, (_, i) => ({
+    date: isoAt(i),
+    value: [0.006, -0.004, 0.009, -0.003, 0.005][i % 5],
+  }));
+  /** The traditional book leg PLUS a live book series, so the own-book delta exists. */
+  function mountWithBookLegAndOwnBook() {
+    render(
+      <ScenarioComposer
+        payload={
+          {
+            ...bookPayload(),
+            equityHistoryState: "ready",
+            equityDailyReturns: ownBookReturns,
+            bookEntryGateSatisfied: true,
+            hasConnectedKeys: true,
+            // A live baseline whose own record clears the gate (400 days), so the
+            // book Sharpe in the tooltip is a number to hold, not an already-gated dash.
+            liveBaselineMetrics: {
+              ...makePayload().liveBaselineMetrics,
+              equity: bookSeries.map((p, i) => ({ date: p.date, value: 1 + i * 0.001 })),
+              drawdown: bookSeries.map((p) => ({ date: p.date, value: 0 })),
+            },
+          } as unknown as MyAllocationDashboardPayload
+        }
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    add(BOOK_ID, BOOK_NAME);
+  }
+  const footer = () =>
+    screen.getByRole("region", { name: "Scenario draft summary and actions" });
+  const sharpePill = () =>
+    screen
+      .getByRole("group", { name: "Allocation KPIs" })
+      .querySelector('[aria-label^="Sharpe delta vs current allocation"]');
+  const lastOwnBookDelta = () => {
+    const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
+    return (calls[calls.length - 1][0] as { scenarioOwnBookDelta?: OwnBookDeltaPayload })
+      .scenarioOwnBookDelta;
+  };
+
+  it("decision (d): the footer Sharpe delta, the strip's Sharpe pill and the book Sharpe in its tooltip are held while a leg's probe is open, then return once", async () => {
+    const { fetchMock, answer } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    mountWithBookLegAndOwnBook();
+
+    // Non-vacuity: the book leg alone is never pending, so all three are live.
+    expect(footer().textContent).toContain("Sharpe");
+    expect(sharpePill()).not.toBeNull();
+    // ... and the tooltip's book Sharpe is a real number (1.2, the fixture's).
+    expect(
+      (vi.mocked(KpiStrip).mock.calls.at(-1)![0] as {
+        liveMetrics?: { sharpe: number | null } | null;
+      }).liveMetrics?.sharpe,
+    ).toBe(1.2);
+    const pillsSettled = screen
+      .getByRole("group", { name: "Allocation KPIs" })
+      .querySelectorAll('[aria-label*="delta vs current allocation"]').length;
+    expect(pillsSettled).toBeGreaterThan(1);
+
+    vi.mocked(KpiStrip).mockClear();
+    add();
+    expect(
+      fetchMock.mock.calls.some(
+        ([u]) => typeof u === "string" && u.includes("/returns"),
+      ),
+      "no /returns fetch was issued - the held state is not being observed",
+    ).toBe(true);
+
+    // HELD. Footer item and pill are not rendered; the tooltip's book Sharpe is
+    // the dash (the strip's `liveMetrics.sharpe` is null on every held render).
+    expect(footer().textContent).not.toContain("Sharpe");
+    expect(sharpePill(), "the Sharpe delta pill was rendered while held").toBeNull();
+    for (const c of vi.mocked(KpiStrip).mock.calls) {
+      expect(
+        (c[0] as { liveMetrics?: { sharpe: number | null } | null }).liveMetrics?.sharpe,
+      ).toBeNull();
+    }
+    // Basis-invariant deltas keep rendering: the other cells' pills are untouched.
+    expect(
+      screen
+        .getByRole("group", { name: "Allocation KPIs" })
+        .querySelectorAll('[aria-label*="delta vs current allocation"]').length,
+    ).toBe(pillsSettled - 1);
+
+    await answer(drawerAnswer("traditional"));
+    await waitFor(() => expect(sharpePill()).not.toBeNull());
+    expect(footer().textContent).toContain("Sharpe");
+    expect(
+      (vi.mocked(KpiStrip).mock.calls.at(-1)![0] as {
+        liveMetrics?: { sharpe: number | null } | null;
+      }).liveMetrics?.sharpe,
+    ).toBe(1.2);
+  });
+
+  it("decision (d): the own-book delta's basis-dependent slots and basis-built records are held while a leg's probe is open; max drawdown still renders", async () => {
+    const { fetchMock, answer } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    mountWithBookLegAndOwnBook();
+
+    // Non-vacuity: with the book leg alone every slot is on offer.
+    const settled = lastOwnBookDelta()!;
+    expect(settled.sharpe).not.toBeNull();
+    expect(settled.sortino).not.toBeNull();
+    expect(settled.max_dd).not.toBeNull();
+    expect(settled.records).toBeDefined();
+
+    vi.mocked(ScenarioFactsheetChart).mockClear();
+    add();
+    expect(
+      fetchMock.mock.calls.some(
+        ([u]) => typeof u === "string" && u.includes("/returns"),
+      ),
+      "no /returns fetch was issued - the held state is not being observed",
+    ).toBe(true);
+    const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      const d = (c[0] as { scenarioOwnBookDelta?: OwnBookDeltaPayload }).scenarioOwnBookDelta!;
+      expect(d.sharpe, "the Sharpe delta slot carried a number while held").toBeNull();
+      expect(d.sortino, "the Sortino delta slot carried a number while held").toBeNull();
+      // The records are built at the interim basis; a verdict read off them would
+      // print a withheld cause, so they are not handed over while held.
+      expect(d.records).toBeUndefined();
+      expect(d.max_dd, "max drawdown is basis-invariant and keeps rendering").not.toBeNull();
+    }
+
+    await answer(drawerAnswer("traditional"));
+    await waitFor(() => expect(lastOwnBookDelta()!.sharpe).not.toBeNull());
+    const final = lastOwnBookDelta()!;
+    expect(final.sortino).not.toBeNull();
+    expect(final.records).toBeDefined();
+    // FINAL 252 clock: the blend Sharpe the strip shows, minus the book's.
+    expect(sharpeCell()).toBe(FINAL_252_SHARPE);
+  });
+
+  // The two verdict branches of the rolling panel that name a cause or a basis:
+  // a 200-day record is `short` (the muted annualization note), a 100-day record
+  // is below the 126-day window (the withheld "Awaiting more data" body). Each is
+  // on screen with the book leg alone and must be absent while a leg is pending.
+  for (const [label, days, probe] of [
+    [
+      "the annualization note",
+      200,
+      (card: HTMLElement) =>
+        within(card).queryByTestId("blend-rolling-annualization-note"),
+    ],
+    [
+      "the withheld reason",
+      100,
+      (card: HTMLElement) => within(card).queryByText("Awaiting more data"),
+    ],
+  ] as const) {
+    it(`decision (d): ${label} of the rolling panel is silent while a leg's probe is open, and the populated headings stay`, async () => {
+      const { fetchMock, answer } = deferredReturnsFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      mountWithBookLeg(bookSeries.slice(0, days));
+      const card = () =>
+        document.querySelector('[data-panel="blend-rolling"]') as HTMLElement;
+      // Non-vacuity: with the book leg alone this surface IS on screen.
+      expect(probe(card())).not.toBeNull();
+
+      add();
+      expect(
+        fetchMock.mock.calls.some(
+          ([u]) => typeof u === "string" && u.includes("/returns"),
+        ),
+        "no /returns fetch was issued - the held state is not being observed",
+      ).toBe(true);
+      expect(probe(card()), `${label} was shown while held`).toBeNull();
+      expect(within(card()).getByText("Rolling Sharpe")).toBeInTheDocument();
+      expect(within(card()).getByText("Rolling volatility")).toBeInTheDocument();
+      expect(within(card()).getByText("Rolling Sortino")).toBeInTheDocument();
+
+      await answer(
+        returnsBody({
+          daily_returns: drawerSeries.slice(0, days),
+          asset_class: "traditional",
+          cagr: 0.15,
+          sharpe: 0.9,
+        }),
+      );
+      await waitFor(() => expect(probe(card())).not.toBeNull());
+    });
+  }
+
+  describe("peer rank (decision (d), UI-SPEC 4.3: no interim-basis rank is requested)", () => {
+    const peerCalls = (fetchMock: ReturnType<typeof deferredReturnsFetch>["fetchMock"]) =>
+      (fetchMock.mock.calls as unknown as Array<[unknown, { body: string }]>).filter(
+        ([u]) => typeof u === "string" && u.includes("/api/scenario/peer-rank"),
+      );
+    // Past the composer's 350 ms peer-rank debounce, so a request that WOULD be
+    // sent has been sent by the time the count is read.
+    const pastDebounce = () =>
+      act(async () => {
+        await new Promise((r) => setTimeout(r, 500));
+      });
+
+    it("decision (d): no peer-rank request is made while a leg is pending; exactly one follows the settle, carrying the raw final Sharpe", async () => {
+      const { fetchMock, answer } = deferredReturnsFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      mountWithBookLeg();
+
+      // Non-vacuity: the book leg alone is never pending, so the blend IS ranked.
+      await pastDebounce();
+      expect(peerCalls(fetchMock)).toHaveLength(1);
+
+      add();
+      await pastDebounce();
+      expect(
+        peerCalls(fetchMock),
+        "a peer-rank request went out while the drawer leg's probe was open",
+      ).toHaveLength(1);
+
+      await answer(drawerAnswer("traditional"));
+      await waitFor(() => expect(peerCalls(fetchMock)).toHaveLength(2));
+      await pastDebounce();
+      expect(peerCalls(fetchMock)).toHaveLength(2);
+
+      // BLEND-01 fence: the request carries the engine's RAW Sharpe on the final
+      // basis, with no basis factor. It is the very figure the strip shows.
+      const body = JSON.parse(
+        peerCalls(fetchMock)[1][1].body,
+      );
+      expect(body.sharpe.toFixed(2)).toBe(FINAL_252_SHARPE);
+      expect(sharpeCell()).toBe(FINAL_252_SHARPE);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // F5 - a FAILED probe is terminal for the hydration effect.
+  //
+  // Traced in 213-RESEARCH F5: a failure writes only `addedMetricsById[id] =
+  // "unavailable"` and leaves `addedReturnsById[id]` undefined (so remove + re-add
+  // retries). The hydration effect read that undefined as "not resolved" and
+  // re-fetched the failed leg whenever ANY dependency changed (another leg added or
+  // settled). A figure could therefore render on the nullish => 365 rule, blank
+  // when the silent retry put the leg back in flight, and return on a different
+  // basis once the retry succeeded. Failure is now terminal for the effect; the
+  // user's remove + re-add (WR-01) is the retry.
+  // -------------------------------------------------------------------------
+  const LEG_A = "213-leg-a-fails";
+  const LEG_B = "213-leg-b-settles";
+  /** Final Sharpe for book + B(traditional) beside a FAILED leg A: A is a null
+   *  class, so the blend stays on the 365 rule. Measured once, a literal. */
+  const BOOK_PLUS_B_BESIDE_FAILED_A_SHARPE = "9.57";
+
+  type Step = { fail: true } | { hold: true } | { body: unknown };
+  /** A /returns stub scripted PER LEG: each request for an id consumes that
+   *  id's next step (a failure, a held-open answer, or a ready body), and every
+   *  request is counted so a silent re-fetch is observable. */
+  function scriptedReturns(script: Record<string, Step[]>) {
+    const requests: string[] = [];
+    const holds = new Map<string, (body: unknown) => void>();
+    const fetchMock = vi.fn(async (url: unknown) => {
+      const m =
+        typeof url === "string" ? /\/api\/strategies\/([^/]+)\/returns/.exec(url) : null;
+      if (!m) return { ok: true, status: 200, json: async () => ({}) };
+      const id = decodeURIComponent(m[1]);
+      requests.push(id);
+      const step: Step = script[id]?.shift() ?? { fail: true };
+      if ("fail" in step) throw new Error("network down");
+      if ("hold" in step) {
+        const body = await new Promise<unknown>((res) => holds.set(id, res));
+        return { ok: true, status: 200, json: async () => body };
+      }
+      return { ok: true, status: 200, json: async () => step.body };
+    });
+    return {
+      fetchMock,
+      requestsFor: (id: string) => requests.filter((r) => r === id).length,
+      async release(id: string, body: unknown) {
+        await act(async () => {
+          holds.get(id)!(body);
+          await Promise.resolve();
+        });
+      },
+    };
+  }
+
+  it("F5 / decision (d): a leg whose probe FAILED ends pending, and the figure stays on the 365 rule", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const script = scriptedReturns({ [LEG_A]: [{ fail: true }] });
+    vi.stubGlobal("fetch", script.fetchMock);
+    mountWithBookLeg();
+    add(LEG_A, "Leg A");
+    // Pending ENDS: a failed probe is settled, so the strip shows a number again
+    // (book leg alone on the nullish => 365 clock, the same literal the interim
+    // blend carried).
+    await waitFor(() => expect(sharpeCell()).toBe("10.07"));
+    // ...and stays ended: no silent re-fetch puts the leg back in flight.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(sharpeCell()).toBe("10.07");
+    expect(script.requestsFor(LEG_A)).toBe(1);
+    warn.mockRestore();
+  });
+
+  it("F5 / decision (d): leg A failed, then leg B is added and settles - A is NOT re-fetched and no held figure blanks again", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // The retry WOULD succeed (traditional), which is what made the old
+    // number -> blank -> number sequence possible.
+    const script = scriptedReturns({
+      [LEG_A]: [{ fail: true }, { body: drawerAnswer("traditional") }],
+      [LEG_B]: [{ hold: true }],
+    });
+    vi.stubGlobal("fetch", script.fetchMock);
+    mountWithBookLeg();
+    add(LEG_A, "Leg A");
+    await waitFor(() => expect(sharpeCell()).toBe("10.07"));
+
+    add(LEG_B, "Leg B");
+    // B is genuinely pending, so the strip holds; A is NOT in flight again.
+    expect(sharpeCell()).toBe("—");
+    expect(
+      script.requestsFor(LEG_A),
+      "adding leg B re-fetched the failed leg A behind the user's back",
+    ).toBe(1);
+
+    const rendersAtAnswer = vi.mocked(KpiStrip).mock.calls.length;
+    await script.release(LEG_B, drawerAnswer("traditional"));
+    await waitFor(() =>
+      expect(sharpeCell()).toBe(BOOK_PLUS_B_BESIDE_FAILED_A_SHARPE),
+    );
+    // Once B settled the figure never blanks again: every render handed to the
+    // strip from the answer on carries a number, and it is the same one.
+    const after = stripSharpes().slice(rendersAtAnswer);
+    expect(after.length).toBeGreaterThan(0);
+    expect(
+      after.every((v) => v !== null),
+      "the figure blanked after leg B settled (a failed leg was re-fetched)",
+    ).toBe(true);
+    expect(new Set(after).size).toBe(1);
+    expect(script.requestsFor(LEG_A)).toBe(1);
+    warn.mockRestore();
+  });
+
+  it("F5 / decision (d): remove + re-add is the retry - a failed leg re-asks exactly once, and its answer settles the hold", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const script = scriptedReturns({
+      [LEG_A]: [{ fail: true }, { hold: true }],
+    });
+    vi.stubGlobal("fetch", script.fetchMock);
+    mountWithBookLeg();
+    add(LEG_A, "Leg A");
+    await waitFor(() => expect(sharpeCell()).toBe("10.07"));
+    expect(script.requestsFor(LEG_A)).toBe(1);
+
+    fireEvent.click(
+      within(addedRow(LEG_A)).getByRole("button", { name: "Remove from scenario" }),
+    );
+    add(LEG_A, "Leg A");
+    // The explicit retry went out, and the leg is pending again, so the strip holds.
+    expect(script.requestsFor(LEG_A)).toBe(2);
+    expect(sharpeCell()).toBe("—");
+
+    await script.release(LEG_A, drawerAnswer("traditional"));
+    await waitFor(() => expect(sharpeCell()).toBe(FINAL_252_SHARPE));
+    warn.mockRestore();
+  });
+
+  it("decision (d): a book-only scenario is never held - every leg arrives resolved from the payload", () => {
+    const script = scriptedReturns({});
+    vi.stubGlobal("fetch", script.fetchMock);
+    const rendersBeforeBookAdd = mountWithBookLeg();
+    // The strip shows the book leg's number at once and no /returns probe exists.
+    expect(sharpeCell()).toBe(BOOK_ALONE_SHARPE);
+    const sinceBookAdd = stripSharpes().slice(rendersBeforeBookAdd);
+    expect(sinceBookAdd.length).toBeGreaterThan(0);
+    expect(
+      sinceBookAdd.every((v) => v !== null),
+      "a book-only render handed the strip a held (null) Sharpe",
+    ).toBe(true);
+    expect(script.requestsFor(BOOK_ID)).toBe(0);
   });
 });

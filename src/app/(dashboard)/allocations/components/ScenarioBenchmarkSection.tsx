@@ -88,6 +88,17 @@ interface ScenarioBenchmarkSectionProps {
    * correlation are basis-invariant; TE/IR/alpha ride √periodsPerYear.
    */
   periodsPerYear?: number;
+  /**
+   * Phase 213 decision (d), SC-4: true while any blend leg's asset-class probe is
+   * still open, so `periodsPerYear` is the interim basis and not the final one.
+   * Tracking Error, Information Ratio and Alpha ride that basis, so they print the
+   * silent em-dash, and the annualization note and the "{N}-day annualized" sentence
+   * are not rendered (both name the basis or a cause read off an interim verdict).
+   * Beta and correlation are basis-invariant and render as usual. The empty-state
+   * branches above are decided by data presence only; pending never selects one.
+   * Optional, default false: every other caller is byte-identical.
+   */
+  basisPending?: boolean;
 }
 
 /** One label/value metric row mirroring the ScenarioCompareTable row tokens. */
@@ -125,6 +136,7 @@ export function ScenarioBenchmarkSection({
   portfolioDaily,
   btc,
   periodsPerYear = 252,
+  basisPending = false,
 }: ScenarioBenchmarkSectionProps) {
   // Pair FIRST so {N} is the paired count (D-68), not the union window. The
   // heading and the methodology line read this same n.
@@ -173,8 +185,13 @@ export function ScenarioBenchmarkSection({
   const pairedDates = paired?.dates ?? [];
   const overlapDays = coveredDays(pairedDates[0], pairedDates[pairedDates.length - 1]);
   const state = gateAnnualized(record, overlapDays);
+  // Phase 213 decision (d): pending blanks the three basis-built slots and the
+  // basis-naming text; the gate state above stays a function of the interim basis
+  // and is never shown.
   const note =
-    state === "withheld"
+    basisPending
+      ? null
+      : state === "withheld"
       ? widenedWithheldReason("overlap", record)
       : state === "short"
         ? widenedShortNote("overlap", overlapDays)
@@ -191,19 +208,19 @@ export function ScenarioBenchmarkSection({
           metric="tracking-error"
           label="Tracking Error"
           term="tracking_error"
-          value={formatPercent(gatedValue(m.trackingError, state))}
+          value={formatPercent(basisPending ? null : gatedValue(m.trackingError, state))}
         />
         <MetricRow
           metric="information-ratio"
           label="Information Ratio"
           term="information_ratio"
-          value={formatNumber(gatedValue(m.informationRatio, state))}
+          value={formatNumber(basisPending ? null : gatedValue(m.informationRatio, state))}
         />
         <MetricRow
           metric="alpha"
           label="Alpha"
           term="alpha"
-          value={formatPercent(gatedValue(m.alpha, state))}
+          value={formatPercent(basisPending ? null : gatedValue(m.alpha, state))}
         />
         <MetricRow
           metric="beta"
@@ -221,7 +238,8 @@ export function ScenarioBenchmarkSection({
         </p>
       ) : null}
       <p className="mt-2 text-fixed-11 text-text-muted">
-        {methodologyLine(n)} Metrics are {periodsPerYear}-day annualized active returns.
+        {methodologyLine(n)}
+        {basisPending ? "" : ` Metrics are ${periodsPerYear}-day annualized active returns.`}
       </p>
     </div>
   );

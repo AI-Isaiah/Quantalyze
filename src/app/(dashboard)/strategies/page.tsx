@@ -929,20 +929,26 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   captureProbeOutcomes(probeOutcomes);
   captureProbeThrows(probeThrows);
 
-  // Phase 199 plan 10 (D-02): the allocator half of /my-strategies, for allocator
-  // and `both`: one placeholder row per active key that has produced no strategy,
-  // and the viewer's real portfolio (what Simulate Impact scores against). A
-  // manager-only page makes neither read. Both take the session user's id and
-  // nothing else (T-199-30; RLS is the backstop).
+  // Phase 199 plan 10 (D-02): one placeholder row per key that has produced no
+  // strategy, and, for allocator and `both`, the viewer's real portfolio (what
+  // Simulate Impact scores against). Both take the session user's id and nothing
+  // else (T-199-30; RLS is the backstop).
+  // ⛔ CORRECTED 2026-11-14 (Phase 213 decision (b)): the placeholder read used to
+  // be allocator-only, which hid a manager's orphaned key from the one page that
+  // could disconnect it. That `isAllocator` gate is SUPERSEDED: every role that
+  // can create a key through the wizard (manager, allocator, `both`) reads its
+  // strategyless keys. Phase 199 D-02 gave no reason to exclude manager-only
+  // accounts. Only the PORTFOLIO read stays allocator-only.
   // ⛔ T-199-25, error ≠ empty (149 WR-01, the `getMyWatchlist` idiom):
   // `getStrategylessActiveKeys` returns `null` on a transient DB failure, and a
   // null is NEVER read as "no keys". It prints its own line below, and the page
   // never takes the empty state while it stands. `getRealPortfolio` already
   // THROWS on a read error (to error.tsx) and returns null only for "this viewer
   // has no portfolio row", which is a real answer and not a failure.
-  const [bareKeys, portfolio] = isAllocator
-    ? await Promise.all([getStrategylessActiveKeys(user.id), getRealPortfolio(user.id)])
-    : [[], null];
+  const [bareKeys, portfolio] = await Promise.all([
+    getStrategylessActiveKeys(user.id),
+    isAllocator ? getRealPortfolio(user.id) : null,
+  ]);
   const placeholderKeysUnreadable = bareKeys === null;
   // Delta 5 — formatted SERVER-side so the client table never owns exchange
   // naming (and so an unmapped code can never reach the DOM as `undefined`).
@@ -953,6 +959,8 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
     exchange: k.exchange,
     exchangeLabel: EXCHANGE_DISPLAY[k.exchange],
     keyLabel: k.label,
+    finishSetupEligible: k.finishSetupEligible,
+    syncStatus: k.syncStatus,
   }));
 
   // Phase 170.7 (D-03): every row is shaped by the one analytics shaper. A

@@ -165,6 +165,8 @@ vi.mock("./steps/MultiKeyConnectStep", () => ({
       // 154-06 / WIZCONT-02 — optional, exactly as `ConnectKeySuccess` declares
       // it, so the mock cannot claim a shape the real component never sends.
       deduped?: boolean;
+      // 213 / WR-02 — optional, exactly as `ConnectKeySuccess` declares it.
+      heldSession?: boolean;
     }) => void;
     onDirtyChange?: (dirty: boolean) => void;
   }) => (
@@ -201,6 +203,42 @@ vi.mock("./steps/MultiKeyConnectStep", () => ({
         }
       >
         Connect success (deduped)
+      </button>
+      {/* 213 / CR-02: the F6 session fence answering a resubmit (key B, after
+          Try another key) with the draft this session ALREADY held — the same
+          strategy/key ids `connect-success` landed, now carrying deduped. */}
+      <button
+        type="button"
+        data-testid="connect-success-deduped-held"
+        onClick={() =>
+          props.onSuccess?.({
+            strategyId: "strat-reconnected",
+            apiKeyId: "key-reconnected",
+            exchange: "okx",
+            deduped: true,
+          })
+        }
+      >
+        Connect success (deduped onto the held draft)
+      </button>
+      {/* 213 / WR-02: a dedup answered after an attempt that ended unanswered
+          (Stop waiting / deadline). The session never held a strategyId, and
+          the result is a strategy the session did not hold, so only the
+          step's `heldSession` flag can tell the wizard. */}
+      <button
+        type="button"
+        data-testid="connect-success-deduped-heldsession"
+        onClick={() =>
+          props.onSuccess?.({
+            strategyId: "strat-orphaned-by-abort",
+            apiKeyId: "key-orphaned-by-abort",
+            exchange: "okx",
+            deduped: true,
+            heldSession: true,
+          })
+        }
+      >
+        Connect success (deduped after an unanswered attempt)
       </button>
       {/* F2: drive the dirty signal so the stepper-gating test can prove a
           forward jump is blocked while connect_key holds unsaved edits. */}
@@ -900,6 +938,101 @@ describe("[154-06 / WIZCONT-02] WizardClient — the dedup notice", () => {
     await screen.findByTestId("mock-sync-preview");
 
     expect(screen.queryByTestId("wizard-dedup-notice")).toBeNull();
+  });
+});
+
+/**
+ * 213 KEYFLOW / CR-02 (founder option 1, 2026-11-14) — the F6 session fence
+ * answers a cross-key resubmit with the ORIGINAL draft (`deduped: true`, the
+ * same strategyId), never validating key B. "These credentials are already
+ * connected" is false there, so the strip must say what happened.
+ */
+describe("[213 CR-02] WizardClient — dedup onto the draft this session already held", () => {
+  const OLD_COPY =
+    "These credentials are already connected. We continued with your existing strategy instead of creating a duplicate.";
+  const KEPT_COPY =
+    "We kept the strategy this setup already created, on its original key. To connect different credentials, delete this draft first.";
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("draft on key A, Try another key, submit key B answered with A's strategyId: shows the honest sentence, not the old one", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    // Key A connects: the session now holds strat-reconnected.
+    fireEvent.click(screen.getByTestId("connect-success"));
+    await screen.findByTestId("mock-sync-preview");
+    expect(screen.queryByTestId("wizard-dedup-notice")).toBeNull();
+
+    // Try another key, then key B is submitted; F6 returns A's ids, deduped.
+    fireEvent.click(screen.getByTestId("sync-try-another"));
+    await screen.findByTestId("mock-connect-step");
+    fireEvent.click(screen.getByTestId("connect-success-deduped-held"));
+    await screen.findByTestId("mock-sync-preview");
+
+    const strip = screen.getByTestId("wizard-dedup-notice");
+    expect(strip).toHaveTextContent(KEPT_COPY);
+    expect(screen.queryByText(OLD_COPY)).toBeNull();
+  });
+
+  // 213 / R3-M2 — supersedes the WR-02 pin below, which asserted KEPT_COPY on
+  // the heldSession-only arm. That sentence ("this setup already created, on
+  // its original key") is a guess there: the first attempt may have written
+  // nothing, and the dedup may be onto an earlier setup's strategy. The copy
+  // must be true in both cases.
+  const HELD_ONLY_COPY =
+    "We continued with a strategy that already exists for these credentials or this setup instead of creating a duplicate. To connect different credentials, delete that draft first.";
+
+  it("213 WR-02 / R3-M2: Stop waiting / deadline / lost response on a fresh session, then a deduped resubmit: shows the neutral sentence, neither the old one nor the specific kept one", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    // No successful connect first: this session never held a strategyId.
+    fireEvent.click(screen.getByTestId("connect-success-deduped-heldsession"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.getByTestId("wizard-dedup-notice")).toHaveTextContent(
+      HELD_ONLY_COPY,
+    );
+    expect(screen.queryByText(OLD_COPY)).toBeNull();
+    expect(screen.queryByText(KEPT_COPY)).toBeNull();
+  });
+
+  it("213 R3-M2: heldSession with a strategy the session did NOT hold still shows the neutral sentence, never the specific kept one", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    // The session holds strat-reconnected; the heldSession dedup lands on
+    // strat-orphaned-by-abort, so the id comparison cannot confirm anything.
+    fireEvent.click(screen.getByTestId("connect-success"));
+    await screen.findByTestId("mock-sync-preview");
+    fireEvent.click(screen.getByTestId("sync-try-another"));
+    await screen.findByTestId("mock-connect-step");
+    fireEvent.click(screen.getByTestId("connect-success-deduped-heldsession"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.getByTestId("wizard-dedup-notice")).toHaveTextContent(
+      HELD_ONLY_COPY,
+    );
+    expect(screen.queryByText(KEPT_COPY)).toBeNull();
+  });
+
+  it("a deduped result for a strategy this session did NOT hold keeps the old sentence", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    // The session holds strat-reconnected; the dedup lands on strat-existing.
+    fireEvent.click(screen.getByTestId("connect-success"));
+    await screen.findByTestId("mock-sync-preview");
+    fireEvent.click(screen.getByTestId("sync-try-another"));
+    await screen.findByTestId("mock-connect-step");
+    fireEvent.click(screen.getByTestId("connect-success-deduped"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.getByTestId("wizard-dedup-notice")).toHaveTextContent(OLD_COPY);
+    expect(screen.queryByText(KEPT_COPY)).toBeNull();
   });
 });
 
