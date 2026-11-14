@@ -11,6 +11,7 @@ import ccxt
 from fastapi import APIRouter, HTTPException, Request
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
 from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL, SIGN_IN_FAILED_DETAIL, PERMANENT_VALIDATION_ERROR_CODES
+from services.trade_resume import load_strategy_high_waters
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.sfox_client import SfoxApiError, SFOX_PROD_BASE_URL
 from services.sfox_factory import make_sfox_client
@@ -1764,7 +1765,15 @@ async def fetch_trades(request: Request, req: FetchTradesRequest) -> dict[str, A
         raise HTTPException(status_code=500, detail="Failed to decrypt credentials")
 
     exchange = create_exchange(key_data["exchange"], api_key, api_secret, passphrase)
-    since_ms = parse_since_ms(key_data.get("last_sync_at"))
+    # Seed from the strategy's STORED high-water (newest is_fill = false row,
+    # floored to 00:00 UTC): the same rule as the cron, one shared definition
+    # (Phase 211 LASTSYNC-SEED decision 2). `None` means full reach.
+    # `last_sync_at` is no longer a seed: the daily holdings poll overwrites
+    # it for every active key, so a fresh value hid gaps in the stored days.
+    # A failed read already failed open to None inside the helper and was
+    # logged there, so `_hw_err` needs no second log.
+    _hw_by_strategy, _hw_err = load_strategy_high_waters(supabase, [req.strategy_id])
+    since_ms = parse_since_ms(_hw_by_strategy.get(req.strategy_id))
 
     # PR #260 follow-up: if this strategy's existing trade history is below
     # the gate threshold, ignore `since_ms` and force a full-lookback walk.
@@ -1814,9 +1823,11 @@ async def fetch_trades(request: Request, req: FetchTradesRequest) -> dict[str, A
                     since_ms = None
         except Exception as e:
             # Best-effort guard. If the trade-table probe fails for any
-            # reason (RLS shift, schema drift, network blip) we fall
-            # through to the original since_ms — degrades to pre-guard
-            # behaviour, never worse.
+            # reason (RLS shift, schema drift, network blip) we keep the
+            # stored high-water seed we started with (still never
+            # `last_sync_at`). That degrades toward the over-fetch
+            # direction, never toward skipping days: the guard only ever
+            # widens the reach.
             logger.warning("fetch-trades clamp probe failed: %s", e)
 
     try:

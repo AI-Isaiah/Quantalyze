@@ -123,11 +123,16 @@ def _retract_refresh_marker_on_reuse(
     ``no_row`` is LOUD here, as in the TypeScript twin: an error line plus one
     tagged Sentry capture (D-08), because a user's resync left protected as a
     refresh job is the very failure this helper exists to prevent.
-    ⚠️ D-02, unchanged and NOT that race: the enqueue dedup returns the existing id
-    and discards ``p_metadata``, and this call runs afterwards, so there is still a
-    gap between the deduped enqueue and the retraction. Closing it is a merge arm
-    inside ``enqueue_compute_job``, which Phase 191 deliberately did not touch
-    (D-01).
+    ⚠️ D-02, CLOSED IN SQL by Phase 211 D11 (2026-11-14) for this caller: the enqueue
+    dedup used to return the existing id and discard ``p_metadata``, and this call
+    ran afterwards, so there was a gap between the deduped enqueue and the
+    retraction. This resync tail sends ``correlation_id`` on a marker-capable kind,
+    so ``_enqueue_compute_job_internal`` now records the caller's ``p_metadata`` in
+    ``compute_job_dedup_events`` and retracts the refresh marker itself, through
+    ``retract_ledger_refresh_marker``, in the same call as the dedup (D11-1, D11-2,
+    D11-12). This helper stays as the BACKSTOP (D11-4): on that collision it
+    answers ``no_marker`` and stays silent. It is still the only retraction for a
+    caller the SQL does not cover.
 
     Best-effort by design: a failed retraction (rpc error, non-object answer,
     unrecognised outcome) is logged as ``refresh_marker_retraction_failed`` with
@@ -791,6 +796,11 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
             # A JOB CARRYING THE D-15 REFRESH MARKER — a protection that exists
             # for background work nobody is watching, silently inherited by a
             # request someone is watching. Retract it.
+            # ⭐ Phase 211 D11 (2026-11-14): since D11 the database records this
+            # call's metadata in `compute_job_dedup_events` and retracts the marker
+            # in SQL, in the same call as the dedup (D11-1, D11-2). The call below
+            # is the BACKSTOP (D11-4). "There is no merge arm" above stays true:
+            # no caller key is merged into the job row (D11-3).
             _retract_refresh_marker_on_reuse(
                 supabase, tail_job_id, correlation_id=correlation_id
             )

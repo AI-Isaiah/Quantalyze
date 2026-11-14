@@ -126,6 +126,7 @@ from services.exchange import (
 from services.exchange_pagination import PaginationCeilingExceeded
 from services.positions import fetch_positions, persist_position_snapshots
 from services.sfox_client import SfoxClient  # type annotations only
+from services.trade_resume import load_strategy_high_waters
 from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
 # Phase 151: moved to services/mt5_concurrency.py (leaf) so allocator_positions.py
 # can share the ONE terminal registry without an import cycle; re-imported here so
@@ -2059,12 +2060,18 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         return ctx
 
     strategy_id = job["strategy_id"]
-    # Prefer the partial-success checkpoint (migration 045) so a prior run
-    # that persisted fills but failed downstream doesn't re-fetch from scratch.
-    since_ms = parse_since_ms(
-        ctx.key_row.get("last_sync_at"),
-        preferred=ctx.key_row.get("last_fetched_trade_timestamp"),
-    )
+    # Phase 211 LASTSYNC-SEED decisions 1, 2 and 4: the queued job no longer
+    # has ONE `since_ms`, and `api_keys.last_sync_at` is not a seed on this
+    # path. The daily holdings poll overwrites `last_sync_at` for every active
+    # key, so it says "a poll ran recently", not "trades are stored up to
+    # here"; a job seeded from it skipped stored-day gaps. Two values instead:
+    #   * `daily_since_ms` seeds the Phase-1 daily-P&L read (`fetch_all_trades`)
+    #     from the strategy's stored high-water (the ccxt arm below reads it
+    #     through `load_strategy_high_waters`, the one definition the cron and
+    #     POST /fetch-trades share). It never trusts the fills cursor.
+    #   * `fills_since_ms` seeds the Phase-2 fills read (`fetch_raw_trades`),
+    #     computed just before that block.
+    daily_since_ms: int | None = None
 
     raw_fills: list[dict[str, Any]] = []
     # Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_all_trades`` /
@@ -2124,7 +2131,18 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 ctx.exchange, api_key_id=ctx.key_row.get("id")
             )
         else:
-            trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
+            # LASTSYNC-SEED decisions 2 and 3: resume from the stored daily
+            # high-water (UTC day of the newest `is_fill = false` row), read
+            # off the event loop. A failed read already failed OPEN to `None`
+            # (full reach, the idempotent over-fetch direction) and was logged
+            # inside the helper, so the returned error string is not logged a
+            # second time here. MT5 (above) fetches no daily P&L and issues
+            # no high-water read (decision 5).
+            _hw_by_strategy, _hw_err = await db_execute(
+                lambda: load_strategy_high_waters(ctx.supabase, [strategy_id])
+            )
+            daily_since_ms = parse_since_ms(_hw_by_strategy.get(strategy_id))
+            trades = await fetch_all_trades(ctx.exchange, since_ms=daily_since_ms)
             # Drain BEFORE the next exchange call so daily-PnL flags do not
             # get clobbered by ``fetch_raw_trades``' entry-seam reset on
             # the same asyncio task.
@@ -2149,9 +2167,25 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # MT5SYNC-02: mt5 is excluded — fetch_raw_trades is ccxt-shaped and
         # there is no fill-based mt5 consumer (see the mt5 arm above).
         if _RAW_TRADE_INGESTION_ENABLED and not isinstance(ctx.exchange, Mt5Session):
+            # LASTSYNC-SEED decision 4: the fills read keeps the partial-success
+            # checkpoint `last_fetched_trade_timestamp` (migration 045) as its
+            # preferred cursor, so a prior run that persisted fills but failed
+            # downstream does not re-fetch them from scratch. When that cursor
+            # is NULL it falls back to the stored daily high-water, never to
+            # `last_sync_at` (the `None` first argument removes that fallback).
+            # A failed high-water read left `daily_since_ms` None, so a NULL
+            # cursor then means full reach (decision 3). TODOS
+            # 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD stays OPEN: this read
+            # still trusts its cursor and nobody has traced the writer that
+            # put it ahead.
+            fills_since_ms = parse_since_ms(
+                None, preferred=ctx.key_row.get("last_fetched_trade_timestamp")
+            )
+            if fills_since_ms is None:
+                fills_since_ms = daily_since_ms
             try:
                 raw_fills = await fetch_raw_trades(
-                    ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
+                    ctx.exchange, strategy_id, ctx.supabase, since_ms=fills_since_ms
                 )
                 fetch_raw_dq_flags = get_and_clear_last_dq_flags()
                 if fetch_raw_dq_flags:
@@ -2580,15 +2614,18 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # the gate falls through.
     #
     # red-team/C-1 (NEW-C12-02 follow-up): when Phase-1 failed AND Phase-2
-    # succeeded, last_sync_at is correctly held back (NEW-C12-02), but
-    # advancing last_fetched_trade_timestamp to now() would still break the
-    # retry: parse_since_ms returns `preferred` (last_fetched_trade_timestamp)
-    # over last_sync_at, so the next run's Phase-1 fetch starts from the
-    # advanced timestamp — permanently skipping the unpersisted PnL window.
-    # Gate: do NOT advance the fetched cursor when Phase-1 failed, so the
-    # preferred=last_fetched_trade_timestamp path falls back to last_sync_at
-    # on the next run. Phase-2 dedup (exchange_fill_id unique index) absorbs
-    # the re-fetch cost.
+    # succeeded, last_sync_at is correctly held back (NEW-C12-02). Gate: do NOT
+    # advance the fetched cursor when Phase-1 failed.
+    #
+    # Since Phase 211 (LASTSYNC-SEED decision 4) the Phase-1 daily-P&L read
+    # seeds from the stored daily high-water, which does not advance when
+    # Phase-1 failed to persist, so the unpersisted window is re-read
+    # regardless of this cursor. Holding the fills cursor back on a Phase-1
+    # failure now only re-fetches FILLS on the next run, which the
+    # exchange_fill_id dedup (unique index) absorbs. Lineage, 2026-11-14: the
+    # C-1 gate was written when `parse_since_ms` preferred this cursor for the
+    # Phase-1 fetch, where advancing it would have skipped the PnL window for
+    # good. The gate stays; its reason narrowed.
     advance_fetched_cursor = (not raw_fills) or (phase2_complete and not phase1_failed)
 
     # NEW-C12-05 (CL12): fenced epilogue write. The two cursor checkpoints
@@ -2606,8 +2643,9 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # Gating is unchanged from the pre-RPC two-write form; a NULL param means
     # "leave this column untouched", mirroring the old conditional builds:
     #   • last_fetched_trade_timestamp advances only when advance_fetched_cursor
-    #     (G12.A.7 / red-team C-1: held back when Phase-1 failed so the next run
-    #     re-fetches the unpersisted PnL window — parse_since_ms prefers it).
+    #     (G12.A.7 / red-team C-1: held back when Phase-1 failed). Since Phase
+    #     211 it seeds the Phase-2 fills read ONLY (`fills_since_ms`); the
+    #     Phase-1 daily-P&L read seeds from the stored high-water instead.
     #   • last_sync_at advances only when Phase-1 persisted rows (NEW-C12-02:
     #     advancing past an unpersisted window loses the daily-PnL permanently).
     #   • account_balance_usdt is written whenever present (no ordering).
@@ -3194,6 +3232,15 @@ async def _resolve_ccxt_flow_price_index(
 # is in flight gets the fan-out's job id back, its own `correlation_id` is
 # dropped, and the row keeps the marker. The user's resync is then served by a
 # job carrying a protection that exists for work NOBODY IS WATCHING.
+#
+# ⭐ Phase 211 D11 (2026-11-14), for the two directions below: the SQL
+# retraction now runs first. `_enqueue_compute_job_internal` records the caller's
+# metadata and retracts the refresh marker itself, through
+# `retract_ledger_refresh_marker`, for a caller that sends `correlation_id` on a
+# marker-capable kind (D11-1, D11-2, D11-12); the resync-path retraction named under
+# THE RULE is its BACKSTOP (D11-4), and the mirror check at the chain edge is
+# unchanged. The text above is the defect's lineage: it describes the dedup as it
+# was before D11 and is kept so the reason for the backstop stays readable.
 #
 # The harm is production-specific and it is 5/5 of the live cohort. MEASURED by
 # driving the real `sync_strategy_analytics_status` body: with the reused job
@@ -11164,6 +11211,95 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # remaining budget.
     _stitch_start = asyncio.get_running_loop().time()
 
+    # ⛔ Phase 211 D5 (TODOS 161.1-D5): the D-15 guard in ``_stamp_failed`` below
+    # must judge protection from the status the row held BEFORE this job did any
+    # work, not from the column at stamp time. The SQL bridge
+    # (``sync_strategy_analytics_status``) writes ``computation_status``, so a
+    # sibling job's bridge call during a long crawl can rewrite a plain
+    # ``complete`` row to ``computing`` and disarm the guard (the F2 shape). The
+    # single-key derive closed the same hole in Phase 161.1 with its entry read
+    # (``_read_entry_publish_state`` in ``run_derive_broker_dailies_job``); this
+    # is the same read, taken once, carried into ``_stamp_failed`` as a closure
+    # variable.
+    #
+    # ⛔ FAIL-SAFE DIRECTION, unchanged: no row, or a status that is not a
+    # string, leaves this None, and None takes the LOUD destructive path in
+    # ``_stamp_failed``. Never fail toward suppression. A non-terminal status is
+    # stored as read and takes the loud path there for the same reason.
+    #
+    # ⛔ A read that FAILED is not an answer (D-09, as at the derive entry
+    # read). The job fails TRANSIENT (``RefreshMarkerRereadUnavailable``) BEFORE
+    # any crawl or write, so the retry costs one queue round trip and no work.
+    # A programming error propagates unchanged so it is filed ``unknown``.
+    #
+    # Gated on the composite marker, because only a marked job can be granted
+    # protection from this value: an unmarked job pays no extra read and keeps
+    # today's loud path byte-unchanged. The ``data_quality_flags`` read stays
+    # live at stamp time (M-2's merge must see the flags the row holds when the
+    # stamp lands).
+    _entry_computation_status: str | None = None
+    _entry_job_metadata = job.get("metadata")
+    _entry_job_source = (
+        _entry_job_metadata.get("source")
+        if isinstance(_entry_job_metadata, dict)
+        else None
+    )
+    if _entry_job_source == LEDGER_REFRESH_COMPOSITE_SOURCE:
+
+        def _read_entry_composite_status() -> dict[str, Any]:
+            res = (
+                supabase.table("strategy_analytics")
+                .select("computation_status")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            row = getattr(res, "data", None) or {}
+            return dict(row) if isinstance(row, dict) else {}
+
+        try:
+            _entry_composite_row = await db_read_with_retry(
+                _read_entry_composite_status
+            )
+        except Exception as _entry_exc:  # noqa: BLE001 — reported, then re-raised
+            # No exchange is open at this point in the composite handler, so
+            # unlike the derive analog there is nothing to close first.
+            #
+            # A programming error is a bug in this read, not a database answer:
+            # it propagates as itself so ``classify_exception`` files it
+            # ``unknown`` under its own class and text. It is still reported
+            # here first, because ``dispatch`` does not log a handler's
+            # exception.
+            if isinstance(_entry_exc, _READ_PROGRAMMING_ERRORS):
+                logger.error(
+                    "stitch_composite: the pre-refresh status read for strategy "
+                    "%s on marked compute_job %s raised a programming error "
+                    "(%s). No crawl ran and nothing was written; the error "
+                    "propagates unchanged.",
+                    strategy_id, job.get("id"), _read_failure_text(_entry_exc),
+                )
+                _capture_read_failure(_entry_exc, job_id=job.get("id"))
+                raise
+            logger.error(
+                "stitch_composite: could not run the pre-refresh status read "
+                "for strategy %s on marked compute_job %s (%s). No crawl ran "
+                "and nothing was written; failing the job TRANSIENT so the "
+                "queue can retry it.",
+                strategy_id, job.get("id"), _read_failure_text(_entry_exc),
+            )
+            _capture_read_failure(_entry_exc, job_id=job.get("id"))
+            # ``last_error`` is ``str()`` of this exception, which never
+            # includes ``__cause__``, so the failure kind is written into the
+            # text itself.
+            raise RefreshMarkerRereadUnavailable(
+                "stitch_composite: the pre-refresh status read failed for a "
+                "marked refresh, so the job stopped before any crawl and wrote "
+                f"nothing ({_read_failure_text(_entry_exc)})"
+            ) from _entry_exc
+        _entry_status_value = _entry_composite_row.get("computation_status")
+        if isinstance(_entry_status_value, str):
+            _entry_computation_status = _entry_status_value
+
     async def _stamp_failed(message: str, *, detail: str | None = None) -> None:
         """Terminal 'failed' stamp so the wizard poller reaches a gate instead of
         an infinite 'computing' spinner (mirrors the derive path). Scrubbed
@@ -11202,12 +11338,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 strategy_id, scrubbed,
             )
 
-        # ONE select, BOTH columns: the flags for M-2's merge above, and the
-        # CURRENT status for the non-destructive guard below.
+        # The flags are read LIVE here, for M-2's merge above, so the merge sees
+        # whatever the row holds when the stamp lands. The status for the
+        # non-destructive guard below is NOT read here: it comes from the entry
+        # snapshot (``_entry_computation_status``), because the SQL bridge can
+        # move the live column while the job runs (Phase 211 D5).
         def _read_existing_failed_row() -> dict[str, Any]:
             res = (
                 supabase.table("strategy_analytics")
-                .select("data_quality_flags, computation_status")
+                .select("data_quality_flags")
                 .eq("strategy_id", strategy_id)
                 .maybe_single()
                 .execute()
@@ -11263,10 +11402,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             job_id=job.get("id"),
             consequence="the failed stamp writes the composite markers without it.",
         )
-        _existing_status = existing_row.get("computation_status")
-        existing_status: str | None = (
-            _existing_status if isinstance(_existing_status, str) else None
-        )
+        # Phase 211 D5: the entry snapshot, not the live column. None for an
+        # unmarked job (no entry read), which takes the loud path below.
+        existing_status: str | None = _entry_computation_status
         merged_flags: dict[str, Any] = dict(existing_flags)
         merged_flags["csv_source"] = True
         merged_flags["composite"] = True
@@ -11343,8 +11481,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # re-reads the row. ⚠️ That keeps the factsheet live only for a
         # ``complete_with_warnings`` / warned row. The bridge rewrites a plain
         # ``complete`` row to ``computing`` on the ``failed_retry`` transition,
-        # so the retry's ``_read_existing_failed_row`` answers ``computing`` and
-        # the guard does not arm. See the WR-01 note above ``MarkerLiveState``.
+        # so the retry's ENTRY read (``_entry_computation_status``) answers
+        # ``computing`` and the guard does not arm. The protection is still only
+        # for ``complete_with_warnings`` / warned rows. See the WR-01 note above
+        # ``MarkerLiveState``.
         # ``_stamp_io`` already logged the failed read at ERROR with the cause
         # and reported it to Sentry. Nothing is suppressed either — no
         # error-only write happens.

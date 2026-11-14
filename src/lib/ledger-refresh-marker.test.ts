@@ -295,6 +295,56 @@ describe("[Phase 191] parity with the retract_ledger_refresh_marker snapshot", (
   });
 });
 
+/**
+ * Phase 211 D11 (D11-2, D11-12) — the THIRD SQL copy of the marker set.
+ * `_record_enqueue_dedup` records the caller's metadata on a dedup hit and
+ * retracts an inherited refresh marker itself, for a caller that sends a
+ * correlation id. It holds exactly one `(… ->> 'source') IN (…)` list (the
+ * caller-has-no-marker conjunct) and reaches the marker UPDATE only through
+ * `public.retract_ledger_refresh_marker(`. A marker the helper does not know
+ * is never retracted by SQL, and the TS retraction above stays the only
+ * backstop for it; a marker only the helper knows would drop a protection
+ * nothing else honours. Read from the GENERATED snapshot, as the Phase 191
+ * block does.
+ */
+const DEDUP_FN_PATH = resolve(
+  process.cwd(),
+  "supabase/schema/functions/_record_enqueue_dedup.sql",
+);
+const DEDUP_FN_SQL = readFileSync(DEDUP_FN_PATH, "utf8");
+
+describe("[Phase 211 D11] parity with the _record_enqueue_dedup snapshot", () => {
+  it("the helper's one marker list equals the TS set", () => {
+    const lists = parseSqlLedgerRefreshSourceLists(DEDUP_FN_SQL, DEDUP_FN_PATH);
+    // MEASURED 2026-11-14: one list, the caller-has-no-marker conjunct. An
+    // exact count, so a parse that silently finds none fails.
+    expect(lists.length, "the snapshot's marker list was not found; re-point the parse").toBe(1);
+    expect(lists[0]).toEqual(new Set(LEDGER_REFRESH_JOB_SOURCES));
+  });
+
+  it("a marker added to the helper alone turns the helper parity case RED", () => {
+    const widened = DEDUP_FN_SQL.replace(
+      "IN ('ledger-refresh', 'ledger-refresh-composite')",
+      "IN ('ledger-refresh', 'ledger-refresh-composite', 'ledger-refresh-mt5')",
+    );
+    expect(widened).not.toBe(DEDUP_FN_SQL);
+    const lists = parseSqlLedgerRefreshSourceLists(widened, "a widened copy");
+    expect(lists).toHaveLength(1);
+    expect(lists[0].size).toBe(3);
+    expect(lists[0]).not.toEqual(new Set(LEDGER_REFRESH_JOB_SOURCES));
+  });
+
+  it("the helper retracts through the one retraction function, once, outside comments", () => {
+    // D11-12: one marker list and one UPDATE shape behind every retraction. The
+    // header prose names the function, so `--` comments are stripped first.
+    const code = DEDUP_FN_SQL.split("\n")
+      .map((line) => line.replace(/--.*$/, ""))
+      .join("\n");
+    const call = `public.${RETRACT_REFRESH_MARKER_RPC}(`;
+    expect(code.split(call).length - 1, `expected exactly one ${call} outside comments`).toBe(1);
+  });
+});
+
 describe("[161.1-D13] retractInheritedRefreshMarker", () => {
   // Pitfall 16: the UNION, not one value — one positive case per marker.
   it.each(["ledger-refresh", "ledger-refresh-composite"])(

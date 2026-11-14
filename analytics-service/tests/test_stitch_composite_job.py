@@ -191,7 +191,20 @@ class _FakeQuery:
             # drive a gateway 504 through `_stamp_failed`'s flags/status read.
             self.fake.analytics_reads += 1
             if self.fake.analytics_read_raises:
-                raise self.fake.analytics_read_raises.pop(0)
+                _queued = self.fake.analytics_read_raises.pop(0)
+                # A ``None`` entry means "answer THIS read": it is consumed and
+                # the read falls through to the answer below.
+                if _queued is not None:
+                    raise _queued
+            # Phase 211 D5: the status each answering read serves, in order, so a
+            # test can move the column between the entry read and the stamp read
+            # (the F2 shape). Once the list is empty the fixed ``existing_status``
+            # answers, as it always did.
+            _status = (
+                self.fake.existing_status_by_read.pop(0)
+                if self.fake.existing_status_by_read
+                else self.fake.existing_status
+            )
             # `computation_status` is served alongside the flags because
             # `_stamp_failed` reads both columns in ONE select. It defaults to
             # None, which is NOT in the terminal-success set, so every
@@ -200,7 +213,7 @@ class _FakeQuery:
             return SimpleNamespace(
                 data={
                     "data_quality_flags": dict(self.fake.existing_flags),
-                    "computation_status": self.fake.existing_status,
+                    "computation_status": _status,
                 }
             )
         if self.table == "compute_jobs":
@@ -248,13 +261,24 @@ class _FakeSupabase:
         live_job_metadata: object = _LIVE_JOB_ABSENT,
         live_job_id: str | None = None,
         live_job_read_raises: bool = False,
-        analytics_read_raises: list[BaseException] | None = None,
+        analytics_read_raises: list[BaseException | None] | None = None,
+        existing_status_by_read: list[str | None] | None = None,
     ) -> None:
         self.members = members
         # Exceptions the `strategy_analytics` select raises, one per read, before
-        # it answers. Default empty keeps every other construction unchanged.
-        self.analytics_read_raises: list[BaseException] = list(
+        # it answers. A ``None`` entry answers that read instead of raising.
+        # Default empty keeps every other construction unchanged.
+        self.analytics_read_raises: list[BaseException | None] = list(
             analytics_read_raises or []
+        )
+        # Phase 211 D5: the `computation_status` each ANSWERING `strategy_analytics`
+        # select serves, one per read in order, then `existing_status` once the
+        # list is empty. A marked composite job's first select is the entry read
+        # and its second is the stamp-time flags read, so two entries model a
+        # sibling bridge call moving the column between them. Default empty keeps
+        # every other construction unchanged.
+        self.existing_status_by_read: list[str | None] = list(
+            existing_status_by_read or []
         )
         # How many `strategy_analytics` selects the handler issued.
         self.analytics_reads = 0

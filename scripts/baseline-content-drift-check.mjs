@@ -302,8 +302,21 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * taken after the apply); both are EXPECTED until that re-dump, and NO allowlist row was added for
  * either. Raising this floor records the functions joining the corpus; it does NOT suppress any
  * finding.
+ *
+ * MOVED 2026-11-14 (Phase 211 SYNCJOBS plan 03), 134 -> 135: one ADDITION, not a parser gain.
+ * `public._record_enqueue_dedup(uuid, text, jsonb, uuid[])` enters the chain via forward migration
+ * 20261114130000_enqueue_dedup_record_retract.sql. MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on this tree: `functions compared 135 - MATCH 129,
+ * DRIFT 5, SNAPSHOT_MISSING 1, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `findings 3`. The one
+ * SNAPSHOT_MISSING finding is `_record_enqueue_dedup/4`, whose migration is not on PROD yet
+ * (recorded as a dated `snapshot-only` row in NAME_SET_RATCHET in scripts/dump-sql-functions.ts,
+ * cleared by the re-dump taken after the apply). The same migration re-bases both overloads of
+ * `_enqueue_compute_job_internal`, so `DRIFT _enqueue_compute_job_internal/7` and
+ * `DRIFT _enqueue_compute_job_internal/10` (2 differing lines each) are new findings. All three are
+ * EXPECTED until that re-dump, and NO allowlist row was added for any of them. Raising this floor
+ * records the function joining the corpus; it does NOT suppress any finding.
  */
-export const COMPARED_FLOOR = 134;
+export const COMPARED_FLOOR = 135;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

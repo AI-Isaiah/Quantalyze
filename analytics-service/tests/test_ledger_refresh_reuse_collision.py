@@ -18,6 +18,11 @@ by a caller who never asked for it. ``_enqueue_compute_job_internal``
 4. every later failure of that job is SUPPRESSED, at both hops and in the SQL
    bridge, on behalf of a request the user is watching.
 
+Phase 211 D11 (2026-11-14): the SQL now records the caller's metadata and retracts
+the marker itself for a caller that sends ``correlation_id`` (D11-1, D11-2). The
+scenario above is the defect's lineage and the contract of the Python backstop
+(D11-4), which this file drives; it is not a description of the dedup today.
+
 MEASURED, not reasoned, before this file was written — against the real function
 bodies on a throwaway Postgres:
 
@@ -108,6 +113,13 @@ class _Queue:
 
     Spelled out rather than mocked because the discard IS the defect — a double
     that merged metadata would make every test here vacuous.
+
+    ⭐ Phase 211 D11 (2026-11-14): this double models the dedup as it was BEFORE
+    D11, on purpose. The SQL now records ``p_metadata`` and retracts the marker for
+    a caller that sends ``correlation_id`` (D11-1, D11-2), but the double keeps the
+    discard so the Python backstop (D11-4) is driven as if that SQL retraction had
+    not run. ``test_a_job_with_no_marker_is_silent`` is the backstop's answer in
+    production after D11, where the SQL has already dropped ``source``.
     """
 
     IN_FLIGHT = ("pending", "running", "done_pending_children")
@@ -138,7 +150,9 @@ class _Queue:
                 and row["kind"] == kind
                 and row["status"] in self.IN_FLIGHT
             ):
-                return str(row["id"])  # ⛔ p_metadata discarded, exactly as in SQL
+                # ⛔ p_metadata discarded: SQL's behaviour before Phase 211 D11, kept
+                # here on purpose to drive the Python backstop (D11-4).
+                return str(row["id"])
         return self.seed(kind=kind, metadata=payload.get("p_metadata"))
 
     def retract(self, job_id: str, correlation_id: str) -> dict[str, Any]:

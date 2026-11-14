@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.133.45.0] - 2026-11-14 — Phase 211 SYNCJOBS: trade fetches skip nothing, the enqueue dedup keeps the caller's intent, and a failed composite keeps its real status
+
+This phase fixes three bookkeeping defects in the sync and job paths:
+- A user-triggered or queued trade fetch now starts from the strategy's own stored data. Before, it started from `api_keys.last_sync_at`, which the daily holdings poll overwrites.
+- An enqueue that dedups onto an existing job now records what the caller sent. When that caller asked for a loud result, the inherited quiet-refresh marker is retracted.
+- A failed composite job is judged against the status it had when it started, not a status that a bridge rewrote mid-run.
+
+The phase has one migration, which auto-applies to TEST and then PROD on merge.
+
+### Fixed
+- **Trade fetch resume point (LASTSYNC-SEED).**
+  - `POST /fetch-trades` (`analytics-service/routers/exchange.py`) and the queued `sync_trades` job (`run_sync_trades_job` in `analytics-service/services/job_worker.py`) now seed their daily read from the strategy's newest stored `is_fill = false` trade, floored to 00:00 UTC. Both use the helper the cron already used, moved to `analytics-service/services/trade_resume.py` (`load_strategy_high_waters`, `high_water_floor_iso`); `routers/cron.py` imports it.
+  - A failed or empty read fails open to a full reach, so the fetch can over-fetch but never under-fetches. `last_sync_at` is no longer a seed on either path. The route still writes it.
+  - The span guard is kept.
+  - The fills read in the queued job keeps `last_fetched_trade_timestamp` and falls back to the daily high-water. The MT5 arm is untouched.
+- **Enqueue dedup drops nothing the caller relies on (D11, founder option B "Record + drop the flag").** Migration `20261114130000_enqueue_dedup_record_retract.sql`:
+  - Adds `public.compute_job_dedup_events`: RLS enabled, a deny-all policy, `service_role` SELECT only, an FK to `compute_jobs` with ON DELETE CASCADE.
+  - Adds a SECURITY DEFINER helper, `public._record_enqueue_dedup`, called at both dedup return sites (the look-up hit and the lost-race re-read) of both `_enqueue_compute_job_internal` overloads. Each overload is re-based byte-for-byte on its latest definition, plus the two calls.
+  - The helper records the caller's metadata. For `derive_broker_dailies`, `compute_analytics_from_csv` and `stitch_composite`, when the caller sends a `correlation_id` and no refresh marker, it also retracts an inherited `ledger-refresh` marker through the existing `retract_ledger_refresh_marker`, and raises a WARNING naming the marker and the job.
+  - It never adds a marker and merges nothing into the job row.
+  - It skips parented enqueues, NULL, empty or non-object metadata, and any existing job in `done_pending_children` (review WR-01). That last skip keeps it off every row the ancestor-first fan-in protocol locks FOR UPDATE.
+  - Metadata over 8192 bytes is recorded as `{oversize_bytes: n}` and never fails the enqueue.
+  - The Python and TypeScript retractions stay as backstops.
+  - The manual rollback `supabase/migrations/down/20261114130000-rollback.sql` restores both prior bodies and drops the helper. It keeps the table.
+- **Composite failure stamp (D5).** `run_stitch_composite_job` reads `computation_status` once at entry, gated on the `ledger-refresh-composite` marker, and `_stamp_failed` judges protection against that snapshot.
+  - A failed entry read fails the job TRANSIENT (`RefreshMarkerRereadUnavailable`) before any crawl or write. A programming error propagates as itself.
+  - `data_quality_flags` is still read live, so the M-2 merge is preserved.
+
+### Changed
+- Comments in `job_worker.py`, `services/ingestion/long_fetch.py` and `src/lib/ledger-refresh-marker.ts` now say that SQL records and retracts on a dedup hit, and that the Python and TypeScript retractions are backstops.
+- Function snapshots are regenerated: `_record_enqueue_dedup.sql` is new and `_enqueue_compute_job_internal.sql` is updated.
+- The new helper is added to the name-set ratchet (`scripts/dump-sql-functions.ts`). `COMPARED_FLOOR` goes to 135 (`scripts/baseline-content-drift-check.mjs`). The two overloads carry VAC-04 prod-body-ack pragmas.
+- **SQL mutation census.**
+  - `FILES_FLOOR` goes from 81 to 82 and `ARMS_FLOOR` from 832 to 848: this phase adds 16 arms to Phase 210's 832.
+  - ci.yml's anti-skip floors are `SENTINEL_FLOOR` 29 and `ARMS_FLOOR` 461, where the dedup gate is credited with 16 arms.
+  - Every pin test moved with them.
+
+### Tests
+- `supabase/tests/test_enqueue_dedup_record_retract.sql` adds 16 arms, each with a RED-UNDER twin. On the throwaway pg-lane the mutation runner reads 16/16 biting.
+  - The arms are SITE-A, SITE-B (a forced insert race), NO-MERGE, KIND-COMPOSITE, KIND-CSV, MARKED-CALLER, NO-CORRELATION, NON-MARKER-KIND, PARENTED, DPC-SKIP, EMPTY-META, OVERSIZE, FRESH-INSERT, ACL-HELPER, TABLE and BODY-PIN.
+  - BODY-PIN covers the unreachable 7-argument overload (42725).
+- New pytest files: `test_fetch_trades_resume_seed.py`, `test_sync_trades_resume_seed.py` and `test_stitch_composite_entry_snapshot.py`. The existing composite, job-worker and reuse-collision tests were re-pointed to match.
+- Python and TypeScript parity cases pin the helper's marker list and retraction call to `LEDGER_REFRESH_JOB_SOURCES`.
+- Every fix goes RED when it is reverted. This was measured by neutering the fix and restoring it from a byte backup. The verifier re-ran the neuters: route seed 3/4 RED, job seed 3/3, D5 both F2 arms.
+
+### Notes
+- **Closed in `TODOS.md`:** `167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED`, `161.1-D11` and `161.1-D5`.
+  - The new entry `211-D11-RESIDUAL-UNCORRELATED-SENDERS` books the decided residual (D11-9): finalize-wizard and csv-finalize send no `correlation_id`, so SQL cannot retract for them.
+  - `167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD` stays open, and its owner line no longer points at the closed entry.
+  - `161.1-D12` no longer says D11 removes its window.
+- **Background senders.** Only `reconcile-strategies` and `sync-funding` send a `correlation_id` in the background. Their kinds cannot retract.
+- **Review.**
+  - Round 1 found two MEDIUMs: WR-01 (the dedup helper took FK KEY SHARE locks on fan-in children) and WR-02 (a SQL retraction left no log line). Both were fixed. Round 2 found no MEDIUM or above, and the silent-failure re-review found none either.
+  - migration-reviewer caught a version collision with Phase 210's `20261114120000`, so the migration was renumbered to `20261114130000`; its second pass was clean.
+  - rls-policy-auditor found no MEDIUM or above.
+- **Expected on this PR:** baseline-content-drift shows DRIFT for `_enqueue_compute_job_internal` /7 and /10 and SNAPSHOT_MISSING for `_record_enqueue_dedup` until the post-apply re-dump. VAC-08 sees the migration only after apply-on-merge.
+- **Verification is `human_needed`.** The lock argument for the new helper rests on reading the code. The SQL gate is single-session, and no two-session proof was built.
+- **Recorded, not fixed (LOW and INFO, in the phase REVIEW.md only):**
+  - The service_role `GRANT EXECUTE` on the helper is unnecessary.
+  - A retraction failure can abort the enqueue.
+  - The rollback uses a session-level `lock_timeout`.
+  - The route runs the high-water read on the event loop.
+  - A malformed fills cursor falls back to the daily high-water.
+  - The residual-lock paragraph leaves out `mark_compute_job_done`'s same-row wait.
+  - The helper ignores the `done` and `no_row` retraction outcomes.
+
 ## [0.133.44.0] - 2026-11-14 — Phase 208 UIQUICK: alert-digest link, browse error state and share-link failures tell the truth
 
 Four user-facing claims that were not true are fixed: the alert digest no longer says the dashboard lists its alerts, `/browse` tells a failed category read from an empty one, the strategy share button says what went wrong and always leaves the URL on screen when a copy did not land, and a share link now comes back on the host it was minted on.
