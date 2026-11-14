@@ -694,6 +694,38 @@ SELECT completed_at,
     the round-2 fix a deadlock is counted as a failure, named in the failure row and skipped for
     20 hours like any other.
 
+### A `status = 'ok'` row under `ledger_refresh_fanout` is a skip-count row (Phase 214 FRESHTRUTH, 2026-11-14)
+
+Since migration `20261114152300_ledger_fanout_no_advance_weekly_cap.sql` (founder decision, Phase 214
+SC-2), a tick that holds one or more strategies back ONLY because of the no-advance weekly cap writes
+**one** `public.cron_runs` row under `cron_name = 'ledger_refresh_fanout'`. The cap: a strategy whose completed
+refresh cannot move its series gets a 7-day attempt cooldown instead of the 20-hour one, and is admitted again
+once its last attempt is older than that, never excluded.
+
+- **Row shape.** `status = 'ok'`, `error IS NULL`, `metadata->>'cause' = 'no_advance_weekly_cap'`,
+  `metadata->>'skipped_count'`, and `metadata->'skipped_targets'`, which names each capped strategy with
+  `days_unmoved`, the days since its series last advanced. One row per tick that capped something, and
+  **no row on a tick that capped nothing**.
+- **It is not a failure.** Its `error` is NULL, so the prober's `candidate_enqueue_failed` count does not
+  include it, the failed-attempt cooldown does not read it, and the trigger that refuses a failure row does
+  not match it. A capped strategy is waiting for its week to pass, which is the cap working.
+- **Only the cap's own skips are counted.** A strategy enqueued this tick, one inside the ordinary 20-hour
+  cooldown, one with an ineligible key and one whose marks are paused are not named.
+- ⚠️ **Growth.** At most one row per tick, about 8.8 thousand rows a year if something stays capped all year,
+  and `cron_runs` is never purged. Always read with a window and a `cause` filter.
+- ⛔ **The per-target list holds strategy ids.** Read it in the admin editor and never paste it into this
+  repository. The query below deliberately selects counts only.
+
+```sql
+SELECT completed_at,
+       (metadata->>'skipped_count')::int AS capped
+  FROM public.cron_runs
+ WHERE cron_name = 'ledger_refresh_fanout'
+   AND metadata->>'cause' = 'no_advance_weekly_cap'
+   AND completed_at > now() - INTERVAL '65 minutes'
+ ORDER BY completed_at DESC;
+```
+
 ### A strategy whose marks paused is re-admitted weekly, not daily (Phase 174 MARKPAUSE)
 
 Since migration `20261030120000_ledger_fanout_marks_paused_weekly.sql` (founder decision D-01,

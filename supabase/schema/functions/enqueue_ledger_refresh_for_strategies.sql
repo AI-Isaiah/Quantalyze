@@ -55,6 +55,11 @@ DECLARE
   -- by itself writes a failure row. ⚠️ A deadlock (40P01) is NOT counted
   -- here since the 164.6 round-2 review fix: see the handler below.
   v_lost_race      INTEGER := 0;
+  -- ---- the skip count's locals (Phase 214 SC-2) -----------------------------
+  -- How many strategies the no-advance weekly cap held back this tick, and which,
+  -- with the age of each. Filled by one read after the last unlock, written once.
+  v_skipped_count   INTEGER := 0;
+  v_skipped_targets JSONB   := '[]'::jsonb;
 BEGIN
   -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
   -- FIRST statement in the body, deliberately — unchanged from the form this
@@ -632,6 +637,103 @@ BEGIN
       RAISE WARNING 'enqueue_ledger_refresh_for_strategies: failure instrument write failed (SQLSTATE %); % candidate(s) failed this tick', SQLSTATE, v_failed;
     END;
   END IF;
+
+  -- ---- the no-advance weekly cap's skip count (Phase 214 SC-2) ----------
+  -- A cap with no counter is a silent exclusion as far as an operator can see, so
+  -- every tick that holds a strategy back ONLY because of the weekly cap writes ONE
+  -- row naming each one and its age. Founder decision Q1 = A: each skip is counted
+  -- per tick with its reason, under a tag that cannot collide with the failure tag.
+  --
+  -- ⛔ AFTER THE LAST UNLOCK AND AFTER THE FAILURE INSTRUMENT, NEVER INSIDE THE
+  -- LOCK-HOLDING BLOCK, and BEST-EFFORT: a failing write here costs this row and
+  -- nothing else. It must never raise and so never roll back the tick's enqueues,
+  -- which are already made. The migration's apply-time block refuses a body whose
+  -- skip write precedes the last unlock.
+  --
+  -- ⛔ THE ROW CANNOT BE READ AS A FAILURE. Its status is ok and its error is NULL.
+  -- The prober's cron-obs arm, the failed-attempt cooldown above and the trigger
+  -- that refuses a failure row all key on the failure error string, so none of them
+  -- sees this row. It is told apart from the dormancy and failure rows by its cause.
+  --
+  -- WHAT IS COUNTED is only what the cap ALONE causes: the same cohort conjuncts the
+  -- candidate query uses, the whole no-advance signal, NOT marks-paused (so the
+  -- reason is unambiguous), an attempt inside the week, NO attempt inside the
+  -- ordinary window and nothing in flight. A strategy enqueued this tick now has an
+  -- in-flight job and is not counted; one inside the ordinary window, one with an
+  -- ineligible key and a marks-paused one are not either. A tick with no skip
+  -- writes nothing. The staleness view is evaluated a second time here, which is
+  -- accepted at ledger-backed cohort size.
+  BEGIN
+    SELECT count(*),
+           COALESCE(jsonb_agg(jsonb_build_object('strategy_id', sk.strategy_id,
+                                                 'days_unmoved', sk.days_unmoved)
+                              ORDER BY sk.strategy_id), '[]'::jsonb)
+      INTO v_skipped_count, v_skipped_targets
+      FROM (
+        SELECT lrs.strategy_id,
+               CURRENT_DATE - lrs.last_return_date AS days_unmoved
+          FROM public.ledger_refresh_staleness lrs
+          JOIN public.strategies s
+            ON s.id = lrs.strategy_id
+          LEFT JOIN public.api_keys ak
+            ON ak.id = s.api_key_id
+        WHERE lrs.is_stale
+          AND lrs.is_composite = FALSE
+          AND s.status IN ('published', 'pending_review', 'private')
+          AND ak.sync_status IS DISTINCT FROM 'revoked'
+          AND ak.disconnected_at IS NULL
+          AND COALESCE(ak.is_active, TRUE)
+          AND lrs.stale_reason = 'series_behind'
+          AND (CURRENT_DATE - lrs.last_return_date) >= 8
+          AND EXISTS (
+                SELECT 1
+                  FROM public.compute_jobs cj3
+                 WHERE cj3.strategy_id = lrs.strategy_id
+                   AND cj3.kind = 'compute_analytics_from_csv'
+                   AND cj3.status = 'done'
+                   AND cj3.created_at >= (lrs.last_return_date + 5)::timestamptz
+              )
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM public.strategy_analytics sa
+                 WHERE sa.strategy_id = lrs.strategy_id
+                   AND (sa.data_quality_flags ->> 'marks_trailing_since') ~ '^\d{4}-\d{2}-\d{2}$'
+                   AND sa.data_quality_flags ->> 'marks_trailing_since' <= to_char(CURRENT_DATE - 3, 'YYYY-MM-DD')
+              )
+          AND EXISTS (
+                SELECT 1
+                  FROM public.compute_jobs cj
+                 WHERE cj.strategy_id = lrs.strategy_id
+                   AND cj.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
+                   AND cj.created_at > now() - INTERVAL '7 days'
+              )
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM public.compute_jobs cj
+                 WHERE cj.strategy_id = lrs.strategy_id
+                   AND cj.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
+                   AND cj.created_at > now() - INTERVAL '20 hours'
+              )
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM public.compute_jobs cj2
+                 WHERE cj2.strategy_id = lrs.strategy_id
+                   AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')
+              )
+      ) sk;
+    IF v_skipped_count > 0 THEN
+      INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+      VALUES ('ledger_refresh_fanout', 'ok', now(), NULL,
+              jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies',
+                                 'cause', 'no_advance_weekly_cap',
+                                 'skipped_count', v_skipped_count,
+                                 'skipped_targets', v_skipped_targets));
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    -- Counts nothing and names nothing, by the rule every handler in this body
+    -- follows: the SQLSTATE only, never an identifier (T-161.1-10).
+    RAISE WARNING 'enqueue_ledger_refresh_for_strategies: skip-count write failed (SQLSTATE %)', SQLSTATE;
+  END;
 
   -- ---- NO all-candidates-failed raise (164.6 round-2 review fix) ---------
   -- The round-1 fix raised here when every candidate failed, so the scheduler
