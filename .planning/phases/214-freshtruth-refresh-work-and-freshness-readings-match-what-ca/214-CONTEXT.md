@@ -41,6 +41,7 @@ routed, not fixed here); scheduling the composite fan-out; widening `_record_enq
 - Consistent with Phase 211 decision D11 item 8: a `correlation_id` means user-initiated; no background path retracts.
 
 ### SC-5 — chip label overflow (founder, Q3 = a)
+- ⛔ AMENDED 2026-11-14 (founder, after measurement, option A): the overflow does not reproduce at HEAD (1485px plus a 1485-to-360px sweep, real browser, local stack). SC-5 now reads "does not reproduce at HEAD, measured". The spec e2e/freshness-chip-width.spec.ts becomes a passing one-line fit check in the e2e-seeded CI list. TODOS 0.12 is deleted with "does not reproduce" wording. The wrap decision below stands. Recorded here and in the ROADMAP (deviation policy).
 - Let the label row wrap at that width and keep the full `Track record · future — check data` sentence. No copy change. Measure at 1485px in a real browser, per DESIGN.md.
 
 ### Decided autonomously

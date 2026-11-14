@@ -479,7 +479,7 @@ Plans:
 2. The fan-out excludes or caps a strategy whose derive leaves `last_return_date` unmoved, and counts each skip with a reason.
 3. A composite whose member windows have all closed reads as closed in `ledger_refresh_staleness`, not stale; the composite fan-out stays unscheduled.
 4. After deploy, a PROD read through the Supabase MCP (marker query first) shows the stale count drained, or names each remaining row and why.
-5. The freshness chip's "future" label fits at 1485px, measured in a real browser.
+5. The freshness chip's "future" label fits at 1485px, measured in a real browser. ⛔ AMENDED 2026-11-14 (founder decision, option A): does not reproduce at HEAD, measured at 1485px plus a 1485-to-360px sweep in a real browser; a seeded Playwright spec pins that the label stays on one line inside its column. TODOS `0.12` is deleted as "does not reproduce", not "fixed".
 6. It touches migrations, so migration-reviewer and rls-policy-auditor are both clean before merge.
 7. Each fix has a test that goes RED when it is reverted.
 8. The finalize-wizard `stitch_composite` and csv-finalize `compute_analytics_from_csv` enqueues send a `correlation_id`, or a founder decision widens `_record_enqueue_dedup`'s predicate, so an enqueue from either that dedups onto a marked refresh job no longer stays on the quiet refresh path. A SQL gate arm that is RED on the Phase 211 code (an uncorrelated csv-finalize dedup onto a marked job leaves the marker) proves it. (added 2026-11-14, founder decision, TODOS `211-D11-RESIDUAL-UNCORRELATED-SENDERS`)
