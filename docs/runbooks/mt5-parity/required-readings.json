@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "readings": [
+    {
+      "id": "account_currency",
+      "kind": "text",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "forbidden",
+      "min_count": 1,
+      "founder_prompt": "Read the account deposit currency in the Navigator, under Accounts, or in the header of the account's Report."
+    },
+    {
+      "id": "trade_mode",
+      "kind": "text",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "forbidden",
+      "min_count": 1,
+      "founder_prompt": "Record real or demo, as the terminal's account properties state it (right-click the account in the Navigator, then Properties)."
+    },
+    {
+      "id": "credit",
+      "kind": "money",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "forbidden",
+      "min_count": 1,
+      "founder_prompt": "Read Credit in the Toolbox, Trade tab, in the account's balance line (zero when the line shows no Credit); 0.00 is a reading."
+    },
+    {
+      "id": "summary_instant_utc",
+      "kind": "instant",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "forbidden",
+      "min_count": 1,
+      "founder_prompt": "Write down the UTC time, to the second and ending in Z, at which you read the other readings that start with summary_."
+    },
+    {
+      "id": "summary_balance_at_t",
+      "kind": "money",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "forbidden",
+      "min_count": 1,
+      "founder_prompt": "Read Balance in the Toolbox, Trade tab, at the instant you recorded."
+    },
+    {
+      "id": "summary_equity_at_t",
+      "kind": "money",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "forbidden",
+      "min_count": 1,
+      "founder_prompt": "Read Equity in the Toolbox, Trade tab, at the instant you recorded."
+    },
+    {
+      "id": "summary_floating_pl_at_t",
+      "kind": "money",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "forbidden",
+      "min_count": 1,
+      "founder_prompt": "Read the floating profit and loss (the open-positions total in the Toolbox, Trade tab) at the instant you recorded."
+    },
+    {
+      "id": "summary_credit_facility_at_t",
+      "kind": "money",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "forbidden",
+      "min_count": 1,
+      "founder_prompt": "Read Credit Facility from the Summary block of a freshly generated Report at the instant you recorded."
+    },
+    {
+      "id": "weekend_close_balance",
+      "kind": "money",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "required",
+      "min_count": 1,
+      "founder_prompt": "On the Saturday or Sunday after the Friday edge, read the frozen Balance in the Toolbox, Trade tab, and record it with that Friday as the as-of day."
+    },
+    {
+      "id": "weekend_close_equity",
+      "kind": "money",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "required",
+      "min_count": 1,
+      "founder_prompt": "On the Saturday or Sunday after the Friday edge, read the frozen Equity in the Toolbox, Trade tab, and record it with that Friday as the as-of day."
+    },
+    {
+      "id": "statement_equity",
+      "kind": "money",
+      "provenance": [
+        "broker_statement"
+      ],
+      "as_of": "required",
+      "min_count": 1,
+      "founder_prompt": "From the broker's statement, read the account equity at the close of each statement day you hold, and record one reading per day with that day as the as-of day."
+    },
+    {
+      "id": "all_history_report_sha256",
+      "kind": "sha256",
+      "provenance": [
+        "terminal_report_export"
+      ],
+      "as_of": "forbidden",
+      "min_count": 1,
+      "founder_prompt": "After saving the All-History Report, compute its sha256 as the export section below says and record the 64 hex characters."
+    },
+    {
+      "id": "near_midnight_deal_display_time",
+      "kind": "text",
+      "provenance": [
+        "terminal_reading"
+      ],
+      "as_of": "forbidden",
+      "min_count": 1,
+      "founder_prompt": "In the Toolbox, History tab, find the deal Phase 155.1 preselected and read the time the terminal displays for it, in the form YYYY.MM.DD HH:MM:SS."
+    }
+  ]
+}

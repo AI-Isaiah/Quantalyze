@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "accounts": {
+    "SYN-A": {
+      "readings": [
+        {"id": "statement_equity", "as_of": "2026-11-06", "value": 11900.00, "provenance": "broker_statement"},
+        {"id": "weekend_close_equity", "as_of": "2026-11-13", "value": 12150.00, "provenance": "terminal_reading"},
+        {"id": "weekend_close_balance", "as_of": "2026-11-13", "value": 12070.00, "provenance": "terminal_reading"},
+        {"id": "account_currency", "as_of": null, "value": "USD", "provenance": "terminal_reading"},
+        {"id": "trade_mode", "as_of": null, "value": "real", "provenance": "terminal_reading"},
+        {"id": "credit", "as_of": null, "value": 0.00, "provenance": "terminal_reading"},
+        {"id": "summary_instant_utc", "as_of": null, "value": "2026-11-16T10:00:00Z", "provenance": "terminal_reading"},
+        {"id": "summary_balance_at_t", "as_of": null, "value": 12070.00, "provenance": "terminal_reading"},
+        {"id": "summary_equity_at_t", "as_of": null, "value": 12150.00, "provenance": "terminal_reading"},
+        {"id": "summary_floating_pl_at_t", "as_of": null, "value": 80.00, "provenance": "terminal_reading"},
+        {"id": "summary_credit_facility_at_t", "as_of": null, "value": 0.00, "provenance": "terminal_reading"},
+        {"id": "statement_equity", "as_of": "2026-10-02", "value": 10000.00, "provenance": "broker_statement"},
+        {"id": "statement_equity", "as_of": "2026-10-09", "value": 10290.00, "provenance": "broker_statement"},
+        {"id": "statement_equity", "as_of": "2026-10-16", "value": 12481.00, "provenance": "broker_statement"},
+        {"id": "statement_equity", "as_of": "2026-10-23", "value": 11481.00, "provenance": "broker_statement"},
+        {"id": "statement_equity", "as_of": "2026-10-30", "value": 11719.00, "provenance": "broker_statement"},
+        {"id": "all_history_report_sha256", "as_of": null, "value": "ba862913dc971061b8ff01f2aa30dabdc567f61d78af8695caee5e8aee51ea42", "provenance": "terminal_report_export"},
+        {"id": "near_midnight_deal_display_time", "as_of": null, "value": "2026.10.27 02:30:00", "provenance": "terminal_reading"}
+      ]
+    }
+  }
+}

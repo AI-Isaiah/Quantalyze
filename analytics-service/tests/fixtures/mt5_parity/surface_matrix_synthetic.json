@@ -1,0 +1,615 @@
+{
+  "matrix_version": 1,
+  "mode": "synthetic",
+  "accounts": [
+    {
+      "key_ordinal": "k1",
+      "label": "SYN-A",
+      "unit": "USD",
+      "strategy_status": "draft",
+      "computed_at": "2026-11-14T03:00:00Z",
+      "cells": [
+        {
+          "surface": "factsheet",
+          "symbol": "fetchAndBuildPayloadWithReason",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.105883646941,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.9,
+            "sharpe": 3.1,
+            "max_drawdown": -0.0333861948084
+          },
+          "figure_states": {
+            "cagr": "withheld",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "share_card",
+          "symbol": "computeOgHeadline",
+          "visibility": "not_rendered_while_unpublished",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": null,
+            "last_return_date": null,
+            "cagr": 0.9,
+            "sharpe": 3.1,
+            "max_drawdown": null
+          },
+          "figure_states": {
+            "cagr": "withheld",
+            "sharpe": "shown",
+            "max_drawdown": null
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "factsheet_pdf",
+          "symbol": "same_as factsheet",
+          "visibility": "not_rendered_while_unpublished",
+          "state": "same_as",
+          "same_as": "factsheet",
+          "reason": null,
+          "figures": {
+            "cumulative_return": null,
+            "last_return_date": null,
+            "cagr": null,
+            "sharpe": null,
+            "max_drawdown": null
+          },
+          "figure_states": {
+            "cagr": null,
+            "sharpe": null,
+            "max_drawdown": null
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "allocations_strategies_panel",
+          "symbol": "toStrategyRows",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": null,
+            "last_return_date": "2026-11-13",
+            "cagr": null,
+            "sharpe": 3.1,
+            "max_drawdown": -0.0333861948084
+          },
+          "figure_states": {
+            "cagr": null,
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "allocations_live_baseline",
+          "symbol": "liveBaselineMetricsFromPerKeyDailies plus liveBookFigures",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.10588,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.4,
+            "sharpe": 3.1,
+            "max_drawdown": -0.03339
+          },
+          "figure_states": {
+            "cagr": "withheld",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "scenario_composer_book",
+          "symbol": "buildPerKeyStrategyForBuilderSet plus computeScenario",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.10588,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.4,
+            "sharpe": 3.1,
+            "max_drawdown": -0.03339
+          },
+          "figure_states": {
+            "cagr": "withheld",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "scenario_composer_route",
+          "symbol": "resolveDailyReturnSeries plus computeScenario",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": "route_core_steps",
+          "figures": {
+            "cumulative_return": 0.10588,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.4,
+            "sharpe": 3.1,
+            "max_drawdown": -0.03339
+          },
+          "figure_states": {
+            "cagr": "withheld",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "owner_list_card",
+          "symbol": "shapeRowAnalytics plus gatedValue",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.105883646941,
+            "last_return_date": "2026-11-13",
+            "cagr": null,
+            "sharpe": 3.1,
+            "max_drawdown": -0.0333861948084
+          },
+          "figure_states": {
+            "cagr": "withheld",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "discovery_card",
+          "symbol": "shapeRowAnalytics plus gatedValue",
+          "visibility": "not_rendered_while_unpublished",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.105883646941,
+            "last_return_date": "2026-11-13",
+            "cagr": null,
+            "sharpe": 3.1,
+            "max_drawdown": -0.0333861948084
+          },
+          "figure_states": {
+            "cagr": "withheld",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        }
+      ],
+      "cross_store": {
+        "days_compared": 40,
+        "days_differing": 0,
+        "first_differing_day": null
+      }
+    },
+    {
+      "key_ordinal": "k2",
+      "label": "SYN-B",
+      "unit": "USD",
+      "strategy_status": "published",
+      "computed_at": "2026-11-14T03:00:00Z",
+      "cells": [
+        {
+          "surface": "factsheet",
+          "symbol": "fetchAndBuildPayloadWithReason",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.2,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.3,
+            "sharpe": 1.5,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "share_card",
+          "symbol": "computeOgHeadline",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": null,
+            "last_return_date": null,
+            "cagr": 0.3,
+            "sharpe": 1.5,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "factsheet_pdf",
+          "symbol": "same_as factsheet",
+          "visibility": "owner_visible",
+          "state": "same_as",
+          "same_as": "factsheet",
+          "reason": null,
+          "figures": {
+            "cumulative_return": null,
+            "last_return_date": null,
+            "cagr": null,
+            "sharpe": null,
+            "max_drawdown": null
+          },
+          "figure_states": {
+            "cagr": null,
+            "sharpe": null,
+            "max_drawdown": null
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "allocations_strategies_panel",
+          "symbol": "toStrategyRows",
+          "visibility": "owner_visible",
+          "state": "error",
+          "same_as": null,
+          "reason": "TypeError",
+          "figures": {
+            "cumulative_return": null,
+            "last_return_date": null,
+            "cagr": null,
+            "sharpe": null,
+            "max_drawdown": null
+          },
+          "figure_states": {
+            "cagr": null,
+            "sharpe": null,
+            "max_drawdown": null
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "allocations_live_baseline",
+          "symbol": "liveBaselineMetricsFromPerKeyDailies plus liveBookFigures",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.25,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.3,
+            "sharpe": 1.5,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "scenario_composer_book",
+          "symbol": "buildPerKeyStrategyForBuilderSet plus computeScenario",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.2,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.3,
+            "sharpe": 1.8052502794428733,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "scenario_composer_route",
+          "symbol": "resolveDailyReturnSeries plus computeScenario",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": "route_core_steps",
+          "figures": {
+            "cumulative_return": 0.9,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.3,
+            "sharpe": 1.5,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "usd"
+        },
+        {
+          "surface": "owner_list_card",
+          "symbol": "shapeRowAnalytics plus gatedValue",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.2,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.3,
+            "sharpe": 1.5,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "discovery_card",
+          "symbol": "shapeRowAnalytics plus gatedValue",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.2,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.3,
+            "sharpe": 1.5,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        }
+      ],
+      "cross_store": {
+        "days_compared": 40,
+        "days_differing": 2,
+        "first_differing_day": "2026-10-12"
+      }
+    },
+    {
+      "key_ordinal": "k3",
+      "label": "SYN-C",
+      "unit": "USD",
+      "strategy_status": "draft",
+      "computed_at": "2026-11-14T03:00:00Z",
+      "cells": [
+        {
+          "surface": "factsheet",
+          "symbol": "fetchAndBuildPayloadWithReason",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.2,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.2,
+            "sharpe": 1.2,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "withheld",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "share_card",
+          "symbol": "computeOgHeadline",
+          "visibility": "not_rendered_while_unpublished",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": null,
+            "last_return_date": null,
+            "cagr": 0.2,
+            "sharpe": 1.2,
+            "max_drawdown": null
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "withheld",
+            "max_drawdown": null
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "factsheet_pdf",
+          "symbol": "same_as factsheet",
+          "visibility": "not_rendered_while_unpublished",
+          "state": "same_as",
+          "same_as": "factsheet",
+          "reason": null,
+          "figures": {
+            "cumulative_return": null,
+            "last_return_date": null,
+            "cagr": null,
+            "sharpe": null,
+            "max_drawdown": null
+          },
+          "figure_states": {
+            "cagr": null,
+            "sharpe": null,
+            "max_drawdown": null
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "allocations_strategies_panel",
+          "symbol": "toStrategyRows",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": null,
+            "last_return_date": "2026-11-13",
+            "cagr": null,
+            "sharpe": 1.2,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": null,
+            "sharpe": "withheld",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "allocations_live_baseline",
+          "symbol": "liveBaselineMetricsFromPerKeyDailies plus liveBookFigures",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.2,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.2,
+            "sharpe": 1.2,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "withheld",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "scenario_composer_book",
+          "symbol": "buildPerKeyStrategyForBuilderSet plus computeScenario",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.2,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.2,
+            "sharpe": 1.2,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "withheld",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "scenario_composer_route",
+          "symbol": "resolveDailyReturnSeries plus computeScenario",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": "route_core_steps",
+          "figures": {
+            "cumulative_return": 0.2,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.1341424342974391,
+            "sharpe": 1.2,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "withheld",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "owner_list_card",
+          "symbol": "shapeRowAnalytics plus gatedValue",
+          "visibility": "owner_visible",
+          "state": "value",
+          "same_as": null,
+          "reason": null,
+          "figures": {
+            "cumulative_return": 0.2,
+            "last_return_date": "2026-11-13",
+            "cagr": 0.2,
+            "sharpe": 1.2,
+            "max_drawdown": -0.05
+          },
+          "figure_states": {
+            "cagr": "shown",
+            "sharpe": "shown",
+            "max_drawdown": "shown"
+          },
+          "unit_view": "native"
+        },
+        {
+          "surface": "discovery_card",
+          "symbol": "shapeRowAnalytics plus gatedValue",
+          "visibility": "not_rendered_while_unpublished",
+          "state": "same_as",
+          "same_as": "owner_list_card",
+          "reason": null,
+          "figures": {
+            "cumulative_return": null,
+            "last_return_date": null,
+            "cagr": null,
+            "sharpe": null,
+            "max_drawdown": null
+          },
+          "figure_states": {
+            "cagr": null,
+            "sharpe": null,
+            "max_drawdown": null
+          },
+          "unit_view": "native"
+        }
+      ],
+      "cross_store": {
+        "days_compared": 40,
+        "days_differing": 0,
+        "first_differing_day": null
+      }
+    }
+  ]
+}

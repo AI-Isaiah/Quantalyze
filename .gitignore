@@ -167,3 +167,6 @@ scripts/local-stack/.stack/
 # the RAW measurement the committed execution ledger is derived from and carries
 # verbatim failure text; the ledger carries verdicts only. Never commit it.
 .live-db-lane-execution.json
+
+# Phase 155 MT5 parity capture directory: raw PROD rows, never tracked.
+/.mt5-parity/
