@@ -181,8 +181,14 @@ defensively — absent key ⇒ generic fallback, never KeyError; flag names neve
    > This needs an operator, not a retry — see docs/runbooks/mt5-go-live.md."
 
    Fence-checked: clean (today's near-identical constant already passes the fence live).
-3. **Flags absent/ambiguous:** today's generic constant, unchanged (honest fallback — never
-   guess a cause).
+3. **Flags absent/ambiguous:** the generic cause-free fallback (honest fallback — never
+   guess a cause):
+   > "The MT5 gateway would not let us prove read-only capability, and it did not report why.
+   > This needs an operator, not a retry — see docs/runbooks/mt5-go-live.md."
+
+   Amended 2026-11-14 by Phase 212 WIZTRUTH (founder-approved copy). This arm read "today's
+   generic constant, unchanged", and that constant named the external-Python-API option, which
+   is arm 2's cause and is not known on this path.
 
 Delivery: a shared flag→cause builder beside `terminal_trade_permission_off` in
 `mt5_validation.py`/`mt5_probe.py`, consumed by BOTH raise sites (`ingestion/mt5.py:315`,

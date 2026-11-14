@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155, 207, 208, 209, 210 and 211 complete; 155.1, 155.2 and 157 wait on the founder; 212-215 booked)
+current_phase_name: parallel phases (155 and 207-214 complete; 155.1, 155.2 and 157 wait on the founder; 215 held by the founder)
 status: executing
-stopped_at: Phases 208, 210 and 211 complete; records landed together
-last_updated: "2026-11-14T12:36:33.104Z"
+stopped_at: Phases 212, 213 and 214 complete; records landed together
+last_updated: "2026-11-14T23:05:46.364Z"
 last_activity: 2026-11-14
-last_activity_desc: Phases 208, 210 and 211 complete
-state_head: 3ac730ef960ea5a03d58a5a3bd36bd0ce2bd2c62
+last_activity_desc: Phases 212, 213 and 214 complete
+state_head: 2d1020dd547f14ff7a9ca65021ecd3e4ee2e7bb9
 progress:
   total_phases: 13
-  completed_phases: 6
-  total_plans: 34
-  completed_plans: 34
-  percent: 46
+  completed_phases: 9
+  total_plans: 62
+  completed_plans: 62
+  percent: 69
 ---
 
 ## ⭐ STATE lineage
@@ -175,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 155 PARITYHARNESS, 207 RETRYPROP, 208 UIQUICK, 209 SCRUBLEAKS, 210 PUBLICTRUTH and 211 SYNCJOBS complete; 212 WIZTRUTH, 213 KEYFLOW, 214 FRESHTRUTH and 215 TESTREACH booked, not started
+Phase: parallel — 155 PARITYHARNESS and 207 RETRYPROP through 214 FRESHTRUTH complete; 215 TESTREACH not started, held by the founder
 Plan: per phase (see each phase directory)
-Status: 155.1 SERVERCLOCK waits for the founder's Monday 2026-11-16 live gateway spike; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session
-Last activity: 2026-11-14 — Phases 208, 210 and 211 complete (records landed in one PR)
-Progress: [█████░░░░░] 46%
+Status: 155.1 SERVERCLOCK waits on the founder: weekend spike run 1 done 2026-11-14 with verdict GO, the market-hours run is scheduled for Monday 2026-11-16; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session
+Last activity: 2026-11-14 — Phases 212, 213 and 214 complete (records landed in one PR)
+Progress: [███████░░░] 69%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1807,7 +1807,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-14T07:30:26.000Z
-**Stopped At:** Phases 208, 210 and 211 complete; records landed together
+**Stopped At:** Phases 212, 213 and 214 complete; records landed together
 **Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z
