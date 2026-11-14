@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.48.1] - 2026-11-14 — BASELINE: automated re-dump after the PROD apply of 2d1020dd
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `43651289345`, after the PROD apply of merge `2d1020dd`: sha256 `559fe7c0…` → `e8a2f5e3…`.
+- Shape, old → new: tables 67 → 67, policies 154 → 154, function statements 135 → 135, distinct function names 133 → 133, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261114151700_ledger_staleness_closed_composites.sql`, `20261114152300_ledger_fanout_no_advance_weekly_cap.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-14` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.48.0 → 0.133.48.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=323 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 135 — MATCH 132, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `43651289345` succeeded, and this entry was composed by the `redump-pr` job. Run `43651289345` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.48.0] - 2026-11-14 — Phase 214 FRESHTRUTH: refresh work and freshness readings match what can actually change
 
 The ledger-refresh fan-out and the staleness view now tell apart a strategy whose data can still move from one that cannot. A closed composite stops reading as stale, a strategy whose series has not advanced is retried weekly instead of daily (never excluded), and both finalize routes send the correlation id the enqueue dedup needs. Two migrations.
