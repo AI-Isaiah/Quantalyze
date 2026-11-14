@@ -4268,28 +4268,27 @@ fixing it would widen the phase past its six success criteria. The two earlier T
 (`[167.1.2.2.2-CRON-TICK-RESIDUALS]` and `[167.1.2.2.2-PROVENANCE-GATE-RESIDUALS]`) sit above, under the
 DERIVECRON heading, where plans 01 and 02 appended them.
 
-### 167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED — the user-triggered trade fetch and the queued sync job still seed from `last_sync_at` (booked 2026-10-10, Phase 167.1.2.2.2 SC-3 sibling)
+### 211-D11-RESIDUAL-UNCORRELATED-SENDERS — two enqueue callers send no `correlation_id`, so the SQL dedup cannot retract an inherited refresh marker for them (booked 2026-11-14, Phase 211 SYNCJOBS D11-9)
 
-**Why it is open.** Phase 167.1.2.2.2 fixes the cron's resume fallback to start from the strategy's
-stored high-water and stops it reading `api_keys.last_sync_at` (D-12), because the daily holdings poll
-overwrites that column for every active key (23 of 23 live keys matched the poll's run time within 10
-minutes when measured on 2026-10-09). The poll keeps writing it: four other readers depend on that. Two
-other readers of the same column as a resume point are left as they were. (a) The user-triggered
-`fetch_trades` route in `analytics-service/routers/exchange.py` (the research called it `/sync-trades`;
-the route is `POST /fetch-trades`) seeds `since_ms` from `last_sync_at`, guarded only by a "below the
-gate threshold, force a full lookback" check. (b) The queued `sync_trades` job
-(`run_sync_trades_job` in `analytics-service/services/job_worker.py`) prefers
-`api_keys.last_fetched_trade_timestamp` and falls back to `last_sync_at`; it is shielded only while that
-preferred column is right, and see `167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD` for why it may not be.
-Neither is on the daily path, so neither blocks this phase's goal.
+**Why it is open.** Phase 211 closed `161.1-D11` with founder option B ("Record + drop the flag"). On an
+enqueue dedup hit, `_record_enqueue_dedup` (migration `20261114130000`) records the caller's metadata. For
+a caller that sends a `correlation_id` and no refresh marker, it also retracts an inherited
+`ledger-refresh` marker. Two callers send no `correlation_id`, so the retraction never fires for them:
 
-**Owner:** unrouted; review at the next milestone audit, or the first phase that edits either function.
-**Trigger:** any edit to `fetch_trades` or `run_sync_trades_job` that touches its resume point, or a
-user-triggered sync that returns fewer trades than the age of the newest stored trade implies.
-**Gate (what closes it):** both seed from the strategy's stored high-water, the way the cron fallback
-does, with a test that fails first on today's code: a fresh `last_sync_at` beside an old stored trade must
-still reach back to that trade.
-⛔ **Not a close:** the cron's fix, which lives in `analytics-service/routers/cron.py` only.
+- (a) The finalize-wizard `stitch_composite` enqueue sends `{source: "finalize-wizard"}`. The TypeScript
+  backstop retraction in `src/lib/ledger-refresh-marker.ts` still covers it.
+- (b) The csv-finalize `compute_analytics_from_csv` enqueue has no backstop. A user's CSV finalize that
+  dedups onto a marked refresh job therefore stays on the quiet refresh path.
+
+Widening either caller changes TypeScript callers, so it was out of Phase 211's scope (D11-9).
+
+**Owner:** unrouted; the first phase that edits either enqueue call.
+**Trigger:** any edit to the finalize-wizard or csv-finalize enqueue, or a user CSV finalize whose
+failure is reported quietly because it inherited a refresh marker.
+**Gate (what closes it):** both callers send a `correlation_id`, or a founder decision widens the helper's
+predicate. Either way it needs a SQL gate arm that fails first: on today's code, an uncorrelated
+csv-finalize dedup onto a marked job leaves the marker.
+
 
 ### 167.1.2.2.2-CRONOBS-SCOPE — the prober's `cron-obs` arm watches two named jobs and joins pg_net rows by time alone (booked 2026-10-10, Phase 167.1.2.2.2 SC-6)
 
@@ -4343,7 +4342,7 @@ not use it as a resume point for exactly that reason (the cron resumes from the 
 the queued `sync_trades` job passes it as its preferred seed, so that job would skip those 6 days. Which
 writer put it ahead was not traced; it was measured on one strategy only.
 
-**Owner:** unrouted; review with `167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED` at the next milestone audit.
+**Owner:** unrouted; review at the next milestone audit. (Its sibling `167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED` was closed by Phase 211 SYNCJOBS on 2026-11-14: the queued `sync_trades` job now seeds its daily read from the stored high-water, but its fills read still prefers this column.)
 **Trigger:** the same edit as that entry, or a second strategy read more than 1 day ahead of its stored
 data.
 **Gate (what closes it):** the writer is identified and either keeps the column a stored-through mark or
@@ -5881,20 +5880,6 @@ follows is what was deliberately left, with the reason.
   escape makes a false fire less likely but does not close the vacuity. Not in the findings and not
   in scope; the two 161.1 arms deliberately did NOT copy that shape.
 
-161.1-D5. **⛔ `run_stitch_composite_job._stamp_failed` carries the IDENTICAL defect the phase just
-  fixed twice.** `analytics-service/services/job_worker.py` (~:5760) reads `computation_status`
-  LIVE at stamp time, in the same "ONE select, BOTH columns" as the M-2 flags merge — i.e. its
-  guard's oracle is a column the SQL bridge writes, which is exactly the root cause closed on
-  hop 1 and hop 2 this phase.
-  - **Why it is narrower:** the composite stamp is chain-terminal, so there is no hop-2
-    amplification. Its exposure is the F2 shape only — a sibling job's bridge call moving
-    `computation_status` mid-crawl and disarming the guard.
-  - **Not fixed in 161.1:** it was outside the five findings' file scope, and splitting the read
-    touches gate-10/gate-11 territory that a concurrently-edited migration also pins. Fixing it
-    blind, in parallel, was the higher risk.
-  - **Fix shape:** take the publish snapshot at handler entry and carry it forward, mirroring
-    `run_csv_strategy_analytics`'s `refresh_publish_status` / `refresh_publish_warned` keywords.
-
 161.1-D6. **Residual window on the hop-1 oracle — closing it needs the fan-out migration.** The
   fan-out enqueues the derive in SQL, so the earliest oracle Python can take is at handler entry.
   A sibling transition landing between the SQL enqueue and that read still bounces a plain
@@ -5948,22 +5933,12 @@ follows is what was deliberately left, with the reason.
   - Severity capped: for `complete_with_warnings` rows (the entire live cohort) branch (a) never
     advertised `computing` anyway, so the incremental harm is on plain-`complete` rows.
 
-161.1-D11. **⛔ THE REAL CLOSURE for the reuse-collision class: `enqueue_compute_job` needs a
-  metadata MERGE arm.** `_enqueue_compute_job_internal` dedupes on `(target, kind)` and on a hit does
-  `RETURN v_existing_id`, **discarding `p_metadata` entirely**. Phase 161.1 closed the consequence in
-  Python (the resync tail retracts an inherited refresh marker; both honour-sites re-ask the row),
-  but the RPC still silently drops every caller's metadata on every collision, system-wide.
-  - **Not attempted same-day, deliberately:** that RPC is on every enqueue path in the system. A
-    merge arm changes what every caller's metadata means on collision and needs its own review and
-    its own blast-radius check — not a ride-along on a phase fix.
-  - A merge arm would also remove the read-modify-write in the retraction helper (see D12).
-
 161.1-D12. **Read-modify-write residual in the marker retraction, measured harmless.** The retraction
   reads then writes `compute_jobs.metadata`; a claim committing inside that window loses
   `unified_backbone_at_claim`. Measured harmless — nothing re-reads that key from the row (the drain
   check takes it from the claim's own returned metadata). Recorded because "measured harmless today"
-  is a dated claim: re-check if any reader of that key from the ROW is ever added. Disappears
-  entirely once D11 lands.
+  is a dated claim: re-check if any reader of that key from the ROW is ever added.
+  Phase 211 SYNCJOBS closed D11 on 2026-11-14 WITHOUT a merge arm (founder option B: record the caller's metadata in a side table and retract the marker in SQL), so this window stays as described.
 
 161.1-DEC (founder decisions, 2026-08-25). Two are still not implemented.
 
