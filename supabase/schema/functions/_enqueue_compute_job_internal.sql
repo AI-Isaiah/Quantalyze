@@ -2,12 +2,16 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260716090000_retire_compute_analytics_kind_rpc_guard.sql
+-- source migration: 20261114130000_enqueue_dedup_record_retract.sql
+-- ==========================================================================
+-- STEP 3: the two overloads of _enqueue_compute_job_internal, re-based
+-- ==========================================================================
 -- --------------------------------------------------------------------------
--- 7-param overload — verbatim from 20260510180226:164 with ONLY the
--- retired-kind guard inserted after the p_kind NULL guard.
+-- 7-argument overload: verbatim from 20260716090000 (its CREATE OR REPLACE, with the
+-- retired-kind guard), the header schema-qualified, plus the two helper calls. The
+-- overload is unreachable (42725 on any 7-argument call, D11-13).
 -- --------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION _enqueue_compute_job_internal(
+CREATE OR REPLACE FUNCTION public._enqueue_compute_job_internal(
   p_strategy_id     UUID,
   p_portfolio_id    UUID,
   p_kind            TEXT,
@@ -78,6 +82,7 @@ BEGIN
   END IF;
 
   IF v_existing_id IS NOT NULL THEN
+    PERFORM public._record_enqueue_dedup(v_existing_id, p_kind, p_metadata, p_parent_job_ids);  -- Phase 211 D11, SITE A (7-arg)
     RETURN v_existing_id;
   END IF;
 
@@ -131,23 +136,16 @@ BEGIN
       USING ERRCODE = 'serialization_failure';
   END IF;
 
+  PERFORM public._record_enqueue_dedup(v_new_id, p_kind, p_metadata, p_parent_job_ids);  -- Phase 211 D11, SITE B (7-arg)
   RETURN v_new_id;
 END;
 $$;
 
--- source migration: 20261024120000_fan_in_graph_and_decision_cascade.sql
+-- source migration: 20261114130000_enqueue_dedup_record_retract.sql
 -- --------------------------------------------------------------------------
--- (3) _enqueue_compute_job_internal (10 arguments): the parent lock goes through
---     the helper (D-06)
+-- 10-argument overload: verbatim from section (3) of 20261024120000 (the latest
+-- definition), plus the two helper calls.
 -- --------------------------------------------------------------------------
--- The body is the LATEST definition (20260924230827, Phase 164.9.1), byte for
--- byte, with ONE change: the statement that locked the parents FOR SHARE in
--- job-id order is replaced by a call to public._fan_in_lock_rows. Schema-
--- qualified deliberately, as in the source: an unqualified CREATE OR REPLACE
--- resolves against the SESSION search_path and could create a second function in
--- another schema. The 7-argument overload is uncallable and is not touched.
--- Its COMMENT is re-issued right after its ACL below (the phrase the
--- revert-discriminator gate reads stays in place).
 CREATE OR REPLACE FUNCTION public._enqueue_compute_job_internal(
   p_strategy_id     UUID,
   p_portfolio_id    UUID,
@@ -296,6 +294,7 @@ BEGIN
   END IF;
 
   IF v_existing_id IS NOT NULL THEN
+    PERFORM public._record_enqueue_dedup(v_existing_id, p_kind, p_metadata, p_parent_job_ids);  -- Phase 211 D11, SITE A (10-arg)
     RETURN v_existing_id;
   END IF;
 
@@ -398,6 +397,7 @@ BEGIN
       USING ERRCODE = 'serialization_failure';
   END IF;
 
+  PERFORM public._record_enqueue_dedup(v_new_id, p_kind, p_metadata, p_parent_job_ids);  -- Phase 211 D11, SITE B (10-arg)
   RETURN v_new_id;
 END;
 $$;

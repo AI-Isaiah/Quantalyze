@@ -33,6 +33,7 @@ _FUNCTIONS = Path(__file__).resolve().parents[2] / "supabase" / "schema" / "func
 _RETRACT_SQL = (_FUNCTIONS / "retract_ledger_refresh_marker.sql").read_text()
 _MARK_SQL = (_FUNCTIONS / "mark_compute_job_kept_figures.sql").read_text()
 _BRIDGE_SQL = (_FUNCTIONS / "sync_strategy_analytics_status.sql").read_text()
+_DEDUP_SQL = (_FUNCTIONS / "_record_enqueue_dedup.sql").read_text()
 
 # Mirrors the regex in src/lib/ledger-refresh-marker.test.ts (parseSqlLedgerRefreshSourceLists).
 _SOURCE_LIST_RE = re.compile(r"->>\s*'source'\)\s*IN\s*\(([^)]*)\)")
@@ -137,3 +138,41 @@ def test_a_misspelled_key_is_absent_from_both_snapshots() -> None:
     """The presence checks above can go red: a one-letter misspelling is in neither file."""
     assert "'read_refusal_kept_figure'" not in _MARK_SQL
     assert "read_refusal_kept_figurez" not in _BRIDGE_SQL
+
+
+def test_dedup_helper_marker_list_equals_the_python_marker_set() -> None:
+    """Phase 211 D11 (D11-2, D11-12): ``_record_enqueue_dedup`` is the THIRD SQL copy of the marker
+    set. It holds exactly one list, the caller-has-no-marker conjunct (the helper retracts only for
+    a caller that does not itself send a refresh marker). It must equal ``LEDGER_REFRESH_JOB_SOURCES``:
+    a marker the helper does not know is never retracted by SQL, so the user's request stays
+    protected by it, and a marker the helper knows that nothing else honours would drop a
+    protection nothing else would have given. The count is pinned (measured 2026-11-14: 1) so a
+    parse that finds nothing fails instead of comparing an empty set."""
+    lists = _source_lists(_DEDUP_SQL)
+    assert len(lists) == 1, f"expected 1 marker list in the dedup helper snapshot, found {len(lists)}"
+    assert lists[0] == LEDGER_REFRESH_JOB_SOURCES
+
+
+def test_a_marker_added_to_the_dedup_helper_alone_fails_the_comparison() -> None:
+    """The comparison above can go red: widen the helper's list in a copy of the snapshot and the
+    parsed set no longer equals the Python one."""
+    widened = _DEDUP_SQL.replace(
+        "IN ('ledger-refresh', 'ledger-refresh-composite')",
+        "IN ('ledger-refresh', 'ledger-refresh-composite', 'ledger-refresh-mt5')",
+        1,
+    )
+    assert widened != _DEDUP_SQL, "the replace matched nothing: re-point the widened-copy case"
+    lists = _source_lists(widened)
+    assert len(lists) == 1
+    assert lists[0] != LEDGER_REFRESH_JOB_SOURCES
+    assert len(lists[0]) == 3
+
+
+def test_dedup_helper_retracts_through_the_one_retraction_function() -> None:
+    """Phase 211 D11 (D11-12): the helper reuses ``retract_ledger_refresh_marker`` instead of
+    writing a second UPDATE of ``compute_jobs``, so there is one marker list and one UPDATE shape
+    behind every retraction. With ``--`` comments stripped (the header names the function in
+    prose), the snapshot calls ``public.<RETRACT_REFRESH_MARKER_RPC>(`` exactly once."""
+    code = "\n".join(re.sub(r"--.*$", "", line) for line in _DEDUP_SQL.splitlines())
+    call = f"public.{RETRACT_REFRESH_MARKER_RPC}("
+    assert code.count(call) == 1, f"expected exactly one call to {call} outside comments"

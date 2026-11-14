@@ -989,7 +989,10 @@ class TestSyncTradesFeatureFlag:
             new=AsyncMock(return_value=10000.0),
         ), patch(
             "services.job_worker.db_execute",
-            side_effect=lambda fn: asyncio.to_thread(fn),
+            # Phase 211: run_sync_trades_job now USES db_execute's return value
+            # (the stored high-water read), so the patch must return the
+            # function's result, not an un-awaited to_thread coroutine.
+            new=AsyncMock(side_effect=lambda fn: fn()),
         ), patch(
             "services.job_worker.fetch_raw_trades",
             mock_fetch_raw,

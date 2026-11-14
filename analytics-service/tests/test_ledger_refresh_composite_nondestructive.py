@@ -140,7 +140,8 @@ async def _run(
     job_id: str = _JOB_ID,
     live_metadata: object = _FROM_SNAPSHOT,
     live_job_read_raises: bool = False,
-    analytics_read_raises: list[BaseException] | None = None,
+    analytics_read_raises: list[BaseException | None] | None = None,
+    existing_status_by_read: list[str | None] | None = None,
     expect_error_kind: str = "permanent",
     log: MagicMock | None = None,
     sentry: MagicMock | None = None,
@@ -168,6 +169,7 @@ async def _run(
         live_job_id=job_id,
         live_job_read_raises=live_job_read_raises,
         analytics_read_raises=analytics_read_raises,
+        existing_status_by_read=existing_status_by_read,
     )
     job: dict[str, Any] = {
         "id": job_id,
@@ -723,7 +725,10 @@ class TestStampReadRetriesAGateway504:
 
     Neuter to redden: read through ``db_execute`` again. The first test then
     fails on the error kind (the 504 escapes), and the second on the read
-    count (one read, not the retry budget)."""
+    count (one read, not the retry budget).
+
+    Since Phase 211 D5 (2026-11-14) a marked job's first ``strategy_analytics``
+    select is the entry read, so the queued failures start at the second."""
 
     @pytest.mark.asyncio
     async def test_one_gateway_504_is_retried_and_the_stamp_still_decides(
@@ -734,10 +739,12 @@ class TestStampReadRetriesAGateway504:
             fake = await _run(
                 metadata={"source": _COMPOSITE_MARKER},
                 existing_status="complete_with_warnings",
-                analytics_read_raises=[_Gateway504("gateway timeout")],
+                # The leading None lets the entry read answer (Phase 211 D5).
+                analytics_read_raises=[None, _Gateway504("gateway timeout")],
             )
-        assert fake.analytics_reads == 2, (
-            f"expected one failed and one answering read, saw {fake.analytics_reads}"
+        assert fake.analytics_reads == 3, (
+            "expected the entry read, one failed stamp read and one answering "
+            f"stamp read, saw {fake.analytics_reads}"
         )
         payloads = _analytics_upserts(fake)
         assert payloads, (
@@ -771,7 +778,12 @@ class TestAFailedStampReadKeepsTheCause:
     wrapper). Every case goes RED on the error kind. Drop ``scrubbed`` from its
     raise and every case goes RED on ``last_error``; drop ``cause`` from its
     ERROR line and every parametrised case goes RED on the log assertion.
-    Measured 2026-09-26 against the round-3 arm."""
+    Measured 2026-09-26 against the round-3 arm.
+
+    Since Phase 211 D5 (2026-11-14) a marked job's first ``strategy_analytics``
+    select is the entry read, so the queued failures start at the second. The
+    marked params queue a leading ``None`` and expect one more read; the
+    unmarked param takes no entry read and is unchanged."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -780,14 +792,14 @@ class TestAFailedStampReadKeepsTheCause:
             pytest.param(
                 {"source": _COMPOSITE_MARKER},
                 "persistent-504",
-                "budget",
+                "budget+entry",
                 "_Gateway504",
                 id="marked-persistent-504",
             ),
             pytest.param(
                 {"source": _COMPOSITE_MARKER},
                 "non-504",
-                1,
+                2,
                 "RuntimeError",
                 id="marked-non-504-first-failure",
             ),
@@ -805,12 +817,18 @@ class TestAFailedStampReadKeepsTheCause:
     ) -> None:
         from services.db import DB_READ_MAX_RETRIES
 
-        failures: list[BaseException] = (
+        failures: list[BaseException | None] = (
             [_Gateway504("gateway timeout") for _ in range(DB_READ_MAX_RETRIES)]
             if raises == "persistent-504"
             else [RuntimeError("permission denied for table strategy_analytics")]
         )
-        expected_reads = DB_READ_MAX_RETRIES if reads == "budget" else reads
+        marked = isinstance(metadata, dict)
+        if marked:
+            # The entry read answers; the queued failures land on the stamp read.
+            failures = [None, *failures]
+        expected_reads = (
+            DB_READ_MAX_RETRIES + 1 if reads == "budget+entry" else reads
+        )
         log = MagicMock()
         sentry = MagicMock()
         results: list[Any] = []
@@ -862,12 +880,17 @@ class TestAFailedStampReadKeepsTheCause:
         self,
     ) -> None:
         """``classify_exception`` keeps 500 characters. A PostgREST error body
-        can be longer, so the read's text is bounded and the cause survives."""
+        can be longer, so the read's text is bounded and the cause survives.
+
+        Since Phase 211 D5 (2026-11-14) a marked job's first
+        ``strategy_analytics`` select is the entry read, so the queued failure
+        starts at the second."""
         results: list[Any] = []
         await _run(
             metadata={"source": _COMPOSITE_MARKER},
             existing_status="complete_with_warnings",
-            analytics_read_raises=[RuntimeError("x" * 2000)],
+            # The leading None lets the entry read answer (Phase 211 D5).
+            analytics_read_raises=[None, RuntimeError("x" * 2000)],
             expect_error_kind="transient",
             results=results,
         )

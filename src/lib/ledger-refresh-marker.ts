@@ -58,7 +58,9 @@ export const RETRACTION_OUTCOMES = ["retracted", "done", "no_marker", "no_row"] 
  * can no longer lose its key to a stale copy this helper wrote back.
  *
  * `enqueue_compute_job` dedups on (target, kind) over the in-flight statuses and
- * returns the EXISTING id with the caller's `p_metadata` discarded. If a
+ * returns the EXISTING id with the caller's `p_metadata` discarded. (That was the
+ * behaviour before Phase 211 D11, 2026-11-14: the metadata is now recorded in
+ * `compute_job_dedup_events` and never merged into the job row.) If a
  * recurring ledger refresh already holds the strategy's `stitch_composite`, the
  * user's request is now served by a job carrying the refresh marker — a
  * protection meant for background work nobody is watching.
@@ -74,10 +76,12 @@ export const RETRACTION_OUTCOMES = ["retracted", "done", "no_marker", "no_row"] 
  * owns it is the careful direction; retraction is the LOUD direction, so
  * widening it can only make more failures visible.
  *
- * ⚠️ D-02, UNCHANGED and stated rather than hidden: `enqueue_compute_job`
- * itself still discards the caller's metadata on a dedup, so the user's request
- * is served by the existing job until this retraction runs. This phase closes
- * the retraction's race, not that gap.
+ * ⚠️ D-02, CLOSED IN SQL by Phase 211 D11 (2026-11-14) for a caller that sends
+ * `correlation_id`, and still OPEN for one that does not. `keys/sync` sends
+ * `correlation_id`, so `_enqueue_compute_job_internal` retracts the marker itself
+ * (D11-2) and this helper is the BACKSTOP (D11-4): it answers `no_marker`.
+ * `finalize-wizard` sends only `source`, so SQL does not retract for it and this
+ * helper remains its ONLY retraction (D11-9 residual, booked at ship).
  *
  * Outcomes (`RETRACTION_OUTCOMES`):
  *   * `retracted`  -> `{ retracted: true, marker }`. The marker must be one of
