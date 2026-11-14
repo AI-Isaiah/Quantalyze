@@ -251,7 +251,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 40 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 41 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -506,6 +506,7 @@ DECLARE
   s_sk1        UUID;     -- arm SK1: capped no-advance strategy, the skip row must name it
   s_sk2        UUID;     -- arm SK2: no-advance, but its last attempt is 2 HOURS old (ordinary cooldown)
   s_sk3        UUID;     -- arm SK3: SK1's shape on a key with disconnected_at set
+  s_sk4        UUID;     -- arm SK4: an ordinary stale strategy with no jobs, enqueued on the tick whose skip write fails
   v_sk_fpre    INTEGER;  -- arm SK1: failure rows before the tick
   v_sk_fpost   INTEGER;  -- arm SK1: ... and after it
   v_sk_pre     INTEGER;  -- arm SK1: skip-count rows before the tick
@@ -747,6 +748,8 @@ BEGIN
   -- Arms SK2 and SK3 (Phase 214 plan 06): the two strategies the skip count must NOT name.
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf SK2', 'draft') RETURNING id INTO s_sk2;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_disc,     'lrf SK3', 'draft') RETURNING id INTO s_sk3;
+  -- Arm SK4 (review SFH-F3): the strategy the tick enqueues while its skip write fails.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf SK4', 'draft') RETURNING id INTO s_sk4;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf R1', 'draft') RETURNING id INTO s_r1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf R2', 'draft') RETURNING id INTO s_r2;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_inactive, 'lrf H1', 'draft') RETURNING id INTO s_h_inact;
@@ -970,6 +973,11 @@ BEGIN
          (s_sk2, 'derive_broker_dailies',      'done', now() - INTERVAL '2 hours'),
          (s_sk3, 'compute_analytics_from_csv', 'done', now() - INTERVAL '1 day'),
          (s_sk3, 'derive_broker_dailies',      'done', now() - INTERVAL '2 days');
+  -- Arm SK4's row: a stale series (age 20) with NO job at all, so the signal is false, the
+  -- ordinary 20-hour window is open and the tick enqueues exactly one derive for it.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_sk4, 'complete', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 20, 'YYYY-MM-DD'), 'value', 0.002)));
 
   RAISE NOTICE 'Seed OK.';
 
@@ -1255,7 +1263,7 @@ BEGIN
   --    leaving every other line of it intact, and the APPLY SURVIVES (the
   --    deletion is not a migration needle) while this arm is the FIRST failure —
   --    `TEST FAILED (M2): … wrote 0 instrument row(s) …`, lane exit 3. Unmutated,
-  --    the same lane prints ALL 40 ARMS EXECUTED and exits 0.
+  --    the same lane prints ALL 41 ARMS EXECUTED and exits 0.
   -- ⛔ THE TWO PROSE MENTIONS ABOVE CARRY THE COUNT ON PURPOSE AND MUST MOVE
   -- WITH IT. The anti-skip gate reads this file's sentinel with a
   -- `grep -aoE "ALL [0-9]+ ARMS EXECUTED" | head -1`, so the FIRST match in
@@ -2789,6 +2797,64 @@ BEGIN
   UPDATE strategies SET status = 'draft' WHERE id = s_sk3;
 
   -- ======================================================================
+  -- ARM SK4 — THE SKIP COUNT'S OWN WRITE FAILS, AND THE TICK STILL RETURNS ITS ENQUEUE
+  -- COUNT (review round 1, SFH-F3). The skip block is best-effort: a failing write costs
+  -- the row and never a good enqueue, which is already made. A lane-only trigger on the
+  -- heartbeat table refuses a row whose cause is the weekly cap, standing in for a
+  -- revoked privilege or a constraint drift. SK1's strategy is still held by the cap
+  -- (so the skip write is attempted) and SK4's strategy is enqueued beside it. The
+  -- tick must RETURN 1, raise nothing, keep the enqueued job and write no skip row.
+  -- The trigger and its function are created and dropped inside this arm.
+  -- ======================================================================
+  -- RED-UNDER: make the skip block's exception handler re-raise instead of warning
+  --            (the handler's one statement becomes a bare re-raise; the handler's
+  --            opening words, which STEP 2 needles, stay). The refused skip write then
+  --            escapes the function, the call raises LRSK4 and pg_cron would roll back
+  --            SK4's good enqueue. No earlier arm refuses a skip row, so this is the
+  --            first failure.
+  -- RED-UNDER-M: {"arm":"SK4","apply":[{"kind":"edit","file":"supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql","find":"RAISE WARNING 'enqueue_ledger_refresh_for_strategies: skip-count write failed (SQLSTATE %)', SQLSTATE;","replace":"RAISE;","occurrences":1}]}
+  CREATE FUNCTION pg_temp.lrf_refuse_skip_row() RETURNS TRIGGER LANGUAGE plpgsql AS $refuse_sk$
+  BEGIN
+    RAISE EXCEPTION 'arm SK4: the heartbeat table refuses the skip row' USING ERRCODE = 'LRSK4';
+  END $refuse_sk$;
+  CREATE TRIGGER lrf_refuse_skip_row_trg BEFORE INSERT ON public.cron_runs
+    FOR EACH ROW WHEN (NEW.metadata->>'cause' = 'no_advance_weekly_cap')
+    EXECUTE FUNCTION pg_temp.lrf_refuse_skip_row();
+  SELECT count(*) INTO v_sk_pre FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout' AND metadata->>'cause' = 'no_advance_weekly_cap';
+  UPDATE strategies SET status = 'published' WHERE id IN (s_sk1, s_sk4);
+  v_ret := NULL;
+  v_err_state := NULL;
+  v_err_msg := NULL;
+  BEGIN
+    v_ret := public.enqueue_ledger_refresh_for_strategies();
+  EXCEPTION WHEN OTHERS THEN
+    v_err_state := SQLSTATE;
+    v_err_msg := SQLERRM;
+  END;
+  IF v_err_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (SK4): a tick whose skip-count write was refused raised (SQLSTATE %, message %) instead of returning. The skip block is best-effort: raising there rolls back every enqueue the tick already made, so a lost counter row becomes a lost tick.', v_err_state, v_err_msg;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_sk1 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (SK4): the capped strategy was enqueued (% new job(s)), expected 0 — this arm needs the cap to hold SK1''s strategy so the skip write is attempted before it can measure the refusal.', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_sk4 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_ret IS DISTINCT FROM 1 OR v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (SK4): with the skip row refused, the tick returned % and the ordinary strategy holds % derive_broker_dailies row(s), expected 1 and 1. A failed skip write must cost the row and nothing else.', v_ret, v_cnt;
+  END IF;
+  SELECT count(*) INTO v_sk_post FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout' AND metadata->>'cause' = 'no_advance_weekly_cap';
+  IF v_sk_post <> v_sk_pre THEN
+    RAISE EXCEPTION 'TEST FAILED (SK4): % skip-count row(s) were written although the heartbeat table refused every one, so the refusal did not happen and this arm measured nothing.', v_sk_post - v_sk_pre;
+  END IF;
+  DROP TRIGGER lrf_refuse_skip_row_trg ON public.cron_runs;
+  DROP FUNCTION pg_temp.lrf_refuse_skip_row();
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_sk1, s_sk4);
+
+  -- ======================================================================
   -- ARM U — A TICK IN WHICH EVERY CANDIDATE FAILED KEEPS ITS FAILURE ROW, AND
   -- THE NEXT TICK'S COOLDOWN SKIPS THOSE CANDIDATES (164.6 round-2 review fix,
   -- 164.6-REVIEW-R2 WR-01 / 164.6-REVIEW-SFH-R2 N2).
@@ -3091,7 +3157,7 @@ BEGIN
 
   UPDATE strategies SET status = 'draft' WHERE id IN (s_w1, s_w2, s_w3, s_w4);
 
-  RAISE NOTICE 'ALL 40 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, NA1, NA2, NA3, NA4, NA5, NA6, SK1, SK2, SK3, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
+  RAISE NOTICE 'ALL 41 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, NA1, NA2, NA3, NA4, NA5, NA6, SK1, SK2, SK3, SK4, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
 END $$;
 
 ROLLBACK;

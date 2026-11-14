@@ -1077,6 +1077,7 @@ DECLARE
   v_raise_pos   INTEGER;
   v_skip_pos    INTEGER;
   v_first_unlock INTEGER;
+  v_skip_exc_pos INTEGER;
   -- THE NEEDLES, each BOUND TO A SHAPE and held in a variable so every check
   -- states it once and names it in its own failure message. ⛔ The ones that
   -- name a statement are ASSEMBLED BY CONCATENATION: written whole, each would
@@ -1157,6 +1158,13 @@ DECLARE
   --      of the rewrite, the apply survives and the ARM, not the apply, is the first
   --      failure.
   v_skip_needle  TEXT := '''no_advance_' || 'weekly_cap';
+  -- (15) ⭐ NEW (phase 214 review round 1, SFH-F3): the skip block's own exception
+  --      handler, needled on the handler's OPENING WORDS and searched only in the
+  --      text AFTER the skip needle, so an earlier handler cannot satisfy it. It is
+  --      the token the gate arm that forces the skip write to fail keeps in its
+  --      rewrite (the twin replaces the handler's body, never its opening), so the
+  --      apply survives and the ARM, not the apply, is the first failure.
+  v_skip_exc_needle TEXT := 'EXCEPTION WHEN ' || 'OTHERS';
 BEGIN
   -- 1. the function landed, resolves to EXACTLY ONE function, and takes
   --    ZERO arguments. ⛔ The overload count is ASSERTED: every read below
@@ -1334,6 +1342,14 @@ BEGIN
   IF position(v_lock_needle IN substr(v_def, 1, v_skip_pos)) = 0
      OR position(v_lock_needle IN substr(v_def, v_skip_pos)) <> 0 THEN
     RAISE EXCEPTION 'Migration 20261114152300: public.%''s skip-count write ("%") is not after the LAST advisory unlock ("%"). Placed before it, a failing write reaches the lock-holding block''s handler, which unlocks and re-raises, and the whole tick rolls back with every enqueue that succeeded', v_fn, v_skip_needle, v_lock_needle;
+  END IF;
+  -- ⭐ NEW (SFH-F3): the skip block still has its OWN exception handler, after the
+  --    skip write. Without it a failing skip write raises out of the function and
+  --    pg_cron rolls back the enqueues this tick already made; the gate arm SK4
+  --    measures that behaviourally and this check refuses the handler's removal.
+  v_skip_exc_pos := position(v_skip_exc_needle IN substr(v_def, v_skip_pos));
+  IF v_skip_exc_pos = 0 THEN
+    RAISE EXCEPTION 'Migration 20261114152300: public.%''s skip-count write ("%") has no exception handler after it (looked for "%"). A failing write would then raise out of the function and the scheduler would roll back every enqueue the tick already made', v_fn, v_skip_needle, v_skip_exc_needle;
   END IF;
 
   -- 11. THE WHOLE EXECUTE GRANTEE SET IS EXACTLY THE OWNER. aclexplode over
