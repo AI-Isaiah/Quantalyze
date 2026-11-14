@@ -45,8 +45,9 @@
 --           the request's correlation_id) retracts a ledger-refresh marker it dedups onto.
 --   MARKED-CALLER  a caller that itself sends a refresh marker retracts nothing; the marker
 --           stays and the event is recorded with no retracted_marker.
---   NO-CORRELATION  the finalize-wizard shape (a source, no correlation_id) retracts nothing
---           in SQL: the recorded residual whose TypeScript backstop stays.
+--   NO-CORRELATION  an uncorrelated caller (a `source`, no correlation_id) retracts nothing
+--           in SQL. Since Phase 214 no route sends that shape (both finalize routes send
+--           their correlation_id), so this pins the predicate's correlation_id conjunct.
 --   NON-MARKER-KIND  process_key_long is outside the kind list: an artificial marker stays.
 --   PARENTED  a parented enqueue records and retracts nothing.
 --   DPC-SKIP  an UNPARENTED caller with correlation metadata that dedups onto a
@@ -606,14 +607,16 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (MARKED-CALLER): the event row says a marker % was retracted, but nothing was', v_marker;
   END IF;
 
-  -- ===== ARM NO-CORRELATION - the finalize-wizard shape retracts nothing in SQL ====
-  -- D11-2 / D11-9, the recorded residual: finalize-wizard sends a `source` and NO
-  -- correlation_id, so SQL does not retract for it and its TypeScript backstop stays.
+  -- ===== ARM NO-CORRELATION - an uncorrelated caller retracts nothing in SQL ====
+  -- D11-2: a caller that sends a `source` and NO correlation_id is not a user-initiated
+  -- request SQL can attribute, so it does not retract. Since Phase 214 no route sends this
+  -- shape (finalize-wizard and csv-finalize send their correlation_id); the arm pins the
+  -- predicate's correlation_id conjunct, and the TypeScript backstop stays by D11-4.
   -- RED-UNDER: delete the `correlation_id IS NOT NULL` conjunct from the helper. The
   --            retraction then runs for a caller with no correlation id and strips the
-  --            composite marker the wizard's own backstop is meant to handle.
+  --            composite marker an uncorrelated caller has no claim on.
   -- RED-UNDER-M: {"arm":"NO-CORRELATION","apply":[{"kind":"edit","file":"supabase/migrations/20261114130000_enqueue_dedup_record_retract.sql","find":"     AND (p_metadata ->> 'correlation_id') IS NOT NULL\n","replace":"","occurrences":1}]}
-  v_sent := jsonb_build_object('source', 'finalize-wizard');
+  v_sent := jsonb_build_object('source', 'uncorrelated-caller');
   v_seed_meta := jsonb_build_object('source', 'ledger-refresh-composite', 'enqueued_at', v_enq_at);
   v_strat := pg_temp.dd_seed('stitch_composite', 'pending', v_seed_meta);
   v_seed := pg_temp.dd_job(v_strat, 'stitch_composite');
