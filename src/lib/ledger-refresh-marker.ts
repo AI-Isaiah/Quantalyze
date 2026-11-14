@@ -77,11 +77,12 @@ export const RETRACTION_OUTCOMES = ["retracted", "done", "no_marker", "no_row"] 
  * widening it can only make more failures visible.
  *
  * ⚠️ D-02, CLOSED IN SQL by Phase 211 D11 (2026-11-14) for a caller that sends
- * `correlation_id`, and still OPEN for one that does not. `keys/sync` sends
- * `correlation_id`, so `_enqueue_compute_job_internal` retracts the marker itself
- * (D11-2) and this helper is the BACKSTOP (D11-4): it answers `no_marker`.
- * `finalize-wizard` sends only `source`, so SQL does not retract for it and this
- * helper remains its ONLY retraction (D11-9 residual, booked at ship).
+ * `correlation_id`. `keys/sync` sends `correlation_id`, so
+ * `_enqueue_compute_job_internal` retracts the marker itself (D11-2) and this
+ * helper is the BACKSTOP (D11-4): it answers `no_marker`. Since Phase 214 the
+ * `finalize-wizard` stitch enqueue and the `csv-finalize` analytics enqueue send
+ * their request's `correlation_id` too, so SQL retracts for them as well and this
+ * helper normally answers `no_marker` there. The backstop stays by D11-4.
  *
  * Outcomes (`RETRACTION_OUTCOMES`):
  *   * `retracted`  -> `{ retracted: true, marker }`. The marker must be one of

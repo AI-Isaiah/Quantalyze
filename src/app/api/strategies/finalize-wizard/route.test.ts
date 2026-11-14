@@ -1864,6 +1864,14 @@ describe("POST /api/strategies/finalize-wizard — Phase 106 finalize enqueue", 
     expect(enqueueCall).toBeDefined();
     expect(enqueueCall!.args.p_kind).toBe("stitch_composite");
     expect(enqueueCall!.args.p_strategy_id).toBe(STRATEGY_ID);
+    // Phase 214 SC-8: a user-initiated stitch request carries its request's
+    // correlation id, so the SQL dedup helper retracts an inherited
+    // ledger-refresh marker for it. EXACT equality (not toMatchObject): dropping
+    // the key must turn this RED.
+    expect(enqueueCall!.args.p_metadata).toEqual({
+      source: "finalize-wizard",
+      correlation_id: TEST_CORRELATION_ID,
+    });
     fetchSpy.mockRestore();
   });
 

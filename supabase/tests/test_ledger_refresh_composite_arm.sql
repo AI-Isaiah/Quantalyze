@@ -49,10 +49,14 @@
 -- re-counted against the new file before the swap and every occurrence count
 -- held. No `occurrences` or `nth` value moved.
 --
--- ⚠️ EXACTLY TWO edit steps still name 20260825120000_ledger_refresh_staleness_
--- view.sql, and that is CORRECT, not an oversight: the D/precondition and
--- E1/precondition twins mutate the staleness VIEW, which neither 20260907130000
--- nor 20260911130000 redefines. A view that is not superseded is not dead text.
+-- ⚠️ NO edit step names 20260825120000_ledger_refresh_staleness_view.sql any more
+-- (Phase 214 FRESHTRUTH). The D/precondition and E1/precondition twins mutate the
+-- staleness VIEW, and 20261114151700_ledger_staleness_closed_composites.sql, the
+-- last entry of this file's apply list, re-defines that view. A twin that edited
+-- the old file's view text would be overwritten when the new migration applied and
+-- would report no-red, so both were re-pointed to the new file IN THE SAME COMMIT
+-- as the apply-list entry. Their `find` strings were re-counted on the new file's
+-- final bytes and each still matches exactly once.
 --
 -- ⚠️ AND WHY SEVERAL TWINS CARRY `"occurrences":2,"nth":2`. 20260911130000, like
 -- 20260907130000 before it, holds BOTH fan-out bodies (single-key first,
@@ -206,7 +210,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 23 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 24 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -282,7 +286,7 @@
 -- ⚠️ The sentinel string itself is deliberately NOT repeated in this header:
 -- this file's own verify pins it to exactly ONE occurrence, so that the roster
 -- can only be edited where it is RAISED.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","scripts/pg-lane/fixtures/31-fixture-system-flags.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","supabase/migrations/20260924120000_ledger_fanout_failure_count.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","scripts/pg-lane/fixtures/31-fixture-system-flags.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql","supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql"]}
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -304,6 +308,7 @@ DECLARE
   s_e_mixed    UUID;  -- arm E1: one deferred-venue member + one not
   s_e_all      UUID;  -- arm E2: every member on the deferred venue
   s_g          UUID;  -- arm G: stale composite attempted 2 h ago
+  s_cl         UUID;  -- arm CL: composite whose every member window has closed
   h_set        UUID[];-- arm H: 5 stale eligible composites
   v_ret        INTEGER;
   v_cnt        INTEGER;
@@ -601,6 +606,15 @@ BEGIN
   -- asserts anything.
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrc D', 'draft') RETURNING id INTO s_d;
 
+  -- Arm CL's composite (Phase 214): CLOSED. Every member declares a window_end, the
+  -- latest one is long past, and the series (seeded below) stops on the day before
+  -- it. Parked 'draft' like every other fixture; arm CL publishes it.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc CL', 'draft') RETURNING id INTO s_cl;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_cl, k_led,   uid, CURRENT_DATE - 400, CURRENT_DATE - 200, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_cl, k_led_b, uid, CURRENT_DATE - 300, CURRENT_DATE - 199, 1);
+
   -- Arm B's composite: TWO members, one eligible and one REVOKED. That mix is
   -- deliberate — see arm B's closing assertion.
   INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
@@ -661,6 +675,12 @@ BEGIN
   INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
   VALUES (s_c, 'complete_with_warnings', now(),
           jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 1, 'YYYY-MM-DD'), 'value', 0.004)));
+
+  -- Arm CL's analytics: the series ends on the day before the latest window_end
+  -- (window_end is EXCLUSIVE), so the view reads the composite closed and not stale.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_cl, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 200, 'YYYY-MM-DD'), 'value', 0.004)));
 
   -- Arm G's prior ATTEMPT: terminal (so the in-flight conjunct is not what is being
   -- measured), created 2 hours ago (so the 20-hour cooldown is).
@@ -942,7 +962,7 @@ BEGIN
   --    leaving every other line of it intact, and the APPLY SURVIVES (the
   --    deletion is not a migration needle) while this arm is the FIRST failure —
   --    `TEST FAILED (M2): … wrote 0 instrument row(s) …`, lane exit 3. Unmutated,
-  --    the same lane prints ALL 23 ARMS EXECUTED and exits 0.
+  --    the same lane prints ALL 24 ARMS EXECUTED and exits 0.
   -- RED-UNDER-M: {"arm":"M2","apply":[{"kind":"edit","file":"supabase/migrations/20260924120000_ledger_fanout_failure_count.sql","find":"v_cause := 'flag_read_failed';","replace":"v_cause := NULL;","occurrences":2,"nth":2}]}
   IF v_cnt_m2 <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (M2): the flag read RAISED and the composite arm wrote % instrument row(s) naming flag_read_failed AND carrying a non-NULL metadata->>''sqlstate'', expected exactly 1. The guard swallows the error and WARNs, which is correct and is exactly what arm L proves — but a WARNING is not a trace pg_cron keeps, so without this row a composite arm that has been failing its activation read on every tick for weeks is indistinguishable from one that is dormant by design. This is the APPGUC-WARNING-UNINSTRUMENTED-01 half of WR-10. A count of 0 here is EITHER no row at all OR a row whose `sqlstate` key has gone: the key is what separates 42P01 from 42501 from a planner fault, check 7 of the migration cannot see its deletion (that check asserts the statement shape of the INSERT, which survives), and this arm is the only reader of the key.', v_cnt_m2;
@@ -1090,14 +1110,14 @@ BEGIN
   -- tables, not assumed from the seed. These are the predicate's INPUTS, not a
   -- re-implementation of the predicate.
   -- ======================================================================
-  -- RED-UNDER: make `is_composite` in the VIEW (20260825120000) unconditionally
+  -- RED-UNDER: make `is_composite` in the VIEW (20261114151700) unconditionally
   --            true — drop the strategy_keys correlation from its EXISTS. The
   --            precondition then reads is_composite=true for a member-less
   --            single-key fixture, which is exactly the "the view or the seed
   --            changed" case it exists to catch. The view's own STEP-3 drift
   --            assertions cover deferred_venues and has_mt5_member, not this
   --            expression, so the apply still succeeds.
-  -- RED-UNDER-M: {"arm":"D/precondition","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy_id = s.id","replace":"SELECT 1","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"D/precondition","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy_id = s.id","replace":"SELECT 1","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_d;
 
   SELECT lrs.is_stale, lrs.is_composite, lrs.has_mt5_member
@@ -1162,12 +1182,12 @@ BEGIN
   UPDATE strategies SET status = 'published' WHERE id IN (s_e_mixed, s_e_all);
 
   -- RED-UNDER: point the VIEW's `deferred_venues` at a DIFFERENT ledger venue
-  --            (20260825120000). It stays inside the venue set and still reads
+  --            (20261114151700). It stays inside the venue set and still reads
   --            lv.deferred_venues, so both of that migration's own drift
   --            assertions still pass and the apply succeeds — and yet
   --            has_mt5_member reads FALSE for the mixed fixture, which is the
   --            silent-stop-excluding drift the migration's comment describes.
-  -- RED-UNDER-M: {"arm":"E1/precondition","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"ARRAY['mt5']::TEXT[]                    AS deferred_venues","replace":"ARRAY['sfox']::TEXT[]                   AS deferred_venues","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"E1/precondition","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"ARRAY['mt5']::TEXT[]                    AS deferred_venues","replace":"ARRAY['sfox']::TEXT[]                   AS deferred_venues","occurrences":1}]}
   -- E-precondition: both fixtures must be otherwise eligible, or the exclusion
   -- below is being performed by something else.
   SELECT lrs.is_stale, lrs.is_composite, lrs.has_mt5_member
@@ -2038,7 +2058,35 @@ BEGIN
 
   UPDATE strategies SET status = 'draft' WHERE id IN (s_w3, s_w4);
 
-  RAISE NOTICE 'ALL 23 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, S1, T, U, V1, V2, W) and passed — the composite refresh arm is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row naming this function, partitioned from the single-key arm, bounded, its exclusions are falsifiable, a composite that fails to enqueue is counted and named in one exact cron_runs row while its sibling still enqueues and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every composite failed returns 0 without raising, keeps its failure row and puts those composites on the cooldown so a healthy composite behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is not a failure while a deadlock is counted and named as one, and its EXECUTE grantee set and DEFINER exemption both still hold.';
+  -- ======================================================================
+  -- ARM CL — Phase 214 SC-3: A CLOSED COMPOSITE IS NOT ENQUEUED. Its member windows
+  -- have all closed and its series stops on the day before the latest window_end,
+  -- so the view reads it closed and not stale and the composite fan-out, which
+  -- selects on is_stale, never sees it as a candidate. Without this arm the view
+  -- could stop excusing a closed composite and every earlier arm here (all of them
+  -- open-window composites) would stay green while a finished composite was
+  -- re-stitched every cooldown, forever, for no new day.
+  -- ======================================================================
+  -- RED-UNDER: in the NEW view migration (20261114151700), drop the `- 1` from the
+  --            series-reached-the-end conjunct, so the series must reach the
+  --            window_end itself. The exclusive end makes that impossible, the
+  --            composite reads stale again and is enqueued. Every earlier arm uses
+  --            open windows, which never close, so this arm is the first failure.
+  -- RED-UNDER-M: {"arm":"CL","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"lr.last_return_date >= max(sk.window_end) - 1","replace":"lr.last_return_date >= max(sk.window_end)","occurrences":1}]}
+  UPDATE strategies SET status = 'published' WHERE id = s_cl;
+  v_ret := public.enqueue_ledger_composite_refresh();
+  IF v_ret <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (CL): a composite whose every member window has CLOSED produced % enqueue(s), expected 0 — the view no longer excuses a finished composite, so it is re-stitched every cooldown for no new day', v_ret;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_cl AND kind = 'stitch_composite'
+     AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (CL): a closed composite got % stitch_composite job(s) in the last hour, expected 0', v_cnt;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_cl;
+
+  RAISE NOTICE 'ALL 24 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, S1, T, U, V1, V2, W, CL) and passed — the composite refresh arm is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row naming this function, partitioned from the single-key arm, bounded, its exclusions are falsifiable, a composite that fails to enqueue is counted and named in one exact cron_runs row while its sibling still enqueues and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every composite failed returns 0 without raising, keeps its failure row and puts those composites on the cooldown so a healthy composite behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is not a failure while a deadlock is counted and named as one, and its EXECUTE grantee set and DEFINER exemption both still hold.';
 END $$;
 
 ROLLBACK;
