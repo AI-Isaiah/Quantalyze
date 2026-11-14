@@ -132,13 +132,13 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 
 ### Phases (v1.18)
 
-- [ ] **Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down** - A PROD census per account, a read-only capture of our side, provenance-locked oracle intake, a compare engine shown RED on broken inputs, and the agent-checkable halves of MT5-09 and MT5-15 measured; no founder needed
+- [x] **Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down** - A PROD census per account, a read-only capture of our side, provenance-locked oracle intake, a compare engine shown RED on broken inputs, and the agent-checkable halves of MT5-09 and MT5-15 measured; no founder needed (completed 2026-11-14)
 - [ ] **Phase 155.1: SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading** - One narrow tick-time read, asserted against the configured rule inside the leased derive and persisted write-once by a pure-DDL migration; parallel with 155, no trading day needed
 - [ ] **Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%** - The founder's scripted session on MM2, MM3 and FX-AI_V, Gate A and Gate B per account, every surface the same, every gap fixed at its root or ruled on; after 155, session after the 155.1 deploy
 - [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
-- [ ] **Phase 207: RETRYPROP — every error page's Try again button works** - Boundaries use Next's real `retry` prop; independent of the MT5 phases
+- [x] **Phase 207: RETRYPROP — every error page's Try again button works** - Boundaries use Next's real `retry` prop; independent of the MT5 phases (completed 2026-11-14)
 - [ ] **Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth** - Quick UI fixes; independent of the MT5 phases
-- [ ] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases
+- [x] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases (completed 2026-11-14)
 - [ ] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases
 - [ ] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases
 
@@ -147,7 +147,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 **Goal:** Before the founder sits at the terminal, an agent-built harness captures our side from PROD read-only, accepts only external oracle inputs, and returns a per-account verdict it has been shown able to fail. Every check that needs no founder (the PROD census, the MT5-09 data layer, the MT5-15 flags) is already measured, so its findings reach the fix loop early. Research Phase A.
 **Requirements**: PARITY-01, PARITY-02, PARITY-03, PARITY-04
 **Depends on:** Nothing (first of the milestone; runs in parallel with 155.1)
-**Plans:** TBD
+**Plans:** 11/11 plans complete
 **UI hint**: no
 
 Research flags (`/gsd-plan-phase --research-phase`): the Report parser slice (the export's encoding, separators, column headers and whether a per-deal Balance column exists are undocumented, so the parser is written against one real export and fails loud on an unknown header) and the surface slice (re-locate "strategy detail", confirm the factsheet loader). The engine and taxonomy, the capture SQL and its write-keyword gate follow existing precedents (`parity_diff.py`, the marksource census) and need no research.
@@ -160,7 +160,26 @@ Research flags (`/gsd-plan-phase --research-phase`): the Report parser slice (th
 5. Pre-verification for 155.2, which closes both requirements: the MT5-09 surface matrix, on the surface list fixed at this phase's discuss-phase and cited by symbol, compares each account's numbers at the data layer, and every data-quality flag these accounts carry (MT5-15) is read from stored data and classified. Each discrepancy is recorded as a named finding with its root-cause lead for MT5-10's fix loop in 155.2; nothing is fixed silently here.
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 155-01-PLAN.md — tracer: synthetic capture sealed, provenance-gated worksheet and a Gate B verdict end to end, plus the one synthetic account (Wave 1)
+- [x] 155-02-PLAN.md — census SQL (marker, bind, census-accounts, census-edges), write-keyword gate shown able to fail, `.mt5-parity/` gitignore pin (Wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 155-03-PLAN.md — the ten SELECT-only capture files under the gate, run order and truncation fallback in the runbook (Wave 2)
+- [x] 155-05-PLAN.md — All-History Report parser by header (UTF-8 and UTF-16) and the complete founder worksheet intake (Wave 2)
+- [x] 155-09-PLAN.md — MT5-09 data-layer surface matrix over all live surfaces, cited by symbol (Wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 155-04-PLAN.md — every census and capture file executed on a throwaway cluster against the capture contract (Wave 3)
+- [x] 155-06-PLAN.md — Gate A legs, window validation and picker, and the clock, flow and pre-mark explainers (Wave 3)
+- [x] 155-08-PLAN.md — MT5-15 flag classes, surface-matrix findings, census and findings renderers, tracked-text scanner (Wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 155-07-PLAN.md — three RED proofs with byte-backup restore, rehearsal flag, verdict and red-proof CLI, purity gate (Wave 4)
+- [x] 155-10-PLAN.md — orchestrator-only PROD census and capture through the MCP, sealed, and the census record (Wave 4; not autonomous)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 155-11-PLAN.md — dress rehearsal, RED-proof record and findings ledger from the real capture (Wave 5)
 
 ### Phase 155.1: SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading
 
@@ -225,13 +244,13 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 155. PARITYHARNESS | 0/? | Not started | - |
+| 155. PARITYHARNESS | 11/11 | Complete | 2026-11-14 |
 | 155.1. SERVERCLOCK | 0/? | Not started | - |
 | 155.2. LIVEPARITY | 0/? | Not started | - |
 | 157. FOUNDER-CONFIRM | 0/? | Not started | - |
-| 207. RETRYPROP | 0/? | Not started | - |
+| 207. RETRYPROP | 1/1 | Complete | 2026-11-14 |
 | 208. UIQUICK | 0/? | Not started | - |
-| 209. SCRUBLEAKS | 0/? | Not started | - |
+| 209. SCRUBLEAKS | 5/5 | Complete | 2026-11-14 |
 | 210. PUBLICTRUTH | 0/? | Not started | - |
 | 211. SYNCJOBS | 0/? | Not started | - |
 
@@ -298,13 +317,13 @@ Plans:
 **Goal:** Every error boundary's Try again button calls the `retry` prop Next 16.4.2 actually passes (`{ error, reset, retry }`), not `unstable_retry`, which is undefined at runtime. Closes TODOS `196-ERROR-BOUNDARY-UNSTABLE-RETRY-01` (booked by founder 2026-11-13 from the TODOS prune, PR #1259).
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases; runs in parallel with them.
-**Plans:** 0 plans
+**Plans:** 1/1 plans complete
 **Success Criteria** (what must be TRUE):
 1. No error boundary under `src/app` reads `unstable_retry`.
 2. A test renders every boundary through the props Next's own `error-boundary.js` passes and proves Try again calls `retry`; it goes RED when one boundary is reverted.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 207 to break down)
+- [x] 207-01-PLAN.md — every error boundary's Try again calls `retry`, proven through Next's real ErrorBoundary
 
 ### Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth
 
@@ -326,7 +345,7 @@ Plans:
 **Goal:** Error reports never carry raw PostgREST `details`/`hint` and are never lost: scrub at the capture boundary, a `beforeSend` that cannot throw, a UUID guard on the signed-out OG route, and a coded 400 for malformed JSON on validate-and-encrypt. Closes TODOS `204-SENTRY-RAW-SUPABASE-ERRORS`, `SHARE-QA-07`, `170.3-OG-MALFORMED-ID` and the validate-and-encrypt bare `req.json()` entry; `SHARE-D-164-C` (`create_scenario_share` in the audit RPC list) rides along. Booked by the founder 2026-11-13 ("Error-report leaks") from the TODOS prune, PR #1259.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
-**Plans:** 0 plans
+**Plans:** 5/5 plans complete
 **Success Criteria** (what must be TRUE):
 1. `scrubCaptureInput` scrubs non-Error objects, so no capture site can forward `details`/`hint`.
 2. `scrubRecordStrings` survives frozen and getter-only objects without losing the report.
@@ -335,7 +354,11 @@ Plans:
 5. Each fix has a test that goes RED when it is reverted.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 209 to break down)
+- [x] 209-01-PLAN.md — Wave 1: capture-mode renderer, so `captureToSentry` never forwards PostgREST `details`/`hint` (SC1, D-01..D-05)
+- [x] 209-02-PLAN.md — Wave 1: guarded `scrubSentryEvent` that withholds at the nearest writable parent and never throws or returns null (SC2, D-06..D-09a)
+- [x] 209-03-PLAN.md — Wave 1: `isUuid` guard on the OG route; P3 rewritten with a real status check; slot-not-spent test (SC3, D-10..D-12)
+- [x] 209-04-PLAN.md — Wave 1: coded 400 for a malformed, null or non-object body on validate-and-encrypt; two censuses moved (SC4, D-13, D-14)
+- [x] 209-05-PLAN.md — Wave 1: `create_scenario_share` under the audit law, with a literal typed call and a positive-control pin (SHARE-D-164-C, D-15, D-16)
 
 ### Phase 210: PUBLICTRUTH — public factsheet cues come from real data only
 

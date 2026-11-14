@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: defining requirements
-status: planning
-stopped_at: context exhaustion at 75% (2026-11-13)
-last_updated: "2026-11-13T13:51:21.090Z"
-last_activity: 2026-11-13
-last_activity_desc: Milestone v1.18 started
+current_phase_name: parallel phases (155, 207 and 209 complete; 208, 210 and 211 in progress)
+status: executing
+stopped_at: Phases 155, 207 and 209 complete; records landed together
+last_updated: "2026-11-14T07:30:26.000Z"
+last_activity: 2026-11-14
+last_activity_desc: Phases 155, 207 and 209 complete
 state_head: 40ff7161c075113187162a407a6cb51c502da5a5
 progress:
   total_phases: 9
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  completed_phases: 3
+  total_plans: 17
+  completed_plans: 17
+  percent: 33
 ---
 
 ## ⭐ STATE lineage
@@ -31,7 +31,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-13)
 
-**Current focus:** Planning next milestone (v1.21 closed 2026-11-13)
+**Current focus:** v1.18 parallel phases — 155, 207 and 209 complete; 208, 210 and 211 in progress; 155.1 waits for the founder's 2026-11-16 live gateway spike
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -175,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: Not started (roadmap created)
-Plan: —
-Status: v1.18 roadmap awaiting founder approval; 155 PARITYHARNESS and 155.1 SERVERCLOCK start first, in parallel, then 155.2 LIVEPARITY with 157 FOUNDER-CONFIRM in its session
-Last activity: 2026-11-13 — v1.18 roadmap created (4 phases, 15/15 requirements mapped)
-Progress: [░░░░░░░░░░] 0%
+Phase: parallel — 155 PARITYHARNESS, 207 RETRYPROP and 209 SCRUBLEAKS complete; 208 UIQUICK, 210 PUBLICTRUTH and 211 SYNCJOBS in progress
+Plan: per phase (see each phase directory)
+Status: 155.1 SERVERCLOCK waits for the founder's Monday 2026-11-16 live gateway spike; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session
+Last activity: 2026-11-14 — Phases 155, 207 and 209 complete (records landed in one PR)
+Progress: [███░░░░░░░] 33%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -393,6 +393,23 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 194 P02 | 1 session | 3 tasks | 13 files |
 | Phase 194 P03 | 1 session | 3 tasks | 9 files |
 | Phase 194 P13 | 1 session | 3 tasks | 9 files |
+| Phase 155 P01 | 52 min | 2 tasks | 9 files |
+| Phase 155 P02 | 25 min | 2 tasks | 7 files |
+| Phase 155 P03 | 25 min | 3 tasks | 12 files |
+| Phase 155 P05 | 35 min | 2 tasks | 9 files |
+| Phase 155 P09 | 45 min | 2 tasks | 1 files |
+| Phase 155 P04 | 20 min | 2 tasks | 1 files |
+| Phase 155 P06 | 8 min | 2 tasks | 2 files |
+| Phase 155 P08 | 25 min | 2 tasks | 6 files |
+| Phase 155 P07 | 35 min | 3 tasks | 6 files |
+| Phase 155 P10 | 5 min | 2 tasks | 1 files |
+| Phase 155 P11 | 12 min | 2 tasks | 3 files |
+| Phase 207 P01 | 10min | 4 tasks | 18 files |
+| Phase 209 P01 | 25min | 2 tasks | 4 files |
+| Phase 209 P02 | 30min | 2 tasks | 2 files |
+| Phase 209 P03 | 20min | 2 tasks | 2 files |
+| Phase 209 P04 | 25min | 2 tasks | 3 files |
+| Phase 209 P05 | 15min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -1067,6 +1084,19 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 194]: D-05 (founder, Show don't flag) overrides the plausibility wording of SC-4 and TRUST-05; recorded in ROADMAP and REQUIREMENTS
 - [Phase 194]: Engine-constant alignment (365 vs 365.25, ddof 0 vs 1) booked as 194-ENGINE-CONSTANTS, not decided by any D-0x
 - [Phase 194]: 194-03: D-15 verdict in figure-gate.ts (total record withholds, window only qualifies); missing-last list contract in list-figures.ts; Scenario VaR/CVaR on historicalVarCvar
+- [Phase 155]: 155-01: ordinal labels are sealed into the capture manifest at seal time; an unlabelled ordinal is refused — a label cannot be edited after sealing, and an unlabelled account can never reach a verdict
+- [Phase 155]: 155-01: verdict renderer and JSON accept only the typed Verdict; AccountVerdict refuses a label with a 5+ digit run — redaction of the tracked record is a type, not a review habit
+- [Phase 155]: 155-02: census-inception and census-flags folded into census-accounts (identity_* and flag_keys columns); census orders by numeric ordinal so k10 follows k9
+- [Phase 155]: 155-08: flag classes are a proposal for 155.2 sign-off; digit_run_5 ignores decimal fraction digits so ratio_3sf output never trips the record scan; census/findings CLI writes nothing when its rendering trips a rule
+- [Phase 155]: 155-11: added a supplementary picker-window rehearsal beside the plan's explicit windows, since the plan windows are all refused on the real capture
+- [Phase 207]: D-05: real ErrorBoundary path shipped in the cross-boundary test; the hand-built-props fallback was not needed
+- [Phase 209]: D-03 held: seam log renderer untouched; Sentry path uses its own scrubSeamErrorForCapture
+- [Phase 209]: D-05/A2: placeholder covers every non-Error object with no allowlisted field, including arrays and URL/Date/class instances
+- [Phase 209]: 209-02: scrubSentryEvent withholds unwritable token-holding values at the nearest writable parent and returns a minimal replacement event (never null) for both hooks; outer try/catch added as a safety net
+- [Phase 209]: 209-03: malformed og id is a not-found behind isUuid(id): no read, no log, long cache, Sentry slot untouched; P3 status assertion made non-vacuous via mock status
+- [Phase 209]: 209-04 D-13: validate-and-encrypt body guard copied exactly from create-with-key, no new error code; the parse rejection is swallowed (credential hygiene, Pitfall 5)
+- [Phase 209]: 209-04 D-14: both emission censuses moved on purpose (KEY_MISSING_REQUIRED_FIELD 2 to 3, expectedSites 12 to 13, rosterFloor stays 4)
+- [Phase 209]: 209-05 D-15/D-16: create_scenario_share listed in MUTATING_RPC_NAMES, route call made a plain typed one-line literal, and a positive-control pin (RED under cast, unlisted name, removed audit call) keeps the listing from going decorative
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1770,6 +1800,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-11-14T07:30:26.000Z
+**Stopped At:** Phases 155, 207 and 209 complete; records landed together
+**Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z
 **Stopped At:** context exhaustion at 75% (2026-11-13)

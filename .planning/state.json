@@ -6,7 +6,7 @@
     {
       "number": "155",
       "name": "PARITYHARNESS",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "155.1",
@@ -26,7 +26,7 @@
     {
       "number": "207",
       "name": "RETRYPROP",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "208",
@@ -36,7 +36,7 @@
     {
       "number": "209",
       "name": "SCRUBLEAKS",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "210",
@@ -51,8 +51,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 1)",
-    "reason": "Phase ? of 4 — needs a plan"
+    "label": "Advance to the next step (phases 208, 210 and 211 in progress; 155.1 waits for the 2026-11-16 gateway spike)",
+    "reason": "Phases 155, 207 and 209 complete; 3 of 9"
   },
-  "updated_at": "2026-11-13T21:34:23.396Z"
+  "updated_at": "2026-11-14T07:30:26.000Z"
 }

@@ -17,10 +17,10 @@
 
 ### Parity harness (agent-built, no founder needed)
 
-- [ ] **PARITY-01**: Every expected value the harness compares carries a provenance of exactly `terminal_reading`, `terminal_report_export` or `broker_statement`, and the harness refuses any other source, including our own gateway or `mt5_soak.reconcile_parity`.
-- [ ] **PARITY-02**: The harness goes RED on each deliberately broken input (a reclassified BALANCE deal, a one-hour clock shift, a dropped oldest deal) and GREEN again after a byte-backup restore, proven in the phase record.
-- [ ] **PARITY-03**: Our side is captured read-only from persisted PROD rows through versioned SELECT-only SQL behind a write-keyword test; raw figures stay in an untracked directory and only ratios, ordinals and verdicts are tracked.
-- [ ] **PARITY-04**: A pre-flight census records, per account: first mark day `S`, open P&L at the candidate Friday edges, stored `data_quality_flags`, account unit, published status, record length and `computed_at`, plus an inception identity check (the ledger rolled back past the first deal comes to about 0).
+- [x] **PARITY-01**: Every expected value the harness compares carries a provenance of exactly `terminal_reading`, `terminal_report_export` or `broker_statement`, and the harness refuses any other source, including our own gateway or `mt5_soak.reconcile_parity`.
+- [x] **PARITY-02**: The harness goes RED on each deliberately broken input (a reclassified BALANCE deal, a one-hour clock shift, a dropped oldest deal) and GREEN again after a byte-backup restore, proven in the phase record.
+- [x] **PARITY-03**: Our side is captured read-only from persisted PROD rows through versioned SELECT-only SQL behind a write-keyword test; raw figures stay in an untracked directory and only ratios, ordinals and verdicts are tracked.
+- [x] **PARITY-04**: A pre-flight census records, per account: first mark day `S`, open P&L at the candidate Friday edges, stored `data_quality_flags`, account unit, published status, record length and `computed_at`, plus an inception identity check (the ledger rolled back past the first deal comes to about 0).
 
 ### MT5 verification (carried requirements)
 
@@ -60,10 +60,10 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PARITY-01 | Phase 155 | Pending |
-| PARITY-02 | Phase 155 | Pending |
-| PARITY-03 | Phase 155 | Pending |
-| PARITY-04 | Phase 155 | Pending |
+| PARITY-01 | Phase 155 | Complete |
+| PARITY-02 | Phase 155 | Complete |
+| PARITY-03 | Phase 155 | Complete |
+| PARITY-04 | Phase 155 | Complete |
 | MT5-06 | Phase 155.1 | Pending |
 | MT5-07 | Phase 155.2 | Pending |
 | MT5-08 | Phase 155.2 | Pending |
