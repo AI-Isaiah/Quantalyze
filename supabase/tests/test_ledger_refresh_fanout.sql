@@ -48,8 +48,8 @@
 -- touches as a strict superset. (2) 20261114151700_ledger_staleness_closed_composites.sql
 -- re-creates the staleness view, which the new body reads; it follows the previous
 -- last entry and precedes the new one. (3) 20261114152300 itself is LAST.
--- ⛔ PLAN 06 (Phase 214 SC-2, the skip count) APPENDS arm SK1 here: 35 arms -> 36; 41
--- twin sections -> 42. The new body writes one cron_runs row per tick that the weekly cap
+-- ⛔ PLAN 06 (Phase 214 SC-2, the skip count) APPENDS arms SK1, SK2 and SK3 here: 35 arms
+-- -> 38; 41 twin sections -> 44. The new body writes one cron_runs row per tick that the weekly cap
 -- holds a strategy back, under its own cause, status ok and error NULL. Its skip statement
 -- RE-SPELLS the candidate query's eligibility and signal conjuncts, so every twin whose
 -- needle that statement repeats was RECOUNTED on the new file's final bytes in the same
@@ -251,7 +251,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 36 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 38 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -502,6 +502,8 @@ DECLARE
   s_na4        UUID;     -- arm NA4: age 20, its done analytics job PREDATES the stale day
   -- ⛔ Arm SK1 (Phase 214 FRESHTRUTH plan 06), same rule as every DECLARE above.
   s_sk1        UUID;     -- arm SK1: capped no-advance strategy, the skip row must name it
+  s_sk2        UUID;     -- arm SK2: no-advance, but its last attempt is 2 HOURS old (ordinary cooldown)
+  s_sk3        UUID;     -- arm SK3: SK1's shape on a key with disconnected_at set
   v_sk_fpre    INTEGER;  -- arm SK1: failure rows before the tick
   v_sk_fpost   INTEGER;  -- arm SK1: ... and after it
   v_sk_pre     INTEGER;  -- arm SK1: skip-count rows before the tick
@@ -738,6 +740,9 @@ BEGIN
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf NA4', 'draft') RETURNING id INTO s_na4;
   -- Arm SK1 (Phase 214 plan 06): a capped no-advance strategy. Parked like the rest.
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf SK1', 'draft') RETURNING id INTO s_sk1;
+  -- Arms SK2 and SK3 (Phase 214 plan 06): the two strategies the skip count must NOT name.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf SK2', 'draft') RETURNING id INTO s_sk2;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_disc,     'lrf SK3', 'draft') RETURNING id INTO s_sk3;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf R1', 'draft') RETURNING id INTO s_r1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf R2', 'draft') RETURNING id INTO s_r2;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_inactive, 'lrf H1', 'draft') RETURNING id INTO s_h_inact;
@@ -926,6 +931,20 @@ BEGIN
   INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
   VALUES (s_sk1, 'compute_analytics_from_csv', 'done', now() - INTERVAL '1 day'),
          (s_sk1, 'derive_broker_dailies',      'done', now() - INTERVAL '2 days');
+  -- Arms SK2 and SK3's rows, by INSERT only. SK2 carries the no-advance signal (age 20,
+  -- a done analytics job a day old) but its last derive attempt is 2 HOURS old, inside the
+  -- ordinary 20-hour window, so the ordinary cooldown holds it and the cap is not the cause.
+  -- SK3 is SK1's exact shape (attempts 1 and 2 days old) on a DISCONNECTED key.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_sk2, 'complete', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 20, 'YYYY-MM-DD'), 'value', 0.002))),
+         (s_sk3, 'complete', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 20, 'YYYY-MM-DD'), 'value', 0.002)));
+  INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
+  VALUES (s_sk2, 'compute_analytics_from_csv', 'done', now() - INTERVAL '1 day'),
+         (s_sk2, 'derive_broker_dailies',      'done', now() - INTERVAL '2 hours'),
+         (s_sk3, 'compute_analytics_from_csv', 'done', now() - INTERVAL '1 day'),
+         (s_sk3, 'derive_broker_dailies',      'done', now() - INTERVAL '2 days');
 
   RAISE NOTICE 'Seed OK.';
 
@@ -1211,7 +1230,7 @@ BEGIN
   --    leaving every other line of it intact, and the APPLY SURVIVES (the
   --    deletion is not a migration needle) while this arm is the FIRST failure —
   --    `TEST FAILED (M2): … wrote 0 instrument row(s) …`, lane exit 3. Unmutated,
-  --    the same lane prints ALL 36 ARMS EXECUTED and exits 0.
+  --    the same lane prints ALL 38 ARMS EXECUTED and exits 0.
   -- ⛔ THE TWO PROSE MENTIONS ABOVE CARRY THE COUNT ON PURPOSE AND MUST MOVE
   -- WITH IT. The anti-skip gate reads this file's sentinel with a
   -- `grep -aoE "ALL [0-9]+ ARMS EXECUTED" | head -1`, so the FIRST match in
@@ -2635,6 +2654,67 @@ BEGIN
   UPDATE strategies SET status = 'draft' WHERE id = s_sk1;
 
   -- ======================================================================
+  -- ARM SK2 — ONLY THE CAP'S OWN SKIPS ARE COUNTED: A STRATEGY HELD BY THE ORDINARY
+  -- COOLDOWN IS NOT. The signal is true (age 20, a done analytics job a day old) but
+  -- the last derive attempt is 2 HOURS old, inside the 20-hour window. It would be
+  -- held with or without the cap, so the cap is not what skipped it: 0 derive jobs,
+  -- and the count of skip rows does not move. This arm also proves the other half of
+  -- the contract: a tick with no cap skip writes NO row.
+  -- ======================================================================
+  -- RED-UNDER: make the skip statement's "no attempt inside the ordinary window"
+  --            conjunct vacuous in 20261114152300 (its time predicate becomes FALSE).
+  --            SK2's strategy is then counted as a cap skip and a row appears. SK1's
+  --            attempts are a day and 2 days old and SK3's key is disconnected, so
+  --            neither can trip this twin first.
+  -- RED-UNDER-M: {"arm":"SK2","apply":[{"kind":"edit","file":"supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql","find":"AND cj.created_at > now() - INTERVAL '20 hours'","replace":"AND FALSE","occurrences":1}]}
+  SELECT count(*) INTO v_sk_pre FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout' AND metadata->>'cause' = 'no_advance_weekly_cap';
+  UPDATE strategies SET status = 'published' WHERE id = s_sk2;
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_sk2 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (SK2): a no-advance strategy whose last attempt is 2 hours old was enqueued (% new job(s)), expected 0 — the ordinary 20-hour cooldown no longer holds it, so this arm cannot tell the cap from the cooldown.', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_sk_post FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout' AND metadata->>'cause' = 'no_advance_weekly_cap';
+  IF v_sk_post <> v_sk_pre THEN
+    RAISE EXCEPTION 'TEST FAILED (SK2): a tick whose only held strategy is inside the ordinary 20-hour cooldown wrote % skip-count row(s), expected 0 — the counter blames the weekly cap for a skip the cap did not cause, so an operator reads a cap that is working as a strategy being starved for a week. Likely cause: the skip statement no longer requires that NO attempt falls inside the ordinary window.', v_sk_post - v_sk_pre;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_sk2;
+
+  -- ======================================================================
+  -- ARM SK3 — AN INELIGIBLE KEY IS NOT A CAP SKIP. SK1's exact shape, but the key has
+  -- disconnected_at set. The strategy is held back by its key and not by the cap, so
+  -- it appears in no skip row written by this call.
+  -- ======================================================================
+  -- RED-UNDER: delete the skip statement's disconnected-key conjunct in 20261114152300
+  --            (the SECOND occurrence in the text; the first is the candidate
+  --            query's). SK3's strategy is then counted. SK1's key is connected and
+  --            SK2's attempt is inside the ordinary window, so neither trips this
+  --            twin first.
+  -- RED-UNDER-M: {"arm":"SK3","apply":[{"kind":"edit","file":"supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql","find":"AND ak.disconnected_at IS NULL","replace":"AND TRUE","occurrences":2,"nth":2}]}
+  SELECT count(*) INTO v_sk_pre FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout' AND metadata->>'cause' = 'no_advance_weekly_cap';
+  UPDATE strategies SET status = 'published' WHERE id = s_sk3;
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_sk3 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (SK3): a strategy on a disconnected key was enqueued (% new job(s)), expected 0 — the candidate query no longer excludes a disconnected key.', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_sk_post FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout' AND metadata->>'cause' = 'no_advance_weekly_cap';
+  SELECT count(*) INTO v_cnt FROM public.cron_runs
+   WHERE cron_name = 'ledger_refresh_fanout'
+     AND metadata->>'cause' = 'no_advance_weekly_cap'
+     AND metadata->'skipped_targets' @> jsonb_build_array(jsonb_build_object('strategy_id', s_sk3));
+  IF v_cnt <> 0 OR v_sk_post <> v_sk_pre THEN
+    RAISE EXCEPTION 'TEST FAILED (SK3): a strategy held back by a disconnected key is named in % skip-count row(s) (skip rows written by this tick: %), expected 0 and 0 — the counter blames the weekly cap for a strategy its key excludes. Likely cause: the skip statement no longer applies the candidate query''s key-eligibility conjuncts.', v_cnt, v_sk_post - v_sk_pre;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_sk3;
+
+  -- ======================================================================
   -- ARM U — A TICK IN WHICH EVERY CANDIDATE FAILED KEEPS ITS FAILURE ROW, AND
   -- THE NEXT TICK'S COOLDOWN SKIPS THOSE CANDIDATES (164.6 round-2 review fix,
   -- 164.6-REVIEW-R2 WR-01 / 164.6-REVIEW-SFH-R2 N2).
@@ -2937,7 +3017,7 @@ BEGIN
 
   UPDATE strategies SET status = 'draft' WHERE id IN (s_w1, s_w2, s_w3, s_w4);
 
-  RAISE NOTICE 'ALL 36 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, NA1, NA2, NA3, NA4, SK1, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
+  RAISE NOTICE 'ALL 38 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, NA1, NA2, NA3, NA4, SK1, SK2, SK3, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
 END $$;
 
 ROLLBACK;
