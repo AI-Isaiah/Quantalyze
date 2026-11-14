@@ -16,7 +16,7 @@
 -- never rewritten there. An applied migration stays byte-identical.
 --
 -- ══════════════════════════════════════════════════════════════════════════
--- THE DECISION, quoted from the phase CONTEXT
+-- THE DECISION, as recorded in the phase CONTEXT (summarised here, not a quotation)
 -- ══════════════════════════════════════════════════════════════════════════
 -- Founder, Phase 214 CONTEXT "SC-2 — fan-out treatment of a strategy whose
 -- refresh cannot advance", Q1 = A: weekly cap, NEVER exclude. The trigger is the
@@ -121,9 +121,11 @@
 -- one sentence, the REVOKE is re-issued, and the apply-time block's messages name
 -- this file.
 --
--- ⚠️ Regenerating supabase/schema/functions/ (`npm run schema:functions`) is the
--- ship step's job: the snapshot is what VAC-04 and `npm run schema:functions:check`
--- read, and it is generated from the migrations, never edited by hand.
+-- ⚠️ supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql is
+-- regenerated in this same change (`npm run schema:functions`), AFTER the VAC-04
+-- ack above was measured on the previous snapshot. The snapshot is what VAC-04 and
+-- `npm run schema:functions:check` read, and it is generated from the migrations,
+-- never edited by hand.
 --
 -- ══════════════════════════════════════════════════════════════════════════
 -- DISJOINTNESS — what STEP 2 asserts vs. what the gate arms MUTATE
