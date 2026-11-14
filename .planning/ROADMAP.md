@@ -470,7 +470,7 @@ Plans:
 
 ### Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change
 
-**Goal:** Refresh work goes only where data can actually advance, and every freshness reading tells the truth about why a series has stopped. One live MT5 strategy has had its series stuck at 36 days while its key syncs daily and its derive finishes `publish_warned` every day. The fan-out re-derives it daily for nothing. The two Deribit composites read stale in `ledger_refresh_staleness`, although every member window ended by 2026-04-30. Founder decision 2026-11-14 (0.3, "Yes, closed records"): they read as closed records, not stale, and the composite fan-out stays unscheduled. The freshness chip's `TRACK RECORD · FUTURE — CHECK DATA` label overflows its masthead column at 1485px (297.9px in 204.2px). Closes TODOS `0.1`, `0.12` and `0.3`. Booked by the founder 2026-11-14 from the FIX NOW triage.
+**Goal:** Refresh work goes only where data can actually advance, and every freshness reading tells the truth about why a series has stopped. One live MT5 strategy has had its series stuck at 36 days while its key syncs daily and its derive finishes `publish_warned` every day. The fan-out re-derives it daily for nothing. The two Deribit composites read stale in `ledger_refresh_staleness`, although every member window ended by 2026-04-30. Founder decision 2026-11-14 (0.3, "Yes, closed records"): they read as closed records, not stale, and the composite fan-out stays unscheduled. The freshness chip's `TRACK RECORD · FUTURE — CHECK DATA` label overflows its masthead column at 1485px (297.9px in 204.2px). Closes TODOS `0.1`, `0.12`, `0.3` and `211-D11-RESIDUAL-UNCORRELATED-SENDERS` (added by founder decision 2026-11-14: the Phase 211 D11-9 residual, where the finalize-wizard `stitch_composite` and csv-finalize `compute_analytics_from_csv` enqueues send no `correlation_id`, so the SQL enqueue dedup cannot retract an inherited `ledger-refresh` marker for them). Booked by the founder 2026-11-14 from the FIX NOW triage.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of the other FIX NOW phases.
 **Plans:** 0 plans
@@ -482,6 +482,7 @@ Plans:
 5. The freshness chip's "future" label fits at 1485px, measured in a real browser.
 6. It touches migrations, so migration-reviewer and rls-policy-auditor are both clean before merge.
 7. Each fix has a test that goes RED when it is reverted.
+8. The finalize-wizard `stitch_composite` and csv-finalize `compute_analytics_from_csv` enqueues send a `correlation_id`, or a founder decision widens `_record_enqueue_dedup`'s predicate, so an enqueue from either that dedups onto a marked refresh job no longer stays on the quiet refresh path. A SQL gate arm that is RED on the Phase 211 code (an uncorrelated csv-finalize dedup onto a marked job leaves the marker) proves it. (added 2026-11-14, founder decision, TODOS `211-D11-RESIDUAL-UNCORRELATED-SENDERS`)
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 214 to break down)

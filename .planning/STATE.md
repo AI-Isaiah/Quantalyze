@@ -5,16 +5,16 @@ milestone_name: MT5-VERIFY & founder confirmations
 current_phase_name: parallel phases (155, 207 and 209 complete; 208, 210 and 211 in progress)
 status: executing
 stopped_at: Phases 155, 207 and 209 complete; records landed together
-last_updated: "2026-11-14T07:30:26.000Z"
+last_updated: "2026-11-14T12:36:09.529Z"
 last_activity: 2026-11-14
 last_activity_desc: Phases 155, 207 and 209 complete
-state_head: 40ff7161c075113187162a407a6cb51c502da5a5
+state_head: 3f70c4753a1525fe54772ddfe6aad523fdcf6af4
 progress:
   total_phases: 13
-  completed_phases: 3
-  total_plans: 17
-  completed_plans: 17
-  percent: 23
+  completed_phases: 6
+  total_plans: 34
+  completed_plans: 34
+  percent: 46
 ---
 
 ## ⭐ STATE lineage
@@ -179,7 +179,7 @@ Phase: parallel — 155 PARITYHARNESS, 207 RETRYPROP and 209 SCRUBLEAKS complete
 Plan: per phase (see each phase directory)
 Status: 155.1 SERVERCLOCK waits for the founder's Monday 2026-11-16 live gateway spike; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session
 Last activity: 2026-11-14 — Phases 155, 207 and 209 complete (records landed in one PR)
-Progress: [███░░░░░░░] 33%
+Progress: [█████░░░░░] 46%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -711,6 +711,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 214 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): FRESHTRUTH, refresh work and freshness readings match what can actually change (0.3: closed records)
 - Phase 215 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): TESTREACH, CI-only: every test guarding money math or error contracts runs and test apps match production
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
+- Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
 
 ### Decisions
 
