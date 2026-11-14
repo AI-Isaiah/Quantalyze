@@ -20,7 +20,7 @@ status: all_fixed
 - Fixed: 2
 - Skipped: 0
 
-**Where it ran.** The caller named the existing worktree `/Users/helios-mammut/claude-projects/quantalyze-211` (branch `feat/211-syncjobs`) as the only place to work, so no second worktree was created. All gates ran in that checkout, on the throwaway pg-lane (scratch cluster, loopback only). Nothing touched TEST or PROD, and no `supabase db push`, `link`, `--db-url` or `--project-ref` was run.
+**Where it ran.** The caller named the existing worktree `../quantalyze-211` (a sibling checkout) (branch `feat/211-syncjobs`) as the only place to work, so no second worktree was created. All gates ran in that checkout, on the throwaway pg-lane (scratch cluster, loopback only). Nothing touched TEST or PROD, and no `supabase db push`, `link`, `--db-url` or `--project-ref` was run.
 
 **Not run, by instruction (disk was at about 1 GB free).** The Docker local-stack was not booted, so the `sql-tests` lane (committed dump plus the D-F replay) was not exercised. The FULL mutation corpus was not run: the mutation runner ran on the one gate file only, with `--file`. `ARMS_FLOOR` 846 is therefore the static annotated-unwaived count from `--parse-only`, an upper bound on biting. CI `sql-mutation` FULL on the PR head is the run that compares it with a real biting count.
 
