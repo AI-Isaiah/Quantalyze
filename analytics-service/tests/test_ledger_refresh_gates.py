@@ -87,8 +87,24 @@ from typing import Final
 # from experience. Renaming or superseding either migration means editing the
 # constant here in the same commit as the rename.
 _STALENESS_VIEW_MIGRATION_NAME: Final[str] = (
-    "20260825120000_ledger_refresh_staleness_view.sql"
+    "20261114151700_ledger_staleness_closed_composites.sql"
 )
+# ⛔ MOVED 2026-11-14 (Phase 214 FRESHTRUTH), in the SAME COMMIT as the migration
+# that superseded the view. 20261114151700 re-defines public.ledger_refresh_staleness
+# with CREATE OR REPLACE VIEW (a closed composite reads is_closed and is not stale
+# for series_behind; two columns appended), so it is the LIVE definition of the view
+# and every region extractor below (view body, verdict markers, venue arrays, the
+# status pair) must read IT, or those gates would guard a body nothing runs. The
+# parser function ledger_refresh_parse_series_date stays defined in 20260825120000
+# and is not re-defined.
+# ⛔ SUPERSEDED-BUT-APPLIED view definitions, named rather than dropped. Same rule as
+# _FANOUT_SUPERSEDED_MIGRATION_NAMES below: the applied file is the record of what
+# ran on PROD, so it stays in the dormancy scan BY NAME (it lies inside window 1) and
+# a redating of it out of that window fails floor 1 instead of shrinking the scan
+# quietly. Enumerated, never dropped.
+_STALENESS_VIEW_SUPERSEDED_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
+    "20260825120000_ledger_refresh_staleness_view.sql",
+})
 # ⚠️ MOVED 2026-09-07 (phase 164.7 / D-01), and this is the pointer-hygiene rule
 # above being obeyed rather than an exception to it. 20260907130000 re-defines
 # BOTH fan-out bodies in ONE file: the activation switch moved off an
@@ -332,6 +348,23 @@ _PHASE_MIGRATION_WINDOW_5_END: Final[str] = "20260924120001"
 _PHASE_MIGRATION_WINDOW_6_START: Final[str] = "20261030120000"
 _PHASE_MIGRATION_WINDOW_6_END: Final[str] = "20261030120001"
 
+# ⛔ A SEVENTH DISJOINT RANGE, added in the SAME COMMIT as 20261114151700 (Phase 214
+# FRESHTRUTH) — never by widening range 6, which would swallow every migration
+# stamped between 20261030120001 and 20261114151700 into a raw comments-included
+# scan they were never reviewed against. Half-open and one second wide, like its
+# six siblings.
+#
+# ⚠️ What this range ARMS, and it was measured before it was added: everything
+# inside it is scanned RAW by floor 4, comments included. MEASURED 2026-11-14 on
+# 20261114151700, with the commands below run on the final bytes of the file:
+#     grep -ac 'cron\.schedule' <file>                                   -> 0
+#     grep -ac 'cron\.unschedule' <file>                                 -> 0
+#     grep -acE 'enqueue_ledger_(refresh_for_strategies|composite_refresh)' <file> -> 0
+# i.e. 0 occurrences of the schedule verb, 0 of the unschedule verb, 0 of either
+# fan-out name. The range was written after that reading.
+_PHASE_MIGRATION_WINDOW_7_START: Final[str] = "20261114151700"
+_PHASE_MIGRATION_WINDOW_7_END: Final[str] = "20261114151701"
+
 # ⛔ THE FLOOR IS A SET, NOT A COUNT. `len(paths) >= 4` is satisfiable by any
 # four files that happen to land in the window; this names the exact migrations
 # that MUST be inside the scan, so the check fails loudly when a pointer goes
@@ -353,6 +386,10 @@ _PHASE_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
     # set-not-a-count comment above exists to prevent. Naming every generation
     # makes the floor survive the next pointer move without an edit.
     *_FANOUT_SUPERSEDED_MIGRATION_NAMES,
+    # Phase 214 — the superseded view definition, BY NAME (see
+    # _STALENESS_VIEW_SUPERSEDED_MIGRATION_NAMES). The live one is already named
+    # above through _STALENESS_VIEW_MIGRATION_NAME.
+    *_STALENESS_VIEW_SUPERSEDED_MIGRATION_NAMES,
 })
 
 # ⛔ THE ESCAPE CHECK'S TOKENS. A window is still a selection, so something has
@@ -561,6 +598,7 @@ _PHASE_MIGRATION_WINDOWS: Final[tuple[tuple[str, str], ...]] = (
     (_PHASE_MIGRATION_WINDOW_4_START, _PHASE_MIGRATION_WINDOW_4_END),
     (_PHASE_MIGRATION_WINDOW_5_START, _PHASE_MIGRATION_WINDOW_5_END),
     (_PHASE_MIGRATION_WINDOW_6_START, _PHASE_MIGRATION_WINDOW_6_END),
+    (_PHASE_MIGRATION_WINDOW_7_START, _PHASE_MIGRATION_WINDOW_7_END),
 )
 
 

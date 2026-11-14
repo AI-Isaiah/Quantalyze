@@ -1,6 +1,8 @@
 -- Test: public.ledger_refresh_staleness — the LEDGER-03 freshness verdict.
 -- Guards migration 20260825120000_ledger_refresh_staleness_view.sql
--- (Phase 161.1 / D-03, D-04, D-05, D-06, T-161.1-04).
+-- (Phase 161.1 / D-03, D-04, D-05, D-06, T-161.1-04) and, since Phase 214, the
+-- view's closed-composite re-definition in
+-- 20261114151700_ledger_staleness_closed_composites.sql (SC-3).
 --
 -- What makes this gate worth having
 -- ---------------------------------
@@ -31,6 +33,10 @@
 --                             the view or EXECUTE the parser, and security_invoker
 --                             is still on. Mirrors the apply-time DO block, which
 --                             runs once and can be silently undone afterwards.
+--   I  Phase 214 SC-3       — a composite whose every member window has closed and
+--                             whose series reached the day before the latest
+--                             window_end reads is_stale FALSE, stale_reason NULL,
+--                             is_closed TRUE, closed_through = window_end - 1.
 --
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION on
 -- failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
@@ -70,7 +76,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 8 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 9 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -85,8 +91,9 @@
 -- was DISCOVERED, not guessed — plan 164.4-04 started from the sibling composite
 -- gate's proven 10-entry list and this gate was GREEN on the FIRST iteration (it
 -- exercises the view the other two read, so it names a strict subset of their
--- objects). Proven `ALL 8 ARMS EXECUTED (A-H)`, mean 1.03 s/lane over 3 timed runs.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql"]}
+-- objects). Proven `ALL 9 ARMS EXECUTED (A-I)` (the 1.03 s/lane mean over 3 timed runs was
+-- measured at the original eight arms; Phase 214 added the closed-composite arms).
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql"]}
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -112,6 +119,9 @@ DECLARE
   s_f4           UUID;  -- Arm F: age exactly 4 (largest legitimate age)
   s_f5           UUID;  -- Arm F: age exactly 5 (first stale age)
   s_g            UUID;  -- Arm G: okx, must be out of cohort
+  s_i            UUID;  -- Arm I: deribit composite, every member window closed
+  v_closed       BOOLEAN;
+  v_closed_thru  DATE;
   v_stale        BOOLEAN;
   v_stale2       BOOLEAN;
   v_reason       TEXT;
@@ -178,6 +188,15 @@ BEGIN
   INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
   VALUES (s_d, k_deribit_b, uid, CURRENT_DATE - 200, 1);
 
+  -- Arm I: a COMPOSITE whose every member window has CLOSED. window_end is
+  -- EXCLUSIVE, so the latest end is CURRENT_DATE - 199 and the last day the
+  -- series can carry is CURRENT_DATE - 200, which is where its series stops.
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, NULL, 'lrs I') RETURNING id INTO s_i;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_i, k_deribit,   uid, CURRENT_DATE - 400, CURRENT_DATE - 200, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (s_i, k_deribit_b, uid, CURRENT_DATE - 300, CURRENT_DATE - 199, 1);
+
   -- Analytics rows. Series elements are ordered NEWEST-FIRST on purpose: an
   -- implementation that reads the array TAIL instead of taking max() over every
   -- element would read the OLDEST day and fail these arms.
@@ -211,7 +230,10 @@ BEGIN
     (s_d, 'complete_with_warnings', now(), jsonb_build_array(
         jsonb_build_object('date', to_char(CURRENT_DATE - 36, 'YYYY-MM-DD'), 'value', 0.004))),
     (s_g, 'complete_with_warnings', now(), jsonb_build_array(
-        jsonb_build_object('date', to_char(CURRENT_DATE - 1, 'YYYY-MM-DD'), 'value', 0.004)));
+        jsonb_build_object('date', to_char(CURRENT_DATE - 1, 'YYYY-MM-DD'), 'value', 0.004))),
+    -- I: status 'complete', series ends the day before the latest window_end.
+    (s_i, 'complete', now(), jsonb_build_array(
+        jsonb_build_object('date', to_char(CURRENT_DATE - 200, 'YYYY-MM-DD'), 'value', 0.004)));
 
   RAISE NOTICE 'Seed OK: uid=%', uid;
 
@@ -501,7 +523,37 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (H): role authenticated can EXECUTE ledger_refresh_parse_series_date — the REVOKE at 20260825120000:173 has been undone';
   END IF;
 
-  RAISE NOTICE 'ALL 8 ARMS EXECUTED (A-H) and passed — ledger_refresh_staleness verdict is falsifiable.';
+  -- ======================================================================
+  -- ARM I — Phase 214 SC-3: a CLOSED composite reads closed, not stale. Its
+  -- members all declare a window_end, the latest one is long past, and the series
+  -- stops on the day before it. Nothing is left to fetch, so a series that stopped
+  -- 200 days ago is the expected end of a finished composite, not a fault. This is
+  -- the arm for the two composites that read stale for 199 days after closing.
+  -- ======================================================================
+  -- RED-UNDER: in the NEW view migration (20261114151700), drop the `- 1` from the
+  --            series-reached-the-end conjunct, so the series must reach the
+  --            window_end itself. window_end is EXCLUSIVE, so a series ending the
+  --            day before it can never satisfy that and the closed composite
+  --            reads stale again. Earlier arms use no window_end and are
+  --            untouched, so this arm is the first failure.
+  -- RED-UNDER-M: {"arm":"I","apply":[{"kind":"edit","file":"supabase/migrations/20261114151700_ledger_staleness_closed_composites.sql","find":"lr.last_return_date >= max(sk.window_end) - 1","replace":"lr.last_return_date >= max(sk.window_end)","occurrences":1}]}
+  SELECT is_stale, stale_reason, is_closed, closed_through
+    INTO v_stale, v_reason, v_closed, v_closed_thru
+    FROM public.ledger_refresh_staleness WHERE strategy_id = s_i;
+  IF v_stale IS DISTINCT FROM FALSE THEN
+    RAISE EXCEPTION 'TEST FAILED (I): a composite whose every member window closed, with its series at the day before the latest window_end, read is_stale=% (reason=%), expected FALSE. Likely cause: the closed excuse is missing from the verdict, or the series-reached-the-end conjunct no longer allows for the exclusive window_end', v_stale, v_reason;
+  END IF;
+  IF v_reason IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (I): a closed composite carries stale_reason=%, expected NULL', v_reason;
+  END IF;
+  IF v_closed IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'TEST FAILED (I): is_closed=% for a composite whose windows have all closed, expected TRUE', v_closed;
+  END IF;
+  IF v_closed_thru IS DISTINCT FROM (CURRENT_DATE - 200) THEN
+    RAISE EXCEPTION 'TEST FAILED (I): closed_through=% but the latest window_end is % and window_end is EXCLUSIVE, so the last day a closed series can carry is %', v_closed_thru, (CURRENT_DATE - 199), (CURRENT_DATE - 200);
+  END IF;
+
+  RAISE NOTICE 'ALL 9 ARMS EXECUTED (A-I) and passed — ledger_refresh_staleness verdict is falsifiable.';
 END $$;
 
 ROLLBACK;
