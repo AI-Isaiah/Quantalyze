@@ -26,15 +26,15 @@ key-decisions:
   - "Re-pointing the 34 existing twins moved into the Task 1 commit instead of Task 2, so no commit leaves a twin mutating dead text"
   - "The fan-out gate's apply list gained the csv kind registration migration, because the new fixtures insert compute_analytics_from_csv jobs"
 metrics:
-  duration: "about 1 hour 15 minutes"
+  duration: "about 1 hour 30 minutes (estimate: no start time was captured; the four commits span 18:40 to the header fix, which covers only the end of the run)"
   completed: 2026-11-14
 status: complete
 actuals:
   tokens: 48000
   tasks: 3
-  commits: 3
+  commits: 4
 plan_head_before: 67b043b60969a3b41ec4eed1a2af59ebd6b417c1
-plan_head_after: f51a2e2d47ba483949917ddc5383eb1b2d426d84
+plan_head_after: 342e63598dd8290ce2a9babbdab5f9b38018be5a
 ---
 
 # Phase 214 Plan 03: no-advance strategies are capped to a weekly attempt Summary
@@ -78,7 +78,7 @@ Needle hygiene counts on the new file: `THEN INTERVAL '7 days'` 1, `INTERVAL '20
 
 Other checks: `pytest tests/test_ledger_refresh_gates.py tests/test_sql_gate_scoped_updates.py` 41 passed (re-run with the rollback present); `schema:functions:check` current (133 functions); `lint-migration-data-dependence` self-test OK and corpus `0 NEW`; `lint-sql-gates` self-test OK and 0 findings; `lint-app-guc` 0 findings.
 
-Vitest files that read migrations or snapshots (59 discovered by the plan's grep, 58 run, 53 passed, 1 skipped, 4 red, 7 failing tests), every red one with its first failing line:
+Vitest files that read migrations or snapshots (59 discovered by the plan's grep; 58 ran, 53 passed, 1 skipped, 4 red with 7 failing tests). The one discovered file that did NOT run is `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` (vitest did not pick it up in the run; the cause was not investigated, so its state is unknown). The one skipped file is `src/__tests__/compare-holding-rls.test.ts` (every test skipped; reason not investigated). A second run with the JSON reporter, started while a commit and a SUMMARY edit were happening, also flagged `sql-mutation-scope-step.test.ts` red; run alone it passes (21 tests), so that was a race with the working tree and not a finding. Every red one with its first failing line:
 
 | file | first failing assertion | reason | owner |
 |---|---|---|---|
@@ -104,7 +104,18 @@ No migration-reading vitest file other than those four is red.
 - **Why:** the plan's own rule (TRAP E) is that the apply-list entry and the twin re-point land in one commit, otherwise a commit exists where 34 twins mutate dead text. Task 2's step 2 therefore became verification only (recount table above).
 - **Commit:** `96bea854a`
 
+**3. [Process] `npm ci` was not run.** The plan's first action lists it; `node_modules` was already installed in this worktree (717 entries) and the lockfile was not touched, so no package was added or changed. `verify-plan-anchors` ran first and exited 0.
+
+**4. [Plan wording] Arm NA3's twin replaces the predicate with `AND TRUE` instead of deleting the line.** Same effect (the failed analytics job then counts), no whitespace-fragile multi-line find, and the P5 twin is the precedent. Occurrence count 1, biting in the subset run.
+
+**5. [Review fix] The migration header's "quoted from the phase CONTEXT" became "summarised, not a quotation", and its line saying the snapshot regeneration is the ship step's job now says it is regenerated in this change.** Header prose only, committed separately (`342e63598`); the find counts, the lane gate (35 arms), the subset mutation run (41/41), pytest (41 passed) and the static linters were re-run on the final bytes and are unchanged.
+
 No other deviations.
+
+## Proof limits
+
+- The gate was proven on the minimal throwaway lane (`scripts/pg-lane/run.sh`) only. CI's `sql-tests` loads the committed baseline instead. Settled statically for the new rows: `supabase/schema/baseline.sql` carries one trigger on `compute_jobs` (a BEFORE UPDATE `updated_at` stamp, no INSERT trigger), `compute_jobs_status_check` admits `done` and `failed_final`, and `compute_jobs_kind_target_coherence` admits `compute_analytics_from_csv` with a strategy target (the strategy-scoped arm lists it). Every sibling arm already inserts `derive_broker_dailies` rows the same way. No CHECK or trigger in the baseline rejects the new inserts, but the first CI run of the gate is the real confirmation.
+- The RESEARCH pitfalls were checked against the final files after the first handback review: Pitfall 1 (needle drift) by the 39-row recount; Pitfall 2 (static pointers) by the pointer move, the superseded entry and window 8 in one commit; Pitfall 5 (check 7 and data-dependent guards) does not apply here because this plan adds no `cron_runs` write (plan 06 owns it) and the apply-time block reads the catalogue only.
 
 ## Known Stubs
 
@@ -125,4 +136,4 @@ None. The new subquery reads only `public.compute_jobs`, schema-qualified; the b
 ## Self-Check: PASSED
 
 - FOUND: supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql, supabase/migrations/down/20261114152300-rollback.sql, supabase/tests/test_ledger_refresh_fanout.sql, analytics-service/tests/test_ledger_refresh_gates.py, supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql
-- FOUND commits: 96bea854a, e94b2d932, f51a2e2d4
+- FOUND commits: 96bea854a, e94b2d932, f51a2e2d4, 342e63598 (and the summary commit)
