@@ -156,6 +156,14 @@
 -- existence-subquery opener and the three-day cutoff expression. The needles
 -- STEP 2 uses are ASSEMBLED BY CONCATENATION for the same reason.
 --
+-- ⚠️ TWO STEP 2 CHECKS ARE SCOPED TO THE CANDIDATE QUERY (phase 214 review round 1,
+-- WR-02): the lifecycle-column check and the marks-paused-window check. The skip
+-- count re-spells the same tokens after the last unlock, so a search over the whole
+-- body was satisfied by that copy alone and no longer guarded the candidate query.
+-- Both now search only the text before the FIRST advisory unlock, which is where the
+-- lock-holding block, and so the candidate query, ends. No gate twin rewrites those
+-- tokens away inside the candidate query: each keeps them in its replacement.
+--
 -- ⛔ CATALOGUE READS ONLY in STEP 2, never a row count
 -- ([164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]); see STEP 2's own note.
 --
@@ -1068,6 +1076,7 @@ DECLARE
   v_fail_pos    INTEGER;
   v_raise_pos   INTEGER;
   v_skip_pos    INTEGER;
+  v_first_unlock INTEGER;
   -- THE NEEDLES, each BOUND TO A SHAPE and held in a variable so every check
   -- states it once and names it in its own failure message. ⛔ The ones that
   -- name a statement are ASSEMBLED BY CONCATENATION: written whole, each would
@@ -1255,9 +1264,14 @@ BEGIN
     RAISE EXCEPTION 'Migration 20261114152300: public.% still reads the RETIRED app-namespace database setting (found "%"). An operator on this platform is refused 42501 setting it, so that read can never be TRUE and the function would be permanently dormant for a reason no cron_runs cause names', v_fn, v_guc_needle;
   END IF;
 
-  -- 8. the lifecycle conjunct is still there, bound to the column.
-  IF position(v_life_needle IN v_def) = 0 THEN
-    RAISE EXCEPTION 'Migration 20261114152300: public.% no longer filters candidates on the strategy lifecycle column (looked for "%"). Without that conjunct the fan-out enqueues refreshes for every lifecycle state the staleness view surfaces, drafts and archives included', v_fn, v_life_needle;
+  -- 8. the lifecycle conjunct is still there, bound to the column. ⛔ SCOPED TO THE
+  --    CANDIDATE QUERY (phase 214 review round 1, WR-02): the skip count re-spells
+  --    this conjunct after the last unlock, so a search over the whole body would be
+  --    satisfied by that copy alone. The candidate query sits inside the lock-holding
+  --    block, before the FIRST advisory unlock, so the text before it is the region.
+  v_first_unlock := position(v_lock_needle IN v_def);
+  IF position(v_life_needle IN substr(v_def, 1, v_first_unlock)) = 0 THEN
+    RAISE EXCEPTION 'Migration 20261114152300: public.% no longer filters candidates on the strategy lifecycle column (looked for "%" in the candidate query, before the first advisory unlock). Without that conjunct the fan-out enqueues refreshes for every lifecycle state the staleness view surfaces, drafts and archives included', v_fn, v_life_needle;
   END IF;
 
   -- 9. and it still EXCLUDES the drafting state…
@@ -1356,8 +1370,11 @@ BEGIN
   --     dropped the window and fell back to the daily cooldown, which is the cost
   --     this migration exists to remove. Neither needle is a fragment any twin
   --     deletes (see needle 13).
-  IF position(v_pause_needle IN v_def) = 0 OR position(v_week_needle IN v_def) = 0 OR position(v_age_needle IN v_def) = 0 THEN
-    RAISE EXCEPTION 'Migration 20261114152300: public.% no longer carries the marks-paused attempt window (looked for "%", "%" and "%"). A strategy whose marks paused would again be re-derived every 20 hours for as long as the pause lasts, or one whose pause is under 3 days old would be frozen for a week', v_fn, v_pause_needle, v_week_needle, v_age_needle;
+  --     ⛔ SCOPED TO THE CANDIDATE QUERY like check 8 (WR-02): the skip count spells
+  --     the same three tokens after the last unlock, so a whole-body search would
+  --     pass with the candidate query's paused branch gone.
+  IF position(v_pause_needle IN substr(v_def, 1, v_first_unlock)) = 0 OR position(v_week_needle IN substr(v_def, 1, v_first_unlock)) = 0 OR position(v_age_needle IN substr(v_def, 1, v_first_unlock)) = 0 THEN
+    RAISE EXCEPTION 'Migration 20261114152300: public.% no longer carries the marks-paused attempt window in the candidate query, before the first advisory unlock (looked for "%", "%" and "%"). A strategy whose marks paused would again be re-derived every 20 hours for as long as the pause lasts, or one whose pause is under 3 days old would be frozen for a week', v_fn, v_pause_needle, v_week_needle, v_age_needle;
   END IF;
 
   RAISE NOTICE 'Migration 20261114152300: the single-key ledger fan-out re-based — a strategy whose marks have been paused for 3 days or more, or whose completed refresh left its series unmoved for 3 or more days after it went stale, is re-admitted after 7 days instead of 20 hours; every other stale strategy keeps the 20-hour cooldown, and a tick that held strategies back for that reason writes one skip-count row naming them; the composite fan-out, the staleness view and the return value are untouched. NOTHING scheduled, NOTHING activated';
