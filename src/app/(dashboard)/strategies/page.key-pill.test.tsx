@@ -26,12 +26,19 @@ vi.mock("server-only", () => ({}));
 // attaches the public trust tier. Both reads go through the shared queries
 // module, which these suites' Supabase doubles do not model (a published
 // universe, the trust-signal RPC), so the two are answered here: no comparison
-// set, no signals. Role is manager in every case below, so the allocator-only
-// reads never run.
+// set, no signals. Role is manager in every case below, so the portfolio read
+// (allocator-only) never runs.
+// Phase 213 decision (b) SUPERSEDES the sentence that used to end this comment
+// ("so the allocator-only reads never run"): a manager's page now reads its
+// strategyless keys too. That read is not what these suites measure and their
+// double does not model its three tables, so it is answered here with no
+// orphans, which keeps the `api_keys` / `strategy_keys` call census below about
+// the key-pill reads alone.
 vi.mock("@/lib/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/queries")>()),
   getOwnRowPercentiles: vi.fn(async () => null),
   readPublicVerificationSignals: vi.fn(async () => new Map()),
+  getStrategylessActiveKeys: vi.fn(async () => []),
 }));
 // 167.2 review-fix: the page captures its read failures to Sentry.
 const captureToSentryMock = vi.hoisted(() => vi.fn());

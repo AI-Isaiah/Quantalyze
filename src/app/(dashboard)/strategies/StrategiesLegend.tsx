@@ -140,7 +140,8 @@ const OWNERSHIP_DEFINITIONS = {
 const PIPELINE_DEFINITIONS = {
   syncing: "First metrics arrive about 10–15 minutes after a key connects.",
   no_data: "No figures yet, and no computation is running.",
-  no_strategy_yet: "A connected key with no strategy. Finish setup creates one.",
+  no_strategy_yet:
+    "A stored key with no strategy. Finish setup, when offered, builds one from it. Disconnect stops using the key and keeps it on record, so the account can be connected again.",
 } as const satisfies Record<keyof typeof PIPELINE_CHIPS, string>;
 
 const KEY_PILL_DEFINITIONS = {

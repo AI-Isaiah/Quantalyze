@@ -516,7 +516,9 @@ describe("[154-06 / TWIN-8] composite/add-key — the 23505 arm discriminates", 
 
   it("the VENUE-IDENTITY constraint is ALARM-ONLY here — it is unreachable, so its arrival is a premise change", async () => {
     // add_wizard_composite_key does not write venue_account_id (TWIN-7), and
-    // MT5 cannot be a composite member — so this cannot fire today. If it ever
+    // MT5 cannot be a composite member (Phase 213 decision (c): this route
+    // refuses `mt5` with COMPOSITE_MT5_UNSUPPORTED ahead of every write) — so this
+    // cannot fire today. If it ever
     // does, a silent 409 would bury the fact that the composite path started
     // writing venue identities.
     rpcMock.mockResolvedValue({
@@ -949,17 +951,18 @@ describe("POST /api/strategies/composite/add-key — credential posture (T-88-13
 });
 
 /**
- * Phase 135 (MT5SRC-03) — mt5 acceptance on the multi-key path. 'mt5' was
- * auto-widened into SUPPORTED_EXCHANGES (plan 135-02), so isSupportedExchange
- * admits it with ZERO route.ts edits — identical to the create-with-key
- * sibling. mt5 flows the api_secret-REQUIRED path (no sfox-style relaxation),
- * and a bogus exchange value is STILL rejected (TS enum → pydantic → SQL CHECK).
+ * Phase 135 (MT5SRC-03) — mt5 on the multi-key path. SUPERSEDED 2026-11-14 by
+ * Phase 213 decision (c): "MT5 cannot be a composite member". The three cases
+ * that asserted an mt5 add was ACCEPTED are INVERTED in place below, each renamed
+ * "superseded by Phase 213 decision (c)", never deleted: the same three request
+ * shapes now prove the refusal. The unsupported-exchange case is untouched.
+ *
+ * ⚠️ MT5_ENABLED stays "true" here on purpose. This is the go-live state the old
+ * acceptance cases ran in, and the point of decision (c) is that the answer is
+ * the same with the flag on. The flag-off half lives in the block after this one.
  */
-describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)", () => {
+describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03), superseded by Phase 213 decision (c)", () => {
   beforeEach(resetHappyMocks);
-  // Acceptance = the go-live state: MT5_ENABLED=true so the server gate (added to
-  // mirror validate-and-encrypt + the sfox precedent) lets the connect through.
-  // The fail-closed default is covered by the dedicated block below.
   beforeEach(() => {
     process.env.MT5_ENABLED = "true";
   });
@@ -976,26 +979,24 @@ describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)"
     wizard_session_id: WIZARD_SESSION_ID,
   };
 
-  it("accepts exchange=mt5 (clears isSupportedExchange) and stamps p_exchange='mt5' into add_wizard_composite_key", async () => {
+  function expectRefusedBeforeAnyWork() {
+    expect(checkLimitMock).not.toHaveBeenCalled();
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  }
+
+  it("refuses exchange=mt5 with COMPOSITE_MT5_UNSUPPORTED and mints no key (superseded by Phase 213 decision (c): was 'accepts exchange=mt5')", async () => {
     const POST = await importPost();
     const res = await POST(makeReq(MT5_BODY));
 
-    expect(res.status).toBe(200);
-    // login/api_key, investor pw/api_secret, broker server/passphrase — the
-    // exact slot mapping the worker's is_mt5 branch reads back.
-    expect(validateKeyMock).toHaveBeenCalledWith(
-      "mt5",
-      "500123456",
-      "investor-password-123",
-      "MetaQuotes-Demo",
-      { userId: MOCK_USER.id },
-    );
-    const [rpcName, rpcArgs] = rpcMock.mock.calls[0];
-    expect(rpcName).toBe("add_wizard_composite_key");
-    expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("mt5");
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("COMPOSITE_MT5_UNSUPPORTED");
+    expectRefusedBeforeAnyWork();
   });
 
-  it("flows the api_secret-REQUIRED path — mt5 with NO api_secret is a 400 (no sfox relaxation leak)", async () => {
+  it("refuses an mt5 add with NO api_secret as COMPOSITE_MT5_UNSUPPORTED, not a missing-field 400 (superseded by Phase 213 decision (c): was 'flows the api_secret-REQUIRED path')", async () => {
     const POST = await importPost();
     const res = await POST(
       makeReq({
@@ -1009,25 +1010,21 @@ describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)"
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    // 142.2-07 / MT5-04: an ABSENT investor password is a missing field, not a
-    // malformed one — same split as the create-with-key sibling.
-    expect(json.code).toBe("KEY_MISSING_REQUIRED_FIELD");
-    expect(json.error).toBe("api_secret is required");
-    expect(validateKeyMock).not.toHaveBeenCalled();
+    // The refusal is about the VENUE, so it must win over the shape guards: a
+    // user fixing the "missing field" this used to report would then hit the
+    // refusal on the next try.
+    expect(json.code).toBe("COMPOSITE_MT5_UNSUPPORTED");
+    expectRefusedBeforeAnyWork();
   });
 
-  it("accepts a SHORT (<8) mt5 login on the multi-key path — a broker account number is often 5-7 digits (RED-TEAM)", async () => {
+  it("refuses a SHORT (<8) mt5 login the same way (superseded by Phase 213 decision (c): was 'accepts a SHORT mt5 login')", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...MT5_BODY, api_key: "500123" }));
 
-    expect(res.status).toBe(200);
-    expect(validateKeyMock).toHaveBeenCalledWith(
-      "mt5",
-      "500123",
-      "investor-password-123",
-      "MetaQuotes-Demo",
-      { userId: MOCK_USER.id },
-    );
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("COMPOSITE_MT5_UNSUPPORTED");
+    expectRefusedBeforeAnyWork();
   });
 
   it("STILL 400s an invalid exchange value (three-layer lockstep: bogus never admitted)", async () => {
@@ -1043,38 +1040,58 @@ describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)"
 });
 
 /**
- * Phase 135 (MT5SRC-03) — STRUCTURAL server gate (regression for the ship-review
- * finding). Add-to-composite is a second connect path; with MT5_ENABLED unset it
- * must FAIL CLOSED — a clean 400 "not yet available", no live probe, no minted
- * composite key. Without the gate the request falls through to the Python
- * MT5_DISABLED_DETAIL gate → UNKNOWN → 500. Reddens if the gate is removed.
- * Mirrors the sfox server-gate block verbatim.
+ * Phase 135 (MT5SRC-03) — STRUCTURAL server gate. SUPERSEDED 2026-11-14 by Phase
+ * 213 decision (c): with the flag OFF an mt5 add is now refused as
+ * COMPOSITE_MT5_UNSUPPORTED, ahead of the gate, rather than KEY_VENUE_NOT_ENABLED.
+ * The gate itself is KEPT in the route as a tripwire (see its comment) and is
+ * unreachable, so this block pins the answer that replaced it in BOTH flag states:
+ * the refusal must not depend on `MT5_ENABLED`, which is what would make the
+ * moved-below-the-gate neuter RED here.
  */
-describe("POST /api/strategies/composite/add-key — mt5 server gate (MT5_ENABLED off)", () => {
+describe("POST /api/strategies/composite/add-key — mt5 server gate (MT5_ENABLED off), superseded by Phase 213 decision (c)", () => {
   beforeEach(resetHappyMocks);
-  beforeEach(() => {
+  afterEach(() => {
     delete process.env.MT5_ENABLED;
   });
 
+  const MT5_FLAG_BODY = (exchange: string) => ({
+    exchange,
+    api_key: "500123456",
+    api_secret: "investor-password-123",
+    passphrase: "MetaQuotes-Demo",
+    label: "mt5 composite key",
+    wizard_session_id: WIZARD_SESSION_ID,
+  });
+
   it.each(["mt5", "MT5", "Mt5"])(
-    "fails closed for %s (400 not-available, no live probe, no key minted)",
+    "refuses %s with MT5_ENABLED OFF as COMPOSITE_MT5_UNSUPPORTED, not the venue-flag code (superseded by Phase 213 decision (c): was 400 not-available)",
     async (exchange) => {
+      delete process.env.MT5_ENABLED;
       const POST = await importPost();
-      const res = await POST(
-        makeReq({
-          exchange,
-          api_key: "500123456",
-          api_secret: "investor-password-123",
-          passphrase: "MetaQuotes-Demo",
-          label: "mt5 composite key",
-          wizard_session_id: WIZARD_SESSION_ID,
-        }),
-      );
+      const res = await POST(makeReq(MT5_FLAG_BODY(exchange)));
 
       expect(res.status).toBe(400);
       const json = await res.json();
-      expect(json.code).toBe("KEY_VENUE_NOT_ENABLED");
-      expect(json.error).toBe("MT5 integration is not yet available.");
+      expect(json.code).toBe("COMPOSITE_MT5_UNSUPPORTED");
+      expect(json.error).not.toBe("MT5 integration is not yet available.");
+      expect(checkLimitMock).not.toHaveBeenCalled();
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["mt5", "MT5", "Mt5"])(
+    "refuses %s with MT5_ENABLED ON the same way (Phase 213 decision (c): the answer does not depend on the flag)",
+    async (exchange) => {
+      process.env.MT5_ENABLED = "true";
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_FLAG_BODY(exchange)));
+
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.code).toBe("COMPOSITE_MT5_UNSUPPORTED");
+      expect(checkLimitMock).not.toHaveBeenCalled();
       expect(validateKeyMock).not.toHaveBeenCalled();
       expect(encryptKeyMock).not.toHaveBeenCalled();
       expect(rpcMock).not.toHaveBeenCalled();
@@ -1082,6 +1099,7 @@ describe("POST /api/strategies/composite/add-key — mt5 server gate (MT5_ENABLE
   );
 
   it("does NOT gate ccxt — binance runs normally with MT5_ENABLED unset", async () => {
+    delete process.env.MT5_ENABLED;
     const POST = await importPost();
     const res = await POST(
       makeReq({
@@ -1643,7 +1661,7 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/composite/add-key — Sen
  * create-with-key twin: 12 emitting guards (a raw grep says 14 and counts two
  * comment mentions), only the `code` literal moved.
  */
-describe("[142.2-07 / MT5-04] composite/add-key — all 12 rejection sites, honest codes", () => {
+describe("[142.2-07 / MT5-04] composite/add-key — all 11 reachable rejection sites (12 until Phase 213 decision (c)), honest codes", () => {
   const LONG = "x".repeat(513);
 
   beforeEach(resetHappyMocks);
@@ -1703,10 +1721,15 @@ describe("[142.2-07 / MT5-04] composite/add-key — all 12 rejection sites, hone
       error: "sFOX integration is not yet available.",
     },
     {
-      // UI-UNREACHABLE from this surface (MultiKeyConnectStep has no MT5 card)
-      // AND unreachable in production since MT5-01. Covered as a ROUTE contract
-      // so the two routes cannot drift; NOT claimed as UI coverage.
-      guard: "mt5 venue switch is off (route-level only — no MT5 card here)",
+      // Phase 213 decision (c) (2026-11-14): ONE row replaces the two MT5 rows
+      // that stood here ("mt5 venue switch is off" and "mt5 investor password
+      // absent"). Both guards are now UNREACHABLE: the refusal answers every mt5
+      // request first, flag on or off, so neither the KEY_VENUE_NOT_ENABLED gate
+      // nor the three-credential guard can fire. The source KEEPS both as a
+      // tripwire, so the route's emitting-site count (13, pinned in
+      // wizardErrors.invariant.test.ts) and this reachable-row count (11) differ
+      // BY DESIGN. The flag-on/flag-off proof lives in the mt5 describes above.
+      guard: "mt5 is refused as a composite member (Phase 213 decision (c))",
       body: {
         exchange: "mt5",
         api_key: "500123456",
@@ -1714,20 +1737,8 @@ describe("[142.2-07 / MT5-04] composite/add-key — all 12 rejection sites, hone
         passphrase: "MetaQuotes-Demo",
         wizard_session_id: WIZARD_SESSION_ID,
       },
-      code: "KEY_VENUE_NOT_ENABLED",
-      error: "MT5 integration is not yet available.",
-    },
-    {
-      guard: "mt5 investor password absent (route-level only)",
-      body: {
-        exchange: "mt5",
-        api_key: "500123456",
-        passphrase: "MetaQuotes-Demo",
-        wizard_session_id: WIZARD_SESSION_ID,
-      },
-      env: { MT5_ENABLED: "true" },
-      code: "KEY_MISSING_REQUIRED_FIELD",
-      error: "api_secret is required",
+      code: "COMPOSITE_MT5_UNSUPPORTED",
+      error: "MT5 accounts cannot be part of a multi-key strategy.",
     },
     {
       // ⭐ THE ONE GENUINE FORMAT FAILURE on this route too.
@@ -1779,7 +1790,8 @@ describe("[142.2-07 / MT5-04] composite/add-key — all 12 rejection sites, hone
   ];
 
   it("the table covers every emitting guard — hand-typed count, not a derivation", () => {
-    expect(SITES.length).toBe(12);
+    // 12 → 11 (Phase 213 decision (c)): the two unreachable MT5 rows became one.
+    expect(SITES.length).toBe(11);
   });
 
   it.each(SITES)("$guard -> 400 $code", async ({ body, env, code, error }) => {
@@ -1805,9 +1817,10 @@ describe("[142.2-07 / MT5-04] composite/add-key — all 12 rejection sites, hone
     ]);
   });
 
-  it("the split is real — five distinct codes where there used to be one", () => {
+  it("the split is real — six distinct codes where there used to be one (five, plus COMPOSITE_MT5_UNSUPPORTED from Phase 213 decision (c))", () => {
     const distinct = new Set(SITES.map((s) => s.code));
     expect([...distinct].sort()).toEqual([
+      "COMPOSITE_MT5_UNSUPPORTED",
       "KEY_INPUT_TOO_LONG",
       "KEY_INVALID_FORMAT",
       "KEY_MISSING_REQUIRED_FIELD",

@@ -731,6 +731,14 @@ export interface WizardResumeOverrides {
  * to compare — including the CSV branch, whose `failedCsvSubmitSig` burn is
  * emitted as a pair with the session id and would go with it.
  *
+ * ⛔ SUPERSEDED 2026-11-14 (Phase 213 decision (a)) for the UNKNOWN case only.
+ * On the API branch an incoming `null` meeting a stored STRING key now declines
+ * in `deriveWizardResumeOverrides` (`unknownMeetsStoredKey`), unless the stored
+ * draft is the one on screen (F1: a resumed composite draft). This function is
+ * unchanged on purpose: it cannot see `source`, and the CSV branch's LITERAL
+ * `null` stays load-bearing and permissive. Every sentence above is kept as
+ * lineage.
+ *
  * ⚠️ KNOWN RESIDUAL, NAMED BECAUSE D-01 DOES NOT REMOVE IT. On the manager
  * wizard route (`src/app/(dashboard)/strategies/new/wizard/page.tsx`) a
  * draft-read fault degrades `initialDraft` to null — the page renders WITHOUT a
@@ -746,6 +754,12 @@ export interface WizardResumeOverrides {
  * an incoming key exists to compare. Closing it belongs at the create route's
  * fence (compare the submitted key, or key the fence on it), not here — do not
  * read this permissive arm as evidence the case is covered.
+ *
+ * ⛔ SUPERSEDED 2026-11-14 (Phase 213 decision (a)): the trigger described above
+ * is now removed client-side for the unknown case. An API-branch incoming `null`
+ * meeting a stored string `apiKeyId` no longer restores `wizardSessionId` unless
+ * the stored draft is the one on screen (F1). The create route's fence stays the
+ * server backstop. The CSV literal `null` is untouched.
  */
 function sessionKeyMatches(
   stored: string | null | undefined,
@@ -833,9 +847,34 @@ export function deriveWizardResumeOverrides(
   // lost token for drafts saved before this shipped, accepted on the record
   // (CONTEXT.md D-02).
   //
+  // Phase 213 / KEYFLOW decision (a), 2026-11-14 — SUPERSEDES D-01 and D-02 FOR
+  // THE UNKNOWN CASE ONLY. On the API branch an incoming `null` means "could not
+  // determine the key" (the manager wizard mounted with neither draft nor
+  // preselect, or a legacy three-argument caller), and answering it with the
+  // provably-keyless verdict let a stored key-A token reach a key-B submit
+  // through the create-with-key F6 session fence. So an unknown incoming key
+  // meeting a STORED STRING key declines, and the wizard keeps its fresh token.
+  //
+  // F1 exception: when the stored draft IS the draft on screen
+  // (`initialDraftId === loaded.strategyId`) the draft and its token belong
+  // together — a resumed composite draft arrives with no incoming key and must
+  // not fork. The CSV branch is excluded by `source === "api"`: its `null` is a
+  // LITERAL "provably keyless", which stays load-bearing. No new parameter.
+  const sameDraftOnScreen = initialDraftId !== null && loaded.strategyId === initialDraftId;
+  const unknownMeetsStoredKey =
+    source === "api" &&
+    incomingApiKeyId === null &&
+    typeof loaded.apiKeyId === "string" &&
+    !sameDraftOnScreen;
+
   // ANDed into the SAME `if` on purpose: `failedCsvSubmitSig` is emitted inside
   // it, and the burn must decline together with the id it retired.
-  if (loaded.wizardSessionId && (loaded.source ?? "api") === source && sessionKeyMatches(loaded.apiKeyId, incomingApiKeyId)) {
+  if (
+    loaded.wizardSessionId &&
+    (loaded.source ?? "api") === source &&
+    sessionKeyMatches(loaded.apiKeyId, incomingApiKeyId) &&
+    !unknownMeetsStoredKey
+  ) {
     out.wizardSessionId = loaded.wizardSessionId;
 
     // RT-3 — the burn rides with the session id it retired, never on its own.

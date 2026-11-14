@@ -172,6 +172,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // login/investor-password/broker-server, not ccxt-shaped.
   const isMt5 = exchange.toLowerCase() === "mt5";
 
+  // Phase 213 / KEYFLOW decision (c) (founder, 2026-11-14) — an MT5 key can NEVER
+  // be a composite member: the stitch job has no mt5 arm, so a member the draft
+  // accepted would only fail later at finalize. Refused HERE, ahead of the
+  // MT5_ENABLED gate below, so the answer does not depend on the venue flag, and
+  // ahead of every rate-limit token, validate, encrypt and RPC, so the copy's
+  // "we stopped before saving anything" is literally true. Named code, never
+  // KEY_VENUE_NOT_ENABLED: that one would tell a flag-on user the venue is
+  // unavailable, which is false.
+  // ⚠️ A UX fence, not a database invariant: a direct PostgREST insert into
+  // `strategy_keys` is not fenced here (bounded residual, CONTEXT "No SQL change").
+  if (isMt5) {
+    return NextResponse.json(
+      {
+        code: "COMPOSITE_MT5_UNSUPPORTED",
+        error: "MT5 accounts cannot be part of a multi-key strategy.",
+      },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
   // ccxt API keys are long secrets; an MT5 login is a short broker ACCOUNT NUMBER
   // (commonly 5-8 digits), so mt5 requires only a NON-BLANK login, mirroring the
   // validate-and-encrypt + create-with-key mt5 shape. Without this carve-out a
@@ -205,6 +225,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // ⚠️ UNREACHABLE SINCE Phase 213 decision (c) (2026-11-14), KEPT as the
+  // tripwire if the stitch job gains an MT5 arm: the refusal above answers every
+  // `isMt5` request first, flag on or off, so this gate and the MT5
+  // three-credential guard below can no longer fire.
   // Phase 135 (MT5SRC-03) — STRUCTURAL server gate, mirroring the sfox arm above
   // and the create-with-key sibling. Add-to-composite is a second connect path;
   // without the gate, an mt5 add in the client-on/server-off half-state falls
@@ -218,6 +242,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // ⚠️ UNREACHABLE SINCE Phase 213 decision (c), KEPT as the tripwire if the stitch
+  // job gains an MT5 arm (see the gate above).
   // MT5 three-credential defense-in-depth (RED-TEAM — mirror of validate-and-encrypt
   // + create-with-key): mt5 requires ALL THREE non-blank slots (login/api_key,
   // investor password/api_secret, broker server/passphrase). The generic <8 secret
@@ -535,8 +561,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
          * non-NULL `venue_account_id`, `add_wizard_composite_key` does not
          * write that column (migration 20260812083206 deliberately left the
          * composite RPC untouched — TWIN-7), and MT5 — the only venue with an
-         * identity to write — cannot be a composite member anyway (the stitch
-         * worker has no mt5 arm; ROADMAP 153.6 records it as out of scope).
+         * identity to write — cannot be a composite member anyway: this route refuses
+         * `mt5` with `COMPOSITE_MT5_UNSUPPORTED` ahead of every write (Phase 213
+         * decision (c), 2026-11-14), which is the guard that makes this sentence
+         * true. It used to cite the stitch worker's missing mt5 arm (ROADMAP
+         * 153.6, out of scope), which only explained why such a member would fail
+         * later, not why it could not be added.
          *
          * So seeing it here means a PREMISE HAS CHANGED — the composite path
          * started writing venue identities — and that is worth an alarm, not a

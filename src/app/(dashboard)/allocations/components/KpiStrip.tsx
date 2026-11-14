@@ -110,6 +110,13 @@ interface KpiStripProps {
    * byte-identical. The scenario composer passes "panel".
    */
   variant?: "cards" | "panel";
+  /**
+   * Phase 213 decision (d), UI-SPEC 4.3. True while a scenario leg's asset-class
+   * probe is open: the Sharpe delta pill (and the "Current allocation" tooltip it
+   * carries) is not rendered, because its operand is built on an interim
+   * annualization basis. Omitted keeps every existing caller byte-identical.
+   */
+  sharpeDeltaHeld?: boolean;
 }
 
 interface Cell {
@@ -326,6 +333,7 @@ export function KpiStrip({
   scenarioMetrics = null,
   liveMetrics = null,
   variant,
+  sharpeDeltaHeld = false,
 }: KpiStripProps) {
   // Phase 07 / 07-03 — the warm-up helper line renders for each null KPI
   // cell when the allocator is still backfilling AND not globally stale.
@@ -526,7 +534,10 @@ export function KpiStrip({
       // Delta pill renders only when both scenario AND live values are
       // available — graceful degradation when liveMetrics is null.
       const showDeltaPill =
-        showScenarioPrimary && liveMetrics != null && metricKey != null;
+        showScenarioPrimary &&
+        liveMetrics != null &&
+        metricKey != null &&
+        !(sharpeDeltaHeld && metricKey === "sharpe");
       // An impossible operand makes the delta uncomputable: the pill prints the dash it prints
       // for a missing value, never a figure derived from the impossible one.
       const delta =

@@ -15,7 +15,15 @@
  *
  * The passphrase slot's attribute set follows `passphraseSecret` (D-76
  * refinement, plan-check round 1): the masked OKX passphrase gets the secret
- * set; MT5's visible "Broker server" gets the key set.
+ * set; MT5's visible "Broker server" got the key set.
+ *
+ * ⛔ 2026-11-14 (Phase 213 decision (c)): no member panel can be on MT5 any more,
+ * so the MT5 Broker server case below is CONVERTED to a pin on the decision, and
+ * the two MT5 D-08 paste cases were DELETED. The same D-08 behaviours (investor
+ * password kept as pasted, login still stripped) stay pinned on the single-key
+ * step by `ConnectKeyStep.credential-input.test.tsx`: "with MT5 selected, a pasted
+ * investor password is kept exactly as pasted (D-08) …" and "with MT5 selected, a
+ * pasted login is still stripped (D-08 exempts the password only)".
  */
 import { render, screen, fireEvent, within, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -93,23 +101,20 @@ describe("MultiKeyConnectStep panel credential inputs: no saved-login autofill (
     }
   });
 
-  it("an MT5 panel's Broker server (the passphrase slot, passphraseSecret false) gets the key set, autocomplete=off, because it is a visible non-secret field and new-password would invite a password-generation offer there", async () => {
+  it("[213 (c) supersedes] an MT5 panel's Broker server (the passphrase slot, passphraseSecret false) gets the key set, autocomplete=off — with MT5 selected on the single-key form no member panel exists to carry a Broker server field, and the note renders", async () => {
     vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
     vi.resetModules();
     const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
     render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
-    // State A on MT5 (the draft carry-over route), then "+ Add another key window".
     fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
     fireEvent.change(screen.getByLabelText("MT5 login"), { target: { value: "5000123" } });
     fireEvent.change(screen.getByLabelText("Broker server"), {
       target: { value: "TestBroker-Demo" },
     });
-    fireEvent.click(screen.getByTestId("multi-add-key"));
-    const panel0 = screen.getByTestId("key-panel-0");
-    const server = within(panel0).getByTestId("key-0-passphrase") as HTMLInputElement;
-    expect(server.type).toBe("text");
-    expect(server.getAttribute("autocomplete")).toBe("off");
-    expectVendorIgnore(server);
+    expect(screen.queryByTestId("multi-add-key")).toBeNull();
+    expect(screen.getByTestId("multi-add-key-mt5-note")).toBeInTheDocument();
+    expect(screen.queryByTestId("key-panel-0")).toBeNull();
+    expect(screen.queryByTestId("key-0-passphrase")).toBeNull();
   });
 });
 
@@ -160,44 +165,5 @@ describe("MultiKeyConnectStep panel credential inputs: pasted whitespace is stri
     await user.click(passphrase);
     await user.paste("  pass phrase  ");
     expect(passphrase.value).toBe("  pass phrase  ");
-  });
-
-  /** MT5 enabled, two panels, MT5 selected on panel 1. */
-  async function renderPanel1OnMt5() {
-    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
-    vi.resetModules();
-    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
-    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
-    fireEvent.click(screen.getByTestId("multi-add-key"));
-    const panel1 = screen.getByTestId("key-panel-1");
-    fireEvent.click(within(panel1).getByTestId("key-1-exchange-mt5"));
-    return panel1;
-  }
-
-  it("with MT5 selected in a panel, a pasted investor password is kept exactly as pasted (D-08), because the server now stores it verbatim and a client strip would be the only trim left", async () => {
-    const panel1 = await renderPanel1OnMt5();
-    const user = userEvent.setup();
-    const secret = within(panel1).getByTestId("key-1-api-secret") as HTMLInputElement;
-    await user.click(secret);
-    await user.paste(" Inv Pw 7 "); // fabricated
-    expect(
-      secret.value,
-      "since D-08 the server stores the MT5 password exactly as sent, so stripping " +
-        "the paste here would store a password other than the one the user chose " +
-        "(169.3 D-76's own exclusion rule, as for UpdateMt5SecretDialog)",
-    ).toBe(" Inv Pw 7 ");
-  });
-
-  it("with MT5 selected in a panel, a pasted login is still stripped (D-08 exempts the password only)", async () => {
-    const panel1 = await renderPanel1OnMt5();
-    const user = userEvent.setup();
-    const login = within(panel1).getByTestId("key-1-api-key") as HTMLInputElement;
-    await user.click(login);
-    await user.paste(" 5550001 "); // fabricated
-    expect(
-      login.value,
-      "the MT5 login is a numeric account id; widening the verbatim exemption to " +
-        "the key slot would let a pasted space reach the broker as part of it",
-    ).toBe("5550001");
   });
 });

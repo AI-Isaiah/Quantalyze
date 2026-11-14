@@ -1631,6 +1631,156 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
     );
   });
 
+  /**
+   * 213 / WR-02 — the first attempt ends with NO answer (user abort or the client
+   * deadline) while the route, which reads no `request.signal`, goes on to write
+   * key A and its draft. The second attempt (the same or edited credentials)
+   * is answered by F6 with `deduped: true`. `WizardClient` never learned a
+   * strategyId, so only this step can tell it the dedup is onto a draft the
+   * session left behind: `heldSession`.
+   */
+  function mockAbortThenDeduped(): void {
+    let call = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      call += 1;
+      if (call > 1) {
+        return Promise.resolve(
+          jsonResponse(
+            {
+              ok: true,
+              strategy_id: "33333333-3333-3333-3333-333333333333",
+              api_key_id: "44444444-4444-4444-4444-444444444444",
+              deduped: true,
+            },
+            200,
+          ),
+        );
+      }
+      const signal = (init as RequestInit | undefined)?.signal ?? null;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+    });
+  }
+
+  it("213 WR-02: after `Stop waiting`, an edited resubmit answered `deduped: true` reports heldSession", async () => {
+    mockAbortThenDeduped();
+    const { onSuccess } = await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+    fireEvent.click(screen.getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+    expect(screen.getByTestId("wizard-connect-wait-cancelled")).toBeTruthy();
+
+    // The user edits the credentials and submits again.
+    fireEvent.change(screen.getByPlaceholderText("Paste the read-only key"), {
+      target: { value: "AK_LIVE_edited" },
+    });
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await advance(0);
+
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(
+      onSuccess.mock.calls[0]![0],
+      "a dedup that follows an unanswered attempt must say so; without " +
+        "`heldSession` the wizard claims these credentials are already connected",
+    ).toMatchObject({ deduped: true, heldSession: true });
+  });
+
+  it("213 WR-02: after the client deadline, a resubmit answered `deduped: true` reports heldSession", async () => {
+    mockAbortThenDeduped();
+    const { onSuccess } = await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(SERIALIZED_DEADLINE_MS + 1);
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "SEAM_DEADLINE_EXCEEDED",
+    );
+
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await advance(0);
+
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onSuccess.mock.calls[0]![0]).toMatchObject({
+      deduped: true,
+      heldSession: true,
+    });
+  });
+
+  const DEDUPED_ANSWER = {
+    ok: true,
+    strategy_id: "33333333-3333-3333-3333-333333333333",
+    api_key_id: "44444444-4444-4444-4444-444444444444",
+    deduped: true,
+  };
+
+  it("213 R3-M1: after a lost response (network error, no abort), a resubmit answered `deduped: true` reports heldSession", async () => {
+    // A rejected fetch with no abort is an attempt that ended with NO answer:
+    // the route may have written key A and its draft before the connection
+    // dropped. Without the flag the wizard claims "already connected".
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(jsonResponse(DEDUPED_ANSWER, 200));
+    const { onSuccess } = await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(0);
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "SERVICE_UNREACHABLE",
+    );
+
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await advance(0);
+
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(
+      onSuccess.mock.calls[0]![0],
+      "a dedup that follows a lost response must say so; without `heldSession` " +
+        "the wizard claims these credentials are already connected",
+    ).toMatchObject({ deduped: true, heldSession: true });
+  });
+
+  it("213 R3-M1: an HTTP error the server ANSWERED does not mark the attempt unanswered", async () => {
+    // The server answered, so nothing is known to have been written by that
+    // attempt; the flag must not be set, or every refusal-then-dedup would be
+    // narrated as a lost response.
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ code: "TOTALLY_MADE_UP" }, 500))
+      .mockResolvedValueOnce(jsonResponse(DEDUPED_ANSWER, 200));
+    const { onSuccess } = await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(0);
+
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await advance(0);
+
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onSuccess.mock.calls[0]![0]).not.toHaveProperty("heldSession");
+  });
+
+  it("213 WR-02: a plain deduped answer with NO earlier unanswered attempt carries no heldSession", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+          deduped: true,
+        },
+        200,
+      ),
+    );
+    const { onSuccess } = await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(0);
+
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onSuccess.mock.calls[0]![0]).not.toHaveProperty("heldSession");
+  });
+
   it("`Stop waiting` asks for no confirmation — there is nothing to confirm", async () => {
     // ⚠️ NOT because "nothing is persisted": that was CR-02's category error —
     // `validate-key` is pre-encrypt / pre-RPC, but what the user aborts is

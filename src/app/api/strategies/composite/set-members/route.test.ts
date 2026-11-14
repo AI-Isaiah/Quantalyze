@@ -48,9 +48,36 @@ vi.mock("@/lib/ratelimit", () => ({
 }));
 
 const rpcMock = vi.fn();
+// Phase 213 / KEYFLOW decision (c): the route reads the caller's own
+// `api_keys.exchange` for the members BEFORE the RPC. `fromMock` records the
+// table, the selected columns, the id filter and the tenant filter so the test
+// can pin that the read is user-scoped, and `apiKeysResult` is what it answers.
+const fromMock = vi.fn();
+const selectMock = vi.fn();
+const inMock = vi.fn();
+const eqMock = vi.fn();
+let apiKeysResult: { data: unknown; error: unknown } = { data: [], error: null };
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     rpc: (...args: unknown[]) => rpcMock(...args),
+    from: (...a: unknown[]) => {
+      fromMock(...a);
+      const chain = {
+        select: (...x: unknown[]) => {
+          selectMock(...x);
+          return chain;
+        },
+        in: (...x: unknown[]) => {
+          inMock(...x);
+          return chain;
+        },
+        eq: (...x: unknown[]) => {
+          eqMock(...x);
+          return Promise.resolve(apiKeysResult);
+        },
+      };
+      return chain;
+    },
   }),
 }));
 
@@ -104,6 +131,19 @@ function makeReq(body: unknown): NextRequest {
 
 function resetHappyMocks() {
   rpcMock.mockReset();
+  fromMock.mockReset();
+  selectMock.mockReset();
+  inMock.mockReset();
+  eqMock.mockReset();
+  // Happy default: every member's owned key is a ccxt venue.
+  apiKeysResult = {
+    data: [
+      { id: AKID1, exchange: "binance" },
+      { id: AKID2, exchange: "okx" },
+      { id: AKID3, exchange: "bybit" },
+    ],
+    error: null,
+  };
   checkLimitMock.mockReset();
   checkLimitMock.mockResolvedValue({ success: true });
   rpcMock.mockResolvedValue({ data: 3, error: null });
@@ -322,5 +362,91 @@ describe("POST /api/strategies/composite/set-members — B15 limiter ordering", 
     expect(limiterKey).toContain("composite-set-members");
     expect(limiterKey).toContain(MOCK_USER.id);
     expect(rpcMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Phase 213 / KEYFLOW decision (c) (2026-11-14) — an MT5 key cannot be a
+ * composite member through THIS route either. `composite/add-key` refuses an
+ * mt5 mint, but set-members attaches existing keys by id, so without this read a
+ * caller could attach an owned MT5 key and reach the stitch job, which has no
+ * mt5 arm. The read is user-scoped and runs BEFORE the membership RPC.
+ *
+ * ⚠️ A UX fence, not a database invariant: a direct PostgREST insert into
+ * `strategy_keys` or a direct `set_wizard_composite_members` call is a named
+ * bounded residual (CONTEXT: no SQL change).
+ */
+describe("POST /api/strategies/composite/set-members — mt5 members refused (Phase 213 decision (c))", () => {
+  beforeEach(resetHappyMocks);
+
+  it("refuses a member whose owned key is mt5 with 400 COMPOSITE_MT5_UNSUPPORTED — RPC never called", async () => {
+    apiKeysResult = {
+      data: [
+        { id: AKID1, exchange: "binance" },
+        { id: AKID2, exchange: "MT5" }, // any case
+        { id: AKID3, exchange: "okx" },
+      ],
+      error: null,
+    };
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ strategy_id: STRATEGY_ID, keys: VALID_KEYS }),
+    );
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ code: "COMPOSITE_MT5_UNSUPPORTED" });
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("reads api_keys user-scoped (.in(member ids) and .eq(user_id)) before the RPC, then lets an all-ccxt handoff through", async () => {
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ strategy_id: STRATEGY_ID, keys: VALID_KEYS }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(fromMock).toHaveBeenCalledWith("api_keys");
+    expect(selectMock).toHaveBeenCalledWith("id, exchange");
+    expect(inMock).toHaveBeenCalledWith("id", [AKID1, AKID2, AKID3]);
+    // Tenant scoping stays explicit (T-213-06): never rely on RLS alone.
+    expect(eqMock).toHaveBeenCalledWith("user_id", MOCK_USER.id);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("FAILS LOUD on a faulted api_keys read: 500 UNKNOWN, and the RPC is never called (a read fault never passes)", async () => {
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    apiKeysResult = {
+      data: null,
+      error: { code: "XX000", message: "boom: api_keys read failed" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ strategy_id: STRATEGY_ID, keys: VALID_KEYS }),
+    );
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json).toEqual({ code: "UNKNOWN" });
+    // H-0305: the raw read error never reaches the client.
+    expect(JSON.stringify(json)).not.toContain("boom");
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("a member id the caller does not own returns no row and stays the RPC's own ownership answer (no ownership oracle)", async () => {
+    apiKeysResult = {
+      data: [{ id: AKID1, exchange: "binance" }],
+      error: null,
+    };
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ strategy_id: STRATEGY_ID, keys: VALID_KEYS }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
   });
 });

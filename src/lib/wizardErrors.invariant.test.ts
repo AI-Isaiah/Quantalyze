@@ -274,7 +274,14 @@ const ROUTES: readonly RouteUnderTest[] = [
     rosterFile: join(WIZARD_STEPS, "MultiKeyConnectStep.tsx"),
     rosterName: "KNOWN_ADD_KEY_CODES",
     statusRe: "400",
-    expectedSites: 12,
+    // ⚠️ 12 → 13 (2026-11-14, Phase 213 plan 03 / decision (c)): one ADDED guard,
+    // the mt5 refusal answering `COMPOSITE_MT5_UNSUPPORTED`. It is an addition,
+    // not a substitution: the two now-unreachable MT5 guards (the `MT5_ENABLED`
+    // gate and the three-credential guard) are KEPT in the source as a tripwire and
+    // still count, so the source site count and the reachable-row count in the route
+    // test differ by design. The value was READ OFF THIS TEST'S OWN FAILURE MESSAGE
+    // ("13 ... 12 were measured").
+    expectedSites: 13,
   },
   {
     // 153.1-06 / WIZFORM-02 — THE THIRD ENTRY, and the whole reason the two
@@ -950,6 +957,10 @@ const EXPECTED_SPLIT_CODES: readonly string[] = [
   "KEY_UNSUPPORTED_VENUE",
   "KEY_VENUE_NOT_ENABLED",
   "PRESELECT_REQUEST_INVALID",
+  // 2026-11-14, Phase 213 plan 03 / decision (c): 6 → 7. `composite/add-key` emits
+  // it for an `mt5` exchange (ahead of the flag gate). Read off the law's own
+  // failure message, not counted.
+  "COMPOSITE_MT5_UNSUPPORTED",
 ];
 
 describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its route's roster", () => {
@@ -1285,7 +1296,15 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
    * SHARE, and the single-route arm is named here, once, with the assertion
    * below proving the name is still earning its place.
    */
-  const MIRROR_EXEMPT: readonly string[] = ["PRESELECT_REQUEST_INVALID"];
+  //
+  // ⚠️ 2026-11-14, Phase 213 plan 03 / decision (c): `COMPOSITE_MT5_UNSUPPORTED` joins.
+  // Only `composite/add-key` emits it: `create-with-key` is the SINGLE-key route,
+  // where an MT5 connect is legitimate, so it STRUCTURALLY has no counterpart refusal.
+  // The law below polices the exemption (exactly one side must emit it).
+  const MIRROR_EXEMPT: readonly string[] = [
+    "PRESELECT_REQUEST_INVALID",
+    "COMPOSITE_MT5_UNSUPPORTED",
+  ];
 
   it("the two KEY-VALIDATION routes emit the SAME set of codes — they are structural mirrors", () => {
     // Not a tautology: the routes are separate files with separate guards, and

@@ -577,3 +577,64 @@ describe("[164.2.1 / SESSIONID-FENCE] WIRE — a keyless draft's resume stamps t
   });
 });
 
+
+/**
+ * Phase 213 / KEYFLOW decision (a), 2026-11-14 — THE UNKNOWN CASE, WIRED.
+ *
+ * SUPERSEDES the 164.2.1 D-01 reading ("an incoming `null` claims nothing, so it
+ * restores"). The manager wizard mounted with NO draft and NO preselect has no
+ * incoming key to compare, and used to be handed an abandoned key-A payload's
+ * session id; `create-with-key` short-circuits its F6 fence on
+ * `(user_id, wizard_session_id)` alone, so a key-B submit could be answered with
+ * key A's strategy. `WizardClient` is mounted DIRECTLY (the overlay always hands
+ * it a preselect or a draft) with the REAL `saveWizardState`/`loadWizardState`
+ * and the REAL connect step; the oracle is the `wizard_session_id` actually
+ * POSTed.
+ *
+ * ⛔ THE THROWAWAY-ID TRAP applies here exactly as in the file header: the fresh
+ * mint is "not key A's" before any fix exists, so the hydration wait below is a
+ * `toHaveBeenCalledWith("wizard_start", …)`, and the neuter protocol (delete the
+ * `!unknownMeetsStoredKey` conjunct) is what shows this `it` can fail.
+ */
+describe("[213 / KEYFLOW decision (a)] an unknown incoming key never inherits key A's wizardSessionId", () => {
+  it("decision (a): a wizard mounted with no draft and no preselect POSTs a FRESH wizard_session_id, never key A's stored token", async () => {
+    await seedAbandonedDraftOnKeyA(KEY_A.id);
+
+    render(
+      <WizardClient
+        entryContext="manager"
+        initialDraft={null}
+        initialDraftKind={null}
+        onSuccess={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    await awaitHydration();
+
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "AK_TEST_KEY_B" },
+    });
+    fireEvent.change(document.querySelector("#wizard-api-secret")!, {
+      target: { value: "SECRET_TEST_KEY_B" },
+    });
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    const emitted = createCalls[0].wizard_session_id;
+    expect(
+      emitted,
+      "An unknown incoming key was handed key A's idempotency token. The " +
+        "create-with-key F6 fence would answer with key A's draft, and the " +
+        "owner would be connected to the wrong key without a refusal.",
+    ).not.toBe(A_SESSION);
+    // Declining must leave the fresh mint in place, not strip the field.
+    expect(typeof emitted).toBe("string");
+    expect((emitted as string).length).toBeGreaterThan(0);
+    // The decline is COUNTABLE under its own triage label, and the event
+    // carries no key id and no session id (T-213-02).
+    expect(vi.mocked(trackForQuantsEventClient)).toHaveBeenCalledWith(
+      "wizard_session_id_not_restored",
+      { step: "incoming_key_unknown" },
+    );
+  });
+});

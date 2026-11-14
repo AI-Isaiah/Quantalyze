@@ -1921,3 +1921,103 @@ describe("ScenarioComposer — Phase 113 solved-L persists at Save (RED scaffold
     expect(serialized).not.toContain("rowMode");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 213 plan 09, decision (d), UI-SPEC 4.4 — save and update persist no
+// figure.
+//
+// A scenario's figures (Sharpe, Sortino, volatility) are annualized on the blend
+// basis, which is provisional while any leg's asset-class probe is open. Nothing
+// the composer sends to the saved-scenarios endpoint may carry one, so a number
+// computed on an interim basis can never be written down and re-read later as if
+// it were final. The two request bodies are `{ name, draft }` and nothing else;
+// a figure key entering either one (a top-level addition, or a stamped field
+// inside the draft) goes RED here.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — Phase 213 decision (d): save and update persist no figure", () => {
+  const FIGURE_KEYS = ["sharpe", "sortino", "volatility"];
+
+  /** Every key at any depth of a parsed JSON value. */
+  function allKeys(value: unknown, out: string[] = []): string[] {
+    if (Array.isArray(value)) {
+      for (const v of value) allKeys(v, out);
+    } else if (value !== null && typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) {
+        out.push(k);
+        allKeys(v, out);
+      }
+    }
+    return out;
+  }
+  /** The figure keys found anywhere in a body, matched case-insensitively on substring. */
+  const figureKeysIn = (body: unknown) =>
+    allKeys(body).filter((k) =>
+      FIGURE_KEYS.some((f) => k.toLowerCase().includes(f)),
+    );
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    registeredOpen = null;
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("the key walk itself bites: it finds a figure key nested at depth and ignores unrelated keys", () => {
+    expect(figureKeysIn({ name: "n", draft: { schema_version: 1 } })).toEqual([]);
+    expect(figureKeysIn({ name: "n", draft: { a: [{ metrics: { sharpe: 1 } }] } })).toEqual([
+      "sharpe",
+    ]);
+    expect(figureKeysIn({ name: "n", sortino_365d: 2, draft: {} })).toEqual(["sortino_365d"]);
+  });
+
+  it("the POST body of a save has exactly the keys name and draft, and no figure key at any depth", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "Pinned" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    fireEvent.click(screen.getByRole("button", { name: /^Save scenario$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this scenario/i), {
+      target: { value: "Pinned" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [, init] = saveCalls(fetchMock)[0];
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(Object.keys(body).sort()).toEqual(["draft", "name"]);
+    expect(figureKeysIn(body)).toEqual([]);
+  });
+
+  it("the PUT body of an update has exactly the keys name and draft, and no figure key at any depth", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: SAVED_ID, name: "Saved" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    openRow({ id: SAVED_ID, name: "Saved", draft: okDraft() });
+    fireEvent.click(await screen.findByRole("button", { name: /Update scenario/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [, init] = saveCalls(fetchMock)[0];
+    expect((init as RequestInit).method).toBe("PUT");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(Object.keys(body).sort()).toEqual(["draft", "name"]);
+    expect(figureKeysIn(body)).toEqual([]);
+  });
+});

@@ -685,6 +685,13 @@ export interface ConnectKeySuccess {
    * Absent on every other arm, including the ordinary first connect and the F6
    * session-fence replay (that one is a double-click; it needs no explaining).
    *
+   * ⛔ CORRECTED 2026-11-14 (Phase 213 decision (a)): the F6 session-fence arm
+   * now ALSO answers `deduped: true`, so a double-click or browser retry on the
+   * credential path shows the existing dedup notice at sync_preview (CONTEXT
+   * discretion default; founder review pending). The reuse path still
+   * deliberately does not forward it (see `handleContinueWithKey`). The two
+   * sentences above are kept as lineage.
+   *
    * ⭐ IT IS REPORTED UPWARD RATHER THAN RENDERED HERE, AND THAT IS THE WHOLE
    * REASON THIS FIELD EXISTS. `onSuccess` is `WizardClient`'s step advance: it
    * calls `setStep("sync_preview")`, so this component UNMOUNTS in the same
@@ -697,6 +704,16 @@ export interface ConnectKeySuccess {
    * not send it and this type must not grow a field for it.
    */
   deduped?: boolean;
+  /**
+   * 213 / WR-02 — present and `true` ONLY on a credential-arm success that
+   * follows an attempt of THIS mount which ended with NO answer (`Stop waiting`
+   * or the client deadline). Such an attempt may have written key A and its
+   * draft server-side (the route does not read `request.signal`) while the
+   * client never learned a `strategyId`, so `WizardClient` cannot recognise the
+   * resulting F6 dedup by id. Client-computed, never sent by the server; it is
+   * only read together with `deduped`.
+   */
+  heldSession?: boolean;
 }
 
 /**
@@ -1103,6 +1120,14 @@ export function ConnectKeyStep({
    * is a failure that must be.
    */
   const abortReasonRef = useRef<"user" | "deadline" | null>(null);
+  /**
+   * 213 / WR-02 — set when an attempt of this mount ended with NO answer (user
+   * abort, deadline, or a lost response: R3-M1) and never cleared. The route may have written key A and
+   * its draft anyway, so a later credential submit that comes back
+   * `deduped: true` was answered with THAT draft, not with the credentials now
+   * on screen. Forwarded as `heldSession` on the success arm.
+   */
+  const unansweredAttemptRef = useRef(false);
   /**
    * The submit row, so a cancel can put focus back on the submit button
    * (UI-SPEC Surface 1 §Cancel affordance).
@@ -1526,6 +1551,11 @@ export function ConnectKeyStep({
         // every OTHER path emits is byte-identical to the pre-154 one. The
         // ordinary connect gets no new field and no new UI.
         ...(data.deduped === true ? { deduped: true } : {}),
+        // 213 / WR-02 — same spread rule: absent unless an earlier attempt of
+        // this mount ended unanswered AND this answer is a dedup.
+        ...(data.deduped === true && unansweredAttemptRef.current
+          ? { heldSession: true }
+          : {}),
       });
     } catch (err) {
       /**
@@ -1540,6 +1570,8 @@ export function ConnectKeyStep({
        * below still holds unchanged.
        */
       if (abortRef.current?.signal.aborted) {
+        // 213 / WR-02 — either abort ends the attempt with no answer.
+        unansweredAttemptRef.current = true;
         if (abortReasonRef.current === "user") {
           // The user chose this. ⛔ No `errorCode`, ⛔ no `console.error`, and
           // ⛔ no `wizard_error` event: recording a deliberate cancel as an error
@@ -1584,6 +1616,12 @@ export function ConnectKeyStep({
       // submitted" is knowable for a breaker that DECLINED to send and false
       // for a request that timed out. The two entries are one apart in the
       // table and 140.3-12 already separated them once.
+      //
+      // 213 / R3-M1 — a lost response is an attempt that ended with NO answer
+      // too: the route may have written key A and its draft before the
+      // connection dropped, so the next deduped answer is onto a draft this
+      // mount never learned the id of. Same flag as the two abort arms above.
+      unansweredAttemptRef.current = true;
       setErrorCode("SERVICE_UNREACHABLE");
       trackForQuantsEventClient("wizard_error", {
         wizard_session_id: wizardSessionId,

@@ -2339,8 +2339,16 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * receipt below is unchanged. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE
    * ("expected 101 to be 100") with the entry added and the pin unmoved, never counted,
    * and it moves in lockstep with the declaration in the SEAMUX-04 block.
+   *
+   * ⚠️ 101 → 102 (2026-11-14, Phase 213 plan 03 / decision (c)): one arrival,
+   * `COMPOSITE_MT5_UNSUPPORTED`. Its actions are `["expand_log"]`, which is not in
+   * `DESTRUCTIVE_ACTIONS`, so it sits outside the scanned population and the
+   * "destructive class is FOUR entries" receipt below is unchanged. The value was
+   * READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 102 to be 101") with the
+   * entry added and the pin unmoved, never counted, and it moves in lockstep with the
+   * declaration in the SEAMUX-04 block.
    */
-  const EXPECTED_TABLE_SIZE = 101;
+  const EXPECTED_TABLE_SIZE = 102;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -3105,8 +3113,16 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * unchanged" and "wizard_session_id idempotency" are all ABSENT, and it takes no
    * exemption. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 101 to
    * be 100"), never counted.
+   *
+   * ⚠️ 101 → 102 (2026-11-14, Phase 213 plan 03 / decision (c)): one arrival,
+   * `COMPOSITE_MT5_UNSUPPORTED`, walked against the FORBIDDEN fragments by hand BEFORE the
+   * number moved: "been notified", "been alerted", "we fetched your trades", "data is
+   * unchanged" and "wizard_session_id idempotency" are all ABSENT, and it takes no
+   * exemption. Its one stored-state claim, "We stopped before saving anything", is true
+   * on both emitters because each refuses before any write. The value was READ OFF THIS
+   * GUARD'S OWN FAILURE MESSAGE ("expected 102 to be 101"), never counted.
    */
-  const EXPECTED_TABLE_SIZE = 101;
+  const EXPECTED_TABLE_SIZE = 102;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -5224,6 +5240,10 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
     //     `ProfileTabs.tsx`;
     //   · `my-strategies` renders the orphan as a "No strategy yet" row whose
     //     only control is "Finish setup →", which reopens this same wizard.
+    // ⛔ CORRECTED 2026-11-14 (Phase 213 decision (b)): the last bullet no longer
+    // holds. The `/strategies` row now also offers Disconnect, so the way out is
+    // that row, not any of the surfaces listed here. The phrase class below is
+    // unchanged: the copy still names no "Manage keys" surface.
     // 161-UI-SPEC's draft bullet ("Disconnect the unused key under Manage keys,
     // then connect it here again") named the first of those. It was replaced,
     // not reworded, and this case is what stops it coming back.
@@ -5285,8 +5305,24 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
    * redirected off it, and the manager wizard is a place this refusal renders.
    * A FLAT assertion of that page would re-open the same D-17 class the case
    * above exists to keep closed — for the other population.
+   *
+   * ⛔ CORRECTED 2026-11-14 (Phase 213 decision (b)): the role condition is gone.
+   * `/strategies` now lists the strategyless keys for manager, allocator and
+   * `both`, and `/my-strategies` redirects there, so the page is reachable by
+   * every role that can see this refusal. The case below keeps the one condition
+   * that is still true (the row's Finish setup is offered only where the key is
+   * eligible) and the next case pins the Disconnect way out.
    */
-  it("names the self-serve reuse route 162-06 made real, and names it conditionally", () => {
+  it("names the self-serve reuse route 162-06 made real, scoped to the rows that offer it (conditional-on-role pin superseded by Phase 213 decision (b))", () => {
+    // ⛔ SUPERSEDED 2026-11-14 (Phase 213 decision (b)). This case used to demand
+    // that the Strategies-page bullet carry an `if`, because that page was
+    // allocator-only and a manager would have been told about a page that
+    // redirects them away. After decision (b) every key-creating role (manager,
+    // allocator, `both`) has the page and gets the placeholder row, so the
+    // sentence may name the page flatly. What is STILL conditional is the
+    // control: an inactive or revoked orphan shows Disconnect only, so the
+    // sentence must say "where that row offers" Finish setup rather than promise
+    // it on every row. The retired role-conditional pin is kept here as lineage.
     const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
     const bullets = copy.fix.map((f) => f.toLowerCase());
 
@@ -5310,14 +5346,48 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
 
     expect(
       reuseBullet,
-      "The Strategies-page bullet asserts that page FLATLY. It is guarded by " +
-        "requireRolePage(…, 'allocator'), and this refusal also renders in the " +
-        "manager wizard, where that page redirects away — so an unconditional " +
-        "sentence names an unreachable surface for the manager population. It " +
-        "is also not guaranteed to LIST the key: the listing filters on " +
-        "is_active / sync_status, while the fence that emits this code filters " +
-        "only on disconnected_at.",
-    ).toMatch(/\bif\b/);
+      "The Strategies-page bullet promises 'Finish setup' on every row. A key the " +
+        "page lists but cannot safely finish (inactive or revoked) offers " +
+        "Disconnect only, so the promise must be scoped to the rows that offer it.",
+    ).toMatch(/\bwhere that row offers\b/);
+  });
+
+  it("[Phase 213 decision (b)] names the Disconnect control on the 'No strategy yet' row, and no unreachable Profile → API keys remedy", () => {
+    const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
+
+    // The way out is NAMED: a bullet tells the user to choose Disconnect on the
+    // "No strategy yet" row, and says what that does to the key.
+    const disconnectBullet = copy.fix.find((f) => f.includes("“Disconnect”"));
+    expect(
+      disconnectBullet,
+      "No fix bullet names the “Disconnect” control. Decision (b) shipped that " +
+        "control on the /strategies placeholder row precisely so this refusal has " +
+        "a way out; a refusal that does not name it is the dead end again.",
+    ).toBeDefined();
+    expect(disconnectBullet).toContain("on that row");
+    expect(disconnectBullet).toContain("kept on record");
+
+    // CONTEXT F3: Profile → API keys is not reliably reachable for a manager, so
+    // no line may send the user there. Hand-typed lower-cased phrase class, with
+    // a positive control so an emptied list cannot pass vacuously.
+    const UNREACHABLE_REMEDIES = ["profile", "api keys"] as const;
+    const remediesIn = (haystack: string): string[] =>
+      UNREACHABLE_REMEDIES.filter((p) => haystack.toLowerCase().includes(p));
+    expect(
+      remediesIn("Disconnect it under Profile → API keys, then try again."),
+      "The unreachable-remedy predicate matched nothing in the exact line decision " +
+        "(b) rejected, so it has gone blind. ⛔ Fix the phrase list, never delete this.",
+    ).not.toEqual([]);
+    expect(
+      remediesIn([copy.title, copy.cause, ...copy.fix].join(" | ")),
+      "KEY_ORPHANED sends the user to Profile → API keys, which a manager cannot " +
+        "reliably reach (213-CONTEXT F3). The remedy is the row's Disconnect.",
+    ).toEqual([]);
+
+    // The contact route survives only for the one case the page cannot answer.
+    expect(copy.fix.at(-1)).toBe(
+      "If the Strategies page does not list this key, send the correlation id below through the contact form.",
+    );
   });
 
   it("no longer tells the owner that reusing this exact account means emailing us", () => {
@@ -6748,10 +6818,13 @@ describe("[167-01 / D-05, D-07] KEY_SIGN_IN_FAILED — an ambiguous MT5 sign-in 
 describe("[167.1.2 / WR-04 follow-up] KEY_ORPHANED claims only what every path to it shares", () => {
   const entry = WIZARD_ERROR_COPY.KEY_ORPHANED;
 
-  it("names what the reads measured: a stored key on this account that no strategy uses", () => {
+  it("names what the reads measured: a stored key on this account that no strategy uses (final sentence superseded by Phase 213 decision (b))", () => {
     expect(entry.title).toBe("This key is already stored, but no strategy uses it.");
+    // ⛔ SUPERSEDED 2026-11-14 (Phase 213 decision (b)): the last sentence used to
+    // say the saved key "does not clear on its own", which left the reader with
+    // no way out. It now says what clears it: disconnecting the saved key.
     expect(entry.cause).toBe(
-      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again cannot build a new strategy over the saved key, and the saved key does not clear on its own.",
+      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again is refused until the saved key is disconnected.",
     );
   });
 
@@ -6761,10 +6834,16 @@ describe("[167.1.2 / WR-04 follow-up] KEY_ORPHANED claims only what every path t
   // RE-ENTERING the credentials: this code is emitted only by the race arm,
   // after a credential submit, and the same account is refused by the same
   // index every time. The cause has to name that act, so the two lines agree.
-  it("says what cannot work (re-entering the credentials) without denying the Finish setup remedy it offers", () => {
+  it("says what cannot work (re-entering the credentials) without denying the Finish setup remedy it offers (wording superseded by Phase 213 decision (b))", () => {
     expect(entry.cause).not.toMatch(/A new strategy cannot be created over that key/);
-    expect(entry.cause).toMatch(/credentials again cannot build/);
-    expect(entry.fix[1]).toMatch(/“Finish setup” on that row builds the strategy from the key already stored/);
+    // ⛔ SUPERSEDED 2026-11-14: "credentials again cannot build a new strategy"
+    // became "credentials again is refused until the saved key is disconnected".
+    // The IN-02 intent stands: the cause names the ACT that fails (re-entering
+    // credentials), never "no strategy can be built over the key", which fix[1]'s
+    // Finish setup contradicts.
+    expect(entry.cause).not.toMatch(/cannot build a new strategy/);
+    expect(entry.cause).toMatch(/credentials again is refused until the saved key is disconnected/);
+    expect(entry.fix[1]).toMatch(/Where that row offers “Finish setup”, it builds the strategy from the stored key/);
   });
 
   it("never asserts the deleted-draft story as the only way here, nor that nothing at all uses the key", () => {
@@ -6902,9 +6981,13 @@ describe("201 D-07: the wizard names the Strategies page, never My Strategies", 
     expect(offenders).toEqual([]);
   });
 
-  it("the four sentences the UI-SPEC rewrites read word for word", () => {
+  it("the four sentences the UI-SPEC rewrites read word for word (the KEY_ORPHANED one superseded by Phase 213 decision (b))", () => {
+    // ⛔ SUPERSEDED 2026-11-14 (Phase 213 decision (b), UI-SPEC Surface 2): the
+    // conditional "If your account includes the Strategies page, look for this
+    // account there…" is gone, because every role that reaches this refusal now
+    // has that page. The 201 D-07 intent stands: the sentence names "Strategies".
     expect(WIZARD_ERROR_COPY.KEY_ORPHANED.fix).toContain(
-      "If your account includes the Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",
+      "On the Strategies page, this account is listed at the end of the list, marked “No strategy yet”. Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
     );
     expect(WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE.fix).toContain(
       "If you arrived from Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",

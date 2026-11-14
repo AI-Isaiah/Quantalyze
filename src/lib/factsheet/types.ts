@@ -1158,6 +1158,15 @@ export type FactsheetCsvPayload = FactsheetCommon & {
    * when the allocator has no live book. Blend-only.
    */
   scenarioOwnBookDelta?: OwnBookDeltaPayload;
+  /**
+   * Phase 213 decision (d), SC-4 (CR-01) - the composer's preview only, present only
+   * when true: a blend leg's asset-class probe is still open, so `periodsPerYear` is
+   * the INTERIM basis. `windowView` reads it and blanks every annualized-risk figure
+   * it re-derives over a zoomed range (Ann. vol, Sharpe, Sortino and the bootstrap
+   * Sharpe and Sortino intervals), the way `buildScenarioFactsheetPayload` blanks the
+   * full range. Omitted on every other payload, so the public factsheet is untouched.
+   */
+  basisPending?: boolean;
 };
 
 /**

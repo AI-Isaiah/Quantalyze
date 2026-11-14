@@ -429,18 +429,80 @@ describe("deriveWizardResumeOverrides — pure LS-derivation helper", () => {
       expect(out.wizardSessionId).toBeUndefined();
     });
 
-    // The asymmetry, stated as its own pin: a caller that names no key makes no
-    // claim, so nothing may be declined. This is the CSV branch (there is no key
-    // on it at all), the manager route mounted with neither draft nor preselect,
-    // and every legacy three-argument caller in this file.
-    it("DOES restore when the caller names NO incoming key — no claim, nothing to compare", () => {
+    // Phase 213 / KEYFLOW decision (a), 2026-11-14 — SUPERSEDES the 164.2.1 D-01
+    // pin that stood here ("DOES restore when the caller names NO incoming key").
+    // On the API branch an incoming `null` means "could not determine the key",
+    // and meeting a stored STRING key it now declines, so key A's token cannot
+    // reach a key-B submit through the create-with-key F6 session fence. What is
+    // still permissive: the CSV branch (its literal `null` is provably keyless),
+    // and an API pointer carrying no stored key (nothing to lend). The two other
+    // populations D-01 named, the manager route mounted with neither draft nor
+    // preselect and legacy three-argument callers that carry a stored key, are
+    // no longer permissive.
+    it("decision (a), 2026-11-14: an unknown incoming key meeting a stored key declines (supersedes 164.2.1 D-01 for the unknown case)", () => {
       const out = deriveWizardResumeOverrides(
         abandonedDraftOnKeyA,
         "api",
         null,
         null,
       );
+      expect(out.wizardSessionId).toBeUndefined();
+    });
+
+    it("decision (a): the CSV branch's literal null stays load-bearing and still restores the stored session id", () => {
+      const csvDraft: WizardLocalState = {
+        strategyId: "",
+        wizardSessionId: "csv-session-id",
+        step: "csv_upload",
+        savedAt: 1_700_000_000_000,
+        source: "csv",
+        strategyName: "Aurora Capital",
+        apiKeyId: "key-a",
+      };
+      const out = deriveWizardResumeOverrides(csvDraft, "csv", null, null);
+      expect(out.wizardSessionId).toBe("csv-session-id");
+    });
+
+    it("decision (a): an unknown incoming key meeting NO stored key (absent or null) still restores — nothing to mix up", () => {
+      const { apiKeyId: _omit, ...noStoredKey } = abandonedDraftOnKeyA;
+      void _omit;
+      expect(
+        deriveWizardResumeOverrides(noStoredKey, "api", null, null).wizardSessionId,
+      ).toBe("api-session-id");
+      expect(
+        deriveWizardResumeOverrides(
+          { ...abandonedDraftOnKeyA, apiKeyId: null },
+          "api",
+          null,
+          null,
+        ).wizardSessionId,
+      ).toBe("api-session-id");
+    });
+
+    // F1 control (213-CONTEXT "Post-research clarifications"): a resumed
+    // composite draft arrives with the stored first-member key and NO incoming
+    // key, and the stored draft IS the draft on screen. Declining there would
+    // fork a second composite draft, so BOTH the token and the step survive.
+    it("decision (a) F1 control: a resumed composite draft (stored draft IS the one on screen) still restores wizardSessionId AND step", () => {
+      const out = deriveWizardResumeOverrides(
+        abandonedDraftOnKeyA,
+        "api",
+        "draft-uuid",
+        null,
+      );
       expect(out.wizardSessionId).toBe("api-session-id");
+      expect(out.step).toBe("sync_preview");
+    });
+
+    it("decision (a): a DIFFERENT draft on screen still declines the stored token and offers the resume banner", () => {
+      const out = deriveWizardResumeOverrides(
+        abandonedDraftOnKeyA,
+        "api",
+        "another-draft-uuid",
+        null,
+      );
+      expect(out.wizardSessionId).toBeUndefined();
+      expect(out.showResumeBanner).toBe(true);
     });
 
     // The gate must touch ONLY wizardSessionId (and the burn that rides with

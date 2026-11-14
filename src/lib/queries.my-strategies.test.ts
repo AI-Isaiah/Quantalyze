@@ -105,7 +105,7 @@ describe("deriveStrategylessKeys — founder census (both link forms)", () => {
     expect(result.map((k) => k.id)).toEqual(["k7", "k8"]);
   });
 
-  it("projects exactly { id, exchange, label } and preserves input key order", () => {
+  it("projects exactly { id, exchange, label, finishSetupEligible, syncStatus } and preserves input key order (widened by Phase 213 decision (b))", () => {
     const keys = [
       key("kb", { exchange: "mt5", label: "MT5 live" }),
       key("ka", { exchange: "sfox", label: "sFOX main" }),
@@ -114,8 +114,8 @@ describe("deriveStrategylessKeys — founder census (both link forms)", () => {
     const result = deriveStrategylessKeys(keys, [], []);
 
     expect(result).toEqual([
-      { id: "kb", exchange: "mt5", label: "MT5 live" },
-      { id: "ka", exchange: "sfox", label: "sFOX main" },
+      { id: "kb", exchange: "mt5", label: "MT5 live", finishSetupEligible: true, syncStatus: "connected" },
+      { id: "ka", exchange: "sfox", label: "sFOX main", finishSetupEligible: true, syncStatus: "connected" },
     ]);
   });
 
@@ -170,7 +170,12 @@ describe("deriveStrategylessKeys — archived is NOT coverage (W-4 ruling)", () 
 });
 
 describe("deriveStrategylessKeys — eligibility + link hygiene", () => {
-  it("never returns ineligible keys, even when totally uncovered", () => {
+  it("lists every non-disconnected orphan; only a disconnected key is excluded (superseded by Phase 213 decision (b))", () => {
+    // Phase 213 decision (b) SUPERSEDES the Phase 149 pin that returned only
+    // `["eligible"]`. The list now matches the create-with-key venue fence's
+    // live-key test (`disconnected_at IS NULL`): an inactive or revoked-but-
+    // connected orphan is refused there as KEY_ORPHANED, so it must be listed
+    // for the owner to see and disconnect it. Only a disconnected key is gone.
     const keys = [
       key("inactive", { is_active: false }),
       key("revoked", { sync_status: "revoked" }),
@@ -180,7 +185,19 @@ describe("deriveStrategylessKeys — eligibility + link hygiene", () => {
 
     const result = deriveStrategylessKeys(keys, [], []);
 
-    expect(result.map((k) => k.id)).toEqual(["eligible"]);
+    expect(result.map((k) => k.id)).toEqual(["inactive", "revoked", "eligible"]);
+    // The per-key-dailies predicate rides each row as a flag instead of a filter:
+    // "Finish setup" is offered only where a draft over the key could sync.
+    expect(result.map((k) => [k.id, k.finishSetupEligible])).toEqual([
+      ["inactive", false],
+      ["revoked", false],
+      ["eligible", true],
+    ]);
+    expect(result.map((k) => [k.id, k.syncStatus])).toEqual([
+      ["inactive", "connected"],
+      ["revoked", "revoked"],
+      ["eligible", "connected"],
+    ]);
   });
 
   it("ignores null api_key_id (CSV strategies carry no key)", () => {

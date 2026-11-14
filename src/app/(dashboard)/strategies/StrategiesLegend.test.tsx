@@ -252,7 +252,7 @@ describe("the TAGS group (199-14 task 2)", () => {
   });
 });
 
-describe("the PIPELINE group (199-14 task 2)", () => {
+describe("the PIPELINE group (199-14 task 2; the no_strategy_yet definition superseded by Phase 213 decision (b))", () => {
   it("renders the chips the table renders: the shared base class and the shared label and tone", () => {
     const { container } = render(<StrategiesLegend />);
     const entries = groupEntries(container, "Pipeline");
@@ -265,7 +265,11 @@ describe("the PIPELINE group (199-14 task 2)", () => {
     expect(entries.map((e) => e.definition)).toEqual([
       "First metrics arrive about 10–15 minutes after a key connects.",
       "No figures yet, and no computation is running.",
-      "A connected key with no strategy. Finish setup creates one.",
+      // Superseded 2026-11-14 (Phase 213 decision (b), UI-SPEC 1.6): the old line
+      // read "A connected key with no strategy. Finish setup creates one." and
+      // named one action. The row now carries two, so the definition names both
+      // and says the key is stored (not "connected") and kept on Disconnect.
+      "A stored key with no strategy. Finish setup, when offered, builds one from it. Disconnect stops using the key and keeps it on record, so the account can be connected again.",
     ]);
   });
 });

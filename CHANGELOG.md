@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.133.47.0] - 2026-11-14 — Phase 213 KEYFLOW: a key and its draft can never be silently mixed up
+
+The wizard no longer resumes a stored key's draft onto a key it cannot identify, and it tells the truth whenever it continues with an existing draft. A key with no strategy now has a way out: you can Disconnect it from its "No strategy yet" row. MT5 can no longer be added as a composite member. The scenario composer holds every figure that depends on the annualization basis until each leg's asset class is known.
+
+### Fixed
+- **Unknown key never resumes a stored-key draft (decision (a)).**
+  - `deriveWizardResumeOverrides` declines the stored session id when the incoming key is unknown (API branch, incoming `null`), a key is stored, and the stored draft is not the one already on screen (F1).
+  - The decline is reported with the telemetry reason `incoming_key_unknown`.
+  - create-with-key now returns `deduped: true` on the session-fence arm as well. The venue-fence, 23505 re-read and reuse arms already did.
+- **The dedup notice says what happened (founder decision on CR-02: honest copy, client only).**
+  - When the dedup returns the draft this setup already held, which happens on a resubmit after "Try another key" or "Review keys", the wizard now says: "We kept the strategy this setup already created, on its original key. To connect different credentials, delete this draft first."
+  - A dedup reached after an earlier attempt that ended with no answer (Stop waiting, the client deadline, or a lost response) gets neutral copy. That copy is true whether the draft came from this setup or an earlier one.
+  - Every other dedup keeps "These credentials are already connected…".
+  - The stale 161-04 comment that claimed a different key takes the normal create path carries a dated CORRECTED note.
+- **Disconnect on the "No strategy yet" row (decision (b)).**
+  - Every role now reads its keys that have no strategy, and the orphan list uses the venue fence's own live-key test (`disconnected_at IS NULL`).
+  - A Disconnect-only confirm calls the existing owner-scoped `disconnect_allocator_api_key` RPC. The key is disconnected, never deleted, and focus and a live announcement follow.
+  - Esc is held while the request is in flight, so a failure stays visible. Both an RPC error and a thrown network error are logged and sent to Sentry with tags only, and the confirm never stays stuck loading.
+  - The `KEY_ORPHANED` copy now points to Disconnect. Finish setup shows only on rows that can finish.
+  - The legend has a matching line, and the feeds helpers moved to `src/components/exchanges/key-feeds-confirm.ts`.
+- **MT5 is refused as a composite member (decision (c)).**
+  - The MT5 card is gone from the multi-key roster, and a footer note says why.
+  - `enterMulti` refuses an MT5 draft.
+  - `composite/add-key` answers 400 `COMPOSITE_MT5_UNSUPPORTED` before the MT5 flag gate.
+  - `composite/set-members` reads the members' `api_keys` user-scoped. It refuses an MT5 member with the same code and answers 500 `UNKNOWN` on a read fault.
+- **Basis-dependent figures wait for every leg (decision (d), closes the `159-BASIS-FLIP` symptom).**
+  - While any leg's asset class is pending, the composer holds the KPI strip's Sharpe, Sortino and volatility, the Sharpe and own-book deltas, the gate caption and peer rank, the rolling panels, and the benchmark TE, IR and Alpha.
+  - The factsheet preview is held too, including a range zoomed before the probe opened, through a csv-only `basisPending` flag that `windowView` honours. The public factsheet is unchanged.
+  - A failed probe is final (F5). Remove and re-add the leg to retry.
+  - Save, update and commit bodies carry no figures.
+
+### Tests
+- Every gate has a pin that went RED when its fix was neutered from a byte backup and restored. The verifier reproduced RED for SC-1 through SC-4 on its own.
+- Six venue-independent long-wait tests were moved onto ccxt panels before the MT5 card was removed. Superseded MT5 pins were updated in place, with the reason stated in the test text.
+
+### Notes
+- Closes TODOS `164.2.1-INCOMING-NULL-CONFLATION`, `0.08` (`D-161-05-A`), the Phase 153.6 "MT5 as a composite member" OUT line, and `0e` (`159-BASIS-FLIP`). All four entries were already absent from `TODOS.md` at the base commit (checked with `grep -aF`), so this ship deletes nothing.
+- No migration and no analytics-service change.
+- ⚠️ Accepted residual (F2): a replay that resolves inside the `create_wizard_strategy` RPC still returns no `deduped` flag. Closing it needs a migration, which this phase does not ship.
+- ⚠️ Accepted residual (T-213-08): the MT5 composite refusal is a TypeScript route fence, not a database invariant, so a direct PostgREST or RPC write bypasses it. PROD has no MT5 composite members.
+- The add-key MT5 flag gate and three-credential guard are now unreachable. They are kept on purpose as a tripwire.
+- Known limits recorded, not fixed (LOW): the pending hold has no time bound if a `/returns` probe hangs, and a zoomed range skips the two-basis CAGR/Calmar rule (CAGR does not depend on the basis).
 ## [0.133.46.0] - 2026-11-14 — Phase 212 WIZTRUTH: the wizard and key screens name the real cause and a real next step
 
 The strategy wizard and the two dashboard key forms now say what actually went wrong and what the user can actually do next. Before this, some refusals stated a cause nobody had proven, an orphaned MT5 key took 120 seconds to be refused, the dashboard key forms showed server codes as `UNKNOWN`, and fifteen strings pointed users at a "support" channel that does not exist. No migration (SC7).
