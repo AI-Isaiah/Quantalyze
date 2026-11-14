@@ -125,7 +125,31 @@ function isDashboardEnvelopeDialog(source: string): boolean {
   return /buildEnvelope\s*\(/.test(source) && /<Modal[\s>]/.test(source);
 }
 
-function derivePopulation(): string[] {
+/**
+ * ⭐ Phase 212 WIZTRUTH (plan 09) — FILES THAT MOUNT `<Modal` AND CALL
+ * `buildEnvelope(` BUT ARE NOT PER-ROUTE DIALOGS.
+ *
+ * Plan 08 made the two live `keys/validate-and-encrypt` consumers render the
+ * route's `code` through `buildEnvelope`. Both are large host components that
+ * happen to mount a `<Modal` for the add-key form, so the predicate above
+ * matched them. They have no `DASHBOARD_DIALOG_ROUTE_CODES` row to be held to:
+ * their route's roster is `KNOWN_VALIDATE_AND_ENCRYPT_CODES`, and the law that
+ * holds it is the fifth `SURFACES` entry of `wizardErrors.roster-render.test.tsx`
+ * (real `StrategyForm`, real fetch) plus the wizard invariant's validate-and-
+ * encrypt census. Hand-typed on purpose, each with its reason; the entry must
+ * still match the predicate (see the anti-stale case in the C describe), so it
+ * cannot outlive the code that justifies it.
+ */
+const COVERED_BY_WIZARD_ROSTER: Readonly<Record<string, string>> = {
+  "src/components/strategy/StrategyForm.tsx":
+    "Connect-key modal on the strategy form; classifies keys/validate-and-encrypt " +
+    "through recogniseValidateAndEncryptCode, held by the roster-render fifth surface.",
+  "src/components/exchanges/AllocatorExchangeManager.tsx":
+    "Allocator Add-key form; the same route, classifier and roster-render surface " +
+    "as StrategyForm. Its rotate-secret dialog is the separate UpdateMt5SecretDialog.",
+};
+
+function derivePredicateMatches(): string[] {
   const hits: string[] = [];
   for (const root of SCAN_ROOTS) {
     for (const file of walkTsx(root)) {
@@ -133,6 +157,12 @@ function derivePopulation(): string[] {
     }
   }
   return hits.sort();
+}
+
+function derivePopulation(): string[] {
+  return derivePredicateMatches().filter(
+    (p) => !(p.replace(REPO + "/", "") in COVERED_BY_WIZARD_ROSTER),
+  );
 }
 
 /**
@@ -487,6 +517,18 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
         "DASHBOARD_DIALOG_ROUTE_CODES and a DIALOGS row here, in the SAME " +
         "commit. Do not bump this literal to make the assertion pass.",
     ).toBe(EXPECTED_DIALOG_COUNT);
+  });
+
+  it("C. every wizard-roster exclusion still matches the predicate, with a reason", () => {
+    // Anti-stale: an exclusion for a file that stopped being a Modal that
+    // builds an envelope must be dropped, not left to hide a future dialog.
+    const matches = derivePredicateMatches().map((p) => p.replace(REPO + "/", ""));
+    for (const [file, reason] of Object.entries(COVERED_BY_WIZARD_ROSTER)) {
+      expect(reason.length).toBeGreaterThan(20);
+      expect(matches, `${file} no longer matches the predicate: drop its exclusion`).toContain(
+        file,
+      );
+    }
   });
 
   it("C. every hand-typed DIALOGS row is really in the derived population", () => {

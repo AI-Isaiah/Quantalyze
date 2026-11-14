@@ -44,23 +44,20 @@
  * can surface", which (a)+(b)+(c) define exactly. (Revision round 2 deleted the
  * fourth source for this reason; do not restore it.)
  *
- * ── ⚠️ FOUR SURFACES ARE RENDERED HERE, NOT FIVE. READ `## Surfaces not
- *    rendered` IN `164.2-09-SUMMARY.md` BEFORE READING THIS FILE AS THE WHOLE
- *    CLASS.
+ * ── ⭐ FIVE SURFACES ARE RENDERED HERE (212-08 / SC3 ADDED THE FIFTH).
  *
- * The phase locked FIVE surfaces. `keys/validate-and-encrypt` is the fifth and
- * it is ABSENT from `SURFACES` below, deliberately and with the blocker
- * measured rather than assumed: **none of that route's three consumers reads
- * its `code` field at all**. `ApiKeyManager.tsx`, `StrategyForm.tsx` and
- * `AllocatorExchangeManager.tsx` each read `err.error` — the prose sentence —
- * and `throw new Error(...)` / `setFormError(...)` with it (re-measured at HEAD
- * 2026-09-06, the same finding `KNOWN_VALIDATE_AND_ENCRYPT_CODES`' own docblock
- * records and 164.2-05 re-measured). There is no code→copy render path to
- * assert, so a render row on that surface could only be satisfied by feeding
- * the expected title in as the wire prose and reading it back out — a
- * tautology, and the same proof-by-adjacent-signal this file exists to refuse.
- * The exclusion is DISCLOSED, not silent: `theFifthSurface` below asserts the
- * blocker still holds and reds the day a consumer starts reading `code`.
+ * The phase locked FIVE surfaces. `keys/validate-and-encrypt` is the fifth. Until
+ * Phase 212 it was ABSENT from `SURFACES`, with the blocker measured: neither of
+ * that route's TWO browser consumers (`StrategyForm.tsx`,
+ * `AllocatorExchangeManager.tsx`; `ApiKeyManager` stopped calling it in Phase
+ * 200) read its `code` field, so a render row could only be satisfied by feeding
+ * the expected title in as the wire prose and reading it back out. Phase 212
+ * wired both consumers onto the code channel through
+ * `recogniseValidateAndEncryptCode`, so the fifth surface is now a real row set,
+ * driven through `StrategyForm`'s real fetch. The one thing it is exempt from is
+ * the telemetry oracle: the two forms emit no `wizard_error` event. Its DOM
+ * oracles run unchanged. The `[212-08 / SC3]` describe below replaced the old
+ * exclusion assertion with a live one: each consumer still reads `code`.
  *
  * ⛔ AND NO SUITE OR CASE IN THIS FILE IS SKIPPED. vitest exits 0 over a
  * skipped block, so one here would read as a green close of WIZFORM-02.
@@ -75,10 +72,9 @@
  *
  * ── THE THREE `KNOWN_*` ROSTERS THIS FILE DOES NOT CONSUME ──────────────────
  *
- * `src/` carries EIGHT `KNOWN_*` code rosters. The four surfaces below consume
- * four of them, and the fifth (`KNOWN_VALIDATE_AND_ENCRYPT_CODES`) is the one
- * excluded above. The remaining three are OUT of this plan's locked surface
- * list and are named here so their absence is a decision on the record rather
+ * `src/` carries EIGHT `KNOWN_*` code rosters. The five surfaces below consume
+ * five of them, the fifth being `KNOWN_VALIDATE_AND_ENCRYPT_CODES`. The
+ * remaining three are OUT of this plan's locked surface list and are named here so their absence is a decision on the record rather
  * than an oversight:
  *
  *   · `KNOWN_KICKOFF_CODES`   — `SyncPreviewStep.tsx`, and a `Record`, not a Set
@@ -105,6 +101,7 @@ import {
   ConnectKeyStep,
   type PreselectedKey,
 } from "@/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep";
+import { StrategyForm } from "@/components/strategy/StrategyForm";
 import { MultiKeyConnectStep } from "@/app/(dashboard)/strategies/new/wizard/steps/MultiKeyConnectStep";
 import { CsvSubmitStep } from "@/app/(dashboard)/strategies/new/wizard/steps/CsvSubmitStep";
 import type { MetadataDraft } from "@/app/(dashboard)/strategies/new/wizard/steps/MetadataStep";
@@ -115,6 +112,32 @@ import {
   formatKeyError,
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
+
+// 212-08 — the fifth surface drives the real `StrategyForm`, which mounts a
+// `useRouter()` and reads `discovery_categories` through the browser client. Both
+// are stubbed to inert answers; neither is on the refusal path under test, and no
+// other surface in this file imports either module.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    refresh: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    replace: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+}));
+vi.mock("@/lib/supabase/client", () => ({
+  createClient: () => ({
+    auth: {
+      getUser: () =>
+        Promise.resolve({ data: { user: { id: "user-a" } }, error: null }),
+    },
+    from: () => ({
+      select: () => ({ order: () => Promise.resolve({ data: [], error: null }) }),
+    }),
+  }),
+}));
 
 const trackMock = vi.fn();
 vi.mock("@/lib/for-quants-analytics", () => ({
@@ -132,7 +155,7 @@ function stripped(path: string): string {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// THE FIFTH SURFACE'S TWO MEASUREMENTS (see the `[164.2-09]` describe below).
+// THE FIFTH SURFACE'S TWO MEASUREMENTS (see the `[212-08 / SC3]` describe below).
 //
 // Both live here because both are *derived from disk*. The versions they
 // replace were not: the census compared a hand-typed array's length to a
@@ -192,7 +215,9 @@ function derivePosters(): string[] {
  *   3. any `code` destructured straight out of `await <that>.json()`;
  *   4. a deliberately over-broad backstop — ANY `<ident>.code` read inside the
  *      block that handles the response — so an alias, a re-wrap or an
- *      `(await res.json()).code` cannot slip past (1)-(3).
+ *      `(await res.json()).code` cannot slip past (1)-(3);
+ *   5. (212-08) a call to `recogniseValidateAndEncryptCode(` in that same
+ *      block, which is how the two consumers read the code today.
  */
 function codeChannelReads(src: string): string[] {
   const hits: string[] = [];
@@ -231,26 +256,36 @@ function codeChannelReads(src: string): string[] {
 
   // (4) The backstop. Window = the enclosing block of the fetch call, i.e.
   // from the call site forward until the brace depth drops below where it
-  // started. That is the try/handler body in all three consumers today.
+  // started. That is the try/handler body in both consumers today.
   const at = src.search(VALIDATE_FETCH_RE);
+  let windowEnd = src.length;
   if (at >= 0) {
     let depth = 0;
-    let end = src.length;
     for (let i = at; i < src.length; i++) {
       const ch = src[i];
       if (ch === "{" || ch === "(") depth++;
       else if (ch === "}" || ch === ")") {
         depth--;
         if (depth < 0) {
-          end = i;
+          windowEnd = i;
           break;
         }
       }
     }
-    const window = src.slice(at, end);
+    const window = src.slice(at, windowEnd);
     const read = window.match(/[A-Za-z_$][\w$]*\s*\??\.\s*code\b/);
     if (read) {
       hits.push(`\`${read[0].trim()}\` is read in the response handler`);
+    }
+  }
+
+  // (5) 212-08: the consumers read the code THROUGH the shared recogniser, not
+  // by touching `.code` themselves, so a call to it inside the response handler
+  // is the code-channel read. Same window as (4).
+  if (at >= 0) {
+    const handler = src.slice(at, windowEnd);
+    if (/\brecogniseValidateAndEncryptCode\s*\(/.test(handler)) {
+      hits.push("`recogniseValidateAndEncryptCode(` is called in the response handler");
     }
   }
 
@@ -403,11 +438,15 @@ function statusFor(wireCode: string): number {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// THE FOUR SURFACES
+// THE FIVE SURFACES
 // ───────────────────────────────────────────────────────────────────────────
 
 type SurfaceId =
-  "connect-key" | "multi-key-add" | "multi-key-set-members" | "csv-submit";
+  | "connect-key"
+  | "multi-key-add"
+  | "multi-key-set-members"
+  | "csv-submit"
+  | "validate-and-encrypt";
 
 interface SurfaceUnderTest {
   readonly id: SurfaceId;
@@ -493,6 +532,22 @@ const SURFACES: readonly SurfaceUnderTest[] = [
     literalFloor: 5,
     populationFloor: 10,
   },
+  {
+    // 212-08 / SC3 — the FIFTH surface, rendered since the two dashboard forms
+    // read the route's `code` through `recogniseValidateAndEncryptCode`. The
+    // harness drives `StrategyForm`'s real fetch; `AllocatorExchangeManager`
+    // shares the recogniser and the envelope builder and is pinned in its own suite.
+    id: "validate-and-encrypt",
+    rosterFile: join(REPO, "src/lib/wizardErrors.ts"),
+    rosterName: "KNOWN_VALIDATE_AND_ENCRYPT_CODES",
+    routeFile: join(REPO, "src/app/api/keys/validate-and-encrypt/route.ts"),
+    consultsSeamMap: true,
+    // Measured 2026-11-14: 8 roster members, 15 distinct route literals, 12
+    // population rows after de-duplication and after dropping UNKNOWN.
+    rosterFloor: 7,
+    literalFloor: 13,
+    populationFloor: 10,
+  },
 ];
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -545,7 +600,7 @@ const ROUTE_LITERALS: ReadonlyMap<SurfaceId, readonly string[]> = new Map(
 
 /**
  * ⛔ `UNKNOWN` IS THE TERMINAL, NOT A MEMBER. It is a roster member on three of
- * the four surfaces and a route literal on all four, and it must not enter the
+ * the five surfaces and a route literal on all five, and it must not enter the
  * population: a row asserting "UNKNOWN renders as UNKNOWN and never UNKNOWN" is
  * a contradiction, and one asserting "UNKNOWN renders as UNKNOWN" would be the
  * one green row that proves the classification is broken. Its exclusion is
@@ -602,21 +657,23 @@ const POPULATION: readonly PopulationRow[] = (() => {
 })();
 
 /**
- * ⭐ HAND-TYPED, MEASURED 2026-09-06 AT AUTHORING, NEVER `POPULATION.length`.
+ * ⭐ HAND-TYPED, MEASURED 2026-11-14 (212-08) WITH THE FIFTH SURFACE IN, NEVER
+ * `POPULATION.length`.
  *
- * 36 (connect-key) + 31 (multi-key-add) + 4 (set-members) + 11 (csv-submit)
- * = 82, floored a little under at 78 so an honest single-code removal does not
- * red while a source going blind does. ⛔ A derivation compared against its own
- * length cannot fail: blind every regex in this file and both sides reach zero
- * together, which is the exact vacuity this literal exists to catch.
+ * The derived total was 107 across the five surfaces (43 connect-key, 37
+ * multi-key-add, 4 set-members, 11 csv-submit, 12 validate-and-encrypt), floored
+ * a little under so an honest single-code removal does not red while a source
+ * going blind does. ⛔ A derivation compared against its own length cannot fail:
+ * blind every regex in this file and both sides reach zero together, which is
+ * the exact vacuity this literal exists to catch.
  *
  * ⚠️ AND THIS FLOOR ALONE IS NOT ENOUGH, WHICH IS WHY IT IS NOT ALONE. It was
  * typed AFTER measuring, so it cannot catch a source that was ALREADY blind at
- * authoring time — 83 would have been typed as (say) 76 and passed. The
- * per-source, per-surface non-zero controls below are what cover that, and each
- * one is proven able to fire by a scanner self-test on a hand-built fixture.
+ * authoring time. The per-source, per-surface non-zero controls below are what
+ * cover that, and each one is proven able to fire by a scanner self-test on a
+ * hand-built fixture.
  */
-const EXPECTED_POPULATION_MIN = 78;
+const EXPECTED_POPULATION_MIN = 103;
 
 // ───────────────────────────────────────────────────────────────────────────
 // RENDER HARNESSES — one per surface, each driving the REAL component through
@@ -851,12 +908,52 @@ async function renderCsvSubmitRefusal(
     screen.getByTestId("error-envelope")) as HTMLElement;
 }
 
+/**
+ * `StrategyForm`'s connect-key modal (`keys/validate-and-encrypt`), the fifth
+ * surface. Copied from `StrategyForm.test.tsx`'s `openConnectModalAndSubmit`.
+ * The wire body is `{ code, error }`, exactly what the route forwards.
+ */
+async function renderValidateAndEncryptRefusal(
+  row: PopulationRow,
+  bodyOverride?: Response,
+): Promise<HTMLElement> {
+  // jsdom lacks the <dialog> methods the connect-key <Modal> calls on mount.
+  if (!HTMLDialogElement.prototype.showModal) {
+    HTMLDialogElement.prototype.showModal = function showModal() {
+      this.setAttribute("open", "");
+    };
+  }
+  if (!HTMLDialogElement.prototype.close) {
+    HTMLDialogElement.prototype.close = function close() {
+      this.removeAttribute("open");
+    };
+  }
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    bodyOverride ??
+      jsonResponse(
+        { code: row.wireCode, error: wireProseFor(row.wireCode) },
+        row.status,
+      ),
+  );
+  render(<StrategyForm mode="create" />);
+  fireEvent.click(screen.getByRole("button", { name: /connect api key/i }));
+  fireEvent.change(screen.getByPlaceholderText(/your read-only api key/i), {
+    target: { value: "kkkkkkkk" },
+  });
+  fireEvent.change(screen.getByPlaceholderText(/your api secret/i), {
+    target: { value: "ssssssss" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Connect Key" }));
+  return screen.findByTestId("error-envelope");
+}
+
 const HARNESS: Record<SurfaceId, (row: PopulationRow) => Promise<HTMLElement>> =
   {
     "connect-key": renderConnectKeyRefusal,
     "multi-key-add": renderMultiKeyAddRefusal,
     "multi-key-set-members": renderSetMembersRefusal,
     "csv-submit": renderCsvSubmitRefusal,
+    "validate-and-encrypt": (row) => renderValidateAndEncryptRefusal(row),
   };
 
 /**
@@ -979,6 +1076,13 @@ export function recogniseSeamErrorCode() { return "NOT_A_PAIR"; }
       "csv-submit": stripped(join(WIZARD_STEPS, "CsvSubmitStep.tsx")).includes(
         "recogniseSeamErrorCode(seamErrorCode(",
       ),
+      // 212-08: the fifth surface's hop lives in the shared recogniser, not in a
+      // component, so it is read off that function's own body (bounded, so a
+      // lost hop cannot be satisfied by a later function's call).
+      "validate-and-encrypt":
+        /function recogniseValidateAndEncryptCode[\s\S]{0,1500}?recogniseSeamErrorCode\(/.test(
+          WIZARD_ERRORS_SRC,
+        ),
     };
     for (const s of SURFACES) {
       expect(
@@ -1141,10 +1245,10 @@ describe("[164.2-09] the population is real, whole, and excludes the terminal", 
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// THE FIFTH SURFACE — excluded, and the exclusion is asserted, not narrated.
+// THE FIFTH SURFACE — rendered, and its consumers' code-channel read is asserted.
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("[164.2-09] the FIFTH surface is excluded, and the blocker is measured", () => {
+describe("[212-08 / SC3] the FIFTH surface is rendered: both consumers read `code` (replaces the [164.2-09] exclusion)", () => {
   // Phase 200 plan 08: ApiKeyManager left this list when its Add Key control
   // moved to the Profile tab (AllocatorExchangeManager); it no longer POSTs here.
   const CONSUMERS = [
@@ -1152,48 +1256,74 @@ describe("[164.2-09] the FIFTH surface is excluded, and the blocker is measured"
     "src/components/exchanges/AllocatorExchangeManager.tsx",
   ];
 
-  it("keys/validate-and-encrypt has no code-channel reader, so it cannot be a render row", () => {
-    // The three POSTers, enumerated by grep over src/ (this list is pinned by
-    // the case below, which reds if a fourth appears).
+  it("codeChannelReads sees a recogniser call, and a prose-only reader yields nothing", () => {
+    const reader = stripCommentsPreserveLines(
+      [
+        'async function go() {',
+        '  const res = await fetch("/api/keys/validate-and-encrypt", { method: "POST" });',
+        "  if (!res.ok) {",
+        "    const { code } = recogniseValidateAndEncryptCode(body, res.status);",
+        "  }",
+        "}",
+      ].join("\n"),
+      "ts",
+    );
+    expect(codeChannelReads(reader)).toHaveLength(1);
+    const prose = stripCommentsPreserveLines(
+      [
+        'async function go() {',
+        '  const res = await fetch("/api/keys/validate-and-encrypt", { method: "POST" });',
+        "  if (!res.ok) {",
+        "    const err = await res.json();",
+        "    setError(err.error);",
+        "  }",
+        "}",
+      ].join("\n"),
+      "ts",
+    );
+    expect(
+      codeChannelReads(prose),
+      "A prose-only reader produced a code-channel hit, so the consumer " +
+        "assertion below could never fail.",
+    ).toEqual([]);
+  });
+
+  it("each consumer reads the route's `code` through the recogniser, so the surface is a render row", () => {
     for (const rel of CONSUMERS) {
       const src = stripped(join(REPO, rel));
       expect(
         src,
-        `${rel} POSTs to keys/validate-and-encrypt; confirm before reading the ` +
-          "code-channel claim below.",
+        `${rel} no longer POSTs to keys/validate-and-encrypt; the census below ` +
+          "decides what moved.",
       ).toContain("/api/keys/validate-and-encrypt");
-      // ⭐ THE BLOCKER. Each consumer reads the PROSE (`err.error` /
-      // `result.error`) and never the machine code, so there is no
-      // code→WIZARD_ERROR_COPY render path on this surface at all. Asserting a
-      // title here would mean feeding the title in as the wire prose and
-      // reading it back — the tautology this file refuses.
+      // ⭐ THE LIVE ASSERTION that replaced the [164.2-09] blocker. Reverting a
+      // consumer to read the `error` prose empties this list and reds here AND
+      // reds the fifth-surface rows in the sweep below.
       expect(
-        codeChannelReads(src),
-        `${rel} has started reading the validate-and-encrypt response's \`code\` ` +
-          "field. ⭐ THAT IS GOOD NEWS AND IT INVALIDATES THIS EXCLUSION: the " +
-          "surface now has a code→copy render path, so add it to SURFACES with " +
-          "a real harness and delete this case. See `## Surfaces not rendered` " +
-          "in 164.2-09-SUMMARY.md.",
-      ).toEqual([]);
+        codeChannelReads(src).filter((h) =>
+          h.includes("recogniseValidateAndEncryptCode"),
+        ),
+        `${rel} stopped reading the validate-and-encrypt response's \`code\` ` +
+          "through recogniseValidateAndEncryptCode. It is back to rendering the " +
+          "route's prose, which is the defect SC3 closed.",
+      ).toHaveLength(1);
     }
   });
 
-  it("the consumer census is complete — a FOURTH poster would go unmeasured", () => {
+  it("the consumer census is complete — a THIRD poster would go unmeasured", () => {
     // Every source file under src/ that POSTs to the route, comment-stripped so
     // the ~20 files that merely NAME it in prose do not count. DERIVED FROM
-    // DISK — the previous spelling compared `CONSUMERS.length` to the literal
-    // 3, i.e. a hand-typed array against a hand-typed number, which no change
-    // to production code could redden.
+    // DISK, never a hand-typed array compared to a hand-typed number.
     const derived = derivePosters();
     expect(
       derived.slice().sort(),
       "The set of files POSTing to keys/validate-and-encrypt has moved. A new " +
-        "poster must be added to CONSUMERS above (and its code-channel claim " +
-        "measured), or the blocker claim covers only some of the callers.",
+        "poster must be added to CONSUMERS above and must read `code` through " +
+        "the recogniser, or the code-channel claim covers only some callers.",
     ).toEqual([...CONSUMERS].sort());
     expect(
       derived.length,
-      "Measured 2026-09-06 at 3 call sites; 2 since Phase 200 plan 08 moved " +
+      "Measured at 3 call sites in 2026-09; 2 since Phase 200 plan 08 moved " +
         "ApiKeyManager's Add Key to the Profile tab. This pins the DERIVED count, " +
         "not itself.",
     ).toBe(2);
@@ -1266,8 +1396,14 @@ describe("[164.2-09 / WIZFORM-02] every server-classified code renders as itself
 
       // ── THE SECOND SIGNAL, and only now. It reads trackMock's call log —
       // the analytics payload — not the DOM.
-      expect(trackedWizardErrorCode()).toBe(row.expectedCode);
-      expect(trackedWizardErrorCode()).not.toBe(TERMINAL);
+      //
+      // 212-08: the validate-and-encrypt forms emit NO `wizard_error`
+      // telemetry (none today, and adding it is out of scope), so that one
+      // surface is exempt from this signal ONLY. Its DOM oracles above still run.
+      if (row.surface !== "validate-and-encrypt") {
+        expect(trackedWizardErrorCode()).toBe(row.expectedCode);
+        expect(trackedWizardErrorCode()).not.toBe(TERMINAL);
+      }
     },
     15000,
   );
@@ -1279,13 +1415,14 @@ describe("[164.2-09 / WIZFORM-02] every server-classified code renders as itself
    * upstream 401 as `{"error":"Unauthorized","code":"UNKNOWN"}` — the seam-level
    * `?? "UNKNOWN"` for an envelope that carried no code of its own. 164.2-05
    * closed it AT THE ROUTE with `UPSTREAM_STATUS_TO_SEAM_CODE` (401/403 →
-   * `SEAM_MISCONFIGURED`).
+   * `SEAM_MISCONFIGURED`), a map that lives in `src/lib/wizardErrors.ts` since
+   * 212-04.
    *
-   * ⚠️ AND IT IS RENDERED HERE ON `connect-key`, NOT ON THE ROUTE'S OWN
-   * SURFACE, because that surface has no code-channel reader (the describe
-   * above). `SEAM_MISCONFIGURED` at 401 is what a wizard step now receives for
-   * this failure, and this case proves a wizard step renders it as itself — the
-   * half of the fix that is about what the reader sees.
+   * ⚠️ IT IS RENDERED HERE ON `connect-key`; the route's own surface (the fifth,
+   * driven by the sweep above) renders the same code through
+   * `recogniseValidateAndEncryptCode`. `SEAM_MISCONFIGURED` at 401 is what a
+   * wizard step receives for this failure, and this case proves a wizard step
+   * renders it as itself — the half of the fix that is about what the reader sees.
    */
   it("⭐ THE 2026-08-25 PROD ROW: a bare-401 SEAM_MISCONFIGURED renders as itself", async () => {
     const row: PopulationRow = {
@@ -1303,5 +1440,83 @@ describe("[164.2-09 / WIZFORM-02] every server-classified code renders as itself
     );
     expect(screen.queryByText(UNKNOWN_TITLE)).toBeNull();
     expect(trackedWizardErrorCode()).toBe("SEAM_MISCONFIGURED");
+  }, 15000);
+});
+
+/**
+ * 212-08 / SC3 — the named cases the sweep's per-code rows cannot express,
+ * because each one depends on a STATUS, a body SHAPE or the absence of a code
+ * rather than on a roster member. Codes, statuses and sentences are hand-typed
+ * from the route's documented answers.
+ */
+describe("[212-08 / SC3] the validate-and-encrypt surface — status, shape and fallback cases", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  const row = (wireCode: string, status: number): PopulationRow => ({
+    surface: "validate-and-encrypt",
+    wireCode,
+    expectedCode: wireCode,
+    status,
+    sources: ["route-literal"],
+    titleChannel: "copy",
+  });
+
+  it("a 424 RATE_LIMITED is the venue's throttle: KEY_RATE_LIMIT, not our own limiter's copy", async () => {
+    const envelope = await renderValidateAndEncryptRefusal(row("RATE_LIMITED", 424));
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_RATE_LIMIT");
+    expect(envelope.textContent).toContain(formatKeyError("KEY_RATE_LIMIT").title);
+  }, 15000);
+
+  it("a 429 RATE_LIMITED is our own limiter: RATE_LIMITED", async () => {
+    const envelope = await renderValidateAndEncryptRefusal(row("RATE_LIMITED", 429));
+    expect(envelope).toHaveAttribute("data-error-code", "RATE_LIMITED");
+  }, 15000);
+
+  it("a bare-401 mapped to SEAM_MISCONFIGURED renders that envelope with no Retry control and no draft claim", async () => {
+    const envelope = await renderValidateAndEncryptRefusal(
+      row("SEAM_MISCONFIGURED", 500),
+    );
+    expect(envelope).toHaveAttribute("data-error-code", "SEAM_MISCONFIGURED");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByText(/your draft is saved/i)).toBeNull();
+  }, 15000);
+
+  it("the persist-INSERT 500 keeps its curated sentence, inside the UNKNOWN shell", async () => {
+    const sentence = "Your key was verified but couldn't be saved. Please try again.";
+    const envelope = await renderValidateAndEncryptRefusal(
+      row("UNKNOWN", 500),
+      jsonResponse({ code: "UNKNOWN", error: sentence }, 500),
+    );
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(envelope.textContent).toContain(sentence);
+  }, 15000);
+
+  it("an unparseable body renders UNKNOWN", async () => {
+    const envelope = await renderValidateAndEncryptRefusal(
+      row("UNKNOWN", 502),
+      new Response("<html>gateway</html>", {
+        status: 502,
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  }, 15000);
+
+  it("a 4xx with an unrecognised code keeps its curated sentence as the cause of the UNKNOWN shell", async () => {
+    const sentence = "A CURATED 4XX SENTENCE FOR THIS TEST.";
+    const envelope = await renderValidateAndEncryptRefusal(
+      row("SOME_FUTURE_VENUE_CODE", 424),
+      jsonResponse({ code: "SOME_FUTURE_VENUE_CODE", error: sentence }, 424),
+    );
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(envelope.textContent).toContain(sentence);
   }, 15000);
 });

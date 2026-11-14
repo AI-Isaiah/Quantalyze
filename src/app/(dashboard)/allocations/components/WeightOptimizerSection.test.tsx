@@ -383,6 +383,55 @@ describe("WeightOptimizerSection — SEAMUX-05 / B-13: the failure is named", ()
     errSpy.mockRestore();
   });
 
+  it("SC6 row 6: the unreadable-answer card body links the contact form in a new tab", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch(() =>
+      Promise.resolve(
+        new Response("<html><body>gateway</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+    renderAndRun();
+
+    // The card heading is the match styled font-semibold (the other is the sr-only LiveRegion).
+    const heading = (await screen.findAllByText("Couldn't read the optimizer's answer")).find((n) => n.className.includes("font-semibold"))!;
+    const body = heading.nextElementSibling as HTMLElement;
+    // Hand-typed; the sr-only suffix sits inside the link text.
+    expect(body.textContent).toBe(
+      "The optimizer answered with something this page could not read, so we can't tell whether it ran. Nothing was written to your draft. Run it again, and use the contact form (opens in a new tab) if it repeats.",
+    );
+    expect(body.textContent).not.toContain("@");
+    const link = body.querySelector("a")!;
+    expect(link.getAttribute("href")).toBe("/contact?topic=support");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    // The LiveRegion still announces the heading.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Couldn't read the optimizer's answer",
+    );
+    errSpy.mockRestore();
+  });
+
+  it("SC6 control: a non-pointer failure body renders with no link", async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: "x" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    renderAndRun();
+
+    // The card heading is the match styled font-semibold (the other is the sr-only LiveRegion).
+    const heading = (await screen.findAllByText("Couldn't reach the optimizer")).find((n) => n.className.includes("font-semibold"))!;
+    const body = heading.nextElementSibling as HTMLElement;
+    expect(body.textContent).toBe("The optimizer is unavailable right now. Try again shortly.");
+    expect(body.querySelector("a")).toBeNull();
+  });
+
   it("NEGATIVE CONTROL: the idle and success renders expose NO role=alert", async () => {
     // Without this, the three assertions above are satisfied by a component
     // that announces unconditionally — announcing on every render is worse

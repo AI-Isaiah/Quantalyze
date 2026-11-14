@@ -629,6 +629,41 @@ describe("PATCH /api/keys/[id]/rotate-secret — WR-01: the seam's machine code 
     expect(envelope.code).toBe("SEAM_MISCONFIGURED");
   });
 
+  it("[212-04 / SC3] a bare upstream 401 (our service key refused, no seam code) answers SEAM_MISCONFIGURED at 500 and writes no row", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 401, { detail: "Unauthorized" }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(500);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("SEAM_MISCONFIGURED");
+    expect(envelope.code).not.toBe("UNKNOWN");
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+  });
+
+  // ⭐ 212 review WR-04 — the INTERNAL-TOKEN hop. `/internal/*` skips the
+  // service-key middleware, and a mismatched `X-Internal-Token` answers a bare 403
+  // with no log line and no capture at the source, so this route's own capture is
+  // the ONLY page a stale `INTERNAL_API_TOKEN` can raise. Before 212-04 it paged
+  // through the UNKNOWN terminal; the bare-403 branch moved it off that terminal.
+  it("[212 WR-04] a bare upstream 403 (stale INTERNAL_API_TOKEN) answers SEAM_MISCONFIGURED AND IS captured", async () => {
+    vi.mocked(captureToSentry).mockClear();
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 403, { detail: "Forbidden" }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as Record<string, unknown>).code).toBe("SEAM_MISCONFIGURED");
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+    expect(
+      vi.mocked(captureToSentry),
+      "a stale INTERNAL_API_TOKEN raised no page: SEAM_MISCONFIGURED left OUR_DEFECT_KEY_ERROR_CODES",
+    ).toHaveBeenCalledTimes(1);
+    const [, options] = vi.mocked(captureToSentry).mock.calls[0];
+    expect(options.tags.surface).toBe("keys-rotate-secret");
+    expect(options.secrets).toContain(SYNTHETIC_NEW_SECRET);
+  });
+
   it("MT5_GATEWAY_UNCONFIGURED answers SEAM_INTERNAL_FAULT at 500, not the terminal UNKNOWN", async () => {
     mockResilientFetch.mockResolvedValue(
       seamResponse(false, 500, {

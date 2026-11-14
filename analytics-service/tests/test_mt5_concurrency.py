@@ -1429,6 +1429,81 @@ def test_only_the_validate_sites_read_the_validation_endpoint() -> None:
     )
 
 
+async def test_a_held_job_terminal_never_delays_a_validation_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⭐ Phase 212 SC4 structural pin. A lease held on the JOB terminal (a running
+    derive) must not delay a lease on the VALIDATION terminal (an interactive key
+    validate), so a human connecting a key never queues behind a derive.
+
+    WHY this is the pin and not a longer ``_MT5_LEASE_WAIT_S``. The 20 s bound
+    exists because validate and derive once shared one terminal key. Since Phase
+    164.6.6 D-02 they do not: validate leases ``read_env_validation_gateway_endpoint``'s
+    key, jobs lease ``read_env_gateway_endpoint``'s. The premise "a derive makes a
+    connect wait" is therefore false at HEAD, and this test goes RED if it ever
+    becomes true again. The oracle is BLOCKING: a validation acquisition that
+    still queued behind the job terminal raises ``Mt5TerminalBusyError`` here.
+
+    ⚠️ THE HONEST LIMIT. Nothing in ``read_env_validation_gateway_endpoint``
+    refuses a validation pair EQUAL to the job pair, so the guarantee is a
+    CONFIGURATION fact plus reader routing (pinned by
+    ``test_only_the_validate_sites_read_the_validation_endpoint``), not an
+    enforced invariant. The second half of this test is the RED control that
+    documents it: with the pairs set equal, the same acquisition is busy, which is
+    exactly the original SC4 premise. A deploy that configures them equal
+    re-creates that premise.
+    """
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "10.0.0.5")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "10.0.0.6")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
+
+    # Both keys come through the REAL readers and the real key function, never a
+    # hand-built string: a hand-built pair would pass while the readers collapsed.
+    job_endpoint = mt5_relogin.read_env_gateway_endpoint()
+    validation_endpoint = mt5_relogin.read_env_validation_gateway_endpoint()
+    assert job_endpoint is not None and validation_endpoint is not None
+    job_key = mt5_terminal_key(*job_endpoint)
+    validation_key = mt5_terminal_key(*validation_endpoint)
+
+    async def _acquire_validation_lease(key: str) -> bool:
+        async def _attempt() -> bool:
+            async with mt5_concurrency.mt5_terminal_lease(
+                key, wait_s=0.05, holder="validate", site="212_sc4_pin"
+            ):
+                return True
+
+        # DEADMAN: a regression that drops the bound waits forever on a lock
+        # nothing releases; this turns that hang into a named failure.
+        return await asyncio.wait_for(_attempt(), timeout=10.0)
+
+    async with mt5_concurrency.mt5_terminal_lease(
+        job_key, holder="derive", site="212_sc4_pin"
+    ):
+        assert mt5_concurrency._mt5_terminal_lock_for(job_key).locked()
+        try:
+            acquired = await _acquire_validation_lease(validation_key)
+        except mt5_concurrency.Mt5TerminalBusyError:
+            pytest.fail(
+                "a lease held on the JOB terminal delayed a VALIDATION acquisition: "
+                "validate and derive share a terminal lock again, so a running "
+                "derive makes an interactive connect wait (the original SC4 premise)"
+            )
+        assert acquired is True
+
+        # RED control: validation pair EQUAL to the job pair is the same key, and
+        # the same acquisition now queues behind the held job lease.
+        monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "10.0.0.5")
+        monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18812")
+        equal_endpoint = mt5_relogin.read_env_validation_gateway_endpoint()
+        assert equal_endpoint is not None
+        equal_key = mt5_terminal_key(*equal_endpoint)
+        assert equal_key == job_key
+        with pytest.raises(mt5_concurrency.Mt5TerminalBusyError):
+            await _acquire_validation_lease(equal_key)
+        assert mt5_concurrency._mt5_terminal_lock_for(job_key).locked()
+
+
 def test_the_routing_checker_REDS_on_each_rule() -> None:
     """⛔ THE CALIBRATION, on in-memory sources that each break one rule."""
     clean = (

@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Card } from "@/components/ui/Card";
+import { ErrorEnvelope } from "@/components/error/ErrorEnvelope";
+import type { ErrorEnvelope as ErrorEnvelopeShape } from "@/lib/envelope";
 import { EXCHANGES } from "@/lib/constants";
 import {
   readCredentialInput,
@@ -23,6 +25,12 @@ interface ApiKeyFormProps {
   onCancel: () => void;
   loading: boolean;
   error: string | null;
+  /**
+   * 212-08 / SC3 — the validate-and-encrypt refusal, rendered from the route's
+   * `code`. Sits where the string `error` paragraph sits, which keeps carrying
+   * every other message. No Retry control: this form's own submit is the retry.
+   */
+  errorEnvelope?: ErrorEnvelopeShape | null;
   defaultExchange?: string;
   /**
    * Phase 167.2 / KCS-01: when set, submission is blocked and this is why.
@@ -38,6 +46,7 @@ export function ApiKeyForm({
   onCancel,
   loading,
   error,
+  errorEnvelope = null,
   defaultExchange,
   submitBlockedReason = null,
 }: ApiKeyFormProps) {
@@ -210,6 +219,11 @@ export function ApiKeyForm({
           )}
         </p>
 
+        {errorEnvelope && (
+          <div className="mt-4">
+            <ErrorEnvelope envelope={errorEnvelope} />
+          </div>
+        )}
         {error && <p className="text-sm text-negative mt-3">{error}</p>}
 
         {/* KCS-01 (167.2-UI-SPEC S1): why Connect Key is blocked. Rendered as

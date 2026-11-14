@@ -57,6 +57,22 @@ describe("SignupForm — role lock at signup (2026-05-20 regression)", () => {
     expect(container.querySelector('[data-testid="signup-role-manager"]')).not.toBeNull();
   });
 
+  it("the locked helper links the contact form in a new tab (SC6 row 3)", () => {
+    const { container } = render(<SignupForm />);
+    const helper = Array.from(container.querySelectorAll("p.text-xs")).find((p) =>
+      p.textContent?.includes("This is locked after signup."),
+    )!;
+    expect(helper).toBeDefined();
+    expect(helper.textContent).toBe(
+      "This is locked after signup. Use the contact form (opens in a new tab) to have it changed later.",
+    );
+    expect(helper.textContent).not.toContain("@");
+    const link = helper.querySelector("a")!;
+    expect(link.getAttribute("href")).toBe("/contact?topic=support");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
   it("does NOT expose 'both' as a signup role option", () => {
     // Schema still allows 'both' for legacy / admin-set rows, but
     // signup intentionally omits it — first-time identity is one or

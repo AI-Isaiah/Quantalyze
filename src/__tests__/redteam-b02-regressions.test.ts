@@ -243,6 +243,25 @@ describe("M-02 — partner-import: audit failure returns 500 not 207", () => {
   });
 });
 
+// Phase 212 SC6 — the two admin-only audit_warning strings name the admin's own
+// action (add the audit entry by hand) instead of pointing at a support channel
+// that does not exist. Source-level pins, same style as M-02 above.
+describe("212 SC6 — admin audit_warning sentences name the admin's own action", () => {
+  it("send-intro audit_warning tells the admin to add the audit entry by hand and not re-send", () => {
+    const src = read("admin/match/send-intro/route.ts");
+    expect(src).toContain(
+      'audit_warning: "Intro committed but the audit record could not be written. Add the audit entry by hand; do not re-send."',
+    );
+  });
+
+  it("partner-import audit_warning tells the admin to add the audit entry by hand and not re-run", () => {
+    const src = read("admin/partner-import/route.ts");
+    expect(src).toContain(
+      'audit_warning: "Import succeeded but the audit record could not be written. Add the audit entry by hand. Do NOT re-run the import."',
+    );
+  });
+});
+
 describe("M-03 — verify-strategy: createAdminClient wrapped in try/catch", () => {
   it("verify-strategy/route.ts catches createAdminClient() errors in unifiedVerifyStrategyHandler", () => {
     const src = read("verify-strategy/route.ts");

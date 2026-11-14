@@ -150,6 +150,51 @@ describe("SignupForm — repeated-signup UX guard", () => {
     consoleSpy.mockRestore();
   });
 
+  it("SC6 row 2: the no-user/no-session failure links the contact form in a new tab", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    signUpMock.mockResolvedValueOnce({
+      data: { user: null, session: null },
+      error: null,
+    });
+
+    const { container, getByText } = render(<SignupForm />);
+    fillForm(container);
+    fireEvent.click(getByText("Create account"));
+
+    await waitFor(() => {
+      expect(container.querySelector("p.text-negative")).not.toBeNull();
+    });
+    const errorP = container.querySelector("p.text-negative")!;
+    // Hand-typed; the sr-only suffix sits inside the link text.
+    expect(errorP.textContent).toBe(
+      "Something went wrong — please try again, or use the contact form (opens in a new tab) if the problem persists.",
+    );
+    expect(errorP.textContent).not.toContain("@");
+    const link = errorP.querySelector("a")!;
+    expect(link.getAttribute("href")).toBe("/contact?topic=support");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    consoleSpy.mockRestore();
+  });
+
+  it("SC6 control: a Supabase error.message in the same slot renders as plain text, no link", async () => {
+    signUpMock.mockResolvedValueOnce({
+      data: { user: null, session: null },
+      error: { message: "Password should contain at least one number." },
+    });
+
+    const { container, getByText } = render(<SignupForm />);
+    fillForm(container);
+    fireEvent.click(getByText("Create account"));
+
+    await waitFor(() => {
+      expect(container.querySelector("p.text-negative")).not.toBeNull();
+    });
+    const errorP = container.querySelector("p.text-negative")!;
+    expect(errorP.textContent).toBe("Password should contain at least one number.");
+    expect(errorP.querySelector("a")).toBeNull();
+  });
+
   it("routes to /pending-approval when session is returned immediately (auto-confirm path)", async () => {
     // Updated 2026-05-21 (v0.24.5.18): SignupForm now routes to
     // /pending-approval instead of /onboarding so the universal-approval

@@ -8,6 +8,8 @@ import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/utils";
 import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
 import type { SignupRole as ProfileRole } from "@/lib/closed-sets";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 
 /**
  * Account types collected at signup. The signup form ALWAYS asks the user
@@ -145,7 +147,7 @@ export function SignupForm() {
         });
       }).catch(() => {});
       setError(
-        "Something went wrong — please try again or contact support if the problem persists.",
+        "Something went wrong — please try again, or use the contact form if the problem persists.",
       );
       setLoading(false);
       return;
@@ -209,7 +211,11 @@ export function SignupForm() {
           })}
         </div>
         <p className="mt-2 text-xs text-text-muted">
-          This is locked after signup. Contact support to change it later.
+          <ContactPointerText
+            text="This is locked after signup. Use the contact form to have it changed later."
+            href={contactHref({ topic: "support" })}
+            newTab
+          />
         </p>
       </div>
       <Input
@@ -243,7 +249,16 @@ export function SignupForm() {
         autoComplete="new-password"
       />
       {error && (
-        <p className="text-sm text-negative">{error}</p>
+        <p className="text-sm text-negative">
+          {/* Wrap the render, not the setter: this slot also shows Supabase
+              error.message, which has no pointer phrase and passes through
+              ContactPointerText unchanged. */}
+          <ContactPointerText
+            text={error}
+            href={contactHref({ topic: "support" })}
+            newTab
+          />
+        </p>
       )}
       <Button type="submit" disabled={loading} className="w-full">
         {loading ? "Creating account..." : "Create account"}

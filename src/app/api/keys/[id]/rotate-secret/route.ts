@@ -382,6 +382,18 @@ export async function PATCH(
       if (seamCode !== null) {
         (upstreamFailure as Error & { seamCode?: string }).seamCode = seamCode;
       }
+      // ⭐ 212-04 / SC3 — carry the upstream STATUS as an own data property too,
+      // exactly as `AnalyticsUpstreamError` does for the other two classifier
+      // callers. This route never constructs that class, so without it a bare
+      // 401/403 (our own service key refused, no seam code) reached
+      // `classifyKeyValidationError` with nothing but the message and fell to
+      // the terminal UNKNOWN, while `create-with-key` and `composite/add-key`
+      // answered SEAM_MISCONFIGURED. The classifier reads it with `typeof`, and
+      // only for a null `seamCode` at 401/403; no other verdict moves.
+      (upstreamFailure as Error & { status?: number }).status = res.status;
+      // ⭐ 212 review WR-04 — the classifier's bare-401/403 branch is restricted
+      // to the upstream-hop error type by `name`; this plain `Error` IS that hop.
+      upstreamFailure.name = "AnalyticsUpstreamError";
       throw upstreamFailure;
     }
 

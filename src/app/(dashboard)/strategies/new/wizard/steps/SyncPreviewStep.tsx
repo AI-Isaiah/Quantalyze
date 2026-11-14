@@ -13,6 +13,7 @@ import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import {
   checkStrategyGate,
   isDailyReturnsSourced,
+  isSeriesExaminedButRefused,
   STRATEGY_GATE_MIN_CSV_ROWS,
   type StrategyGateResult,
 } from "@/lib/strategyGate";
@@ -1675,24 +1676,39 @@ export function SyncPreviewStep({
             // rather than silently fixed. The floor is applied below now, so
             // the note is replaced rather than left standing as a description
             // of behaviour that no longer exists.
+
+            // Same `?? null` coercion as the single-key arm, and its only
+            // direction is SAFE: an absent column or an unstamped row arrives
+            // as null, which no allow-list admits.
+            const seriesVerdict =
+              (analyticsRow?.series_completeness as string | null) ?? null;
             const compositeAdmissible = isDailyReturnsSourced({
               // Zero BY CONSTRUCTION for a composite; this arm never queries
               // `trades` and must not start.
               tradeCount: 0,
               csvRowCount: series.length,
-              // Same `?? null` coercion as the single-key arm, and its only
-              // direction is SAFE: an absent column or an unstamped row arrives
-              // as null, which no allow-list admits.
-              seriesCompleteness:
-                (analyticsRow?.series_completeness as string | null) ?? null,
+              seriesCompleteness: seriesVerdict,
             });
             if (!compositeAdmissible) {
-              setErrorCode("GATE_SERIES_PROVENANCE_UNVERIFIED");
+              // 212 / SC1: name the real cause. A verdict the gate EXAMINED and
+              // refused (`sampled_gapped`, `fill_derived_unproven`) gets the
+              // examined-and-refused envelope, whose remedy is a different key
+              // or a CSV; a Retry would reproduce the same verdict. A null or
+              // unknown verdict keeps the provenance refusal and its Retry.
+              // The membership test is the gate's own map via one predicate,
+              // never a verdict list typed here. One variable feeds both the
+              // rendered code and the telemetry so the two cannot diverge.
+              const code = gateFailureToWizardError(
+                isSeriesExaminedButRefused(seriesVerdict)
+                  ? "SERIES_EXAMINED_REFUSED"
+                  : "SERIES_PROVENANCE_UNVERIFIED",
+              );
+              setErrorCode(code);
               setPhase("gate_failed");
               trackForQuantsEventClient("wizard_error", {
                 wizard_session_id: wizardSessionId,
                 step: "sync_preview",
-                code: "GATE_SERIES_PROVENANCE_UNVERIFIED",
+                code,
                 trade_count: 0,
               });
               return "done";

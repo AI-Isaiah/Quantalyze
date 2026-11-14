@@ -2690,7 +2690,7 @@ async function unifiedFinalizeWizardHandler(args: {
         computing_started_at: null,
         computation_error:
           "Composite (multi-key) strategies are not yet supported on the " +
-          "unified-backbone finalize path. Contact support.",
+          "unified-backbone finalize path. Use the contact form to have it resolved.",
         data_quality_flags: { csv_source: true, composite: true },
       },
       { onConflict: "strategy_id" },

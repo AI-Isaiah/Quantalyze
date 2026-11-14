@@ -328,3 +328,63 @@ describe("ApiKeyForm — KCS-01 submitBlockedReason", () => {
     expect(normalise(explicitNull.innerHTML)).toBe(withoutProp);
   });
 });
+
+/**
+ * 212-08 / SC3 — the optional `errorEnvelope` slot. It sits where the string
+ * `error` paragraph sits (below the read-only hint, above the blocked reason),
+ * renders nothing when null, and leaves the string `error` path untouched.
+ * The envelope is hand-built, because this component renders what it is given;
+ * which code a refusal maps to is pinned in the consumer's own suite.
+ */
+describe("ApiKeyForm — 212-08 errorEnvelope slot", () => {
+  const ENVELOPE = {
+    ok: false as const,
+    code: "KEY_NOT_READ_ONLY" as const,
+    human_message: "Example envelope title",
+    cause: "Example envelope cause",
+    debug_context: [],
+    correlation_id: "example-cid",
+    recoverable: false,
+  };
+
+  function renderForm(extra: Record<string, unknown>) {
+    return render(
+      <ApiKeyForm
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        loading={false}
+        error={null}
+        {...extra}
+      />,
+    );
+  }
+
+  it("renders the envelope in a mt-4 wrapper between the read-only hint and the blocked reason", () => {
+    renderForm({ errorEnvelope: ENVELOPE, submitBlockedReason: "Example reason" });
+    const card = screen.getByTestId("error-envelope");
+    expect(card.parentElement).toHaveClass("mt-4");
+    const hint = screen.getByText(/Only read-only keys are accepted/);
+    const reason = screen.getByText("Example reason");
+    expect(
+      hint.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      card.compareDocumentPosition(reason) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("null (or absent) renders nothing extra", () => {
+    const { unmount } = renderForm({ errorEnvelope: null });
+    expect(screen.queryByTestId("error-envelope")).not.toBeInTheDocument();
+    unmount();
+    renderForm({});
+    expect(screen.queryByTestId("error-envelope")).not.toBeInTheDocument();
+  });
+
+  it("the string error prop still renders its own paragraph", () => {
+    renderForm({ error: "Example string error" });
+    expect(screen.getByText("Example string error")).toHaveClass("text-negative");
+    expect(screen.queryByTestId("error-envelope")).not.toBeInTheDocument();
+  });
+});

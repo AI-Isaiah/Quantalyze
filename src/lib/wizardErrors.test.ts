@@ -5,6 +5,7 @@ import {
   formatKeyError,
   gateFailureToWizardError,
   recogniseDashboardDialogCode,
+  recogniseValidateAndEncryptCode,
   classifyKeyValidationError,
   recogniseSeamErrorCode,
   OUR_DEFECT_KEY_ERROR_CODES,
@@ -874,6 +875,116 @@ describe("classifyKeyValidationError — shared key-entry error mapping", () => 
     const blob = (copy.title + " " + copy.cause + " " + copy.fix.join(" ")).toLowerCase();
     expect(blob).toContain("investor");
     expect(blob).not.toMatch(/password (was |is )?(wrong|incorrect|invalid)/);
+  });
+});
+
+// ⭐ 212 review WR-04 / SFH M2 — the bare-401/403 branch is for the UPSTREAM-HOP
+// error type only. A `status` own property alone is not proof of the hop: any other
+// thrown value carrying 401/403 must keep falling through, or a non-upstream failure
+// is reported as OUR stale service key.
+describe("[212 WR-04] classifyKeyValidationError — the bare 401/403 branch is restricted to the upstream-hop error", () => {
+  it("a plain object with status 401 falls through to UNKNOWN", () => {
+    expect(classifyKeyValidationError({ status: 401, message: "x" })).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+  it("a non-upstream Error carrying status 403 falls through to UNKNOWN", () => {
+    expect(
+      classifyKeyValidationError(Object.assign(new Error("denied"), { status: 403 })),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+  it("an upstream-hop error (by name) with status 401 or 403 answers SEAM_MISCONFIGURED/500", () => {
+    for (const status of [401, 403]) {
+      expect(
+        classifyKeyValidationError(
+          Object.assign(new Error("Unauthorized"), { name: "AnalyticsUpstreamError", status }),
+        ),
+      ).toEqual({ code: "SEAM_MISCONFIGURED", status: 500 });
+    }
+  });
+  it("SEAM_MISCONFIGURED is in the our-defect (paging) set", () => {
+    expect(OUR_DEFECT_KEY_ERROR_CODES.has("SEAM_MISCONFIGURED")).toBe(true);
+  });
+});
+
+/**
+ * 212-04 / SC3 — a BARE upstream 401/403 on the classifier shared by
+ * `create-with-key`, `composite/add-key` and `keys/[id]/rotate-secret`.
+ *
+ * The credential on that hop is OUR analytics service key, so a 401 or 403 with
+ * no seam code is our configuration fault, not "your key was refused" and not
+ * the terminal UNKNOWN. The change is strictly additive: only the null-seamCode
+ * 401/403 verdicts move. Every expected code is hand-typed.
+ */
+describe("[212-04] classifyKeyValidationError — a bare upstream 401/403", () => {
+  const upstream = (message: string, status: number, seamCode: unknown) =>
+    Object.assign(new Error(message), {
+      name: "AnalyticsUpstreamError",
+      status,
+      seamCode,
+    });
+
+  it.each([401, 403])(
+    "status %i with seamCode null answers SEAM_MISCONFIGURED at 500",
+    (status) => {
+      expect(
+        classifyKeyValidationError(upstream("Unauthorized", status, null)),
+      ).toEqual({ code: "SEAM_MISCONFIGURED", status: 500 });
+    },
+  );
+
+  it("a 401 carrying a known seamCode still answers the verdict-table row first", () => {
+    expect(
+      classifyKeyValidationError(upstream("Unauthorized", 401, "KEK_UNAVAILABLE")),
+    ).toEqual({ code: "SEAM_MISCONFIGURED", status: 500 });
+    // A different row, so the case cannot pass by the new branch alone.
+    expect(
+      classifyKeyValidationError(upstream("Unauthorized", 401, "RATE_LIMITED")),
+    ).toEqual({ code: "KEY_RATE_LIMIT", status: 503 });
+  });
+
+  it("a 401 carrying an UNKNOWN string seamCode is unchanged: the cascade, not SEAM_MISCONFIGURED", () => {
+    expect(
+      classifyKeyValidationError(
+        upstream("Unauthorized", 401, "SOME_FUTURE_WIRE_CODE"),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+    // ...and the cascade still earns a verdict from the message.
+    expect(
+      classifyKeyValidationError(
+        upstream("Invalid signature", 401, "SOME_FUTURE_WIRE_CODE"),
+      ),
+    ).toEqual({ code: "KEY_INVALID_SIGNATURE", status: 400 });
+  });
+
+  it("a 429 whose message names a rate limit still answers KEY_RATE_LIMIT (429 is not consulted)", () => {
+    expect(
+      classifyKeyValidationError(upstream("Rate limit exceeded", 429, null)),
+    ).toEqual({ code: "KEY_RATE_LIMIT", status: 503 });
+  });
+
+  it("a 400 whose message names a signature still runs the cascade", () => {
+    expect(
+      classifyKeyValidationError(upstream("Invalid signature", 400, null)),
+    ).toEqual({ code: "KEY_INVALID_SIGNATURE", status: 400 });
+  });
+
+  it("a 422 with seamCode null is NOT mapped here (only 401/403 are consulted)", () => {
+    expect(
+      classifyKeyValidationError(upstream("Unprocessable", 422, null)),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("a thrown value with no status property is unaffected and the classifier stays total", () => {
+    expect(classifyKeyValidationError(undefined)).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(null)).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
   });
 });
 
@@ -6804,5 +6915,119 @@ describe("201 D-07: the wizard names the Strategies page, never My Strategies", 
     expect(WIZARD_ERROR_COPY.ALLOCATION_NOT_ALLOCATABLE.fix).toContain(
       "Open Strategies and mark this strategy as your own capital, then allocate again.",
     );
+  });
+});
+
+/**
+ * [212-04 / SC3] `recogniseValidateAndEncryptCode` — the status-aware reader of
+ * `keys/validate-and-encrypt`'s code channel.
+ *
+ * The wire string `RATE_LIMITED` has two producers that mean opposite things: a
+ * 429 is OUR own limiter (the cap is ours), anything else is the venue's
+ * throttle forwarded. Rendering the venue's throttle as "the cap is ours" would
+ * be a false sentence, so the status must decide. Every expectation is
+ * hand-typed; the wire string is attacker-influenceable, so nothing unproven is
+ * ever cast.
+ */
+describe("[212-04] recogniseValidateAndEncryptCode — status decides who throttled", () => {
+  it("RATE_LIMITED at 429 (our own limiter) stays RATE_LIMITED", () => {
+    expect(
+      recogniseValidateAndEncryptCode({ code: "RATE_LIMITED" }, 429),
+    ).toEqual({ code: "RATE_LIMITED", recognised: true });
+  });
+
+  it("RATE_LIMITED at 424 (the venue throttled us) answers KEY_RATE_LIMIT", () => {
+    expect(
+      recogniseValidateAndEncryptCode({ code: "RATE_LIMITED" }, 424),
+    ).toEqual({ code: "KEY_RATE_LIMIT", recognised: true });
+    expect(
+      recogniseValidateAndEncryptCode({ code: "RATE_LIMITED" }, 503),
+    ).toEqual({ code: "KEY_RATE_LIMIT", recognised: true });
+  });
+
+  it("a rostered code answers itself and an alias answers its target", () => {
+    expect(
+      recogniseValidateAndEncryptCode({ code: "KEY_NOT_READ_ONLY" }, 400),
+    ).toEqual({ code: "KEY_NOT_READ_ONLY", recognised: true });
+    expect(
+      recogniseValidateAndEncryptCode({ code: "CIRCUIT_OPEN" }, 503),
+    ).toEqual({ code: "SERVICE_UNAVAILABLE_RETRY", recognised: true });
+    expect(
+      recogniseValidateAndEncryptCode({ code: "SEAM_MISCONFIGURED" }, 500),
+    ).toEqual({ code: "SEAM_MISCONFIGURED", recognised: true });
+  });
+
+  // ⭐ 212 review WR-03 — the caller-fault verdicts resolve to their own
+  // specific entry at a 4xx. Hand-typed (wire code, status) -> expected wizard
+  // code; the table under test is never read back for the expectation.
+  it.each([
+    ["AUTH_FAILED", 424, "KEY_AUTH_FAILED"],
+    ["AUTH_FAILED", 400, "KEY_AUTH_FAILED"],
+    ["MISSING_SCOPE", 424, "KEY_MISSING_READ_SCOPE"],
+    ["PERMISSION_DENIED", 424, "KEY_PERMISSION_DENIED"],
+    ["WITHDRAW_SCOPE", 424, "KEY_HAS_WITHDRAW_PERMS"],
+    ["TRADE_SCOPE", 424, "KEY_HAS_TRADING_PERMS"],
+    // The wizard-code form the route's classifier answers for a bare 400.
+    ["KEY_AUTH_FAILED", 400, "KEY_AUTH_FAILED"],
+  ])(
+    "a 4xx %s at %i is a caller fault and answers %s, recognised",
+    (wire, status, expected) => {
+      expect(
+        recogniseValidateAndEncryptCode({ code: wire }, status),
+      ).toEqual({ code: expected, recognised: true });
+    },
+  );
+
+  it("a verdict outside the caller-fault set, or at a 5xx, is UNKNOWN and NOT recognised", () => {
+    // 424 transients keep the curated-cause path (their copy is un-audited on
+    // these surfaces; MT5_TERMINAL_BUSY states an unmeasured wait).
+    expect(
+      recogniseValidateAndEncryptCode({ code: "MT5_TERMINAL_BUSY" }, 424),
+    ).toEqual({ code: "UNKNOWN", recognised: false });
+    expect(
+      recogniseValidateAndEncryptCode({ code: "SIGN_IN_FAILED" }, 424),
+    ).toEqual({ code: "UNKNOWN", recognised: false });
+    // A 5xx never takes the 4xx verdict arm (WIZERR-06 W1): same wire code,
+    // different status, no recognition.
+    expect(
+      recogniseValidateAndEncryptCode({ code: "AUTH_FAILED" }, 500),
+    ).toEqual({ code: "UNKNOWN", recognised: false });
+    expect(
+      recogniseValidateAndEncryptCode({ code: "KEK_UNAVAILABLE" }, 500),
+    ).toEqual({ code: "UNKNOWN", recognised: false });
+    // The literal wire string "UNKNOWN" is the route admitting it did not
+    // classify; it must not suppress the caller's curated fallback.
+    expect(
+      recogniseValidateAndEncryptCode({ code: "UNKNOWN" }, 500),
+    ).toEqual({ code: "UNKNOWN", recognised: false });
+  });
+
+  it.each([
+    ["__proto__", { code: "__proto__" }],
+    ["constructor", { code: "constructor" }],
+    ["empty string", { code: "" }],
+    ["number", { code: 42 }],
+    ["null code", { code: null }],
+    ["null body", null],
+    ["string body", "RATE_LIMITED"],
+    ["undefined body", undefined],
+    ["array body", ["RATE_LIMITED"]],
+  ])("%s is UNKNOWN and NOT recognised, never cast", (_label, body) => {
+    expect(recogniseValidateAndEncryptCode(body, 424)).toEqual({
+      code: "UNKNOWN",
+      recognised: false,
+    });
+  });
+
+  it("reads a nested service_error body through the discriminator", () => {
+    const nested = (code: string) => ({
+      detail: { code, detail: "x", retryable: true, dependency: "railway" },
+    });
+    expect(
+      recogniseValidateAndEncryptCode(nested("RATE_LIMITED"), 424),
+    ).toEqual({ code: "KEY_RATE_LIMIT", recognised: true });
+    expect(
+      recogniseValidateAndEncryptCode(nested("RATE_LIMITED"), 429),
+    ).toEqual({ code: "RATE_LIMITED", recognised: true });
   });
 });

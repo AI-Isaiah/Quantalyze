@@ -1909,6 +1909,11 @@ describe("POST /api/strategies/finalize-wizard — Phase 86 unified-backbone com
     );
     expect(stamp).toBeDefined();
     expect(stamp!.strategy_id).toBe(STRATEGY_ID);
+    // Phase 212 SC6: the stamped computation_error names the contact form
+    // (hand-typed; first sentence is unchanged from before).
+    expect(stamp!.computation_error).toBe(
+      "Composite (multi-key) strategies are not yet supported on the unified-backbone finalize path. Use the contact form to have it resolved.",
+    );
     // A composite must NEVER be routed to process_key_long here (no stitch job
     // either — the unified path doesn't dispatch composites this phase).
     const enqueueCall = STATE.adminRpcCalls.find(

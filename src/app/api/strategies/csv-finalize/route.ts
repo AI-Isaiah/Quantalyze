@@ -1984,11 +1984,15 @@ async function writeFailedStrategyAnalyticsPlaceholder(
  * `strategy_analytics.computation_error` when the analytics enqueue loses an
  * MVCC race (SQLSTATE 40001, the classification mig 20260826150000 added).
  *
- * VERBATIM the ELSE arm of `computation_error_copy(TEXT)` (mig 20260826120000,
- * Phase 162 HONEST-01). The parity is a GATE, not a convention: route.test.ts
- * reads that arm out of supabase/schema/functions/computation_error_copy.sql
- * and asserts byte equality, so a reworded arm turns this file RED instead of
- * drifting silently.
+ * ⚠️ DELIBERATE DIVERGENCE (2026-11-14, Phase 212 WIZTRUTH, SC6/SC7). This
+ * sentence used to byte-copy the ELSE arm of `computation_error_copy(TEXT)`
+ * (mig 20260826120000, Phase 162 HONEST-01), with route.test.ts reading that arm
+ * out of supabase/schema/functions/computation_error_copy.sql as its oracle.
+ * That arm still ends in the legacy support pointer, a channel that does not
+ * exist. Rewording the SQL needs a migration, which Phase 212 forbids (SC7), so
+ * the TS string now names the contact form and the oracle is a hand-typed
+ * sentence. The SQL arms stay as they are and are booked for a later migration
+ * phase; until then the two are NOT in parity, on purpose.
  *
  * ⚖️ WHY A LITERAL AND NOT AN RPC TO THE HELPER — mig 20260826150000's header
  * proposed calling it, and it IS service_role-EXECUTEable, so the call would
@@ -2019,7 +2023,7 @@ async function writeFailedStrategyAnalyticsPlaceholder(
  * the defer path only, never an enqueue.)
  */
 const ENQUEUE_LOST_RACE_USER_COPY =
-  "Analytics could not complete for this strategy. Retry the sync, or contact support if this persists.";
+  "Analytics could not complete for this strategy. Retry the sync, or use the contact form if this persists.";
 
 function enqueueCsvAnalyticsAfter(
   strategyId: string,

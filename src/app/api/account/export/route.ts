@@ -506,7 +506,7 @@ async function handleExportRequest(
       {
         error: bundle.partial
           ? "Some tables failed to export. Please retry — GDPR Art. 15 requires a complete bundle."
-          : "Your data exceeds export limits and a complete bundle cannot be produced automatically. Please contact support — GDPR Art. 15 requires a complete bundle.",
+          : "Your data exceeds export limits and a complete bundle cannot be produced automatically. Use the contact form to request the complete bundle — GDPR Art. 15 requires a complete bundle.",
         code: bundle.partial ? "export_partial" : "export_truncated",
         request_id: requestId,
       },
@@ -537,7 +537,7 @@ async function handleExportRequest(
     await refundRateLimitToken("manifest_drift");
     return NextResponse.json(
       {
-        error: "Export manifest drift — please contact support.",
+        error: "Export manifest drift — use the contact form to have it resolved.",
         code: "export_manifest_drift",
       },
       { status: 500, headers: NO_STORE_HEADERS },

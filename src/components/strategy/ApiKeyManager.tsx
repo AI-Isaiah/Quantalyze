@@ -88,7 +88,7 @@ interface ApiKeyManagerProps {
  * after `handleLinkKey` resolved without error.
  */
 const SYNC_UNAVAILABLE_COPY =
-  "We couldn't start the sync. Your key is saved — retry in a moment, and contact support if it keeps failing.";
+  "We couldn't start the sync. Your key is saved — retry in a moment, and use the contact form if it keeps failing.";
 
 /**
  * The user-facing message for a non-2xx `/api/keys/sync` response.
@@ -1706,7 +1706,9 @@ export function ApiKeyManager({
           on a key whose last sync had failed, the `revoked` helper's remedy
           path, was reported nowhere. */}
       {error && !(syncStatus === "error" && error === syncError) && (
-        <p className="text-sm text-negative">{error}</p>
+        <p className="text-sm text-negative">
+          <ContactPointerText text={error} href={supportContactHref} />
+        </p>
       )}
     </div>
   );

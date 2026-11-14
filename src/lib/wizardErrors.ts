@@ -33,6 +33,9 @@ import type { GateFailureCode } from "./strategyGate";
 // them. Replacing one bare integer with another is how this file would keep
 // lying with a different number, so the PREDICATE is named instead of a count.
 import { CircuitOpenError } from "@/lib/seam-errors";
+// 212-04 / SC3 — the dependency-free wire-code reader (no imports of its own),
+// used by `recogniseValidateAndEncryptCode` below for the nested service_error shape.
+import { seamErrorCode } from "@/lib/seam-discriminator";
 // 153.1-03 / WIZFORM-03 — SAFE UNDER THE LOAD-BEARING IMPORT RULE ABOVE, and
 // here is the check rather than the assurance. `closed-sets.ts` imports exactly
 // one module (`zod`), declares no `import "server-only"`, and its only
@@ -470,13 +473,11 @@ export type WizardErrorCode =
   // index and fails identically. `actions` carries neither member of
   // `RECOVERABLE_ACTIONS` (`clear_and_retry`, `try_another_key`), so
   // `buildEnvelope` would derive `recoverable: false` if this code ever
-  // reached it. ⚠️ Moot in practice today, and said so rather than assumed:
-  // `KNOWN_VALIDATE_AND_ENCRYPT_CODES`' own docblock records that none of this
-  // route's three consumers reads the `code` channel at all — all three throw
-  // `err.error`'s prose sentence — so this entry buys "typed, and has copy",
-  // the same thing every other row on that roster buys. The field is still
-  // authored honestly rather than left to whatever `actions` happened to
-  // default to.
+  // reached it. ⭐ 212-08: the route's TWO browser consumers (`StrategyForm`,
+  // `AllocatorExchangeManager`) now read the `code` channel through
+  // `recogniseValidateAndEncryptCode`, so this entry IS rendered there, with no
+  // Retry control (neither form passes `onRetry`). The field is authored
+  // honestly rather than left to whatever `actions` happened to default to.
   //
   // ⭐ 167.1.2 REVIEW WR-04 — A SECOND EMITTER, AND THE FIRST CLIENT THAT READS
   // THE CODE. `strategies/create-with-key`'s venue-identity race arm answers
@@ -5540,6 +5541,73 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
   ]);
 
 /**
+ * 164.2-05 / WIZFORM-02 — a BARE upstream 4xx status, classified.
+ *
+ * ⭐ 212-04 (SC3): this map lived in `keys/validate-and-encrypt/route.ts` until
+ * Phase 212. It moved HERE because a Next `route.ts` may not export
+ * non-handler symbols, and because two more routes need the same answer:
+ * `classifyKeyValidationError` (below) consults the 401/403 rows for
+ * `create-with-key`, `composite/add-key` and `keys/[id]/rotate-secret`, and the
+ * validate-and-encrypt route imports the whole map for its 4xx-forward arm. All
+ * of them now agree on what a bare 401/403 means. The prose below was written
+ * for the route; "this route" and "the 4xx-forward arm" in it name that route.
+ *
+ * ── THE MEASUREMENT ─────────────────────────────────────────────────────────
+ *
+ * PRODUCTION, 2026-08-25: this route answered a key-connect attempt with
+ *
+ *     {"error":"Unauthorized","code":"UNKNOWN"}
+ *
+ * The Railway analytics service rejected OUR service key and answered a bare
+ * 401 — no seam envelope, so `AnalyticsUpstreamError.seamCode` was `null` and
+ * the 4xx-forward arm's `err.seamCode ?? "UNKNOWN"` had nothing left to read.
+ * WIZFORM-02's criterion is *"no wizard failure renders UNKNOWN when the server
+ * DID classify it"*, and a 401 IS a classification. It was discarded one line
+ * before it could be used, because the only channel that arm consulted was the
+ * envelope's.
+ *
+ * ⛔ NO ROSTER ROW CAN CLOSE THIS. Every roster, alias table and coverage law
+ * in this repo operates on a code that already exists; here the wire literally
+ * carried the string `"UNKNOWN"`. The status is the only classification present
+ * on the path, so the status is what has to be read.
+ *
+ * ── WHY 401/403 IS OURS ─────────────────────────────────────────────────────
+ *
+ * The credential on THIS hop is the analytics service key held in our own
+ * environment (PYAPI-06). The user's exchange credentials are the request BODY,
+ * never the authorization. So a 401 or 403 here means our own service rejected
+ * our own key — a configuration fault on our side, which is exactly what
+ * `SEAM_MISCONFIGURED`'s copy already says (*"We could not send this request —
+ * our own configuration is wrong"*). Reading it as "your key was rejected"
+ * would be a fresh false attribution, the class this phase exists to close.
+ *
+ * 422 is the service's own shape refusal → `VALIDATION_FAILED`, whose copy was
+ * deliberately authored to name NO producer so it serves both that 422 and our
+ * own 400. 429 is a throttle on that hop → `RATE_LIMITED`.
+ *
+ * ⛔ 400 IS DELIBERATELY ABSENT. A bare 400 from the validator is a verdict
+ * about the USER's key whose specific sentence we did not receive, and
+ * `VALIDATION_FAILED`'s copy (*"The fault is in our software, not in your key
+ * or your data"*) would be FALSE for it. An unmapped 4xx is genuinely
+ * unclassified and still answers `UNKNOWN` — that residue is honest, not a hole
+ * to be filled by widening this table.
+ *
+ * ⛔ EVERY VALUE MUST BE A KEY OF `SEAM_CODE_TO_WIZARD_CODE`. The client's
+ * `recogniseSeamErrorCode` answers `UNKNOWN` for anything outside that table,
+ * so a row minting a code it does not carry would buy nothing at the surface
+ * while reading like a fix here. `wizardErrors.invariant.test.ts` asserts it.
+ */
+export const UPSTREAM_STATUS_TO_SEAM_CODE: ReadonlyMap<number, string> = new Map<
+  number,
+  string
+>([
+  [401, "SEAM_MISCONFIGURED"],
+  [403, "SEAM_MISCONFIGURED"],
+  [422, "VALIDATION_FAILED"],
+  [429, "RATE_LIMITED"],
+]);
+
+/**
  * Classify a caught key-validation exception into a stable wizard error code +
  * HTTP status. SINGLE source of truth for the wizard's key-entry routes
  * (`create-with-key` and `composite/add-key`, which fed byte-identical inline
@@ -5668,6 +5736,50 @@ export function classifyKeyValidationError(error: unknown): {
     if (wizardCode !== "UNKNOWN") return { code: wizardCode, status: 502 };
   }
 
+  // ⭐ Phase 212-04 / SC3 — A BARE 401/403, READ AFTER THE TWO CODE CHANNELS AND
+  // BEFORE THE MESSAGE IS SNIFFED. Production, 2026-08-25: our own analytics
+  // service key was stale, the service answered a bare 401 with no seam
+  // envelope, so `seamCode` was null and the cascade below landed on the
+  // terminal UNKNOWN for `create-with-key`, `composite/add-key` and
+  // `keys/[id]/rotate-secret` alike, while `validate-and-encrypt` alone had
+  // closed it with `UPSTREAM_STATUS_TO_SEAM_CODE`. The credential on this hop is
+  // OUR service key (the user's exchange key is the request BODY), so a 401 or
+  // 403 is our configuration fault, `SEAM_MISCONFIGURED`.
+  //
+  // GUARDED BY `typeof seamCode !== "string"`: a 401 that DID carry a seam code
+  // keeps the verdict table first, and an unknown string code still falls to the
+  // cascade exactly as before. RESTRICTED TO 401/403 on purpose (RESEARCH
+  // Pitfall 4): the map's 422 and 429 rows would change today's
+  // `KEY_INVALID_SIGNATURE` and `KEY_RATE_LIMIT` answers on these routes.
+  //
+  // `status` is an own property read with `typeof`, never `instanceof`, for the
+  // same mock-survival reason as `seamCode`. Status 500 matches the existing
+  // `SEAM_MISCONFIGURED` verdict rows (`EGRESS_PROXY_MISCONFIGURED`,
+  // `SERVICE_KEY_UNCONFIGURED`, `KEK_UNAVAILABLE`); the upstream 401 is NOT
+  // echoed to the browser.
+  //
+  // ⭐ 212 review WR-04 / SFH M2 — RESTRICTED TO THE UPSTREAM-HOP ERROR TYPE, by
+  // its `name` and not by `instanceof` (same mock-survival reason as above). A
+  // `status` own property is not proof of the hop: any other thrown `Error`
+  // (an auth-library error, a PostgREST wrapper) or a plain object with
+  // `status: 401` would otherwise be reported as OUR stale service key. The
+  // real class sets `this.name = "AnalyticsUpstreamError"`, and so do the route
+  // test doubles; `keys/[id]/rotate-secret` never constructs that class, so it
+  // stamps the same `name` on the plain `Error` it builds for this hop.
+  if (
+    typeof seamCode !== "string" &&
+    error instanceof Error &&
+    error.name === "AnalyticsUpstreamError"
+  ) {
+    const upstreamStatus = (error as { status?: unknown }).status;
+    if (upstreamStatus === 401 || upstreamStatus === 403) {
+      const mapped = UPSTREAM_STATUS_TO_SEAM_CODE.get(upstreamStatus);
+      if (mapped !== undefined) {
+        return { code: recogniseSeamErrorCode(mapped), status: 500 };
+      }
+    }
+  }
+
   // `String(error)` keeps the classifier TOTAL: `throw {…}` / `throw undefined`
   // are legal JS, and a second throw from inside a catch block would surface as
   // an unhandled 500 rather than a classified response. Both fall through to
@@ -5779,10 +5891,9 @@ export function classifyKeyValidationError(error: unknown): {
  * qualifies at all three of its wire codes (`MT5_GATEWAY_UNCONFIGURED`,
  * `ADAPTER_INIT_FAILED`, `INTERNAL`) (⛔ CORRECTED 2026-10-07, Phase 164.6.6.3.2:
  * three of `MT5_GATEWAY_UNCONFIGURED`'s emitters moved to
- * `KEY_MT5_VALIDATION_UNCONFIGURED`, which is a member below in its own right); `SEAM_MISCONFIGURED` never reaches this
- * check on the key routes (its wire codes are translated at the step, and the
- * classifier hands the route the wizard code directly), so it is deliberately
- * absent rather than forgotten — add it the day a key route can answer it.
+ * `KEY_MT5_VALIDATION_UNCONFIGURED`, which is a member below in its own right); `SEAM_MISCONFIGURED` was ABSENT here
+ * until the 212 review (WR-04) added it, the day a key route could answer it
+ * (see the 212-04 paragraph below).
  *
  * ⚠️ ONE SET, BOTH ROUTES. `create-with-key` and `composite/add-key` are
  * byte-identical twins at this arm, and fixing one path of that pair is this
@@ -5793,6 +5904,23 @@ export function classifyKeyValidationError(error: unknown): {
  * routes on this set — `keys/[id]/rotate-secret` joined `create-with-key` and
  * `composite/add-key`, so "both key routes" / "BOTH ROUTES" above read as
  * "every key route". The sentences are kept as lineage.
+ *
+ * ⭐ 212-04 / SC3 — A KEY ROUTE CAN NOW ANSWER `SEAM_MISCONFIGURED` FOR A BARE
+ * 401/403 (our own analytics service key refused, no seam code;
+ * `classifyKeyValidationError`'s status branch). 212-04 first left
+ * `SEAM_MISCONFIGURED` OUT of this set (CONTEXT decision, 212) on the premise
+ * that the Python middleware's `_capture_secret_misconfig` still captures it at
+ * the source. ⛔ CORRECTED by the 212 review (WR-04): that premise holds only for
+ * the SERVICE-KEY hop (`create-with-key`, `composite/add-key`). On
+ * `keys/[id]/rotate-secret` the hop is the INTERNAL token, whose mismatch
+ * (`_verify_internal_token`, `routers/internal.py`) raises a bare 403 with no
+ * log line and no capture, so a stale `INTERNAL_API_TOKEN` stopped paging
+ * anywhere once its verdict left the paged terminal `UNKNOWN`. The code is
+ * therefore a member below. The cost is recorded, not hidden: it also pages the
+ * three forwarded `SEAM_MISCONFIGURED` verdict rows (`KEK_UNAVAILABLE`,
+ * `SERVICE_KEY_UNCONFIGURED`, `EGRESS_PROXY_MISCONFIGURED`), all of which are
+ * our operator configuration, and on the service-key hop the Python capture and
+ * this one are two events for one fault (noise kept, as for the MT5 members).
  */
 export const OUR_DEFECT_KEY_ERROR_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
@@ -5822,6 +5950,10 @@ export const OUR_DEFECT_KEY_ERROR_CODES: ReadonlySet<WizardErrorCode> =
     // for the third time. The card tells the user "we have been alerted"; this
     // membership is what makes the route-side half of that true.
     "KEY_MT5_VALIDATION_UNCONFIGURED",
+    // 212 review WR-04. Our own service key or internal token refused, or an
+    // operator-configuration fault forwarded from Python. See the docblock above
+    // for why this is a member and what it widens.
+    "SEAM_MISCONFIGURED",
   ]);
 
 /**
@@ -6200,43 +6332,41 @@ export { DASHBOARD_DIALOG_ROUTE_CODES };
  *
  * ── WHY IT IS HERE AND NOT AT A CONSUMER ────────────────────────────────────
  *
- * Three components POST to that route (`ApiKeyManager`, `StrategyForm`,
- * `AllocatorExchangeManager` — measured by grep over `src/`, 2026-08-24), so a
- * roster living inside any one of them would be a fourth hand-typed registry
- * that the other two silently disagree with. Same call 161-10 made for
+ * TWO browser components POST to that route (`StrategyForm`,
+ * `AllocatorExchangeManager` — re-measured by grep over `src/`, 2026-11-14;
+ * `ApiKeyManager` stopped calling it in Phase 200, and a third consumer is
+ * never invented to make the count match an older docblock), so a roster
+ * living inside either one would be a hand-typed registry that the other
+ * silently disagrees with. Same call 161-10 made for
  * `DASHBOARD_DIALOG_ROUTE_CODES` directly above: one shared table, in the module
  * that already owns the union and the copy, so the coverage law reads ONE
- * declaration rather than re-parsing three component files.
+ * declaration rather than re-parsing component files.
  *
- * ── ⚠️ WHAT THIS ROSTER DOES AND DOES NOT PROVE — READ THIS BEFORE TRUSTING IT
+ * ── ⭐ WHAT THIS ROSTER PROVES (212-08 / SC3 REPLACED THE OLDER READING) ─────
  *
- * The wizard-step rosters (`KNOWN_CREATE_WITH_KEY_CODES` and friends) are read
- * at runtime by the step that renders the error, so "the roster admits it"
- * really does mean "a client can render it". THIS ROSTER IS WEAKER, and saying
- * so is the point of this paragraph.
+ * Until Phase 212 this table was weaker than the wizard-step rosters: neither
+ * consumer read the route's `code`, both threw or rendered the `err.error`
+ * prose, and "rostered" meant only "typed, and has copy". Phase 212 wired BOTH
+ * consumers onto the code channel through `recogniseValidateAndEncryptCode`
+ * (below) and `buildEnvelope`, the way 161-10 wired the dashboard dialogs. So
+ * "the roster admits it" now means "a client renders it", and
+ * `wizardErrors.roster-render.test.tsx` drives that surface as its fifth row
+ * set and asserts both consumers still read `code`.
  *
- * MEASURED at HEAD, 2026-08-24: **none of the three consumers reads this
- * route's `code` field at all.** All three read `err.error` — the prose
- * sentence — and throw or render that. So there is no runtime reader to bind
- * this roster to, and a docblock claiming "a client can render it" would be
- * exactly the kind of false sentence this phase exists to delete.
- *
- * What the 4th `ROUTES` row in `wizardErrors.invariant.test.ts` DOES enforce
- * with this table, and it is not nothing:
+ * What the 4th `ROUTES` row in `wizardErrors.invariant.test.ts` enforces with
+ * this table:
  *
  *   1. every code the route emits is a `WizardErrorCode` (or is translated into
  *      one by `SEAM_CODE_TO_WIZARD_CODE`), so `WIZARD_ERROR_COPY` has a real
- *      entry for it and the first consumer to read the code channel gets copy
+ *      entry for it and a consumer reading the code channel gets copy
  *      rather than the UNKNOWN card;
  *   2. every member listed here has that copy entry;
  *   3. the route's emitter count cannot drift silently — which is how
  *      `STALE_CLIENT` shipped here in Phase 160 with nothing watching it.
  *
- * What it does NOT enforce: that anything renders it today. ⛔ THE FOLLOW-ON IS
- * NAMED DEBT, not an implied fix: wiring those three consumers onto the code
- * channel (the way 161-10 wired the three dashboard dialogs) is what would make
- * this roster's first half real. Until then, treat "rostered" as "typed and
- * has copy", never as "the user will see it".
+ * ⚠️ The forms pass no `surface` or `venue` context and no `onRetry`, so a
+ * surface-gated bullet is suppressed and a Retry control never renders there;
+ * the per-code truth audit of what each form shows is in `212-08-SUMMARY.md`.
  *
  * ── MEMBERSHIP, and the two codes deliberately ABSENT ───────────────────────
  *
@@ -6274,6 +6404,14 @@ export { DASHBOARD_DIALOG_ROUTE_CODES };
  * against the >=500 forwarded-code inventory would be exactly the fabrication
  * this docblock warns against elsewhere. Re-run the 161-08 W1 inventory before
  * trusting either number again.
+ *
+ * ⭐ 212-04 / SC3 — `KEY_RATE_LIMIT` STAYS OFF THIS ROSTER, and that sentence
+ * remains true of the roster. What changed is the READER:
+ * `recogniseValidateAndEncryptCode` (below) answers `KEY_RATE_LIMIT` for a
+ * `RATE_LIMITED` wire code at any status other than 429 (the venue throttled
+ * us, forwarded as a 424), taking the code from the typed
+ * `VENUE_WIRE_CODE_TO_VERDICT` row, never from this set. At 429 (our own
+ * limiter) it answers `RATE_LIMITED`.
  */
 export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
@@ -6310,11 +6448,10 @@ export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
     // arm now answers `RATE_LIMITED`, which already carried the true sentence
     // (*"the cap is ours, not your exchange's"*): wiring, not authoring.
     //
-    // ⚠️ WHAT THIS ROW BUYS, ON THIS ROSTER, IS NOT WHAT IT BUYS ON A WIZARD
-    // STEP'S. Read the ⚠️ paragraph at the head of this table first: none of
-    // this route's three consumers reads the `code` field, so this row means
-    // "typed, and has copy", never "a client renders it". On
-    // `KNOWN_SET_MEMBERS_CODES` the same code IS a copy guard, and on
+    // ⚠️ WHAT THIS ROW BUYS DIFFERS PER ROSTER. Read the ⭐ paragraph at the
+    // head of this table first: since 212-08 this route's TWO consumers read
+    // the `code` field, so on this roster the row means "a client renders it".
+    // On `KNOWN_SET_MEMBERS_CODES` the same code IS a copy guard, and on
     // `KNOWN_ADD_KEY_CODES` a coupling guard — three rosters, three different
     // answers, measured per route in `wizardErrors.invariant.test.ts`.
     //
@@ -6330,10 +6467,9 @@ export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
     // 164.5.3-02 — THE EIGHTH MEMBER. The venue-identity 23505 branch on the
     // persist-INSERT arm (see the union member's own docblock for why this
     // mints rather than reusing `VENUE_ALREADY_CONNECTED`). Read against this
-    // roster's own coverage law: the route's three consumers still read only
-    // `err.error`, never `code` (unchanged by this addition), so this row buys
-    // "typed, and has copy" exactly like every other row here — not "a client
-    // renders it".
+    // roster's own coverage law: the route's two consumers read `code` through
+    // `recogniseValidateAndEncryptCode` (212-08), so this row, like every other
+    // row here, is rendered by the dashboard forms.
     "KEY_VENUE_ALREADY_CONNECTED",
     "UNKNOWN",
   ]);
@@ -6364,6 +6500,104 @@ export function recogniseDashboardDialogCode(
   return roster.has(wireCode as WizardErrorCode)
     ? (wireCode as WizardErrorCode)
     : "UNKNOWN";
+}
+
+/**
+ * ⭐ 212-04 / SC3 — translate a `keys/validate-and-encrypt` 4xx body into a
+ * `WizardErrorCode`, STATUS-AWARE. The one recogniser for that route's code
+ * channel; plan 212-08's two dashboard forms are its callers.
+ *
+ * ── WHY THE STATUS DECIDES ──────────────────────────────────────────────────
+ *
+ * The wire string `RATE_LIMITED` has TWO producers that mean opposite things:
+ *
+ *   · 429 — OUR OWN app limiter (`analytics-service/main.py`, or this route's
+ *     own `userActionLimiter` deny arm). The cap is ours, so the answer is
+ *     `RATE_LIMITED`, whose copy says so.
+ *   · any other status (the validate path forwards the venue's throttle as a
+ *     424) — the VENUE throttled us. `RATE_LIMITED`'s copy would be FALSE for
+ *     it (it would blame our cap), so it answers `KEY_RATE_LIMIT`, read from the
+ *     typed `VENUE_WIRE_CODE_TO_VERDICT` row rather than retyped here.
+ *
+ * ── ORDER, AND WHY NOTHING IS CAST UNPROVEN ─────────────────────────────────
+ *
+ *   (a) read the wire code (`seamErrorCode` handles the nested `service_error`
+ *       shape; a flat string `code` is the fallback);
+ *   (b) `RATE_LIMITED` at a non-429 status → the venue-throttle verdict;
+ *   (c) the alias table via `recogniseSeamErrorCode`, when it knows the code;
+ *   (d) membership in `KNOWN_VALIDATE_AND_ENCRYPT_CODES`, and only THEN the one
+ *       guarded cast (same discipline as `recogniseDashboardDialogCode`);
+ *   (e) otherwise `{ UNKNOWN, recognised: false }`.
+ *
+ * `recognised: false` lets the caller keep the route's own curated `error`
+ * sentence as the cause instead of rendering the generic UNKNOWN copy. A wire
+ * string is attacker-influenceable, so `__proto__`, `constructor`, the empty
+ * string and every non-string answer `recognised: false` (all lookups are
+ * `Map.get` / `Set.has`, never property reads on a plain object).
+ *
+ * Mints no `WizardErrorCode` and changes no roster membership.
+ */
+export function recogniseValidateAndEncryptCode(
+  body: unknown,
+  status: number,
+): { code: WizardErrorCode; recognised: boolean } {
+  const unrecognised = { code: "UNKNOWN" as const, recognised: false };
+  const nested = seamErrorCode(body);
+  const flat =
+    typeof body === "object" && body !== null
+      ? (body as { code?: unknown }).code
+      : undefined;
+  const wire = nested ?? (typeof flat === "string" ? flat : null);
+  if (wire === null || wire.length === 0) return unrecognised;
+
+  if (wire === "RATE_LIMITED" && status !== 429) {
+    const venueThrottle = VENUE_WIRE_CODE_TO_VERDICT.get("RATE_LIMITED");
+    if (venueThrottle !== undefined) {
+      return { code: venueThrottle.code, recognised: true };
+    }
+  }
+
+  const aliased = recogniseSeamErrorCode(wire);
+  if (aliased !== "UNKNOWN") return { code: aliased, recognised: true };
+
+  // ⭐ 212 review WR-03 — THE 4xx CALLER-FAULT VERDICTS, read from the typed
+  // `VENUE_WIRE_CODE_TO_VERDICT` table rather than retyped. A wrong key or
+  // secret (`AUTH_FAILED`) and the scope refusals (`MISSING_SCOPE`,
+  // `PERMISSION_DENIED`, `WITHDRAW_SCOPE`, `TRADE_SCOPE`) are the most common
+  // refusals on both forms, and each has a specific remedy the user can act on.
+  // Without this arm they resolved UNKNOWN and rendered "Try the last action
+  // again." beside a fixable cause.
+  //
+  // THE FILTER IS `status === 400`, deliberately: it is the table's own marker
+  // for a caller fault, and it keeps every other row out. The 424 venue
+  // transients (`MT5_TERMINAL_BUSY`, `SIGN_IN_FAILED`, ...) and every 5xx row
+  // stay unrecognised here, so the WIZERR-06 W1 hazard (a remedy authored for a
+  // 4xx shown on a 5xx) and un-audited copy on these surfaces stay closed.
+  // Placed AFTER the alias table so `RATE_LIMITED` at 429 keeps answering our
+  // own limiter's code.
+  //
+  // The wire string may be the venue wire code (`AUTH_FAILED`, a 424 forward) or
+  // the wizard code the route's own classifier answered for a bare 400 that
+  // carried no seam code (`KEY_AUTH_FAILED`); both resolve to the one verdict.
+  if (status >= 400 && status < 500) {
+    const verdict = VENUE_WIRE_CODE_TO_VERDICT.get(wire);
+    if (verdict !== undefined && verdict.status === 400) {
+      return { code: verdict.code, recognised: true };
+    }
+    for (const row of VENUE_WIRE_CODE_TO_VERDICT.values()) {
+      if (row.status === 400 && row.code === wire) {
+        return { code: row.code, recognised: true };
+      }
+    }
+  }
+
+  // The wire string "UNKNOWN" is rostered but is the route saying it did NOT
+  // classify; reporting it `recognised` would suppress the caller's curated
+  // fallback, so it answers `recognised: false` like every other unproven code.
+  if (wire !== "UNKNOWN" && KNOWN_VALIDATE_AND_ENCRYPT_CODES.has(wire as WizardErrorCode)) {
+    return { code: wire as WizardErrorCode, recognised: true };
+  }
+  return unrecognised;
 }
 
 /**

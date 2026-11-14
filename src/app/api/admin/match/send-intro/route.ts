@@ -624,7 +624,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           contact_request_id: row.contact_request_id,
           match_decision_id: row?.match_decision_id ?? null,
           note_applied: !wasAlreadySent,
-          audit_warning: "Intro committed but the audit record could not be written. Contact support.",
+          audit_warning: "Intro committed but the audit record could not be written. Add the audit entry by hand; do not re-send.",
         },
         { status: 207, headers: NO_STORE_HEADERS },
       );

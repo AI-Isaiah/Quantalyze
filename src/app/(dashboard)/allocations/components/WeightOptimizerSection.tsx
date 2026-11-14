@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { formatPercent } from "@/lib/utils";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 import { LiveRegion } from "@/components/ui/LiveRegion";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
@@ -116,7 +118,7 @@ const FAILURE_COPY: Record<OptimizerFailure, { heading: string; body: string }> 
   },
   unreadable: {
     heading: "Couldn't read the optimizer's answer",
-    body: "The optimizer answered with something this page could not read, so we can't tell whether it ran. Nothing was written to your draft. Run it again, and contact support if it repeats.",
+    body: "The optimizer answered with something this page could not read, so we can't tell whether it ran. Nothing was written to your draft. Run it again, and use the contact form if it repeats.",
   },
 };
 
@@ -238,7 +240,13 @@ export function WeightOptimizerSection({ strategies, onApply }: WeightOptimizerS
           <LiveRegion message={FAILURE_COPY[failure].heading} assertive />
           <EmptyStateCard
             heading={FAILURE_COPY[failure].heading}
-            body={FAILURE_COPY[failure].body}
+            body={
+              <ContactPointerText
+                text={FAILURE_COPY[failure].body}
+                href={contactHref({ topic: "support" })}
+                newTab
+              />
+            }
           />
         </div>
       )}

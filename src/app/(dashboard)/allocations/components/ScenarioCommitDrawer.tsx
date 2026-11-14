@@ -38,6 +38,8 @@ import type {
   BridgeRecommendedDiff,
 } from "./ScenarioComposer";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 
 // M-0095 / M-0094: a STABLE, position-independent identity for a diff row. The
 // drawer's per-row inputs (rejection_reason / percent_allocated / note) feed the
@@ -368,8 +370,8 @@ export function ScenarioCommitDrawer({
       // submitted (off-by-one / double-count bug); there is nothing
       // "missing" to record, so the user needs support to investigate.
       const remediation = overRecorded
-        ? "Contact support — the server reported committing more decisions than were submitted, which needs investigation."
-        : "Review the Outcomes timeline and record any missing decisions there, or contact support.";
+        ? "Use the contact form — the server reported committing more decisions than were submitted, which needs investigation."
+        : "Review the Outcomes timeline and record any missing decisions there, or use the contact form.";
       return (
         `Server reported ${recorded} of ${diffs.length} recorded (${direction} — single-transaction contract violated). ` +
         "Do NOT retry from this drawer — retrying would compound the discrepancy. " +
@@ -888,7 +890,13 @@ export function ScenarioCommitDrawer({
                 }
                 className="mt-6 rounded-md border border-negative bg-[rgba(220,38,38,0.05)] p-3 text-sm text-negative focus:outline-none focus:ring-2 focus:ring-negative/50"
               >
-                {topLevelError}
+                {/* New tab: an open drawer holds unsaved state. Messages without
+                    the pointer phrase pass through unchanged. */}
+                <ContactPointerText
+                  text={topLevelError}
+                  href={contactHref({ topic: "support" })}
+                  newTab
+                />
               </div>
             )}
             {removed.length > 0 && (
