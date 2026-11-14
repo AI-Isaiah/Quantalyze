@@ -17,9 +17,9 @@
 --
 -- Arms (LISTED and EXECUTED in this order; the order is LOAD-BEARING because each twin's
 -- FIRST `TEST FAILED (N)` must name its own arm, so an arm can only depend on arms listed
--- before it). Seventeen arms: plan 03 of this phase created the file with SITE-A, plan 05
+-- before it). Eighteen arms: plan 03 of this phase created the file with SITE-A, plan 05
 -- appended the rest, review WR-01 added DPC-SKIP, and Phase 214 plan 04 added
--- FINALIZE-WIZARD-SHAPE.
+-- FINALIZE-WIZARD-SHAPE and CSV-FINALIZE-SHAPE.
 --   SITE-A  the resync-tail collision (Phase 191 D-02): the optimistic look-up finds an
 --           in-flight derive_broker_dailies job that carries a ledger-refresh marker, and
 --           a caller sending exactly what the process_key_long tail sends (a
@@ -41,6 +41,8 @@
 --   KIND-CSV  a compute_analytics_from_csv job's marker is retracted.
 --   FINALIZE-WIZARD-SHAPE  the finalize-wizard stitch enqueue's exact payload (a `source` and
 --           the request's correlation_id) retracts a composite marker it dedups onto.
+--   CSV-FINALIZE-SHAPE  the csv-finalize analytics enqueue's exact payload (a `source`, `fmt` and
+--           the request's correlation_id) retracts a ledger-refresh marker it dedups onto.
 --   MARKED-CALLER  a caller that itself sends a refresh marker retracts nothing; the marker
 --           stays and the event is recorded with no retracted_marker.
 --   NO-CORRELATION  the finalize-wizard shape (a source, no correlation_id) retracts nothing
@@ -528,6 +530,47 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (FINALIZE-WIZARD-SHAPE): the event row says the retracted marker was % (expected ledger-refresh-composite)', v_marker;
   END IF;
 
+  -- ===== ARM CSV-FINALIZE-SHAPE - the csv-finalize route's exact payload retracts an inherited marker ====
+  -- Phase 214 SC-8: since Phase 214 the csv-finalize route sends its request's correlation_id
+  -- beside its `source`, so a user-initiated analytics request that dedups onto a job a recurring
+  -- refresh queued retracts the inherited marker in SQL. The payload below is that
+  -- route's exact p_metadata, and the SQL under test is unchanged by Phase 214.
+  -- RED-UNDER: add a carve-out to the helper's retraction predicate that refuses a caller whose
+  --            `source` is csv-finalize (a line `AND (p_metadata ->> 'source') IS DISTINCT FROM
+  --            'csv-finalize'` after the correlation_id conjunct). The enqueue still dedups and
+  --            records, but this route's request is served by the refresh job with its
+  --            keep-the-figures marker intact.
+  -- RED-UNDER-M: {"arm":"CSV-FINALIZE-SHAPE","apply":[{"kind":"edit","file":"supabase/migrations/20261114130000_enqueue_dedup_record_retract.sql","find":"     AND (p_metadata ->> 'correlation_id') IS NOT NULL\n","replace":"     AND (p_metadata ->> 'correlation_id') IS NOT NULL\n     AND (p_metadata ->> 'source') IS DISTINCT FROM 'csv-finalize'\n","occurrences":1}]}
+  v_sent := jsonb_build_object('source', 'csv-finalize', 'fmt', 'daily_returns', 'correlation_id', 'c-csv-shape');
+  v_strat := pg_temp.dd_seed('compute_analytics_from_csv', 'pending',
+               jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', v_enq_at));
+  v_seed := pg_temp.dd_job(v_strat, 'compute_analytics_from_csv');
+
+  SELECT o_ret, o_state, o_msg INTO v_ret, v_state, v_msg
+    FROM pg_temp.dd_call(v_strat, 'compute_analytics_from_csv', v_sent);
+
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (CSV-FINALIZE-SHAPE): the enqueue raised SQLSTATE % (message: %)', v_state, v_msg;
+  END IF;
+  IF v_ret IS DISTINCT FROM v_seed THEN
+    RAISE EXCEPTION 'TEST FAILED (CSV-FINALIZE-SHAPE): the enqueue returned % but the in-flight job is %', v_ret, v_seed;
+  END IF;
+  v_m := (SELECT metadata FROM public.compute_jobs WHERE id = v_seed);
+  IF v_m ? 'source' THEN
+    RAISE EXCEPTION 'TEST FAILED (CSV-FINALIZE-SHAPE): the refresh marker is still on the job after the csv-finalize payload deduped onto it (metadata %)', v_m;
+  END IF;
+  IF v_m ->> 'refresh_marker_retracted' IS DISTINCT FROM 'ledger-refresh' THEN
+    RAISE EXCEPTION 'TEST FAILED (CSV-FINALIZE-SHAPE): refresh_marker_retracted is not ledger-refresh (metadata %)', v_m;
+  END IF;
+  SELECT count(*) INTO v_n FROM public.compute_job_dedup_events WHERE job_id = v_seed;
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (CSV-FINALIZE-SHAPE): % compute_job_dedup_events rows name the job (expected exactly 1)', v_n;
+  END IF;
+  SELECT retracted_marker INTO v_marker FROM public.compute_job_dedup_events WHERE job_id = v_seed;
+  IF v_marker IS DISTINCT FROM 'ledger-refresh' THEN
+    RAISE EXCEPTION 'TEST FAILED (CSV-FINALIZE-SHAPE): the event row says the retracted marker was % (expected ledger-refresh)', v_marker;
+  END IF;
+
   -- ===== ARM MARKED-CALLER - a caller that carries a marker retracts nothing =====
   -- D11-2: a recurring refresh that dedups onto another refresh job is the same kind of work,
   -- so the existing job keeps its marker. The caller sends source=ledger-refresh itself.
@@ -940,7 +983,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (BODY-PIN): the helper contains % UPDATE statement(s), expected none: it must reuse the retraction function, never write compute_jobs itself', v_n;
   END IF;
 
-  RAISE NOTICE 'ALL 17 ARMS EXECUTED (SITE-A, SITE-B, NO-MERGE, KIND-COMPOSITE, KIND-CSV, FINALIZE-WIZARD-SHAPE, MARKED-CALLER, NO-CORRELATION, NON-MARKER-KIND, PARENTED, DPC-SKIP, EMPTY-META, OVERSIZE, FRESH-INSERT, ACL-HELPER, TABLE, BODY-PIN): both return sites retract and record, a dedup merges nothing into the job row, the three marker-capable kinds retract, the finalize-wizard payload retracts, a marked caller, a caller with no correlation id and a non-marker kind do not, a parented enqueue, a dedup onto a done_pending_children row and NULL, empty or non-object metadata record nothing, an oversize payload is recorded as its size without failing the enqueue, a fresh insert records nothing, the helper and the side table are locked down to service_role, and both overloads carry both call sites while the helper reuses the marker UPDATE.';
+  RAISE NOTICE 'ALL 18 ARMS EXECUTED (SITE-A, SITE-B, NO-MERGE, KIND-COMPOSITE, KIND-CSV, FINALIZE-WIZARD-SHAPE, CSV-FINALIZE-SHAPE, MARKED-CALLER, NO-CORRELATION, NON-MARKER-KIND, PARENTED, DPC-SKIP, EMPTY-META, OVERSIZE, FRESH-INSERT, ACL-HELPER, TABLE, BODY-PIN): both return sites retract and record, a dedup merges nothing into the job row, the three marker-capable kinds retract, the finalize-wizard and csv-finalize payloads retract, a marked caller, a caller with no correlation id and a non-marker kind do not, a parented enqueue, a dedup onto a done_pending_children row and NULL, empty or non-object metadata record nothing, an oversize payload is recorded as its size without failing the enqueue, a fresh insert records nothing, the helper and the side table are locked down to service_role, and both overloads carry both call sites while the helper reuses the marker UPDATE.';
 END $$;
 
 ROLLBACK;

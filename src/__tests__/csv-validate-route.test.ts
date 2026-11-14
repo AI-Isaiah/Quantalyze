@@ -1559,6 +1559,18 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
       p_kind: "compute_analytics_from_csv",
       p_metadata: { source: "csv-finalize", fmt: "daily_returns" },
     });
+    // Phase 214 SC-8: the enqueue carries the SAME correlation id the response
+    // envelope returns, so the SQL dedup helper retracts an inherited
+    // ledger-refresh marker for this user-initiated request. EXACT equality
+    // (the toMatchObject above is partial): dropping the key must turn this RED.
+    const body = await res.json();
+    expect(typeof body.correlation_id).toBe("string");
+    expect(body.correlation_id.length).toBeGreaterThan(0);
+    expect((args as { p_metadata: unknown }).p_metadata).toEqual({
+      source: "csv-finalize",
+      fmt: "daily_returns",
+      correlation_id: body.correlation_id,
+    });
   });
 
   // Phase 106 Stage B: the flag-off no-enqueue cases (former Tests 10 / 10b)
