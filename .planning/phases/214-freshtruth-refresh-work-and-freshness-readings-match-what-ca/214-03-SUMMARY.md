@@ -26,13 +26,13 @@ key-decisions:
   - "Re-pointing the 34 existing twins moved into the Task 1 commit instead of Task 2, so no commit leaves a twin mutating dead text"
   - "The fan-out gate's apply list gained the csv kind registration migration, because the new fixtures insert compute_analytics_from_csv jobs"
 metrics:
-  duration: "about 1 hour 30 minutes (estimate: no start time was captured; the four commits span 18:40 to the header fix, which covers only the end of the run)"
+  duration: "about 1 hour 30 minutes (estimate: no start time was captured; the commit timestamps only cover the last part of the run)"
   completed: 2026-11-14
 status: complete
 actuals:
   tokens: 48000
   tasks: 3
-  commits: 4
+  commits: 5
 plan_head_before: 67b043b60969a3b41ec4eed1a2af59ebd6b417c1
 plan_head_after: 342e63598dd8290ce2a9babbdab5f9b38018be5a
 ---
