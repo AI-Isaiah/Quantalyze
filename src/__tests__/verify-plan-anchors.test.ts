@@ -749,7 +749,7 @@ describe("WR-06 — a deliberately deferred plan can leave the pending set HONES
     // v1.20 closed 2026-11-06 and its phase directories moved to
     // `.planning/milestones/v1.20-phases/`, so plan 07 is no longer in the
     // pending scan at all. The routing is what must survive the archive: the
-    // marker, the TODOS entry and Phase 159's corrected blocked items are read
+    // marker and Phase 159's corrected blocked items are read
     // from where they now live.
 
     const marker = readFileSync(
@@ -767,12 +767,11 @@ describe("WR-06 — a deliberately deferred plan can leave the pending set HONES
       "the deferral marker must carry the MEASUREMENT that forced it, not just an assertion",
     ).toContain("69 fail");
 
-    const todos = readFileSync(join(REPO_ROOT, "TODOS.md"), "utf8");
-    expect(
-      todos,
-      "TODOS.md is the single backlog ground truth in this repo. A deferral recorded only in a " +
-        "phase directory is routed to nothing once the phase is archived.",
-    ).toContain("[VAC-07-DEFER]");
+    // The TODOS.md leg of this check was retired 2026-11-14 (TODOS sweep 2). Its entry,
+    // `[VAC-07-DEFER]`, closed 2026-09-12 once its owning phase, 164.5, discharged both of
+    // its obligations, and closed entries are deleted from TODOS.md, so there is no live
+    // backlog row left to route to. The dated marker above and Phase 159's corrected
+    // blocked items below are the archived routing, and both are still asserted.
 
     // And the falsified recipe must be gone from Phase 159's blocked items.
     const v159 = readFileSync(

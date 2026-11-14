@@ -75,6 +75,13 @@ about the CLI link and the marker.
   Booked as `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`, routed to **Phase 164.9 TESTISOLATION**.
   **Interim remedy: REVERT THE MERGE.** ⛔ Never edit `supabase-migrate.yml` to get a deploy out;
   that is the failure mode the entry exists to prevent.
+  ⛔ **CORRECTED 2026-11-14 (TODOS sweep 2) — `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` is CLOSED;
+  the two sentences above are kept as lineage.** Phase 164.9 TESTISOLATION closed it with
+  `scripts/lint-migration-data-dependence.mjs`, which refuses a new data-reading `DO`-block guard at
+  author time with no opt-out marker. The 83 already-applied guards are carried by
+  `[164.9-DATA-DEPENDENT-GUARD-CENSUS]`. The `TODOS.md` entry is ticked and kept only because that
+  open entry inherits from it. Reverting the merge stays the remedy if such a refusal ever reaches
+  `apply-test` anyway.
   ⚠️ Since PR #767 (Phase 164.8.1 REFDATA, merged AFTER the restore above) a FUTURE restore
   replays allowlisted migration-seeded reference data, so "every public table comes back empty"
   describes the 2026-09-08 restore and will not describe the next one. Re-read the allowlist
@@ -151,6 +158,11 @@ about the CLI link and the marker.
   run against the PR's schema instead of being red until merge. Nothing else about (b)
   changed. Gates that probe SHARED TEST's applied-ness — VAC-08 in `test-db-drift` among
   them — still see the migration only after apply-on-merge.
+  ⛔ **CORRECTED 2026-11-14 (TODOS sweep 2) — `[164.8-PUSH-RACE-VAC08]` is CLOSED and its two
+  `TODOS.md` copies are deleted; the paragraphs above are kept as lineage.** Half (a) is gone: no
+  `ci.yml` job holds key `61616158` (2026-09-26). Half (b) is the accepted by-construction
+  consequence of apply-on-merge described above: it can red a PR, never turn a real drift green, and
+  nothing owns further work on it. Do not cite the id as an open owner.
 - ⭐ **D-F, 2026-09-23 (Phase 164.4.2 DECISION F, founder) — the local-stack lane REPLAYS
   migrations newer than its dump.** `scripts/local-stack/run.sh up` (the lane behind
   `sql-tests`, `frontend-local-stack` and `frontend-live-db-lane`) loads
@@ -196,6 +208,12 @@ no gate until this correction. `TODOS.md` now carries a real `FANOUT-GLOBAL-01` 
 name was KEPT, not retired** — it is cited by name here, in the `### Phase 164.9` `ROADMAP.md`
 entry, and in at least two other `TODOS.md` entries as a family label, and retiring it would
 orphan those citations for no gain.
+⛔ **CORRECTED 2026-11-14 (TODOS sweep 2) — the `FANOUT-GLOBAL-01` entry is CLOSED and deleted from
+`TODOS.md`; the paragraph above is kept as lineage.** Its owner, Phase 164.9 TESTISOLATION, shipped,
+and all five family members it named are closed. Since Phase 164.9.4 the `sql-tests`, `python` and
+`e2e-seeded` jobs run on lanes private to their runner. The rule itself does not need a `TODOS.md`
+entry and stays here: on shared TEST, assert about YOUR OWN rows. Use the id as a family label only,
+never as an open owner.
 
 ## Test Coverage
 
@@ -489,6 +507,27 @@ asserts it. Never run `npm version` (it rewrites the lockfile and can normalise 
 global workflow file — `/gsd-update` overwrites `~/.claude/gsd-core/workflows/ship.md` and has
 already eaten one edit to it. The durable backstop is a repo-owned gate that fails a PR touching
 non-planning paths without moving `VERSION`; until that exists, this section is the rule.
+
+## TODOS.md holds open work only (founder decision 2026-11-14)
+
+Two TODOS sweeps (PR #1259 and the 2026-11-14 sweep 2) deleted more than 400 entries. Most of them were
+either LOW or Info review survivors, which this repo never fixes, or entries a phase had closed in
+code while the entry stayed. Two rules stop both from coming back:
+
+- **(a) LOW and Info review survivors are NOT booked in `TODOS.md`.** Record them in the phase's own
+  `REVIEW.md` and nowhere else. This matches the review rule: only MEDIUM and above gets fixed or
+  routed. A LOW or Info line in `TODOS.md` is noise that the next sweep has to delete.
+- **(b) Every phase ship deletes the `TODOS.md` entries it closed, in the same PR, and names them in
+  the CHANGELOG entry.** Ticking `[x]` or adding a "CLOSED" paragraph is not enough. MEASURED
+  2026-11-14: `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` was closed by Phase 164.9, which its own
+  CHANGELOG entry says, but the entry stayed `[ ]` and this file kept calling it routed. The same
+  happened to `FANOUT-GLOBAL-01` and `[164.8-PUSH-RACE-VAC08]`. If this file, a runbook or a test
+  cites an id the ship closes, fix that pointer in the same PR (a dated ⛔ CORRECTED note in this
+  file, or a reader that no longer needs the entry).
+
+⛔ A test or script that reads `TODOS.md` to keep an entry alive is the wrong shape. Pin the
+invariant itself, the way `analytics-service/tests/test_mt5_relogin.py`'s trades-scrub pin now
+asserts the history wait and the flag directly.
 
 ## CI gate integrity — two traps that both cost this repo a session (measured 2026-09-17)
 

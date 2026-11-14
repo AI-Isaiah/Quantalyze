@@ -494,12 +494,13 @@ _ESCALATION_RESERVE_CROSSINGS: Final[int] = SCRUB_RELAUNCH_RESERVE_CROSSINGS
 #: jobs terminal afterwards. That is safe because both callers of
 #: `read_mt5_deal_ledger` (the derive and the backfill) wait for a fresh login's
 #: history to settle (`services/mt5_read.py`, D-04), so a fresh cache no longer
-#: hands back a partial deal history (RESEARCH Finding C). The flip is owned by
-#: `TODOS.md` `MT5-JOB-TERMINAL-TRADES-SCRUB-01`, and its pin
-#: (`test_SCRUB_the_job_path_keeps_trades_until_MT5_JOB_TERMINAL_TRADES_SCRUB_01`)
-#: reads that entry live, so the constant and the ledger line move together. The
+#: hands back a partial deal history (RESEARCH Finding C). The flip was owned by
+#: `TODOS.md` `MT5-JOB-TERMINAL-TRADES-SCRUB-01`, closed 2026-11-14 once it was
+#: done. Its pin
+#: (`test_SCRUB_the_job_path_deletes_trades_now_that_the_history_wait_is_on_main`)
+#: asserts the wait (`_settle_deal_history`) exists and this constant is 1. The
 #: validation terminal's scrub already passes 1. ⛔ Never set it back to 0 while
-#: the wait is on `main`: the pin goes RED on the ledger line.
+#: the wait is on `main`: the pin goes RED.
 _JOB_TERMINAL_DELETE_TRADES: Final[int] = 1
 
 #: The heal's clock. ⛔ A module attribute, not a bare `time.monotonic` call, only
