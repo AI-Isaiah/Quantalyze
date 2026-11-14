@@ -403,3 +403,23 @@ maintainer's note there says #4908 owns the root resolver. The guard line
 are present at the `v1.20.1` tag, so parallel agents now overwrite only the single fallback slot. A
 short recurrence comment for #6010 is drafted and waits for founder approval.
 
+---
+
+## Moved from TODOS.md (2026-11-14)
+
+Formerly TODOS FIX NOW `### Phase 153.3 (WIZFORM-GW) — recorded residuals`. Upstream tooling, not repo work; not re-checked against the current gsd-tools release.
+
+- **GSD `gsd-sdk query state.*` verbs take NAMED flags, not positional args — the executor
+  prompt documents positional.** Found 2026-08-09 during plan 153.3-05's state update.
+  `state.record-session "" "<stopped-at>" "None"` silently records only `Last Date` and drops the
+  stopped-at; `state.record-metric` and `state.add-decision` return `{"error": …}` on positional
+  argv. Correct forms: `--stopped-at/--resume-file`, `--phase/--plan/--duration/--tasks/--files`,
+  `--summary`. ⚠️ Also: **every** SDK write to `.planning/STATE.md` REGRESSES the frontmatter
+  `last_activity` to a stale value (observed: `2026-08-09 -- Phase 153.3 wave 4 complete` →
+  `2026-08-07 -- Phase 152 execution started`, three times in a row). Repaired in place each time.
+  Same defect family as the `### Decisions` heading drift already annotated in `STATE.md`.
+  ⚠️ `state.record-metric` is also NOT idempotent — running it twice appends a duplicate row.
+- **`phase.add` does not append the new phase to `.planning/state.json` `phases[]`.** Measured
+  2026-11-14 booking Phases 212-215: four runs changed only `next.label`, `next.reason` and
+  `updated_at` (and overwrote the hand-written `next.label` prose). The entries were added by hand.
+  Not yet filed.

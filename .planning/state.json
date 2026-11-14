@@ -47,12 +47,32 @@
       "number": "211",
       "name": "SYNCJOBS",
       "status": "pending"
+    },
+    {
+      "number": "212",
+      "name": "WIZTRUTH",
+      "status": "pending"
+    },
+    {
+      "number": "213",
+      "name": "KEYFLOW",
+      "status": "pending"
+    },
+    {
+      "number": "214",
+      "name": "FRESHTRUTH",
+      "status": "pending"
+    },
+    {
+      "number": "215",
+      "name": "TESTREACH",
+      "status": "pending"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (phases 208, 210 and 211 in progress; 155.1 waits for the 2026-11-16 gateway spike)",
-    "reason": "Phases 155, 207 and 209 complete; 3 of 9"
+    "label": "Advance to the next step (phases 208, 210 and 211 in progress; 212-215 booked 2026-11-14; 155.1 waits for the 2026-11-16 gateway spike)",
+    "reason": "Phases 155, 207 and 209 complete; 3 of 13"
   },
-  "updated_at": "2026-11-14T07:30:26.000Z"
+  "updated_at": "2026-11-14T08:30:24.293Z"
 }

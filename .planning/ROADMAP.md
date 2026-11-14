@@ -141,6 +141,10 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases (completed 2026-11-14)
 - [ ] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases
 - [ ] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases
+- [ ] **Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work** - Wizard and key-screen truth; independent of the MT5 phases
+- [ ] **Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out** - Key and draft flow, four founder decisions; independent of the MT5 phases
+- [ ] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases
+- [ ] **Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production** - CI-only test reach; independent of the MT5 phases
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
 
@@ -253,6 +257,10 @@ Plans:
 | 209. SCRUBLEAKS | 5/5 | Complete | 2026-11-14 |
 | 210. PUBLICTRUTH | 0/? | Not started | - |
 | 211. SYNCJOBS | 0/? | Not started | - |
+| 212. WIZTRUTH | 0/? | Not started | - |
+| 213. KEYFLOW | 0/? | Not started | - |
+| 214. FRESHTRUTH | 0/? | Not started | - |
+| 215. TESTREACH | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.18)
 
@@ -327,7 +335,7 @@ Plans:
 
 ### Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth
 
-**Goal:** Three user-facing lies are fixed: the alert digest email's "View in dashboard" link lands where alerts are shown, the browse page tells a failed read apart from an empty one, and share-link failures are logged and tell the user what happened. Closes TODOS `195-ALERT-DIGEST-LINK-TARGET`, `195-BROWSE-EMPTY-VS-ERROR`, `170.6.1-SFH2-SHARE-FAILURES-UNLOGGED` and the R2 ShareableLink dialog-copy entries. Booked by the founder 2026-11-13 ("Quick UI fixes") from the TODOS prune, PR #1259.
+**Goal:** Three user-facing lies are fixed: the alert digest email's "View in dashboard" link lands where alerts are shown, the browse page tells a failed read apart from an empty one, and share-link failures are logged and tell the user what happened. Closes TODOS `195-ALERT-DIGEST-LINK-TARGET`, `195-BROWSE-EMPTY-VS-ERROR`, `170.6.1-SFH2-SHARE-FAILURES-UNLOGGED`, the R2 ShareableLink dialog-copy entries and `SHARE-HOST-01` (added 2026-11-14 from the FIX NOW triage). Booked by the founder 2026-11-13 ("Quick UI fixes") from the TODOS prune, PR #1259.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
 **Plans:** 0 plans
@@ -336,6 +344,7 @@ Plans:
 2. `getPopulatedCategorySlugs` distinguishes error from empty, and browse renders each state distinctly.
 3. Every `ShareableLink.tsx` catch logs, a 401/403 says what it is, and the manual-copy fallback shows the URL.
 4. Each fix carries a test that goes RED when it is reverted.
+5. Both share routes (`strategies/[id]/share`, `allocator/scenario/share`) build the URL from the CSRF-validated request origin ahead of `NEXT_PUBLIC_APP_URL`; a test minting on a non-production host gets that host back. (added 2026-11-14, `SHARE-HOST-01`)
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 208 to break down)
@@ -389,6 +398,86 @@ Plans:
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 211 to break down)
+
+### Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work
+
+**Goal:** Every refusal the wizard and the key screens show names the cause that was actually established, and every remedy it offers can succeed. The composite arm of `SyncPreviewStep` branches on the real verdict instead of hardcoding `GATE_SERIES_PROVENANCE_UNVERIFIED`. `MT5_GATEWAY_MISCONFIGURED_DETAIL` (`mt5_probe.py`), the "cause unknown" fallback, stops asserting arm 2's "Disable automatic trading through the external Python API" option. The three `keys/validate-and-encrypt` consumers (`ApiKeyManager`, `StrategyForm`, `AllocatorExchangeManager`) render from `code`, not prose. An MT5 connect that meets a running derive either waits it out or says it is busy (`_MT5_LEASE_WAIT_S` is 20 s against a 40 s derive read plus a 10 s restart, `mt5_concurrency.py`). An orphaned MT5 key is refused before the 120 s validate where its identity is known first. Closes TODOS `0.07` (`D-161-07-A`), `0.09`, `D-161-05-B`, Phase 153.5 finding #10, the WIZFORM-02 §D entry, `WIZFORM-02-VE-CODECHANNEL`, `164.2-WIZARD-BARE401` and `CONTACT-SUPPORT-POINTERS-01`. Booked by the founder 2026-11-14 from the FIX NOW triage.
+**Requirements**: TBD
+**Depends on:** Nothing. Independent of the v1.18 MT5 phases and of the other FIX NOW phases.
+**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+1. A composite gated `sampled_gapped` or `fill_derived_unproven` renders `GATE_SERIES_EXAMINED_REFUSED`, not the provenance sentence.
+2. `MT5_GATEWAY_MISCONFIGURED_DETAIL` names no cause, and the founder approves its copy (the `161-UI-SPEC.md` arm 3 contract moves with it).
+3. The three validate-and-encrypt consumers render from `code`, and a bare upstream 401/403 with no seam envelope answers a named code.
+4. An MT5 connect during a running derive waits long enough, or says it is busy and when to retry. The wait is sized from measured hold times, not guessed.
+5. An orphaned MT5 key is refused without waiting out validation wherever its identity is known before validation.
+6. Every remaining "contact support" pointer names a real next step.
+7. No migration.
+8. Each fix has a test that goes RED when it is reverted.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 212 to break down)
+
+### Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out
+
+**Goal:** A wizard draft is never resumed onto a different key without the user seeing it, and every key state the product can reach has a control that gets the user out. Four founder decisions, taken 2026-11-14 through AskUserQuestion:
+- (a) **Refuse when unknown.** Today `sessionKeyMatches` (`src/lib/wizard/localStorage.ts`) returns true for an incoming `null`. That `null` means two things: the CSV branch, which provably has no key, and the API branch, where `initialDraft` was nulled (a read fault, or a draft from the other branch) and no preselect exists. In the second case the stored key-A `wizardSessionId` is restored. The create-with-key F6 fence then returns key A's strategy and `api_key_id` for a key-B submit, without comparing keys and without a `deduped` flag. The decision: an unknown incoming key meeting a stored key does not resume the draft, and create-with-key returns a `deduped` flag. This supersedes founder-locked Phase 164.2.1 decisions D-01 (the 4th positional parameter contract) and D-02 (that boundary) as far as the unknown case goes. The CSV branch's literal `null` stays load-bearing.
+- (b) **Add Disconnect.** An orphaned key (no strategy, no draft) has no release surface: `ApiKeyManager` mounts only on a strategy's edit page, Profile → Exchanges is allocator-only, and `cleanup_abandoned_wizard_drafts()` never picks a draftless key up again. The decision: a Disconnect control (disconnect, never delete) on the manager's "No strategy yet" row, with the `KEY_ORPHANED` copy pointing at it.
+- (c) **Block it.** `run_stitch_composite_job` has no `mt5` arm, so an MT5 composite member permanently fails its job. Yet `composite/add-key` accepts `mt5`, and the wizard offers an MT5 composite card under `MT5_UI_ENABLED` (`MultiKeyConnectStep`). The decision: MT5 cannot be a composite member. The card is removed and `composite/add-key` refuses `mt5` with a named code.
+- (d) **Hold and show pending.** A drawer-added leg has no asset class until its `/returns` probe settles, so the scenario composer's blend basis flips √365 → √252 mid-render, and vol, Sharpe and Sortino change with no user action. The decision: basis-dependent metrics show as pending until every leg's asset class resolves.
+
+Closes TODOS `164.2.1-INCOMING-NULL-CONFLATION`, `0.08` (`D-161-05-A`), the Phase 153.6 "MT5 as a composite member" OUT line, and `0e` (`159-BASIS-FLIP`). Booked by the founder 2026-11-14 from the FIX NOW triage.
+**Requirements**: TBD
+**Depends on:** Nothing. Independent of the v1.18 MT5 phases and of the other FIX NOW phases.
+**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+1. When the incoming key cannot be determined and a stored draft carries a key, the wizard does not resume that draft; create-with-key's response carries a `deduped` flag whenever it returns an existing draft. (decision a)
+2. A manager can disconnect an orphaned key from its "No strategy yet" row; the key row is kept (disconnected, never deleted), and the `KEY_ORPHANED` copy names that control. (decision b)
+3. The wizard offers no MT5 composite card, and `composite/add-key` refuses `mt5` with a named code. (decision c)
+4. The scenario composer shows basis-dependent metrics as pending until every leg's asset class has resolved, and never shows a number computed on the interim basis. (decision d)
+5. No migration is expected; if one turns out to be needed, migration-reviewer and rls-policy-auditor must both be clean before merge.
+6. Each fix has a test that goes RED when it is reverted.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 213 to break down)
+
+### Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change
+
+**Goal:** Refresh work goes only where data can actually advance, and every freshness reading tells the truth about why a series has stopped. One live MT5 strategy has had its series stuck at 36 days while its key syncs daily and its derive finishes `publish_warned` every day. The fan-out re-derives it daily for nothing. The two Deribit composites read stale in `ledger_refresh_staleness`, although every member window ended by 2026-04-30. Founder decision 2026-11-14 (0.3, "Yes, closed records"): they read as closed records, not stale, and the composite fan-out stays unscheduled. The freshness chip's `TRACK RECORD · FUTURE — CHECK DATA` label overflows its masthead column at 1485px (297.9px in 204.2px). Closes TODOS `0.1`, `0.12` and `0.3`. Booked by the founder 2026-11-14 from the FIX NOW triage.
+**Requirements**: TBD
+**Depends on:** Nothing. Independent of the v1.18 MT5 phases and of the other FIX NOW phases.
+**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+1. The 36-day MT5 case is diagnosed and its cause is recorded.
+2. The fan-out excludes or caps a strategy whose derive leaves `last_return_date` unmoved, and counts each skip with a reason.
+3. A composite whose member windows have all closed reads as closed in `ledger_refresh_staleness`, not stale; the composite fan-out stays unscheduled.
+4. After deploy, a PROD read through the Supabase MCP (marker query first) shows the stale count drained, or names each remaining row and why.
+5. The freshness chip's "future" label fits at 1485px, measured in a real browser.
+6. It touches migrations, so migration-reviewer and rls-policy-auditor are both clean before merge.
+7. Each fix has a test that goes RED when it is reverted.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 214 to break down)
+
+### Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production
+
+**Goal:** CI-only phase: no product behaviour changes. Every test guarding money math or an error contract runs in some environment, and test apps are built the way production builds them. Today the `HAS_PY_ENV` money-math KPI parity cases never run. Pytest cases gated on `TEST_SUPABASE_DB_URL` skip in the `python` job, which exports `LANE_DB_URL`. The binance cassettes are missing. Test modules mount a bare `FastAPI()` that never sees the app-global 422/429 handlers. The worker raises `HTTPException`, which can never render. The two key-step code rosters are hand-typed. Closes TODOS "Tests that run in NO environment", the bare-`FastAPI()` entry, "Worker raises an HTTP exception", `ROSTER-DERIVE-01`, `D-161-01`, the 403-vs-422 split and the teaser-bucket saturation alert. Booked by the founder 2026-11-14 from the FIX NOW triage.
+**Requirements**: TBD
+**Depends on:** Nothing. Independent of the v1.18 MT5 phases and of the other FIX NOW phases.
+**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+1. The `HAS_PY_ENV` parity tests run in CI, or are removed with a recorded reason.
+2. Tests gated on `TEST_SUPABASE_DB_URL` run on `LANE_DB_URL`, or each is listed with why it cannot.
+3. A shared app-factory fixture replaces every bare `FastAPI()` in the test suite.
+4. The worker raises a domain exception that `classify_exception` maps, never `HTTPException`.
+5. `KNOWN_CREATE_WITH_KEY_CODES` and `KNOWN_ADD_KEY_CODES` are derived from each route's contract, still per route (not merged).
+6. The binance cassettes are recorded or retired.
+7. The `first_rule.upper()` CSV code family is visible to the derived vocabulary (`D-161-01`), the 403-vs-422 split in `_scope_rejected` is decided and pinned, and the anonymous teaser bucket's saturation raises an alert.
+8. No migration.
+9. Each fix has a test that goes RED when it is reverted.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 215 to break down)
 
 ---
 

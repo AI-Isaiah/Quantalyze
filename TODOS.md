@@ -49,52 +49,25 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    host — the localhost fallback at `:121` is load-bearing for local dev.
    ⛔ NOT affected: token derivation, revocation, or the 410 lane. The link WORKS; it is the host
    that is wrong. Full loop verified green in `164-VERIFICATION.md` human item 4.
+   **Owner:** Phase 208 UIQUICK (booked 2026-11-14)
 
-0.01. **📋 PHASE 164.1 SCOPE — single source. Collected 2026-08-25; the phase does NOT exist yet.**
-   Create with `/gsd-phase --insert 164` (decimal phases land AFTER their integer, so 164.1 sits
-   between 164 and 165). Build the CONTEXT from THIS list rather than re-deriving it.
-   ⚠️ Ordering is load-bearing: 164.1 must come AFTER 164, because DEC-1 retires guards over
-   `scenarios`/`scenario_shares` and 164 (SHARE) is the phase that touches them. Retiring first
-   would remove the guard immediately before the work it guards.
+0.011. **`[D-161-01]` The `first_rule.upper()` CSV code family is invisible to the derived vocabulary.**
+   Phase 161's deferred error-surface item (`.planning/milestones/v1.20-phases/161-wizerr-honest-error-surfaces/deferred-items.md`),
+   re-measured live 2026-11-14 at `analytics-service/services/csv_adapter.py` (the `first_rule.upper()` site).
+   Re-homed from the deleted 0.01 "Phase 164.1 scope" wrapper.
+   **Owner:** Phase 215 TESTREACH (booked 2026-11-14)
 
-   **A. Founder decisions already taken (from 161.1's DEC block):**
-   - **DEC-1** — retire frozen-spine gates 1+2, KEEP gate 3.
-     Acceptance: gate 3 must still FAIL when the `scenarios`/`scenario_shares` RLS honesty tests
-     are edited (neuter → observe RED → restore byte-identically), else retiring 1+2 has silently
-     taken 3 with it.
-   - **DEC-3** — D13 composite twin closes here, BEFORE any composite go-live.
-   - **DEC-4** — the advisory lock, in its own phase, with a REAL concurrency test. It touches two
-     RPCs that run on every job transition for every strategy; a half-applied lock discipline reads
-     as protection while providing none.
-     ⭐ **TAKEN 2026-09-26 by Phase 164.5.2 BRIDGELOCK** — migration
-     `20260926120000_mark_compute_job_bridge_advisory_lock.sql` (both RPCs in one file) and the
-     LANE-ONLY two-backend gate `supabase/tests/test_mark_rpc_bridge_advisory_lock.sql`.
+0.012. **`[D-161-05-B]` An orphaned MT5 connect waits out the full 120 s validate before refusing.**
+   Phase 161's deferred error-surface item. Re-measured live 2026-11-14: the orphan verdict is
+   reached only after validation in `src/app/api/strategies/create-with-key/route.ts`. Where the
+   key's identity is known before validation, the refusal should come first.
+   Re-homed from the deleted 0.01 "Phase 164.1 scope" wrapper.
+   **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
 
-   **B. Detection gap found during the 2026-08-25 prod outage:**
-   - **0.04 — PYAPI-06 cannot detect the outage it was built for.** The client omits `X-Service-Key`
-     when its value is falsy; the server treats an absent header as prober noise. The only caller
-     that can legitimately send an absent header is our own service with an empty key — exactly the
-     case discarded. Fix is BOTH halves (loud client-side refusal + a server signal that
-     distinguishes a guarded-route caller from a prober). See 0.04 for the full shape and the
-     explicit warning not to simply dedent the capture out of `if provided:`.
-
-   **C. Phase 161's deferred error-surface items** (`.planning/milestones/v1.20-phases/161-wizerr-honest-error-surfaces/deferred-items.md`):
-   - **D-161-01** — the `first_rule.upper()` CSV code family is invisible to the derived vocabulary
-   - **D-161-02** — `formatColumnInDataframeMessage` matches a shape this producer has never emitted
-   - **D-161-03** — the column-less message still renders "at row 0"
-   - **D-161-05-A** — no manager-facing surface can release an ORPHANED api_key
-     ⚠️ OVERLAPS Phase 162's HONEST-06 / D-162-3 (the use-existing-key server path). Check what 162
-     actually shipped BEFORE planning this, or the two phases will fight over the same file.
-   - **D-161-05-B** — an orphaned MT5 connect waits out the full 120 s validate before refusing
-   - **D-161-07-A** — the wizard COMPOSITE arm still renders the provenance sentence for an EXAMINED
-     verdict (also filed here as 0.07)
-   - **D-161-04 / D-161-07-B** — a contracts-registry full-suite timeout flake and a
-     `vercel-functions` validator false-positive. Tooling, not user-facing; include only if cheap.
-
-   **D. WIZFORM-02 — server-classified codes still render `code: UNKNOWN`. RECORDED OPEN**
-   (Phase 153 span verification FAILED 2026-08-13) and it GATES other work (see the entry near the
-   `GATED ON WIZFORM-02 CLOSING` marker — a new code cannot be minted until the coverage-law
-   population is honest).
+0.013. **WIZFORM-02 — server-classified codes still render `code: UNKNOWN` on the dashboard key surfaces. RECORDED OPEN**
+   (Phase 153 span verification FAILED 2026-08-13). It GATES other work (see the entry near the
+   `GATED ON WIZFORM-02 CLOSING` marker: a new code cannot be minted until the coverage-law
+   population is honest). Re-homed from the deleted 0.01 wrapper's §D.
    - ⭐ **FRESH EVIDENCE 2026-08-25, measured on PROD, not inherited:** `/api/keys/validate-and-encrypt`
      returned `{"error":"Unauthorized","code":"UNKNOWN"}` — a server-classified upstream fault
      reaching the client with NO code, exactly the defect. This is a live reproduction, so plan
@@ -120,133 +93,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      (`UPSTREAM_STATUS_TO_SEAM_CODE`: 401/403 → `SEAM_MISCONFIGURED`), so a *wizard step* now
      receives `SEAM_MISCONFIGURED` and the sweep proves `connect-key` renders it as itself. The
      unproven half is that the three DASHBOARD consumers show it — because they cannot.
-
-   **Context for Phase 164.2.1 (recorded here because it lands in this §D neighbourhood):**
-   - **The `RATE_LIMITED` class fix shipped (164.2 plan 05).** All four `userActionLimiter`
-     routes now answer `RATE_LIMITED`, and `grep -rl '"KEY_RATE_LIMIT"' src/app/api
-     --include=route.ts` returns **0 files** — those buckets are keyed `<route>:<uid>`, ours per
-     user, while `KEY_RATE_LIMIT`'s copy blamed the exchange and offered a remedy no exchange
-     account can perform. ⚠️ **Read `164.2-05-SUMMARY.md` before adding another roster row:** it
-     MEASURED that the three `RATE_LIMITED` roster rows do NOT buy the same thing —
-     `KNOWN_ADD_KEY_CODES` is a **COUPLING** guard (that arm translates first, so the row cannot
-     change what renders), `KNOWN_SET_MEMBERS_CODES` is a real **COPY** guard (removing the row
-     renders `data-error-code="UNKNOWN"`, observed), and `KNOWN_VALIDATE_AND_ENCRYPT_CODES` buys
-     "typed, and has copy" only. Same row, three different meanings.
-   - **`DRAFT_SESSION_COLLISION` was MINTED (164.2 plan 04), 409, and it is only the COPY half.**
-     The reuse arm's 23505 now splits: same API key → `DRAFT_ALREADY_EXISTS` byte-identical;
-     different key or a dark read → `DRAFT_SESSION_COLLISION`, whose cause names the wizard
-     SESSION (not the `(user_id, wizard_session_id, source)` column triple — `wizardErrors.test.ts`
-     bans an internal field name in user-visible copy). ⛔ **The FUNCTIONAL fix — minting a fresh
-     session id or re-resolving to the found draft — is Phase 164.2.1 SESSIONID-FENCE and is NOT
-     shipped.** 164.2 chose which TRUE sentence to show and still answers 409.
-     `PRESELECT_REQUEST_INVALID` (400) was minted in the same plan for the reuse arm's
-     request-shape refusal, and deliberately carries neither member of `RECOVERABLE_ACTIONS`.
-
-   **Not in scope:** 0.02 (OKX entity) — founder call, NOT PURSUED.
-
-0.02. **⏸️ NOT PURSUED — founder call 2026-08-25: "forget OKX entity".** A different OKX key connected successfully at 21:38:12Z, so the immediate need is met and the entity theory was never confirmed (the founder's OKX domain was never read back). Kept as a RECORD, not a task: the underlying limitation below is real and measured, so if a future user reports a key that cannot connect while another key on the same account can, start here rather than re-deriving it. Do NOT schedule work on it without a fresh confirmation.
-   ORIGINAL FILING: **OKX is hardcoded to ccxt's default (global) entity — a key issued on any other OKX
-   entity can NEVER connect, and the UI blames the user's credentials.** Surfaced 2026-08-25 when
-   a founder key issued AFTER an OKX re-KYC failed while an older key on the same account passed.
-   - `analytics-service/services/exchange.py:817-830` — `create_exchange` sets only `apiKey`,
-     `secret`, `password`, `enableRateLimit`. No hostname, region, or entity option is offered for
-     any venue, so OKX resolves to ccxt's default endpoint.
-   - OKX operates separate entities on separate API hosts. A key minted on entity B produces a
-     signature entity A cannot verify, which OKX reports as `50113 Invalid Sign` — indistinguishable
-     at the UI from a mistyped secret.
-   - **MEASURED, same deployment, minutes apart:** the stored pre-KYC key `QA OKX Read-key` probed
-     clean at 21:37:12 (`read:true, trade:false, withdraw:false, probe_error:false`), while the
-     post-KYC key returned `50113` at 21:30:12. Our signing path is NOT broken; the endpoint is
-     simply the wrong one for that key. ⚠️ CONFIRM the entity with the founder before building
-     anything — the correlation is strong but the OKX domain has not yet been read back.
-   - **Why this is worse than a missing feature:** the user is told "Authentication failed. Check
-     your API key and secret." They then re-issue keys, re-paste secrets, and doubt their own
-     account — which is exactly what happened tonight — for a venue we simply do not support the
-     entity of. There is no path by which a correct user action resolves it.
-   - **Fix shape (needs a founder decision — do not default it):**
-     (a) support an entity/host selector for OKX and persist it beside the key, or
-     (b) detect the entity mismatch and say so explicitly in the error copy.
-     (b) alone is honest but still leaves the user unable to connect; (a) alone without (b) leaves
-     the next mis-selected key equally mute. The pair is the complete fix.
-   - **HONEST-01 class (Phase 162):** a venue verdict our own configuration caused, rendered as a
-     statement about the user's credential. Same class as 0.03 and the `Unauthorized` case, and the
-     third instance found in one evening — the error-copy work in 162 should treat "whose fault is
-     this actually" as the organising question, not the individual strings.
-
-0.04. **⚠️ PYAPI-06 cannot detect the outage it was built to detect — the client's silent
-   header-omission and the server's noise filter compose into a blind spot.** Found while
-   root-causing 0.05, which PYAPI-06 sat through in total silence.
-   - `src/lib/analytics-client.ts:466` — `...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY })`
-     OMITS the header entirely when the key is falsy. No throw, no log, no startup failure: an
-     unconfigured platform secret silently degrades into an ANONYMOUS request.
-   - `analytics-service/main.py:802` — PYAPI-06 site 5 captures the mismatch only `if provided:`.
-
-   ⭐ **SHIPPED in Phase 164.1 (2026-09-06, PR #746, v0.77.14.0).** Both halves. TS:
-   `analytics-client.ts` refuses with `SeamConfigError` ABOVE the try when
-   `ANALYTICS_SERVICE_KEY` is unset, so a missing key can no longer be rewritten as an
-   upstream outage. Python: an ABSENT `X-Service-Key` returns 401 with
-   `detail.code = "SERVICE_KEY_ABSENT"` while a WRONG key keeps the opaque
-   `{"detail":"Unauthorized"}` — the two are finally distinguishable. The `if provided:`
-   block is byte-identical (34 insertions, 0 deletions), so the zero-event pin still holds.
-   COVERED GOING FORWARD by the `pyapi06` arm of `scripts/prod-prober/` on an hourly
-   schedule, with five defect kinds. ⭐ VERIFIED IN PRODUCTION, behaviourally rather than
-   by a green job row: after the deploy, an absent header returned
-   `{"detail":{"code":"SERVICE_KEY_ABSENT",...}}` and a wrong key returned
-   `{"detail":"Unauthorized"}`; the arm read GREEN on live run 34018874984.
-     An absent header is deliberately treated as "internet background noise" from a prober, and
-     that reasoning is CORRECT in isolation — an unauthenticated prober must not page anyone.
-   - **Composed, they cancel out.** The one caller that can legitimately send an absent header is
-     OUR OWN service with an empty key, and that is precisely the case the server discards. So the
-     complete-outage variant is the ONE variant with no signal, while the milder stale-value
-     variant (which at least still authenticates as *someone*) is loudly captured. The safeguard is
-     inverted with respect to severity.
-   - **MEASURED, not theorised:** five consecutive `POST /api/validate-key 401` in Railway logs
-     (2026-08-25 20:52 → 21:27) with ZERO `service_key.mismatch` lines. Meanwhile `/health` stayed
-     green, `/process-key` and `/internal/*` kept working (both exempt from the gate), and the 4xx
-     never tripped the 140.2 breaker. Every alarm the system has was, by design, looking elsewhere.
-   - **Blast radius while blind:** all exchange key-connects on every non-wizard surface, key-scope
-     verification, AND the scheduled `/api/match/cron-recompute` job — silently, for an unknown
-     duration. `api_keys` had been frozen at 32 rows since 2026-08-23.
-   - ⭐ **FIX (founder: goes in PHASE 164.1, the guards phase):**
-     1. Client — an empty `ANALYTICS_SERVICE_KEY` must FAIL LOUD at startup, not omit a header.
-        Mirror `mintTenantClaim`'s existing refusal discipline (`analytics-client.ts:415-422`
-        already argues exactly this for the tenant claim, and the same argument was never applied
-        one line down to the service key).
-     2. Server — distinguish "absent header from a caller that reached a guarded route" from a
-        prober, OR make the client's loud failure the guarantee that absence really is noise.
-        Do NOT simply dedent the capture out of `if provided:` — the comment there is right that
-        doing so buries the signal under internet scan traffic.
-     3. Acceptance is a RED-witnessed test, per project rule: set the key empty, assert the seam
-        REFUSES rather than sending an anonymous request. Neuter the guard, observe the failure
-        first-hand, restore byte-identically.
-   - **Also route to HONEST-01 (Phase 162):** a forwarded upstream `Unauthorized` rendered on a
-     credential form as user-facing copy. It reads as "your key was rejected" when the truth is
-     "our service auth is broken" — the founder reasonably concluded their own key was bad. Exactly
-     the class 162 exists to close, and a real instance of it costing real debugging time.
-
-0.06. **⚠️ The key-scope panel claims scopes it just said it could not read.** Found in a LIVE prod
-   QA pass (2026-08-25) while attempting the Phase-160 persist-arm smoke, not by a reviewer — the
-   panel rendered both halves of a contradiction on screen at once.
-   - `src/components/connect/KeyPermissionBadge.tsx`: the plain-English summary correctly branches
-     on `perms.probe_error` (`:218` → *"Could not contact the exchange to verify scopes."*), but the
-     three scope chips (`:251-253`, `Read`/`Trade`/`Withdraw`) and the footer caption (`:255-260`,
-     *"Detected {time} from the exchange."*) render **unconditionally** whenever `perms` is present.
-   - Observed on screen simultaneously: *"Could not contact the exchange to verify scopes"* AND
-     *"Read ✓ Trade ✓ Withdraw ✓ · Detected just now from the exchange."* Both cannot be true.
-   - ⛔ Worst arm: the chips asserted **Trade ✓ and Withdraw ✓** directly beneath the form's own copy
-     *"Only read-only keys are accepted. Keys with trading or withdrawal permissions will be
-     rejected."* A user who believes the chips concludes their read-only key carries withdraw rights.
-     A user who believes the copy concludes the app is broken. The panel cannot be trusted either way.
-   - **Fix shape:** when `probe_error` is set there is NO fresh probe result, so the chips and the
-     "Detected … from the exchange" caption must not render as fact. Show them as unknown or omit
-     them; the summary already carries the honest message. ⚠️ Do NOT fix by suppressing only the
-     caption — the chips are the load-bearing false claim.
-   - **Regression test must be witnessed RED:** render with `probe_error: true` plus non-null
-     read/trade/withdraw and assert no scope claim is presented as detected. Neuter the guard,
-     observe the failure first-hand, restore byte-identically.
-   - **Belongs to Phase 162 (HONEST).** This is the phase's exact class — a rendered claim the data
-     underneath contradicts — and it is the same shape as HONEST-02's freshness problem, one surface
-     over. If 162's plan does not already cover it, add it there rather than point-fixing here.
+   **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
 
 0.07. **⚠️ The composite arm tells a `sampled_gapped` series a false provenance sentence.** Found and
    deliberately left live by Phase 161 (`161-07`, D-161-07-A) — it fell outside that task's declared
@@ -261,26 +108,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    - **Fix shape:** branch the composite arm's code on the actual verdict instead of hardcoding one,
      mapping `sampled_gapped` to its own reason. One-line fix recorded in
      `.planning/milestones/v1.20-phases/161-wizerr-honest-error-surfaces/deferred-items.md`; the 142.2 pin moves with it.
-
-0.08. **⚠️ A manager cannot release their own orphaned API key — no surface exists.** Found
-   2026-08-24 during Phase 161 (WIZERR-03) execution, when the approved `161-UI-SPEC.md` remedy
-   bullet turned out to be **unwinnable at HEAD** and had to be replaced rather than shipped.
-   - The UI-SPEC said: *"Disconnect the unused key under Manage keys, then connect it here again."*
-     Measured: the string `"Manage keys"` occurs **nowhere** in `src`. `ApiKeyManager` is mounted
-     only on the per-strategy edit page (`strategies/[id]/edit/page.tsx`) — and an orphaned key by
-     definition has no strategy. Profile → Exchanges is `allocatorOnly`, and the wizard user in this
-     flow is a manager. `my-strategies` displays the orphan but its only control reopens the wizard
-     that just refused.
-   - So the honest refusal now shipping (`KEY_ORPHANED`) correctly tells the user their key is
-     stranded — **and there is no place in the product where they can un-strand it.** The orphan is
-     permanent: `cleanup_abandoned_wizard_drafts()` builds its candidate set only from drafts that
-     same run is deleting, so a key with no draft is never a candidate again (re-measured at HEAD).
-   - Shipping the original bullet would have breached the exact principle WIZERR-03 enforces — a
-     remedy that cannot succeed. Filed by the executor as D-161-05-A; recorded here because it is a
-     **product gap**, not a phase artifact.
-   - **Fix shape:** give managers a key-release surface reachable without a strategy (extend the
-     profile Exchanges panel past `allocatorOnly`, or add a control on `my-strategies`), then point
-     the `KEY_ORPHANED` remedy at it.
+   **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
 
 0.09. **⚠️ MT5 generic fallback names a cause it has NOT proven — a false sentence in the arm that
    exists for "cause unknown".** Found 2026-08-24 during Phase 161 (WIZERR-01) execution; the plan
@@ -302,153 +130,15 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      check, change the constant, and re-run `test_mt5_validate_parity.py` (the default-argument pin
      `str(Mt5GatewayMisconfigured()) == MT5_GATEWAY_MISCONFIGURED_DETAIL` binds it). Founder call on
      the wording, since the UI-SPEC copy contract is an approved artifact.
+   **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
 
-0. **⛔ MT5 ARCHITECTURE — the shared gateway cannot safely serve more than ONE user, and the
-   read-only guarantee can fail OPEN.** Found 2026-08-08 by the platform research that Phase 134
-   specified but never executed (`153-EVIDENCE-mt5-platform.md`, `153-EVIDENCE-mt5-latency.md`).
-   **Founder decision needed before any further MT5 build.**
-   - **Structural:** `mt5linux` 0.1.9 starts a single `ThreadedServer(SlaveService)`; every rpyc
-     connection `import MetaTrader5` resolves through that one process's `sys.modules`, so **all
-     callers share ONE C-extension holding ONE logged-in account**. `login()` on any connection
-     silently reassigns the account every other caller sees, and our `finally:` `close()` →
-     `mt5.shutdown()` (`routers/exchange.py:449-466`) tears down the IPC pipe *for concurrent
-     callers*, who then see `-10004`. rpyc namespaces isolate variable names, not C globals.
-     Our own `Mt5AccountMismatchError` bracket (`routers/exchange.py:364-368`, test named
-     `test_mt5_login_bracket_post_hijack`) **detects** this race — it cannot remove it.
-     MQL5 moderators are explicit: one account per terminal, a separate installation per account.
-   - **🔒 Security — read-only verification can FAIL OPEN.** `is_trade_capable`
-     (`services/mt5_validation.py:133-149`) concludes "investor/read-only" when BOTH signals are
-     negative (`trade_allowed` false AND `order_check` retcode ≠ 10009). But `trade_allowed` is
-     false for several documented reasons besides investor mode — including the terminal's
-     **default-ON** *"Disable automatic trading through the external Python API"*. Under that
-     default a **MASTER password passes our investor probe** and is stored stamped read-only.
-     We call `terminal_info()` **nowhere** (verified: zero hits in `analytics-service/`), so we
-     cannot distinguish the two. Also: `_TRADE_RETCODE_DONE = 10009` is `[ASSUMED]`, and the real
-     investor signal `10017 TRADE_RETCODE_TRADE_DISABLED` is never tested.
-   - **Login classification is inverted both ways** (`services/mt5_validation.py:37-56`, both
-     token tables `[ASSUMED]`): a wrong-but-known server returns `-6 AUTH_FAILED` → we blame the
-     user's password; an *unknown* server **times out** rather than erroring.
-   - **Data integrity:** MT5 history syncs asynchronously after login; first-call-empty is widely
-     reported, with an unresolved **Wine-specific** report of history never arriving. Our
-     `()` → `[]` "honest empty" rule turns that into a **confidently flat account**.
-   - **Why none of this was caught:** CI never installs `mt5linux` (`Dockerfile:29` installs it
-     into the image only); every contract test injects a `_connect` double
-     (`services/mt5_client.py:135-141`). The real transport has never run outside production.
-     Phase 134 designed `scripts/mt5_spike.py` to answer exactly these four unknowns — **the
-     harness was never built and `analytics-service/docs/mt5-spike-gonogo.md` still has 38
-     `human_needed` cells.** v1.15 shipped through a gate that was never opened.
-   - **RESOLVED 2026-08-08 — founder chose option (3), and the "once per day" fact makes it the
-     right answer on cost too.** See `docs/notes/mt5-scaling-cost-2026-08-08.md` (prices read
-     2026-08-08) — but note that report models **one terminal per account**, which is the wrong
-     model for us. MT5 accounts refresh **once per day**, and a daily sync is sequential, so ONE
-     terminal serves many accounts across a day (capacity ≈ daily window ÷ cycle time). Corrected
-     comparison:
-     | | one-terminal self-host (what we have) | MetaApi, duty-cycled nightly |
-     |---|---|---|
-     | 25 accounts | ~$20/mo **flat** | ~$124/mo |
-     | 100 accounts | ~$20/mo **flat** | ~$495/mo |
-     | per extra account | **≈ $0** | $4.95/mo |
-     The per-account marginal cost is ~zero until we exceed one terminal's daily throughput —
-     then we add a second container, not a subscription. ⚠️ Throughput is currently
-     **unquantified** because cycle time is uninstrumented; D-32 fixes that and is the input to
-     any future revisit.
-   - **Credential custody is the decisive non-price factor and it points the same way.** A managed
-     provider means a third party holds customers' broker investor passwords — a GDPR
-     sub-processor whose blast radius is every MT5 user at once. Quantalyze sells verified track
-     records to allocators; this surfaces in diligence. Self-hosting keeps it in our own store.
-   - ⚠️ Useful even though we are not buying: MetaApi bills **6 hours minimum per server start**,
-     so a wizard validation there would cost ~$0.144 a click — rate-limiting interactive
-     validation is sound design regardless of provider.
-   - ⛔ **API2Trade: do not use** for anything holding credentials — domain created 2026-04-13,
-     no Wayback history, ~5h of status-page history, yet claims "10,000+ Active Accounts", two
-     different legal entities named across the site, mail-forwarding address in the Imprint.
-   - **Revisit trigger** (not a task): if we ever need *interactive* MT5 at a rate that saturates
-     one terminal, or if a second replica is proposed (which breaks the one-session invariant —
-     D-33), re-open this with real cycle-time data in hand.
-   - ⚠️ **Interacts with Phase 153 WIZFORM-05:** the 30 s wall is *also* a real timeout inversion
-     (`initialize()` unbounded at its 60 s vendor default inside a 30 s rpyc bound — D-24), but
-     fixing the timeout on a one-account architecture buys a working single user, not a working
-     product. Decide the architecture before sizing the budget.
-
-0.4 **⛔ PHASE 153.6 — PARITY: the fixes that only landed on one path (✅ SHIPPED 2026-08-12 as PR #675, v0.58.0.0 — residual above).**
-   Raised by `/code-review xhigh` over the whole 153→153.5 span (40 agents, 29 verified findings
-   → 13 distinct defects). **Nine come here**; two were fixed unplanned in the same session; two
-   are deliberately out. Full charter in `.planning/ROADMAP.md` under *Phase 153.6*.
-   ⭐ **The shape is "the fix landed once, not twice."** Three of the four root causes are the
-   same failure — a correct remedy applied to one path while its duplicate went untouched, with
-   no guard asserting the two agree. Found *inside the span whose own charter said "fix it at
-   the SINK, not three times"*. Close each cluster by making the two paths **unable to diverge
-   again**, not with N patches.
-   | Cluster | What |
-   |---|---|
-   | **A** (3) | `services/ingestion/mt5.py` never got 153.3's `routers/exchange.py` fixes: the `order_check` short-circuit (without it `_WRONG_SERVER_TOKENS` turns an operator refusal into a 400 accusing the user's BROKER SERVER — the exact documented incident), the broad materialization catch (an unscrubbed rpyc raise is a credential-disclosure surface, T-134-01), and a bare `RuntimeError` documented PERMANENT that the worker actually **RETRIES** via `classify_exception`'s unknown fall-through |
-   | **B** (3) | broad `except`s re-absorbing `Mt5SessionAbandoned` upstream of D-42's classify arms: one mislabels a fence incident as a gateway fault that never happened; one 503s it into the **mt5-gateway breaker**; plus `restart()` check 2 raising inside `_timed`, emitting the stage event check 1 was placed outside `_timed` to avoid |
-   | **C** (1) | `connectAbortDeadlineMsFor` sized against the branch table's **closed**-breaker column when the governing one is **failing** (175 500 vs 165 000 ms serialized) → CR-01's "nothing was saved" lie is reachable again ~10.5 s before the route finishes writing. ⛔ **Two halves — the number AND the oracle**, which pins the wrong column and so cannot red on it |
-   | **D** (1) | 🔒 **SECURITY, LIVE ON PROD.** `REVOKE UPDATE ON api_keys` is bypassable by DELETE + re-INSERT (`authenticated` keeps INSERT/DELETE; the browser already holds the server-minted ciphertext), and that same client-writable `exchange` is the sole authority for skipping finalize-wizard's ASVS V4 scope probe. ⚠️ SELF-targeted control bypass, **not** a tenant leak. The migration is on `main` and `supabase/migrations/**` auto-applies to PROD. ⛔ Needs a design decision, not a patch |
-   | **E** (1) | a probe parse miss moved off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE`, removing Retry for a condition a rolling deploy produces. Here rather than ad-hoc because error codes ripple into 153.1's pinned tables (re-cut, never delete) |
-   📌 **OUT (decided):** MT5 as a **composite member** — 153.4's CR-03 fix made an MT5 composite
-   panel reachable for the first time and `run_stitch_composite_job` has no `mt5` arm, so it
-   permanently `_stamp_failed`s the job. That is a **product decision** (teach the worker MT5, or
-   block MT5 in the composite wizard), natural neighbour **Phase 155**. Also out: the epoch never
-   re-binds (`_assert_live` binds on first touch only, so one `Mt5Client` serves exactly one
-   lease) — no production path does this, all five lease blocks ast-verified, and 153.5 already
-   pinned the constraint naming its future fix (rebind on lease entry).
-
-0.5 **✅ PHASE 153.5 COMPLETE 2026-08-11 — the abandoned-`to_thread` class (three review findings, ONE defect).**
-   Raised by the `/code-review high` of Phase 153.3 (2026-08-09, 10 findings reported, 4 fixed
-   immediately). **CLOSED: 5/5 plans, verification passed 22/22 must-haves.** The fence is TWO
-   mechanisms (D-36 as amended) — a `terminal_key`-keyed epoch registry fencing method calls, and
-   a lease-occupancy `ContextVar` fencing construction, since a method-level fence cannot reach
-   finding #6 (the zombie sits inside `__init__`'s blocking connect with no method to guard).
-   Preconditioned on routing the three raw `async with _mt5_terminal_lock_for(...)` acquisitions
-   through the lease — **including finding #5's own path**, without which a bump in the lease
-   `finally` would have left the headline finding open with every test green.
-   ⚠️ **Two limits ACCEPTED, in code not just docs:** the fence cannot un-send an rpyc call already
-   dispatched on the wire (`sync_request_timeout` is client-side only), and a construction
-   *completing* between the `wait_for` firing and the bump still leaks one socket — narrowed, not
-   closed. ⚠️ Its follow-on review findings are booked as **Phase 153.6** (item 0.4 above).
-   Historical charter lives in `.planning/ROADMAP.md`
-   § *Phase 153.5*; context at
-   `.planning/phases/153.5-wizform-abandon-work-that-outlives-its-timeout/153.5-CONTEXT.md`.
-   This entry is the backlog mirror of that charter, not the reminder that it is unplanned.
-   **The one defect:** work handed to `asyncio.to_thread` **outlives its `asyncio.wait_for`**. The
-   `wait_for` raises, the caller unwinds and releases the terminal lease, and the abandoned thread
-   keeps driving the same process-global MT5 session. Three faces, all in the 153.3 diff:
-   📌 **Anchors are SYMBOLS, not line numbers** — the original 153.3-era citations rotted (#6 and
-   #7 were off by ~30 and ~130 lines; #5 still held). Line hints are `as of 2026-08-11` only:
-   **if a hint disagrees with its symbol, the symbol wins.**
-   | # | Site (symbol anchor; line hint as of 2026-08-11) | Symptom |
-   |---|---|---|
-   | 5 | `services/mt5_concurrency.py` › `_mt5_bounded_restart` — the `wait_for(to_thread(client.restart), timeout=_MT5_RESTART_TIMEOUT_S)` (~L118) | `_mt5_bounded_restart` abandons at 10s; the one permitted `mt5.shutdown()` can fire **after** the lease is released, under the next holder |
-   | 6 | `routers/exchange.py` › `_validate_mt5_key_probe` › nested `_connect_and_probe`, **STAGE 1 — connect** (~L513) (+ `services/ingestion/mt5.py` › `Mt5Adapter.validate`, the `wait_for(to_thread(_build_client))` inside the lease, ~L207) | connect-stage timeout orphans an `Mt5Client` the thread then constructs — `client` was never assigned, so the Pitfall-6 `finally` releases nothing and the rpyc session leaks |
-   | 7 | `routers/exchange.py` › `_validate_mt5_key_probe` — **THE ONE END-TO-END DEADLINE (D-03)**, `wait_for(_connect_and_probe(), timeout=_MT5_VALIDATE_DEADLINE_S)` (~L817) | the end-to-end deadline fires; the abandoned probe keeps issuing rpyc calls, so D-29's serialization does not hold on the timeout path |
-   ⭐ **Fix it at the SINK, once — not three times.** Patching three call sites is precisely the
-   instance-not-class mistake this milestone has paid for sixteen times, and #5/#6/#7 are the same
-   mechanism. Candidate designs (needs a real decision, do NOT let a fixer improvise):
-   a cancellation-aware wrapper; a generation/epoch counter the terminal checks before each call;
-   or refusing to release the lease until the worker thread confirms it has stopped.
-   ⚠️ **The AST lease-roster CANNOT see this** — its enclosure proof is *lexical*, so it reads the
-   `shutdown` as inside `async with` and passes while the runtime escapes. Any fix needs a
-   **runtime** assertion (observe the abandoned thread touching the session after release), not a
-   second static pin. Guard #16 of the phase lives here.
-   **Deferred to Phase 155 (needs the real latency data D-32 just made collectable — do NOT guess
-   these numbers):** finding #8, the 60s per-stage ceiling wraps SIX round-trips whose own ceilings
-   are 45 000ms IPC / 55s rpyc, so "innermost fires first" holds per round-trip but not per stage
-   (re-censors exactly the slow-but-working login D-24 unblocked); and finding #10, the 20s
-   interactive lease wait is smaller than the worker's 40s read + 10s restart hold, so an
-   interactive validate can never wait out one in-flight derive.
-
-0e. **[159-BASIS-FLIP] ScenarioComposer: blend basis flips 365→252 mid-render while a
-   drawer-added leg's `/returns` probe is in flight.** Red-team finding (2026-08-23,
-   INVESTIGATE): a drawer-added leg has no `addedAssetClassById` entry until its probe
-   settles (`ScenarioComposer.tsx` ~:1465), so RANK-06 resolves the in-flight null to the
-   conservative √365 clock and the settled `'traditional'` to √252 — a pure-tradfi blend's
-   displayed vol/Sharpe/Sortino visibly change with no user action, as a function of
-   network timing. The steady-state values are honest in both states; only the transition
-   is jarring. **Product decision needed:** suppress the basis-dependent metrics (or hold
-   the panel) until every selected leg's class has resolved, or accept the flicker as the
-   cost of never showing a flattering interim number. Not a phase-159 blocker.
-   **Recorded:** 2026-08-23 (phase 159 red-team, finding 3)
+0.51. **Phase 153.5 finding #10 — the 20 s interactive lease wait is shorter than one in-flight derive.**
+   `_MT5_LEASE_WAIT_S` is 20 s, while the worker's derive holds the terminal for a 40 s read plus a
+   10 s restart (`services/mt5_concurrency.py`, re-measured 2026-11-14). So an interactive validate
+   can never wait out one in-flight derive. Size the wait from measured hold times (D-32 made them
+   collectable), or tell the user the terminal is busy and when to retry. Kept from the deleted
+   0.5 "Phase 153.5 complete" entry; finding #8 moved to TRIGGER-GATED.
+   **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
 
 0.12. **🎨 FreshnessChip's longest label overflows its masthead column — measured in a real browser.**
    Found 2026-08-26 during the phase-162 browser pass on localhost/TEST (the first time this phase
@@ -464,23 +154,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    non-blocking per the stopping rule.
    **Fix candidates:** shorten the future label on the series arm (e.g. `TRACK RECORD · FUTURE`), or
    let the label row wrap at this breakpoint. Re-measure in a browser — jsdom cannot see this class.
-
-0.10. **⚠️ The wizard preselect can render a dismissal control that does nothing.**
-   ⚠️ *Id note: this is the zero-padded `0.01`–`0.10` series. Do NOT confuse it with the legacy
-   unpadded `0.1` / `0.2` / `0.3` items further down, which are a different, older scheme and are
-   cited by `docs/runbooks/ledger-refresh-go-live.md` and `.planning/STATE.md`.* Found by the
-   B-2 fixer while closing the KEY_REUSE_UNAVAILABLE dead end (2026-08-26); recorded, NOT fixed.
-   `onUseDifferentKey` is an OPTIONAL prop while `preselectKey` is also optional, so a host can in
-   principle render the preselect branch with no dismissal handler. The "Use a different key"
-   button would then paint as a no-op — and because `KEY_REUSE_UNAVAILABLE`'s copy now NAMES that
-   control as the remedy, the refusal would point at a dead button. That is the same unwinnable-loop
-   class the fix just closed, one prop away.
-   **Not live today** (measured): `ContributionWizardOverlay:302-303` passes both and
-   `WizardClient:1262-1263` forwards both, so no host omits it. Severity is guard-hygiene, not
-   user-facing — filed per the stopping rule, not blocking.
-   **Fix:** make the two props co-travel in the type (a discriminated union on the preselect
-   branch), so a host that supplies `preselectKey` MUST supply `onUseDifferentKey`. Requires
-   editing `WizardClient.tsx`, which the fixer did not own.
+   **Owner:** Phase 214 FRESHTRUTH (booked 2026-11-14)
 
 0.1. **⛔ LEDGER-BACKED VENUES HAVE NO RECURRING STRATEGY REFRESH — MT5 factsheets go stale
    silently, forever.** Founder-reported 2026-08-23 ("MT5 strategies are not being read out every
@@ -555,69 +229,235 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
        stale — which is precisely the failure mode this phase exists to eliminate, committed by
        the ledger that is supposed to track it. Close it only after the runbook has been executed
        and the staleness view's stale count is observed to drain.
-   - **Adjacent, separate:** the `bybit` key has been failing since 2026-08-14 with
-     `retCode 33004 "Your api key has expired."` — last good sync `2026-08-06`. Needs replacing;
-     nothing surfaced it.
+   - **Re-measured on PROD 2026-11-14 (FIX NOW triage).** The fan-out has been live since
+     2026-09-17. `ledger_refresh_staleness` held 13 rows: 9 of 11 MT5 strategies fresh (1-4 days).
+     One MT5 strategy at 81 days has a disconnected key (expected). One MT5 strategy at 36 days has
+     a live key that synced the same day, and its daily derive and compute finish `publish_warned`
+     with flags `dust_nav_guard` / `twr_chain_broken` / `insufficient_window`, so its series cannot
+     advance while the fan-out re-derives it daily. That residue, not the whole venue class, is
+     what stays open here.
+   **Owner:** Phase 214 FRESHTRUTH (booked 2026-11-14)
 
-0.2. **⚠️ SIBLING DEFECT — a ccxt strategy with no new fills also never recomputes.** Raised as
-   OQ-5 by Phase 161.1's research and **deliberately left out of scope** there: different venue
-   class, different mechanism. Filed here so it is not lost in a phase directory.
-   - **Measured at HEAD.** `analytics-service/routers/cron.py:471-472` builds the recompute list as
-     `[sid for sid, stored in per_strategy_stored.items() if stored > 0]`. The recurring recompute
-     is therefore gated on a **positive stored-fill count**, so a strategy that traded nothing on a
-     given day is dropped from the list and is not recomputed at all. A flat trading day produces
-     no recompute — the same "nothing happened, so nothing was refreshed" shape as the ledger
-     defect above, arrived at by a different route.
-   - **Adjacent, same file, same family:** the comment at `:466-469` records that a *failed* enqueue
-     is never re-driven either, because `last_sync_at` has already advanced — so the next tick
-     fetches no new trades and recomputes nothing. Recovery relies on the daily/portfolio cascade
-     or a user-triggered recompute. Another instance of `last_sync_at` advancing while the
-     analytics behind it do not.
-   - **Why it is less visible than the ledger case:** ccxt venues currently sit at 0 days stale
-     (okx, bybit), because those strategies do trade. The gap opens on a quiet strategy, not on a
-     broken one — so it will surface as one stale factsheet, not an outage.
-   - **This is cheap to detect now.** The staleness view Phase 161.1 shipped
-     (`public.ledger_refresh_staleness`) surfaces the ccxt cohort **for free** if the venue filter
-     is dropped from the view's row restriction (`… WHERE sv.exchanges && lv.venues`). The
-     freshness verdict itself is venue-agnostic.
-   - **Fix shape:** a staleness-gated fan-out generalises to this directly — the 161.1 fan-out's
-     predicate is "stale AND live AND not in-flight AND outside the cooldown", none of which is
-     ledger-specific. What changes is the cohort and the enqueued kind.
-   - **Also out of scope, recorded for whoever picks this up:** per the 161.1 PROD census
-     (2026-08-25), **34 of the 37 `failed`-status rows are the CSV cohort**, not the ledger venues
-     and not ccxt. That is a third, separate population needing its own diagnosis — do not fold it
-     into either fix.
+### Phase 153.7 review + verification — findings routed onward (added 2026-08-14)
 
-0.3. **📋 DISPOSITION (D-COMP / D-01, decided 2026-08-25) — composite ledger strategies, and the
-   coverage gap the decision leaves open until the composite arm lands.**
-   - **Resolved: option (a) — MT5-only composite deferral.** Founder's words were *"on mt5 no
-     composites"*, so the deferral is scoped to MT5 and never to deribit. Option (b) ("exclude all
-     composites") was rejected because deribit's **only** live PROD strategy IS a composite, so (b)
-     would have left the venue the whole ledger pipeline was built for sitting in the refresh set
-     with nothing to refresh.
-   - **How it was implemented, which is not quite how it reads.** The single-key fan-out
-     (`20260825130000`) excludes **all** composites by an explicit `is_composite = FALSE` conjunct —
-     kept and commented deliberately, so a future MT5 composite is *skipped by name* rather than
-     silently mishandled. Deribit's coverage was moved to a **separate composite arm on
-     `stitch_composite`** rather than being carved out inside that one predicate.
-   - ⛔ **The honest consequence, and the reason this entry exists.** Until that composite arm
-     lands, **deribit is in the refresh set with nothing refreshing it** — the single-key fan-out
-     skips its one strategy, and the composite arm is not yet built. A venue-coverage check that
-     asserts set membership passes green over exactly that state. This is the interim shape option
-     (b) was rejected *for*, so it must not be allowed to become permanent by inattention.
-   - **UPDATE 2026-08-25 (phase 161.1 plan 04) — half of the close condition is met.** The
-     composite arm now EXISTS: `enqueue_ledger_composite_refresh`
-     (`supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql`), shipped **DORMANT and
-     UNSCHEDULED** behind the same fail-closed `app.ledger_refresh_enabled` setting as the
-     single-key arm, with an 8-arm matched-pair SQL gate and static gates 10–11.
-     ⛔ **The second half is NOT met and this entry stays OPEN.** No deribit composite has been
-     observed to refresh. The `stitch_composite` path has never run recurrently, so plan 04's task 3
-     requires ONE manual PROD enqueue observed to completion — `last_return_date` advancing in the
-     staleness view — **before** the composite schedule is documented as activatable. Until that
-     tracer passes, deribit's coverage is a mechanism that has never been exercised end-to-end,
-     which is a *different* state from the one above but is **not** the close condition.
-   - **Close condition:** the composite arm exists and a deribit composite is observed to refresh —
-     `last_return_date` advancing in the staleness view, not a job going green.
+The 153.7 fix round closed WR-01, WR-02, WR-03, W-153.7-1 (with a real guard, not a note),
+W-153.7-2 and W-153.7-4 in code. The three below are recorded rather than fixed, each for a
+stated reason. ⛔ Neither of the first two is a 153.7 regression — both are pre-existing and are
+listed now only because 153.7 is what made them reachable or re-read them.
+
+- [ ] **`ROSTER-DERIVE-01` — the two key-step rosters are still HAND-TYPED, and the class fix has
+  no owner until this line does.** `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`) and
+  `KNOWN_ADD_KEY_CODES` (`MultiKeyConnectStep.tsx`) are hand-maintained allow-lists. Their own
+  docblock used to assign the derived-roster class fix to *"Phase 153 / WIZFORM-02"* — which is
+  now **ticked COMPLETE** (`REQUIREMENTS.md`), so that pointer named a closed requirement and the
+  fix was ownerless. **This item is that owner**; both docblocks now cite it by name.
+  ⭐ **WHAT CHANGED IN THE MEANTIME, so this is no longer a silent hazard.** 153.7's verifier
+  MEASURED that deleting `"SEAM_INTERNAL_FAULT",` from either roster left the whole suite green
+  while the wizard rendered `UNKNOWN` **with a Retry control** against `retryable=False` faults —
+  the 2026-08-05 `SERVICE_UNREACHABLE` incident shape. The 153.7 fix round closed that with
+  `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`: the classifier-reachable
+  population is derived (cascade literals by source scan + the LIVE `VENUE_WIRE_CODE_TO_VERDICT`)
+  and checked against each roster under the translate-first admission rule. **A missing roster row
+  now reds CI by name.** So what remains is DUPLICATION, not exposure.
+  What is blocked: nothing ships wrong today. What unblocks it: deriving both rosters from the
+  route contract instead of typing them, so the guard has nothing left to catch.
+  ⚠️ **The obvious shortcut is wrong and is written down so it is not re-attempted:** merging the
+  two rosters. They are separate on purpose (`ConnectKeyStep`'s docblock argues it at length — a
+  step admits the codes ITS route emits, not the whole vocabulary), and a merged set would pass the
+  guard while admitting each route's codes at the other.
+  **Owner:** Phase 215 TESTREACH (booked 2026-11-14)
+
+### v1.16 Phase-140.1 review — formerly HOMELESS findings (added 2026-07-26; owned by Phase 215 TESTREACH since 2026-11-14)
+
+> ⚠️ **Why these are here:** they lived only in `.planning/phases/140.1-*/140.1-REVIEW.md` and
+> `140.1-TS-OBLIGATIONS.md`, which are **gitignored and have zero git backup** (`git ls-files
+> .planning` → 5 legacy phase-19 files only), in a repo whose memory records two prior accidental
+> destructions of exactly these ledgers. Full evidence stays in those files while they exist.
+
+- **Tests that run in NO environment (three findings).** (a) `TEST_SUPABASE_DB_URL` is wired into
+  the `sql-tests` CI job only (`ci.yml:810`), never the `python` job (`ci.yml:1030-1033`) — so
+  **31 pytest cases skip in CI exactly as they do locally**. (b) `HAS_PY_ENV` is set in **zero files
+  repo-wide** — the 5 Phase-4-vs-Phase-5 **money-math KPI parity** cases it gates are permanently
+  dormant. (c) 4 `tests/test_repro_key_flow.py` cases skip on missing **binance** cassettes
+  (`tests/cassettes/` holds only `okx/` and `bybit/`). CI wiring; no owning phase.
+- **Nine test modules mount a bare `FastAPI()`**, so they never see the app-global 422/429 handlers
+  and their 422s render in FastAPI's default **leaking** shape. **Negative half: none of them is
+  vacuous today — do NOT schedule a "fix the broken tests" sweep.** Positive half: the credential-safe
+  422 is gated by exactly ONE file (`tests/test_validation_error_contract.py`), and
+  `test_process_key.py` is where a future author would "prove the 422 is safe" and prove nothing.
+  A shared app-factory fixture closes it.
+- **403-vs-422 split unowned.** `_scope_rejected` (`routers/process_key.py:1295-1299`) is a three-arm
+  OR behind one return, so ordinary `not val.valid` failures (incl. a malformed CSV) now answer
+  **403** where 422 would be sharper. The consumer half is tracked as TS-14; the split decision itself
+  has no owner.
+- **Worker raises an HTTP exception.** `analytics_runner.py:1725` raises `HTTPException(500)` from the
+  WORKER — a category error that can never render.
+- **Anonymous teaser bucket 30/hour** (`routers/process_key.py:99`) — deliberate and founder-retunable;
+  wants a saturation alert so exhaustion is visible rather than silent.
+
+**Owner (all five bullets above):** Phase 215 TESTREACH (booked 2026-11-14)
+
+---
+
+## ⏳ TRIGGER-GATED — not work until the trigger fires
+
+Moved here from FIX NOW on 2026-11-14 (founder: "Yes, do all three"). Each item keeps its id.
+None of these is work until its **Trigger:** fires.
+
+0.02. **⏸️ NOT PURSUED — founder call 2026-08-25: "forget OKX entity".** A different OKX key connected successfully at 21:38:12Z, so the immediate need is met and the entity theory was never confirmed (the founder's OKX domain was never read back). Kept as a RECORD, not a task: the underlying limitation below is real and measured, so if a future user reports a key that cannot connect while another key on the same account can, start here rather than re-deriving it. Do NOT schedule work on it without a fresh confirmation.
+   ORIGINAL FILING: **OKX is hardcoded to ccxt's default (global) entity — a key issued on any other OKX
+   entity can NEVER connect, and the UI blames the user's credentials.** Surfaced 2026-08-25 when
+   a founder key issued AFTER an OKX re-KYC failed while an older key on the same account passed.
+   - `analytics-service/services/exchange.py:817-830` — `create_exchange` sets only `apiKey`,
+     `secret`, `password`, `enableRateLimit`. No hostname, region, or entity option is offered for
+     any venue, so OKX resolves to ccxt's default endpoint.
+   - OKX operates separate entities on separate API hosts. A key minted on entity B produces a
+     signature entity A cannot verify, which OKX reports as `50113 Invalid Sign` — indistinguishable
+     at the UI from a mistyped secret.
+   - **MEASURED, same deployment, minutes apart:** the stored pre-KYC key `QA OKX Read-key` probed
+     clean at 21:37:12 (`read:true, trade:false, withdraw:false, probe_error:false`), while the
+     post-KYC key returned `50113` at 21:30:12. Our signing path is NOT broken; the endpoint is
+     simply the wrong one for that key. ⚠️ CONFIRM the entity with the founder before building
+     anything — the correlation is strong but the OKX domain has not yet been read back.
+   - **Why this is worse than a missing feature:** the user is told "Authentication failed. Check
+     your API key and secret." They then re-issue keys, re-paste secrets, and doubt their own
+     account — which is exactly what happened tonight — for a venue we simply do not support the
+     entity of. There is no path by which a correct user action resolves it.
+   - **Fix shape (needs a founder decision — do not default it):**
+     (a) support an entity/host selector for OKX and persist it beside the key, or
+     (b) detect the entity mismatch and say so explicitly in the error copy.
+     (b) alone is honest but still leaves the user unable to connect; (a) alone without (b) leaves
+     the next mis-selected key equally mute. The pair is the complete fix.
+   - **HONEST-01 class (Phase 162):** a venue verdict our own configuration caused, rendered as a
+     statement about the user's credential. Same class as 0.03 and the `Unauthorized` case, and the
+     third instance found in one evening — the error-copy work in 162 should treat "whose fault is
+     this actually" as the organising question, not the individual strings.
+   **Trigger:** a user reports a key that cannot connect while another key on the same OKX account can.
+
+0. **⛔ MT5 ARCHITECTURE — one shared gateway terminal serves every MT5 account (decision record).**
+   Found 2026-08-08 by the platform research Phase 134 specified (`153-EVIDENCE-mt5-platform.md`,
+   `153-EVIDENCE-mt5-latency.md`). ⭐ 2026-11-14: three sub-points were removed as resolved, see
+   `git show 3f52d473a:TODOS.md` for their text. The shared-session sub-point is answered by the
+   founder's option (3) decision below. The read-only fail-open sub-point is closed (`terminal_info`
+   and `tradeapi_disabled` are read in `services/mt5_probe.py`, and `classify_trade_capability` in
+   `services/mt5_validation.py` is tri-state and fails closed). The first-call-empty sub-point is
+   closed too.
+   - **Login classification is inverted both ways** (`services/mt5_validation.py:37-56`, both
+     token tables `[ASSUMED]`): a wrong-but-known server returns `-6 AUTH_FAILED` → we blame the
+     user's password; an *unknown* server **times out** rather than erroring.
+   - **Why none of this was caught:** CI never installs `mt5linux` (`Dockerfile:29` installs it
+     into the image only); every contract test injects a `_connect` double
+     (`services/mt5_client.py:135-141`). The real transport has never run outside production.
+     Phase 134 designed `scripts/mt5_spike.py` to answer exactly these four unknowns — **the
+     harness was never built and `analytics-service/docs/mt5-spike-gonogo.md` still has 38
+     `human_needed` cells.** v1.15 shipped through a gate that was never opened.
+   - **RESOLVED 2026-08-08 — founder chose option (3), and the "once per day" fact makes it the
+     right answer on cost too.** See `docs/notes/mt5-scaling-cost-2026-08-08.md` (prices read
+     2026-08-08) — but note that report models **one terminal per account**, which is the wrong
+     model for us. MT5 accounts refresh **once per day**, and a daily sync is sequential, so ONE
+     terminal serves many accounts across a day (capacity ≈ daily window ÷ cycle time). Corrected
+     comparison:
+     | | one-terminal self-host (what we have) | MetaApi, duty-cycled nightly |
+     |---|---|---|
+     | 25 accounts | ~$20/mo **flat** | ~$124/mo |
+     | 100 accounts | ~$20/mo **flat** | ~$495/mo |
+     | per extra account | **≈ $0** | $4.95/mo |
+     The per-account marginal cost is ~zero until we exceed one terminal's daily throughput —
+     then we add a second container, not a subscription. ⚠️ Throughput is currently
+     **unquantified** because cycle time is uninstrumented; D-32 fixes that and is the input to
+     any future revisit.
+   - **Credential custody is the decisive non-price factor and it points the same way.** A managed
+     provider means a third party holds customers' broker investor passwords — a GDPR
+     sub-processor whose blast radius is every MT5 user at once. Quantalyze sells verified track
+     records to allocators; this surfaces in diligence. Self-hosting keeps it in our own store.
+   - ⚠️ Useful even though we are not buying: MetaApi bills **6 hours minimum per server start**,
+     so a wizard validation there would cost ~$0.144 a click — rate-limiting interactive
+     validation is sound design regardless of provider.
+   - ⛔ **API2Trade: do not use** for anything holding credentials — domain created 2026-04-13,
+     no Wayback history, ~5h of status-page history, yet claims "10,000+ Active Accounts", two
+     different legal entities named across the site, mail-forwarding address in the Imprint.
+   - **Revisit trigger** (not a task): if we ever need *interactive* MT5 at a rate that saturates
+     one terminal, or if a second replica is proposed (which breaks the one-session invariant —
+     D-33), re-open this with real cycle-time data in hand.
+   - ⚠️ **Interacts with Phase 153 WIZFORM-05:** the 30 s wall is *also* a real timeout inversion
+     (`initialize()` unbounded at its 60 s vendor default inside a 30 s rpyc bound — D-24), but
+     fixing the timeout on a one-account architecture buys a working single user, not a working
+     product. Decide the architecture before sizing the budget.
+   **Trigger:** interactive MT5 at a rate that saturates one terminal, or a proposal for a second
+   gateway replica (D-33). Re-open with real cycle-time data in hand.
+
+0.52. **Phase 153.5 finding #8 — the 60 s per-stage ceiling wraps SIX round-trips.** Their own
+   ceilings are 45 000 ms IPC and 55 s rpyc, so "innermost fires first" holds per round-trip but
+   not per stage. That re-censors exactly the slow-but-working login D-24 unblocked. Do NOT guess
+   these numbers. Kept from the deleted 0.5 entry; finding #10 is owned by Phase 212 WIZTRUTH.
+   **Trigger:** measured per-stage latency data (D-32) shows a stage ceiling firing on a working login.
+
+0.10. **⚠️ The wizard preselect can render a dismissal control that does nothing.**
+   ⚠️ *Id note: this is the zero-padded `0.01`–`0.10` series. Do NOT confuse it with the legacy
+   unpadded `0.1` item in FIX NOW, which is an older scheme cited by
+   `docs/runbooks/ledger-refresh-go-live.md` (items `0.2` and `0.3` were removed 2026-11-14).* Found by the
+   B-2 fixer while closing the KEY_REUSE_UNAVAILABLE dead end (2026-08-26); recorded, NOT fixed.
+   `onUseDifferentKey` is an OPTIONAL prop while `preselectKey` is also optional, so a host can in
+   principle render the preselect branch with no dismissal handler. The "Use a different key"
+   button would then paint as a no-op — and because `KEY_REUSE_UNAVAILABLE`'s copy now NAMES that
+   control as the remedy, the refusal would point at a dead button. That is the same unwinnable-loop
+   class the fix just closed, one prop away.
+   **Not live today** (measured): `ContributionWizardOverlay:302-303` passes both and
+   `WizardClient:1262-1263` forwards both, so no host omits it. Severity is guard-hygiene, not
+   user-facing — filed per the stopping rule, not blocking.
+   **Fix:** make the two props co-travel in the type (a discriminated union on the preselect
+   branch), so a host that supplies `preselectKey` MUST supply `onUseDifferentKey`. Requires
+   editing `WizardClient.tsx`, which the fixer did not own.
+   **Trigger:** a host renders the preselect branch without `onUseDifferentKey`, or `WizardClient.tsx` is next edited.
+
+0.014. **`[D-161-04]` A contracts-registry full-suite timeout flake.** Phase 161's deferred
+   tooling item (`.planning/milestones/v1.20-phases/161-wizerr-honest-error-surfaces/deferred-items.md`).
+   Not user-facing. Re-homed from the deleted 0.01 wrapper.
+   **Trigger:** the flake reds a CI run.
+
+0.015. **`[D-161-07-B]` A `vercel-functions` validator false-positive.** Phase 161's deferred tooling
+   item (same file). Not user-facing. Re-homed from the deleted 0.01 wrapper.
+   **Trigger:** the false positive blocks a deploy or a PR.
+
+### v1.14 Smoothed-MTM go-live blockers — FIXED in the v1.14 landing (2026-07-23)
+Surfaced by the /ship Fable red team; the safety-critical ones fixed in the landing PR so
+flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM factsheet.
+- ⏳ **GLB-1 (REMAINS — now non-catastrophic, dogfood-driven):** on an option expiry day the
+  ΔMTM grid caps at `last_settled=T-1` while the anchor read is post-08:00-UTC delivery on day T,
+  so the book-channel residual can breach `_assert_smoothed_book_channel`
+  (`deribit_ingest.py`~2032, `deribit_txn.py`~1746) → `LedgerValuationError`. With GLB-2/GLB-3
+  in place this now DEGRADES safely (smoothed omitted for that book/day, cash+MTM intact) rather
+  than failing the whole job — so it is NO LONGER a flag-flip safety blocker, but it does mean
+  smoothed may be unavailable on expiry days for active options books. Proper fix (reconcile the
+  book channel at a boundary consistent with the anchor) is best validated against real options
+  books in the live dogfood, not blind. Watch for it in the /qa + Phoenix acceptance.
+  **Trigger:** `SMOOTHED_MTM_ENABLED` is turned on, or a real options book is dogfooded.
+
+### No branch protection on `main` (from the v1.16 merge guards, added 2026-07-26)
+
+- **No branch protection on `main` at all.** GitHub `rulesets: []` and
+  `branches/main/protection` → 404 — verified first-hand. There are **no required status checks**,
+  so nothing mechanically blocks a merge with red CI. Combined with the next item this is the live
+  risk. ~~**Founder action:** enable branch protection requiring the `frontend`, `python` and
+  `sql-tests` aggregator checks.~~
+  → ✅ **DECIDED 2026-07-27 (founder): DEFERRED until there are paying clients.** Raised twice and
+  declined twice; **this is settled — do not re-raise it each phase.** The reasoning is a solo-founder
+  velocity trade, and it is defensible while the only committer is the founder.
+  ⚠️ **The one consequence that must not go invisible:** every CI gate in this repo — including the
+  real-Redis lane 140.2 built and wired strictly into the `frontend` aggregator — is **advisory at
+  merge**. So *"CI is green"* is a statement about a **run**, never about **what landed on `main`**.
+  Any phase-closure or verification wording must say **"the workflow would have caught it"**, never
+  **"the workflow did stop it"**. `140.3-VALIDATION.md` already carries this rule verbatim; keep it
+  in every subsequent phase's validation doc. **Re-open when the first paying client lands** — at
+  that point the merge-time guarantee starts protecting someone other than us.
+  **Trigger:** the first paying client lands.
+
+---
+
+## 👤 FOUNDER OPS — founder actions, not phase work
+
+Moved here from FIX NOW on 2026-11-14 (founder: "Yes, do all three"). Each is an action only the
+founder can take.
 
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
@@ -647,171 +487,15 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    {208.77.244.242, 152.55.184.240/.241} with Nautilus (7-day access, email all 3).
    **Founder decision:** sFOX-venue vs Nautilus-manager path; actual vs adjusted NAV.
 
-### Phase 153.3 (WIZFORM-GW) — recorded residuals (added 2026-08-09)
+### Founder sign-offs pending (re-booked 2026-11-14)
 
-- [ ] **GSD `gsd-sdk query state.*` verbs take NAMED flags, not positional args — the executor
-  prompt documents positional.** Found 2026-08-09 during plan 153.3-05's state update.
-  `state.record-session "" "<stopped-at>" "None"` silently records only `Last Date` and drops the
-  stopped-at; `state.record-metric` and `state.add-decision` return `{"error": …}` on positional
-  argv. Correct forms: `--stopped-at/--resume-file`, `--phase/--plan/--duration/--tasks/--files`,
-  `--summary`. ⚠️ Also: **every** SDK write to `.planning/STATE.md` REGRESSES the frontmatter
-  `last_activity` to a stale value (observed: `2026-08-09 -- Phase 153.3 wave 4 complete` →
-  `2026-08-07 -- Phase 152 execution started`, three times in a row). Repaired in place each time.
-  Same defect family as the `### Decisions` heading drift already annotated in `STATE.md`.
-  ⚠️ `state.record-metric` is also NOT idempotent — running it twice appends a duplicate row.
+### [200-FOUNDER-SIGNOFF-ACCEPTED-RISKS-AND-DEFAULTS] — founder sign-off pending on accepted risks T-200-06, T-200-09, T-200-10, T-200-13 and on the orchestrator-default decisions D-01..D-15 and D-R1 (booked 2026-11-11, Phase 200 verification; re-booked 2026-11-14 as a founder decision, not a LOW finding)
 
-### Phase 153.7 review + verification — findings routed onward (added 2026-08-14)
+**Reading.** Phase 200 ran with orchestrator defaults for decisions D-01 through D-15, and D-R1 (an unchecked feeds read holds Delete key, not Disconnect) was recorded at review time. The security audit accepted four risks (T-200-06, T-200-09, T-200-10, T-200-13). None of this has been signed off by the founder. D-06 (the API keys tab for every role) is the costly one to reverse.
 
-The 153.7 fix round closed WR-01, WR-02, WR-03, W-153.7-1 (with a real guard, not a note),
-W-153.7-2 and W-153.7-4 in code. The three below are recorded rather than fixed, each for a
-stated reason. ⛔ Neither of the first two is a 153.7 regression — both are pre-existing and are
-listed now only because 153.7 is what made them reachable or re-read them.
+**Why it is back.** TODOS sweep 2 deleted it with the Phase 200 LOW section because its own tag read LOW. The founder chose to keep tracking it (2026-11-14).
 
-- [ ] **`ROSTER-DERIVE-01` — the two key-step rosters are still HAND-TYPED, and the class fix has
-  no owner until this line does.** `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`) and
-  `KNOWN_ADD_KEY_CODES` (`MultiKeyConnectStep.tsx`) are hand-maintained allow-lists. Their own
-  docblock used to assign the derived-roster class fix to *"Phase 153 / WIZFORM-02"* — which is
-  now **ticked COMPLETE** (`REQUIREMENTS.md`), so that pointer named a closed requirement and the
-  fix was ownerless. **This item is that owner**; both docblocks now cite it by name.
-  ⭐ **WHAT CHANGED IN THE MEANTIME, so this is no longer a silent hazard.** 153.7's verifier
-  MEASURED that deleting `"SEAM_INTERNAL_FAULT",` from either roster left the whole suite green
-  while the wizard rendered `UNKNOWN` **with a Retry control** against `retryable=False` faults —
-  the 2026-08-05 `SERVICE_UNREACHABLE` incident shape. The 153.7 fix round closed that with
-  `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`: the classifier-reachable
-  population is derived (cascade literals by source scan + the LIVE `VENUE_WIRE_CODE_TO_VERDICT`)
-  and checked against each roster under the translate-first admission rule. **A missing roster row
-  now reds CI by name.** So what remains is DUPLICATION, not exposure.
-  What is blocked: nothing ships wrong today. What unblocks it: deriving both rosters from the
-  route contract instead of typing them, so the guard has nothing left to catch.
-  ⚠️ **The obvious shortcut is wrong and is written down so it is not re-attempted:** merging the
-  two rosters. They are separate on purpose (`ConnectKeyStep`'s docblock argues it at length — a
-  step admits the codes ITS route emits, not the whole vocabulary), and a merged set would pass the
-  guard while admitting each route's codes at the other.
-
-### v1.14 Smoothed-MTM go-live blockers — FIXED in the v1.14 landing (2026-07-23)
-Surfaced by the /ship Fable red team; the safety-critical ones fixed in the landing PR so
-flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM factsheet.
-- ⏳ **GLB-1 (REMAINS — now non-catastrophic, dogfood-driven):** on an option expiry day the
-  ΔMTM grid caps at `last_settled=T-1` while the anchor read is post-08:00-UTC delivery on day T,
-  so the book-channel residual can breach `_assert_smoothed_book_channel`
-  (`deribit_ingest.py`~2032, `deribit_txn.py`~1746) → `LedgerValuationError`. With GLB-2/GLB-3
-  in place this now DEGRADES safely (smoothed omitted for that book/day, cash+MTM intact) rather
-  than failing the whole job — so it is NO LONGER a flag-flip safety blocker, but it does mean
-  smoothed may be unavailable on expiry days for active options books. Proper fix (reconcile the
-  book channel at a boundary consistent with the anchor) is best validated against real options
-  books in the live dogfood, not blind. Watch for it in the /qa + Phoenix acceptance.
-
-### v1.16 branch `feat/v1.16-production-resilience` — merge guards (added 2026-07-26)
-
-- **No branch protection on `main` at all.** GitHub `rulesets: []` and
-  `branches/main/protection` → 404 — verified first-hand. There are **no required status checks**,
-  so nothing mechanically blocks a merge with red CI. Combined with the next item this is the live
-  risk. ~~**Founder action:** enable branch protection requiring the `frontend`, `python` and
-  `sql-tests` aggregator checks.~~
-  → ✅ **DECIDED 2026-07-27 (founder): DEFERRED until there are paying clients.** Raised twice and
-  declined twice; **this is settled — do not re-raise it each phase.** The reasoning is a solo-founder
-  velocity trade, and it is defensible while the only committer is the founder.
-  ⚠️ **The one consequence that must not go invisible:** every CI gate in this repo — including the
-  real-Redis lane 140.2 built and wired strictly into the `frontend` aggregator — is **advisory at
-  merge**. So *"CI is green"* is a statement about a **run**, never about **what landed on `main`**.
-  Any phase-closure or verification wording must say **"the workflow would have caught it"**, never
-  **"the workflow did stop it"**. `140.3-VALIDATION.md` already carries this rule verbatim; keep it
-  in every subsequent phase's validation doc. **Re-open when the first paying client lands** — at
-  that point the merge-time guarantee starts protecting someone other than us.
-
-### v1.16 Phase-140.1 review — HOMELESS findings (no owning phase; added 2026-07-26)
-
-> ⚠️ **Why these are here:** they lived only in `.planning/phases/140.1-*/140.1-REVIEW.md` and
-> `140.1-TS-OBLIGATIONS.md`, which are **gitignored and have zero git backup** (`git ls-files
-> .planning` → 5 legacy phase-19 files only), in a repo whose memory records two prior accidental
-> destructions of exactly these ledgers. Full evidence stays in those files while they exist.
-
-- **Tests that run in NO environment (three findings).** (a) `TEST_SUPABASE_DB_URL` is wired into
-  the `sql-tests` CI job only (`ci.yml:810`), never the `python` job (`ci.yml:1030-1033`) — so
-  **31 pytest cases skip in CI exactly as they do locally**. (b) `HAS_PY_ENV` is set in **zero files
-  repo-wide** — the 5 Phase-4-vs-Phase-5 **money-math KPI parity** cases it gates are permanently
-  dormant. (c) 4 `tests/test_repro_key_flow.py` cases skip on missing **binance** cassettes
-  (`tests/cassettes/` holds only `okx/` and `bybit/`). CI wiring; no owning phase.
-- **Nine test modules mount a bare `FastAPI()`**, so they never see the app-global 422/429 handlers
-  and their 422s render in FastAPI's default **leaking** shape. **Negative half: none of them is
-  vacuous today — do NOT schedule a "fix the broken tests" sweep.** Positive half: the credential-safe
-  422 is gated by exactly ONE file (`tests/test_validation_error_contract.py`), and
-  `test_process_key.py` is where a future author would "prove the 422 is safe" and prove nothing.
-  A shared app-factory fixture closes it.
-- **403-vs-422 split unowned.** `_scope_rejected` (`routers/process_key.py:1295-1299`) is a three-arm
-  OR behind one return, so ordinary `not val.valid` failures (incl. a malformed CSV) now answer
-  **403** where 422 would be sharper. The consumer half is tracked as TS-14; the split decision itself
-  has no owner.
-- **Worker raises an HTTP exception.** `analytics_runner.py:1725` raises `HTTPException(500)` from the
-  WORKER — a category error that can never render.
-- **Anonymous teaser bucket 30/hour** (`routers/process_key.py:99`) — deliberate and founder-retunable;
-  wants a saturation alert so exhaustion is visible rather than silent.
-- **Process item (TRAP-9 class B2):** plans enumerate production sites exhaustively but not the TESTS
-  those changes invalidate. Plan-check found 4; plans 06, 07 and 08 each found one *more* the plan did
-  not predict. Fold into the planning template, not a code phase.
-
-- [ ] **`[164.2.1-INCOMING-NULL-CONFLATION]` ⚖️ FOUNDER CALL — `sessionKeyMatches`'s
-      incoming-`null` arm conflates "provably no key" with "could not determine the key", and on
-      the second reading a user who connects key B can be handed key A's strategy and key A's
-      `api_key_id`, silently (booked 2026-09-07 while correcting Phase 164.2.1's own records;
-      ⛔ PRE-EXISTING — NOT introduced by 164.2.1, which neither created nor widened it).**
-      **The trace, verified by command at HEAD, both legs:**
-      1. `WizardPage` (`src/app/(dashboard)/strategies/new/wizard/page.tsx:41`) wraps
-         `readLatestWizardDraft` in a `try/catch` and, on a fault, degrades `initialDraft` to
-         `null` — its own comment at `:101` says *"Degrade to \"no draft\""*. That route passes
-         **no `preselectKey` at all** (`:141-145` renders `<WizardClient>` with only
-         `initialDraft` / `initialDraftKind`), so `WizardClient`'s 4th argument
-         `initialDraft?.api_key_id ?? preselectKey?.id ?? null` resolves to `null`,
-         `sessionKeyMatches` (`src/lib/wizard/localStorage.ts:584-590` @ `f42d1c59`)
-         short-circuits `if (incoming === null) return true;`, and the restore gate inside
-         `deriveWizardResumeOverrides` (`:672` @ `f42d1c59`) restores the stored key-A
-         `wizardSessionId`. ⚠️ **Cite these two by SYMBOL** — `localStorage.ts` is actively
-         growing and every line number in it drifted within a day of this booking.
-         ⚠️ **A draft-read FAULT is not the only trigger.** `draftIsOnThisBranch`
-         (`page.tsx:108-110`) also nulls `initialDraft` whenever the stored draft belongs to the
-         *other* branch (`draftMatchesSource(kind, source)` false) — normal operation, no fault
-         required. Any record that describes this as fault-only is understating it.
-      2. `POST` (`src/app/api/strategies/create-with-key/route.ts:840`, the F6 idempotency
-         fence at `:1077-1104`) selects `strategies` on `(user_id, wizard_session_id)` ONLY and
-         then does `if (existingDraft?.id && existingDraft.api_key_id) { return { ok: true,
-         strategy_id: existingDraft.id, api_key_id: existingDraft.api_key_id } }` — returning
-         the existing draft **without ever comparing the submitted key**, and **without setting a
-         `deduped` flag** the client could notice or surface.
-      **Consequence, stated plainly:** on `/strategies/new/wizard` with an abandoned key-A
-      payload in localStorage, connecting **key B** can hand back **key A's strategy and key A's
-      `api_key_id`**. The user is silently resumed onto the wrong key's strategy. This is a
-      user-facing correctness defect, which is why it is booked in FIX NOW and not mid-term.
-      **The root cause is a CONFLATION, and only half of it is a hazard.** `incoming === null`
-      today means two different facts that the call site does not distinguish:
-      - **CSV branch — provably keyless.** All 13 CSV save sites write the literal
-        `apiKeyId: null` and the call site passes literal `null` when `source === "csv"`
-        (the WR-02 ternary). There is no key to compare and never was. **Not a hazard**, and the
-        literal `null` is load-bearing: comparing here would strip a live RT-3 CSV burn.
-      - **API branch — could not determine.** `initialDraft` was nulled (fault, or wrong-branch
-        draft) and there is no preselect, so the caller does not KNOW the key. Today that is
-        read as "claims nothing, so decline nothing". **This is the hazard**, and it is exactly
-        the shape CONTEXT decision **D-02** already ruled on for the *stored* side: *"an
-        unprovable case is not a safe case."* The two sides are being held to different rules.
-      **Two candidate resolutions, neither free:**
-      (a) **Distinguish no-key from unknown-key at the call site** — pass a third state (e.g.
-          `"unknown"` vs `null`) and make *unknown meeting a present stored key* **DECLINE**,
-          matching D-02's own rule. Costs one lost idempotency token on that path (the draft,
-          the resume banner and the server row all survive — `WizardClient` re-seeds from
-          `newWizardSessionId()` on mount), and touches the 4th-parameter contract D-01 pinned.
-      (b) **Keep it permissive but make it COUNTABLE** — emit telemetry at the incoming-`null`
-          arm (and/or a `deduped` flag from the F6 fence) so the residual has a measured rate
-          instead of an argued one. Cheaper, changes no behaviour, and would tell us whether (a)
-          is worth its cost.
-      ⛔ **FOUNDER CALL — do NOT let an agent silently "fix" this.** Either resolution changes
-      founder-locked decision **D-01** (4th positional parameter, defaulted, not an options
-      object) and (a) also re-opens **D-02**'s boundary. The permissive arm is what makes
-      164.2.1's change provably monotonic — the grant set is a strict subset of the pre-PR grant
-      set precisely BECAUSE incoming `null` reproduces pre-PR behaviour byte-for-byte — so
-      narrowing it is a deliberate behaviour change, not a bug fix, and it must be decided, not
-      assumed. Recorded against Phase 164.2.1 in `164.2.1-SECURITY.md` (Notes carried forward)
-      and `164.2.1-VERIFICATION.md` (IN-04); neither raises `threats_open` nor moves the
-      `passed` verdict, because the phase's own criteria are about the **preselect** path and
-      here there is no preselect at all.
+**Owner / Trigger:** founder. Closed when the founder confirms or changes each, starting with D-06.
 
 ---
 
@@ -1033,6 +717,8 @@ typography stays one tier per role.
   - LOW fixed in `b97080820`: the zoom test now proves the zoom took effect on the Withheld render before it asserts the copies stay dashed.
 
 ### CONTACT-SUPPORT-POINTERS-01 — fifteen user-facing strings tell a user to "contact support" without saying how (booked 2026-10-07, Phase 164.6.6.3.5)
+
+**Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
 
 **Why it is open.** These strings send a user to "contact support" and name no channel. Before Phase
 164.6.6.3.5 that was an unspoken email address; after its D-01 the only channel is the contact form
@@ -1355,6 +1041,7 @@ per-metric decision.
 - [ ] **`[WIZFORM-02-VE-CODECHANNEL]` `keys/validate-and-encrypt` has no code→copy render path,
       so criterion 3's fifth surface cannot be rendered (booked 2026-09-06, Phase 164.2 plan 09,
       FOUNDER DECISION at the plan-06 gate: accept 4-of-5 and book the wiring).**
+      **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
       Measured at HEAD by reading all three consumers: `ApiKeyManager.tsx`, `StrategyForm.tsx` and
       `AllocatorExchangeManager.tsx` each read `err.error` / `result.error` — the PROSE — and
       **none reads `code`**. So a row for that surface in `src/lib/wizardErrors.roster-render.test.tsx`
@@ -1741,6 +1428,7 @@ per-metric decision.
 - [ ] **`[164.2-WIZARD-BARE401]` A bare upstream 401/403 with no seam envelope still answers
       `code: "UNKNOWN"` on the two routes the wizard actually calls (booked 2026-09-06, Phase
       164.2 ship review).**
+      **Owner:** Phase 212 WIZTRUTH (booked 2026-11-14)
       `create-with-key/route.ts:1731` and `composite/add-key/route.ts:710` both funnel the
       upstream error through `classifyKeyValidationError`, which reads `seamCode` — **null** on
       the middleware's bare `{"detail": "Unauthorized"}` body (`analytics-service/main.py:868`) —
@@ -5146,16 +4834,6 @@ Three entries are new: one known limit (CONTEXT D-16) and two residuals from the
 **Fix if triggered.** Treat the state as a wait only while the key is younger than N days (`api_keys.created_at`), then map it to a line that names the cause.
 
 **Owner / Trigger:** a user report of a permanent "being rebuilt" panel, or the next phase touching the derive's refusal mapping.
-
-## Founder sign-offs pending (re-booked 2026-11-14)
-
-### [200-FOUNDER-SIGNOFF-ACCEPTED-RISKS-AND-DEFAULTS] — founder sign-off pending on accepted risks T-200-06, T-200-09, T-200-10, T-200-13 and on the orchestrator-default decisions D-01..D-15 and D-R1 (booked 2026-11-11, Phase 200 verification; re-booked 2026-11-14 as a founder decision, not a LOW finding)
-
-**Reading.** Phase 200 ran with orchestrator defaults for decisions D-01 through D-15, and D-R1 (an unchecked feeds read holds Delete key, not Disconnect) was recorded at review time. The security audit accepted four risks (T-200-06, T-200-09, T-200-10, T-200-13). None of this has been signed off by the founder. D-06 (the API keys tab for every role) is the costly one to reverse.
-
-**Why it is back.** TODOS sweep 2 deleted it with the Phase 200 LOW section because its own tag read LOW. The founder chose to keep tracking it (2026-11-14).
-
-**Owner / Trigger:** founder. Closed when the founder confirms or changes each, starting with D-06.
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 

@@ -1459,6 +1459,9 @@ here, but this precondition sits here because this is where a reader would go to
 - **The deribit composite.** The fan-out excludes composites by an explicit conjunct; deribit's
   sole live strategy is a composite, so it gets zero coverage from *this* mechanism. Its coverage
   is owed to the separate composite arm on `stitch_composite`. See `TODOS.md` item **0.3**.
+  ⭐ **2026-11-14:** `TODOS.md` item 0.3 was removed. The founder decided that the two Deribit
+  composites, whose member windows all end by 2026-04-30, are closed records, not stale ones, and
+  the composite fan-out stays unscheduled. `.planning/ROADMAP.md` Phase 214 FRESHTRUTH owns it.
   ⛔ That arm's schedule is blocked by item 6 (the composite's own runs are not yet watched) of
   the precondition `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` in the section directly above.
   ⛔ **CORRECTED 2026-09-25 (round-1 review WR-04):** and by item 7 of the same precondition
@@ -1466,3 +1469,6 @@ here, but this precondition sits here because this is where a reader would go to
   claim-time snapshot that gave the section its id was closed by Phase 164.6.7 (2026-09-25).
 - **The ccxt sibling defect.** ccxt strategies with no new fills also never recompute — a different
   venue class and a different mechanism, out of scope here. See `TODOS.md` item **0.2**.
+  ⭐ **2026-11-14:** `TODOS.md` item 0.2 was removed as resolved. The ccxt sync cron's D-02 arm
+  (`analytics-service/routers/cron.py`, Phase 167.2.1.1.1 NAVMTM) now derives every eligible
+  strategy of a healthy key daily, whether it stored new fills or not.
