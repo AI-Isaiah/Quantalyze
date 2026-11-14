@@ -51,17 +51,17 @@
     {
       "number": "212",
       "name": "WIZTRUTH",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "213",
       "name": "KEYFLOW",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "214",
       "name": "FRESHTRUTH",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "215",
@@ -71,8 +71,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (212-215 booked 2026-11-14; 155.1 waits for the 2026-11-16 gateway spike; 155.2 and 157 wait for the founder's trading-day session)",
-    "reason": "Phases 155, 207, 208, 209, 210 and 211 complete; 6 of 13"
+    "label": "Advance to the next step (155.1 waits for the founder's Monday 2026-11-16 market-hours spike run; 155.2 and 157 wait for the founder's trading-day session; 215 TESTREACH is held by the founder)",
+    "reason": "Phases 155 and 207-214 complete; 9 of 13"
   },
-  "updated_at": "2026-11-14T12:36:33.133Z"
+  "updated_at": "2026-11-14T23:05:46.396Z"
 }

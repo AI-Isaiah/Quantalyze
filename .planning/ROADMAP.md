@@ -141,9 +141,9 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases (completed 2026-11-14)
-- [ ] **Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work** - Wizard and key-screen truth; independent of the MT5 phases
-- [ ] **Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out** - Key and draft flow, four founder decisions; independent of the MT5 phases
-- [ ] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases
+- [x] **Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work** - Wizard and key-screen truth; independent of the MT5 phases (completed 2026-11-15)
+- [x] **Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out** - Key and draft flow, four founder decisions; independent of the MT5 phases (completed 2026-11-15)
+- [x] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases (completed 2026-11-15)
 - [ ] **Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production** - CI-only test reach; independent of the MT5 phases
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
@@ -257,9 +257,9 @@ Plans:
 | 209. SCRUBLEAKS | 5/5 | Complete | 2026-11-14 |
 | 210. PUBLICTRUTH | 5/5 | Complete | 2026-11-14 |
 | 211. SYNCJOBS | 7/7 | Complete | 2026-11-14 |
-| 212. WIZTRUTH | 0/? | Not started | - |
-| 213. KEYFLOW | 0/? | Not started | - |
-| 214. FRESHTRUTH | 0/? | Not started | - |
+| 212. WIZTRUTH | 9/9 | Complete | 2026-11-15 |
+| 213. KEYFLOW | 12/12 | Complete | 2026-11-15 |
+| 214. FRESHTRUTH | 7/7 | Complete | 2026-11-15 |
 | 215. TESTREACH | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.18)
@@ -429,9 +429,10 @@ Plans:
 ### Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work
 
 **Goal:** Every refusal the wizard and the key screens show names the cause that was actually established, and every remedy it offers can succeed. The composite arm of `SyncPreviewStep` branches on the real verdict instead of hardcoding `GATE_SERIES_PROVENANCE_UNVERIFIED`. `MT5_GATEWAY_MISCONFIGURED_DETAIL` (`mt5_probe.py`), the "cause unknown" fallback, stops asserting arm 2's "Disable automatic trading through the external Python API" option. The three `keys/validate-and-encrypt` consumers (`ApiKeyManager`, `StrategyForm`, `AllocatorExchangeManager`) render from `code`, not prose. An MT5 connect that meets a running derive either waits it out or says it is busy (`_MT5_LEASE_WAIT_S` is 20 s against a 40 s derive read plus a 10 s restart, `mt5_concurrency.py`). An orphaned MT5 key is refused before the 120 s validate where its identity is known first. Closes TODOS `0.07` (`D-161-07-A`), `0.09`, `D-161-05-B`, Phase 153.5 finding #10, the WIZFORM-02 §D entry, `WIZFORM-02-VE-CODECHANNEL`, `164.2-WIZARD-BARE401` and `CONTACT-SUPPORT-POINTERS-01`. Booked by the founder 2026-11-14 from the FIX NOW triage.
+⛔ **CORRECTED 2026-11-14 (Phase 212 planning, measured at HEAD)** — the Goal and Success Criteria below are kept exactly as written, as lineage. (a) `keys/validate-and-encrypt` has two live consumers, `StrategyForm` and `AllocatorExchangeManager` (through `ApiKeyForm`); `ApiKeyManager` stopped calling the route in Phase 200, so "the three consumers" in the Goal and in criterion 3 means these two, and no third is invented (`212-CONTEXT.md`, post-research SC3 decision). (b) A derive leases the job terminal key and an interactive validate leases the validation terminal key (Phase 164.6.6 D-02), so the Goal's premise that the 20 s lease wait runs against a 40 s derive is false at HEAD; `_MT5_LEASE_WAIT_S` stays 20 s (`212-CONTEXT.md`, post-research SC4 decision, pinned by plan 01), and criterion 4's copy outcome follows the founder answer recorded in `212-CONTEXT.md` ("Pending founder questions / SC4 busy copy"); until it is answered, the busy-copy bytes are kept as plan 09 records. The founder answered "keep" on 2026-11-14, so "Try again in a minute." stands.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of the other FIX NOW phases.
-**Plans:** 0 plans
+**Plans:** 9/9 plans complete
 **Success Criteria** (what must be TRUE):
 1. A composite gated `sampled_gapped` or `fill_derived_unproven` renders `GATE_SERIES_EXAMINED_REFUSED`, not the provenance sentence.
 2. `MT5_GATEWAY_MISCONFIGURED_DETAIL` names no cause, and the founder approves its copy (the `161-UI-SPEC.md` arm 3 contract moves with it).
@@ -443,7 +444,15 @@ Plans:
 8. Each fix has a test that goes RED when it is reverted.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 212 to break down)
+- [x] 212-01-PLAN.md — MT5 cause-unknown sentence (SC2), 161-UI-SPEC arm-3 amendment, SC4 structural lease pin
+- [x] 212-02-PLAN.md — composite arm branches on the real verdict (SC1)
+- [x] 212-03-PLAN.md — orphaned MT5 key refused before the 120 s validate (SC5)
+- [x] 212-04-PLAN.md — shared status map, bare 401/403 classifier branch, status-aware recogniser (SC3 server)
+- [x] 212-05-PLAN.md — in-app contact pointers: ProfileForm, SignupForm, ScenarioCommitDrawer, WeightOptimizerSection (SC6)
+- [x] 212-06-PLAN.md — key panel pointers: SyncProgress sync errors, ApiKeyManager sync-start copy (SC6)
+- [x] 212-07-PLAN.md — server strings incl. isolated csv-finalize default (SC6, SC7)
+- [x] 212-08-PLAN.md — dashboard key forms render from code; fifth sweep surface (SC3 client)
+- [x] 212-09-PLAN.md — no-email and legacy-pointer sweep, SC4 copy default, phase gate (SC4, SC6, SC7)
 
 ### Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out
 
@@ -456,7 +465,7 @@ Plans:
 Closes TODOS `164.2.1-INCOMING-NULL-CONFLATION`, `0.08` (`D-161-05-A`), the Phase 153.6 "MT5 as a composite member" OUT line, and `0e` (`159-BASIS-FLIP`). Booked by the founder 2026-11-14 from the FIX NOW triage.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of the other FIX NOW phases.
-**Plans:** 0 plans
+**Plans:** 12/12 plans complete
 **Success Criteria** (what must be TRUE):
 1. When the incoming key cannot be determined and a stored draft carries a key, the wizard does not resume that draft; create-with-key's response carries a `deduped` flag whenever it returns an existing draft. (decision a)
 2. A manager can disconnect an orphaned key from its "No strategy yet" row; the key row is kept (disconnected, never deleted), and the `KEY_ORPHANED` copy names that control. (decision b)
@@ -466,26 +475,53 @@ Closes TODOS `164.2.1-INCOMING-NULL-CONFLATION`, `0.08` (`D-161-05-A`), the Phas
 6. Each fix has a test that goes RED when it is reverted.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 213 to break down)
+**Wave 1**
+- [x] 213-01-PLAN.md — tracer: unknown incoming key meeting a stored key does not resume (F1 form, `deriveWizardResumeOverrides`), wired pin, `incoming_key_unknown` telemetry label (Wave 1)
+- [x] 213-02-PLAN.md — `deduped: true` on the create-with-key F6 session-fence arm; F2 RPC-replay residual named (Wave 1)
+- [x] 213-03-PLAN.md — `COMPOSITE_MT5_UNSUPPORTED`: add-key refuses mt5 before the flag gate, set-members refuses an mt5 member, both step rosters admit it (Wave 1)
+- [x] 213-04-PLAN.md — "No strategy yet" rows for every role and every orphan the venue fence refuses; row variants with a Disconnect slot (Wave 1)
+- [x] 213-05-PLAN.md — composer `legsPending` holds the strip's Sharpe through a real 365→252 flip; failed probe terminal (F5) (Wave 1)
+- [x] 213-08-PLAN.md — six venue-independent long-wait tests re-seated onto ccxt panels, green before the MT5 removal (Wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 213-06-PLAN.md — Disconnect-only confirm on the row through `disconnect_allocator_api_key`, shared feeds helpers, announcement and focus (Wave 2)
+- [x] 213-07-PLAN.md — `KEY_ORPHANED` copy names Disconnect, reconnect-after-disconnect route proof, legend line, no-migration check (Wave 2)
+- [x] 213-11-PLAN.md — composer gate caption and peer-rank request held while a leg is pending (Wave 2)
+- [x] 213-12-PLAN.md — MT5 card removed from the member roster, footer note, `enterMulti` refusal, MT5-premised tests converted (Wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 213-09-PLAN.md — rolling Sharpe, volatility and Sortino panels, Sharpe delta and own-book delta held; save/update bodies pinned figure-free (Wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 213-10-PLAN.md — benchmark section and factsheet preview held through `basisPending`, CAGR two-basis rule (Wave 4)
+
+**Cross-cutting constraints:** <!-- gsd:generated -->
+- Spec-less probe fallback: skipped (no requirement IDs; SC-1..SC-6 are the contract).
 
 ### Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change
 
 **Goal:** Refresh work goes only where data can actually advance, and every freshness reading tells the truth about why a series has stopped. One live MT5 strategy has had its series stuck at 36 days while its key syncs daily and its derive finishes `publish_warned` every day. The fan-out re-derives it daily for nothing. The two Deribit composites read stale in `ledger_refresh_staleness`, although every member window ended by 2026-04-30. Founder decision 2026-11-14 (0.3, "Yes, closed records"): they read as closed records, not stale, and the composite fan-out stays unscheduled. The freshness chip's `TRACK RECORD · FUTURE — CHECK DATA` label overflows its masthead column at 1485px (297.9px in 204.2px). Closes TODOS `0.1`, `0.12`, `0.3` and `211-D11-RESIDUAL-UNCORRELATED-SENDERS` (added by founder decision 2026-11-14: the Phase 211 D11-9 residual, where the finalize-wizard `stitch_composite` and csv-finalize `compute_analytics_from_csv` enqueues send no `correlation_id`, so the SQL enqueue dedup cannot retract an inherited `ledger-refresh` marker for them). Booked by the founder 2026-11-14 from the FIX NOW triage.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of the other FIX NOW phases.
-**Plans:** 0 plans
+**Plans:** 7/7 plans complete
 **Success Criteria** (what must be TRUE):
 1. The 36-day MT5 case is diagnosed and its cause is recorded.
 2. The fan-out excludes or caps a strategy whose derive leaves `last_return_date` unmoved, and counts each skip with a reason.
 3. A composite whose member windows have all closed reads as closed in `ledger_refresh_staleness`, not stale; the composite fan-out stays unscheduled.
 4. After deploy, a PROD read through the Supabase MCP (marker query first) shows the stale count drained, or names each remaining row and why.
-5. The freshness chip's "future" label fits at 1485px, measured in a real browser.
+5. The freshness chip's "future" label fits at 1485px, measured in a real browser. ⛔ AMENDED 2026-11-14 (founder decision, option A): does not reproduce at HEAD, measured at 1485px plus a 1485-to-360px sweep in a real browser; a seeded Playwright spec pins that the label stays on one line inside its column. TODOS `0.12` is deleted as "does not reproduce", not "fixed".
 6. It touches migrations, so migration-reviewer and rls-policy-auditor are both clean before merge.
 7. Each fix has a test that goes RED when it is reverted.
 8. The finalize-wizard `stitch_composite` and csv-finalize `compute_analytics_from_csv` enqueues send a `correlation_id`, or a founder decision widens `_record_enqueue_dedup`'s predicate, so an enqueue from either that dedups onto a marked refresh job no longer stays on the quiet refresh path. A SQL gate arm that is RED on the Phase 211 code (an uncorrelated csv-finalize dedup onto a marked job leaves the marker) proves it. (added 2026-11-14, founder decision, TODOS `211-D11-RESIDUAL-UNCORRELATED-SENDERS`)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 214 to break down)
+- [x] 214-01-PLAN.md — SC-1 diagnosis of the 36-day MT5 series (verdict H1, executable evidence)
+- [x] 214-02-PLAN.md — closed composites read closed, not stale, in `ledger_refresh_staleness` (SC-3)
+- [x] 214-03-PLAN.md — a no-advance strategy is capped to a weekly attempt, never excluded (SC-2, first half)
+- [x] 214-04-PLAN.md — the finalize-wizard and csv-finalize enqueues send their `correlation_id` (SC-8)
+- [x] 214-05-PLAN.md — FreshnessChip label measured at 1485px; does not reproduce, regression pin kept (SC-5, amended)
+- [x] 214-06-PLAN.md — the no-advance weekly cap counts each skip with its reason (SC-2, second half)
+- [x] 214-07-PLAN.md — the floors count the phase's new SQL gate arms (SC-7)
 
 ### Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production
 
