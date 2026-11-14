@@ -429,6 +429,16 @@ const MUTATING_RPC_NAMES: readonly string[] = [
   // QUOTED LITERAL at its `.rpc(` call, since that regex reads no constant; the
   // pin "retractInheritedRefreshMarker counts as a mutator" fails on either slip.
   "retract_ledger_refresh_marker",
+  // Phase 209 (SHARE-D-164-C): the scenario share mint, which hands out a
+  // capability URL for a scenario. It is the older sibling of
+  // create_strategy_share / revoke_strategy_share and had never been under the
+  // audit law. Listing the name only makes the law reach the route because the
+  // route's call is now a plain typed literal call with the name on the same
+  // line as `.rpc(`. MEASURED in the 209 research: with the old method cast
+  // kept, removing the route's audit call stayed GREEN even with the name
+  // listed, so listing alone was decorative (the SEC-03 lesson again). The pin
+  // "the scenario share mint stays visible to the law" keeps both halves bound.
+  "create_scenario_share",
 ];
 
 /**
@@ -1037,6 +1047,25 @@ describe("audit-coverage — the Sync routes' retraction helper (Phase 191)", ()
       "utf8",
     );
     expect(moduleExportMutates(helperSrc, "retractInheritedRefreshMarker")).toBe(true);
+  });
+});
+
+describe("audit-coverage — the scenario share mint stays visible to the law (Phase 209, SHARE-D-164-C)", () => {
+  // The corpus test's `detectedMutationSites` floor is a lower bound, so a call
+  // that drops out of detection (a method cast coming back, the name split from
+  // `.rpc(` across lines, or the list entry removed) would stay green and
+  // silently make the listing decorative again. This pin fails first.
+  it("create_scenario_share is detected exactly once in the scenario share route and covered by an audit call, never a pragma", () => {
+    const relPath = "src/app/api/allocator/scenario/share/route.ts";
+    const src = fs.readFileSync(
+      path.resolve(__dirname, "../app/api/allocator/scenario/share/route.ts"),
+      "utf8",
+    );
+    const hits = findRpcMutations(relPath, src);
+    expect(hits).toHaveLength(1);
+    const check = isCovered(hits[0], src.split("\n"));
+    expect(check.covered).toBe(true);
+    expect(["audit-call", "audit-call-above"]).toContain(check.reason);
   });
 });
 

@@ -210,6 +210,19 @@ function makeReq(body: Record<string, unknown> = {}): NextRequest {
 }
 
 /**
+ * Phase 209 SC4 — the same request as `makeReq`, but the body is the RAW string
+ * the caller supplies. `makeReq` always `JSON.stringify`s an object, so it can
+ * never send malformed JSON, a literal `null` or a non-object value.
+ */
+function makeRawReq(body: string): NextRequest {
+  return new NextRequest("http://localhost:3000/api/keys/validate-and-encrypt", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...VALID_ORIGIN },
+    body,
+  });
+}
+
+/**
  * 160-05 / RANK-03 — `persist: true` is part of the VALID body now, not an
  * opt-in. The legacy arm is retired: a body without the discriminator is
  * refused with `STALE_CLIENT`, so a fixture that omitted it would measure that
@@ -2176,6 +2189,8 @@ describe("[161-09 / WIZERR-08] the four request-shape arms carry codes true of t
   // Positive control FIRST. A table that shrank to nothing would report no
   // failures and pass this suite for the worst possible reason.
   it("the arm table is the four MEASURED arms, not however many survived an edit", () => {
+    // The body-shape guard (Phase 209 SC4) is pinned in its own describe below:
+    // it needs a RAW body, and every row here goes through `makeReq`'s object.
     expect(ARMS.length).toBe(4);
   });
 
@@ -2218,7 +2233,10 @@ describe("[161-09 / WIZERR-08] the four request-shape arms carry codes true of t
       src.match(/code:\s*"KEY_VENUE_NOT_ENABLED"/g)?.length,
       "the comment-stripper blanked real code — every negative claim below is vacuous",
     ).toBe(2);
-    expect(src.match(/code:\s*"KEY_MISSING_REQUIRED_FIELD"/g)?.length).toBe(2);
+    // 2 → 3 on purpose (Phase 209 SC4 / D-14): the third emitter is the
+    // body-shape guard at the top of `POST` (malformed, `null` or non-object
+    // JSON body → `Invalid request body`). The adjacent venue count stays 2.
+    expect(src.match(/code:\s*"KEY_MISSING_REQUIRED_FIELD"/g)?.length).toBe(3);
     expect(
       src.match(/code:\s*"KEY_INVALID_FORMAT"/g),
       "an arm answers KEY_INVALID_FORMAT again. This route runs NO format check " +
@@ -2518,5 +2536,126 @@ describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream 
     expect(body.code).toBe("UNKNOWN");
     // And the 5xx REDACTION is intact — the raw upstream text never crosses.
     expect(body.error).toBe("Key validation failed. Please try again.");
+  });
+});
+
+/**
+ * Phase 209 SC4 / RESEARCH Pitfall 5 — a malformed body whose parse error QUOTES
+ * the credential. The secret value is deliberately UNQUOTED: V8 reports an
+ * unexpected token with a short excerpt of the input, so `JSON.parse` of this
+ * throws a message containing `SECRET-SEN`. A merely TRUNCATED body reports only
+ * a position, which would make the sentinel oracle vacuous.
+ */
+const LEAKY_MALFORMED_BODY =
+  '{"exchange":"okx","api_key":"k","api_secret": SECRET-SENTINEL-must-not-echo}';
+
+describe("[209 SC4] a malformed, null or non-object JSON body answers the coded 400", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+  });
+
+  // Before Phase 209 the first statement of `POST` awaited `req.json()` with no
+  // catch, and `withAuth` has none either, so each of these reached the caller
+  // as a Next.js default 500 with no machine code. ⛔ The sentence and the code
+  // are HAND-TYPED, not read from the route, so a drifting route moves only one
+  // side of the assertion.
+  it.each([
+    ["malformed JSON", "{not json"],
+    ["a literal null", "null"],
+  ])("%s → 400 KEY_MISSING_REQUIRED_FIELD, no-store, no probe, no capture", async (_label, raw) => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRawReq(raw));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.code).toBe("KEY_MISSING_REQUIRED_FIELD");
+    expect(body.error).toBe("Invalid request body");
+    expect(res.headers.get("cache-control")?.toLowerCase()).toContain("no-store");
+    // No live credential probe is spent and nothing is captured.
+    expect(mockValidateKey).not.toHaveBeenCalled();
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
+  // The `typeof body !== "object"` half of the guard. Without it these valid
+  // JSON values would fall through to the presence check and answer the
+  // different sentence `Missing required fields`.
+  it.each([
+    ["a number", "42"],
+    ["a JSON string", '"text"'],
+    ["a boolean", "true"],
+  ])("%s → the same coded 400, no probe", async (_label, raw) => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRawReq(raw));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.code).toBe("KEY_MISSING_REQUIRED_FIELD");
+    expect(body.error).toBe("Invalid request body");
+    expect(mockValidateKey).not.toHaveBeenCalled();
+  });
+
+  // Review WR-07: only a `SyntaxError` means "malformed body". A consumed or
+  // aborted body rejects with something else; swallowing it into the 400 told the
+  // wizard to say "fill in every field" and hid a server fault from Sentry.
+  it("a NON-SyntaxError rejection from req.json() is rethrown, not turned into the coded 400", async () => {
+    const fault = new TypeError("Body is unusable: Body has already been read");
+    const req = makeRawReq("{}");
+    vi.spyOn(req, "json").mockRejectedValue(fault);
+    const { POST } = await import("./route");
+
+    await expect(POST(req)).rejects.toBe(fault);
+    expect(mockValidateKey).not.toHaveBeenCalled();
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  describe("a credential inside a malformed body leaves no trace", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("the fixture really echoes the credential in its own parse error (anti-vacuity)", () => {
+      expect(() => JSON.parse(LEAKY_MALFORMED_BODY)).toThrow(/SECRET-SEN/);
+    });
+
+    it("answers 400 and the secret reaches no response, log line or capture", async () => {
+      const spies = [
+        vi.spyOn(console, "error").mockImplementation(() => {}),
+        vi.spyOn(console, "warn").mockImplementation(() => {}),
+        vi.spyOn(console, "log").mockImplementation(() => {}),
+      ];
+      const { POST } = await import("./route");
+      const res = await POST(makeRawReq(LEAKY_MALFORMED_BODY));
+      const text = await res.text();
+
+      expect(res.status).toBe(400);
+      expect(text).not.toContain("SECRET-SEN");
+      expect(captureSpy).not.toHaveBeenCalled();
+
+      const calls = spies.flatMap((spy) => spy.mock.calls);
+      // Primary oracle: bites whatever the message says. A logged `Error`
+      // instance carries the parse message with it.
+      for (const args of calls) {
+        for (const arg of args) {
+          expect(arg instanceof Error, "an Error instance was logged").toBe(false);
+        }
+      }
+      // Secondary oracle: the specific leak.
+      for (const args of calls) {
+        expect(args.map((a) => String(a)).join(" ")).not.toContain("SECRET-SEN");
+      }
+    });
   });
 });

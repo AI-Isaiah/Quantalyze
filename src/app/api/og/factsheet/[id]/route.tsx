@@ -7,6 +7,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
 import { shortenOgDescription } from "@/lib/factsheet/og-description";
 import { isComputedAnalytics } from "@/lib/closed-sets";
+import { isUuid } from "@/lib/utils";
 // Phase 194.1 plan 06 (census B3; 194 D-04 as superseded by D-15, D-13, 2026-11-08): the card is
 // gated on the strategy's TOTAL record, built from the four alias scalars the embed carries.
 import { gateAnnualized, shortTrackMarkerTitle, withheldReason } from "@/lib/figure-gate";
@@ -108,68 +109,79 @@ export async function GET(
   let data: OgStrategyRow | null = null;
   // SFH-02: set on any failure path, so the card is sent no-store (see below).
   let failed = false;
-  try {
-    const supabase = await createClient();
-    const res = await withPublishedOnly(
-      supabase
-        .from("strategies")
-        .select(
-          // Phase 147 / SCEN-01: `returns_series` joins the embed. The
-          // analytics-service writes the cumprod equity curve there and leaves
-          // `daily_returns` NULL (CSV ingest only), so reading `daily_returns`
-          // alone rendered the BLANK card — name, then three em-dashes — for
-          // every service-computed strategy on every social unfurl. Disclosure
-          // is unchanged: withPublishedOnly below still gates the read, so the
-          // column is only ever read for a published row, and the raw series
-          // never leaves the server (the response is an image).
-          // STALE-01: `computation_status` joins the embed. It is the ONLY
-          // column that distinguishes a series belonging to a run that
-          // FINISHED from one left behind by a run that failed — every
-          // `IS NOT NULL` test passes on both. Read-only widening of a
-          // published row's projection; nothing new leaves the server (this
-          // response is a PNG).
-          // Phase 169.4.1 OGSHARPE (SC4, D-10): the stored `cagr`, `sharpe` and
-          // `max_drawdown` join the embed, so the card shows the values the
-          // factsheet headline and every list show instead of a recomputation.
-          // They are already public on the discovery projection; nothing new
-          // leaves the server.
-          // Review round 1 (CR-01): `data_quality_flags` joins the embed. On a
-          // chain-broken row the stored `cagr` covers only the suffix after the
-          // break, so computeOgHeadline hides it (see its docblock). Read-only;
-          // the flags never leave the server (this response is a PNG).
-          // Round 2 (SFH-R2-01): `metrics_json_by_basis`, `cumulative_return`,
-          // `volatility`, `sortino` and `calmar` join the embed, so the card can
-          // ask the page's own question (is the stored cash headline applicable?)
-          // and withhold a chain-broken row the page withholds. Same published-
-          // gated read of the same row; the columns are already public on the
-          // factsheet page and never leave the server (this response is a PNG).
-          // Phase 194.1 plan 06 (B3, D-15): the four record scalar aliases join the embed (the
-          // factsheet's own `RECORD_SCALAR_ALIASES`; `returns_series` and `metrics_json` are
-          // never projected whole by them), so the card judges the strategy's TOTAL record, not
-          // the resolved series, which is capped. The concatenation types the select `string`:
-          // postgrest-js cannot parse the `->-1` index of the `series_end` alias at the type
-          // level, so a literal would type every row as a `ParserError`; the row is cast below.
-          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cumulative_return, volatility, cagr, sharpe, sortino, calmar, max_drawdown, data_quality_flags, metrics_json_by_basis, " +
-            RECORD_SCALAR_ALIASES +
-            " )",
-        )
-        .eq("id", id),
-    )
-      .maybeSingle();
-    // SFH-02: supabase-js does not throw on a query error, it returns
-    // `{ data: null, error }`. Without this check a statement timeout or a
-    // column error rendered the generic card as if the row were not found.
-    // A genuine not-found (`data === null`, `error === null`) is not a failure.
-    if (res.error) {
+  // Phase 209 (D-10, TODOS `170.3-OG-MALFORMED-ID`): a malformed id is a not-found, not a
+  // failure. It skips the read, logs nothing and never reaches `reportOgFailure` or its
+  // throttled Sentry slot, so a scraper cannot spend the one capture a real read failure
+  // needs. The precedent is the tearsheet route's `isUuid` guard.
+  // Review WR-08: one `console.info` (NOT an error, never Sentry) so our own bad og:image
+  // URL stays distinguishable from scraper noise. The id is truncated and JSON-quoted.
+  if (!isUuid(id)) {
+    console.info("[og:factsheet] malformed id ignored", JSON.stringify(String(id).slice(0, 8)));
+  }
+  if (isUuid(id)) {
+    try {
+      const supabase = await createClient();
+      const res = await withPublishedOnly(
+        supabase
+          .from("strategies")
+          .select(
+            // Phase 147 / SCEN-01: `returns_series` joins the embed. The
+            // analytics-service writes the cumprod equity curve there and leaves
+            // `daily_returns` NULL (CSV ingest only), so reading `daily_returns`
+            // alone rendered the BLANK card — name, then three em-dashes — for
+            // every service-computed strategy on every social unfurl. Disclosure
+            // is unchanged: withPublishedOnly below still gates the read, so the
+            // column is only ever read for a published row, and the raw series
+            // never leaves the server (the response is an image).
+            // STALE-01: `computation_status` joins the embed. It is the ONLY
+            // column that distinguishes a series belonging to a run that
+            // FINISHED from one left behind by a run that failed — every
+            // `IS NOT NULL` test passes on both. Read-only widening of a
+            // published row's projection; nothing new leaves the server (this
+            // response is a PNG).
+            // Phase 169.4.1 OGSHARPE (SC4, D-10): the stored `cagr`, `sharpe` and
+            // `max_drawdown` join the embed, so the card shows the values the
+            // factsheet headline and every list show instead of a recomputation.
+            // They are already public on the discovery projection; nothing new
+            // leaves the server.
+            // Review round 1 (CR-01): `data_quality_flags` joins the embed. On a
+            // chain-broken row the stored `cagr` covers only the suffix after the
+            // break, so computeOgHeadline hides it (see its docblock). Read-only;
+            // the flags never leave the server (this response is a PNG).
+            // Round 2 (SFH-R2-01): `metrics_json_by_basis`, `cumulative_return`,
+            // `volatility`, `sortino` and `calmar` join the embed, so the card can
+            // ask the page's own question (is the stored cash headline applicable?)
+            // and withhold a chain-broken row the page withholds. Same published-
+            // gated read of the same row; the columns are already public on the
+            // factsheet page and never leave the server (this response is a PNG).
+            // Phase 194.1 plan 06 (B3, D-15): the four record scalar aliases join the embed (the
+            // factsheet's own `RECORD_SCALAR_ALIASES`; `returns_series` and `metrics_json` are
+            // never projected whole by them), so the card judges the strategy's TOTAL record, not
+            // the resolved series, which is capped. The concatenation types the select `string`:
+            // postgrest-js cannot parse the `->-1` index of the `series_end` alias at the type
+            // level, so a literal would type every row as a `ParserError`; the row is cast below.
+            "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cumulative_return, volatility, cagr, sharpe, sortino, calmar, max_drawdown, data_quality_flags, metrics_json_by_basis, " +
+              RECORD_SCALAR_ALIASES +
+              " )",
+          )
+          .eq("id", id),
+      )
+        .maybeSingle();
+      // SFH-02: supabase-js does not throw on a query error, it returns
+      // `{ data: null, error }`. Without this check a statement timeout or a
+      // column error rendered the generic card as if the row were not found.
+      // A genuine not-found (`data === null`, `error === null`) is not a failure.
+      if (res.error) {
+        failed = true;
+        reportOgFailure("read", id, res.error);
+      }
+      data = (res.data ?? null) as unknown as OgStrategyRow | null;
+    } catch (err) {
+      // OG image still renders with the fallback.
+      // (deliberately doesn't throw — broken OG image must not 500 the deploy)
       failed = true;
-      reportOgFailure("read", id, res.error);
+      reportOgFailure("read", id, err);
     }
-    data = (res.data ?? null) as unknown as OgStrategyRow | null;
-  } catch (err) {
-    // OG image still renders with the fallback.
-    // (deliberately doesn't throw — broken OG image must not 500 the deploy)
-    failed = true;
-    reportOgFailure("read", id, err);
   }
 
   // Visibility fact (Phase 201 D-09, D-17): the read above is published-only

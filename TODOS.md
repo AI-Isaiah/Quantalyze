@@ -1098,17 +1098,11 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
-- [ ] **[204-SENTRY-RAW-SUPABASE-ERRORS]** (logged 2026-11-10, Phase 204 INTROAUTH review round 2, SEC-01 class; MEDIUM, security/data-integrity; owner: unassigned, book a phase or fold into the next API-hardening pass) **Other API routes pass a raw Supabase/PostgREST error to `captureToSentry`, so `details` and `hint` (a failing-row dump can carry a requester's values) may reach Sentry.**
-  - **Why:** a PostgREST error is a plain object, so `src/lib/sentry-capture.ts` (`scrubCaptureInput`) renders the whole object through `scrubSeamError`. That scrubber removes known secrets, not row values. Phase 204 fixed `/api/intro` only (`5a7b0da83`). Its three captures now send `new Error(\`<label>: ${code} ${message}\`)`.
-  - **Candidate sites, measured 2026-11-10:**
-    - **How they were found:** `grep -rn -a -E 'captureToSentry\((error|err|[a-zA-Z]+Error|[a-zA-Z]+Err)\b' src/app/api`, excluding tests and `new Error`. Some of these pass a thrown JS `Error`, not a PostgREST object, so triage each site.
-    - **Strategies:** `strategies/finalize-wizard` (9), `strategies/csv-finalize` (7), `strategies/create-with-key` (4), `strategies/composite/add-key` (3), `strategies/[id]/share` (2), `strategies/[id]/returns` (2), `strategies/draft/[id]`, `strategies/csv-validate`, `strategies/browse`, `strategies/[id]/share/revoke`, `verify-strategy` (3).
-    - **Keys:** `keys/sync` (3), `keys/validate-and-encrypt` (2), `keys/[id]/rotate-secret` (2), `keys/[id]/permissions`.
-    - **Factsheet:** `factsheet/[id]/tearsheet.pdf` (3), `factsheet/[id]/pdf` (3), `og/factsheet/[id]`.
-    - **Allocator scenarios:** `allocator/scenario/saved` (3), `allocator/scenario/saved/[id]` (3), `allocator/scenario/share` (2), `allocator/scenario/share/revoke`, `allocator/scenario/commit`.
-    - **Other:** `scenario/optimize` (2), `trades/upload`, `simulator`, `portfolio-optimizer`, `cron/refresh-benchmark`, `bridge`, `admin/match/send-intro`.
-  - **Fix direction:** reduce at the capture boundary rather than per call site. When the input is a non-`Error` object carrying `code`, `scrubCaptureInput` would keep only `code` and `message`. One test, which sets `details` and `hint` sentinels, then covers every route. The per-site tests in `src/app/api/intro/route.test.ts` show the assertion shape.
-  - **Gate:** a test that fails when a `details` or `hint` sentinel on a plain-object error reaches the Sentry client, shown RED before the fix.
+- [ ] **[209-SENTRY-DIRECT-CAPTURE-DETAILS]** (logged 2026-11-14, Phase 209 SCRUBLEAKS review residual, CONTEXT `<deferred>`; MEDIUM, security/data-integrity; owner: unassigned, book a phase when taken up) **Direct `Sentry.captureException` call sites bypass `scrubCaptureInput`, so a plain PostgREST error object captured there still carries `details` and `hint` to Sentry under `extra.__serialized__`.**
+  - **Why:** Phase 209 scrubbed the `captureToSentry` chokepoint and made `beforeSend` total; the SDK serialises a non-Error capture into `extra.__serialized__`, which `scrubSentryEvent` scrubs for share tokens only. Measured in review: `alert-digest` (two sites) ships `details`/`hint` this way.
+  - **Candidate sites:** `alert-digest` (2), `admin.ts`, `founder-lp-report`, `ops-alert`, `for-quants-lead`, `error.tsx`/`global-error.tsx`, plus `audit.ts`, `for-quants-leads-admin.ts`, `preferences.ts`. Find them with `grep -rn -a 'Sentry.captureException' src --include=*.ts --include=*.tsx`, excluding tests.
+  - **Fix direction:** one arm in `scrubSentryEvent` (`src/instrumentation.ts`) that drops `details`/`hint` from `extra.__serialized__`, so every direct site is covered at the last hop; or route the sites through `captureToSentry`.
+  - **Gate:** a real-SDK envelope test (the in-memory transport in `src/instrumentation.test.ts`) capturing a plain object with `details`/`hint` sentinels, shown RED before the fix.
 
 - [ ] **[198-FD3-SIDEBAR-ADD-A-STRATEGY]** (logged 2026-11-09, Phase 198 MYBOOK, founder decision FD-3 2026-11-08; owner: unassigned, book a phase when taken up). On the allocator workspace, the sidebar and mobile-nav "Add a Strategy" still open the manager `WizardClient`. Phase 198 took the wizard off the My allocation header only; the header now opens the allocator's own add-allocation flow. The founder chose to leave the sidebar entry alone in that phase and book this follow-up. Decide what "Add a Strategy" means for an allocator (the add-allocation flow, a manager-only entry, or hidden), and update `e2e/wizard-resume.spec.ts`, which now reaches the wizard through the sidebar.
 
@@ -5291,11 +5285,6 @@ Source: `164-REVIEW.md` (0 critical / 3 warning / 6 info) plus two defects found
 closure pipeline. The two user-reachable warnings (WR-02, WR-03) are FIXED and committed; what
 follows is everything that was not.
 
-- **[SHARE-D-164-C] `create_scenario_share` is not in `MUTATING_RPC_NAMES` at all.** Pre-existing,
-  on shipped code: `allocator/scenario/share/route.ts` has therefore never been under the audit
-  law. Phase 164 put the new `create_strategy_share` / `revoke_strategy_share` under it and left
-  the older sibling out, which is now the only unaudited share mint in the tree.
-
 - **[SHARE-INFO] six Info findings**, none blocking under the stopping rule: ci.yml arm-count
   narrative arithmetic (the *enforced* integers are correct and were re-verified — 103/166/8); the
   Sentry breadcrumb/extra scrub is one level deep; the 32-char secret floor is duplicated with no
@@ -5371,21 +5360,6 @@ Neither closed. Both found something better than a pass.
   capture used above is the only thing that ever has. ⭐ Candidate mechanism for 164.3
   (VACUITY): keep the capture harness and assert on transmitted bytes, rather than on a
   fixture that mirrors the implementation's own idea of its surface.
-
-- **[SHARE-QA-07] the recursive scrub weakened the file's own no-throw contract.**
-  `src/instrumentation.ts:41` promises that a future SDK shape change degrades to "that
-  field was not scrubbed" and NEVER to a throw inside `beforeSend` — and a throw there
-  drops the whole event, so the failure mode is silent loss of error reporting. The
-  shallow walk assigned only to top-level keys; the recursive one assigns unconditionally
-  across every nested object and array it reaches, so a frozen object, a sealed object or
-  a getter-only property anywhere in the subtree now throws where it previously could not.
-  No evidence Sentry freezes events and `beforeSend` has no `try/catch`, so this is
-  hardening, not a live defect — but the comment currently overstates the guarantee.
-  Remedy is one of: wrap the body in `try/catch` and return the event unscrubbed-but-
-  delivered on throw (WRONG — that would ship the token), wrap and return `null` to DROP
-  the event fail-closed, or assign only when `scrubSharePath` actually changed the string.
-  ⭐ The third is cheapest and shrinks the write surface to the rare match. Decide in
-  164.1; do not leave the contract comment claiming more than the code delivers.
 
 ### Phase 164 (SHARE) — browser-UAT findings (booked 2026-08-28)
 
@@ -6103,17 +6077,6 @@ one exists), and note that `package-lock.json`'s root version is **stale at `0.7
 been drifting for several releases with nothing enforcing it. `npm ci` tolerates the root-version
 mismatch today, so this is hygiene rather than breakage; left untouched here to keep the diff
 surgical.
-
-### Two guard gaps on `keys/validate-and-encrypt` (raised 2026-08-23, Phase-160 closeout review)
-
-Both surfaced by the pre-landing review of the `STALE_CLIENT` retirement. Neither is a
-live defect; both are **missing tripwires**, so the class can re-open silently.
-
-- **`const body = await req.json()` has no `try`/`catch`** (`route.ts`, top of `POST`).
-  Malformed JSON — or a body of literal `null` — throws inside the `withAuth` wrapper, which
-  has no catch either, so the caller gets a Next.js default 500 with no coded envelope. That
-  contradicts the route's own stated invariant, "a machine code on EVERY error arm".
-  Pre-existing, not introduced by Phase 160, and out of that phase's diff.
 
 ### Money-path correctness (latent / flag-gated / edge cases)
 - ~~**Unified-backbone CSV-finalize breaks if flag on**~~ — **CLOSED 2026-08-17 (Phase 145
@@ -8055,34 +8018,13 @@ disagrees with Holdings for that account.
 
 ## Phase 170.3 (OGPUBLIC) — routed review items (logged 2026-10-11)
 
-### 170.3-OG-MALFORMED-ID — a malformed id on the now-public OG route can mask real read failures in Sentry (booked 2026-10-11, review WR-01 / SFH-1, MEDIUM)
-
-**Why it is open.** `/api/og/factsheet/[id]` is reachable signed-out since 170.3. A non-uuid id goes
-straight to `.eq("id", id)`, so PostgREST answers 22P02 and the route takes its failure path. That path
-logs on every hit, sends `no-store`, renders a full card and spends the `og-factsheet:read` Sentry
-throttle slot. That slot allows one capture per 60 s per instance, so a malformed hit once a minute hides a real
-timeout or column drift. Both reviewers flagged it; MEDIUM, so it is booked rather than fixed.
-**Fix.** Check `isUuid(id)` before the read, as `src/app/api/factsheet/[id]/tearsheet.pdf/route.ts`
-already does. Treat a malformed id as not-found: generic card, normal cache, no capture. Change test P3
-in `route.public-access.test.tsx`, and add a separate valid-uuid read-error case that keeps the `no-store`
-plus one-capture behaviour pinned.
-**Owner / Trigger:** the next phase touching `src/app/api/og/`; or any Sentry gap on OG reads.
-
 ### 170.3-OG-NOTFOUND-CACHE — a not-yet-published strategy's blank card is cached for a day or more (booked 2026-10-11, SFH-2, MEDIUM)
 
 **Why it is open.** A genuine not-found (an unpublished or unknown id) renders the generic card under
 `LONG_CACHE_CONTROL` (1 day `s-maxage` plus 7 days `stale-while-revalidate`). If a link is shared before
 publishing, unfurlers and the CDN keep the blank card after the strategy is published.
 **Fix.** Give a not-found a short cache, and keep the long cache for rendered data.
-**Owner / Trigger:** as 170.3-OG-MALFORMED-ID.
-
-### 170.3-OG-P3-STATUS-VACUOUS — P3's "never a 404" line cannot fail (booked 2026-10-11, SFH-3, MEDIUM)
-
-**Why it is open.** `expect(res.status ?? 200).toBe(200)` in `route.public-access.test.tsx` always
-passes, because the ImageResponse mock has no `status`. A 404 is still caught indirectly by the cache
-assertion.
-**Fix.** Give the mock a status, or assert the response type, then neuter to RED.
-**Owner / Trigger:** fixed together with 170.3-OG-MALFORMED-ID.
+**Owner / Trigger:** the next phase touching `src/app/api/og/`. Phase 209 (2026-11-14) touched it and left this open: the cache policy for a genuine not-found is a separate decision. A malformed id now takes the same not-found path, under the same long cache.
 
 ## Phase 164.6.8 (OUTAGEALERT) — routed review items (logged 2026-10-14)
 

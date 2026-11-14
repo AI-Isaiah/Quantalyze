@@ -1,4 +1,4 @@
-import { scrubSeamError, scrubSeamString } from "./seam-redaction";
+import { scrubSeamErrorForCapture, scrubSeamString } from "./seam-redaction";
 
 /**
  * Lazy Sentry capture helper.
@@ -77,8 +77,11 @@ import { scrubSeamError, scrubSeamString } from "./seam-redaction";
  * and `stack`, and its `cause` chain is FOLDED INTO the scrubbed message rather
  * than re-attached — attaching the original object would hand Sentry the very
  * bytes this function exists to remove. Anything else is rendered to a scrubbed
- * string. `extra` and `tags` string values are scrubbed too, because a call site
- * can legitimately put an upstream detail in `extra`.
+ * string. Since Phase 209, a non-Error object (at the top level or anywhere in
+ * the cause chain) renders through the capture-mode renderer, so only its name,
+ * code, message, errno and syscall are sent, or a fixed placeholder when it has
+ * none of them. `extra` and `tags` string values are scrubbed too, because a
+ * call site can legitimately put an upstream detail in `extra`.
  *
  * WHAT MUST NOT REGRESS. The scrub runs in its OWN try/catch with a fail-safe
  * fallback: a scrubbing failure must neither throw into the caller's catch block
@@ -102,10 +105,11 @@ function scrubCaptureInput(err: unknown, secrets: readonly unknown[]): unknown {
       let message = scrubSeamString(err.message ?? "", secrets);
       const cause = (err as { cause?: unknown }).cause;
       if (cause !== undefined && cause !== null) {
-        // FOLDED IN, never re-attached. `scrubSeamError` renders the whole chain
-        // and scrubs it; handing Sentry the original `cause` object would ship
-        // the unscrubbed message this function was called to remove.
-        message += ` [cause: ${scrubSeamError(cause, secrets)}]`;
+        // FOLDED IN, never re-attached. `scrubSeamErrorForCapture` renders the
+        // whole chain in capture mode and scrubs it; handing Sentry the original
+        // `cause` object would ship the unscrubbed message this function was
+        // called to remove.
+        message += ` [cause: ${scrubSeamErrorForCapture(cause, secrets)}]`;
       }
       const rebuilt = new Error(message);
       rebuilt.name = scrubSeamString(err.name ?? "Error", secrets);
@@ -114,7 +118,7 @@ function scrubCaptureInput(err: unknown, secrets: readonly unknown[]): unknown {
       }
       return rebuilt;
     }
-    return scrubSeamError(err, secrets);
+    return scrubSeamErrorForCapture(err, secrets);
   } catch {
     // Fail SAFE, and still capture: an alert that never fires is a worse outcome
     // than an alert with no detail, and shipping the original would defeat the

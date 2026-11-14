@@ -141,7 +141,26 @@ const UPSTREAM_STATUS_TO_SEAM_CODE: ReadonlyMap<number, string> = new Map<
 ]);
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
-  const body = await req.json();
+  // Phase 209 SC4 / D-13 — a malformed, `null` or non-object JSON body answers
+  // the route's own coded 400 instead of a Next.js default 500 with no machine
+  // code. Copied exactly from the `strategies/create-with-key` sibling. The
+  // guard sits ABOVE the limiter and the probe, so a bad body spends neither.
+  // ⛔ A `SyntaxError` is SWALLOWED, never logged or captured: a V8 message
+  // quotes a fragment of the input, and this body carries raw exchange
+  // credentials (RESEARCH Pitfall 5). Anything ELSE (a consumed or aborted
+  // body, a stream fault) is not a malformed body and is rethrown, so it
+  // reaches the error pipeline rather than posing as "fill in every field"
+  // (review WR-07).
+  const body = await req.json().catch((err: unknown) => {
+    if (err instanceof SyntaxError) return null;
+    throw err;
+  });
+  if (!body || typeof body !== "object") {
+    return NextResponse.json(
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "Invalid request body" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
   const { exchange, api_key, api_secret, passphrase } = body;
 
   // SECURITY-SENSITIVE carve-out (119-CONTEXT Q1, LOCKED): sFOX authenticates with a

@@ -33,12 +33,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * Coverage matrix:
  *   P1 — unpublished id: generic card, nothing of the row, long cache, no Sentry
  *   P2 — unknown id: the same generic card, long cache (a genuine not-found)
- *   P3 — malformed id (PostgREST 22P02): generic card, a 200 never a 404,
- *        failure-path cache header
+ *   P3 — malformed id: the generic card as a 200 (never a 404) with the long cache,
+ *        no database read, no failure log, no capture (Phase 209 SC3, D-10). The
+ *        status line is a real assertion since the mock carries a status (D-12).
  *   P4 — published control (non-vacuity): the SAME row published renders its
  *        name and stored Sharpe, so P1 cannot pass because the fake is empty
- *   P5 — predicate: every case read `strategies` with status = published and
- *        the requested id
+ *   P5 — predicate: every uuid-shaped case read `strategies` with status =
+ *        published and the requested id (a malformed id never reads: P3)
+ *   P6 — a malformed hit does not spend the og-factsheet:read Sentry slot: a valid-uuid
+ *        read error in the same window still captures once (Phase 209, D-11)
+ *   P7 — a valid-uuid read error keeps no-store and exactly one capture (D-11)
  */
 
 vi.mock("server-only", () => ({}));
@@ -56,6 +60,8 @@ const STATE = vi.hoisted(() => ({
   strategyRow: null as Record<string, unknown> | null,
   /** When true, the fake answers every read with `{ data: null, error: null }`. */
   returnNothing: false,
+  /** Phase 209 D-11: when set, the fake answers a uuid-filtered read with this error. */
+  readError: null as { code: string; message: string } | null,
   observed: {
     filters: [] as Array<[string, unknown]>,
     tables: [] as string[],
@@ -70,8 +76,13 @@ const ogCalls = vi.hoisted(
 vi.mock("next/og", () => ({
   ImageResponse: class {
     headers = new Headers();
+    /** Phase 209 D-12: the status the route asked for, 200 when it asked for none,
+     *  so a status assertion on the response can fail (170.3-OG-P3-STATUS-VACUOUS). */
+    status: number;
     constructor(element: unknown, options?: unknown) {
       ogCalls.push({ element, options });
+      const asked = (options as { status?: unknown } | undefined)?.status;
+      this.status = typeof asked === "number" ? asked : 200;
     }
   },
 }));
@@ -118,6 +129,7 @@ vi.mock("@/lib/supabase/server", () => ({
               },
             };
           }
+          if (STATE.readError) return { data: null, error: STATE.readError };
           const row = STATE.strategyRow;
           if (STATE.returnNothing || !row) return { data: null, error: null };
           // Anonymous RLS: a row is visible only if it matches every predicate
@@ -243,9 +255,11 @@ beforeEach(async () => {
   __resetCaptureThrottleForTests();
   STATE.strategyRow = null;
   STATE.returnNothing = false;
+  STATE.readError = null;
   STATE.observed = { filters: [], tables: [] };
   ogCalls.length = 0;
   vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.spyOn(console, "info").mockImplementation(() => undefined);
 });
 
 afterEach(() => {
@@ -276,16 +290,72 @@ describe("GET /api/og/factsheet/[id] — signed-out caller (OGPUBLIC)", () => {
     expect(afterSpy).not.toHaveBeenCalled();
   });
 
-  it("P3 — a MALFORMED id renders the generic card as a 200 (never a 404) with the failure-path cache header (D-02)", async () => {
+  it("P3 — a MALFORMED id renders the generic card as a 200 with the long cache and never reaches the database or Sentry (Phase 209 SC3, D-10)", async () => {
     STATE.strategyRow = makeRow("published");
     const { GET } = await import("./route");
     const res = await GET(makeRequest(MALFORMED_ID), ctx(MALFORMED_ID));
+    const { captureToSentry } = await import("@/lib/sentry-capture");
 
     expectGenericCard();
-    expect(res.status ?? 200).toBe(200);
-    const failure = failureCacheControl();
-    expect(failure).not.toBe(LONG_CACHE);
-    expect(res.headers.get("Cache-Control")).toBe(failure);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe(LONG_CACHE);
+    // A malformed id is a not-found, not a failure: no read, no log, no capture.
+    expect(STATE.observed.tables).toEqual([]);
+    expect(afterSpy).not.toHaveBeenCalled();
+    expect(captureToSentry).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalled();
+    // Review WR-08: it is not silent either. One info line, a truncated quoted id,
+    // and the full id never appears.
+    expect(console.info).toHaveBeenCalledTimes(1);
+    expect(console.info).toHaveBeenCalledWith(
+      "[og:factsheet] malformed id ignored",
+      JSON.stringify(MALFORMED_ID.slice(0, 8)),
+    );
+  });
+
+  it("P3b — a valid-uuid read logs no malformed-id info line (WR-08)", async () => {
+    STATE.strategyRow = makeRow("published");
+    const { GET } = await import("./route");
+    await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(console.info).not.toHaveBeenCalled();
+  });
+
+  it("P6 — a MALFORMED hit does not spend the Sentry slot: a valid-uuid read error right after it still captures once (Phase 209, D-11)", async () => {
+    STATE.strategyRow = makeRow("published");
+    const { GET } = await import("./route");
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+
+    await GET(makeRequest(MALFORMED_ID), ctx(MALFORMED_ID));
+    expect(captureToSentry).not.toHaveBeenCalled();
+
+    STATE.readError = { code: "57014", message: "canceling statement due to statement timeout" };
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+
+    // Same throttle window (reset only in beforeEach): had the malformed hit taken the
+    // slot, this real failure would be dropped and the one capture would carry 22P02.
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    expect(captureToSentry).toHaveBeenCalledWith(
+      STATE.readError,
+      expect.objectContaining({
+        tags: expect.objectContaining({ route: "api/og/factsheet", stage: "read" }),
+        extra: expect.objectContaining({ strategy_id: PUBLISHED_ID }),
+      }),
+    );
+    expect(res.headers.get("Cache-Control")).toBe(failureCacheControl());
+  });
+
+  it("P7 — a valid-uuid READ ERROR is sent no-store with exactly one capture (Phase 209, D-11)", async () => {
+    STATE.strategyRow = makeRow("published");
+    STATE.readError = { code: "57014", message: "canceling statement due to statement timeout" };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe(failureCacheControl());
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    expect(captureToSentry).toHaveBeenCalledWith(STATE.readError, expect.anything());
+    expect(console.error).toHaveBeenCalled();
   });
 
   it("P4 — non-vacuity: the SAME row, published, renders its name and stored figures", async () => {
@@ -305,7 +375,6 @@ describe("GET /api/og/factsheet/[id] — signed-out caller (OGPUBLIC)", () => {
   it.each([
     ["unpublished", PUBLISHED_ID, "draft"],
     ["unknown", UNKNOWN_ID, "published"],
-    ["malformed", MALFORMED_ID, "published"],
     ["published", PUBLISHED_ID, "published"],
   ] as const)(
     "P5 — the %s read carries status = published and the requested id on strategies (T-170.3-03)",

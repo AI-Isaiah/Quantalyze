@@ -186,6 +186,37 @@ const PLAIN_OBJECT_DIAGNOSTIC_KEYS: readonly string[] = [
 ];
 
 /**
+ * The fields read off a plain object on the SENTRY CAPTURE path (Phase 209).
+ *
+ * This is the key list for `captureToSentry`, and it deliberately leaves out the
+ * two PostgREST row-dump fields that `PLAIN_OBJECT_DIAGNOSTIC_KEYS` keeps for the
+ * seam LOG path. Sentry is a third party, and those two fields can carry a failing
+ * row's values (TODOS `204-SENTRY-RAW-SUPABASE-ERRORS`, Phase 209). Because the two
+ * keys are absent from this list, the renderer never reads them, so a hostile
+ * getter on either is never invoked.
+ */
+const CAPTURE_OBJECT_DIAGNOSTIC_KEYS: readonly string[] = [
+  "name",
+  "code",
+  "message",
+  "errno",
+  "syscall",
+];
+
+/**
+ * What the Sentry capture path renders for a non-Error object with none of the
+ * `CAPTURE_OBJECT_DIAGNOSTIC_KEYS` (Phase 209, D-05).
+ *
+ * Such an object can carry arbitrary row values, so the capture path sends this
+ * fixed string instead of a `toString` rendering or a serialisation. It applies to
+ * EVERY such object, including arrays and objects with their own `toString` (a
+ * `URL`, a `Date`, a class instance): D-01 gates on "non-Error object", and a class
+ * instance's `toString` can print row values. That is RESEARCH A2, taken as
+ * discretion.
+ */
+const CAPTURE_OPAQUE_OBJECT = "[non-Error object withheld from the capture]";
+
+/**
  * Ceiling on the serialised fallback for an object with no named field.
  *
  * The fallback exists so an opaque object says SOMETHING rather than nothing,
@@ -358,6 +389,7 @@ function describeThrown(
   err: unknown,
   depth: number,
   seen: Set<object>,
+  capture = false,
 ): string {
   if (depth > MAX_CAUSE_DEPTH) return "…";
   if (err === undefined) return "undefined";
@@ -373,7 +405,7 @@ function describeThrown(
       let rendered = `${name}: ${message}`;
       const cause = (err as { cause?: unknown }).cause;
       if (cause !== undefined && cause !== null) {
-        rendered += ` [cause: ${describeThrown(cause, depth + 1, seen)}]`;
+        rendered += ` [cause: ${describeThrown(cause, depth + 1, seen, capture)}]`;
       }
       return rendered;
     }
@@ -394,13 +426,16 @@ function describeThrown(
       // before, so no case regresses.
       const record = err as Record<string, unknown>;
       const parts: string[] = [];
-      for (const key of PLAIN_OBJECT_DIAGNOSTIC_KEYS) {
+      for (const key of capture
+        ? CAPTURE_OBJECT_DIAGNOSTIC_KEYS
+        : PLAIN_OBJECT_DIAGNOSTIC_KEYS) {
         const field = record[key];
         if (typeof field === "string" || typeof field === "number") {
           parts.push(`${key}=${field}`);
         }
       }
       if (parts.length > 0) return parts.join(" ");
+      if (capture) return CAPTURE_OPAQUE_OBJECT;
 
       // No named field. A CUSTOM `toString` (a `URL`, a `Date`, a class with
       // its own renderer) still says something useful, so it wins — only the
@@ -450,6 +485,28 @@ export function scrubSeamError(
 ): string {
   try {
     return scrubSeamString(describeThrown(err, 0, new Set<object>()), extraSecrets);
+  } catch {
+    return "[seam-redaction: unrepresentable thrown value]";
+  }
+}
+
+/**
+ * Render an unknown thrown value as a SCRUBBED string for the SENTRY capture path.
+ *
+ * The Sentry-capture variant of `scrubSeamError` (Phase 209, D-04): the same
+ * `key=value` string shape as the log renderer, minus the two PostgREST row-dump
+ * fields, so existing Sentry issue grouping is unchanged. Total by construction,
+ * for the same reason as `scrubSeamError`: every caller is inside a catch block.
+ */
+export function scrubSeamErrorForCapture(
+  err: unknown,
+  extraSecrets: readonly unknown[] = [],
+): string {
+  try {
+    return scrubSeamString(
+      describeThrown(err, 0, new Set<object>(), true),
+      extraSecrets,
+    );
   } catch {
     return "[seam-redaction: unrepresentable thrown value]";
   }

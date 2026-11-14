@@ -475,12 +475,22 @@ const ROUTES: readonly RouteUnderTest[] = [
     // This row enforces "typed, and has copy"; it does NOT enforce "a client
     // renders it", which is what the wizard-step rows enforce. That gap is
     // recorded as named debt at the roster, not papered over here.
+    //
+    // ⚠️ 12 → 13 (Phase 209 SC4). The emitter ADDED is the body-shape guard at
+    // the top of `POST`, which answers `{ code: "KEY_MISSING_REQUIRED_FIELD",
+    // error: "Invalid request body" }` at 400 for a malformed, `null` or
+    // non-object JSON body — `{ code, error }` order, inside
+    // `EMITTER_BODY_MAX_CHARS`, so it is VISIBLE to this predicate. It is the
+    // same guard `strategies/create-with-key` carries (D-13). `KEY_MISSING_
+    // REQUIRED_FIELD` is now emitted THREE times on this route. No new code:
+    // the distinct-code count and the roster are unchanged, and `rosterFloor`
+    // stays 4.
     label: "keys/validate-and-encrypt",
     route: join(REPO, "src/app/api/keys/validate-and-encrypt/route.ts"),
     rosterFile: join(REPO, "src", "lib", "wizardErrors.ts"),
     rosterName: "KNOWN_VALIDATE_AND_ENCRYPT_CODES",
     statusRe: "[45]\\d\\d",
-    expectedSites: 12,
+    expectedSites: 13,
     // 8 measured members as of 164.5.3-02 (7 until then; 6 until 164.2-05
     // admitted `RATE_LIMITED`); ~60% of 8 is 4.8, which still floors at 4 — the
     // SAME literal this row was already pinned at, unmoved on purpose. This

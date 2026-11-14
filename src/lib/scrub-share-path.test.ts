@@ -13,7 +13,7 @@
  */
 import { describe, it, expect } from "vitest";
 
-import { scrubSharePath, isSharePath } from "./scrub-share-path";
+import { scrubSharePath, isSharePath, isScenarioSharePath } from "./scrub-share-path";
 
 /** A real-shaped token: 43 base64url characters, the width `deriveShareToken`
  *  emits. Typed by hand so these vectors do not depend on the deriver. */
@@ -107,14 +107,52 @@ describe("scrubSharePath — vectors", () => {
 });
 
 describe("scrubSharePath — pass-through", () => {
+  // Phase 209 WR-04: `/scenario-share/abcdef` is NO LONGER pass-through — it is a
+  // capability lane too and moved to the scrub vectors below, on purpose.
   it.each([
     "/factsheet/44444444-4444-4444-8444-444444444444/v2",
-    "/scenario-share/abcdef",
     "https://quantalyze.xyz/browse?sort=sharpe",
     "/factsheet-share", // the prefix with NO segment is not a token
     "",
   ])("leaves %j byte-identical", (input) => {
     expect(scrubSharePath(input)).toBe(input);
+  });
+});
+
+describe("scrubSharePath — the scenario-share lane (Phase 209 WR-04)", () => {
+  // The scenario share mint puts a raw capability token in
+  // `/scenario-share/<token>`; a scrubber that stopped at `/factsheet-share/`
+  // shipped it to Sentry in `request.url`, `transaction` and span descriptions.
+  const SCENARIO_PLACEHOLDER = "/scenario-share/[token]";
+
+  it("replaces a bare scenario token path with its own placeholder", () => {
+    expect(scrubSharePath(`/scenario-share/${TOKEN}`)).toBe(SCENARIO_PLACEHOLDER);
+  });
+
+  it("scrubs inside a full URL, keeping origin and query", () => {
+    expect(
+      scrubSharePath(`https://quantalyze.xyz/scenario-share/${TOKEN}?ref=slack`),
+    ).toBe(`https://quantalyze.xyz${SCENARIO_PLACEHOLDER}?ref=slack`);
+  });
+
+  it("scrubs a short or malformed segment identically (unconditional)", () => {
+    expect(scrubSharePath("/scenario-share/abcdef")).toBe(SCENARIO_PLACEHOLDER);
+  });
+
+  it("scrubs both lanes in one string and does not cross the placeholders", () => {
+    expect(
+      scrubSharePath(`/factsheet-share/${TOKEN} then /scenario-share/${TOKEN_2}`),
+    ).toBe(`${EXPECTED_PLACEHOLDER} then ${SCENARIO_PLACEHOLDER}`);
+  });
+
+  it("is idempotent", () => {
+    const once = scrubSharePath(`/scenario-share/${TOKEN}`);
+    expect(scrubSharePath(once)).toBe(once);
+  });
+
+  it("leaves the bare prefix and a prefix-adjacent path alone", () => {
+    expect(scrubSharePath("/scenario-share")).toBe("/scenario-share");
+    expect(scrubSharePath("/scenario-shared/abc")).toBe("/scenario-shared/abc");
   });
 });
 
@@ -130,7 +168,7 @@ describe("isSharePath — the shared client-suppression predicate", () => {
 
   it.each([
     "/factsheet/44444444-4444-4444-8444-444444444444/v2",
-    "/scenario-share/abcdef",
+    "/scenario-share/abcdef", // client suppression is the factsheet lane only (WR-04 widened the SCRUBBER, not this)
     "/browse",
     "/",
     "/factsheet-shareholders", // ⛔ prefix-adjacent, must NOT match
@@ -147,6 +185,30 @@ describe("isSharePath — the shared client-suppression predicate", () => {
   });
 });
 
+describe("isScenarioSharePath — the Plausible gate's scenario-lane predicate (WR-09)", () => {
+  it.each([`/scenario-share/${TOKEN}`, "/scenario-share/abcdef", "/scenario-share"])(
+    "is TRUE for %j",
+    (p) => {
+      expect(isScenarioSharePath(p)).toBe(true);
+    },
+  );
+
+  it.each([
+    `/factsheet-share/${TOKEN}`,
+    "/scenario-shared/abc", // prefix-adjacent
+    "/allocations",
+    "/",
+  ])("is FALSE for %j", (p) => {
+    expect(isScenarioSharePath(p)).toBe(false);
+  });
+
+  it("takes a PATHNAME — a full URL must not match", () => {
+    expect(
+      isScenarioSharePath(`https://quantalyze.xyz/scenario-share/${TOKEN}`),
+    ).toBe(false);
+  });
+});
+
 describe("scrubSharePath — the property that matters", () => {
   it.each([
     `/factsheet-share/${TOKEN}`,
@@ -154,6 +216,8 @@ describe("scrubSharePath — the property that matters", () => {
     `/factsheet-share/${TOKEN}#f`,
     `https://quantalyze.xyz/factsheet-share/${TOKEN}`,
     `first /factsheet-share/${TOKEN} then /factsheet-share/${TOKEN_2}`,
+    `/scenario-share/${TOKEN}`,
+    `https://quantalyze.xyz/scenario-share/${TOKEN}?x=1`,
   ])("no token survives in the output of %j", (input) => {
     const out = scrubSharePath(input);
     expect(out).not.toContain(TOKEN);
