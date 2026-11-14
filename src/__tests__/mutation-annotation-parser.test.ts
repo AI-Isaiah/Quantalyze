@@ -1115,7 +1115,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS, plan 06): `armsSeen` 830 -> 845, the 15 twinned arms of the NEW gate test_enqueue_dedup_record_retract.sql. Read off `--parse-only` (`coverage: files 82/109`, `arms: 0/845/0`) and the exit-0 SUBSET run of the new gate test_enqueue_dedup_record_retract.sql (15 annotated arms).
 // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS review fix WR-01): `armsSeen` 845 -> 846, the +1 twinned arm DPC-SKIP of test_enqueue_dedup_record_retract.sql. MEASURED: this file's run read `expected 846 to be 845`, and `--parse-only` printed `arms: 0/846/0`.
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS ship, rebased on Phase 210 PUBLICTRUTH): combined with Phase 210's +2 arms (830 -> 832) and +8 file steps on origin/main, so arm counts read Phase 211's value +2 and step counts +8.
-    expect(armsSeen).toBe(848);
+    // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): `armsSeen` 848 -> 864, the +16 twinned arms in four existing gates (staleness I-N +6, composite CL +1, fan-out NA1-NA4 and SK1-SK3 +7, dedup FINALIZE-WIZARD-SHAPE and CSV-FINALIZE-SHAPE +2). MEASURED: this file's run read `expected 864 to be 848`, and `--parse-only` printed `coverage: files 82/109`, `arms: 0/864/0`; the exit-0 SUBSET run of the four gates printed `arms: 109/109/0`, `biting: 109`. No file joined.
+    expect(armsSeen).toBe(864);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1165,7 +1166,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS, plan 06): `stepsSeen` 943 -> 956, +13 file steps contributed by the NEW gate test_enqueue_dedup_record_retract.sql. MEASURED, not derived: the sibling `needles.length` pin read `expected 956 to be 943` over the same corpus.
 // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS review fix WR-01): `stepsSeen` 956 -> 957, the +1 file step of the new DPC-SKIP twin. MEASURED: this file's run read `expected 957 to be 956`.
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS ship, rebased on Phase 210 PUBLICTRUTH): combined with Phase 210's +2 arms (830 -> 832) and +8 file steps on origin/main, so arm counts read Phase 211's value +2 and step counts +8.
-    expect(stepsSeen).toBe(965);
+    // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): `stepsSeen` 965 -> 981, +16 file steps contributed by the 16 new twins. MEASURED, not derived: this file's run read `expected 981 to be 965`.
+    expect(stepsSeen).toBe(981);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2131,7 +2133,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS, plan 06): `needles.length` 943 -> 956, the same +13 file steps as `stepsSeen`. MEASURED: this pin read `expected 956 to be 943`.
 // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS review fix WR-01): 956 -> 957, moving WITH `stepsSeen` (the DPC-SKIP twin's `find` needle). MEASURED: this file's run read `expected 957 to be 956`.
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS ship, rebased on Phase 210 PUBLICTRUTH): combined with Phase 210's +2 arms (830 -> 832) and +8 file steps on origin/main, so arm counts read Phase 211's value +2 and step counts +8.
-    expect(needles.length).toBe(965);
+    // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): `needles.length` 965 -> 981, the same +16 file steps as `stepsSeen`. MEASURED: this file's run read `expected 981 to be 965`.
+    expect(needles.length).toBe(981);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
