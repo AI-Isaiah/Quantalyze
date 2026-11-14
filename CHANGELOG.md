@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.45.1] - 2026-11-14 — BASELINE: automated re-dump after the PROD apply of aabe7427
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `43594887781`, after the PROD apply of merge `aabe7427`: sha256 `10799455…` → `559fe7c0…`.
+- Shape, old → new: tables 66 → 67, policies 153 → 154, function statements 134 → 135, distinct function names 132 → 133, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261114120000_get_published_trade_venues_open_windows.sql`, `20261114130000_enqueue_dedup_record_retract.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-14` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.45.0 → 0.133.45.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=321 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 135 — MATCH 132, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `43594887781` succeeded, and this entry was composed by the `redump-pr` job. Run `43594887781` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.45.0] - 2026-11-14 — Phase 211 SYNCJOBS: trade fetches skip nothing, the enqueue dedup keeps the caller's intent, and a failed composite keeps its real status
 
 This phase fixes three bookkeeping defects in the sync and job paths:

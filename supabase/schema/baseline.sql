@@ -311,6 +311,7 @@ BEGIN
   END IF;
 
   IF v_existing_id IS NOT NULL THEN
+    PERFORM public._record_enqueue_dedup(v_existing_id, p_kind, p_metadata, p_parent_job_ids);  -- Phase 211 D11, SITE A (7-arg)
     RETURN v_existing_id;
   END IF;
 
@@ -364,6 +365,7 @@ BEGIN
       USING ERRCODE = 'serialization_failure';
   END IF;
 
+  PERFORM public._record_enqueue_dedup(v_new_id, p_kind, p_metadata, p_parent_job_ids);  -- Phase 211 D11, SITE B (7-arg)
   RETURN v_new_id;
 END;
 $$;
@@ -507,6 +509,7 @@ BEGIN
   END IF;
 
   IF v_existing_id IS NOT NULL THEN
+    PERFORM public._record_enqueue_dedup(v_existing_id, p_kind, p_metadata, p_parent_job_ids);  -- Phase 211 D11, SITE A (10-arg)
     RETURN v_existing_id;
   END IF;
 
@@ -609,6 +612,7 @@ BEGIN
       USING ERRCODE = 'serialization_failure';
   END IF;
 
+  PERFORM public._record_enqueue_dedup(v_new_id, p_kind, p_metadata, p_parent_job_ids);  -- Phase 211 D11, SITE B (10-arg)
   RETURN v_new_id;
 END;
 $_$;
@@ -617,7 +621,7 @@ $_$;
 ALTER FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) IS 'Private shared implementation of the idempotent enqueue pattern. Handles all four target scopes (strategy / portfolio / allocator / api_key) via 4-way XOR on the four id parameters. Extended in migration 066 for api_key scope + scheduled run_at. ACL re-asserted by migration 118. Rejects the retired compute_analytics kind with invalid_parameter_value (Phase 106 D3). Race-loser re-read uses a plain SELECT INTO on all four arms; if the winner already advanced past the in-flight statuses, raises serialization_failure so the caller can retry vs. surfacing a 500 (Phase 163 OPS-08, parity with the 7-param overload''s mig 109 P3 fix). Computes the initial status and INSERTs it explicitly: done_pending_children while at least one listed parent is not yet done; a child whose parents are all done starts pending, as does a child with no parents (Phase 164.9.1). With parents, it locks them first through public._fan_in_lock_rows in ancestor-first (depth, id) order (Phase 164.9.3.1 D-06) and reads them: a NULL element, a missing parent or a failed_final parent is refused with invalid_parameter_value, so no enqueue creates a child that no mark-done can release.';
+COMMENT ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) IS 'Private shared implementation of the idempotent enqueue pattern. Handles all four target scopes (strategy / portfolio / allocator / api_key) via 4-way XOR on the four id parameters. Extended in migration 066 for api_key scope + scheduled run_at. ACL re-asserted by migration 118. Rejects the retired compute_analytics kind with invalid_parameter_value (Phase 106 D3). Race-loser re-read uses a plain SELECT INTO on all four arms; if the winner already advanced past the in-flight statuses, raises serialization_failure so the caller can retry vs. surfacing a 500 (Phase 163 OPS-08, parity with the 7-param overload''s mig 109 P3 fix). Computes the initial status and INSERTs it explicitly: done_pending_children while at least one listed parent is not yet done; a child whose parents are all done starts pending, as does a child with no parents (Phase 164.9.1). With parents, it locks them first through public._fan_in_lock_rows in ancestor-first (depth, id) order (Phase 164.9.3.1 D-06) and reads them: a NULL element, a missing parent or a failed_final parent is refused with invalid_parameter_value, so no enqueue creates a child that no mark-done can release. On a dedup hit (the optimistic look-up and the lost-race re-read) it calls public._record_enqueue_dedup, which records the caller''s metadata in compute_job_dedup_events and retracts an inherited refresh marker (Phase 211 D11).';
 
 
 
@@ -719,6 +723,61 @@ ALTER FUNCTION "public"."_match_decisions_visibility_check"() OWNER TO "postgres
 
 
 COMMENT ON FUNCTION "public"."_match_decisions_visibility_check"() IS 'audit-2026-05-07 M-0825 + specialist-review take 2 (MED-2 search_path). BEFORE INSERT trigger function for match_decisions. Gates voluntary_add / bridge_recommended INSERTs on _assert_strategy_visible_to_allocator. Raises 42501 with strategy_id + allocator_id in the message on visibility failure. SET search_path = public, pg_catalog locks lookups.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."_record_enqueue_dedup"("p_job_id" "uuid", "p_kind" "text", "p_metadata" "jsonb", "p_parent_job_ids" "uuid"[]) RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  v_res    jsonb;
+  v_marker text;
+  v_bytes  integer;
+  v_status text;
+BEGIN
+  IF p_job_id IS NULL
+     OR COALESCE(cardinality(p_parent_job_ids), 0) > 0
+     OR jsonb_typeof(p_metadata) IS DISTINCT FROM 'object'
+     OR p_metadata = '{}'::jsonb THEN
+    RETURN;
+  END IF;
+
+  -- Review WR-01: a `done_pending_children` row is a fan-in child, and the FOR UPDATE that
+  -- mark_compute_job_done and mark_compute_job_failed take on fan-in children conflicts with
+  -- the FOR KEY SHARE this helper's INSERT takes through the FK. Skip such a row, so the
+  -- helper never holds or waits on a row the ancestor-first protocol locks. Plain SELECT, no
+  -- lock. A row never enters this status after its insert, so the read cannot go stale into it.
+  SELECT status INTO v_status FROM public.compute_jobs WHERE id = p_job_id;
+  IF v_status = 'done_pending_children' THEN
+    RETURN;
+  END IF;
+
+  IF p_kind IN ('derive_broker_dailies', 'compute_analytics_from_csv', 'stitch_composite')
+     AND (p_metadata ->> 'correlation_id') IS NOT NULL
+     AND NOT COALESCE((p_metadata ->> 'source') IN ('ledger-refresh', 'ledger-refresh-composite'), FALSE) THEN
+    v_res := public.retract_ledger_refresh_marker(p_job_id, p_metadata ->> 'correlation_id');
+    IF v_res ->> 'outcome' = 'retracted' THEN
+      v_marker := v_res ->> 'marker';
+      RAISE WARNING '_record_enqueue_dedup: retracted marker % from compute_job %', v_marker, p_job_id;
+    END IF;
+  END IF;
+
+  v_bytes := octet_length(p_metadata::text);
+  INSERT INTO public.compute_job_dedup_events (job_id, caller_metadata, retracted_marker)
+  VALUES (
+    p_job_id,
+    CASE WHEN v_bytes > 8192 THEN jsonb_build_object('oversize_bytes', v_bytes) ELSE p_metadata END,
+    v_marker
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_record_enqueue_dedup"("p_job_id" "uuid", "p_kind" "text", "p_metadata" "jsonb", "p_parent_job_ids" "uuid"[]) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."_record_enqueue_dedup"("p_job_id" "uuid", "p_kind" "text", "p_metadata" "jsonb", "p_parent_job_ids" "uuid"[]) IS 'Phase 211 D11 (migration 20261114130000): called at both dedup return sites of both _enqueue_compute_job_internal overloads. Records the caller''s p_metadata in compute_job_dedup_events and, for a marker-capable kind (derive_broker_dailies, compute_analytics_from_csv, stitch_composite) whose caller sends a correlation_id and no refresh marker, retracts an inherited ledger-refresh marker through public.retract_ledger_refresh_marker in the same call. Does nothing for a parented enqueue, for an existing job that is done_pending_children, for NULL, empty or non-object metadata. Metadata over 8192 bytes is recorded as {oversize_bytes: n} and never fails the enqueue. Merges no caller key into the job row. Service-role only; no caller outside the enqueue function.';
 
 
 
@@ -7146,14 +7205,15 @@ CREATE OR REPLACE FUNCTION "public"."get_published_trade_venues"("p_strategy_ids
     JOIN public.strategy_keys sk ON sk.strategy_id = s.id
     JOIN public.api_keys k ON k.id = sk.api_key_id
    WHERE s.status = 'published'
-     AND s.id = ANY(p_strategy_ids);
+     AND s.id = ANY(p_strategy_ids)
+     AND (sk.window_end IS NULL OR sk.window_end > current_date);
 $$;
 
 
 ALTER FUNCTION "public"."get_published_trade_venues"("p_strategy_ids" "uuid"[]) OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."get_published_trade_venues"("p_strategy_ids" "uuid"[]) IS 'Phase 170.6.1 DISCOVERYPHONE (SC-2, D-04): the venue a PUBLISHED strategy''s trades come from — the distinct lowercased api_keys.exchange reached through strategies.api_key_id and strategy_keys. Correct-by-construction public exposure: SECURITY DEFINER + pinned search_path lets anon read WITHOUT widening api_keys or strategy_keys access. RETURNS TABLE (strategy_id, exchange) is the column allow-list: a key id, label or encrypted field is structurally unreachable. The status gate on strategies is the published-gate. Sole reader in app code: readPublishedTradeVenues (plan 04).';
+COMMENT ON FUNCTION "public"."get_published_trade_venues"("p_strategy_ids" "uuid"[]) IS 'Phase 170.6.1 DISCOVERYPHONE (SC-2, D-04), re-based by Phase 210 PUBLICTRUTH (D-01): the venue a PUBLISHED strategy''s trades come from — the distinct lowercased api_keys.exchange reached through strategies.api_key_id and through strategy_keys members whose window is still open (a member whose window has closed is not returned). Correct-by-construction public exposure: SECURITY DEFINER + pinned search_path lets anon read WITHOUT widening api_keys or strategy_keys access. The result table (strategy_id, exchange) is the column allow-list: a key id, label or encrypted field is structurally unreachable. The status gate on strategies is the published-gate. Sole reader in app code: readPublishedTradeVenues.';
 
 
 
@@ -13003,6 +13063,44 @@ COMMENT ON CONSTRAINT "bridge_outcomes_percent_allocated_range_check" ON "public
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."compute_job_dedup_events" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "job_id" "uuid" NOT NULL,
+    "caller_metadata" "jsonb" NOT NULL,
+    "retracted_marker" "text",
+    "deduped_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "compute_job_dedup_events_caller_metadata_object_chk" CHECK (("jsonb_typeof"("caller_metadata") = 'object'::"text")),
+    CONSTRAINT "compute_job_dedup_events_caller_metadata_size_chk" CHECK (("octet_length"(("caller_metadata")::"text") <= 8192))
+);
+
+
+ALTER TABLE "public"."compute_job_dedup_events" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."compute_job_dedup_events" IS 'Phase 211 D11 (migration 20261114130000): one row per enqueue that deduped onto an in-flight compute job and carried metadata, written by public._record_enqueue_dedup. Rows die with their job through the FK (done rows after 30 days, failed rows after 90). There is NO delete-guard trigger; if one is ever added it must exempt quantalyze.sanitize_in_progress = ''on''. No user_id column, so the GDPR export does not cover it. Reachable only through the SECURITY DEFINER writer; service_role holds SELECT for operators.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_dedup_events"."id" IS 'Row id, generated.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_dedup_events"."job_id" IS 'The in-flight compute job the enqueue deduped onto (the id the enqueue returned). ON DELETE CASCADE: the event dies with its job.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_dedup_events"."caller_metadata" IS 'The p_metadata the deduping caller sent, as a JSON object. A payload over 8192 bytes is stored as {"oversize_bytes": n} instead. NULL, empty and non-object metadata are never recorded.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_dedup_events"."retracted_marker" IS 'The refresh marker (source value) the SAME call retracted from the existing job, else NULL. After this migration the Python backstop answers no_marker on that collision and logs nothing, so this column is the audit trail of a SQL retraction.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_dedup_events"."deduped_at" IS 'When the enqueue deduped.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."compute_job_kinds" (
     "name" "text" NOT NULL
 );
@@ -14696,6 +14794,11 @@ ALTER TABLE ONLY "public"."bridge_outcomes"
 
 
 
+ALTER TABLE ONLY "public"."compute_job_dedup_events"
+    ADD CONSTRAINT "compute_job_dedup_events_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."compute_job_kinds"
     ADD CONSTRAINT "compute_job_kinds_pkey" PRIMARY KEY ("name");
 
@@ -15084,6 +15187,10 @@ CREATE INDEX "bridge_outcomes_needs_recompute" ON "public"."bridge_outcomes" USI
 
 
 CREATE INDEX "bridge_outcomes_strategy_id" ON "public"."bridge_outcomes" USING "btree" ("strategy_id");
+
+
+
+CREATE INDEX "compute_job_dedup_events_job_id_idx" ON "public"."compute_job_dedup_events" USING "btree" ("job_id");
 
 
 
@@ -15907,6 +16014,11 @@ ALTER TABLE ONLY "public"."bridge_outcomes"
 
 
 
+ALTER TABLE ONLY "public"."compute_job_dedup_events"
+    ADD CONSTRAINT "compute_job_dedup_events_job_id_fkey" FOREIGN KEY ("job_id") REFERENCES "public"."compute_jobs"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."compute_jobs"
     ADD CONSTRAINT "compute_jobs_allocator_id_fkey" FOREIGN KEY ("allocator_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
@@ -16578,6 +16690,17 @@ CREATE POLICY "bridge_outcomes_update_own" ON "public"."bridge_outcomes" FOR UPD
 
 
 CREATE POLICY "categories_public_read" ON "public"."discovery_categories" FOR SELECT USING (true);
+
+
+
+ALTER TABLE "public"."compute_job_dedup_events" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "compute_job_dedup_events_deny_all" ON "public"."compute_job_dedup_events" USING (false) WITH CHECK (false);
+
+
+
+COMMENT ON POLICY "compute_job_dedup_events_deny_all" ON "public"."compute_job_dedup_events" IS 'Deny every row to every non-owner role. The only writer, public._record_enqueue_dedup, runs as the table owner, which bypasses RLS because the table is ENABLEd and not FORCEd.';
 
 
 
@@ -17478,6 +17601,11 @@ GRANT ALL ON FUNCTION "public"."_match_decisions_visibility_check"() TO "service
 
 
 
+REVOKE ALL ON FUNCTION "public"."_record_enqueue_dedup"("p_job_id" "uuid", "p_kind" "text", "p_metadata" "jsonb", "p_parent_job_ids" "uuid"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_record_enqueue_dedup"("p_job_id" "uuid", "p_kind" "text", "p_metadata" "jsonb", "p_parent_job_ids" "uuid"[]) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."_scoring_weight_overrides_is_valid"("p_overrides" "jsonb") TO "anon";
 GRANT ALL ON FUNCTION "public"."_scoring_weight_overrides_is_valid"("p_overrides" "jsonb") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."_scoring_weight_overrides_is_valid"("p_overrides" "jsonb") TO "service_role";
@@ -18366,6 +18494,10 @@ GRANT ALL ON TABLE "public"."bridge_outcome_dismissals" TO "service_role";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."bridge_outcomes" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."bridge_outcomes" TO "authenticated";
 GRANT ALL ON TABLE "public"."bridge_outcomes" TO "service_role";
+
+
+
+GRANT SELECT ON TABLE "public"."compute_job_dedup_events" TO "service_role";
 
 
 
