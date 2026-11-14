@@ -2,14 +2,13 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase: "155.1"
-current_phase_name: SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading
-status: planning
-stopped_at: Phase 210 complete, ready to plan Phase 155.1
-last_updated: "2026-11-14T12:36:26.702Z"
+current_phase_name: parallel phases (155, 207, 208, 209, 210 and 211 complete; 155.1, 155.2 and 157 wait on the founder; 212-215 booked)
+status: executing
+stopped_at: Phases 208, 210 and 211 complete; records landed together
+last_updated: "2026-11-14T12:36:33.104Z"
 last_activity: 2026-11-14
-last_activity_desc: Phase 210 complete, transitioned to Phase 155.1
-state_head: 6ee0bfc8a840419aaa2355aca5e6e662b61b4f6d
+last_activity_desc: Phases 208, 210 and 211 complete
+state_head: 3ac730ef960ea5a03d58a5a3bd36bd0ce2bd2c62
 progress:
   total_phases: 13
   completed_phases: 6
@@ -176,10 +175,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 155.1 — SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-11-14 — Phase 210 complete, transitioned to Phase 155.1
+Phase: parallel — 155 PARITYHARNESS, 207 RETRYPROP, 208 UIQUICK, 209 SCRUBLEAKS, 210 PUBLICTRUTH and 211 SYNCJOBS complete; 212 WIZTRUTH, 213 KEYFLOW, 214 FRESHTRUTH and 215 TESTREACH booked, not started
+Plan: per phase (see each phase directory)
+Status: 155.1 SERVERCLOCK waits for the founder's Monday 2026-11-16 live gateway spike; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session
+Last activity: 2026-11-14 — Phases 208, 210 and 211 complete (records landed in one PR)
 Progress: [█████░░░░░] 46%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -1808,7 +1807,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-14T07:30:26.000Z
-**Stopped At:** Phase 210 complete, ready to plan Phase 155.1
+**Stopped At:** Phases 208, 210 and 211 complete; records landed together
 **Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z

@@ -140,7 +140,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth** - Quick UI fixes; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases (completed 2026-11-14)
-- [ ] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases
+- [x] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases (completed 2026-11-14)
 - [ ] **Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work** - Wizard and key-screen truth; independent of the MT5 phases
 - [ ] **Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out** - Key and draft flow, four founder decisions; independent of the MT5 phases
 - [ ] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases
@@ -256,7 +256,7 @@ Plans:
 | 208. UIQUICK | 5/5 | Complete | 2026-11-14 |
 | 209. SCRUBLEAKS | 5/5 | Complete | 2026-11-14 |
 | 210. PUBLICTRUTH | 5/5 | Complete | 2026-11-14 |
-| 211. SYNCJOBS | 0/? | Not started | - |
+| 211. SYNCJOBS | 7/7 | Complete | 2026-11-14 |
 | 212. WIZTRUTH | 0/? | Not started | - |
 | 213. KEYFLOW | 0/? | Not started | - |
 | 214. FRESHTRUTH | 0/? | Not started | - |
@@ -405,7 +405,7 @@ Plans:
 **Goal:** Sync and job bookkeeping are correct on every path: a user-triggered trade fetch no longer seeds from the poll-overwritten `last_sync_at`, the enqueue dedup no longer drops the caller's metadata, and composite `_stamp_failed` stops reading status live. Closes TODOS `167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED`, `161.1-D11` and `161.1-D5`; the design for D11 is settled at discuss-phase. Booked by the founder 2026-11-13 ("Sync and jobs correctness") from the TODOS prune, PR #1259.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
-**Plans:** 0 plans
+**Plans:** 7/7 plans complete
 **Success Criteria** (what must be TRUE):
 1. A user-triggered fetch cannot skip trades that the daily poll's `last_sync_at` write would otherwise hide.
 2. An enqueue that dedups onto an existing job keeps or merges the caller's metadata by a recorded rule.
