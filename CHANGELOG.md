@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.133.46.0] - 2026-11-14 — Phase 212 WIZTRUTH: the wizard and key screens name the real cause and a real next step
+
+The strategy wizard and the two dashboard key forms now say what actually went wrong and what the user can actually do next. Before this, some refusals stated a cause nobody had proven, an orphaned MT5 key took 120 seconds to be refused, the dashboard key forms showed server codes as `UNKNOWN`, and fifteen strings pointed users at a "support" channel that does not exist. No migration (SC7).
+
+### Fixed
+- **MT5 cause-unknown fallback names no cause.** `MT5_GATEWAY_MISCONFIGURED_DETAIL` (`analytics-service/services/mt5_probe.py`) is now the founder-approved sentence (2026-11-14): the gateway would not let us prove read-only capability, did not report why, and an operator is needed rather than a retry. The parity oracle and the 161 UI-SPEC arm-3 carrier follow it.
+- **The composite arm names the examined-and-refused verdict.** `SyncPreviewStep` renders `GATE_SERIES_EXAMINED_REFUSED` for `sampled_gapped` and `fill_derived_unproven` series through the new `isSeriesExaminedButRefused` (`src/lib/strategyGate.ts`), instead of a false provenance sentence; one variable feeds both the rendered code and telemetry.
+- **An orphaned MT5 key is refused before the 120 s validate.** `create-with-key` runs the existing orphan resolver first on the MT5 credential arm and returns the existing `KEY_ORPHANED` 409 through one `keyOrphanedResponse()`. A user with an orphaned key and a wrong password now hears about the orphan first (documented cost).
+- **A bare upstream 401/403 answers `SEAM_MISCONFIGURED` on every key route.** One shared `UPSTREAM_STATUS_TO_SEAM_CODE` (now exported from `src/lib/wizardErrors.ts`) feeds the classifier's no-seam-code branch on `create-with-key`, `composite/add-key`, `rotate-secret` and `validate-and-encrypt`. `rotate-secret` now carries the upstream status (and the upstream error name) so its hop classifies too.
+- **The dashboard key forms render server codes.** `StrategyForm` and `AllocatorExchangeManager` (via `ApiKeyForm`) read `code` through the new status-aware `recogniseValidateAndEncryptCode` and render the roster `ErrorEnvelope` with a minted correlation id sent as `X-Correlation-Id`. Wrong credentials and the 400-status venue verdicts (`AUTH_FAILED`, `MISSING_SCOPE`, `PERMISSION_DENIED`, `WITHDRAW_SCOPE`, `TRADE_SCOPE`) render their own remedy. Forwarded 5xx operator-fault codes render UNKNOWN's own cause instead of "Key validation failed. Please try again.", and the persist-INSERT 500 keeps its sentence.
+- **The correlation id a user is asked to send can be found.** `validate-and-encrypt` reads the inbound id once and logs it on its terminal-500, persist-INSERT, venue-collision, admin-unavailable, breaker, 504 and 4xx-forward arms, and tags its Sentry captures with it. The 4xx line logs status and code only.
+- **StrategyForm clears a refusal and its correlation id when the connect modal closes**, matching the allocator form.
+- **Contact pointers name a real channel.** ProfileForm, SignupForm, ScenarioCommitDrawer, WeightOptimizerSection, SyncProgress and ApiKeyManager render through `ContactPointerText` (the contact form, with a topic). The account-export refusals, the finalize-wizard composite error and csv-finalize's `ENQUEUE_LOST_RACE_USER_COPY` name the contact form; the admin send-intro and partner-import `audit_warning` strings name the admin's next action. `EmptyStateCard.body` accepts a node.
+
+### Changed
+- **`SEAM_MISCONFIGURED` pages again** (review WR-04). It is now in `OUR_DEFECT_KEY_ERROR_CODES`, because a stale `INTERNAL_API_TOKEN` on `rotate-secret` raises a bare 403 that Python does not capture, so the Next-side page was the only one. The bare-401/403 branch now applies only to an `AnalyticsUpstreamError`, not to any object with a `status`. Cost: the forwarded `KEK_UNAVAILABLE`, `SERVICE_KEY_UNCONFIGURED` and `EGRESS_PROXY_MISCONFIGURED` rows page as well, and the service-key hop produces two events per fault. This reverses the phase's own earlier decision, recorded in 212-CONTEXT.
+
+### Tests
+- A validate and a derive never share an MT5 terminal lock (`test_a_held_job_terminal_never_delays_a_validation_acquisition`, with an equal-config RED control).
+- Every composite verdict and its remedy control is pinned. The orphan refusal wins over wrong credentials, and ccxt is unchanged.
+- A bare 401/403 is pinned on all three classifier callers (`route.bare-401.test.ts` and siblings).
+- The validate-and-encrypt surface joins the roster-render sweep as its fifth surface (`EXPECTED_POPULATION_MIN` 103).
+- The no-email sweep and its legacy-pointer arm cover every touched module. The dialog-envelope law excludes the two validate-and-encrypt host forms, which the roster sweep covers.
+- Each fix was shown RED with the fix removed and GREEN once it was restored from a byte backup.
+
+### Removed
+- TODOS entries closed by this phase: `0.07` (composite false provenance sentence), `0.09` (MT5 generic fallback naming an unproven cause), `0.012` / `[D-161-05-B]` (orphaned MT5 connect waits 120 s), `0.013` and `[WIZFORM-02-VE-CODECHANNEL]` (dashboard key surfaces render `UNKNOWN`), `[164.2-WIZARD-BARE401]` (bare 401/403 without a seam envelope), `CONTACT-SUPPORT-POINTERS-01` (fifteen "contact support" strings), and `0.51` (20 s lease wait vs one derive: closed as recorded and structurally pinned, because at HEAD the validate and the derive lease different terminals).
+
+### Notes
+- **Booked:** `[212-CONTACT-SUPPORT-SURVIVORS]`. The SQL `computation_error_copy` arms and five Python strings still say "contact support". The SQL change needs a migration, so csv-finalize's sentence and the SQL ELSE arm are deliberately out of parity until it lands.
+- **Updated:** the Phase 145 option `CSV_FINALIZE_MOVED` has its WIZFORM-02 gate open (not picked up). The `[164.2-SEAMCODE-UNION]` citations now point at the moved map by symbol.
+- **Known limits:**
+  - `KEY_MT5_TERMINAL_BUSY` still says "Try again in a minute." No truthful static number was found, and that copy is pending a founder answer.
+  - The validate/derive lock separation holds only while the job and validation gateway endpoint pairs differ. That is deployment configuration, not enforced at startup.
+  - A bare-400 MT5 master-password or wrong-server detail, and `KEY_INVALID_SIGNATURE`, still render their curated sentence inside the UNKNOWN shell.
+  - The inbound correlation id is not threaded through to the analytics service's own logs.
+
 ## [0.133.45.1] - 2026-11-14 — records: close 208 UIQUICK, 210 PUBLICTRUTH, 211 SYNCJOBS; D11-9 into 214; baseline re-dump
 
 Records PR for three phases whose code is already on `main` (208 as #1270, 210 as #1268, 211 as #1271). It carries their phase artifacts, the founder's 2026-11-14 answers to the open verification items, the `phase complete` runs, and the baseline re-dump that turns `main`'s `sql-gate-lint` green again. The only non-records change is that re-dump's one cleared `NAME_SET_RATCHET` row; there is no source or test change.
