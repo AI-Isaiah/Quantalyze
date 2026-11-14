@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.133.42.0] - 2026-11-14 — Phase 209 SCRUBLEAKS: error reports carry no raw database details and never get lost
+
+A PostgREST error is a plain object, and its `details` and `hint` can quote a failing row, values a requester typed included. `captureToSentry` sent such objects to Sentry whole. `beforeSend` could also throw on a frozen or getter-only value, and the SDK then drops the whole event. Both are closed: the capture boundary keeps only diagnostic fields, and the Sentry scrubber cannot throw and cannot lose a report. The signed-out OG route no longer spends its Sentry slot on a malformed id, and validate-and-encrypt answers a malformed body with its coded 400. Closes TODOS `204-SENTRY-RAW-SUPABASE-ERRORS`, `SHARE-QA-07`, `SHARE-D-164-C`, `170.3-OG-MALFORMED-ID`, `170.3-OG-P3-STATUS-VACUOUS` and the validate-and-encrypt body entry.
+
+### Security
+- **`captureToSentry` no longer forwards `details` or `hint`.** A non-Error object, and every link of an Error's `cause` chain, is rendered in a capture mode that keeps only `name`, `code`, `message`, `errno` and `syscall` (`scrubSeamErrorForCapture` in `src/lib/seam-redaction.ts`). An object with none of those fields becomes a fixed placeholder instead of its serialisation. The log path is unchanged and still keeps `details`/`hint` for operators.
+- **A Next-wrapped PostgREST error is rebuilt without its row fields.** Next turns a thrown plain object into `new Error(JSON.stringify(obj))`, which reached Sentry through `onRequestError`. A plain Error whose message parses as a PostgREST object is now rebuilt from its `code` and `message` and tagged `message_rebuilt`.
+- **Transactions go through `beforeSendTransaction` again.** The SDK's default streamed trace lifecycle bypassed it, so a share token in a span name or URL could ship. `Sentry.init` now sets `traceLifecycle: "static"` (CONTEXT D-17).
+- **Console breadcrumbs are dropped** (`beforeBreadcrumb`), because a logged PostgREST error carried `details`/`hint` into every later event. Sentry events lose the console trail; the Vercel logs keep it (D-18).
+- **`/scenario-share/<token>` is scrubbed like `/factsheet-share/<token>`**, and Plausible is withdrawn on the scenario-share lane (`isScenarioSharePath`).
+
+### Fixed
+- **`beforeSend` cannot throw and cannot lose the event.** `scrubSentryEvent` walks every top-level key with guarded reads, writes only when the scrub changed a value and reads it back, and withholds or rebuilds a value it cannot write (`scrub_rebuilt` marker). When the event root itself is unwritable it returns a minimal replacement event (tags `scrub_withheld`/`scrub_error`, the exception type, trace ids and `type`), never `null`, and logs one content-free line. Live SDK scope objects under `sdkProcessingMetadata` are skipped.
+- **A malformed id on `/api/og/factsheet/[id]` is a not-found.** `isUuid(id)` runs before the read, so there is no database read, no capture and the normal long cache. One info line records the hit. A real read error on a valid id still captures once.
+- **validate-and-encrypt answers a malformed or `null` body with the coded 400** (`KEY_MISSING_REQUIRED_FIELD`, `NO_STORE_HEADERS`) instead of Next's uncoded 500. Only a `SyntaxError` from `req.json()` is swallowed, with no log or capture of the body; anything else is rethrown.
+- **The scenario share mint is under the audit law.** `create_scenario_share` is listed in `MUTATING_RPC_NAMES` and the route calls `supabase.rpc` without the method cast that hid it from the corpus scan.
+
+### Tests
+- New suites: capture-boundary sentinels (plain object, Error with plain cause, nested cause, opaque object) in `sentry-capture.test.ts` and `seam-redaction.test.ts`; the SC2 suite in `instrumentation.test.ts` (frozen, sealed and getter-only values, throwing getters, non-iterable lists, unwritable root), plus real-SDK envelope tests through an in-memory transport; scenario-share cases in `scrub-share-path.test.ts` and `PlausibleScript.test.tsx`.
+- OG `route.public-access.test.tsx`: the ImageResponse mock now has a real status, so P3's "never a 404" line can fail; P3b, P6 and P7 pin the malformed-id path and that the Sentry slot stays free for a real read error.
+- `audit-coverage.test.ts` gains a positive-control pin: exactly one detected and covered `create_scenario_share` site.
+- Censuses moved on purpose: the seam-redaction export set (6 to 7), the validate-and-encrypt `KEY_MISSING_REQUIRED_FIELD` count (2 to 3) and the wizardErrors invariant `expectedSites` (12 to 13).
+- Every fix was neutered and seen RED, then restored from a byte backup. The executors, both fixer rounds and the verifier each recorded their proofs.
+
+### Removed
+- `TODOS.md` entries `204-SENTRY-RAW-SUPABASE-ERRORS`, `SHARE-QA-07`, `SHARE-D-164-C`, `170.3-OG-MALFORMED-ID`, `170.3-OG-P3-STATUS-VACUOUS` and the validate-and-encrypt `req.json()` entry, now closed.
+
+### Notes
+- **Recorded, not fixed: direct `Sentry.captureException` call sites.** They bypass `captureToSentry`, so a plain PostgREST object captured there still carries `details`/`hint` under `extra.__serialized__` (measured in review on `alert-digest`). Out of scope by CONTEXT decision; booked as TODOS `209-SENTRY-DIRECT-CAPTURE-DETAILS` with a one-arm fix direction in `scrubSentryEvent`.
+- `170.3-OG-NOTFOUND-CACHE` stays open: the cache policy for a genuine not-found is a separate decision. Its trigger now names Phase 209 as having passed it.
+- Review: three rounds of gsd-code-reviewer and silent-failure-hunter. Round 1 found one HIGH (the Next-wrapped PostgREST error) and seven MEDIUMs; round 2 found two HIGHs (streamed tracing, console breadcrumbs) and four MEDIUMs. Two fixer rounds fixed all of them. Round 3 came back clean. Eleven INFO notes are recorded in the phase review rather than fixed.
+- Security audit: 14 threats, all closed. Verification: passed, 5/5.
+- Checked locally before push: `npx tsc --noEmit -p .`, `npm run lint` and the full `npx vitest run`. The full run shows only the two known `compute.conventions.test.ts` last-digit snapshot differences (local Node against CI's Node 22), in a file this change does not touch.
+
 ## [0.133.41.0] - 2026-11-14 — Phase 155 PARITYHARNESS: an agent-built harness can prove our MT5 numbers wrong
 
 Phase 155 of milestone v1.18 MT5-VERIFY. It ships an offline, fail-closed harness that compares the numbers we store and render for an MT5 account against the terminal's and the broker's own figures, returns a per-account verdict, and has been shown able to fail. No product code changes: everything is new modules under `analytics-service/services/` and `scripts/`, a runbook with read-only SQL under `docs/runbooks/mt5-parity/`, and tests. 44 commits on `feat/155-parityharness` (11 plans plus three review-and-fix rounds).
