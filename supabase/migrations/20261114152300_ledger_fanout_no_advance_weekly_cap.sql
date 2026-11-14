@@ -114,12 +114,13 @@
 -- source migration is that same file). MEASURED 2026-11-14 before writing a
 -- line: no migration newer than 20261030120000 defines the function.
 --
--- EXACTLY ONE EXECUTABLE EDIT was made to that body: the cooldown CASE's
+-- ONE EDIT to the candidate query was made to that body: the cooldown CASE's
 -- marks-paused branch gains an OR of the no-advance signal, with the comment
--- block above it. Every other line is that body's, byte for byte, the
--- dollar-quote TAG included. Plus, outside the body: the function COMMENT gains
--- one sentence, the REVOKE is re-issued, and the apply-time block's messages name
--- this file.
+-- block above it. Plan 06 of this phase then appends ONE ADDITIVE BLOCK after the
+-- failure instrument (the skip count, described in its own section below) and its
+-- two locals. Every other line is that body's, byte for byte, the dollar-quote TAG
+-- included. Plus, outside the body: the function COMMENT gains two sentences, the
+-- REVOKE is re-issued, and the apply-time block's messages name this file.
 --
 -- ⚠️ supabase/schema/functions/enqueue_ledger_refresh_for_strategies.sql is
 -- regenerated in this same change (`npm run schema:functions`), AFTER the VAC-04
@@ -134,8 +135,12 @@
 -- never runs, no arm can be the first failure, and the mutation runner scores a
 -- defect. WAIVED_CEILING in scripts/mutation-floors.mjs is 0 (read it BY
 -- SYMBOL), so such an intersection is designed out here. STEP 2's checks carry
--- over from 20261030120000 unchanged; the four arms this phase adds each REWRITE
--- a fragment of the signal that no STEP 2 needle reads.
+-- over from 20261030120000, with two changes owned by the skip count: the count of
+-- cron_runs writes moves from two to three, and one further needle, the skip
+-- count's cause, is checked for presence and for its place after the last unlock.
+-- The four arms of the signal each REWRITE a fragment of it that no STEP 2 needle
+-- reads, and the arm that owns the skip row rewrites its cause by EXTENDING the
+-- literal, so that needle stays a prefix of the rewrite.
 --
 -- ⛔ NO GATE `find` STRING IS REPRODUCED ANYWHERE IN THIS FILE'S PROSE,
 -- deliberately. The mutation runner counts `occurrences` over the RAW FILE TEXT,
@@ -157,6 +162,37 @@
 -- today. It adds a read of public.compute_jobs per candidate inside the
 -- candidate query, the same table the cooldown already reads. No PROD count was
 -- taken for this file; the lane gate proves the behaviour on constructed rows.
+--
+-- ══════════════════════════════════════════════════════════════════════════
+-- PHASE 214 SC-2 — THE SKIP COUNT (plan 06)
+-- ══════════════════════════════════════════════════════════════════════════
+-- A cap with no counter is a silent exclusion as far as an operator can see, so a
+-- tick that holds one or more strategies back ONLY because of the weekly cap now
+-- writes ONE public.cron_runs row under the fan-out's cron name, after the last
+-- unlock and after the failure instrument. Its status is ok, its error is NULL, and
+-- its metadata carries the function name, the cause (the weekly cap), the count
+-- and a list naming each held strategy with the days its series has been unmoved.
+--
+-- WHY THE ERROR IS NULL. The reader audit (PHASE 214 RESEARCH) found three readers
+-- of this table's fan-out rows, and every one keys on the failure error string: the
+-- prod prober's cron-obs arm counts it, the candidate query's failed-attempt
+-- cooldown reads it back, and the trigger that refuses a failure row matches it. A
+-- NULL error is invisible to all three, so the skip row cannot raise the prober's
+-- failure count, cool a strategy down or be refused. It is told apart from the
+-- dormancy and failure rows by its cause.
+--
+-- A TICK WITH NO SKIP WRITES NOTHING, for the reason the dormancy instrument's
+-- healthy case writes nothing: no purge of this table exists, so a row per tick would
+-- accrue for ever to restate a fact one read already gives.
+--
+-- GROWTH, ACCEPTED AND RECORDED: at most one row per tick, so at most about 8.8
+-- thousand rows a year if something stays capped for the whole year, and no purge is
+-- added. The staleness view is evaluated a second time per tick for the count, which
+-- is accepted at ledger-backed cohort size.
+--
+-- BEST-EFFORT. The block runs in its own exception scope and raises nothing: a
+-- failing write costs this row and never a good enqueue, which is already made.
+-- STEP 2 refuses a body whose skip write is not after the last unlock.
 
 BEGIN;
 
@@ -212,6 +248,11 @@ DECLARE
   -- by itself writes a failure row. ⚠️ A deadlock (40P01) is NOT counted
   -- here since the 164.6 round-2 review fix: see the handler below.
   v_lost_race      INTEGER := 0;
+  -- ---- the skip count's locals (Phase 214 SC-2) -----------------------------
+  -- How many strategies the no-advance weekly cap held back this tick, and which,
+  -- with the age of each. Filled by one read after the last unlock, written once.
+  v_skipped_count   INTEGER := 0;
+  v_skipped_targets JSONB   := '[]'::jsonb;
 BEGIN
   -- ---- Lock B (D-08, 164.7 D-01): the fail-closed activation switch ------
   -- FIRST statement in the body, deliberately — unchanged from the form this
@@ -790,6 +831,103 @@ BEGIN
     END;
   END IF;
 
+  -- ---- the no-advance weekly cap's skip count (Phase 214 SC-2) ----------
+  -- A cap with no counter is a silent exclusion as far as an operator can see, so
+  -- every tick that holds a strategy back ONLY because of the weekly cap writes ONE
+  -- row naming each one and its age. Founder decision Q1 = A: each skip is counted
+  -- per tick with its reason, under a tag that cannot collide with the failure tag.
+  --
+  -- ⛔ AFTER THE LAST UNLOCK AND AFTER THE FAILURE INSTRUMENT, NEVER INSIDE THE
+  -- LOCK-HOLDING BLOCK, and BEST-EFFORT: a failing write here costs this row and
+  -- nothing else. It must never raise and so never roll back the tick's enqueues,
+  -- which are already made. The migration's apply-time block refuses a body whose
+  -- skip write precedes the last unlock.
+  --
+  -- ⛔ THE ROW CANNOT BE READ AS A FAILURE. Its status is ok and its error is NULL.
+  -- The prober's cron-obs arm, the failed-attempt cooldown above and the trigger
+  -- that refuses a failure row all key on the failure error string, so none of them
+  -- sees this row. It is told apart from the dormancy and failure rows by its cause.
+  --
+  -- WHAT IS COUNTED is only what the cap ALONE causes: the same cohort conjuncts the
+  -- candidate query uses, the whole no-advance signal, NOT marks-paused (so the
+  -- reason is unambiguous), an attempt inside the week, NO attempt inside the
+  -- ordinary window and nothing in flight. A strategy enqueued this tick now has an
+  -- in-flight job and is not counted; one inside the ordinary window, one with an
+  -- ineligible key and a marks-paused one are not either. A tick with no skip
+  -- writes nothing. The staleness view is evaluated a second time here, which is
+  -- accepted at ledger-backed cohort size.
+  BEGIN
+    SELECT count(*),
+           COALESCE(jsonb_agg(jsonb_build_object('strategy_id', sk.strategy_id,
+                                                 'days_unmoved', sk.days_unmoved)
+                              ORDER BY sk.strategy_id), '[]'::jsonb)
+      INTO v_skipped_count, v_skipped_targets
+      FROM (
+        SELECT lrs.strategy_id,
+               CURRENT_DATE - lrs.last_return_date AS days_unmoved
+          FROM public.ledger_refresh_staleness lrs
+          JOIN public.strategies s
+            ON s.id = lrs.strategy_id
+          LEFT JOIN public.api_keys ak
+            ON ak.id = s.api_key_id
+        WHERE lrs.is_stale
+          AND lrs.is_composite = FALSE
+          AND s.status IN ('published', 'pending_review', 'private')
+          AND ak.sync_status IS DISTINCT FROM 'revoked'
+          AND ak.disconnected_at IS NULL
+          AND COALESCE(ak.is_active, TRUE)
+          AND lrs.stale_reason = 'series_behind'
+          AND (CURRENT_DATE - lrs.last_return_date) >= 8
+          AND EXISTS (
+                SELECT 1
+                  FROM public.compute_jobs cj3
+                 WHERE cj3.strategy_id = lrs.strategy_id
+                   AND cj3.kind = 'compute_analytics_from_csv'
+                   AND cj3.status = 'done'
+                   AND cj3.created_at >= (lrs.last_return_date + 5)::timestamptz
+              )
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM public.strategy_analytics sa
+                 WHERE sa.strategy_id = lrs.strategy_id
+                   AND (sa.data_quality_flags ->> 'marks_trailing_since') ~ '^\d{4}-\d{2}-\d{2}$'
+                   AND sa.data_quality_flags ->> 'marks_trailing_since' <= to_char(CURRENT_DATE - 3, 'YYYY-MM-DD')
+              )
+          AND EXISTS (
+                SELECT 1
+                  FROM public.compute_jobs cj
+                 WHERE cj.strategy_id = lrs.strategy_id
+                   AND cj.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
+                   AND cj.created_at > now() - INTERVAL '7 days'
+              )
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM public.compute_jobs cj
+                 WHERE cj.strategy_id = lrs.strategy_id
+                   AND cj.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
+                   AND cj.created_at > now() - INTERVAL '20 hours'
+              )
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM public.compute_jobs cj2
+                 WHERE cj2.strategy_id = lrs.strategy_id
+                   AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')
+              )
+      ) sk;
+    IF v_skipped_count > 0 THEN
+      INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+      VALUES ('ledger_refresh_fanout', 'ok', now(), NULL,
+              jsonb_build_object('function', 'enqueue_ledger_refresh_for_strategies',
+                                 'cause', 'no_advance_weekly_cap',
+                                 'skipped_count', v_skipped_count,
+                                 'skipped_targets', v_skipped_targets));
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    -- Counts nothing and names nothing, by the rule every handler in this body
+    -- follows: the SQLSTATE only, never an identifier (T-161.1-10).
+    RAISE WARNING 'enqueue_ledger_refresh_for_strategies: skip-count write failed (SQLSTATE %)', SQLSTATE;
+  END;
+
   -- ---- NO all-candidates-failed raise (164.6 round-2 review fix) ---------
   -- The round-1 fix raised here when every candidate failed, so the scheduler
   -- would record a failed run. That raise rolled back the failure row written
@@ -834,7 +972,10 @@ COMMENT ON FUNCTION public.enqueue_ledger_refresh_for_strategies() IS
   '7 days instead of 20 hours. Phase 214: so does a strategy whose series is behind, '
   'whose last return date is 8 or more days old and whose compute_analytics_from_csv '
   'job completed on or after the day it went stale (a no-advance strategy: weekly cap, '
-  'never exclusion).';
+  'never exclusion). Phase 214: a tick that holds one or more strategies back for that '
+  'reason alone writes one public.cron_runs row (cron_name ''ledger_refresh_fanout'', '
+  'status ''ok'', error NULL) naming each one and its age in `metadata`; a tick with no '
+  'such skip writes nothing.';
 
 -- service_role is REVOKEd alongside PUBLIC, anon and authenticated, and the
 -- REVOKE is RE-ISSUED rather than trusted to survive CREATE OR REPLACE (the
@@ -900,6 +1041,7 @@ DECLARE
   v_instr_count INTEGER;
   v_fail_pos    INTEGER;
   v_raise_pos   INTEGER;
+  v_skip_pos    INTEGER;
   -- THE NEEDLES, each BOUND TO A SHAPE and held in a variable so every check
   -- states it once and names it in its own failure message. ⛔ The ones that
   -- name a statement are ASSEMBLED BY CONCATENATION: written whole, each would
@@ -914,9 +1056,9 @@ DECLARE
   --     and the ARM is the first failure.
   v_null_needle  TEXT := 'v_enabled IS DISTINCT FROM TRUE';
   -- (3) the cron_runs write. ⭐ NOW COUNTED, not merely found: each body
-  --     carries TWO writes after this file (the dormancy instrument and the
-  --     failure instrument), so a bare presence test would pass with the
-  --     dormancy write deleted and the failure write standing in for it.
+  --     carries THREE writes after this file (the dormancy instrument, the
+  --     failure instrument and the skip count), so a bare presence test would
+  --     pass with one write deleted and another standing in for it.
   v_instr_needle TEXT := 'INSERT INTO public.' || 'cron_runs';
   -- (4) the lifecycle conjunct's own shape, BOUND TO THE COLUMN (never the
   --     value set, which arm P's twin rewrites in the fan-out gate).
@@ -973,6 +1115,13 @@ DECLARE
   --      The three-day age test (D-04): the cutoff date expression, kept as a
   --      token by the age twin for the same reason.
   v_age_needle   TEXT := 'CURRENT_' || 'DATE - 3';
+  -- (14) ⭐ NEW in Phase 214 plan 06: the skip count's cause, needled on its OPENING
+  --      quote and NO closing quote, assembled by concatenation like every needle
+  --      here. The missing closing quote is deliberate: the gate arm that owns the
+  --      skip row rewrites the literal by EXTENDING it, so the needle stays a prefix
+  --      of the rewrite, the apply survives and the ARM, not the apply, is the first
+  --      failure.
+  v_skip_needle  TEXT := '''no_advance_' || 'weekly_cap';
 BEGIN
   -- 1. the function landed, resolves to EXACTLY ONE function, and takes
   --    ZERO arguments. ⛔ The overload count is ASSERTED: every read below
@@ -1059,11 +1208,12 @@ BEGIN
     RAISE EXCEPTION 'Migration 20261114152300: public.% does not compare the activation flag with the NULL-safe form "%" — a NULL-unsafe comparison opens the flag on the read-failure and missing-row paths, which are the two paths this guard exists for', v_fn, v_null_needle;
   END IF;
 
-  -- 7. BOTH cron_runs writes are still there: the dormancy instrument and the
-  --    failure instrument. Counted, for the reason given at needle (3).
+  -- 7. ALL THREE cron_runs writes are still there: the dormancy instrument, the
+  --    failure instrument and the skip count. Counted, for the reason given at
+  --    needle (3).
   v_instr_count := (length(v_def) - length(replace(v_def, v_instr_needle, ''))) / length(v_instr_needle);
-  IF v_instr_count <> 2 THEN
-    RAISE EXCEPTION 'Migration 20261114152300: public.% writes public.cron_runs % time(s) in its executable text (looked for "%"), expected 2 — the dormancy instrument and the failure instrument. One of the two counted traces is gone, and the survivor would satisfy a presence test on its own', v_fn, v_instr_count, v_instr_needle;
+  IF v_instr_count <> 3 THEN
+    RAISE EXCEPTION 'Migration 20261114152300: public.% writes public.cron_runs % time(s) in its executable text (looked for "%"), expected 3 — the dormancy instrument, the failure instrument and the skip count. One of the three counted traces is gone, and a survivor would satisfy a presence test on its own', v_fn, v_instr_count, v_instr_needle;
   END IF;
 
   -- 7b. the count that DECIDES between the two invisible dormant causes is
@@ -1133,6 +1283,19 @@ BEGIN
     RAISE EXCEPTION 'Migration 20261114152300: public.%''s failure-row re-raise ("%") is not after the LAST advisory unlock ("%"). Raised before it, the tick can end holding the lock', v_fn, v_raise_needle, v_lock_needle;
   END IF;
 
+  -- 10f. ⭐ NEW in Phase 214 plan 06: the skip count is present and sits AFTER THE
+  --      LAST ADVISORY UNLOCK, in the shape of check 10c. Inside the lock-holding
+  --      block a failing write would reach that block's handler, which unlocks and
+  --      re-raises, and the tick would roll back with its enqueues.
+  v_skip_pos := position(v_skip_needle IN v_def);
+  IF v_skip_pos = 0 THEN
+    RAISE EXCEPTION 'Migration 20261114152300: public.% has no skip-count write (looked for "%"), so a strategy the no-advance weekly cap holds back is held in silence', v_fn, v_skip_needle;
+  END IF;
+  IF position(v_lock_needle IN substr(v_def, 1, v_skip_pos)) = 0
+     OR position(v_lock_needle IN substr(v_def, v_skip_pos)) <> 0 THEN
+    RAISE EXCEPTION 'Migration 20261114152300: public.%''s skip-count write ("%") is not after the LAST advisory unlock ("%"). Placed before it, a failing write reaches the lock-holding block''s handler, which unlocks and re-raises, and the whole tick rolls back with every enqueue that succeeded', v_fn, v_skip_needle, v_lock_needle;
+  END IF;
+
   -- 11. THE WHOLE EXECUTE GRANTEE SET IS EXACTLY THE OWNER. aclexplode over
   --     COALESCE(proacl, acldefault(…)) ENUMERATES the grantees instead of
   --     probing a guessed list, and a NULL acl (whose MEANING is the default
@@ -1171,6 +1334,6 @@ BEGIN
     RAISE EXCEPTION 'Migration 20261114152300: public.% no longer carries the marks-paused attempt window (looked for "%", "%" and "%"). A strategy whose marks paused would again be re-derived every 20 hours for as long as the pause lasts, or one whose pause is under 3 days old would be frozen for a week', v_fn, v_pause_needle, v_week_needle, v_age_needle;
   END IF;
 
-  RAISE NOTICE 'Migration 20261114152300: the single-key ledger fan-out re-based — a strategy whose marks have been paused for 3 days or more, or whose completed refresh left its series unmoved for 3 or more days after it went stale, is re-admitted after 7 days instead of 20 hours; every other stale strategy keeps the 20-hour cooldown; the composite fan-out, the staleness view and the return value are untouched. NOTHING scheduled, NOTHING activated';
+  RAISE NOTICE 'Migration 20261114152300: the single-key ledger fan-out re-based — a strategy whose marks have been paused for 3 days or more, or whose completed refresh left its series unmoved for 3 or more days after it went stale, is re-admitted after 7 days instead of 20 hours; every other stale strategy keeps the 20-hour cooldown, and a tick that held strategies back for that reason writes one skip-count row naming them; the composite fan-out, the staleness view and the return value are untouched. NOTHING scheduled, NOTHING activated';
 END $verify$;
 COMMIT;
