@@ -1,24 +1,27 @@
 /**
- * Phase 214 plan 05 (SC-5, SC-7) — the FreshnessChip label fits its masthead
- * column at 1485px, measured in a real browser.
+ * Phase 214 plan 05 (SC-5, SC-7) — the FreshnessChip label stays on one line
+ * inside its masthead column at 1485px, measured in a real browser.
  *
- * WHY A BROWSER: jsdom has no layout. The chip's `Track record · future — check
- * data` label was recorded (TODOS 0.12, 2026-08-26) as 297.9px of text in a
- * 204.2px masthead column at 1485px, and no unit test can see that. The founder
- * decision (CONTEXT SC-5, Q3 = a) is to let the label wrap and keep the full
- * sentence; this spec is the measurement that decision is held to.
+ * WHY A BROWSER: jsdom has no layout. TODOS 0.12 (2026-08-26) recorded the chip's
+ * `Track record · future — check data` label as 297.9px of text in a 204.2px
+ * masthead column at 1485px, and no unit test can see that.
  *
- * ⛔ THE NARROW-COLUMN CONDITION MUST BE EXERCISED. A GREEN against a column
- * that was never squeezed proves nothing, because the label fits an unsqueezed
- * column on the unchanged markup too. Each test asserts the measured chip
- * column is at most NARROW_COLUMN_MAX_PX and FAILS (never passes) with the
- * message `narrow-column condition not exercised: column <w>px` when it is
- * wider. The August reading was 204.2px.
+ * THAT OVERFLOW DOES NOT REPRODUCE AT HEAD. Measured with this spec's seed (a long
+ * strategy name and description, series end five days ahead): the masthead fits one
+ * row at 1485px (column 295.3px, label row 295.3px, one line), and a viewport sweep
+ * from 1485px down to 360px showed no overflow, no wrap and no horizontal scroll.
+ * SC-5 is amended to "does not reproduce at HEAD, measured at 1485px plus a
+ * 1485-to-360px sweep" (founder decision, 2026-11-14).
+ *
+ * WHAT THIS SPEC IS NOW: a regression pin. It fails if the label overflows its
+ * column, is clipped, or wraps past one line. The founder decision (CONTEXT SC-5,
+ * Q3 = a) stands: wrapping is allowed and the full sentence is kept, so there is no
+ * narrow-column precondition; the pin is that the label stays inside its column on
+ * one line, which is what HEAD does.
  *
  * Tests:
  *   a. future tone   — `Track record · future — check data`, masthead pressure.
- *   b. baseline      — `Computed · fresh`, same pressure, must pass before and
- *                      after the class change.
+ *   b. baseline      — `Computed · fresh`, same pressure.
  *   c. SyncBadge     — its `future — check data` text, measured at the same
  *                      viewport (RESEARCH addendum decision 5).
  *
@@ -52,9 +55,6 @@ const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
 
 const VIEWPORT = { width: 1485, height: 900 } as const;
-
-/** The August reading was 204.2px; 230px is the "squeezed" ceiling. */
-const NARROW_COLUMN_MAX_PX = 230;
 
 // Per worker, so one worker's afterAll cannot delete the rows another worker's test is
 // still reading (layout-narrow.spec.ts precedent). Every prefix starts `e2e-p214-`.
@@ -162,10 +162,18 @@ async function assertChipLabelFits(
 
   const m = await row.evaluate((el) => {
     const col = el.parentElement!.parentElement!.parentElement!;
+    const cs = getComputedStyle(el);
+    // `normal` has no pixel value; fall back to the usual 1.5 x fontSize.
+    const lineH =
+      cs.lineHeight === "normal"
+        ? parseFloat(cs.fontSize) * 1.5
+        : parseFloat(cs.lineHeight);
     return {
       rowScroll: el.scrollWidth,
       rowClient: el.clientWidth,
       rowRectW: el.getBoundingClientRect().width,
+      rowH: el.getBoundingClientRect().height,
+      lineH,
       columnW: col.getBoundingClientRect().width,
     };
   });
@@ -173,18 +181,20 @@ async function assertChipLabelFits(
     type: "measured",
     description:
       `${label}: label row scrollWidth=${m.rowScroll} clientWidth=${m.rowClient} ` +
-      `rect=${m.rowRectW.toFixed(1)}px; chip column=${m.columnW.toFixed(1)}px`,
+      `rect=${m.rowRectW.toFixed(1)}px h=${m.rowH.toFixed(1)}px lineH=${m.lineH.toFixed(1)}px; ` +
+      `chip column=${m.columnW.toFixed(1)}px`,
   });
   console.log(
     `[p214 measured] ${label}: row scrollWidth=${m.rowScroll} clientWidth=${m.rowClient} ` +
-      `rect=${m.rowRectW.toFixed(1)}px column=${m.columnW.toFixed(1)}px`,
+      `rect=${m.rowRectW.toFixed(1)}px h=${m.rowH.toFixed(1)}px lineH=${m.lineH.toFixed(1)}px ` +
+      `column=${m.columnW.toFixed(1)}px`,
   );
 
-  // The squeeze must have happened, or a GREEN below proves nothing.
+  // One line: a wrapped label is at least two line heights tall.
   expect(
-    m.columnW,
-    `narrow-column condition not exercised: column ${m.columnW.toFixed(1)}px`,
-  ).toBeLessThanOrEqual(NARROW_COLUMN_MAX_PX);
+    m.rowH,
+    `${label}: label row height ${m.rowH.toFixed(1)}px > 1.5 x line height ${m.lineH.toFixed(1)}px (label wrapped)`,
+  ).toBeLessThanOrEqual(1.5 * m.lineH);
 
   await assertChildrenInside(page, column, `${label}: label row inside column`);
   await row.scrollIntoViewIfNeeded();
@@ -195,7 +205,7 @@ async function assertChipLabelFits(
   ).toBeLessThanOrEqual(m.rowClient);
 }
 
-test.describe("Phase 214 SC-5 — FreshnessChip label fits its masthead column at 1485px", () => {
+test.describe("Phase 214 SC-5 — FreshnessChip label stays on one line inside its masthead column at 1485px", () => {
   test.skip(
     !HAS_SEED_ENV,
     "freshness-chip-width: seed-helper env vars not wired " +
