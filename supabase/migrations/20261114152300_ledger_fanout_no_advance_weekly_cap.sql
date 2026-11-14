@@ -48,7 +48,12 @@
 --   * a compute_analytics_from_csv job reached `done` and was created on or after
 --     the day the strategy went stale (last return date plus 5). That job is the
 --     TAIL of the derive chain, so it is the completion marker: a derive can
---     finish while its compute fails, and a failed tail is not a completed run.
+--     finish while its compute fails, and a failed tail is not a completed run;
+--   * AND a derive_broker_dailies job reached `done`, created on or after that same
+--     day. The founder decision names a completed derive PLUS compute run, so the
+--     tail alone is not proof (phase 214 review round 1, SFH-F1): a compute job
+--     with no completed derive behind it has not shown that the broker reports
+--     nothing new.
 --
 -- ⛔ THE SPLICE POINT IS LOAD-BEARING. The new condition goes AFTER the close
 -- paren of the marks-paused existence subquery and before the THEN, joined by
@@ -577,16 +582,20 @@ BEGIN
                          -- Phase 214 FRESHTRUTH (SC-2, founder Q1 = A, "Weekly cap,
                          -- never exclude"): a strategy whose completed refresh
                          -- cannot move its series gets the same weekly window. The
-                         -- signal is three conjuncts: the view reads it stale
+                         -- signal is four conjuncts: the view reads it stale
                          -- because its series is behind; its last return date is
                          -- 8 or more days old (the view reads stale from age 5, so
                          -- this is unmoved for 3 or more days after going stale);
-                         -- and a compute job of the chain TAIL reached done on or
-                         -- after the day it went stale. The tail is the completion
-                         -- marker because a derive can finish while its compute
-                         -- fails. Joined by OR AFTER the close paren above: an OR
-                         -- before it would land inside the analytics-row filter and
-                         -- give every strategy with an analytics row the week.
+                         -- a compute job of the chain TAIL reached done on or
+                         -- after the day it went stale; and a derive job reached
+                         -- done on or after that day too (a completed derive plus
+                         -- compute run, which is what the decision names). The
+                         -- tail is a completion marker because a derive can finish
+                         -- while its compute fails, and the derive is required
+                         -- because a compute alone proves no derive ran. Joined by
+                         -- OR AFTER the close paren above: an OR before it would
+                         -- land inside the analytics-row filter and give every
+                         -- strategy with an analytics row the week.
                          -- Still keyed on the ATTEMPT, and still a throttle: with
                          -- no attempt in the week it is admitted again.
                          OR (
@@ -599,6 +608,14 @@ BEGIN
                                 AND cj3.kind = 'compute_analytics_from_csv'
                                 AND cj3.status = 'done'
                                 AND cj3.created_at >= (lrs.last_return_date + 5)::timestamptz
+                           )
+                           AND EXISTS (
+                             SELECT 1
+                               FROM public.compute_jobs cj4
+                              WHERE cj4.strategy_id = lrs.strategy_id
+                                AND cj4.kind = 'derive_broker_dailies'
+                                AND cj4.status = 'done'
+                                AND cj4.created_at >= (lrs.last_return_date + 5)::timestamptz
                            )
                          ) THEN INTERVAL '7 days'
                          ELSE INTERVAL '20 hours'
@@ -886,6 +903,14 @@ BEGIN
                    AND cj3.status = 'done'
                    AND cj3.created_at >= (lrs.last_return_date + 5)::timestamptz
               )
+          AND EXISTS (
+                SELECT 1
+                  FROM public.compute_jobs cj4
+                 WHERE cj4.strategy_id = lrs.strategy_id
+                   AND cj4.kind = 'derive_broker_dailies'
+                   AND cj4.status = 'done'
+                   AND cj4.created_at >= (lrs.last_return_date + 5)::timestamptz
+              )
           AND NOT EXISTS (
                 SELECT 1
                   FROM public.strategy_analytics sa
@@ -971,7 +996,8 @@ COMMENT ON FUNCTION public.enqueue_ledger_refresh_for_strategies() IS
   'whose marks have been paused for 3 days or more keeps the attempt cooldown for '
   '7 days instead of 20 hours. Phase 214: so does a strategy whose series is behind, '
   'whose last return date is 8 or more days old and whose compute_analytics_from_csv '
-  'job completed on or after the day it went stale (a no-advance strategy: weekly cap, '
+  'and derive_broker_dailies jobs both completed on or after the day it went stale (a '
+  'no-advance strategy: weekly cap, '
   'never exclusion). Phase 214: a tick that holds one or more strategies back for that '
   'reason alone writes one public.cron_runs row (cron_name ''ledger_refresh_fanout'', '
   'status ''ok'', error NULL) naming each one and its age in `metadata`; a tick with no '

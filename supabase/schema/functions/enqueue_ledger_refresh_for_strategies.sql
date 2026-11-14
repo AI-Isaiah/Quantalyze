@@ -384,16 +384,20 @@ BEGIN
                          -- Phase 214 FRESHTRUTH (SC-2, founder Q1 = A, "Weekly cap,
                          -- never exclude"): a strategy whose completed refresh
                          -- cannot move its series gets the same weekly window. The
-                         -- signal is three conjuncts: the view reads it stale
+                         -- signal is four conjuncts: the view reads it stale
                          -- because its series is behind; its last return date is
                          -- 8 or more days old (the view reads stale from age 5, so
                          -- this is unmoved for 3 or more days after going stale);
-                         -- and a compute job of the chain TAIL reached done on or
-                         -- after the day it went stale. The tail is the completion
-                         -- marker because a derive can finish while its compute
-                         -- fails. Joined by OR AFTER the close paren above: an OR
-                         -- before it would land inside the analytics-row filter and
-                         -- give every strategy with an analytics row the week.
+                         -- a compute job of the chain TAIL reached done on or
+                         -- after the day it went stale; and a derive job reached
+                         -- done on or after that day too (a completed derive plus
+                         -- compute run, which is what the decision names). The
+                         -- tail is a completion marker because a derive can finish
+                         -- while its compute fails, and the derive is required
+                         -- because a compute alone proves no derive ran. Joined by
+                         -- OR AFTER the close paren above: an OR before it would
+                         -- land inside the analytics-row filter and give every
+                         -- strategy with an analytics row the week.
                          -- Still keyed on the ATTEMPT, and still a throttle: with
                          -- no attempt in the week it is admitted again.
                          OR (
@@ -406,6 +410,14 @@ BEGIN
                                 AND cj3.kind = 'compute_analytics_from_csv'
                                 AND cj3.status = 'done'
                                 AND cj3.created_at >= (lrs.last_return_date + 5)::timestamptz
+                           )
+                           AND EXISTS (
+                             SELECT 1
+                               FROM public.compute_jobs cj4
+                              WHERE cj4.strategy_id = lrs.strategy_id
+                                AND cj4.kind = 'derive_broker_dailies'
+                                AND cj4.status = 'done'
+                                AND cj4.created_at >= (lrs.last_return_date + 5)::timestamptz
                            )
                          ) THEN INTERVAL '7 days'
                          ELSE INTERVAL '20 hours'
@@ -692,6 +704,14 @@ BEGIN
                    AND cj3.kind = 'compute_analytics_from_csv'
                    AND cj3.status = 'done'
                    AND cj3.created_at >= (lrs.last_return_date + 5)::timestamptz
+              )
+          AND EXISTS (
+                SELECT 1
+                  FROM public.compute_jobs cj4
+                 WHERE cj4.strategy_id = lrs.strategy_id
+                   AND cj4.kind = 'derive_broker_dailies'
+                   AND cj4.status = 'done'
+                   AND cj4.created_at >= (lrs.last_return_date + 5)::timestamptz
               )
           AND NOT EXISTS (
                 SELECT 1

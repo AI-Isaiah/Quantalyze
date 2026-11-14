@@ -251,7 +251,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 39 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 40 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -500,6 +500,7 @@ DECLARE
   s_na2        UUID;     -- arm NA2: stale at age 7, one completed run (not yet 3 days unmoved)
   s_na3        UUID;     -- arm NA3: age 20, but its analytics job FAILED (not a completed run)
   s_na4        UUID;     -- arm NA4: age 20, its done analytics job PREDATES the stale day
+  s_na6        UUID;     -- arm NA6: age 20, a done analytics job after the stale day but NO done derive at all
   s_na5        UUID;     -- arm NA5: age 20 with the whole done tail, but its analytics status is FAILED (reason status_not_success)
   -- ⛔ Arm SK1 (Phase 214 FRESHTRUTH plan 06), same rule as every DECLARE above.
   s_sk1        UUID;     -- arm SK1: capped no-advance strategy, the skip row must name it
@@ -740,6 +741,7 @@ BEGIN
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2,     'lrf NA3', 'draft') RETURNING id INTO s_na3;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf NA4', 'draft') RETURNING id INTO s_na4;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2,     'lrf NA5', 'draft') RETURNING id INTO s_na5;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf NA6', 'draft') RETURNING id INTO s_na6;
   -- Arm SK1 (Phase 214 plan 06): a capped no-advance strategy. Parked like the rest.
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf SK1', 'draft') RETURNING id INTO s_sk1;
   -- Arms SK2 and SK3 (Phase 214 plan 06): the two strategies the skip count must NOT name.
@@ -901,8 +903,10 @@ BEGIN
   -- window, because every attempt they carry is older than that and younger
   -- than nothing. Seeded by INSERT only, like NA1's.
   --   NA2: age 7, so the series is behind but not yet unmoved for 3 days after it
-  --        went stale (its stale day, last return date + 5, is 2 days ago); the one
-  --        completed analytics job is on or after that day. Fails the AGE conjunct.
+  --        went stale (its stale day, last return date + 5, is 2 days ago); the
+  --        completed analytics job AND the completed derive (added with SFH-F1, so the
+  --        age twin still has a whole tail to free) are on or after that day. Fails
+  --        the AGE conjunct.
   --   NA3: age 20 and a completed derive, but the analytics job FAILED. Fails the
   --        STATUS conjunct: a failed compute is not a completed run.
   --   NA4: age 20 and a done analytics job, but it was created 17 days ago, before
@@ -917,6 +921,7 @@ BEGIN
           jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 20, 'YYYY-MM-DD'), 'value', 0.002)));
   INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
   VALUES (s_na2, 'compute_analytics_from_csv', 'done',         now() - INTERVAL '1 day'),
+         (s_na2, 'derive_broker_dailies',      'done',         now() - INTERVAL '1 day'),
          (s_na3, 'derive_broker_dailies',      'done',         now() - INTERVAL '1 day'),
          (s_na3, 'compute_analytics_from_csv', 'failed_final', now() - INTERVAL '1 day'),
          (s_na4, 'compute_analytics_from_csv', 'done',         (CURRENT_DATE - 17)::timestamptz),
@@ -931,6 +936,14 @@ BEGIN
   INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
   VALUES (s_na5, 'compute_analytics_from_csv', 'done', now() - INTERVAL '1 day'),
          (s_na5, 'derive_broker_dailies',      'done', now() - INTERVAL '1 day');
+  -- Arm NA6's rows (review SFH-F1): the signal's DERIVE conjunct. Age 20 and a done
+  -- analytics job a day old, on or after the stale day, but NO derive job at all, so the
+  -- strategy has shown no completed derive and the tail alone must not cap it.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_na6, 'complete', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 20, 'YYYY-MM-DD'), 'value', 0.002)));
+  INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
+  VALUES (s_na6, 'compute_analytics_from_csv', 'done', now() - INTERVAL '1 day');
   -- Arm SK1's rows (Phase 214 FRESHTRUTH plan 06). NA1a's shape: a returns series
   -- whose newest date is 20 days old (stale, series_behind, stale since 15 days ago),
   -- a done analytics job a day old (on or after the stale day, so the no-advance
@@ -1242,7 +1255,7 @@ BEGIN
   --    leaving every other line of it intact, and the APPLY SURVIVES (the
   --    deletion is not a migration needle) while this arm is the FIRST failure —
   --    `TEST FAILED (M2): … wrote 0 instrument row(s) …`, lane exit 3. Unmutated,
-  --    the same lane prints ALL 39 ARMS EXECUTED and exits 0.
+  --    the same lane prints ALL 40 ARMS EXECUTED and exits 0.
   -- ⛔ THE TWO PROSE MENTIONS ABOVE CARRY THE COUNT ON PURPOSE AND MUST MOVE
   -- WITH IT. The anti-skip gate reads this file's sentinel with a
   -- `grep -aoE "ALL [0-9]+ ARMS EXECUTED" | head -1`, so the FIRST match in
@@ -1867,7 +1880,7 @@ BEGIN
   --            forward 5 days from the last return date. NA4's early job then
   --            counts, the signal is true, and its 2-day-old derive holds it for
   --            the week.
-  -- RED-UNDER-M: {"arm":"NA4","apply":[{"kind":"edit","file":"supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql","find":"(lrs.last_return_date + 5)","replace":"(lrs.last_return_date - 100)","occurrences":2,"nth":1}]}
+  -- RED-UNDER-M: {"arm":"NA4","apply":[{"kind":"edit","file":"supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql","find":"(lrs.last_return_date + 5)","replace":"(lrs.last_return_date - 100)","occurrences":4,"nth":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_na4;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   SELECT count(*) INTO v_cnt FROM compute_jobs
@@ -1901,6 +1914,30 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (NA5): a strategy stale because its latest analytics run FAILED (reason status_not_success), whose series is 20 days old and which holds a done derive and compute run a day old, produced % new job(s), expected exactly 1 — the weekly cap reaches a failing strategy, so a strategy whose analytics keep failing is held to one attempt a week. Likely cause: the signal no longer requires the view reason to be series_behind.', v_cnt;
   END IF;
   UPDATE strategies SET status = 'draft' WHERE id = s_na5;
+
+  -- ======================================================================
+  -- ARM NA6 — A DONE COMPUTE TAIL ALONE IS NOT A COMPLETED RUN (review round 1,
+  -- SFH-F1). The founder decision names "a completed derive plus compute run after the
+  -- strategy went stale". Age 20 and a done analytics job a day old, on or after the
+  -- stale day, but no derive job that reached done. The tail alone proves no derive
+  -- ran, so the strategy keeps the 20-hour cooldown: its day-old attempt is outside
+  -- it, so it IS enqueued. Without NA6 a strategy whose derive never completed (a
+  -- manual or csv compute, a purged derive) is held to one attempt a week.
+  -- ======================================================================
+  -- RED-UNDER: point the signal's derive existence test in 20261114152300 at the
+  --            analytics kind instead of the derive kind (the FIRST occurrence in the
+  --            text; the second is the skip statement's copy). NA6's done analytics job
+  --            then satisfies BOTH existence tests, the signal is true, and the strategy
+  --            is held for the week. NA1-NA5 each hold a done derive already.
+  -- RED-UNDER-M: {"arm":"NA6","apply":[{"kind":"edit","file":"supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql","find":"AND cj4.kind = 'derive_broker_dailies'","replace":"AND cj4.kind = 'compute_analytics_from_csv'","occurrences":2,"nth":1}]}
+  UPDATE strategies SET status = 'published' WHERE id = s_na6;
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_na6 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (NA6): a stale series_behind strategy at age 20 with a done analytics job a day old but NO completed derive produced % new job(s), expected exactly 1 — the weekly cap counts a compute tail alone as a completed run, so a strategy whose derive never completed is held to one attempt a week. Likely cause: the signal no longer requires a done derive job on or after the day the strategy went stale.', v_cnt;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_na6;
 
   -- ======================================================================
   -- ARM G1 — the PER-VENUE CAP (D-09). Six stale eligible strategies on ONE
@@ -3054,7 +3091,7 @@ BEGIN
 
   UPDATE strategies SET status = 'draft' WHERE id IN (s_w1, s_w2, s_w3, s_w4);
 
-  RAISE NOTICE 'ALL 39 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, NA1, NA2, NA3, NA4, NA5, SK1, SK2, SK3, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
+  RAISE NOTICE 'ALL 40 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, NA1, NA2, NA3, NA4, NA5, NA6, SK1, SK2, SK3, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
 END $$;
 
 ROLLBACK;
