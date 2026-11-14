@@ -139,7 +139,7 @@ function mount(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
       <RangeHarness />
-      <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+      <FactsheetBody payload={payload} hideHeader hideFooter />
     </FactsheetProvider>,
   );
 }

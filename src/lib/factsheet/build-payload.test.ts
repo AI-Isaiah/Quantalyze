@@ -114,6 +114,30 @@ describe("SC-4 — cash byte-identity across the deriveSeriesBundle refactor", (
     expect(payload.seriesByBasis).toBeUndefined();
     expect(stableStringify(payload)).toMatchSnapshot();
   });
+
+  // Phase 210 D-15: a runtime assertion on a BUILT api payload. A type-only removal cannot
+  // fail at runtime, so this goes RED when either removed field, or any demo name, is put
+  // back into the api return.
+  it("the api payload carries no demo peer cohort and no demo allocator blend (D-15)", () => {
+    const payload = buildFactsheetPayload(API_STRATEGY, CASH_SERIES)!;
+    expect(payload.ingestSource).toBe("api");
+    expect("peerPercentile" in payload).toBe(false);
+    expect("allocatorPortfolios" in payload).toBe(false);
+    // The event-study signatures are real data and stay.
+    expect("eventSignatures" in payload).toBe(true);
+    expect("benchEventSignatures" in payload).toBe(true);
+    const serialized = JSON.stringify(payload);
+    for (const name of [
+      "60/40 Stocks/Bonds",
+      "Multi-Asset Risk Parity",
+      "Diversified Crypto Blend",
+      "sixty_forty",
+      "multi_asset",
+      "crypto_book",
+    ]) {
+      expect(serialized, `the serialized api payload must not contain "${name}"`).not.toContain(name);
+    }
+  });
 });
 
 describe("MTM-04 — seriesByBasis.mark_to_market bundle emission", () => {

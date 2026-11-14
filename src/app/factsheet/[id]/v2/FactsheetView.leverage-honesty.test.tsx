@@ -136,7 +136,7 @@ const SMALL = buildSmall();
 function renderBody(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideAllocatorSection />
+      <FactsheetBody payload={payload} />
     </FactsheetProvider>,
   );
 }

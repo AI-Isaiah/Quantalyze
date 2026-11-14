@@ -60,7 +60,7 @@ function renderStrip() {
   payload.strategyMetrics.ann_vol = -0.0004;
   const { container } = render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} scenarioMode />
     </FactsheetProvider>,
   );
   const grid = Array.from(container.querySelectorAll<HTMLElement>("div.grid")).find((el) =>

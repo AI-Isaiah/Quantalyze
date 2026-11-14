@@ -1370,8 +1370,9 @@ describe("205 D-02 parity: native and USD views agree on the withheld stress for
 /**
  * 205 D-03 (194.2-REVIEW-R3 WR-03): on the api arm, every PROD strategy, an unparseable date in the
  * second sorted curve position used to throw out of `alignBlend` and render the route error page for
- * every visitor, with and without a BTC native unit. The record verdict now withholds the blends (and
- * every other figure) instead, so the fetch path resolves a withheld payload.
+ * every visitor, with and without a BTC native unit. The record verdict withholds every figure instead,
+ * so the fetch path resolves a withheld payload. Phase 210 removed the blend alignment that threw, so
+ * the api payload no longer carries a blend field at all.
  *
  * `"2024-01-1"` sorts between `2024-01-09` and `2024-01-10`, so it is the second curve point and the
  * native series' first date once the inversion drops day 0.
@@ -1395,14 +1396,14 @@ describe("205 D-03 parity: an unreadable api-arm curve returns a withheld payloa
     expect(payload.ingestSource).toBe("api");
     if (payload.ingestSource !== "api") throw new Error("expected the api arm");
     expect(payload.figureRecord?.unreadable).toBe(true);
-    expect(payload.allocatorPortfolios).toBeNull();
+    expect("allocatorPortfolios" in payload).toBe(false);
     expect(payload.stressWindows.unreadable).toBe(true);
     if (flags) {
       expect(payload.usdViewUnavailable).toBeUndefined();
       const usd = payload.usdView?.payload;
       expect(usd?.figureRecord?.unreadable).toBe(true);
       if (usd?.ingestSource !== "api") throw new Error("expected the USD view on the api arm");
-      expect(usd.allocatorPortfolios).toBeNull();
+      expect("allocatorPortfolios" in usd).toBe(false);
     }
   });
 });

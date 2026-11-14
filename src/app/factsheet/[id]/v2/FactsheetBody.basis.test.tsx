@@ -161,7 +161,6 @@ function renderBody(payload: FactsheetPayload) {
       <FactsheetBody
         payload={payload}
         hideHeader
-        hideAllocatorSection
         hideFooter={false}
       />
     </FactsheetProvider>,
@@ -252,7 +251,6 @@ describe("FactsheetBody — Phase 90 single-key parity (GREEN today AND after)",
         <FactsheetBody
           payload={payload}
           hideHeader
-          hideAllocatorSection
           hideFooter={false}
         />
       </FactsheetProvider>,

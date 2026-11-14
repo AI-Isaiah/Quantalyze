@@ -110,7 +110,7 @@ function payloadFor(f: Fixture): FactsheetPayload {
 function renderHeader(payload: FactsheetPayload) {
   const view = render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+      <FactsheetBody payload={payload} hideFooter />
     </FactsheetProvider>,
   );
   const header = view.container.querySelector("header") as HTMLElement;

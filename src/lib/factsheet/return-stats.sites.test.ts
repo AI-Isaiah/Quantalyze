@@ -25,7 +25,6 @@ import { calmarByYear } from "./calmar-by-year";
 import { buildComparatorBlock } from "./comparator-block";
 import { buildFactsheetPayload } from "./build-payload";
 import { bootstrapCI, MIN_SHARPE_RESAMPLES } from "./bootstrap";
-import { computePeerPercentile } from "./peer-cohort";
 import { computeOgHeadline } from "./og-metrics";
 import { mean, stdDev } from "@/lib/portfolio-math-utils";
 import {
@@ -183,24 +182,11 @@ describe("T13 end to end: the factsheet payload's headline Sharpe", () => {
   });
 });
 
-describe("peer percentile: a strategy with no Sharpe has no Sharpe rank (D7, SFH-H1)", () => {
-  it("a NaN Sharpe ranks as NaN, never the 0th percentile", () => {
-    const got = computePeerPercentile(Number.NaN, 1, -0.1);
-    expect(Number.isNaN(got.sharpe)).toBe(true);
-    // The other two dimensions still rank.
-    expect(Number.isFinite(got.sortino)).toBe(true);
-  });
-
-  it("control: a finite Sharpe keeps its rank", () => {
-    expect(Number.isFinite(computePeerPercentile(1, 1, -0.1).sharpe)).toBe(true);
-  });
-});
-
 // Review round 2 HI-02 / SFH-R2-H2 (founder decision D7): a series with no
 // losing day has no Sortino and one with no drawdown has no Calmar. Both are
 // NaN ("—"), as the tearsheet shows for the same series, never a fabricated 0
 // that the peer bar then ranks near the bottom of the cohort.
-describe("HI-02 compute, bootstrapCI and computePeerPercentile: Sortino and Calmar that do not exist are NaN", () => {
+describe("HI-02 compute and bootstrapCI: Sortino and Calmar that do not exist are NaN", () => {
   /** Every return positive, and dispersing: a real Sharpe, no Sortino, no Calmar. */
   const ALL_POSITIVE = NOISY_A.map((r) => Math.abs(r) + 0.0005);
 
@@ -281,14 +267,7 @@ describe("HI-02 compute, bootstrapCI and computePeerPercentile: Sortino and Calm
     expect(full.sortino.n_valid).toBe(200);
   });
 
-  it("computePeerPercentile: a NaN Sortino ranks as NaN, never the 5th percentile; a finite one keeps its rank", () => {
-    const none = computePeerPercentile(1, Number.NaN, -0.1);
-    expect(Number.isNaN(none.sortino)).toBe(true);
-    expect(Number.isFinite(none.sharpe)).toBe(true);
-    expect(Number.isFinite(computePeerPercentile(1, 1, -0.1).sortino)).toBe(true);
-  });
-
-  it("the api factsheet payload of a constant yield carries no Sortino rank and no Sortino/Calmar", () => {
+  it("the api factsheet payload of a constant yield carries no Sortino/Calmar", () => {
     const daily = navConstantYield(CONSTANT_YIELDS["apy_5pct"], N).map((value, i) => ({ date: DATES[i], value }));
     const p = buildFactsheetPayload(
       {
@@ -306,9 +285,6 @@ describe("HI-02 compute, bootstrapCI and computePeerPercentile: Sortino and Calm
     )!;
     expect(Number.isNaN(p.strategyMetrics.sortino)).toBe(true);
     expect(Number.isNaN(p.strategyMetrics.calmar)).toBe(true);
-    const peer = (p as { peerPercentile?: { sortino: number } | null }).peerPercentile;
-    expect(peer).toBeTruthy();
-    expect(Number.isNaN(peer!.sortino)).toBe(true);
   });
 });
 

@@ -223,7 +223,7 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
     const payload = overview(n);
     return render(
       <FactsheetProvider payload={payload} persist={false}>
-        <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+        <FactsheetBody payload={payload} hideHeader hideFooter />
       </FactsheetProvider>,
     );
   }
@@ -295,7 +295,7 @@ describe("AlphaBetaDecomposition — the shared paired-observation floor (169.4 
     const payload = paddedOverview();
     render(
       <FactsheetProvider payload={payload} persist={false}>
-        <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+        <FactsheetBody payload={payload} hideHeader hideFooter />
       </FactsheetProvider>,
     );
     expect(screen.queryByTestId("joint-floor-reason")).toBeNull();

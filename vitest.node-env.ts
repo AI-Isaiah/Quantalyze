@@ -230,7 +230,6 @@ export const NODE_ENV_TEST_FILES: string[] = [
   "src/lib/drawdown-math.test.ts",
   "src/lib/envelope.test.ts",
   "src/lib/factsheet/align.test.ts",
-  "src/lib/factsheet/allocator.test.ts",
   "src/lib/factsheet/basis-metrics.test.ts",
   "src/lib/factsheet/compute.dd.test.ts",
   "src/lib/factsheet/compute.metrics.test.ts",

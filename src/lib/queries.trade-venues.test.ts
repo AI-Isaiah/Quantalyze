@@ -291,6 +291,23 @@ describe("getStrategiesByCategory - a failed or malformed venue read is UNAVAILA
     expect(venueLogs(consoleError)).toHaveLength(0);
     expect(venueSentry()).toHaveLength(0);
   });
+
+  it("D-06 (Phase 210): a composite whose every key window has closed gets no venue row, keeps its listed exchange, and raises no alarm", async () => {
+    // get_published_trade_venues returns zero rows for a published composite whose every
+    // strategy_keys window has closed (migration 20261114120000), so its id is simply absent.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    rec.venueResponse = { data: [{ strategy_id: ID_A, exchange: "okx" }], error: null };
+
+    const rows = await getStrategiesByCategory("crypto-sma");
+
+    const a = rows.find((r) => r.id === ID_A)!;
+    const b = rows.find((r) => r.id === ID_B)!;
+    expect(a.tradeVenues).toEqual(["okx"]);
+    expect(b.tradeVenues).toBeUndefined();
+    expect(b.tradeVenuesUnavailable).toBeUndefined();
+    expect(venueLogs(consoleError)).toHaveLength(0);
+    expect(venueSentry()).toHaveLength(0);
+  });
 });
 
 describe("getMyStrategies - D-06: the owner list is out of scope", () => {

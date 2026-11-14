@@ -416,9 +416,6 @@ function FactsheetShell({
 export interface FactsheetBodyOptions extends OwnerLaneProps {
   /** Suppress the strategy-name header (caller already provides its own). */
   hideHeader?: boolean;
-  /** A no-op since QUIETVIEW (Phase 193 D-05 removed the demo allocator section).
-   *  Kept so existing callers compile; removal is booked with `[193-DEMO-PAYLOAD-PRODUCERS]`. */
-  hideAllocatorSection?: boolean;
   /** Suppress the QSF footer + disclaimer (caller already provides closing chrome). */
   hideFooter?: boolean;
   /** Render an optional slot above the KpiStrip — used to inject a live
@@ -1653,7 +1650,10 @@ function FactsheetHeader({
                 after the trade-fetch line. A statement about the whole record,
                 so it sits in the header (what survives printing), not in the
                 chart seam. Server truth only (`payload.unrecoveredGaps`). */}
-            <UnrecoveredGapLines gaps={payload.unrecoveredGaps} />
+            <UnrecoveredGapLines
+              gaps={payload.unrecoveredGaps}
+              unavailable={payload.unrecoveredGapsUnavailable}
+            />
             {/* D-06: each range rebuilt from OKX's quarterly statement, directly
                 after the gap lines so a partly rebuilt gap shows both (SC-4).
                 Shown to every viewer; server truth only

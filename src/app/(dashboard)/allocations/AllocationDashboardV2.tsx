@@ -337,7 +337,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           <FactsheetBody
             payload={factsheetPayload}
             hideHeader
-            hideAllocatorSection
             hideFooter
             topSlot={equitySlot}
           />

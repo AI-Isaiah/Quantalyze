@@ -44,7 +44,7 @@ beforeEach(() => {
 function renderBody(payload: FactsheetCsvPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideHeader hideAllocatorSection hideFooter={false} />
+      <FactsheetBody payload={payload} scenarioMode hideHeader hideFooter={false} />
     </FactsheetProvider>,
   );
 }

@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.133.43.0] - 2026-11-14 — Phase 210 PUBLICTRUTH: public factsheet cues come from real data only
+
+Three fixes to what a public factsheet and Discovery show. Each one removes a cue that real data did not back. The phase has one migration, and it changes no live output when it deploys: PROD had 0 closed `strategy_keys` windows on published strategies on 2026-11-14. Its value is the first key rotation.
+
+### Fixed
+- **A key rotation no longer raises a false venue-mismatch cue.** `get_published_trade_venues(uuid[])` now returns venues only from `strategy_keys` members whose window is still open: `window_end IS NULL OR window_end > current_date`. `window_end` is the exclusive end of the window, so a window ending today counts as closed. Before this, a strategy listed as OKX that had moved from a Binance key to an OKX key showed `Listed as OKX; trades come from Binance, OKX.` The single-key arm (`strategies.api_key_id`) is unchanged. If every window of a published composite has closed, the strategy now gets no venue rows, and the badge shows the listed exchange with no mismatch cue (D-06).
+  - New migration `20261114120000_get_published_trade_venues_open_windows.sql`. It is a `CREATE OR REPLACE` with the same signature, result table, SECURITY DEFINER and pinned `search_path`, and it restates REVOKE and GRANT. Its self-verify reads only the catalogue, so it applies on TEST's empty tables. The rollback `down/20261114120000-rollback.sql` restores the previous body with `CREATE OR REPLACE` and has no DROP. The function snapshot under `supabase/schema/functions/` is updated with it.
+  - migration-reviewer and rls-policy-auditor were both CLEAN, with 0 findings at any severity.
+- **A malformed gap record is disclosed instead of reading as "no gaps".** `readUnrecoveredGaps` returns a malformed verdict, mirroring `readReconstructedRanges`. The factsheet builder then reports it to Sentry (`stage: factsheet-unrecovered-gaps`) with one of six fixed reason strings and no raw provenance. It also sets `unrecoveredGapsUnavailable`. The factsheet and the tear sheet then show the muted line "Record of days without trade data unavailable. Some days may be missing from the record." in place of the gap lines.
+
+### Removed
+- **No public payload carries invented peer or allocator data.** The api arm of the factsheet payload no longer computes or ships `peerPercentile` (the seeded demo peer cohort) or `allocatorPortfolios` (the demo blends). Phase 193 QUIETVIEW had removed only their render, so the numbers still reached the client in the RSC payload and in the cached payload.
+  - `src/lib/factsheet/peer-cohort.ts` and `src/lib/factsheet/allocator.ts` are deleted, with their unit tests and their rows in the return-stats site censuses. The csv arm's `scenarioPeer` and `PeerPercentilePayload`, which rank against the real verified universe, are kept. ADR-0025 records the removal.
+  - The no-op `hideAllocatorSection` option on `FactsheetBody` and its two callers are removed.
+
+### Changed
+- **Factsheet payload cache key `factsheet-v2-payload-v24` → `v25`,** bumped once for both payload changes. No cached entry can serve a payload with demo fields, or one without the gap flag. It is the only cache that stores the api-arm payload.
+- **SQL mutation census:** `ARMS_FLOOR` goes from 830 to 832 for the two new arms, `TV-closed-window` and `TV-window-end-today`. The six existing body-editing arms in `supabase/tests/test_get_published_trade_venues.sql` now point at the new migration file. A one-file mutation run gave `arms: 12/12/0`. `FILES_FLOOR` and `WAIVED_CEILING` are unchanged.
+
+### Tests
+- Every fix has a test that goes RED when the fix is reverted. This was measured by neutering the source and restoring it from a byte backup. Venues: the two new SQL arms. Demo payload: runtime `"peerPercentile" in payload` / `"allocatorPortfolios" in payload` checks, plus a serialized-payload check for demo blend names. Gap record: the reader verdict, the Sentry report and flag, and the render cases.
+- A `SyncBadge` test pins the rotation case: listed `okx` with venues `[okx]` shows no cue, and `[binance, okx]` still shows one.
+
+### Notes
+- **Closed in `TODOS.md`:** `170.6.1-VENUES-CLOSED-KEY-WINDOWS`, `193-DEMO-PAYLOAD-PRODUCERS` (together with its now-empty "Phase 193 (QUIETVIEW) — routed items" section) and `167.1.2.2.2-GAP-RECORD-SILENT-PARSE`.
+- **Expected on this PR:** baseline-content-drift shows a DRIFT row for `get_published_trade_venues/1` until the post-apply re-dump. No allowlist row was added for it.
+- **Recorded, not fixed (LOW and INFO, in the phase REVIEW.md only):** `parseUnrecoveredGaps` is still exported but used only by tests. No mutation arm names the `window_end IS NULL` half of the predicate on its own. The tear-sheet pass-through test cannot go RED on revert; the `printView` render test covers that path. Future-dated windows are still returned, by decision (CONTEXT deferred).
+
 ## [0.133.42.3] - 2026-11-14 — records: book WIZTRUTH, KEYFLOW, FRESHTRUTH, TESTREACH; FIX NOW cleanup
 
 Records PR from the founder's FIX NOW triage (every decision approved 2026-11-14 through AskUserQuestion). It books four phases, adds a criterion to Phase 208, and restructures the `TODOS.md` FIX NOW section. `TODOS.md` goes from 7,016 to 6,694 lines. No source or test change. The pre-cleanup file is `git show 3f52d473a:TODOS.md`.

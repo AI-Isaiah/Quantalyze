@@ -30,49 +30,80 @@ function isIsoCalendarDate(value: unknown): value is string {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
 }
 
-function warnMalformed(reason: string): [] {
+/**
+ * What `readUnrecoveredGaps` found in a `series_provenance` value.
+ *
+ * `malformed` is `null` when the record is absent or valid, and a short reason
+ * string when it is present but unusable. The two are NOT the same fact for a
+ * reader: absent means no gap was recorded, malformed means we cannot say, and
+ * a silent empty list would present every day as a day with trade data
+ * (Phase 210 PUBLICTRUTH, D-16).
+ */
+export interface UnrecoveredGapsRead {
+  gaps: UnrecoveredGap[];
+  malformed: string | null;
+}
+
+function malformedGaps(reason: string): UnrecoveredGapsRead {
   console.warn(
     `[trade-fetch-provenance] series_provenance.unrecovered_gaps is malformed (${reason}); naming no gap`,
   );
-  return [];
+  return { gaps: [], malformed: reason };
 }
 
 /**
- * Parse the validated gap list out of a `series_provenance` value.
+ * Parse the validated gap list out of a `series_provenance` value, and say
+ * whether the record was malformed (Phase 210 PUBLICTRUTH, D-16).
  *
- * Pure and total. Absent, empty or gap-free input yields `[]` silently. Any
- * malformed shape (non-object provenance, non-array gap list, a non-object
- * entry, a date that is not a real `YYYY-MM-DD`, `to` before `from`) yields
- * `[]` and one `console.warn`: one bad entry voids the whole record rather than
- * rendering a partial claim. Output is `{from, to}` only, newest `to` first.
+ * Pure and total. Absent, empty or gap-free input yields
+ * `{ gaps: [], malformed: null }` silently. Any malformed shape (non-object
+ * provenance, non-array gap list, a non-object entry, a date that is not a real
+ * `YYYY-MM-DD`, `to` before `from`) yields `{ gaps: [], malformed: <reason> }`
+ * and one `console.warn`: one bad entry voids the whole record rather than
+ * rendering a partial claim. The CALLERS own the loud half: each reports a
+ * non-null `malformed` to Sentry and renders the unavailable line, so a
+ * disclosure failure is visible to an operator and to the reader. Output gaps
+ * are `{from, to}` only, newest `to` first.
  */
-export function parseUnrecoveredGaps(seriesProvenance: unknown): UnrecoveredGap[] {
+export function readUnrecoveredGaps(seriesProvenance: unknown): UnrecoveredGapsRead {
   try {
-    if (seriesProvenance == null) return [];
+    if (seriesProvenance == null) return { gaps: [], malformed: null };
     if (typeof seriesProvenance !== "object" || Array.isArray(seriesProvenance)) {
-      return warnMalformed("provenance is not an object");
+      return malformedGaps("provenance is not an object");
     }
     const raw = (seriesProvenance as Record<string, unknown>).unrecovered_gaps;
-    if (raw == null) return [];
-    if (!Array.isArray(raw)) return warnMalformed("unrecovered_gaps is not an array");
+    if (raw == null) return { gaps: [], malformed: null };
+    if (!Array.isArray(raw)) return malformedGaps("unrecovered_gaps is not an array");
 
     const gaps: UnrecoveredGap[] = [];
     for (const entry of raw) {
       if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
-        return warnMalformed("an entry is not an object");
+        return malformedGaps("an entry is not an object");
       }
       const { from, to } = entry as Record<string, unknown>;
       if (!isIsoCalendarDate(from) || !isIsoCalendarDate(to)) {
-        return warnMalformed("an entry date is not a YYYY-MM-DD calendar date");
+        return malformedGaps("an entry date is not a YYYY-MM-DD calendar date");
       }
       // ISO dates order lexicographically.
-      if (to < from) return warnMalformed("an entry ends before it starts");
+      if (to < from) return malformedGaps("an entry ends before it starts");
       gaps.push({ from, to });
     }
-    return gaps.sort((a, b) => (a.to < b.to ? 1 : a.to > b.to ? -1 : 0));
+    return {
+      gaps: gaps.sort((a, b) => (a.to < b.to ? 1 : a.to > b.to ? -1 : 0)),
+      malformed: null,
+    };
   } catch {
-    return warnMalformed("provenance could not be read");
+    return malformedGaps("provenance could not be read");
   }
+}
+
+/**
+ * The gaps alone, for a caller that has no use for the verdict. Production
+ * surfaces call `readUnrecoveredGaps` so a malformed record is reported and
+ * disclosed; this keeps the original total `UnrecoveredGap[]` contract.
+ */
+export function parseUnrecoveredGaps(seriesProvenance: unknown): UnrecoveredGap[] {
+  return readUnrecoveredGaps(seriesProvenance).gaps;
 }
 
 /**

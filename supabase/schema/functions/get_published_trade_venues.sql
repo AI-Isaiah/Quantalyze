@@ -2,13 +2,18 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261019120000_get_published_trade_venues.sql
+-- source migration: 20261114120000_get_published_trade_venues_open_windows.sql
 -- ==========================================================================
--- STEP 1: get_published_trade_venues — the published-only venue primitive
+-- STEP 1: get_published_trade_venues — the published-only venue primitive, open windows only
 -- ==========================================================================
 -- All source columns are alias-qualified (s. / sk. / k.) so the OUT-parameter
 -- names (strategy_id, exchange) never shadow a source column.
-CREATE FUNCTION public.get_published_trade_venues(p_strategy_ids uuid[])
+-- VAC-04: PROD's live body before this migration equals the committed baseline snapshot
+-- (the same hash sql-gate-lint reports for supabase/schema/baseline.sql), so this replace
+-- overwrites no out-of-band patch.
+--   get_published_trade_venues/1
+-- prod-body-ack: 1dd7db89ef0e3df11e878f2ab68bfb79c8e91dc31ad6ec0cac06965ab90e2d48
+CREATE OR REPLACE FUNCTION public.get_published_trade_venues(p_strategy_ids uuid[])
 RETURNS TABLE (strategy_id uuid, exchange text)
 LANGUAGE sql
 STABLE
@@ -28,5 +33,6 @@ AS $$
     JOIN public.strategy_keys sk ON sk.strategy_id = s.id
     JOIN public.api_keys k ON k.id = sk.api_key_id
    WHERE s.status = 'published'
-     AND s.id = ANY(p_strategy_ids);
+     AND s.id = ANY(p_strategy_ids)
+     AND (sk.window_end IS NULL OR sk.window_end > current_date);
 $$;

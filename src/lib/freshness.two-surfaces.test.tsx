@@ -162,7 +162,7 @@ function chipClaims(seriesEndYmd: string, computedAt: string): Claims {
   const payload = payloadFor(seriesEndYmd, computedAt);
   const { container } = render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+      <FactsheetBody payload={payload} hideFooter />
     </FactsheetProvider>,
   );
   const label = readChipLabel(container);
@@ -344,7 +344,7 @@ describe("WR-04 — on a fractional day the badge and the chip still answer one 
       const payload = payloadFor(seriesEndYmd, computedAt);
       const chipRender = render(
         <FactsheetProvider payload={payload} persist={false}>
-          <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+          <FactsheetBody payload={payload} hideFooter />
         </FactsheetProvider>,
       );
       const label = readChipLabel(chipRender.container);
@@ -423,7 +423,7 @@ describe("TRADESYNC — the badge and the factsheet line answer one fetch instan
     };
     const { container } = render(
       <FactsheetProvider payload={payload} persist={false}>
-        <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+        <FactsheetBody payload={payload} hideFooter />
       </FactsheetProvider>,
     );
     const line = Array.from(container.querySelectorAll("header p")).find((p) =>

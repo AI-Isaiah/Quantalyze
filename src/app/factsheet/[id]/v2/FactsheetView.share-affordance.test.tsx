@@ -190,7 +190,6 @@ function renderBody(
     <FactsheetProvider payload={populatedPayload} persist={false}>
       <FactsheetBody
         payload={populatedPayload}
-        hideAllocatorSection
         hideFooter
         {...props}
       />

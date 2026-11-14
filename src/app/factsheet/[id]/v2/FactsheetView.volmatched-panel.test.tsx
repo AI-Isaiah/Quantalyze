@@ -95,7 +95,7 @@ function withoutVolMatch(p: FactsheetPayload): FactsheetPayload["comparators"] {
 function renderBody(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter={false} />
+      <FactsheetBody payload={payload} hideHeader hideFooter={false} />
     </FactsheetProvider>,
   );
 }

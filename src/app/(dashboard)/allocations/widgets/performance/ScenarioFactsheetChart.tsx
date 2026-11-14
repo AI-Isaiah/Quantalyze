@@ -34,8 +34,7 @@ import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
  *     shareable/comparable real strategy) and the MetricsColumn seam is threaded
  *     for the Phase-42 peer carve-out. The api-only panels (allocator / signatures
  *     / peer) stay absent by construction (ingestSource "csv"); `hideHeader` (the
- *     composer owns the title) and `hideAllocatorSection` (belt-and-suspenders) are
- *     passed; `hideFooter={false}` SHOWS the footer (USER OVERRIDE).
+ *     composer owns the title) is passed; `hideFooter={false}` SHOWS the footer (USER OVERRIDE).
  *   - Q3 (period control): the 3M/6M/12M/ALL SegmentedControl is kept and drives
  *     the shared `xRange` via `setXRange` over the scenario date axis (NOT the
  *     legacy `sliceByPeriod`). It lives in the body's `topSlot` so it stays a
@@ -239,15 +238,14 @@ export function ScenarioFactsheetChart({
           cumulative + underwaterAcc) + every other factsheet panel through the
           synthesized csv payload. scenarioMode suppresses the ControlBar
           Share-link + Compare-strategies actions and threads the MetricsColumn
-          peer seam; hideHeader (composer owns the title), hideAllocatorSection
-          (api-gated anyway), hideFooter={false} (SHOW the footer — USER OVERRIDE).
+          peer seam; hideHeader (composer owns the title), hideFooter={false}
+          (SHOW the footer — USER OVERRIDE).
           The api-only panels (allocator / signatures / peer) stay absent by
           construction because the synth payload is ingestSource "csv". */}
       <FactsheetBody
         payload={synthPayload}
         scenarioMode
         hideHeader
-        hideAllocatorSection
         hideFooter={false}
         topSlot={
           // Q3: the SegmentedControl drives the SHARED xRange via setXRange.

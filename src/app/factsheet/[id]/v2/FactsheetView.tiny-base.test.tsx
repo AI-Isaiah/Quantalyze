@@ -70,7 +70,7 @@ function tinyBasePayload(tinyBaseDays: unknown): FactsheetPayload {
 function renderBody(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} scenarioMode />
     </FactsheetProvider>,
   );
 }

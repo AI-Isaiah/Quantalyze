@@ -1112,7 +1112,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18): `armsSeen` 809 -> 811, the +2 twinned arms 13 and 14 of test_get_verified_cohort_rank_gate.sql (the min-N floor per rank, and the Max DD decile over the whole cohort). Read off the runner's own `arms:` line.
     // ⭐ CURRENCY 2026-11-10 (Phase 194.2 FIGURERESIDUALS, plan 03, D-01): `armsSeen` 811 -> 815, the +4 twinned arms 15 to 18 of test_get_verified_cohort_rank_gate.sql (a malformed first date, last date or headline_since leaves the annualised cohort, and the unreadable arm precedes the observation arm). Arm 12 was rewritten in place, not added. MEASURED by ONE full runner run: `arms: 815/815/0`.
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): `armsSeen` 815 -> 830, the 15 twinned arms of the NEW gate test_contact_requests_insert_intro_authz.sql. Read off `coverage: files 81/108`, `arms: 0/830/0` from `--parse-only`, and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (15 annotated arms); the FULL local run was not run on this host (disk).
-    expect(armsSeen).toBe(830);
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): `armsSeen` 830 -> 832, the +2 twinned arms TV-closed-window and TV-window-end-today of test_get_published_trade_venues.sql (the open-window predicate of migration 20261114120000). Read off `coverage: files 81/108`, `arms: 0/832/0` from `--parse-only`, and the exit-0 SUBSET run of that one file (`arms: 12/12/0`, `biting: 12`). The file was already annotated, so FILES_FLOOR stays 81.
+    expect(armsSeen).toBe(832);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1159,7 +1160,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, plan 20): `stepsSeen` 898 -> 923, +25 file steps: arms 7 to 12 carry 2 + 3 + 2 + 3 + 3 + 9 `edit` steps (the runner replaces one occurrence per step, so a three-copy predicate edit is three steps), and arm 0 gains 3 (it now renames in both migrations of the chain).
     // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18): `stepsSeen` 923 -> 927, +4 file steps: arm 13 carries 1 `edit` step, arm 14 carries 2, and arm 0 gains 1 (the Max DD numerator it renames now occurs twice in the migration, the second being the migration check that reads it back).
     // ⭐ CURRENCY 2026-11-10 (Phase 194.2 FIGURERESIDUALS, plan 03, D-01): `stepsSeen` 927 -> 943, +16 file steps: arms 15, 16, 17 and 18 carry 3 `edit` steps each (a three-copy predicate edit is three steps) = +12, and arm 0 gains 4 (it now renames in all three migrations of the chain). Arms 11 and 12 keep their step counts after the retarget.
-    expect(stepsSeen).toBe(943);
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): `stepsSeen` 943 -> 951, +8 file steps in test_get_published_trade_venues.sql: TV-shape gains 4 (the same four edits on the new migration, since both files must widen), TV-strategy-keys gains 1 (the layered self-verify step), TV-closed-window carries 1 and TV-window-end-today 2 (the runner replaces one occurrence per step, so the body edit and the layered self-verify literal are two steps). The six re-pointed arms moved no step count. MEASURED: this file's run read the count.
+    expect(stepsSeen).toBe(951);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2122,7 +2124,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, plan 20): `needles.length` 898 -> 923, the same +25 file steps as `stepsSeen`.
     // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18): `needles.length` 923 -> 927, the same +4 file steps as `stepsSeen`.
     // ⭐ CURRENCY 2026-11-10 (Phase 194.2 FIGURERESIDUALS, plan 03, D-01): `needles.length` 927 -> 943, the same +16 file steps as `stepsSeen`.
-    expect(needles.length).toBe(943);
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): `needles.length` 943 -> 951, the same +8 file steps as `stepsSeen`.
+    expect(needles.length).toBe(951);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

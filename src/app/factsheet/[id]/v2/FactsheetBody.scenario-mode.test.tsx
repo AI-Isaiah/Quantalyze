@@ -94,14 +94,13 @@ const populatedPayload = buildScenarioFactsheetPayload({
 });
 
 // Mount shape mirrors the composer mount (Plan 40-02 consumes this contract):
-// hideHeader, hideAllocatorSection (api-gated anyway), hideFooter={false}.
+// hideHeader, hideFooter={false}.
 function renderBody(scenarioMode: boolean | undefined, omitProp = false) {
   return render(
     <FactsheetProvider payload={populatedPayload} persist={false}>
       <FactsheetBody
         payload={populatedPayload}
         hideHeader
-        hideAllocatorSection
         hideFooter={false}
         {...(omitProp ? {} : { scenarioMode })}
       />

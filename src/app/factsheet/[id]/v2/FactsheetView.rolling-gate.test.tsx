@@ -89,7 +89,7 @@ function buildPayload(n: number): FactsheetPayload {
 function renderBody(payload: FactsheetPayload): RenderResult {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter={false} />
+      <FactsheetBody payload={payload} hideHeader hideFooter={false} />
     </FactsheetProvider>,
   );
 }

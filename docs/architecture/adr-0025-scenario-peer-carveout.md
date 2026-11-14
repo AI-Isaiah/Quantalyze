@@ -4,6 +4,13 @@
 
 Accepted (2026-06-26) — milestone v1.2.2 Phase 42.
 
+> **Note (2026-11-14, Phase 210 PUBLICTRUTH):** the api arm's demo peer field and
+> demo allocator field were removed from the factsheet payload, and their
+> producers were deleted: the seeded cohort module (`peer-cohort.ts`) and the
+> demo blend module (`allocator.ts`). The references to the demo cohort below
+> are historical. The csv `scenarioPeer` carve-out this ADR records,
+> `PeerPercentilePayload`, and the real verified-universe ranking are unchanged.
+
 ## Context
 
 The factsheet ranks a strategy's Sharpe / Sortino / max-drawdown against a peer

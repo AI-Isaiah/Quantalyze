@@ -150,7 +150,7 @@ function longPayload(): FactsheetPayload {
 function mountBody(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+      <FactsheetBody payload={payload} hideHeader hideFooter />
     </FactsheetProvider>,
   );
 }

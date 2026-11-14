@@ -45,7 +45,7 @@ import {
 import { MARKS_SINCE_FLAG, MARKS_TRAILING_SINCE_FLAG, parseMarksStart } from "@/lib/nav-marks-start";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
-import { parseUnrecoveredGaps, readReconstructedRanges } from "./trade-fetch-provenance";
+import { readReconstructedRanges, readUnrecoveredGaps } from "./trade-fetch-provenance";
 import { readFactsheetBenchmark } from "./benchmark-read";
 import { readBenchmarkPrices } from "./benchmark-source";
 import { convertNativeReturnsToUsd } from "./native-to-usd";
@@ -743,7 +743,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v24", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v25", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
  * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
  * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on
@@ -983,7 +983,18 @@ async function buildFromResolved(
       ? apiKey.exchange.toLowerCase()
       : null;
   const tradesFetchedAt = analytics?.trades_fetched_at ?? null;
-  const unrecoveredGaps = parseUnrecoveredGaps(analytics?.series_provenance);
+  // Phase 210 PUBLICTRUTH D-16/D-17: a malformed gap record is not "no gaps". Report it once
+  // per cache miss with only the short reason (never the raw provenance) and flag the
+  // payload so the header says the record is unavailable instead of reading as gap-free.
+  const { gaps: unrecoveredGaps, malformed: unrecoveredMalformed } = readUnrecoveredGaps(
+    analytics?.series_provenance,
+  );
+  if (unrecoveredMalformed !== null) {
+    captureToSentry(new Error("factsheet: series_provenance.unrecovered_gaps is malformed"), {
+      tags: { stage: "factsheet-unrecovered-gaps", reason: "unrecovered_gaps_malformed", strategy_id: id },
+      extra: { detail: unrecoveredMalformed },
+    });
+  }
   // F5 / IN-01: a malformed record is not an absent one. The RPC already took
   // the rebuilt days out of `unrecovered_gaps`, so naming nothing would present
   // them as live: report it (this runs once per cache miss, not per request) and
@@ -1022,6 +1033,7 @@ async function buildFromResolved(
     tradesFetchedAt,
     tradeFetchVenue,
     unrecoveredGaps,
+    unrecoveredGapsUnavailable: unrecoveredMalformed !== null,
     reconstructedRanges,
     reconstructedRangesUnavailable: reconstructedMalformed !== null,
     trustTier: null,
