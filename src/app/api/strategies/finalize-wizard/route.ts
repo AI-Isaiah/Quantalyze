@@ -2324,7 +2324,7 @@ async function runLegacyFinalize(args: {
             const { data: jobId, error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
               p_strategy_id: resolvedId,
               p_kind: "stitch_composite",
-              p_metadata: { source: "finalize-wizard" },
+              p_metadata: { source: "finalize-wizard", correlation_id: correlationId },
             });
             if (enqueueErr) {
               throw new Error(
