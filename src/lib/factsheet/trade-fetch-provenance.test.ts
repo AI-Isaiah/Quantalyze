@@ -3,6 +3,7 @@ import {
   parseReconstructedRanges,
   parseUnrecoveredGaps,
   readReconstructedRanges,
+  readUnrecoveredGaps,
 } from "./trade-fetch-provenance";
 
 // Typed-literal oracles throughout: the expected spans are written out, never
@@ -96,6 +97,80 @@ describe("parseUnrecoveredGaps", () => {
     const hostile = { get unrecovered_gaps(): unknown { throw new Error("boom"); } };
     expect(() => parseUnrecoveredGaps(hostile)).not.toThrow();
     expect(parseUnrecoveredGaps(hostile)).toEqual([]);
+  });
+});
+
+// Phase 210 PUBLICTRUTH, D-16: `readUnrecoveredGaps` carries the verdict the callers
+// report and render. Absent is not malformed: only a present-but-unusable record says
+// "we cannot read the gap record", and a silent [] there would read as "no gaps".
+describe("readUnrecoveredGaps", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["empty object (key absent)", {}],
+    ["empty list", { unrecovered_gaps: [] }],
+    ["null key", { unrecovered_gaps: null }],
+  ])("%s is absent, not malformed", (_name, input) => {
+    expect(readUnrecoveredGaps(input)).toEqual({ gaps: [], malformed: null });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("a valid record carries its gaps newest first and no malformed reason", () => {
+    expect(
+      readUnrecoveredGaps({
+        unrecovered_gaps: [
+          { from: "2026-01-02", to: "2026-01-05", recorded_at: "x" },
+          { from: "2026-08-01", to: "2026-08-03" },
+        ],
+      }),
+    ).toEqual({
+      gaps: [
+        { from: "2026-08-01", to: "2026-08-03" },
+        { from: "2026-01-02", to: "2026-01-05" },
+      ],
+      malformed: null,
+    });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["to before from", { unrecovered_gaps: [{ from: "2026-07-08", to: "2026-05-07" }] }, "an entry ends before it starts"],
+    ["non-ISO date", { unrecovered_gaps: [{ from: "07/08/2026", to: "2026-07-09" }] }, "an entry date is not a YYYY-MM-DD calendar date"],
+    ["calendar-impossible date", { unrecovered_gaps: [{ from: "2026-02-30", to: "2026-03-02" }] }, "an entry date is not a YYYY-MM-DD calendar date"],
+    ["non-array list", { unrecovered_gaps: "2026-07-08" }, "unrecovered_gaps is not an array"],
+    ["non-object entry", { unrecovered_gaps: [null] }, "an entry is not an object"],
+    ["non-object provenance", "unrecovered_gaps", "provenance is not an object"],
+    ["array provenance", [{ from: "2026-07-08", to: "2026-07-09" }], "provenance is not an object"],
+  ])("%s is malformed with its named reason, gaps empty, one warning", (_name, input, reason) => {
+    expect(readUnrecoveredGaps(input)).toEqual({ gaps: [], malformed: reason });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("one bad entry voids the record but still reports it malformed (never a silent [])", () => {
+    const out = readUnrecoveredGaps({
+      unrecovered_gaps: [
+        { from: "2026-05-07", to: "2026-07-08" },
+        { from: "2026-09-09", to: "2026-09-01" },
+      ],
+    });
+    expect(out.gaps).toEqual([]);
+    expect(out.malformed).toBe("an entry ends before it starts");
+  });
+
+  it("a hostile provenance is malformed, not a throw", () => {
+    const hostile = { get unrecovered_gaps(): unknown { throw new Error("boom"); } };
+    expect(readUnrecoveredGaps(hostile)).toEqual({
+      gaps: [],
+      malformed: "provenance could not be read",
+    });
   });
 });
 

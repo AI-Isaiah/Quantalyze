@@ -154,7 +154,7 @@ describe("the KPI strip prints what the block says (D-15)", () => {
   function mount(payload: FactsheetPayload) {
     return render(
       <FactsheetProvider payload={payload} persist={false}>
-        <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+        <FactsheetBody payload={payload} hideHeader hideFooter />
       </FactsheetProvider>,
     );
   }

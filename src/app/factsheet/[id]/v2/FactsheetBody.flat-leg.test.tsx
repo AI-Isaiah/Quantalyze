@@ -67,7 +67,7 @@ function build(start: string = START, value: (i: number) => number = () => 0, n:
 function mount(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+      <FactsheetBody payload={payload} hideHeader hideFooter />
     </FactsheetProvider>,
   );
 }
@@ -197,7 +197,7 @@ describe("a flat strategy leg on the factsheet (D-04, B13), the KPI strip", () =
     render(
       <FactsheetProvider payload={{ ...base, activeComparator: "btc" }} persist={false}>
         <RangeHarness range={[250, 349]} />
-        <FactsheetBody payload={{ ...base, activeComparator: "btc" }} hideHeader hideAllocatorSection hideFooter />
+        <FactsheetBody payload={{ ...base, activeComparator: "btc" }} hideHeader hideFooter />
       </FactsheetProvider>,
     );
     expect(reasonsBySlot()).toEqual({ strip: [], four: [] });

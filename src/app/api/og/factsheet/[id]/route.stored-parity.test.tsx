@@ -271,7 +271,7 @@ function renderStrip(
   const payload = { ...built, figureRecord: recordFromScalars(scalars, "crypto") };
   const { container, unmount } = render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+      <FactsheetBody payload={payload} hideHeader hideFooter />
     </FactsheetProvider>,
   );
   const kpiGrid = Array.from(container.querySelectorAll<HTMLElement>("div.grid")).find((el) =>

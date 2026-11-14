@@ -30,8 +30,8 @@ import { LazyMount } from "./LazyMount";
  *     them. Callers that did switch them off were hiding the problem, not
  *     fixing it.
  *
- * The premise cases pin that the payload still carries the demo fields and that
- * lazy children mount, so a green run means the render is clean, not that the
+ * The premise cases pin that the payload no longer carries the demo fields (Phase
+ * 210 D-10) and that lazy children mount, so a green run means the render is clean, not that the
  * fixture went empty.
  */
 
@@ -169,13 +169,12 @@ function renderScenarioBody() {
 }
 
 describe("D-07 guard: a factsheet shows no demo, placeholder or foreign content", () => {
-  it("premise: the fixture still carries the demo payload fields", () => {
+  it("premise: the api payload carries no demo payload fields (D-15)", () => {
     const p = buildApiPayload();
     expect(p.ingestSource).toBe("api");
     expect(p.strategyName).not.toMatch(/MultiMarket/i);
-    if (p.ingestSource !== "api") throw new Error("unreachable: asserted above");
-    expect(p.peerPercentile).not.toBeNull();
-    expect((p.allocatorPortfolios ?? []).length).toBeGreaterThan(0);
+    expect("peerPercentile" in p).toBe(false);
+    expect("allocatorPortfolios" in p).toBe(false);
   });
 
   it("premise: LazyMount mounts its children under the firing observer", () => {

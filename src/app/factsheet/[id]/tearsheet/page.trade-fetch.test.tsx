@@ -145,6 +145,25 @@ describe("TearSheet page - the trade-fetch facts ride the factsheet payload (D-0
     expect(p.reconstructedRanges).toEqual([]);
   });
 
+  it("D-18: a malformed gap record reaches the masthead as `unavailable`, never as an empty list", async () => {
+    vi.mocked(fetchAndBuildPayloadWithReason).mockResolvedValue({
+      payload: {
+        strategyId: "s-1",
+        aum: null,
+        maxCapacity: null,
+        figureRecord: null,
+        ...FACTS,
+        unrecoveredGaps: [],
+        unrecoveredGapsUnavailable: true,
+      } as unknown as FactsheetPayload,
+      reason: null,
+    });
+    await renderPage();
+    const p = recorded.payloads[0];
+    expect(p.unrecoveredGapsUnavailable).toBe(true);
+    expect(p.unrecoveredGaps).toEqual([]);
+  });
+
   it("the page makes no service-role read of its own for them (one data path)", async () => {
     await renderPage();
     expect(adminCalls.count).toBe(0);

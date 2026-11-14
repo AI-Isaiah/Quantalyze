@@ -90,7 +90,7 @@ describe("the page's method notes describe the paired-interval comparator (SC3)"
     const payload = payload200();
     const { container } = render(
       <FactsheetProvider payload={payload} persist={false}>
-        <FactsheetBody payload={payload} hideAllocatorSection />
+        <FactsheetBody payload={payload} />
       </FactsheetProvider>,
     );
     const footer = flat(container.querySelector("footer"));

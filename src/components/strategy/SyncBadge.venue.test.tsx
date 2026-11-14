@@ -138,6 +138,24 @@ describe("SyncBadge - the key's venue is the label (D-05, O-1, O-3)", () => {
     expect(titleOf(container)).toContain("Listed as Bybit; trades come from Bybit, OKX");
   });
 
+  it("170.6.1-VENUES-CLOSED-KEY-WINDOWS (D-09): listed okx with venues [okx] shows no cue, while [binance, okx] still names both", () => {
+    // After a key rotation the closed binance member no longer reaches the badge, so the venues
+    // are [okx] and there is no cue. While both keys are open, [binance, okx] is a real mismatch.
+    const after = render(
+      <SyncBadge {...CURRENT} tradeVenues={["okx"]} listedExchanges={["okx"]} exchange="okx" />,
+    );
+    expect(titleOf(after.container)).not.toContain("Listed as");
+    const both = render(
+      <SyncBadge
+        {...CURRENT}
+        tradeVenues={["binance", "okx"]}
+        listedExchanges={["okx"]}
+        exchange="okx"
+      />,
+    );
+    expect(titleOf(both.container)).toContain("Listed as OKX; trades come from Binance, OKX");
+  });
+
   it("full containment (O-3): the venues all sit in the whole listed set, so there is NO cue", () => {
     // `supported_exchanges[0]` alone (bybit) differs from the venue set
     // (bybit, okx), which is exactly the false alarm the listed SET prevents.

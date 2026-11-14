@@ -138,8 +138,9 @@ describe("205 D-02: the stress block follows the record's verdict", () => {
 /**
  * 205 D-03 (194.2-REVIEW-R3 WR-03): on the api arm, every PROD strategy, an unreadable record used
  * to throw `RangeError` out of `alignBlend`'s `isoDayBefore(dates[0])` and send `/factsheet/<id>` to
- * the route error page for every visitor. The record verdict now withholds the allocator blends
- * (`allocatorPortfolios: null`) instead; no date guard lives in `alignBlend`.
+ * the route error page for every visitor. That blend alignment was removed by Phase 210 (the api
+ * payload carries no allocator blends), so the record verdict now withholds the figures and the
+ * payload has no blend field to withhold.
  *
  * The readable days start 2024-10-02 so that each listed date is the FIRST date by string order
  * (`""` < `"2023-13-01"` < `"2024-02-30"` < `"2024-1-5"` < `"2024-10-02"`); the `readableDays()` range
@@ -147,7 +148,7 @@ describe("205 D-02: the stress block follows the record's verdict", () => {
  * `Date.parse` (it rolls to 2024-03-01), so it is the date that never threw at the first position;
  * whether the others throw is observed, not assumed.
  */
-describe("205 D-03: the api arm withholds the allocator blends on an unreadable record", () => {
+describe("205 D-03 (history; blends removed by Phase 210): an unreadable api record returns a withheld payload", () => {
   function apiDaysFrom2024_10_02() {
     return Array.from({ length: 300 }, (_, i) => ({
       date: new Date(Date.UTC(2024, 9, i + 2)).toISOString().slice(0, 10),
@@ -165,23 +166,23 @@ describe("205 D-03: the api arm withholds the allocator blends on an unreadable 
   }
 
   it.each(["", "2023-13-01", "2023-02-32", "2024-1-5", "2024-02-30"])(
-    "an api build whose first date is %j returns a withheld payload with null blends",
+    "an api build whose first date is %j returns a withheld payload and carries no blend field",
     (bad) => {
       const payload = apiPayloadWithFirstDate(bad);
       expect(payload.dates[0]).toBe(bad);
       expect(payload.ingestSource).toBe("api");
       if (payload.ingestSource !== "api") throw new Error("expected the api arm");
       expect(payload.figureRecord?.unreadable).toBe(true);
-      expect(payload.allocatorPortfolios).toBeNull();
+      expect("allocatorPortfolios" in payload).toBe(false);
       expect(payload.stressWindows.unreadable).toBe(true);
     },
   );
 
-  it("a readable api record keeps its three blends (control)", () => {
+  it("a readable api record is not withheld and carries no blend field (control)", () => {
     const payload = apiPayloadWithFirstDate("2024-10-01");
     expect(payload.dates[0]).toBe("2024-10-01");
     if (payload.ingestSource !== "api") throw new Error("expected the api arm");
     expect(payload.figureRecord?.unreadable).toBeFalsy();
-    expect(payload.allocatorPortfolios).toHaveLength(3);
+    expect("allocatorPortfolios" in payload).toBe(false);
   });
 });

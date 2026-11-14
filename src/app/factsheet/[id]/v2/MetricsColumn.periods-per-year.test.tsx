@@ -149,7 +149,7 @@ describe("the Scenario surface's payload carries its basis to MetricsColumn (W2)
     expect(payload.periodsPerYear).toBe(365);
     const { container } = render(
       <FactsheetProvider payload={payload} persist={false}>
-        <FactsheetBody payload={payload} scenarioMode hideHeader hideAllocatorSection hideFooter={false} />
+        <FactsheetBody payload={payload} scenarioMode hideHeader hideFooter={false} />
       </FactsheetProvider>,
     );
     expect(container.querySelector("#leverage-factsheet")).toBeNull();

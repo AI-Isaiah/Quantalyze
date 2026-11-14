@@ -1,9 +1,9 @@
 /**
- * Site tests T16, T17, T19 and T20 for Phase 166.2 plan 05: the factsheet
+ * Site tests T16, T17 and T19 for Phase 166.2 plan 05: the factsheet
  * builder's benchmark, rolling and correlation figures (`jointMetrics`' beta,
  * correlation, tracking error and information ratio; `rollingBeta`;
  * `rollingSharpe`; the benchmark correlations and correlation matrix of
- * `buildFactsheetPayload`; `buildAllocatorMetrics`' correlation) must answer a
+ * `buildFactsheetPayload`) must answer a
  * compounding-NAV constant yield EXACTLY as they answer an all-zero series of
  * the same length (Phase 166.1 D-07), because those sites now compute through
  * `src/lib/return-stats.ts` (D-17).
@@ -26,7 +26,6 @@ import { describe, it, expect } from "vitest";
 import { jointMetrics } from "./joint";
 import { rollingBeta, rollingSharpe, rollingSortino, rollingVol } from "./rolling";
 import { buildFactsheetPayload } from "./build-payload";
-import { buildAllocatorMetrics } from "./allocator";
 import type { DailyReturn } from "./types";
 import { CONSTANT_YIELDS, apyToDaily, navConstantYield } from "@/__tests__/fixtures/dispersion-nav";
 
@@ -397,67 +396,5 @@ describe("T19 buildFactsheetPayload correlations on return-stats (D-07, D-17)", 
   it("T19 cent-rounded 1% APY strategy keeps finite correlations (floor control)", () => {
     const got = payloadCorrelations(CENT_1PCT);
     expect(got.every((x) => Number.isFinite(x))).toBe(true);
-  });
-});
-
-describe("T20 buildAllocatorMetrics correlation on return-stats (D-07, D-17)", () => {
-  const onZeroLeg = buildAllocatorMetrics(BENCH, zeros(N));
-  const zeroPortfolio = buildAllocatorMetrics(zeros(N), STRAT);
-
-  // D7 (founder, 2026-09-26), WR-04: a leg with no dispersion has no
-  // correlation, NaN ("—"), never "+0.00". The sleeve scan stays exact: the
-  // cross term it drops is 0 by construction (one vol is 0).
-  it("T20 an all-zero leg has no correlation (NaN), and the sleeve scan still runs", () => {
-    expect(Number.isNaN(onZeroLeg.corr)).toBe(true);
-    expect(Number.isNaN(zeroPortfolio.corr)).toBe(true);
-    expect(Number.isFinite(onZeroLeg.blend_vol)).toBe(true);
-    expect(Number.isFinite(onZeroLeg.sleeve_pct)).toBe(true);
-    // With the MultiMarket leg flat, blend vol at sleeve w is (1-w) * annVol.
-    const annVol = buildAllocatorMetrics(BENCH, zeros(N)).ann_vol;
-    // Non-null: both legs are fully present (Phase 169.4 D-70(4) nulls only a blend with < 2 usable days).
-    expect(onZeroLeg.blend_vol).toBeCloseTo((1 - onZeroLeg.sleeve_pct!) * annVol!, 12);
-  });
-
-  // SFH-M4 / IN-04: every figure is over one window, so unequal legs are refused
-  // loudly, as jointMetrics refuses them, instead of computing vol over n and the
-  // correlation over min(n, m).
-  it("T20 refuses legs of unequal length", () => {
-    expect(() => buildAllocatorMetrics(BENCH, STRAT.slice(0, N - 1))).toThrow(/same length/);
-    expect(() => buildAllocatorMetrics(BENCH.slice(0, N - 1), STRAT)).toThrow(/same length/);
-  });
-
-  for (const id of YIELD_IDS) {
-    const y = CONSTANT_YIELDS[id];
-
-    it(`T20 a constant-yield strategy leg gives the all-zero leg's correlation, sleeve and blend vol (${id})`, () => {
-      const got = buildAllocatorMetrics(BENCH, navConstantYield(y, N));
-      expect(Object.is(got.corr, onZeroLeg.corr)).toBe(true);
-      expect(Object.is(got.sleeve_pct, onZeroLeg.sleeve_pct)).toBe(true);
-      expect(Object.is(got.blend_vol, onZeroLeg.blend_vol)).toBe(true);
-    });
-
-    it(`T20 a constant-yield portfolio gives the all-zero portfolio's ann_vol and correlation (${id})`, () => {
-      const got = buildAllocatorMetrics(navConstantYield(y, N), STRAT);
-      expect(Object.is(got.ann_vol, zeroPortfolio.ann_vol)).toBe(true);
-      expect(Object.is(got.corr, zeroPortfolio.corr)).toBe(true);
-    });
-  }
-
-  it("T20 cent-rounded 1% APY leg keeps a finite, non-zero correlation (floor control)", () => {
-    const got = buildAllocatorMetrics(BENCH, CENT_1PCT);
-    expect(Number.isFinite(got.corr) && got.corr !== 0).toBe(true);
-  });
-
-  it("T20 a noisy pair keeps its correlation and vols to 12 significant digits", () => {
-    for (const ppy of [252, 365]) {
-      const got = buildAllocatorMetrics(BENCH, STRAT, ppy);
-      const a = windowStats(BENCH);
-      const b = windowStats(STRAT);
-      let cov = 0;
-      for (let i = 0; i < N; i++) cov += (BENCH[i] - a.m) * (STRAT[i] - b.m);
-      cov /= N;
-      expect(sig12(got.corr!)).toBe(sig12(cov / (a.sd * b.sd)));
-      expect(got.ann_vol).toBe(a.sd * Math.sqrt(ppy));
-    }
   });
 });

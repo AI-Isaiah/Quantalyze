@@ -125,7 +125,7 @@ function mount(payload: FactsheetPayload, range?: readonly [number, number]) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
       <RangeHarness range={range} />
-      <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+      <FactsheetBody payload={payload} hideHeader hideFooter />
     </FactsheetProvider>,
   );
 }
@@ -234,7 +234,7 @@ function mountScenario(payload: FactsheetPayload, range: readonly [number, numbe
     <FactsheetProvider payload={payload} persist={false}>
       <RangeHarness range={range} />
       <WindowProbe payload={payload} />
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} scenarioMode />
     </FactsheetProvider>,
   );
 }

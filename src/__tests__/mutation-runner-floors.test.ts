@@ -755,7 +755,8 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
     // ⭐ CURRENCY 2026-11-10 (Phase 194.2 FIGURERESIDUALS, plan 03, D-01): totalAnchored 811 -> 815; copied from ONE full lane run, +4 twinned arms 15 to 18 of test_get_verified_cohort_rank_gate.sql (arm 12 was rewritten, not added).
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): totalAnchored 815 -> 830; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
-    expect(totalAnchored).toBe(830);
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): totalAnchored 830 -> 832, the +2 arms TV-closed-window and TV-window-end-today; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    expect(totalAnchored).toBe(832);
   });
 });
 
@@ -2195,19 +2196,22 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 815/815/0 -> 830/830/0; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
-    "arms: 830/830/0   (executed/annotated/waived)",
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830/830/0 -> 832/832/0; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    "arms: 832/832/0   (executed/annotated/waived)",
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 815 -> 830; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
-    "biting: 830   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830 -> 832; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    "biting: 832   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829, 81 -> 82 legs; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848, 82 -> 83 legs; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801 and 79 -> 80 legs; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 815 -> 830, 80 -> 81 legs; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
-    "lane-invocations: 830   (arm lanes actually spawned — tallied inside runLane, independent of the 830 the verdict loop counted; plus 81 baseline / 81 restore leg(s))",
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830 -> 832, the 81 legs unchanged (no file joined); copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    "lane-invocations: 832   (arm lanes actually spawned — tallied inside runLane, independent of the 832 the verdict loop counted; plus 81 baseline / 81 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -2313,7 +2317,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_fan_in_lock_order_race.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8",
     "  file test_for_quants_leads_contact_dedupe.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4",
     "  file test_funding_fees_rls.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
-    "  file test_get_published_trade_venues.sql: sections 10 / judged 10 / annotated 10 / waived 0 / biting 10",
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): the per-file row of test_get_published_trade_venues.sql 10 -> 12, the same +2 as the aggregate; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    "  file test_get_published_trade_venues.sql: sections 12 / judged 12 / annotated 12 / waived 0 / biting 12",
     "  file test_get_published_trust_signals.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, plan 20): 5 -> 11 (arms 7 to 12). The per-file rows must sum to the aggregate, which moved 803 -> 809 with them; every `803`/`804`/`802` in a CODE line of this file moved +6 in the same commit. Copied from the full run's own per-file line.
     // ⭐ CURRENCY 2026-11-07 (Phase 194 FIGURETRUTH, review round 1 fix, D-18): 11 -> 13 (arms 13 and 14). The per-file rows must sum to the aggregate, which moved 809 -> 811 with them; every `809`/`808`/`810` in a CODE line of this file moved +2 in the same commit. Copied from the full run's own per-file line.
@@ -2406,7 +2411,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 1.6s/791 -> 1.8s/801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 1.8s/801 -> 2.1s/803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 1.9s/815 -> 1.1s/830; the mean is the exit-0 SUBSET run's own `per-arm lane time: mean 1.1s over 15 arm run(s)` (no full run on this host), the arm count is the corpus's; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
-    "per-arm lane time: mean 1.1s over 830 arm run(s)",
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): the arm count in the lane-time line 830 -> 832 (the mean is unchanged text); copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    "per-arm lane time: mean 1.1s over 832 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2451,7 +2457,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 815 -> 830; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
-    expect(r.out).toContain("830 arm lane(s) spawned");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830 -> 832; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    expect(r.out).toContain("832 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2768,13 +2775,15 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 790/791 -> 800/801, both halves together (offset -1 kept); copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 800/801 -> 802/803, both halves together; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 814/815 -> 829/830, both halves together (offset -1 kept); copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
-    expect(r.out).toContain("rows sum to 829 biting arm(s) but the aggregate");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 829/830 -> 831/832, both halves together (offset -1 kept); copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    expect(r.out).toContain("rows sum to 831 biting arm(s) but the aggregate");
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 815 -> 830; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
-    expect(r.out).toContain("reports 830");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830 -> 832; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    expect(r.out).toContain("reports 832");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2825,7 +2834,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
-    const severed = GREEN_LOG.replace(/^lane-invocations: 830 /m, "lane-invocations: 0 ");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): the severed-tally replace anchors on 832; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    const severed = GREEN_LOG.replace(/^lane-invocations: 832 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
@@ -2841,7 +2851,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
-    expect(r.out).toContain("executed=830 lane-invocations=0 biting=830");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830 -> 832; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    expect(r.out).toContain("executed=832 lane-invocations=0 biting=832");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2891,7 +2902,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829/830 -> 848/849; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791/792 -> 801/802; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801/802 -> 803/804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
-    const extra = GREEN_LOG.replace(/^lane-invocations: 830 /m, "lane-invocations: 831 ");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830/831 -> 832/833, the plus-one splice; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    const extra = GREEN_LOG.replace(/^lane-invocations: 832 /m, "lane-invocations: 833 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 793 -> 804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
@@ -2900,7 +2912,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829/830 -> 848/849; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791/792 -> 801/802; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801/802 -> 803/804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
-    expect(r.out).toContain("executed=830 lane-invocations=831 biting=830");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830/831 -> 832/833; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    expect(r.out).toContain("executed=832 lane-invocations=833 biting=832");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -2928,7 +2941,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 830 /m, "lane-invocations: abc ");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): the garbled-tally replace anchors on 832; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 832 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2984,7 +2998,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
-    const waived = GREEN_LOG.replace(/^arms: 830\/830\/0 /m, `arms: 830/830/${WAIVED_CEILING + 1} `);
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830/830 -> 832/832 in the waived-arm splice; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    const waived = GREEN_LOG.replace(/^arms: 832\/832\/0 /m, `arms: 832/832/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -3064,7 +3079,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
-    const zero = GREEN_LOG.replace(/^arms: 830\/830\/0 /m, "arms: 0/830/0 ");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830 -> 832 in the zero-executed splice; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    const zero = GREEN_LOG.replace(/^arms: 832\/832\/0 /m, "arms: 0/832/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
@@ -3076,7 +3092,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829/830 -> 848/849; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791/792 -> 801/802; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801/802 -> 803/804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
-    const spliced = GREEN_LOG.replace(/^biting: 830 /m, "biting: 831 ");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830/831 -> 832/833, the biting-over-executed splice; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    const spliced = GREEN_LOG.replace(/^biting: 832 /m, "biting: 833 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 793 -> 804, 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
@@ -3085,7 +3102,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 830/829 -> 849/848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791/792 -> 801/802; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801/802 -> 803/804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
-    expect(s.out).toContain("biting (831) exceeds executed (830)");
+    // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 831/830 -> 833/832; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+    expect(s.out).toContain("biting (833) exceeds executed (832)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -3265,7 +3283,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
       // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, fix round 1): 801 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`, `lane-invocations: 803`), the metadata-merge gate gaining arms 12 and 13 (12 annotated arms now).
       // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 815 -> 830; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
-      expect(r.out).toContain("biting arms 830 >= 830");
+      // ⭐ CURRENCY 2026-11-14 (Phase 210 PUBLICTRUTH, plan 01, D-09): 830 -> 832 (floor and measured move together); copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/832/0`) and the exit-0 SUBSET run of test_get_published_trade_venues.sql (`arms: 12/12/0`, `biting: 12`, `lane-invocations: 12`); no full run on this host.
+      expect(r.out).toContain("biting arms 832 >= 832");
     }
   });
 

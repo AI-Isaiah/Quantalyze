@@ -18,7 +18,7 @@ import { FactsheetBody } from "./FactsheetView";
  * This is the render-level coverage of the real body subtree (the
  * AllocationDashboardV2 tests MOCK FactsheetBody; the BODY-02 test uses a single
  * healthy payload). It exercises the composer mount shape (scenarioMode,
- * hideHeader, hideAllocatorSection, hideFooter={false}) against EVERY blend the
+ * hideHeader, hideFooter={false}) against EVERY blend the
  * Phase-39 adapter can produce:
  *
  *   - safe-empty   : portfolioDaily = []        → every array [], scalars 0/null
@@ -139,7 +139,7 @@ const BLENDS: Blend[] = [
 ];
 
 // Mount shape mirrors the composer mount (Plan 40-02): scenarioMode, hideHeader,
-// hideAllocatorSection, hideFooter={false}.
+// hideFooter={false}.
 function renderBlend(portfolioDaily: DailyPoint[]) {
   const payload = buildScenarioFactsheetPayload({ portfolioDaily, benchmark: null });
   const result = render(
@@ -148,7 +148,6 @@ function renderBlend(portfolioDaily: DailyPoint[]) {
         payload={payload}
         scenarioMode
         hideHeader
-        hideAllocatorSection
         hideFooter={false}
       />
     </FactsheetProvider>,
@@ -302,7 +301,6 @@ function renderWithCarveouts(scenarioMode: boolean) {
         payload={payload}
         scenarioMode={scenarioMode}
         hideHeader
-        hideAllocatorSection
         hideFooter={false}
       />
     </FactsheetProvider>,

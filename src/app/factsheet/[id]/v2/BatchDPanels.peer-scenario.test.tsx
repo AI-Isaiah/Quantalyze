@@ -17,7 +17,7 @@ import { PeerPercentilePanel } from "./BatchDPanels";
  *      "hypothetical blend · ranked vs verified strategies · sample/252 basis"
  *      renders (plain 10px muted, NOT italic — the api footnote IS italic).
  *   2. API path (Phase 193 D-04): the synthesized demo-cohort arm is gone, so the
- *      panel renders nothing for an api payload even when `peerPercentile` is set.
+ *      panel renders nothing for an api payload (which carries no peer field).
  *   3. SUPPRESSION: csv with a null scenarioPeer → the panel renders nothing.
  *
  * FactsheetProvider's persistence primitive touches localStorage + sentry on
@@ -91,22 +91,19 @@ function csvPayload(
 }
 
 /**
- * A minimal api payload whose peerPercentile is set — exercises the demo-cohort
- * path. Built by flipping a csv payload to the api arm and attaching the four
- * api-only synthesized fields (the panel only reads peerPercentile + ingestSource).
+ * A minimal api payload. Built by flipping a csv payload to the api arm and attaching
+ * the api-only event signatures (the panel only reads scenarioPeer + ingestSource).
  */
-function apiPayload(peerPercentile: PeerPercentilePayload | null): FactsheetPayload {
+function apiPayload(): FactsheetPayload {
   const base = buildScenarioFactsheetPayload({
     portfolioDaily: makeReturnsSeries(300),
     benchmark: null,
   });
-  // Strip the csv-only carve-out and attach the api-arm synthesized panels.
+  // Strip the csv-only carve-out and attach the api-arm event signatures.
   const { scenarioPeer: _drop, ...common } = base;
   return {
     ...common,
     ingestSource: "api",
-    peerPercentile,
-    allocatorPortfolios: null,
     eventSignatures: null,
     benchEventSignatures: null,
   };
@@ -161,11 +158,7 @@ describe("PeerPercentilePanel — scenario-path disclosure (PEER-02)", () => {
   });
 
   it("api path renders nothing: the demo cohort arm is gone (D-04)", () => {
-    const peer: PeerPercentilePayload = { cohortSize: 50, sharpe: 60, sortino: 55, max_dd: 48 };
-    // Premise: the api payload really carries a rank, so an empty panel is the
-    // panel's own decision and not an absent field.
-    const payload = apiPayload(peer);
-    expect(payload.ingestSource === "api" && payload.peerPercentile).toEqual(peer);
+    const payload = apiPayload();
     const { container, queryByText } = renderPanel(payload);
 
     expect(container.innerHTML).toBe("");

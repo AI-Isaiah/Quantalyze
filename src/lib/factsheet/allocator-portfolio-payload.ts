@@ -124,11 +124,11 @@ export function buildAllocatorPortfolioFactsheetPayload(
       unrecoveredGaps: [],
       reconstructedRanges: [],
       trustTier: null,
-      // FINDING-6 (b06-silentfailure): Allocator portfolio blends are always
-      // derived from live API equity curves — not CSV uploads. Explicitly pass
-      // "api" so AllocatorSection and PeerPercentilePanel are NOT suppressed
-      // for allocator dashboard factsheets under the no-invented-data gate.
-      // Without this, the conservative default ("csv") silently hides both panels.
+      // FINDING-6 (b06-silentfailure): allocator portfolios are always derived
+      // from live API equity curves — not CSV uploads. Explicitly pass "api" so
+      // the event signatures stay unlocked for allocator dashboard factsheets
+      // under the no-invented-data gate. Without this, the conservative default
+      // ("csv") silently hides them.
       ingestSource: "api",
       // FINDING-6 style (#597 part 2, BLEND-02): allocator portfolio blends are
       // derived from live API equity curves — every supported venue is crypto

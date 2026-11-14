@@ -121,7 +121,6 @@ function renderBodyNoPersist() {
         payload={populatedPayload}
         scenarioMode
         hideHeader
-        hideAllocatorSection
         hideFooter={false}
       />
     </FactsheetProvider>,
@@ -240,7 +239,7 @@ describe("FactsheetBody — PERMANENT no-cross-tab-bleed gate (GUARD-04, RT2 cla
     act(() => {
       first = render(
         <FactsheetProvider payload={v5} persist={false}>
-          <FactsheetBody payload={v5} hideHeader hideAllocatorSection hideFooter={false} />
+          <FactsheetBody payload={v5} hideHeader hideFooter={false} />
         </FactsheetProvider>,
       );
     });
@@ -277,7 +276,7 @@ describe("FactsheetBody — PERMANENT no-cross-tab-bleed gate (GUARD-04, RT2 cla
     first.unmount();
     const fresh = render(
       <FactsheetProvider payload={v5} persist={false}>
-        <FactsheetBody payload={v5} hideHeader hideAllocatorSection hideFooter={false} />
+        <FactsheetBody payload={v5} hideHeader hideFooter={false} />
       </FactsheetProvider>,
     );
     const freshInput = fresh.container.querySelector(

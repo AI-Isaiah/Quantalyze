@@ -1085,11 +1085,54 @@ describe("167.1.2.2.2 plan 10 - tradesFetchedAt, tradeFetchVenue and unrecovered
     }
   });
 
-  it("a malformed provenance names no gap", async () => {
+  // Phase 210 PUBLICTRUTH D-16/D-17: a malformed gap record is not "no gaps". It names no gap,
+  // flags the payload so the page says the record is unavailable, and reports once with only
+  // the short reason (never the raw dates).
+  it("a malformed provenance names no gap, flags the payload and reports once with only the reason", async () => {
     seed(withKey({ series_provenance: { unrecovered_gaps: [{ from: "2026-07-08", to: "2026-05-07" }] } }, {}));
+    vi.mocked(captureToSentry).mockClear();
     const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
     expect(payload).not.toBeNull();
     expect(payload?.unrecoveredGaps).toEqual([]);
+    expect(payload?.unrecoveredGapsUnavailable).toBe(true);
+    const calls = vi
+      .mocked(captureToSentry)
+      .mock.calls.filter(([, o]) => o.tags.stage === "factsheet-unrecovered-gaps");
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toMatchObject({
+      tags: {
+        stage: "factsheet-unrecovered-gaps",
+        reason: "unrecovered_gaps_malformed",
+        strategy_id: STRATEGY_ID,
+      },
+      extra: { detail: "an entry ends before it starts" },
+    });
+  });
+
+  it("D-17: an absent or valid gap record is not flagged and reports nothing", async () => {
+    for (const provenance of [{}, { unrecovered_gaps: [] }, { unrecovered_gaps: [{ from: "2026-05-07", to: "2026-07-08" }] }]) {
+      seed(withKey({ series_provenance: provenance }, {}));
+      vi.mocked(captureToSentry).mockClear();
+      const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+      expect(payload).not.toBeNull();
+      expect(payload).not.toHaveProperty("unrecoveredGapsUnavailable");
+      expect(
+        vi.mocked(captureToSentry).mock.calls.filter(([, o]) => o.tags.stage === "factsheet-unrecovered-gaps"),
+      ).toHaveLength(0);
+    }
+  });
+
+  it("T-210-11: the gap report carries the reason string only, never the offending dates", async () => {
+    seed(withKey({ series_provenance: { unrecovered_gaps: [{ from: "2026-07-08", to: "2026-05-07" }] } }, {}));
+    vi.mocked(captureToSentry).mockClear();
+    await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    const call = vi
+      .mocked(captureToSentry)
+      .mock.calls.find(([, o]) => o.tags.stage === "factsheet-unrecovered-gaps");
+    expect(call).toBeDefined();
+    const extra = JSON.stringify(call![1].extra);
+    expect(extra).not.toContain("2026-07-08");
+    expect(extra).not.toContain("2026-05-07");
   });
 
   it("an analytics row with none of the three columns still builds, with null, null and []", async () => {

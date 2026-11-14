@@ -192,8 +192,6 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
     const apiPayload: FactsheetPayload = {
       ...common,
       ingestSource: "api",
-      peerPercentile: null,
-      allocatorPortfolios: null,
       eventSignatures: null,
       benchEventSignatures: null,
     };

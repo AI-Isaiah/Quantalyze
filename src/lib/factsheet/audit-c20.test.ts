@@ -349,11 +349,11 @@ describe("FINDING-6: buildAllocatorPortfolioFactsheetPayload produces ingestSour
 //   ingestSource==='api'  OR  (scenarioMode && ingestSource==='csv' && scenarioPeer!=null)
 //
 // So the NEW behavioral invariant is: a csv payload built WITH scenarioPeer set
-// carries the peer carve-out (the gate's csv disjunct activates) WHILE the four
+// carries the peer carve-out (the gate's csv disjunct activates) WHILE the two
 // genuinely-synthetic api-only fields stay STRUCTURALLY ABSENT and ingestSource
 // stays "csv". The render gate is exercised by the MetricsColumn render test
 // (plan 04); here we pin the payload-shape contract the gate reads — the source
-// of truth. The type-field invariant (the four api-only fields never on csv) is
+// of truth. The type-field invariant (the two api-only fields never on csv) is
 // PRESERVED in the RED-TEAM-M2/M3 + B6 blocks below (scenarioPeer is a DIFFERENT
 // field name, so those absence assertions still hold).
 // ---------------------------------------------------------------------------
@@ -374,7 +374,7 @@ describe("IMPORTANT-2 / PEER-01: csv carve-out — scenarioPeer renders peer, sy
       sortino: 65,
       max_dd: 55,
     });
-    // The four GENUINELY-synthetic api-only fields stay structurally ABSENT —
+    // The two GENUINELY-synthetic api-only fields stay structurally ABSENT —
     // `scenarioPeer` does NOT unlock them (it is a different field name on a
     // payload whose ingestSource is still "csv").
     for (const f of SYNTH_FIELDS) {
@@ -406,20 +406,18 @@ describe("IMPORTANT-2 / PEER-01: csv carve-out — scenarioPeer renders peer, sy
 // ---------------------------------------------------------------------------
 // RED-TEAM-M2 / RED-TEAM-M3 + B6 — synthesized panels are STRUCTURALLY ABSENT
 // from the payload for csv strategies (not merely null). The B6 discriminated
-// union (FactsheetApiPayload | FactsheetCsvPayload) omits peerPercentile /
-// allocatorPortfolios / eventSignatures / benchEventSignatures on the csv arm,
+// union (FactsheetApiPayload | FactsheetCsvPayload) omits eventSignatures /
+// benchEventSignatures on the csv arm,
 // so they never reach the RSC payload blob AND a csv consumer cannot read them
 // (an unnarrowed field access is a compile error — see the type-level block).
 // ---------------------------------------------------------------------------
 const SYNTH_FIELDS = [
-  "peerPercentile",
-  "allocatorPortfolios",
   "eventSignatures",
   "benchEventSignatures",
 ] as const;
 
 describe("RED-TEAM-M2/M3 + B6: synthesized panels absent from csv payloads", () => {
-  it("csv strategy: the four synthesized fields are absent from the object (stronger than null)", () => {
+  it("csv strategy: the two synthesized fields are absent from the object (stronger than null)", () => {
     const payload = buildFactsheetPayload(
       makeStrategy({ ingestSource: "csv" }),
       makeReturns(),
@@ -433,7 +431,7 @@ describe("RED-TEAM-M2/M3 + B6: synthesized panels absent from csv payloads", () 
     }
   });
 
-  it("csv default (no ingestSource): the four synthesized fields are absent", () => {
+  it("csv default (no ingestSource): the two synthesized fields are absent", () => {
     // Conservative default — caller omits ingestSource → treated as csv.
     const payload = buildFactsheetPayload(makeStrategy(), makeReturns());
     expect(payload!.ingestSource).toBe("csv");
@@ -442,7 +440,7 @@ describe("RED-TEAM-M2/M3 + B6: synthesized panels absent from csv payloads", () 
     }
   });
 
-  it("api strategy: all four synthesized fields are present and non-null", () => {
+  it("api strategy: both synthesized fields are present and non-null", () => {
     const payload = buildFactsheetPayload(
       makeStrategy({ ingestSource: "api" }),
       makeReadableReturns(),
@@ -451,8 +449,10 @@ describe("RED-TEAM-M2/M3 + B6: synthesized panels absent from csv payloads", () 
     const p = payload!;
     // Narrow to the api arm so the synthesized fields are type-accessible (B6).
     if (p.ingestSource !== "api") throw new Error("expected the api arm");
-    expect(p.peerPercentile).not.toBeNull();
-    expect(p.allocatorPortfolios).not.toBeNull();
+    // D-15 (Phase 210): the demo peer cohort and demo allocator blends are
+    // gone from the api payload, not merely null.
+    expect("peerPercentile" in p).toBe(false);
+    expect("allocatorPortfolios" in p).toBe(false);
     expect(p.eventSignatures).not.toBeNull();
     expect(p.benchEventSignatures).not.toBeNull();
     for (const f of SYNTH_FIELDS) {
@@ -481,20 +481,14 @@ describe("B6: FactsheetPayload discriminated-union contract (type-level)", () =>
     // Before narrowing: each access is a compile error (field absent on the csv
     // arm of the union). Each @ts-expect-error is load-bearing — flatten the
     // union and tsc fails on the now-unused directive.
-    // @ts-expect-error B6: peerPercentile is api-arm-only; unreadable on the union.
-    void p.peerPercentile;
-    // @ts-expect-error B6: allocatorPortfolios is api-arm-only; unreadable on the union.
-    void p.allocatorPortfolios;
     // @ts-expect-error B6: eventSignatures is api-arm-only; unreadable on the union.
     void p.eventSignatures;
     // @ts-expect-error B6: benchEventSignatures is api-arm-only; unreadable on the union.
     void p.benchEventSignatures;
 
     if (p.ingestSource === "api") {
-      // After narrowing: all four compile (NO @ts-expect-error — these lines
+      // After narrowing: both compile (NO @ts-expect-error — these lines
       // MUST type-check, proving the api arm carries the fields).
-      void p.peerPercentile;
-      void p.allocatorPortfolios;
       void p.eventSignatures;
       void p.benchEventSignatures;
     }
@@ -665,42 +659,6 @@ describe("#597: asset-class annualization end-to-end", () => {
     // Non-vacuity: the 80-day fixture fills the 30d fallback window, so there
     // ARE post-warmup entries — a silently all-null array must not pass vacuously.
     expect(compared).toBeGreaterThan(0);
-  });
-
-  // Peer-percentile ranks the ANNUALIZED Sharpe/Sortino DIRECTLY — no basis
-  // rescale. Annualized Sharpe is frequency-invariant, so the cohort (a fixed
-  // distribution of annualized Sharpes) is asset-class-agnostic. The SAME daily
-  // series posted 365 days/year genuinely has a √(365/252)× higher ANNUAL Sharpe
-  // than posted 252 days/year, so the crypto interpretation must rank AT LEAST
-  // as high as traditional — never below. This reddens if anyone re-introduces a
-  // √(252/365) "basis correction" (rejected: it de-annualizes crypto and stamps
-  // a ~17% systematic penalty on 24/7 sleeves — the wrong fix for a non-problem).
-  it("peerPercentile ranks raw annualized Sharpe: crypto never ranks BELOW traditional for the same series", () => {
-    const trad = buildFactsheetPayload(
-      makeStrategy({ ingestSource: "api", assetClass: "traditional" }),
-      rets,
-    )!;
-    const crypto = buildFactsheetPayload(
-      makeStrategy({ ingestSource: "api", assetClass: "crypto" }),
-      rets,
-    )!;
-    if (trad.ingestSource !== "api" || crypto.ingestSource !== "api") {
-      throw new Error("expected the api arm");
-    }
-    expect(trad.peerPercentile).not.toBeNull();
-    expect(crypto.peerPercentile).not.toBeNull();
-    // Crypto's higher annualized Sharpe/Sortino → percentile ≥ traditional's
-    // (cohort CDF is monotonic; equal only if both saturate the clamp). A
-    // rankScale revert would flip these below 1× and redden.
-    expect(crypto.peerPercentile!.sharpe).toBeGreaterThanOrEqual(trad.peerPercentile!.sharpe);
-    expect(crypto.peerPercentile!.sortino).toBeGreaterThanOrEqual(trad.peerPercentile!.sortino);
-    // max_dd carries no annualization term → identical rank.
-    expect(crypto.peerPercentile!.max_dd).toBe(trad.peerPercentile!.max_dd);
-    // Displayed headline Sharpe stays on the crypto √365 basis.
-    expect(crypto.strategyMetrics.sharpe!).toBeCloseTo(
-      trad.strategyMetrics.sharpe! * Math.sqrt(365 / 252),
-      8,
-    );
   });
 });
 

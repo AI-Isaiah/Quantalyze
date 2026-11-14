@@ -130,7 +130,6 @@ function renderBody(
       <FactsheetBody
         payload={populatedPayload}
         hideHeader={hideHeader}
-        hideAllocatorSection
         hideFooter={false}
         {...(omitProp ? {} : { viewerNotice })}
       />
@@ -162,7 +161,6 @@ describe("FactsheetHeader — owner masthead: read-only mark, no Rename (OWN-03 
       <FactsheetProvider payload={populatedPayload} persist={false}>
         <FactsheetBody
           payload={populatedPayload}
-          hideAllocatorSection
           hideFooter
           {...props}
         />

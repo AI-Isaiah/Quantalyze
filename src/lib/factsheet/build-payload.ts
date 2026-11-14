@@ -18,11 +18,8 @@ import {
   IEF_DAILY,
 } from "./benchmarks";
 import { computeStyleDrift } from "./style-drift";
-import { computePeerPercentile } from "./peer-cohort";
 import { annualizationPeriods } from "@/lib/closed-sets";
 import { pearson } from "@/lib/return-stats";
-import { alignBlend, buildAllocatorMetrics, comparatorLeg } from "./allocator";
-import type { BlendLeg } from "./allocator";
 import { streakLengths, streakHistogram } from "./streak";
 import { calmarByYear } from "./calmar-by-year";
 import { bootstrapCI } from "./bootstrap";
@@ -39,8 +36,8 @@ import { quantileSummary } from "./quantiles";
  *
  * CRITICAL (FINDING-1): an EMPTY array means the CSV ingester ran but produced zero rows —
  * that is STILL a CSV strategy. Only null/undefined classifies as "api". Mis-classifying a
- * CSV strategy as "api" would unlock the synthesized demo panels (PeerPercentile /
- * AllocatorSection / Signatures) the no-invented-data contract forbids for CSV.
+ * CSV strategy as "api" would unlock the api-only event-study signatures the
+ * no-invented-data contract forbids for CSV.
  *
  * SINGLE SOURCE OF TRUTH (B6): both the factsheet page (`factsheet/[id]/v2/page.tsx`) and the
  * discovery detail page derive `ingestSource` through THIS function — the derivation turns
@@ -403,7 +400,7 @@ function seriesDatesFor(positions: Array<number | null>, dates: string[], length
  * corr(strategy_returns, asset_returns): the benchmark legs are fixed INPUT series,
  * but the STRATEGY leg is the basis-selected dailies, so cash→MTM moves ρ. Nothing
  * bypasses the backbone; the ONLY thing that stays cash top-level is the api-only
- * synthesized allocator/signatures demo (basis-invariant by construction).
+ * event-study signatures (basis-invariant by construction).
  */
 export function deriveSeriesBundle(
   clipped: DailyReturn[],
@@ -688,8 +685,10 @@ type FactsheetStrategyInput = {
     tradesFetchedAt?: string | null;
     /** The strategy's api-key exchange (F3), never `supported_exchanges`. */
     tradeFetchVenue?: string | null;
-    /** D-02: named unrecovered gaps, already validated by `parseUnrecoveredGaps`. */
+    /** D-02: named unrecovered gaps, already validated by `readUnrecoveredGaps`. */
     unrecoveredGaps?: { from: string; to: string }[];
+    /** D-16/D-17: the stored gap record was malformed; see `FactsheetPayload.unrecoveredGapsUnavailable`. */
+    unrecoveredGapsUnavailable?: boolean;
     /** D-05: rebuilt-from-archive spans, already validated by `parseReconstructedRanges`. */
     reconstructedRanges?: ReconstructedRange[];
     /** F5 / IN-01: the stored record was malformed; see `FactsheetPayload.reconstructedRangesUnavailable`. */
@@ -703,8 +702,7 @@ type FactsheetStrategyInput = {
      *  the annualization basis of every SINGLE-STRATEGY KPI on this factsheet
      *  (headline / rolling / bootstrap CI / comparator joint): √365 crypto,
      *  √252 traditional. Additive + optional; absent → 252 (byte-identical to
-     *  the pre-#597 hardcode). Canned reference-allocation panels stay on
-     *  native 252 (see allocator.ts). */
+     *  the pre-#597 hardcode). */
     assetClass?: string | null;
     description?: string | null;
     subtypes?: string[];
@@ -923,8 +921,7 @@ function buildFromBuildableSeries(
 
   // Default to "csv" (conservative) when the caller doesn't specify — avoids
   // exposing non-derivable panels for strategies whose source isn't explicitly
-  // known. The synthesized demo panels (peer cohort, allocator portfolios,
-  // event signatures) are computed + attached ONLY on the "api" arm below.
+  // known. The event signatures are computed + attached ONLY on the "api" arm below.
   // (NEW-C20-01)
   const ingestSource: IngestSource = strategy.ingestSource ?? "csv";
 
@@ -1064,7 +1061,7 @@ function buildFromBuildableSeries(
   }
 
   // Fields shared by both ingest arms. The discriminated FactsheetPayload (B6)
-  // appends the synthesized api-only panels onto this for "api" strategies. The
+  // appends the api-only event signatures onto this for "api" strategies. The
   // series-derived fields (INCLUDING correlations/correlationMatrix — MTM-04
   // correction: the strategy leg follows the basis) come from `cashBundle`, the ONE
   // derivation cash + MTM share; only strategyMetrics stays top-level cash (the
@@ -1080,9 +1077,11 @@ function buildFromBuildableSeries(
     tradesFetchedAt: strategy.tradesFetchedAt ?? null,
     tradeFetchVenue: strategy.tradeFetchVenue ?? null,
     unrecoveredGaps: strategy.unrecoveredGaps ?? [],
-    reconstructedRanges: strategy.reconstructedRanges ?? [],
     // Present only when true, so every payload with a readable record keeps its
     // exact serialised shape (the SC-4 whole-payload byte pins).
+    ...(strategy.unrecoveredGapsUnavailable ? { unrecoveredGapsUnavailable: true } : {}),
+    reconstructedRanges: strategy.reconstructedRanges ?? [],
+    // Same rule for the reconstructed-ranges flag.
     ...(strategy.reconstructedRangesUnavailable ? { reconstructedRangesUnavailable: true } : {}),
     trustTier: strategy.trustTier,
     description: strategy.description ?? null,
@@ -1166,95 +1165,18 @@ function buildFromBuildableSeries(
     figureRecord: totalRecord,
   };
 
-  // No-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6): the synthesized
-  // demo panels are NOT derivable from a bare daily-return series, so they are
+  // No-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6): the event
+  // signatures are NOT derivable from a bare daily-return series, so they are
   // computed + attached ONLY on the "api" arm. For csv strategies they are
   // absent from the returned object entirely — never serialized into the RSC
   // blob — so the discriminated union makes a csv consumer physically unable to
   // read them, and zero-population csv signatures never add payload weight.
+  // Phase 210 (D-10): the api arm carries no seeded peer cohort and no canned
+  // allocator blends; those were invented figures, not the strategy's own data.
   if (ingestSource === "api") {
-    // #597 — rank the ANNUALIZED Sharpe/Sortino directly against the cohort; do
-    // NOT rescale by the annualization basis. Annualized Sharpe is
-    // frequency-invariant: Sharpe_ann = mean·P / (sd·√P) = mean·√P / sd, and a
-    // crypto strategy's smaller daily returns (spread over P=365 days) × √365
-    // recover the exact same annual Sharpe that a traditional strategy's larger
-    // daily returns × √252 do. Two strategies with the same TRUE annual Sharpe
-    // land on the same annualized value regardless of P, so a √365 Sharpe and a
-    // √252 Sharpe are already on one common scale — the cohort (a fixed
-    // distribution of annualized Sharpes) is asset-class-agnostic. Applying a
-    // √(252/365) "basis correction" here would de-annualize crypto and stamp a
-    // systematic ~17% penalty on every 24/7 sleeve — the wrong fix for a
-    // non-problem. (Frequency only affects the standard ERROR of the estimate,
-    // not its expectation; more obs → tighter, if anything shrink crypto LESS.)
-    const peer = computePeerPercentile(strategyMetrics.sharpe, strategyMetrics.sortino, strategyMetrics.max_dd);
-    // Phase 169.4 (169.5 D-65; D-70(2)-(4)): each allocator portfolio blend is built
-    // on its legs' COMMON calendar through `alignBlend` (the one alignment, every leg
-    // and the book), so a missing leg day, a weekday leg's weekend and every day past
-    // a fixture's last close is skipped or unpaired, never read as a 0% day. Each
-    // blend annualizes on its own calendar's basis; a blend with fewer than 2 usable
-    // days carries null figures and its `through` date.
-    const btcLeg = (weight: number): BlendLeg =>
-      "unavailable" in benchmarkPrices
-        ? comparatorLeg("btc", weight, [], [])
-        : comparatorLeg("btc", weight, benchmarkPrices.prices, benchmarkPrices.dropped);
-    // Review SFH MEDIUM-2: a failed BTC read is named as the cause on the portfolios
-    // with a BTC leg, so the panel never blames the strategy's data ("too few days").
-    const btcUnavailable = "unavailable" in benchmarkPrices ? "BTC" : null;
-    const portfolioFigures = (legs: BlendLeg[], unavailableLeg: string | null = null) => {
-      const a = alignBlend(dates, stratRet, legs);
-      return {
-        ...buildAllocatorMetrics(a.returns, a.book, a.periodsPerYear, a.paired),
-        through: a.through,
-        unavailable_leg: unavailableLeg,
-      };
-    };
     return {
       ...common,
       ingestSource: "api",
-      peerPercentile: peer
-        ? {
-            cohortSize: peer.cohort.length,
-            sharpe: peer.sharpe,
-            sortino: peer.sortino,
-            max_dd: peer.max_dd,
-          }
-        : null,
-      // 205 D-03 (194.2-REVIEW-R3 WR-03): the blends are record-derived figures, so an unreadable
-      // record withholds them like every other figure (null; nothing renders this field, so no
-      // false "no data" claim appears). `alignBlend` is reached only through `portfolioFigures`
-      // inside this array literal, so an unreadable record never reaches its date math. No guard
-      // goes into `alignBlend` or `isoDayBefore`: a throw there on a READABLE record is a code-bug
-      // signal and must stay loud.
-      allocatorPortfolios: totalRecord.unreadable ? null : [
-        {
-          key: "sixty_forty",
-          name: "60/40 Stocks/Bonds",
-          composition: "60% S&P 500 · 40% IEF (US 10y Treasury)",
-          // D-70(3): pure-tradfi legs (SPX + IEF), weekday calendar → 252.
-          ...portfolioFigures([comparatorLeg("spx", 0.6, SPX_DAILY, []), comparatorLeg("ief", 0.4, IEF_DAILY, [])]),
-        },
-        {
-          key: "multi_asset",
-          name: "Multi-Asset Risk Parity",
-          composition: "25% S&P 500 · 25% Gold · 25% IEF · 25% BTC",
-          // D-70(3): 252, was 365 under #597 BLEND-02. Founder ruling 2026-09-30
-          // ("Allow 252 here"): a narrow exception to BLEND-02 for this panel only,
-          // because its points are weekdays once weekend gaps are no longer 0-filled.
-          ...portfolioFigures([
-            comparatorLeg("spx", 0.25, SPX_DAILY, []),
-            comparatorLeg("gld", 0.25, GLD_DAILY, []),
-            comparatorLeg("ief", 0.25, IEF_DAILY, []),
-            btcLeg(0.25),
-          ], btcUnavailable),
-        },
-        {
-          key: "crypto_book",
-          name: "Diversified Crypto Blend",
-          composition: "70% BTC · 30% ETH",
-          // D-70(3): BTC + ETH legs, 7-day calendar → 365 (unchanged).
-          ...portfolioFigures([btcLeg(0.7), comparatorLeg("eth", 0.3, ETH_DAILY, [])], btcUnavailable),
-        },
-      ],
       eventSignatures: computeEventSignatures(stratRet, btcAligned, cashBundle.strategyEquity),
       // BTC's own equity carries its level flat across a BTC null. That level is
       // never read: computeEventSignatures drops every trace whose window reads a

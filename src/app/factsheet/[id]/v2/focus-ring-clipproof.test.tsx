@@ -102,7 +102,7 @@ function renderBody() {
   });
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} scenarioMode />
     </FactsheetProvider>,
   );
 }
@@ -168,7 +168,6 @@ describe("[UIFIX-02 / 151 A2 / Phase 200 D-09] factsheet masthead — no `Rename
       <FactsheetProvider payload={payload} persist={false}>
         <FactsheetBody
           payload={payload}
-          hideAllocatorSection
           hideFooter
           viewerNotice="owner_unpublished"
           ownerShare={{ hasActiveShare: false }}

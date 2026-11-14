@@ -89,7 +89,6 @@ function renderBody(payload: FactsheetPayload) {
       <FactsheetBody
         payload={payload}
         hideHeader
-        hideAllocatorSection
         hideFooter={false}
       />
     </FactsheetProvider>,

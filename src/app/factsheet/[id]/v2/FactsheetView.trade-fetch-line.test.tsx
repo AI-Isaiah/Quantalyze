@@ -117,7 +117,7 @@ function withFacts(
 function renderFactsheet(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+      <FactsheetBody payload={payload} hideFooter />
     </FactsheetProvider>,
   );
 }

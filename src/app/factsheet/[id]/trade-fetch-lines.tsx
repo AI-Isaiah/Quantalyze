@@ -133,6 +133,15 @@ export function TradeFetchUnavailableLine({ size = "caption" }: { size?: TradeLi
 const MAX_NAMED_GAPS = 3;
 
 /**
+ * Phase 210 PUBLICTRUTH, D-18: the line for an `unrecovered_gaps` record that was
+ * present but malformed. NOT silence (a page that cannot read its gap record must
+ * not read as gap-free) and NOT a gap sentence (it names no date). It states the
+ * limit and nothing about the exchange (F1). Locked wording, written exactly.
+ */
+const GAPS_UNAVAILABLE_SENTENCE =
+  "Record of days without trade data unavailable. Some days may be missing from the record.";
+
+/**
  * Named unrecovered gap - Phase 167.1.2.2.2 (TRADESYNC), D-02, with the F1
  * amendment over the UI-SPEC.
  *
@@ -152,11 +161,17 @@ const MAX_NAMED_GAPS = 3;
  * says only that the days are not recovered and are not counted as zero.
  * `FactsheetView.unrecovered-gap.test.tsx` pins the absence of that phrase.
  *
- * `gaps` is `parseUnrecoveredGaps` output: validated `{from, to}` spans, newest
+ * `gaps` is `readUnrecoveredGaps` output: validated `{from, to}` spans, newest
  * `to` first. The component renders them in the order given and takes the first
  * three; it does not re-sort, so the parser stays the one place order is decided.
  * `{days}` is `inclusiveDayCount`, the SAME function the chart seam's
  * `{days}d - no data` label uses, so the two cannot disagree for one span.
+ *
+ * `unavailable` (Phase 210 PUBLICTRUTH, D-18) is the reader's verdict that the
+ * stored record was malformed: `gaps` is then `[]` and this prints the unavailable
+ * sentence instead of nothing. Muted-secondary like the gap lines, names no date
+ * and makes no claim about the exchange (F1). Absent on a payload cached before
+ * the flag existed, which reads as false (the prior behaviour, no new claim).
  *
  * Muted-secondary, never red or amber: a gap is absence, not failure (DESIGN.md).
  * No dot, no glyph. Plain wrapping text: nothing here is `whitespace-nowrap` or
@@ -166,17 +181,20 @@ const MAX_NAMED_GAPS = 3;
  */
 export function UnrecoveredGapLines({
   gaps,
+  unavailable = false,
   size = "caption",
 }: {
   gaps: UnrecoveredGap[] | undefined;
+  unavailable?: boolean;
   size?: TradeLineSize;
 }) {
+  const className = `mt-1 ${SIZE_CLASS[size]} text-text-secondary`;
+  if (unavailable) return <p className={className}>{GAPS_UNAVAILABLE_SENTENCE}</p>;
   // `undefined` is a payload cached before this field existed (plan 10 records
   // that a cache-key collision with main's shape is possible until the release
   // bumps the key). The type says required; a public page must still render
   // nothing rather than throw on `.length`.
   if (!gaps || gaps.length === 0) return null;
-  const className = `mt-1 ${SIZE_CLASS[size]} text-text-secondary`;
   const named = gaps.slice(0, MAX_NAMED_GAPS);
   const more = gaps.length - named.length;
   return (

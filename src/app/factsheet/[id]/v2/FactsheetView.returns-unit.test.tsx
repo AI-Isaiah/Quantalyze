@@ -76,7 +76,7 @@ function renderFactsheet(
 ) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideAllocatorSection hideFooter showAum {...extra} />
+      <FactsheetBody payload={payload} hideFooter showAum {...extra} />
     </FactsheetProvider>,
   );
 }
@@ -235,7 +235,7 @@ describe("A12 / D-21 — the AUM chip never shows a USD figure as if it were BTC
     const p = usdPayload(AUM);
     const { container } = render(
       <FactsheetProvider payload={p} persist={false}>
-        <FactsheetBody payload={p} hideAllocatorSection hideFooter />
+        <FactsheetBody payload={p} hideFooter />
       </FactsheetProvider>,
     );
     expect(hasChip(container)).toBe(false);

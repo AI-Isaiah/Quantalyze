@@ -111,10 +111,10 @@ function withGaps(
   return { ...basePayload, tradesFetchedAt, tradeFetchVenue, unrecoveredGaps };
 }
 
-function renderFactsheet(payload: FactsheetPayload) {
+function renderFactsheet(payload: FactsheetPayload, printView = false) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+      <FactsheetBody payload={payload} hideFooter printView={printView} />
     </FactsheetProvider>,
   );
 }
@@ -124,6 +124,14 @@ function gapLines(container: HTMLElement): HTMLElement[] {
   const header = container.querySelector("header");
   return Array.from(header?.querySelectorAll("p") ?? []).filter((p) =>
     /^No trade data |more gaps? without trade data\.$/.test(p.textContent ?? ""),
+  ) as HTMLElement[];
+}
+
+/** Every header paragraph that is the unavailable sentence for a gap record that could not be read. */
+function unavailableLines(container: HTMLElement): HTMLElement[] {
+  const header = container.querySelector("header");
+  return Array.from(header?.querySelectorAll("p") ?? []).filter((p) =>
+    /^Record of days without trade data unavailable/.test(p.textContent ?? ""),
   ) as HTMLElement[];
 }
 
@@ -211,6 +219,43 @@ describe("FactsheetView - UnrecoveredGapLines (D-02, F1)", () => {
     expect(gapLines(container)).toHaveLength(0);
     expect(container.textContent).not.toContain("No trade data");
     expect(container.textContent).not.toContain("not counted as zero");
+  });
+
+  it("D-18: a malformed gap record shows exactly one muted unavailable sentence and no gap line", () => {
+    const { container } = renderFactsheet({ ...withGaps([]), unrecoveredGapsUnavailable: true });
+    const lines = unavailableLines(container);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].textContent).toBe(
+      "Record of days without trade data unavailable. Some days may be missing from the record.",
+    );
+    expect(gapLines(container)).toHaveLength(0);
+  });
+
+  it("D-18: the unavailable sentence is muted-secondary, never a warning colour", () => {
+    const { container } = renderFactsheet({ ...withGaps([]), unrecoveredGapsUnavailable: true });
+    const cls = unavailableLines(container)[0].className;
+    expect(cls).toContain("mt-1");
+    expect(cls).toContain("text-caption");
+    expect(cls).toContain("text-text-secondary");
+    expect(cls).not.toContain("text-negative");
+  });
+
+  it("D-18: a valid empty record with no flag shows neither the sentence nor a gap line", () => {
+    const { container } = renderFactsheet(withGaps([]));
+    expect(unavailableLines(container)).toHaveLength(0);
+    expect(gapLines(container)).toHaveLength(0);
+  });
+
+  it("D-18 F1: under the flag no rendered text claims the exchange no longer serves the days", () => {
+    const { container } = renderFactsheet({ ...withGaps([]), unrecoveredGapsUnavailable: true });
+    const text = unavailableLines(container).map((p) => p.textContent ?? "").join(" ");
+    expect(text).not.toMatch(/no longer|exchange|serves|venue/i);
+  });
+
+  it("D-18: in the tear sheet's mode (printView) the sentence still shows exactly once and no gap line", () => {
+    const { container } = renderFactsheet({ ...withGaps([]), unrecoveredGapsUnavailable: true }, true);
+    expect(unavailableLines(container)).toHaveLength(1);
+    expect(gapLines(container)).toHaveLength(0);
   });
 
   it("a payload cached before the field existed (unrecoveredGaps undefined) renders no gap line instead of throwing", () => {

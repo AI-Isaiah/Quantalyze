@@ -411,7 +411,6 @@ const TIER2_SITES = [
   "src/lib/factsheet/joint.ts",
   "src/lib/factsheet/rolling.ts",
   "src/lib/factsheet/build-payload.ts",
-  "src/lib/factsheet/allocator.ts",
   "src/lib/factsheet/og-metrics.ts", // T14's computed arm (D-19)
 ];
 
@@ -453,7 +452,6 @@ const RETIRED: ReadonlyArray<{ file: string; token: string; plan: string }> = [
   { plan: "166.2-05", file: FS + "rolling.ts", token: "s > 0 ? (m * periodsPerYear) " + "/ (s * sqrtN)" },
   { plan: "166.2-05", file: FS + "build-payload.ts", token: "denom > 0 ? " + "cov / denom : NaN" },
   { plan: "166.2-05", file: FS + "build-payload.ts", token: "Math.sqrt(" + "va * vb)" },
-  { plan: "166.2-05", file: FS + "allocator.ts", token: "s > 0 && " + "mmS > 0 ?" },
 ];
 
 /** Tokens retired from the WHOLE tree, in live code of any file (this one excluded). */
@@ -496,7 +494,7 @@ const read = (rel: string): string => readFileSync(join(process.cwd(), rel), "ut
 // ---------------------------------------------------------------------------
 
 describe("Phase 166.2 compute-once gate (D-17)", () => {
-  it("import rule: each of the 16 Tier-2 site files exists and imports @/lib/return-stats in live code", () => {
+  it("import rule: each of the 15 Tier-2 site files exists and imports @/lib/return-stats in live code", () => {
     const offenders: string[] = [];
     for (const rel of TIER2_SITES) {
       if (!existsSync(join(process.cwd(), rel))) {
@@ -511,7 +509,7 @@ describe("Phase 166.2 compute-once gate (D-17)", () => {
   });
 
   it("retired table: no retired expression of plans 166.2-01 to 166.2-05 is back in its file", () => {
-    expect(RETIRED).toHaveLength(28);
+    expect(RETIRED).toHaveLength(27);
     const offenders: string[] = [];
     for (const rel of new Set(RETIRED.map(r => r.file))) {
       if (!existsSync(join(process.cwd(), rel))) {

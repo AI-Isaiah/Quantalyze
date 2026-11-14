@@ -100,7 +100,7 @@ function renderIn(payload: FactsheetPayload, node: React.ReactElement) {
 }
 
 function renderBody(payload: FactsheetPayload) {
-  return renderIn(payload, <FactsheetBody payload={payload} hideAllocatorSection hideFooter />);
+  return renderIn(payload, <FactsheetBody payload={payload} hideFooter />);
 }
 
 /** The §IV `Benchmark` section, or null when the rail does not render one. */

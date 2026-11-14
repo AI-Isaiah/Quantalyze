@@ -86,7 +86,7 @@ function renderBody() {
   });
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} scenarioMode />
     </FactsheetProvider>,
   );
 }
@@ -238,7 +238,7 @@ function compositeKpiPayload(): FactsheetPayload {
 function renderComposite(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} scenarioMode />
     </FactsheetProvider>,
   );
 }
@@ -319,7 +319,7 @@ describe("FactsheetView KPI strip — Phase 90 basis relabel (composite) (RED un
     });
     const { container } = render(
       <FactsheetProvider payload={payload} persist={false}>
-        <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+        <FactsheetBody payload={payload} scenarioMode />
       </FactsheetProvider>,
     );
     expect(container.innerHTML).not.toContain("BASIS ·");
@@ -730,7 +730,7 @@ describe("FactsheetView KPI strip — UIFIX-03 (117-03): CUM RETURN extreme valu
     payload.strategyMetrics.sharpe = NaN;
     return render(
       <FactsheetProvider payload={payload} persist={false}>
-        <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+        <FactsheetBody payload={payload} scenarioMode />
       </FactsheetProvider>,
     );
   }
@@ -868,7 +868,7 @@ describe("FactsheetView KPI strip — 164.6.6.3.1 D-09: the alpha eyebrow keeps 
     const active = { ...payload, activeComparator: "btc" as const };
     return render(
       <FactsheetProvider payload={active} persist={false}>
-        <FactsheetBody payload={active} hideHeader hideAllocatorSection hideFooter />
+        <FactsheetBody payload={active} hideHeader hideFooter />
       </FactsheetProvider>,
     );
   }
@@ -979,7 +979,7 @@ describe("FactsheetView KPI strip — 164.6.6.3.3 plan 09: tone and sign from th
     };
     return render(
       <FactsheetProvider payload={payload} persist={false}>
-        <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+        <FactsheetBody payload={payload} hideHeader hideFooter />
       </FactsheetProvider>,
     );
   }

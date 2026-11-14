@@ -19,7 +19,7 @@
  * inspect the middle.
  *
  * Deliberately NO call-expression visitor (Pitfall 3): the numeric `Math`-style
- * `clamp(a, b, c)` helpers in `scenario-montecarlo.ts` / `peer-cohort.ts` are
+ * `clamp(a, b, c)` helper in `scenario-montecarlo.ts` is
  * pure number math, not CSS, and must NOT be flagged. The visitor map below
  * covers only `Literal` + `TemplateElement`, so a call to a local `clamp(...)`
  * identifier is invisible to this rule.

@@ -175,7 +175,7 @@ function renderColumn(payload: FactsheetPayload) {
 function renderBody(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+      <FactsheetBody payload={payload} hideFooter />
     </FactsheetProvider>,
   );
 }
@@ -727,7 +727,7 @@ describe("D-15 — a Withheld strip shows no alpha or IR figure (review WR-04)",
       const view = render(
         <FactsheetProvider payload={payload} persist={false}>
           <Zoom range={[10, 300]} />
-          <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+          <FactsheetBody payload={payload} hideFooter />
         </FactsheetProvider>,
       );
       await act(async () => {
@@ -1447,7 +1447,7 @@ describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
     const view = render(
       <FactsheetProvider payload={payload} persist={false}>
         {zoom && <Zoom range={zoom} />}
-        <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+        <FactsheetBody payload={payload} hideFooter />
       </FactsheetProvider>,
     );
     if (zoom) {
@@ -1706,7 +1706,7 @@ describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
       async function take(basis: Basis) {
         const view = render(
           <FactsheetProvider payload={payload} persist={false}>
-            <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+            <FactsheetBody payload={payload} hideFooter />
           </FactsheetProvider>,
         );
         // FactsheetBody mounts its own BasisProvider, so the basis is switched the way a reader does.

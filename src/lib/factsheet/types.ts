@@ -368,41 +368,6 @@ export type OwnBookDeltaPayload = {
   records?: { blend: FigureRecord; book: FigureRecord };
 };
 
-/**
- * Single demo allocator portfolio with precomputed sleeve + tail metrics.
- * Phase 169.4 D-70(4): every measured figure is null when the blend has fewer
- * than 2 usable days on its legs' common calendar; the panel renders the em-dash
- * with a dated "prices through" caption, never a number.
- */
-export type AllocatorPortfolioPayload = {
-  key: string;
-  name: string;
-  composition: string;
-  ann_vol: number | null;
-  cum_ret: number | null;
-  max_dd: number | null;
-  /** NaN (null after a JSON round-trip) when the correlation is undefined (D7). */
-  corr: number | null;
-  sleeve_pct: number | null;
-  blend_vol: number | null;
-  vol_target: number;
-  /** Null when nothing was measured, including tail_windows 0 (review round 2 WR-01): never a measured 0. */
-  tail_count: number | null;
-  /** Review SFH HIGH-2: the 21-date windows examined (every value priced); tail_count is out of these. */
-  tail_windows: number | null;
-  /** Null when tail_count is 0 (review WR-02): an empty set has no mean, median or share. */
-  tail_mm_mean: number | null;
-  tail_mm_median: number | null;
-  tail_mm_pos: number | null;
-  /** The last close every leg of the blend carries (D-70(4)); null when a leg has none. */
-  through: string | null;
-  /**
-   * Review SFH MEDIUM-2: the leg whose price feed could not be read ("BTC" when
-   * the BTC read failed), so the caption names the outage; null otherwise.
-   */
-  unavailable_leg: string | null;
-};
-
 /** One year of monthly compounded returns. byMonth has 12 slots (Jan..Dec); null = no obs. */
 export type MonthlyReturnsRow = {
   year: string;
@@ -534,8 +499,8 @@ export type TrustTierKind = "api_verified" | "csv_uploaded" | "self_reported";
  * was ingested via live API trade data ("api") or uploaded as a CSV ("csv").
  *
  * This drives which analytical panels the factsheet renders: panels that
- * require fields not derivable from a daily-return series (PeerPercentile,
- * AllocatorPortfolios, event signatures) should be suppressed for CSV
+ * require fields not derivable from a daily-return series (the event
+ * signatures) should be suppressed for CSV
  * strategies per the no-invented-data contract. (NEW-C20-01)
  */
 export type IngestSource = "api" | "csv";
@@ -671,7 +636,7 @@ export type PeerRanks = {
 /**
  * Fields shared by every factsheet payload regardless of ingest source.
  * The discriminated {@link FactsheetPayload} adds `ingestSource` plus the
- * api-only synthesized panels on top of this base.
+ * api-only event signatures on top of this base.
  */
 export type FactsheetCommon = {
   strategyId: string;
@@ -703,11 +668,19 @@ export type FactsheetCommon = {
   tradeFetchVenue: string | null;
   /**
    * D-02: spans (inclusive UTC `YYYY-MM-DD`) the tick and the venue cannot
-   * supply, parsed by `parseUnrecoveredGaps` from
+   * supply, parsed by `readUnrecoveredGaps` from
    * `strategy_analytics.series_provenance`. Server truth only: the client never
    * infers a gap from holes in `dates`. `[]` means none recorded.
    */
   unrecoveredGaps: { from: string; to: string }[];
+  /**
+   * Phase 210 PUBLICTRUTH, D-16..D-18: true when `series_provenance.unrecovered_gaps`
+   * was present but malformed, so `unrecoveredGaps` is `[]` because we could not
+   * read the record, not because there were no gaps. The header then says the
+   * record is unavailable instead of printing nothing. Optional: absent (a
+   * payload cached before the flag) and `false` both mean a readable record.
+   */
+  unrecoveredGapsUnavailable?: boolean;
   /**
    * Phase 167.1.2.2.2.1 (OKXHISTORY), D-05/D-06: spans (inclusive UTC
    * `YYYY-MM-DD`) rebuilt from the venue's bills archive rather than ticked
@@ -1130,20 +1103,18 @@ export type FactsheetCommon = {
 };
 
 /**
- * Synthesized / demo analytical panels NOT derivable from a bare daily-return
- * series — peer cohort, allocator portfolios, event-study signatures. Per the
- * no-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6) these exist ONLY
- * on the "api" arm: for csv-ingested strategies they are ABSENT from the
- * payload entirely (never serialized into the RSC blob), so a consumer cannot
- * read them without first narrowing `ingestSource === "api"`, and a future
- * synthesized panel added here physically cannot render for a CSV strategy.
+ * Analytical panels NOT derivable from a bare daily-return series — the
+ * event-study signatures. Per the no-invented-data contract (NEW-C20-01,
+ * RED-TEAM-M2/M3, B6) these exist ONLY on the "api" arm: for csv-ingested
+ * strategies they are ABSENT from the payload entirely (never serialized into
+ * the RSC blob), so a consumer cannot read them without first narrowing
+ * `ingestSource === "api"`, and a future panel added here physically cannot
+ * render for a CSV strategy. Phase 210 (D-10): the seeded demo peer cohort and
+ * the canned allocator blends were removed from this arm; they were invented
+ * figures, and the absence is pinned at runtime in build-payload.test.ts.
  */
 export type FactsheetApiPayload = FactsheetCommon & {
   ingestSource: "api";
-  /** Peer percentile (synthesized demo cohort). null when the cohort can't be computed. */
-  peerPercentile: PeerPercentilePayload | null;
-  /** Allocator portfolio analysis (demo portfolios). */
-  allocatorPortfolios: AllocatorPortfolioPayload[] | null;
   /** Event-study signatures (1d + 7d horizons) driven by STRATEGY events. */
   eventSignatures: EventSignaturesPayload | null;
   /** Same shape, driven by BENCHMARK events — feeds the Cross Signatures overlay. */
@@ -1152,7 +1123,7 @@ export type FactsheetApiPayload = FactsheetCommon & {
 
 /**
  * The csv arm: a strategy whose daily-return series was uploaded as a CSV.
- * The synthesized api-only panels are absent by construction (no-invented-data).
+ * The api-only event signatures are absent by construction (no-invented-data).
  */
 export type FactsheetCsvPayload = FactsheetCommon & {
   ingestSource: "csv";
@@ -1163,10 +1134,10 @@ export type FactsheetCsvPayload = FactsheetCommon & {
    *
    * Additive + optional: absent on every existing csv call site (the real
    * factsheet route, Discovery, Overview, and the Phase-39 scenario synth
-   * payload), so the api path + the three genuinely-synthetic panels'
-   * structural absence are provably unchanged. This is a DIFFERENT field name
-   * from the api arm's `peerPercentile`, so the type-field invariant (the four
-   * api-only fields never on the csv arm) is preserved.
+   * payload), so the api path + the api-only panels' structural absence are
+   * provably unchanged. The api arm no longer carries any peer field (Phase 210
+   * D-10), so the type-field invariant (the api-only fields never on the csv
+   * arm) is preserved.
    *
    * Blend-scoped by design — NOT promoted to {@link FactsheetCommon} (ADR §6):
    * peer-on-all-csv is out of scope for v1.2.2.
@@ -1177,7 +1148,7 @@ export type FactsheetCsvPayload = FactsheetCommon & {
    * (strategy_types + markets + per-constituent leverage). Additive + optional:
    * absent on every existing csv call site (the key is OMITTED, not undefined),
    * so the payload stays byte-identical and the api arm + the type-field
-   * invariant (the four api-only fields never on csv) are unchanged. Blend-only.
+   * invariant (the api-only fields never on csv) are unchanged. Blend-only.
    */
   scenarioMandate?: ScenarioMandatePayload;
   /**
@@ -1193,10 +1164,10 @@ export type FactsheetCsvPayload = FactsheetCommon & {
  * Top-level payload built server-side and passed to the client view.
  *
  * Discriminated on {@link IngestSource}: "api" = live-ingested trade data
- * (carries the synthesized demo panels); "csv" = user-uploaded daily-return CSV
- * (synthesized panels absent). Drives panel-gating in the view so non-derivable
- * panels (PeerPercentile, AllocatorPortfolios, event signatures) are
- * unrepresentable for CSV strategies by construction. (NEW-C20-01, B6)
+ * (carries the event signatures); "csv" = user-uploaded daily-return CSV
+ * (event signatures absent). Drives panel-gating in the view so non-derivable
+ * panels (the event signatures) are unrepresentable for CSV strategies by
+ * construction. (NEW-C20-01, B6)
  */
 export type FactsheetPayload = FactsheetApiPayload | FactsheetCsvPayload;
 

@@ -3422,7 +3422,15 @@ export const FILES_FLOOR = 81;
 // sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`. NOT MEASURED by a FULL local run: the host had 7.9 GB free on the data volume against the roughly 15 GB a full run needs,
 // so the FULL run is recorded as not-run and 830 is the static annotated-unwaived count that the parse reading prints, an upper bound on biting; CI `sql-mutation` FULL on the PR
 // head SHA (a floors edit forces FULL) is the run that compares it with a real biting count. WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 830;
+// RAISED 830 -> 832 2026-11-14 (Phase 210 PUBLICTRUTH plan 01, D-07/D-09): +2 arms, TV-closed-window and TV-window-end-today in test_get_published_trade_venues.sql (migration
+// 20261114120000 makes get_published_trade_venues read only open strategy_keys windows). Six existing arms were re-pointed at the new migration file and TV-shape gained four steps, so
+// the gate has 12 arms in all. FILES_FLOOR stays 81 (no file joined) and WAIVED_CEILING stays 0 - no waiver was added. MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`,
+// exit 0: `coverage: files 81/108`, `arms: 0/832/0   (executed/annotated/waived)`, `test_get_published_trade_venues.sql: 12 prose / 12 twin(s) / 0 waiver(s)`, `No static defects`, and by the exit-0
+// SUBSET run of the one gate file: `arms: 12/12/0`, `biting: 12`, `lane-invocations: 12` (the two independent tallies AGREE), `ARMS_FLOOR (static upper bound): 832 annotated-unwaived >= floor 830`
+// (the floor before this raise). Per-file line: `test_get_published_trade_venues.sql: sections 12 / judged 12 / annotated 12 / waived 0 / biting 12`. NOT MEASURED by a FULL local run: the host had
+// about 1.8 GB free on the data volume against the roughly 15 GB a full run needs, so the FULL run is recorded as not-run and 832 is the static annotated-unwaived count that the parse reading prints,
+// an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA (a floors edit forces FULL) is the run that compares it with a real biting count.
+export const ARMS_FLOOR = 832;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

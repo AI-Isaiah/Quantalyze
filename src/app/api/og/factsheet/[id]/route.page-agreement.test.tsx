@@ -141,7 +141,7 @@ function renderPage(series: DailyPoint[]): {
   const payload = buildScenarioFactsheetPayload({ portfolioDaily: series, benchmark: null });
   const { container, unmount } = render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} scenarioMode />
     </FactsheetProvider>,
   );
   const kpiGrid = Array.from(container.querySelectorAll<HTMLElement>("div.grid")).find((el) =>

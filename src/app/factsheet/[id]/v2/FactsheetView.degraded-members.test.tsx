@@ -95,7 +95,7 @@ function payloadWithDegraded(
 function degradedElement(payload: FactsheetPayload, props: FactsheetBodyOptions = {}): HTMLElement {
   const view = render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} hideAllocatorSection hideFooter {...props} />
+      <FactsheetBody payload={payload} hideFooter {...props} />
     </FactsheetProvider>,
   );
   const line = Array.from(view.container.querySelectorAll("p")).find((p) =>
@@ -170,7 +170,7 @@ describe("199-18 — the degraded-member line by audience", () => {
   ] as const)("%s: the recipient line, no member key or venue anywhere on the page, and the ask-the-sharer action", (_who, props) => {
     const view = render(
       <FactsheetProvider payload={payload()} persist={false}>
-        <FactsheetBody payload={payload()} hideAllocatorSection hideFooter {...props} />
+        <FactsheetBody payload={payload()} hideFooter {...props} />
       </FactsheetProvider>,
     );
     const el = view.container.querySelector('[data-degrade-id="factsheet.degraded-members-recipient"]');

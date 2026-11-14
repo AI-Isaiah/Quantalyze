@@ -92,7 +92,7 @@ function renderScenario(points: { date: string; value: number }[]) {
   const payload = buildScenarioFactsheetPayload({ portfolioDaily: points, periodsPerYear: 365 });
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideHeader hideAllocatorSection hideFooter={false} />
+      <FactsheetBody payload={payload} scenarioMode hideHeader hideFooter={false} />
     </FactsheetProvider>,
   );
 }
