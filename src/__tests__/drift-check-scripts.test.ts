@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=29 and ARMS_FLOOR=477 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=29 and ARMS_FLOOR=480 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -5082,6 +5082,8 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // `expected 1 to be +0` once ci.yml carried SENTINEL_FLOOR=27, and
     // ci-anti-skip-gate.contract.test.ts re-derives the sentinel-bearing set from the corpus.
     // 405 + 11 = 416 is the table's own sum.
+    // RAISED 2026-11-14 (Phase 214 FRESHTRUTH, review round 1 fix), 29/477 -> 29/480. test_ledger_refresh_fanout.sql gains NA5,
+    // NA6 and SK4 and reads `ALL 41 ARMS EXECUTED` (38 -> 41); no file joined. 477 + 3 = 480 is the table's own sum.
     // RAISED 2026-11-14 (Phase 214 FRESHTRUTH, plan 07), 29/461 -> 29/477. Four existing gate files gain arms and no
     // file joined: test_enqueue_dedup_record_retract.sql `ALL 16` -> `ALL 18 ARMS EXECUTED`, test_ledger_refresh_composite_arm.sql
     // 23 -> 24, test_ledger_refresh_fanout.sql 31 -> 38 and test_ledger_refresh_staleness.sql 8 -> 14, each read with
@@ -5119,7 +5121,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=477", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=480", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

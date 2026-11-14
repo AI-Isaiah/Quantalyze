@@ -57,6 +57,15 @@
 -- occurrence, which precedes the skip statement in the text. The per-twin table is in the
 -- plan 06 SUMMARY. The skip statement spells no interval literal behind the seven-day
 -- window's THEN, so the two window twins keep their counts.
+-- ⭐ REVIEW ROUND 1 (Phase 214, same migration, in place) APPENDS arms NA5, NA6 and SK4:
+-- 38 arms -> 41; 44 twin sections -> 47. NA5 pins the signal's reason conjunct (a failing
+-- strategy keeps the 20-hour retry), NA6 the signal's new done-derive conjunct (a compute
+-- tail alone does not cap), SK4 the skip block's own exception handler (a refused skip row
+-- costs the row and never the tick). The derive conjunct repeats the stale-day expression
+-- in the candidate query and in the skip statement, so NA4's twin was RECOUNTED (2 -> 4,
+-- `nth` 1 still the candidate query's compute test) and NA2's fixture gained the done
+-- derive its age twin needs. Every edit-kind twin was recounted against the migration's
+-- raw bytes: all 44 hold.
 -- Arms P1, P2, P3, P4 and P5 are new in this phase: 26 arms -> 31; 32 twin sections ->
 -- 37. P1 is RED at the base migration by construction (its 2-day-old attempt is
 -- past the 20-hour window), which is how the phase's re-crawl cost was shown.

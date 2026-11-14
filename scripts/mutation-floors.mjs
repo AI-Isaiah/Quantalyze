@@ -3458,7 +3458,14 @@ export const FILES_FLOOR = 82;
 // is the static annotated-unwaived count that the parse reading prints, an upper bound on biting. The 16 added arms ARE measured biting (the subset run above); the other 78 annotated
 // files are unchanged by this phase. CI `sql-mutation` FULL on the PR head SHA (a floors edit forces FULL) is the run that compares it with a real biting count. WAIVED_CEILING stays 0 -
 // no waiver was added.
-export const ARMS_FLOOR = 864;
+// RAISED 864 -> 867 2026-11-14 (Phase 214 FRESHTRUTH review round 1 fix): +3 arms, each twinned, in the EXISTING gate test_ledger_refresh_fanout.sql (no file joined, so FILES_FLOOR stays 82):
+// NA5 (the no-advance signal's series_behind conjunct, WR-01), NA6 (its done-derive conjunct, SFH-F1) and SK4 (the skip block's own exception handler, SFH-F3), 44 -> 47 twin sections.
+// MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`, exit 0: `coverage: files 82/109`, `arms: 0/867/0   (executed/annotated/waived)`, `No static defects`, and by the
+// exit-0 SUBSET run over that one gate (`--subset-from`): `arms: 47/47/0`, `biting: 47`, `lane-invocations: 47` (the two independent tallies AGREE), `No defects in the SUBSET`, per-file line
+// `test_ledger_refresh_fanout.sql: sections 47 / judged 47 / annotated 47 / waived 0 / biting 47`, each of NA5, NA6 and SK4 `RED (identity ok)`. NOT MEASURED by a FULL local run (about 9 GB free
+// against the roughly 15 GB it needs), so 867 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA is the run that compares it with a real
+// biting count. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 867;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
