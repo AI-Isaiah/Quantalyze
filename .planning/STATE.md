@@ -2,13 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155, 207 and 209 complete; 208, 210 and 211 in progress)
-status: executing
-stopped_at: Phases 155, 207 and 209 complete; records landed together
-last_updated: "2026-11-14T12:36:09.529Z"
+current_phase: "155.1"
+current_phase_name: SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading
+status: planning
+stopped_at: Phase 208 complete, ready to plan Phase 155.1
+last_updated: "2026-11-14T12:36:15.434Z"
 last_activity: 2026-11-14
-last_activity_desc: Phases 155, 207 and 209 complete
-state_head: 3f70c4753a1525fe54772ddfe6aad523fdcf6af4
+last_activity_desc: Phase 208 complete, transitioned to Phase 155.1
+state_head: 485226c9578071ec61034c136e2fb91ad21b9ac0
 progress:
   total_phases: 13
   completed_phases: 6
@@ -175,10 +176,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 155 PARITYHARNESS, 207 RETRYPROP and 209 SCRUBLEAKS complete; 208 UIQUICK, 210 PUBLICTRUTH and 211 SYNCJOBS in progress
-Plan: per phase (see each phase directory)
-Status: 155.1 SERVERCLOCK waits for the founder's Monday 2026-11-16 live gateway spike; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session
-Last activity: 2026-11-14 — Phases 155, 207 and 209 complete (records landed in one PR)
+Phase: 155.1 — SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-11-14 — Phase 208 complete, transitioned to Phase 155.1
 Progress: [█████░░░░░] 46%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -1807,7 +1808,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-14T07:30:26.000Z
-**Stopped At:** Phases 155, 207 and 209 complete; records landed together
+**Stopped At:** Phase 208 complete, ready to plan Phase 155.1
 **Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z

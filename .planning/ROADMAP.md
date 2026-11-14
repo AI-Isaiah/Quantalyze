@@ -137,7 +137,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [ ] **Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%** - The founder's scripted session on MM2, MM3 and FX-AI_V, Gate A and Gate B per account, every surface the same, every gap fixed at its root or ruled on; after 155, session after the 155.1 deploy
 - [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
 - [x] **Phase 207: RETRYPROP — every error page's Try again button works** - Boundaries use Next's real `retry` prop; independent of the MT5 phases (completed 2026-11-14)
-- [ ] **Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth** - Quick UI fixes; independent of the MT5 phases
+- [x] **Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth** - Quick UI fixes; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases (completed 2026-11-14)
 - [ ] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases
 - [ ] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases
@@ -253,7 +253,7 @@ Plans:
 | 155.2. LIVEPARITY | 0/? | Not started | - |
 | 157. FOUNDER-CONFIRM | 0/? | Not started | - |
 | 207. RETRYPROP | 1/1 | Complete | 2026-11-14 |
-| 208. UIQUICK | 0/? | Not started | - |
+| 208. UIQUICK | 5/5 | Complete | 2026-11-14 |
 | 209. SCRUBLEAKS | 5/5 | Complete | 2026-11-14 |
 | 210. PUBLICTRUTH | 0/? | Not started | - |
 | 211. SYNCJOBS | 0/? | Not started | - |
@@ -338,7 +338,7 @@ Plans:
 **Goal:** Three user-facing lies are fixed: the alert digest email stops claiming the dashboard shows its alerts (founder decision D-01, 2026-11-14; booked as "the link lands where alerts are shown"), the browse page tells a failed read apart from an empty one, and share-link failures are logged and tell the user what happened. Closes TODOS `195-ALERT-DIGEST-LINK-TARGET`, `195-BROWSE-EMPTY-VS-ERROR`, `170.6.1-SFH2-SHARE-FAILURES-UNLOGGED`, the R2 ShareableLink dialog-copy entries and `SHARE-HOST-01` (added 2026-11-14 from the FIX NOW triage). Booked by the founder 2026-11-13 ("Quick UI fixes") from the TODOS prune, PR #1259.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of each other.
-**Plans:** 0 plans
+**Plans:** 5/5 plans complete
 **Success Criteria** (what must be TRUE):
 1. The digest email (`src/lib/email.ts`) no longer claims the dashboard shows the alerts it lists: its link reads "Open your allocation →" and still targets `/allocations`. ⛔ CORRECTED 2026-11-14 by founder decision D-01 (`208-CONTEXT.md`, "Fix the email wording"); the original criterion, "targets a page that renders the alerts it announces", is kept here as lineage.
 2. `getPopulatedCategorySlugs` distinguishes error from empty, and browse renders each state distinctly.
