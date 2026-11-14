@@ -28,6 +28,26 @@
 -- still quote `occurrences: 2` or `4` for these needles: read them as the lineage
 -- of the 164.6 counts. The machine-executable RED-UNDER-M objects are the live
 -- record, and the runner fails a stale one as occurrence-mismatch.
+-- ⛔ RE-POINTED A SIXTH TIME, 2026-11-14 (Phase 214 FRESHTRUTH plan 03). The apply
+-- list now ends with 20261114152300, which re-creates the SINGLE-KEY body ALONE (its
+-- cooldown CASE ORs a no-advance signal into the marks-paused weekly window), so ALL
+-- 34 edit-kind twin steps that named 20261030120000 were re-pointed to it IN THE SAME
+-- COMMIT as the apply-list entry (TRAP E / C-02, a sixth time). Every `find` was
+-- recounted with a raw-text count on the new file's final bytes: all 34 hold, with
+-- the same occurrence counts and the same `nth` as before, because the re-based
+-- body adds no text any of them matches. The paragraphs below that name earlier
+-- migrations, and the per-arm RED-UNDER prose that names 20261030120000, are LINEAGE.
+-- Arms NA1, NA2, NA3 and NA4 are new in this phase: 31 arms -> 35; 37 twin sections ->
+-- 41. NA1 is RED at 20261030120000 by construction (a day-old completed run is outside
+-- the 20-hour window there), which is how the idle-account cost was shown.
+-- ⚠️ THE APPLY LIST GAINED THREE ENTRIES, AND THEIR ORDER MATTERS. (1)
+-- 20260522111858_compute_analytics_from_csv_kind.sql sits before
+-- 20260614120000_derive_broker_dailies_kind.sql: it registers the
+-- compute_analytics_from_csv kind row that the new fixtures' analytics jobs need
+-- (compute_jobs_kind_fkey), and the later migration then widens the constraints it
+-- touches as a strict superset. (2) 20261114151700_ledger_staleness_closed_composites.sql
+-- re-creates the staleness view, which the new body reads; it follows the previous
+-- last entry and precedes the new one. (3) 20261114152300 itself is LAST.
 -- Arms P1, P2, P3, P4 and P5 are new in this phase: 26 arms -> 31; 32 twin sections ->
 -- 37. P1 is RED at the base migration by construction (its 2-day-old attempt is
 -- past the 20-hour window), which is how the phase's re-crawl cost was shown.
@@ -222,7 +242,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 32 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 35 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -468,6 +488,9 @@ DECLARE
   --    J's three: a missing DECLARE is a 42601 that stops the WHOLE block compiling.
   s_na1a       UUID;     -- arm NA1: no-advance, completed run 1 day ago (capped)
   s_na1b       UUID;     -- arm NA1: no-advance, completed run 8 days ago (re-admitted)
+  s_na2        UUID;     -- arm NA2: stale at age 7, one completed run (not yet 3 days unmoved)
+  s_na3        UUID;     -- arm NA3: age 20, but its analytics job FAILED (not a completed run)
+  s_na4        UUID;     -- arm NA4: age 20, its done analytics job PREDATES the stale day
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
   -- RED-UNDER: DROP the function on the live lane after the migrations have
@@ -691,6 +714,10 @@ BEGIN
   -- per-venue cap cannot be what separates them. Parked like every other fixture.
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf NA1a', 'draft') RETURNING id INTO s_na1a;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2,     'lrf NA1b', 'draft') RETURNING id INTO s_na1b;
+  -- Arms NA2, NA3, NA4 (Phase 214): one strategy per conjunct of the signal.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf NA2', 'draft') RETURNING id INTO s_na2;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led2,     'lrf NA3', 'draft') RETURNING id INTO s_na3;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf NA4', 'draft') RETURNING id INTO s_na4;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf R1', 'draft') RETURNING id INTO s_r1;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led,      'lrf R2', 'draft') RETURNING id INTO s_r2;
   INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_inactive, 'lrf H1', 'draft') RETURNING id INTO s_h_inact;
@@ -842,6 +869,31 @@ BEGIN
          (s_na1a, 'derive_broker_dailies',      'done', now() - INTERVAL '1 day'),
          (s_na1b, 'compute_analytics_from_csv', 'done', now() - INTERVAL '8 days'),
          (s_na1b, 'derive_broker_dailies',      'done', now() - INTERVAL '8 days');
+  -- Arms NA2, NA3 and NA4: the signal's three conjuncts, one strategy each, each
+  -- failing exactly ONE conjunct. All three are then admitted under the 20-hour
+  -- window, because every attempt they carry is older than that and younger
+  -- than nothing. Seeded by INSERT only, like NA1's.
+  --   NA2: age 7, so the series is behind but not yet unmoved for 3 days after it
+  --        went stale (its stale day, last return date + 5, is 2 days ago); the one
+  --        completed analytics job is on or after that day. Fails the AGE conjunct.
+  --   NA3: age 20 and a completed derive, but the analytics job FAILED. Fails the
+  --        STATUS conjunct: a failed compute is not a completed run.
+  --   NA4: age 20 and a done analytics job, but it was created 17 days ago, before
+  --        the strategy went stale (15 days ago), beside a 2-day-old derive.
+  --        Fails the TIMING conjunct.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_na2, 'complete', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 7, 'YYYY-MM-DD'), 'value', 0.002))),
+         (s_na3, 'complete', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 20, 'YYYY-MM-DD'), 'value', 0.002))),
+         (s_na4, 'complete', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 20, 'YYYY-MM-DD'), 'value', 0.002)));
+  INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
+  VALUES (s_na2, 'compute_analytics_from_csv', 'done',         now() - INTERVAL '1 day'),
+         (s_na3, 'derive_broker_dailies',      'done',         now() - INTERVAL '1 day'),
+         (s_na3, 'compute_analytics_from_csv', 'failed_final', now() - INTERVAL '1 day'),
+         (s_na4, 'compute_analytics_from_csv', 'done',         (CURRENT_DATE - 17)::timestamptz),
+         (s_na4, 'derive_broker_dailies',      'done',         now() - INTERVAL '2 days');
 
   RAISE NOTICE 'Seed OK.';
 
@@ -1127,7 +1179,7 @@ BEGIN
   --    leaving every other line of it intact, and the APPLY SURVIVES (the
   --    deletion is not a migration needle) while this arm is the FIRST failure —
   --    `TEST FAILED (M2): … wrote 0 instrument row(s) …`, lane exit 3. Unmutated,
-  --    the same lane prints ALL 32 ARMS EXECUTED and exits 0.
+  --    the same lane prints ALL 35 ARMS EXECUTED and exits 0.
   -- ⛔ THE TWO PROSE MENTIONS ABOVE CARRY THE COUNT ON PURPOSE AND MUST MOVE
   -- WITH IT. The anti-skip gate reads this file's sentinel with a
   -- `grep -aoE "ALL [0-9]+ ARMS EXECUTED" | head -1`, so the FIRST match in
@@ -1695,6 +1747,72 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (NA1): a no-advance strategy whose last completed run is 8 days old produced % new job(s), expected exactly 1 — the weekly cap EXCLUDES instead of throttling, so a strategy whose broker later reports new days would never be refreshed again. Likely cause: the no-advance window is longer than 7 days.', v_cnt2;
   END IF;
   UPDATE strategies SET status = 'draft' WHERE id IN (s_na1a, s_na1b);
+
+  -- ======================================================================
+  -- ARM NA2 — THE AGE CONJUNCT NARROWS THE CAP. A strategy at age 7 has a
+  -- completed analytics job on or after the day it went stale, but it went stale
+  -- only 2 days ago, so it is NOT yet "unmoved for 3 or more days". It keeps the
+  -- 20-hour cooldown: its day-old attempt is outside it, so it IS enqueued. The
+  -- matched twin of NA1's age-20 strategy: without NA2, a body that caps every
+  -- stale strategy with a completed run passes NA1.
+  -- ======================================================================
+  -- RED-UNDER: lower the age threshold in 20261114152300 from 8 days to 7. Age 7
+  --            then satisfies the signal, NA2's strategy gets the week, and its
+  --            day-old attempt holds it. NA1 stays green: age 20 is far past
+  --            either threshold.
+  -- RED-UNDER-M: {"arm":"NA2","apply":[{"kind":"edit","file":"supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql","find":"(CURRENT_DATE - lrs.last_return_date) >= 8","replace":"(CURRENT_DATE - lrs.last_return_date) >= 7","occurrences":1}]}
+  UPDATE strategies SET status = 'published' WHERE id = s_na2;
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_na2 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (NA2): a series_behind strategy at age 7 with a completed run produced % new job(s), expected exactly 1 — the weekly cap reaches a strategy that went stale only 2 days ago, so a series that is merely a few days late is refreshed once a week instead of daily. Likely cause: the age threshold of the no-advance signal is below 8 days.', v_cnt;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_na2;
+
+  -- ======================================================================
+  -- ARM NA3 — A FAILED COMPUTE IS NOT A COMPLETED RUN. Age 20, a done derive and
+  -- an analytics job in failed_final, both a day old. The chain tail did not
+  -- complete, so the strategy has not shown that a refresh cannot move its series:
+  -- it keeps the 20-hour cooldown and IS enqueued. Without NA3 a body that counts
+  -- any analytics job, successful or not, passes NA1 and caps a strategy whose
+  -- compute is simply broken, hiding the failure behind a week of silence.
+  -- ======================================================================
+  -- RED-UNDER: drop the done-status predicate from the signal's existence test in
+  --            20261114152300, replacing it with a constant truth so the rest of
+  --            the conjunction is intact. NA3's failed analytics job then counts,
+  --            the signal is true, and the strategy is held for the week.
+  -- RED-UNDER-M: {"arm":"NA3","apply":[{"kind":"edit","file":"supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql","find":"AND cj3.status = 'done'","replace":"AND TRUE","occurrences":1}]}
+  UPDATE strategies SET status = 'published' WHERE id = s_na3;
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_na3 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (NA3): a stale strategy whose derive completed but whose analytics job FAILED produced % new job(s), expected exactly 1 — a failed compute was counted as a completed run, so a strategy whose compute is broken is held to one attempt a week. Likely cause: the signal no longer requires the analytics job to be done.', v_cnt;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_na3;
+
+  -- ======================================================================
+  -- ARM NA4 — THE COMPLETED RUN MUST POSTDATE THE DAY THE STRATEGY WENT STALE. Age
+  -- 20, a done analytics job created 17 days ago (before the stale day, 15 days
+  -- ago) and a done derive 2 days old. A run from before the strategy went stale
+  -- says nothing about whether a refresh can move it now, so the strategy keeps the
+  -- 20-hour cooldown and IS enqueued. Without NA4 a body that counts ANY past done
+  -- analytics job passes NA1 and caps every strategy that has ever computed.
+  -- ======================================================================
+  -- RED-UNDER: move the stale-day bound in 20261114152300 100 days back instead of
+  --            forward 5 days from the last return date. NA4's early job then
+  --            counts, the signal is true, and its 2-day-old derive holds it for
+  --            the week.
+  -- RED-UNDER-M: {"arm":"NA4","apply":[{"kind":"edit","file":"supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql","find":"(lrs.last_return_date + 5)","replace":"(lrs.last_return_date - 100)","occurrences":1}]}
+  UPDATE strategies SET status = 'published' WHERE id = s_na4;
+  v_ret := public.enqueue_ledger_refresh_for_strategies();
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_na4 AND kind = 'derive_broker_dailies' AND created_at > now() - INTERVAL '1 hour';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (NA4): a stale strategy whose only done analytics job PREDATES the day it went stale produced % new job(s), expected exactly 1 — a run from before the series fell behind was counted as proof that a refresh cannot move it, so the strategy is held to one attempt a week. Likely cause: the signal compares the job to a date earlier than the day the strategy went stale.', v_cnt;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_na4;
 
   -- ======================================================================
   -- ARM G1 — the PER-VENUE CAP (D-09). Six stale eligible strategies on ONE
@@ -2718,7 +2836,7 @@ BEGIN
 
   UPDATE strategies SET status = 'draft' WHERE id IN (s_w1, s_w2, s_w3, s_w4);
 
-  RAISE NOTICE 'ALL 32 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, NA1, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
+  RAISE NOTICE 'ALL 35 ARMS EXECUTED (A, B, C, D, E, F, G, H, I, J, K, L, M1, M2, N, N2, N3, P, P1, P2, P3, P4, P5, NA1, NA2, NA3, NA4, Q, R, S1, T, U, V1, V2, W) and passed — the ledger refresh fan-out is dormant on a missing row, a FALSE row and a RAISING read, each of the two INVISIBLE dormant causes leaves exactly one counted instrument row, EXECUTE is held by the owner alone, the fan-out is bounded, a candidate that fails to enqueue is counted and named in one exact cron_runs row while its siblings still enqueue and is not re-selected inside the failed-attempt cooldown, a healthy tick writes no row, a tick in which every candidate failed returns 0 without raising, keeps its failure row and puts those candidates on the cooldown so a healthy candidate behind them is refreshed, a failure row that cannot be written costs the row and never a good enqueue, a lost enqueue race (40001) is counted apart from failures while a deadlock is counted and named as one, a strategy whose marks have been paused for 3 days or more is re-derived once a week and never excluded for good while a younger pause or a malformed flag value keeps the 20-hour cooldown, and every one of those claims is falsifiable.';
 END $$;
 
 ROLLBACK;
