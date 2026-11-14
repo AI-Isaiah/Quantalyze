@@ -43,7 +43,7 @@ deferred:
 **Status:** passed (SC-4 deferred-by-design to the post-merge PROD read; measured 2026-11-14, see "SC-4 PROD reading" below)
 **Re-verification:** Yes, after the founder amended SC-5 (2026-11-14, option A) and commit 07a673b65 made the chip-width spec a passing regression pin. The first verification at 1d78c911b ended `gaps_found` on SC-5 alone; every other row was re-checked by regression only (nothing else changed between the two SHAs).
 
-## SC-4 PROD reading (2026-11-14, records PR, after the apply)
+## SC-4 PROD reading (2026-11-14, about 23:08Z, records PR, after the apply)
 
 Supabase Migrate run `43651289345` for merge commit `2d1020dd5` concluded `success` (`apply-test`, `apply`, `redump-dump` and `redump-pr` all green), so both migrations are applied on PROD. The read went through the Supabase MCP. The marker query ran first and named PRODUCTION. Only counts, ages, reasons and flags are recorded here; no ids.
 
@@ -51,7 +51,7 @@ Supabase Migrate run `43651289345` for merge commit `2d1020dd5` concluded `succe
 - Both Deribit composites: `is_closed = true`, `closed_through = 2026-04-29`, `last_return_date = 2026-04-29`, `is_stale = false`, `stale_reason` NULL (199 days since the last return). Matches the expectation.
 - Stale row 1: MT5, 81 days behind (`last_return_date = 2026-08-25`), `stale_reason = series_behind`. Its key is disconnected (`disconnected_at` set), so key eligibility keeps it out of the candidate set; it is not a refresh problem. Matches the expectation.
 - Stale row 2: MT5, 36 days behind (`last_return_date = 2026-10-09`), `stale_reason = series_behind`, key connected. It is the 214-DIAGNOSIS H1 case, now held to a weekly attempt. It stays stale until its ledger has activity. Matches the expectation.
-- Not yet observed: no `cron_runs` row with cause `no_advance_weekly_cap` in the 3 hours after the apply. The fan-out had not written one by the time of the read, so the skip count is not yet measured on PROD. This is recorded, not a gap: the SQL gate arms pin the row's shape.
+- Not yet observed: no `cron_runs` row with cause `no_advance_weekly_cap` exists. The read ran within minutes of the apply (about 23:08Z), and the fan-out had not ticked between the apply and the read. So the weekly cap on the 36-day row is inferred from the migration, not observed on PROD, and the skip count is not yet measured there. This is recorded, not a gap: the SQL gate arms pin the cap and the row's shape.
 
 Verdict: the expectation holds. The stale count is 2, and each remaining row is named with its reason.
 

@@ -141,9 +141,9 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 210: PUBLICTRUTH — public factsheet cues come from real data only** - Public factsheet truth; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 211: SYNCJOBS — trade fetches skip nothing and failed jobs keep their real status** - Sync and jobs correctness; independent of the MT5 phases (completed 2026-11-14)
-- [x] **Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work** - Wizard and key-screen truth; independent of the MT5 phases (completed 2026-11-15)
-- [x] **Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out** - Key and draft flow, four founder decisions; independent of the MT5 phases (completed 2026-11-15)
-- [x] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases (completed 2026-11-15)
+- [x] **Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work** - Wizard and key-screen truth; independent of the MT5 phases (completed 2026-11-14)
+- [x] **Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out** - Key and draft flow, four founder decisions; independent of the MT5 phases (completed 2026-11-14)
+- [x] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases (completed 2026-11-14)
 - [ ] **Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production** - CI-only test reach; independent of the MT5 phases
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
@@ -257,9 +257,9 @@ Plans:
 | 209. SCRUBLEAKS | 5/5 | Complete | 2026-11-14 |
 | 210. PUBLICTRUTH | 5/5 | Complete | 2026-11-14 |
 | 211. SYNCJOBS | 7/7 | Complete | 2026-11-14 |
-| 212. WIZTRUTH | 9/9 | Complete | 2026-11-15 |
-| 213. KEYFLOW | 12/12 | Complete | 2026-11-15 |
-| 214. FRESHTRUTH | 7/7 | Complete | 2026-11-15 |
+| 212. WIZTRUTH | 9/9 | Complete | 2026-11-14 |
+| 213. KEYFLOW | 12/12 | Complete | 2026-11-14 |
+| 214. FRESHTRUTH | 7/7 | Complete | 2026-11-14 |
 | 215. TESTREACH | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.18)

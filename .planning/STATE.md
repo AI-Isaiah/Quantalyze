@@ -6,7 +6,7 @@ current_phase_name: parallel phases (155 and 207-214 complete; 155.1, 155.2 and 
 status: executing
 stopped_at: Phases 212, 213 and 214 complete; records landed together
 last_updated: "2026-11-14T23:05:46.364Z"
-last_activity: 2026-11-15
+last_activity: 2026-11-14
 last_activity_desc: Phases 212, 213 and 214 complete
 state_head: 2d1020dd547f14ff7a9ca65021ecd3e4ee2e7bb9
 progress:
@@ -178,7 +178,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: parallel — 155 PARITYHARNESS and 207 RETRYPROP through 214 FRESHTRUTH complete; 215 TESTREACH not started, held by the founder
 Plan: per phase (see each phase directory)
 Status: 155.1 SERVERCLOCK waits on the founder: weekend spike run 1 done 2026-11-14 with verdict GO, the market-hours run is scheduled for Monday 2026-11-16; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session
-Last activity: 2026-11-15 — Phases 212, 213 and 214 complete (records landed in one PR)
+Last activity: 2026-11-14 — Phases 212, 213 and 214 complete (records landed in one PR)
 Progress: [███████░░░] 69%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
