@@ -51,7 +51,12 @@ def _seed_user_id(admin) -> str:
     strategies.user_id FK. See test_compute_jobs_fencing.py for rationale."""
     res = admin.table("profiles").select("id").limit(1).execute()
     if not res.data:
-        pytest.skip("test Supabase project has no seeded profiles")
+        pytest.fail(
+            "Test Supabase project has no seeded profiles — cannot satisfy "
+            "strategies.user_id FK. The lane gets one from the Phase 19 sentinel "
+            "migration's reference data; a lane without it must fail, not skip.",
+            pytrace=False,
+        )
     return res.data[0]["id"]
 
 

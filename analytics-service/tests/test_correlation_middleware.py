@@ -18,13 +18,13 @@ import re
 import httpx
 import pytest
 import structlog
-from fastapi import FastAPI
 
 from services.logging_config import (
     CorrelationMiddleware,
     configure_logging,
     correlation_id_var,
 )
+from tests.app_factory import build_test_app
 
 
 UUID_V4_RE = re.compile(
@@ -36,8 +36,7 @@ UUID_V4_RE = re.compile(
 @pytest.fixture
 def app(monkeypatch):
     configure_logging()
-    test_app = FastAPI()
-    test_app.add_middleware(CorrelationMiddleware)
+    test_app = build_test_app(middleware=[CorrelationMiddleware])
 
     @test_app.post("/_test")
     async def _route():

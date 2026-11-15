@@ -9,7 +9,7 @@ Asserted invariants:
   3. Auth-fail / rate-limit / schema-drift cassettes assert the expected error
      class is raised so the wizard error envelope code path is exercised.
 
-Test count: 12 (3 brokers × 4 scenarios).
+Test count: 11 (2 brokers × 4 scenarios, 2 synthesizer regressions, 1 cassette-set pin).
 """
 
 from __future__ import annotations
@@ -21,23 +21,36 @@ import ccxt
 
 from tests.conftest_vcr import phase16_vcr
 
-# Cassette dir resolved relative to this test file. Phase 16 ships 4 OKX
-# cassettes (founder gate 16-08 Task 3 covers the other 8 — Binance + Bybit
-# recordings against real test broker creds). Without the existence check
-# below, vcrpy `record_mode='once'` would attempt to RECORD missing
-# cassettes, which means a live network call to the broker API. CI runners
-# are inside GitHub Actions IP ranges that Binance and Bybit block (Binance
-# 451 'restricted location', Bybit 403 CloudFront).
+# Cassette dir resolved relative to this test file. Both replayed brokers ship
+# all four scenario cassettes. Without the existence check below, vcrpy
+# `record_mode='once'` would attempt to RECORD a missing cassette, which means
+# a live network call to the broker API from a CI runner.
 _CASSETTE_DIR = Path(__file__).parent / "cassettes"
 
+# The brokers this suite replays. 2026-11-15 (Phase 215 TESTREACH): the binance
+# broker was retired from this list. No binance cassette can be recorded: CI
+# runners sit in IP ranges binance refuses with a 451, and no live binance test
+# key exists locally or in CI, so its four cases skipped forever and read as
+# green. okx and bybit keep the replay shape covered. To re-add binance, record
+# its four cassettes with scripts/record_cassettes.py, then add it here.
+_REPLAY_BROKERS = ["okx", "bybit"]
 
-def _skip_if_no_cassette(broker: str, scenario: str) -> None:
-    """Skip the parametrized case when its cassette is not yet recorded."""
+_SCENARIOS = ["auth-fail", "happy", "rate-limit", "schema-drift"]
+
+
+def _require_cassette(broker: str, scenario: str) -> None:
+    """Fail the case when its cassette is missing.
+
+    A skipped missing cassette reads as green while checking nothing, so a
+    missing file is a failure: every broker in _REPLAY_BROKERS must have all
+    four cassettes.
+    """
     cassette = _CASSETTE_DIR / broker / f"{scenario}.yaml"
     if not cassette.exists():
-        pytest.skip(
-            f"cassette not yet recorded: {broker}/{scenario}.yaml "
-            f"(founder gate 16-08 Task 3)"
+        pytest.fail(
+            f"cassette missing: {broker}/{scenario}.yaml; every broker in "
+            f"_REPLAY_BROKERS must have all four cassettes "
+            f"(record them with scripts/record_cassettes.py)"
         )
 
 
@@ -49,10 +62,6 @@ TEST_CREDS = {
         "apiKey": "test-okx-key",
         "secret": "test-okx-secret",
         "password": "test-okx-passphrase",
-    },
-    "binance": {
-        "apiKey": "test-binance-key",
-        "secret": "test-binance-secret",
     },
     "bybit": {
         "apiKey": "test-bybit-key",
@@ -69,10 +78,10 @@ def _make_exchange(broker: str, creds: dict) -> ccxt.Exchange:
 
 # --- HAPPY PATH ----------------------------------------------------------------
 
-@pytest.mark.parametrize("broker", ["okx", "binance", "bybit"])
+@pytest.mark.parametrize("broker", _REPLAY_BROKERS)
 def test_happy_path_replays_balance_fetch(broker):
     """Replay the canonical successful balance-fetch for each broker."""
-    _skip_if_no_cassette(broker, "happy")
+    _require_cassette(broker, "happy")
     with phase16_vcr.use_cassette(f"{broker}/happy.yaml"):
         ex = _make_exchange(broker, TEST_CREDS[broker])
         result = ex.fetch_balance()
@@ -82,10 +91,10 @@ def test_happy_path_replays_balance_fetch(broker):
 
 # --- AUTH FAIL -----------------------------------------------------------------
 
-@pytest.mark.parametrize("broker", ["okx", "binance", "bybit"])
+@pytest.mark.parametrize("broker", _REPLAY_BROKERS)
 def test_auth_fail_raises_authentication_error(broker):
     """Replay the auth-fail (HTTP 401) path; assert ccxt.AuthenticationError raised."""
-    _skip_if_no_cassette(broker, "auth-fail")
+    _require_cassette(broker, "auth-fail")
     with phase16_vcr.use_cassette(f"{broker}/auth-fail.yaml"):
         ex = _make_exchange(broker, TEST_CREDS[broker])
         with pytest.raises((ccxt.AuthenticationError, ccxt.PermissionDenied)):
@@ -94,10 +103,10 @@ def test_auth_fail_raises_authentication_error(broker):
 
 # --- RATE LIMIT ----------------------------------------------------------------
 
-@pytest.mark.parametrize("broker", ["okx", "binance", "bybit"])
+@pytest.mark.parametrize("broker", _REPLAY_BROKERS)
 def test_rate_limit_raises_rate_limit_exceeded(broker):
     """Replay the rate-limit (HTTP 429) path; assert ccxt.RateLimitExceeded or DDoS raised."""
-    _skip_if_no_cassette(broker, "rate-limit")
+    _require_cassette(broker, "rate-limit")
     with phase16_vcr.use_cassette(f"{broker}/rate-limit.yaml"):
         ex = _make_exchange(broker, TEST_CREDS[broker])
         with pytest.raises((ccxt.RateLimitExceeded, ccxt.DDoSProtection, ccxt.ExchangeError)):
@@ -106,7 +115,7 @@ def test_rate_limit_raises_rate_limit_exceeded(broker):
 
 # --- SCHEMA DRIFT --------------------------------------------------------------
 
-@pytest.mark.parametrize("broker", ["okx", "binance", "bybit"])
+@pytest.mark.parametrize("broker", _REPLAY_BROKERS)
 def test_schema_drift_raises_or_returns_partial(broker):
     """Replay HTTP 200 + unexpected payload; assert ccxt raises OR result has missing fields.
 
@@ -114,7 +123,7 @@ def test_schema_drift_raises_or_returns_partial(broker):
     a field is renamed. Accept any of: ccxt.ExchangeError raise, or a result dict
     where the canonical 'free'/'used' fields are missing.
     """
-    _skip_if_no_cassette(broker, "schema-drift")
+    _require_cassette(broker, "schema-drift")
     with phase16_vcr.use_cassette(f"{broker}/schema-drift.yaml"):
         ex = _make_exchange(broker, TEST_CREDS[broker])
         try:
@@ -135,7 +144,7 @@ def test_schema_drift_raises_or_returns_partial(broker):
 
 # --- SCHEMA DRIFT — synthesizer regression (the cassette-refresh gate) ----------
 
-@pytest.mark.parametrize("broker", ["okx", "bybit"])
+@pytest.mark.parametrize("broker", _REPLAY_BROKERS)
 def test_synthesized_schema_drift_makes_ccxt_raise(broker, tmp_path):
     """The daily cassette-refresh workflow REGENERATES schema-drift.yaml from a
     freshly-recorded happy.yaml via record_cassettes._synthesize_schema_drift,
@@ -154,7 +163,7 @@ def test_synthesized_schema_drift_makes_ccxt_raise(broker, tmp_path):
     """
     import importlib.util
 
-    _skip_if_no_cassette(broker, "happy")
+    _require_cassette(broker, "happy")
 
     rc_path = Path(__file__).resolve().parents[1] / "scripts" / "record_cassettes.py"
     spec = importlib.util.spec_from_file_location("record_cassettes", rc_path)
@@ -174,3 +183,21 @@ def test_synthesized_schema_drift_makes_ccxt_raise(broker, tmp_path):
         ex = _make_exchange(broker, TEST_CREDS[broker])
         with pytest.raises((ccxt.ExchangeError, KeyError, ValueError, TypeError)):
             ex.fetch_balance()
+
+
+# --- CASSETTE SET PIN -----------------------------------------------------------
+
+def test_every_replay_broker_has_all_four_cassettes():
+    """Each replayed broker has all four scenario cassettes on disk.
+
+    The hand-typed floor stops an emptied _REPLAY_BROKERS from passing
+    vacuously (zero brokers, zero checks, green).
+    """
+    assert len(_REPLAY_BROKERS) == 2
+    missing = [
+        f"{broker}/{scenario}.yaml"
+        for broker in _REPLAY_BROKERS
+        for scenario in _SCENARIOS
+        if not (_CASSETTE_DIR / broker / f"{scenario}.yaml").exists()
+    ]
+    assert not missing, f"missing cassettes: {missing}"

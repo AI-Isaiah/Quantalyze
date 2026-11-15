@@ -15,13 +15,14 @@ USE_RAW_TRADE_INGESTION worker path. Phase 1 ran BEFORE Phase 2 in
 analytics-service/services/job_worker.run_sync_trades_job, so every
 successful Phase 1 destroyed prior Phase 2 fills.
 
-Test framework + skipif gate mirror analytics-service/tests/test_resend_correlation_rls.py.
+Test framework mirrors analytics-service/tests/test_resend_correlation_rls.py. Phase 215: the DSN comes
+from the ``live_db_dsn`` fixture (``tests/live_db_dsn.py``): it runs on the CI python job's lane via
+LANE_DB_URL, skips locally without it and fails under CI=true.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from typing import Iterator
 
@@ -29,19 +30,15 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
+from tests.live_db_dsn import connect_live_db
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TEST_SUPABASE_DB_URL"),
-    reason="Live test Supabase project not configured (TEST_SUPABASE_DB_URL unset). "
-    "See MEMORY reference_test_supabase_project.md for the qmnijlgmdhviwzwfyzlc setup.",
-)
+
 
 
 @pytest.fixture
-def service_role_conn() -> Iterator[psycopg.Connection]:
-    """Service-role connection. DSN must point at the test project."""
-    dsn = os.environ["TEST_SUPABASE_DB_URL"]
-    conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+def service_role_conn(live_db_dsn: str) -> Iterator[psycopg.Connection]:
+    """Service-role connection to the local-stack lane (guarded by ``connect_live_db``)."""
+    conn = connect_live_db(live_db_dsn, autocommit=True, row_factory=dict_row)
     try:
         yield conn
     finally:
@@ -63,11 +60,13 @@ def seeded_strategy(
     fill_external_id = f"fill-{uuid.uuid4().hex[:12]}"
 
     with service_role_conn.cursor() as cur:
-        # Profile + strategy seed (FKs into trades).
+        # User + strategy seed (FKs into trades). 2026-11-15 (Phase 215): profiles.id
+        # references auth.users and profiles.display_name is NOT NULL, so the seed goes through
+        # auth.users and the on_auth_user_created trigger makes the profile row.
         cur.execute(
-            "INSERT INTO public.profiles (id, role, created_at) "
-            "VALUES (%s, 'manager', now())",
-            (user_id,),
+            "INSERT INTO auth.users (id, email, raw_user_meta_data) "
+            "VALUES (%s, %s, '{}'::jsonb)",
+            (user_id, f"audit-g12a1-{user_id[:8]}@quantalyze-test.invalid"),
         )
         cur.execute(
             "INSERT INTO public.strategies "
@@ -105,7 +104,7 @@ def seeded_strategy(
                 (strategy_id,),
             )
             cur.execute(
-                "DELETE FROM public.profiles WHERE id = %s",
+                "DELETE FROM auth.users WHERE id = %s",
                 (user_id,),
             )
 
@@ -223,7 +222,13 @@ class TestSyncTradesPreservesFills:
                 "quantity": "0",
                 "fee": "0",
                 "fee_currency": "USDT",
-                "timestamp": "2026-05-03T00:00:00Z",
+                # 2026-11-15 (Phase 215): same timestamp as the first payload on purpose. Since
+                # migration 20260510180535 the RPC deletes only the INCOMING payload's date
+                # range, so a second call replaces the first's rows only where the windows
+                # overlap; a disjoint window leaves them (the retry-data-loss fix). This module
+                # never ran in CI before the lane migration and still assumed the old
+                # delete-everything behaviour.
+                "timestamp": "2026-05-01T00:00:00Z",
                 "order_type": "summary",
             },
         ]

@@ -21,7 +21,6 @@ from uuid import uuid4
 
 import pandas as pd
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routers import match as match_mod
@@ -29,6 +28,7 @@ from services import rate_limit as _rl
 from services.allocator_equity_derive import HoldingsUpdatedAtError
 from services.db import PaginatedSelectTruncated
 from services.holding_marks import HoldingMarkContractError
+from tests.app_factory import build_test_app
 from tests.fake_postgrest import FakeDb
 
 ALLOCATOR = "alloc-1"
@@ -332,8 +332,7 @@ def test_contract_an_unparseable_updated_at_in_the_history_raises(
 
 @pytest.fixture()
 def match_client() -> TestClient:
-    app = FastAPI()
-    app.include_router(match_mod.router)
+    app = build_test_app(match_mod.router)
     return TestClient(app)
 
 

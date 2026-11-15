@@ -37,8 +37,10 @@ The equality is deliberate, following ``test_limiter_identity.py``'s
 site, DELETE its row here.
 
 ⚠️ **A ``frozenset`` of ``(module, function, status)`` triples would NOT be
-sufficient, and this is measured, not asserted.** The 12 sites collapse to only
-**9 distinct triples**, because three functions each raise the same status
+sufficient, and this is measured, not asserted.** The 11 sites collapse to only
+**8 distinct triples** (12 and 9 until 2026-11-15, Phase 215 SC-4: the CSV runner's
+500 is the worker domain exception ``CsvComputationFailed`` now, so its row left the
+roster), because three functions each raise the same status
 twice: ``cron.py``'s ``cron_sync``, ``exchange.py``'s ``fetch_trades`` and
 ``portfolio.py``'s ``verify_strategy``. Under a set equality, DELETING one of a
 duplicated pair yields the same value as the correct tree — a broken tree and a
@@ -77,7 +79,8 @@ blind spots below are pinned by hand-typed constants that redden when they move.
     above there are **3** such matched constructions, all legitimate
     pass-throughs of an already-validated status
     (``error_contract.py``'s ``service_error`` and ``service_error_response``,
-    and ``main.py``'s ``venue_transient_exception_handler``).
+    and ``services/app_error_handlers.py``'s ``venue_transient_exception_handler``,
+    moved there from ``main.py`` in Phase 215 SC-3).
     ⚠️ Under a **LOOSE** reading — *"any ``status_code=`` keyword anywhere, any
     callee"* — the answer is **4**. The fourth is
     ``VenueTransientHTTPException.__init__``'s ``super().__init__(status_code=…)``
@@ -132,7 +135,6 @@ CensusKey = tuple[str, str, int]
 #: **May only shrink.** Re-home a site → delete its row.
 QUARANTINE: Counter[CensusKey] = Counter(
     {
-        ("analytics_runner.py", "run_csv_strategy_analytics", 500): 1,
         ("cron.py", "cron_sync", 500): 2,
         ("csv.py", "csv_validate", 500): 1,
         ("debug_key_flow.py", "_read_test_creds", 503): 1,
@@ -147,8 +149,8 @@ QUARANTINE: Counter[CensusKey] = Counter(
 #: Total construction SITES, which is deliberately larger than the number of
 #: distinct triples. Hand-typed so that collapsing the Counter back to a set
 #: cannot pass unnoticed.
-EXPECTED_SITE_COUNT = 12
-EXPECTED_TRIPLE_COUNT = 9
+EXPECTED_SITE_COUNT = 11
+EXPECTED_TRIPLE_COUNT = 8
 
 #: The triples that occur twice — the exact reason this is a Counter and not a
 #: frozenset. Deleting one member of any of these pairs is invisible to a set.
@@ -758,7 +760,9 @@ class TestBlindSpotsArePinned:
         assert non_literal == {
             ("error_contract.py", "service_error", "HTTPException"),
             ("error_contract.py", "service_error_response", "JSONResponse"),
-            ("main.py", "venue_transient_exception_handler", "JSONResponse"),
+            # 2026-11-15, Phase 215 SC-3: the handler moved from main.py to
+            # services/app_error_handlers.py (bodies unchanged); the count stays 3.
+            ("app_error_handlers.py", "venue_transient_exception_handler", "JSONResponse"),
         }, f"the non-literal sites are no longer the known pass-throughs: {sorted(non_literal)}"
 
     def test_httpexception_subclasses_and_their_sites_are_pinned(self) -> None:

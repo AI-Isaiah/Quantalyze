@@ -107,6 +107,12 @@ import { CsvSubmitStep } from "@/app/(dashboard)/strategies/new/wizard/steps/Csv
 import type { MetadataDraft } from "@/app/(dashboard)/strategies/new/wizard/steps/MetadataStep";
 import { _resetWizardCorrelationIdForTests } from "@/lib/wizard/wizard-correlation";
 import { stripCommentsPreserveLines } from "@/lib/source-scan";
+// Phase 215 / SC-5 — the connect-key and multi-key-add rosters are derived in
+// this module, not declared in the step files, so they are read live below.
+import {
+  KNOWN_ADD_KEY_CODES,
+  KNOWN_CREATE_WITH_KEY_CODES,
+} from "@/lib/wizardKeyRosters";
 import {
   WIZARD_ERROR_COPY,
   formatKeyError,
@@ -585,11 +591,24 @@ interface PopulationRow {
   readonly titleChannel: "copy" | "wire-prose";
 }
 
+/**
+ * The two key-step rosters, read from the LIVE exports (Phase 215 / SC-5). A
+ * source scan of the step files finds no declaration for them any more, and
+ * `deriveRoster` would return `[]`, which the floors below would catch only
+ * after the whole population had silently shrunk.
+ */
+const LIVE_KEY_ROSTERS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["KNOWN_CREATE_WITH_KEY_CODES", KNOWN_CREATE_WITH_KEY_CODES],
+  ["KNOWN_ADD_KEY_CODES", KNOWN_ADD_KEY_CODES],
+]);
+
 /** Roster membership per surface, derived once. */
 const ROSTERS: ReadonlyMap<SurfaceId, readonly string[]> = new Map(
   SURFACES.map((s) => [
     s.id,
-    deriveRoster(stripped(s.rosterFile), s.rosterName),
+    LIVE_KEY_ROSTERS.has(s.rosterName)
+      ? [...LIVE_KEY_ROSTERS.get(s.rosterName)!]
+      : deriveRoster(stripped(s.rosterFile), s.rosterName),
   ]),
 );
 

@@ -52,6 +52,11 @@ _DB_MODULE_SENTINELS = (
     "TEST_SUPABASE_DB_URL",
     "HAS_LIVE_DB",
     "live_db_transport",
+    # 2026-11-15 (Phase 215 TESTREACH plan 02): the 7 psycopg live-DB modules resolve their DSN
+    # through the `live_db_dsn` fixture and no longer contain the old shared-TEST DSN name. Without
+    # this entry they silently leave the `shared_test_db` group and race the fencing tests on the
+    # one lane database. The old entry above stays: other content may still carry it.
+    "live_db_dsn",
 )
 
 
@@ -70,6 +75,29 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if _is_shared_db_module(str(item.fspath)):
             item.add_marker(pytest.mark.xdist_group("shared_test_db"))
+
+
+# Phase 215 TESTREACH plan 02: the lane DSN for the psycopg live-DB modules. Resolution and the
+# CI-fails-never-skips rule live in `tests/live_db_dsn.py`; this fixture is the single seam a
+# module's `service_role_conn` requests, so a module cannot grow its own DSN read.
+@pytest.fixture(scope="session")
+def live_db_dsn() -> str:
+    from tests.live_db_dsn import resolve_live_db_dsn
+
+    return resolve_live_db_dsn()
+
+
+# Phase 215 TESTREACH plan 03 (SC-3): a test app built by the factory carries the SAME three
+# app-global exception handlers production main.py installs (422 credential-safe body, 429
+# RATE_LIMITED + Retry-After, venue-transient 424), through one production function. A bare
+# `FastAPI()` answers with FastAPI's default 422 (which echoes the request input) and slowapi's
+# default 429, bodies production never sends. Modules whose app is built inside a helper or a
+# class fixture import `build_test_app` from `tests.app_factory` directly.
+@pytest.fixture
+def app_factory():
+    from tests.app_factory import build_test_app
+
+    return build_test_app
 
 
 # PR #181 take-2 red-team F16: services.metrics maintains a process-level

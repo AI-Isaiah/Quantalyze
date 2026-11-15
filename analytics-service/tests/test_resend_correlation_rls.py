@@ -9,8 +9,9 @@ Asserted invariants:
      table from a public-facing context.
 
 Migration under test: supabase/migrations/20260515113637_resend_message_correlation.sql
-(Plan 16-05). Test framework + skipif gate mirror
-analytics-service/tests/test_trigger_rls_audit.py (Plan 16-04 deliverable).
+(Plan 16-05). Test framework mirrors analytics-service/tests/test_trigger_rls_audit.py (Plan 16-04
+deliverable). Phase 215: the DSN comes from the ``live_db_dsn`` fixture (``tests/live_db_dsn.py``), so the
+module runs on the CI python job's lane via LANE_DB_URL, skips locally without it and fails under CI=true.
 
 Test caveat: psycopg's `SET LOCAL ROLE anon` switches the session role to
 the `anon` Postgres role; whether the GRANT layer or the RLS layer denies
@@ -20,7 +21,6 @@ either outcome as a pass — both encode the same isolation property.
 
 from __future__ import annotations
 
-import os
 import uuid
 from typing import Iterator
 
@@ -28,23 +28,18 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
+from tests.live_db_dsn import connect_live_db
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TEST_SUPABASE_DB_URL"),
-    reason="Live test Supabase project not configured (TEST_SUPABASE_DB_URL unset). "
-    "See MEMORY reference_test_supabase_project.md for the qmnijlgmdhviwzwfyzlc setup.",
-)
+
 
 
 @pytest.fixture
-def service_role_conn() -> Iterator[psycopg.Connection]:
-    """Connection using the test-project DSN. Service-role context.
+def service_role_conn(live_db_dsn: str) -> Iterator[psycopg.Connection]:
+    """Connection to the local-stack lane. Service-role context.
 
-    DSN must point at the test Supabase project (qmnijlgmdhviwzwfyzlc); never
-    production.
+    ``connect_live_db`` refuses anything but the lane before returning; never TEST, never production.
     """
-    dsn = os.environ["TEST_SUPABASE_DB_URL"]
-    conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+    conn = connect_live_db(live_db_dsn, autocommit=True, row_factory=dict_row)
     try:
         yield conn
     finally:

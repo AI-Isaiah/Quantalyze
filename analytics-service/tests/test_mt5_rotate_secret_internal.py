@@ -39,12 +39,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from cryptography.fernet import InvalidToken
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from routers.internal import router, _reset_rate_limit
 from services.exchange import AUTH_FAILED_DETAIL
 from services.closed_sets import MT5_MASTER_PASSWORD_DETAIL, MT5_WRONG_SERVER_DETAIL
+from tests.app_factory import build_test_app
 
 # Synthetic placeholders only — never a real MT5 login, password or broker
 # server. See the phase's non-negotiable rule (CONTEXT.md) and the module
@@ -61,8 +62,7 @@ _SYNTH_BROKER_SERVER = "Synthetic-Demo-Server"
 def client(monkeypatch):
     monkeypatch.setenv("INTERNAL_API_TOKEN", "test-token")
     _reset_rate_limit()
-    app = FastAPI()
-    app.include_router(router)
+    app = build_test_app(router)
     return TestClient(app)
 
 

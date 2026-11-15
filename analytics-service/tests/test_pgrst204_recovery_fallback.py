@@ -48,7 +48,7 @@ from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
+from services.job_failure import CsvComputationFailed
 
 try:
     from postgrest.exceptions import APIError
@@ -160,7 +160,7 @@ def _db_execute_router(harness: _Harness) -> Any:
     return _side_effect
 
 
-async def _run(harness: _Harness) -> HTTPException:
+async def _run(harness: _Harness) -> CsvComputationFailed:
     """Drive the CSV runner into its catch-all failure arm; return the 500."""
     from services.analytics_runner import run_csv_strategy_analytics
 
@@ -172,7 +172,7 @@ async def _run(harness: _Harness) -> HTTPException:
          patch("services.basis_series.persist_basis_series", new=MagicMock()), \
          patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("compute_all_metrics blew up")):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(CsvComputationFailed) as exc_info:
             await run_csv_strategy_analytics(_STRATEGY_ID)
     return exc_info.value
 
@@ -196,7 +196,8 @@ async def test_pgrst204_fallback_lands_the_terminal_failed() -> None:
     harness = _build_harness(_schema_cache_miss())
 
     exc = await _run(harness)
-    assert exc.status_code == 500
+    assert exc.error_kind == "unknown"
+    assert exc.message == "500: CSV analytics computation failed"
 
     writes = _terminal_writes(harness)
     assert len(writes) == 2, (
@@ -251,7 +252,8 @@ async def test_non_pgrst204_api_errors_still_propagate(
 
     caplog.set_level(logging.WARNING, logger="quantalyze.analytics.runner")
     exc = await _run(harness)
-    assert exc.status_code == 500
+    assert exc.error_kind == "unknown"
+    assert exc.message == "500: CSV analytics computation failed"
 
     assert harness.observed == [boom], (
         "the non-PGRST204 APIError must leave _mark_unrecoverable unchanged; "
@@ -276,7 +278,8 @@ async def test_normal_path_writes_one_terminal_row_clearing_the_stamp() -> None:
     harness = _build_harness(None)
 
     exc = await _run(harness)
-    assert exc.status_code == 500
+    assert exc.error_kind == "unknown"
+    assert exc.message == "500: CSV analytics computation failed"
 
     writes = _terminal_writes(harness)
     assert len(writes) == 1, (

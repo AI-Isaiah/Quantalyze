@@ -19,6 +19,7 @@ import {
   recogniseSeamErrorCode,
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
+import { KNOWN_ADD_KEY_CODES } from "@/lib/wizardKeyRosters";
 import { ValidateWaitCard } from "../ValidateWaitCard";
 import {
   WAIT_CARD_MOUNT_DELAY_MS,
@@ -234,192 +235,13 @@ const TRUST_ATOMS: {
  */
 const MULTI_KEY_FUNNEL_STEP = "connect_key_multi";
 
-/**
- * Every `WizardErrorCode` that `POST /api/strategies/composite/add-key` can put
- * on the wire.
- *
- * Same reasoning as `ConnectKeyStep`'s `KNOWN_CREATE_WITH_KEY_CODES`, which is
- * the sibling route: this replaces a bare `as WizardErrorCode` cast of
- * `data.code` — widened with an optional and then defaulted to `"UNKNOWN"` — of
- * NETWORK DATA into a closed union, copying `SubmitStep.tsx`'s
- * `KNOWN_FINALIZE_CODES` membership shape. The two routes' `classifyKeyValidationError` halves are
- * identical by construction — both call the one shared classifier — but the
- * sets are still written out per route rather than shared, because the direct
- * emissions differ and a shared set would silently admit one route's codes at
- * the other.
- *
- * ⚠️ 140.4-15 / SEAMRIM-08 — THIS SET IS NO LONGER THE ONLY HOP AT THE ADD-KEY
- * ARM, AND IT DELIBERATELY DID NOT GAIN A MEMBER. `140.4-13` made
- * `composite/add-key/route.ts`'s 503 arm answer a limiter MISCONFIGURATION with
- * the WIRE code `SEAM_MISCONFIGURED` (`rateLimitDenyJson`'s
- * `misconfiguredBody`), replacing the 429 `KEY_RATE_LIMIT` whose copy calls the
- * throttle "exchange-side" — our own outage, blamed on the user's venue. With
- * only the set below, that code missed every member and rendered `UNKNOWN`:
- * *"Try the last action again."*, **with a Retry control**, for a fault whose
- * own copy says *"Retrying will not clear it: the setting stays wrong until we
- * fix it and redeploy."* The remedy is the ONE shared table
- * (`SEAM_CODE_TO_WIZARD_CODE`, read through `recogniseSeamErrorCode`) consulted
- * FIRST — coverage-law row 1 — not a member here, which would be a hand-typed
- * allow-list edit owed again at every surface the next wire code reaches.
- *
- * ⚠️ 164.2-05 CORRECTION (2026-09-06). This paragraph used to continue: *"The
- * table's key set and this set intersect in NOTHING, so the ordering cannot
- * change what any member below renders."* THAT IS NO LONGER TRUE — admitting
- * `RATE_LIMITED` below (see its row) gives this set exactly one member the wire
- * table also carries. The CONCLUSION still holds, and it always rested on the
- * other reason: 140.4-16 / WR-11 turned the measurement into an assertion in
- * `seam-ratelimit-posture.invariant.test.ts`, which derives both vocabularies
- * from disk and asserts the NECESSARY condition — a shared code must get the
- * SAME answer — rather than disjointness. The wire table maps `RATE_LIMITED`
- * to ITSELF, so the two sides AGREE and the ordering still cannot change what
- * renders. ⛔ Disjointness was only ever a SUFFICIENT condition that happened
- * to hold here; it did not hold at `KNOWN_KICKOFF_CODES`, which has shared
- * `RATE_LIMITED` all along, and it does not hold here any more either. See `ConnectKeyStep`'s
- * `KNOWN_CREATE_WITH_KEY_CODES` docblock for the full reasoning; both key-entry
- * steps take the change together because both routes emit the code.
- */
-const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
-  new Set<WizardErrorCode>([
-    // Emitted directly by `composite/add-key/route.ts`'s own guards.
-    "KEY_INVALID_FORMAT",
-    // 142.2 / MT5-04 (D-05) — the four codes `KEY_INVALID_FORMAT` was split
-    // into. `composite/add-key/route.ts` mirrors `create-with-key` guard for
-    // guard, so it emits the same four and this roster gains the same four.
-    // The two rosters stay SEPARATE (see the docblock above): they agree here
-    // because the two routes genuinely emit the same set, not because one was
-    // copied from the other.
-    "KEY_MISSING_REQUIRED_FIELD",
-    "KEY_UNSUPPORTED_VENUE",
-    "KEY_VENUE_NOT_ENABLED",
-    "KEY_INPUT_TOO_LONG",
-    "KEY_NOT_READ_ONLY",
-    "KEY_HAS_TRADING_PERMS",
-    "KEY_HAS_WITHDRAW_PERMS",
-    "DRAFT_ALREADY_EXISTS",
-    // Phase 213 / KEYFLOW decision (c) (2026-11-14) — `composite/add-key` refuses
-    // an `mt5` exchange with this code, ahead of its `MT5_ENABLED` gate. Omit the
-    // row and the step renders the generic UNKNOWN card for a refusal the server
-    // classified precisely.
-    "COMPOSITE_MT5_UNSUPPORTED",
-    "KEY_RATE_LIMIT",
-    // 164.2-05 / criterion 4 (2026-09-06) — BESIDE `KEY_RATE_LIMIT`, NOT
-    // INSTEAD OF IT. The two stand for DIFFERENT facts and both are reachable
-    // on this route.
-    //
-    // `composite/add-key`'s `userActionLimiter` deny arm used to answer
-    // `KEY_RATE_LIMIT`, whose copy calls the throttle *"a transient,
-    // exchange-side throttle"* and whose `fix[1]` offers *"try a different
-    // exchange account"*. That bucket is keyed
-    // `strategies-composite-add-key:<uid>` — OURS, per USER — so no exchange is
-    // consulted and no other exchange account can clear it. The arm now answers
-    // `RATE_LIMITED`, which already carried the true sentence (*"the cap is
-    // ours, not your exchange's"*). The route's own comment had recorded that
-    // debt since 140.4-13 and named 140.4-12 as its owner; 140.4-12 never made
-    // the change, and this plan pays it as a CLASS across all four
-    // `userActionLimiter` routes.
-    //
-    // ⛔ `KEY_RATE_LIMIT` STAYS ABOVE because `classifyKeyValidationError` still
-    // returns it at 503 for a GENUINE venue throttle, where its exchange
-    // sentence is TRUE. Removing it would swap a false sentence for an UNKNOWN
-    // card on the one arm that earned it.
-    //
-    // ⚠️ WHAT THIS ROW ACTUALLY BUYS — MEASURED, because 164.2-04 shipped a
-    // first draft of the twin comment in `ConnectKeyStep.tsx` that claimed the
-    // wrong thing. It is a COUPLING guard, not a copy guard: the add-key arm
-    // below TRANSLATES FIRST through `SEAM_CODE_TO_WIZARD_CODE`, which maps
-    // `RATE_LIMITED` to ITSELF, so deleting this line does NOT make the step
-    // render UNKNOWN. What it buys is that this route's own minted vocabulary
-    // is written down here rather than borrowed from the shared wire table —
-    // which is what makes a future edit to that table a caught change instead
-    // of a rendered one. ⛔ `KNOWN_SET_MEMBERS_CODES` below is the OPPOSITE
-    // case; do not copy this paragraph onto it.
-    "RATE_LIMITED",
-    "UNKNOWN",
-    // Returned by the shared `classifyKeyValidationError` at its catch arm.
-    "SERVICE_UNAVAILABLE_RETRY",
-    "KEY_INVALID_SIGNATURE",
-    "KEY_AUTH_FAILED",
-    "KEY_MT5_MASTER_PASSWORD",
-    "KEY_MT5_WRONG_SERVER",
-    // 164.6.5 / criterion 5 — same addition as `KNOWN_CREATE_WITH_KEY_CODES`
-    // (full reasoning there), taken together because both routes share the
-    // classifier that emits it. Admitted HERE IN THE SAME COMMIT the shared
-    // classifier starts returning it.
-    "KEY_MT5_TERMINAL_UNRESPONSIVE",
-    // 164.6.6.3 plan 06 (D-09, D-10) — same addition as `KNOWN_CREATE_WITH_KEY_CODES`
-    // (full reasoning there): the shared classifier now returns it for wire
-    // `MT5_SERVER_UNKNOWN`, so it is admitted HERE IN THE SAME COMMIT the second key
-    // surface starts to receive it. Omit this line and the multi-key step renders
-    // `UNKNOWN`, whose copy names no cause, for a server our terminals do not list.
-    "KEY_MT5_SERVER_UNKNOWN",
-    // 164.6.6.3.2 / item 7 (D-01) — same addition as `KNOWN_CREATE_WITH_KEY_CODES`
-    // (full reasoning there): the shared classifier now returns it for wire
-    // `MT5_VALIDATION_UNCONFIGURED`, so it is admitted HERE IN THE SAME COMMIT the
-    // second key surface starts to receive it. Omit this line and the multi-key step
-    // renders `UNKNOWN`, which offers a Retry and names no cause, for a fault that
-    // repeats until an operator acts.
-    "KEY_MT5_VALIDATION_UNCONFIGURED",
-    // 164.6.6.3.2 / item 10 (D-02) — same addition as `KNOWN_CREATE_WITH_KEY_CODES`
-    // (full reasoning there): the shared classifier now returns it for wire
-    // `MT5_TERMINAL_BUSY`, so it is admitted HERE IN THE SAME COMMIT the second key surface
-    // starts to receive it. Omit this line and the multi-key step renders `UNKNOWN`, which
-    // names no cause, for a terminal that is only briefly busy.
-    "KEY_MT5_TERMINAL_BUSY",
-    "KEY_IP_ALLOWLIST",
-    "KEY_NETWORK_TIMEOUT",
-    "KEY_PROBE_FAILED",
-    "KEY_EXCHANGE_UNAVAILABLE",
-    "KEY_VENUE_TRANSIENT",
-    // ⚠️ STOPGAP (hotfix 2026-08-06, incident 2026-08-05): same three-code
-    // addition as `KNOWN_CREATE_WITH_KEY_CODES` (see the full incident note
-    // there) — the server put `SERVICE_UNREACHABLE` on the wire, the roster
-    // rejected it, and the step rendered UNKNOWN with a Retry control for a
-    // no-answer fault. The two rosters stay SEPARATE (docblock above) and
-    // take the change together because both routes share the classifier that
-    // emits these codes. Copy for all three verified in `WIZARD_ERROR_COPY`.
-    //
-    // ⭐ CLASS fix (derive the roster from the route contract) = `ROSTER-DERIVE-01`
-    // in `TODOS.md` — 153.7 verification W-153.7-2. This line used to point at
-    // "Phase 153 / WIZFORM-02", which is now ticked COMPLETE, leaving the fix
-    // ownerless; and its "do not grow this list further" cannot be obeyed, since
-    // every new classifier verdict must be admitted here in the same commit or
-    // the step renders UNKNOWN with a Retry control. Growing it is no longer
-    // silent: `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`
-    // reds by name when this roster does not admit a classifier-reachable code.
-    // The full reasoning is at the twin line in `ConnectKeyStep.tsx`.
-    "SERVICE_UNREACHABLE",
-    "KEY_MISSING_READ_SCOPE",
-    "KEY_PERMISSION_DENIED",
-    // 153.7-02 / WIZFORM-02-CLASS — the same addition as
-    // `KNOWN_CREATE_WITH_KEY_CODES` (full reasoning there), taken together
-    // because both routes share the classifier that emits it. The two rosters
-    // stay SEPARATE per the docblock above; they agree here because the shared
-    // `classifyKeyValidationError` genuinely returns this code at both catch
-    // arms, not because one was copied from the other. Copy verified present in
-    // `WIZARD_ERROR_COPY`, and it is deliberately NOT recoverable — the three
-    // wire codes behind it are `retryable=False` at their emitters.
-    "SEAM_INTERNAL_FAULT",
-    // 164.5.4-02 / D-03 — the same addition as `KNOWN_CREATE_WITH_KEY_CODES`
-    // (full reasoning there), taken together because both rosters are checked
-    // against the SAME `classifyKeyValidationError` population and
-    // `[153.7 review W-153.7-1]` reds on both by name. The two rosters stay
-    // SEPARATE per the docblock above; they agree here because the shared
-    // classifier genuinely returns this code at both catch arms. Copy verified
-    // present in `WIZARD_ERROR_COPY`, and it is deliberately NOT recoverable —
-    // the wire code behind it is `retryable=False` at its emitter and a Retry
-    // would re-read the identical stored bytes.
-    "KEY_MUST_BE_RECONNECTED",
-    // 167-CREDTRUST / D-05, D-07 — the same addition as
-    // `KNOWN_CREATE_WITH_KEY_CODES` (full reasoning there), taken together
-    // because both rosters are checked against the SAME
-    // `classifyKeyValidationError` population and
-    // `[153.7 review W-153.7-1]` reds on both by name. Copy verified present
-    // in `WIZARD_ERROR_COPY`, and it is deliberately NOT recoverable — the
-    // wire code behind it is `recoverable=False` at its emitter and a Retry
-    // would re-run the identical validate against a terminal a wrong
-    // password may have wedged.
-    "KEY_SIGN_IN_FAILED",
-  ]);
+// `KNOWN_ADD_KEY_CODES` — every `WizardErrorCode` that
+// `POST /api/strategies/composite/add-key` can put on the wire — is derived per
+// route in `src/lib/wizardKeyRosters.ts` (2026-11-15, Phase 215 SC-5), which also
+// carries why the check exists, why this roster is this route's own and never
+// merged with `ConnectKeyStep`'s, and why translate-first codes are not members.
+// The add-key arm below translates FIRST through `recogniseSeamErrorCode`, then
+// consults it.
 
 /**
  * Every `WizardErrorCode` that `POST /api/strategies/composite/set-members` can

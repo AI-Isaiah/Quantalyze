@@ -61,8 +61,9 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from tests.app_factory import build_test_app
 
 
 # --------------------------------------------------------------------------- #
@@ -72,15 +73,14 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture()
 def match_client() -> TestClient:
-    """Bare FastAPI app with ``routers.match`` mounted — no middleware.
+    """Factory app with ``routers.match`` mounted — no middleware.
 
     Cloned from ``tests/test_match_router.py``'s fixture (Rule 11 — match the
     existing idiom rather than inventing a second one).
     """
     from routers.match import router
 
-    app = FastAPI()
-    app.include_router(router)
+    app = build_test_app(router)
     return TestClient(app)
 
 
@@ -497,9 +497,8 @@ def test_s18_simulation_failure_is_permanent_500_keeping_correlation_id(
 
     monkeypatch.setattr(simulator_router, "simulate_add_candidate", _boom)
 
-    app = FastAPI()
+    app = build_test_app(simulator_router.router)
     app.state.limiter = simulator_router.limiter
-    app.include_router(simulator_router.router)
     client = TestClient(app)
 
     correlation_id = "corr-id-s18"
@@ -708,9 +707,8 @@ def test_simulator_per_user_quota_429_advertises_its_window(monkeypatch) -> None
 
     monkeypatch.setattr(simulator_router, "_check_simulator_user_rate", lambda _uid: False)
 
-    app = FastAPI()
+    app = build_test_app(simulator_router.router)
     app.state.limiter = simulator_router.limiter
-    app.include_router(simulator_router.router)
     client = TestClient(app)
 
     resp = client.post(
@@ -733,7 +731,7 @@ def test_simulator_per_user_quota_429_advertises_its_window(monkeypatch) -> None
 
 @pytest.fixture()
 def portfolio_client() -> TestClient:
-    """Bare FastAPI app with ``routers.portfolio`` mounted.
+    """Factory app with ``routers.portfolio`` mounted.
 
     ``app.state.limiter`` is wired and the shared limiter is RESET, because
     PYAPI-03 made every router share ONE ``memory://`` store: without the reset
@@ -747,9 +745,8 @@ def portfolio_client() -> TestClient:
     _reset = getattr(portfolio_mod.limiter, "reset", None)
     if callable(_reset):
         _reset()
-    app = FastAPI()
+    app = build_test_app(portfolio_mod.router)
     app.state.limiter = portfolio_mod.limiter
-    app.include_router(portfolio_mod.router)
     return TestClient(app)
 
 

@@ -15,10 +15,12 @@ Asserted invariants:
      086 L96-99 (FIX 6 - both positional args required).
 
 Test framework: pytest + psycopg (Claude's Discretion per CONTEXT.md - codebase has
-1,695 pytest tests and zero pgTAP fixtures). Tests skip on fork PRs / dev machines
-where TEST_SUPABASE_DB_URL is unset.
+1,695 pytest tests and zero pgTAP fixtures). Phase 215: the module resolves its DSN through the
+`live_db_dsn` fixture (`tests/live_db_dsn.py`), so it runs on the CI python job's private
+local-stack lane via LANE_DB_URL. On a dev machine without the lane values it skips; under
+CI=true without LANE_DB_URL it fails by name.
 
-Test caveat (per FIX 12): the test connects via TEST_SUPABASE_DB_URL on port 5432 where
+Test caveat (per FIX 12): the test connects via the lane DSN as the `postgres` role, where
 `auth.uid()` returns NULL by default. This proves the load-bearing invariant
 ("triggers use NEW.user_id, never auth.uid()"). It does NOT distinguish service-role
 JWT context from anon JWT context - that distinction would require explicit
@@ -27,7 +29,6 @@ JWT context from anon JWT context - that distinction would require explicit
 
 from __future__ import annotations
 
-import os
 import uuid
 from typing import Iterator
 
@@ -35,31 +36,26 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TEST_SUPABASE_DB_URL"),
-    reason="Live test Supabase project not configured (TEST_SUPABASE_DB_URL unset). "
-    "See MEMORY reference_test_supabase_project.md for the qmnijlgmdhviwzwfyzlc setup.",
-)
+from tests.live_db_dsn import connect_live_db
 
 
 @pytest.fixture
-def service_role_conn() -> Iterator[psycopg.Connection]:
-    """Connection using the test-project DSN (auth.uid() returns NULL inside this context).
+def service_role_conn(live_db_dsn: str) -> Iterator[psycopg.Connection]:
+    """Connection to the local-stack lane (auth.uid() returns NULL inside this context).
 
-    DSN must point at the test Supabase project (qmnijlgmdhviwzwfyzlc); never production.
+    The DSN is the lane's loopback DSN, checked by `connect_live_db` before any write; never
+    shared TEST, never production.
 
     Phase 16 fix: assert the load-bearing precondition before yielding. The
     suite below asserts that triggers use NEW.user_id (NOT auth.uid()) by
     verifying the trigger fires under a context where auth.uid() returns
-    NULL. If TEST_SUPABASE_DB_URL ever points at a non-service-role DSN
+    NULL. If the lane DSN ever points at a non-service-role DSN
     (e.g., a future authenticated-context test fixture), the SAME test
     code would still pass via auth.uid() — masking a regression. Sentinel
     here makes the assumption explicit and surfaces the misconfig at
     fixture-setup time, not at assertion time.
     """
-    dsn = os.environ["TEST_SUPABASE_DB_URL"]
-    conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+    conn = connect_live_db(live_db_dsn, autocommit=True, row_factory=dict_row)
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT auth.uid() AS uid")
@@ -93,8 +89,15 @@ def fresh_user_id(service_role_conn: psycopg.Connection) -> Iterator[str]:
         yield uid
     finally:
         with service_role_conn.cursor() as cur:
+            # compute_jobs has no user_id column (it targets a strategy): remove the user's
+            # jobs through their strategies, then the strategies, before the auth user.
+            cur.execute(
+                "DELETE FROM compute_jobs WHERE strategy_id IN "
+                "(SELECT id FROM strategies WHERE user_id = %s)",
+                (uid,),
+            )
+            cur.execute("DELETE FROM strategies WHERE user_id = %s", (uid,))
             cur.execute("DELETE FROM api_keys WHERE user_id = %s", (uid,))
-            cur.execute("DELETE FROM compute_jobs WHERE user_id = %s", (uid,))
             cur.execute("DELETE FROM auth.users WHERE id = %s", (uid,))
 
 
@@ -106,8 +109,8 @@ class TestMigration084FirstApiKeyAddedTrigger:
     ) -> None:
         with service_role_conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO api_keys (user_id, exchange, encrypted_key, dek_encrypted) "
-                "VALUES (%s, 'okx', 'sentinel'::bytea, 'sentinel'::bytea)",
+                "INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted) "
+                "VALUES (%s, 'okx', 'trigger-audit', 'sentinel')",
                 (fresh_user_id,),
             )
             cur.execute(
@@ -128,8 +131,8 @@ class TestMigration084FirstApiKeyAddedTrigger:
         def insert_and_read():
             with service_role_conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO api_keys (user_id, exchange, encrypted_key, dek_encrypted) "
-                    "VALUES (%s, 'okx', 'sentinel'::bytea, 'sentinel'::bytea)",
+                    "INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted) "
+                    "VALUES (%s, 'okx', 'trigger-audit', 'sentinel')",
                     (fresh_user_id,),
                 )
                 cur.execute(
@@ -192,40 +195,38 @@ class TestMigration086ComputeJobsPriority:
         self, service_role_conn: psycopg.Connection, fresh_user_id: str
     ) -> None:
         with service_role_conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO compute_jobs (user_id, kind, priority, status, next_attempt_at) "
-                "VALUES "
-                "(%s, 'analytics', 'normal', 'pending', now()), "
-                "(%s, 'analytics', 'normal', 'pending', now()), "
-                "(%s, 'analytics', 'normal', 'pending', now()), "
-                "(%s, 'analytics', 'low', 'pending', now()), "
-                "(%s, 'analytics', 'low', 'pending', now())",
-                (fresh_user_id,) * 5,
-            )
+            # 2026-11-15 (Phase 215): compute_jobs has no user_id column and kind 'analytics'
+            # is no longer a kind; a job targets a strategy (compute_jobs_kind_target_coherence)
+            # and the claim dedupes per target, so each of the 5 jobs gets its own strategy.
+            strategy_ids = [str(uuid.uuid4()) for _ in range(5)]
+            for sid in strategy_ids:
+                cur.execute(
+                    "INSERT INTO strategies (id, user_id, name, status) "
+                    "VALUES (%s, %s, %s, 'pending_review')",
+                    (sid, fresh_user_id, f"trigger-audit-{sid[:8]}"),
+                )
+            for sid, priority in zip(strategy_ids, ("normal",) * 3 + ("low",) * 2):
+                cur.execute(
+                    "INSERT INTO compute_jobs (strategy_id, kind, priority, status, next_attempt_at) "
+                    "VALUES (%s, 'compute_analytics', %s, 'pending', now())",
+                    (sid, priority),
+                )
             # Phase 19 / H-5 — pass all three args explicitly (the third
             # is BOOLEAN, DEFAULT NULL since migration 104). Passing TRUE
             # mirrors normal worker behavior post-flag-flip; the
             # priority-throttle assertion below is invariant under the
             # third arg.
             #
-            # ⚠️ LATENT, NOT LIVE — this claim is UNSCOPED and would be starved
-            # by the same shared-TEST-DB backlog that `_claim_one` was fixed
-            # for (see test_compute_jobs_fencing.py
-            # `test_claim_one_survives_a_full_batch_of_foreign_backlog_offline`).
-            # With foreign `normal` rows sorting ahead, a batch of 5 fills with
-            # them and `priorities.count("normal") == 3` reads 5.
-            # It has never fired because this whole module skips: `pytestmark`
-            # above needs `TEST_SUPABASE_DB_URL`, which `.github/workflows/
-            # ci.yml` does not set, so it runs NOWHERE today.
-            # ⛔ DELIBERATELY NOT "FIXED" HERE: adding `p_kind_include` means
-            # moving to the 4-arg overload with a TEXT[] bind, and there is no
-            # environment in which that change could be executed to prove it
-            # works. An unverifiable edit to a never-run test is worse than a
-            # documented exposure. Whoever wires `TEST_SUPABASE_DB_URL` owns
-            # scoping this call to `kind = 'analytics'` in the same change.
+            # 2026-11-15 (Phase 215 TESTREACH plan 02): this module now runs on the CI
+            # python job's private lane (LANE_DB_URL) and the claim is SCOPED. The lane holds
+            # only this suite's rows, but a database that also carried foreign `normal`
+            # backlog would fill a batch of 5 with it and read `priorities.count("normal")`
+            # as 5, so the call uses the 5-arg overload and claims ONLY kind 'compute_analytics'
+            # (`p_kind_include TEXT[]`, migrations 20260719073701 and 20260927120000).
+            # Arg 4 binds a Python list as TEXT[]; arg 5 (`p_kind_exclude`) stays NULL.
             cur.execute(
-                "SELECT * FROM claim_compute_jobs_with_priority(%s, %s, %s)",
-                (5, "test-worker-phase-16", True),
+                "SELECT * FROM claim_compute_jobs_with_priority(%s, %s, %s, %s::text[], NULL)",
+                (5, "test-worker-phase-16", True, ["compute_analytics"]),
             )
             claimed = cur.fetchall()
         priorities = [row["priority"] for row in claimed]

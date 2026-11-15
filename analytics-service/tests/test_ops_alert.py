@@ -22,10 +22,10 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from fastapi import FastAPI
 
 from routers import cron as cron_mod
 from services import ops_alert
+from tests.app_factory import build_test_app
 
 # Unmistakably synthetic (see the entropy note in test_prober_cadence_alert.py):
 # unique enough to be visible if it leaks, never "key-shaped".
@@ -133,8 +133,7 @@ async def test_a_cadence_alert_reaches_sentry_and_the_founder_email_route(chan):
     (a) one tagged Sentry capture and (b) one authenticated POST to the
     Next.js route. If either half is dropped the founder is not paged by it.
     """
-    app = FastAPI()
-    app.include_router(cron_mod.router)
+    app = build_test_app(cron_mod.router)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.post(

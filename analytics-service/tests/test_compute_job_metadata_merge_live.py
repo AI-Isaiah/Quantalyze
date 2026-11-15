@@ -33,15 +33,15 @@ comment of a fresh local-stack database (see ``_require_stock_database_comment``
 
 Gating. ``LANE_DB_URL`` is the python CI job's export of the local-stack lane's loopback DSN
 (``.github/workflows/ci.yml``, "Lane handoff"). It is deliberately NOT ``TEST_SUPABASE_DB_URL``,
-which is the shared-TEST secret's name and would un-skip 20+ psycopg modules. Unset locally the
-probe skips; unset with ``CI == "true"`` it FAILS, so a green ``python`` job ran the race. The
+which is the shared-TEST secret's name and would aim writing modules at shared TEST. (Phase 215:
+the guards below now live in ``tests/live_db_dsn.py``, which every psycopg live-DB module shares.)
+Unset locally the probe skips; unset with ``CI == "true"`` it FAILS, so a green ``python`` job ran the race. The
 PostgREST half reads ``SUPABASE_TEST_URL`` / ``SUPABASE_TEST_SERVICE_KEY`` (also the lane's).
 The loopback-guard tests need no database and run with everything unset.
 """
 from __future__ import annotations
 
 import concurrent.futures
-import ipaddress
 import os
 import time
 import uuid
@@ -50,7 +50,6 @@ from urllib.parse import urlparse
 
 import psycopg
 import pytest
-from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 
 try:
@@ -62,95 +61,25 @@ except ImportError:  # pragma: no cover
 
 from services.ingestion.long_fetch import RETRACT_REFRESH_MARKER_RPC
 from services.job_worker import MARK_KEPT_FIGURES_RPC, READ_REFUSAL_KEPT_FIGURES_KEY
+from tests.live_db_dsn import (  # Phase 215: one definition guards every writing module
+    _LANE_DATABASE_COMMENT,
+    _LOOPBACK_HOSTS,
+    _in_ci,
+    _require_lane_server,
+    _require_loopback_dsn,
+    _require_stock_database_comment,
+    _server_addr_is_lane,
+)
 from tests.live_db_transport import wrap_live_db_client
 
 LANE_DB_URL = os.getenv("LANE_DB_URL")
 SUPABASE_URL = os.getenv("SUPABASE_TEST_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_TEST_SERVICE_KEY")
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
-# What a fresh local-stack database answers to ``shobj_description`` (measured on a booted lane).
-# PROD and TEST each carry a hand-set comment naming themselves in its place.
-_LANE_DATABASE_COMMENT = "default administrative connection database"
 _LOCK_WAIT_BUDGET_S = 10.0
 _NEW_CORRELATION_ID = "corr-new"
 _OLD_MARKER = "ledger-refresh"
 _MEMBER_PROGRESS = {"done": 2, "total": 5}
-
-
-def _in_ci() -> bool:
-    return os.getenv("CI", "").lower() == "true"
-
-
-# --------------------------------------------------------------------------------------
-# Loopback guard (T-191-25): this probe writes, and a DSN env var is a thing other jobs point
-# at shared TEST. No database is needed to run the guard itself.
-# --------------------------------------------------------------------------------------
-def _require_loopback_dsn(dsn: str | None) -> None:
-    """``pytest.fail`` unless every host (and ``hostaddr``) in ``dsn`` is a loopback spelling.
-
-    A DSN naming no host is refused too: libpq would fall back to a unix socket or to
-    ``PGHOST`` from the environment, and the probe must write only where the DSN says."""
-    try:
-        params = conninfo_to_dict(dsn or "")
-    except psycopg.ProgrammingError:
-        params = {}
-    hosts = [h.strip() for h in str(params.get("host", "")).split(",")]
-    addrs = [a.strip() for a in str(params.get("hostaddr", "")).split(",") if a.strip()]
-    bad = [h for h in hosts if h not in _LOOPBACK_HOSTS] + [
-        a for a in addrs if a not in _LOOPBACK_HOSTS
-    ]
-    if not params.get("host") or bad:
-        pytest.fail(
-            "test_compute_job_metadata_merge_live refuses to write: LANE_DB_URL does not name "
-            f"only loopback hosts (host={params.get('host')!r}, hostaddr={params.get('hostaddr')!r}; "
-            f"allowed {sorted(_LOOPBACK_HOSTS)}). Run it against the local-stack lane only "
-            "(scripts/local-stack/run.sh up).",
-            pytrace=False,
-        )
-
-
-def _server_addr_is_lane(addr: Any) -> bool:
-    """True for the addresses a lane's server can report for ``inet_server_addr()``: NULL (unix
-    socket), loopback, or a private address. The Supabase CLI publishes Postgres through a
-    docker port mapping, so a connection to 127.0.0.1 reports the container's bridge address
-    (measured: a 172.x private address), never loopback. A public address is a remote server."""
-    if addr is None:
-        return True
-    ip = ipaddress.ip_address(str(addr))
-    return ip.is_loopback or ip.is_private
-
-
-def _require_stock_database_comment(conn: Any) -> None:
-    """``pytest.fail`` unless the connected database still carries the stock comment.
-
-    This is the repo's database-identity query. PROD and TEST each overwrite the comment with one
-    naming themselves, so either is refused, as is NULL or any other value. A hosted project
-    reached through a localhost tunnel passes the host and address checks and is stopped here."""
-    comment = conn.execute(
-        "SELECT shobj_description(oid, 'pg_database') FROM pg_database "
-        "WHERE datname = current_database()"
-    ).fetchone()[0]
-    if comment != _LANE_DATABASE_COMMENT:
-        pytest.fail(
-            "test_compute_job_metadata_merge_live refuses to write: the connected database's "
-            f"comment is {comment!r}, not the stock {_LANE_DATABASE_COMMENT!r} of a local-stack "
-            "lane.",
-            pytrace=False,
-        )
-
-
-def _require_lane_server(conn: psycopg.Connection) -> None:
-    """Second layer after the DSN host check: the server actually answering must be local, and
-    the database must be the lane's own (stock comment)."""
-    addr = conn.execute("SELECT inet_server_addr()").fetchone()[0]  # type: ignore[index]
-    if not _server_addr_is_lane(addr):
-        pytest.fail(
-            f"test_compute_job_metadata_merge_live refuses to write: the connected server "
-            f"reports {addr} (not loopback or a private lane address).",
-            pytrace=False,
-        )
-    _require_stock_database_comment(conn)
 
 
 def _dsn() -> str:

@@ -28,7 +28,6 @@ from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, NamedTuple, TypedDict
 
-from fastapi import HTTPException
 from postgrest.exceptions import APIError
 from supabase import Client
 
@@ -55,6 +54,13 @@ from services.allocated_capital import (
     parse_returns_denominator_config,
 )
 from services.dispersion import dispersion_is_residue
+from services.job_failure import (  # noqa: F401 - WorkerJobFailure is re-exported
+    CsvComputationFailed,
+    CsvInsufficientHistory,
+    CsvMalformedDenominatorConfig,
+    CsvStrategyNotFound,
+    WorkerJobFailure,
+)
 from services.transforms import downsample_series
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
@@ -1547,7 +1553,7 @@ async def run_csv_strategy_analytics(
         .execute()
     )
     if not strategy_result.data:
-        raise HTTPException(status_code=404, detail="Strategy not found")
+        raise CsvStrategyNotFound()
 
     # MEDIUM-1 (v1.9, DQ-03): the broker-vs-user-CSV distinguisher for the
     # interior-break NaN reinstatement below. A BROKER-sourced strategy carries an
@@ -1690,7 +1696,7 @@ async def run_csv_strategy_analytics(
         ``asyncio.wait_for(handler(job), timeout=...)`` (``services/
         job_worker.py``). When it expires it cancels this coroutine with
         ``CancelledError`` — a **BaseException**. The failure arms below are
-        ``except Exception``/``except HTTPException``, so NONE of them see it and
+        ``except Exception``/``except WorkerJobFailure``, so NONE of them see it and
         NONE of the five guarded stamps fire. The run therefore dies with
         ``_mark_computing``'s unconditional ``computation_status='computing'``
         still on the row.
@@ -1967,7 +1973,7 @@ async def run_csv_strategy_analytics(
                         where="analytics_runner._mark_failed",
                     )
                 await db_execute(_mark_failed)
-                raise HTTPException(status_code=400, detail="Insufficient CSV history")
+                raise CsvInsufficientHistory()
 
             # Local import keeps the cycle risk low (analytics_runner is
             # imported at worker startup; pandas is already pulled in via
@@ -2541,7 +2547,11 @@ async def run_csv_strategy_analytics(
 
             return {"status": "complete", "strategy_id": strategy_id}
 
-        except HTTPException:
+        except WorkerJobFailure:
+            # A deliberate, already-dispositioned worker failure (today only the
+            # insufficient-history refusal, which is PERMANENT). It must pass straight
+            # through: the catch-all below would re-wrap it as CsvComputationFailed
+            # (`unknown`), and the queue would retry a fault that can never clear.
             raise
         except PaginatedSelectTruncated as trunc:
             # WR-03 (19.1-REVIEW) + audit-#52 fail-loud contract: mirror the
@@ -2621,7 +2631,7 @@ async def run_csv_strategy_analytics(
             # (run_derive_broker_dailies_job stamps failed + permanent): the generic
             # `except Exception` below would downgrade this to a 500 → classify_exception
             # 'unknown' → indefinite transient retry, losing the reason. Stamp failed and
-            # raise a 422 HTTPException (4xx ∈ 400..499 → classify_exception PERMANENT).
+            # raise CsvMalformedDenominatorConfig (classify_exception PERMANENT, text "422: ...").
             logger.error(
                 "csv analytics: malformed returns_denominator_config for %s: %s",
                 strategy_id, cfg_exc,
@@ -2665,9 +2675,7 @@ async def run_csv_strategy_analytics(
                     "csv analytics: could not mark strategy %s config-failed: %s",
                     strategy_id, mark_exc,
                 )
-            raise HTTPException(
-                status_code=422, detail="Malformed returns_denominator_config"
-            ) from cfg_exc
+            raise CsvMalformedDenominatorConfig() from cfg_exc
         except Exception as exc:  # noqa: BLE001
             logger.error("csv analytics failed for %s: %s", strategy_id, exc)
 
@@ -2677,7 +2685,7 @@ async def run_csv_strategy_analytics(
             # generic "missing data" copy instead of "CSV upload failed".
             #
             # mig 20260707120000: READ-MODIFY-WRITE — do NOT wipe the column. This
-            # path raises HTTP 500 → the job goes to failed_retry and the CSV run is
+            # path raises CsvComputationFailed ("500: ...", unknown) → the job goes to failed_retry and the CSV run is
             # re-dispatched (derive is NOT re-run). A wholesale {csv_source:True}
             # write here destroyed any NAV_TWR_GUARD_KEYS that derive_broker_dailies
             # pre-stamped, so attempt 2's _read_existing_flags found none →
@@ -2829,7 +2837,7 @@ async def run_csv_strategy_analytics(
                         heal_exc,
                     )
 
-            raise HTTPException(status_code=500, detail="CSV analytics computation failed")
+            raise CsvComputationFailed()
     except asyncio.CancelledError:
         # F3 — FIRST, and it must stay above the arms below to be readable as
         # what it is: the budget-timeout path. CancelledError is a BaseException,

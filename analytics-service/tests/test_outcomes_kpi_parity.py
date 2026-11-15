@@ -2,21 +2,16 @@
 
 Asserts that Phase 4 `feedback_engine._success_value` produces per-row
 success values and most-mature deltas that match the TypeScript side's
-`tests/fixtures/outcomes-kpi-parity.json` expected payload. Running this
-test gated on HAS_PY_ENV=1 prevents drift between Phase 4 (Python) and
-Phase 5 (TypeScript) — any change to Phase 4 filter rules must update
+`tests/fixtures/outcomes-kpi-parity.json` expected payload. This module
+runs in the CI `python` job on every PR (Phase 215 TESTREACH, 2026-11-15) and
+prevents drift between the Phase 4 (Python) success-value rule and the Phase 5
+(TypeScript) fixture — any change to Phase 4 filter rules must update
 BOTH the fixture AND this test in the same PR.
 """
 import json
-import os
 import pathlib
 
 import pytest
-
-pytestmark = pytest.mark.skipif(
-    os.environ.get("HAS_PY_ENV") != "1",
-    reason="Python parity test gated on HAS_PY_ENV=1 (Phase 5 D-21 / Voice-D2 option a)",
-)
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]

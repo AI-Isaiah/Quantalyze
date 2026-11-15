@@ -58,8 +58,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
-
+from services.job_failure import CsvInsufficientHistory
 from services.job_worker import (
     DispatchOutcome,
     run_compute_analytics_from_csv_job,
@@ -417,7 +416,7 @@ class TestTwoHopRefreshOverAPublishedRow:
         # Hop 2: the real handler, with the real job the chain edge produced.
         # ONE daily-return row drives the `Insufficient CSV history` arm.
         with patch("services.analytics_runner.get_supabase", return_value=sb):
-            with pytest.raises(HTTPException):
+            with pytest.raises(CsvInsufficientHistory):
                 await run_compute_analytics_from_csv_job(
                     {
                         "id": "job-2",

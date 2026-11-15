@@ -819,14 +819,14 @@ class TestCR03RunnerGuard:
     async def test_unmarked_insufficient_history_is_destructive(self) -> None:
         """CONTROL."""
         from services.analytics_runner import run_csv_strategy_analytics
-        from fastapi import HTTPException
+        from services.job_failure import CsvInsufficientHistory
 
         sb = _runner_supabase(
             [{"date": "2024-01-01", "daily_return": 0.005}],
             existing_status="complete_with_warnings",
         )
         with patch("services.analytics_runner.get_supabase", return_value=sb):
-            with pytest.raises(HTTPException):
+            with pytest.raises(CsvInsufficientHistory):
                 await run_csv_strategy_analytics("s1")
 
         payload = self._terminal(sb)
@@ -836,14 +836,14 @@ class TestCR03RunnerGuard:
     @pytest.mark.asyncio
     async def test_marked_insufficient_history_preserves_publish_state(self) -> None:
         from services.analytics_runner import run_csv_strategy_analytics
-        from fastapi import HTTPException
+        from services.job_failure import CsvInsufficientHistory
 
         sb = _runner_supabase(
             [{"date": "2024-01-01", "daily_return": 0.005}],
             existing_status="complete_with_warnings",
         )
         with patch("services.analytics_runner.get_supabase", return_value=sb):
-            with pytest.raises(HTTPException):
+            with pytest.raises(CsvInsufficientHistory):
                 await run_csv_strategy_analytics(
                     "s1",
                     refresh_source=_MARKER,
@@ -887,14 +887,14 @@ class TestCR03RunnerGuard:
         ``_mark_computing`` (and the SQL bridge's branch (a)) leaves behind.
         """
         from services.analytics_runner import run_csv_strategy_analytics
-        from fastapi import HTTPException
+        from services.job_failure import CsvInsufficientHistory
 
         sb = _runner_supabase(
             [{"date": "2024-01-01", "daily_return": 0.005}],
             existing_status="computing",
         )
         with patch("services.analytics_runner.get_supabase", return_value=sb):
-            with pytest.raises(HTTPException):
+            with pytest.raises(CsvInsufficientHistory):
                 await run_csv_strategy_analytics(
                     "s1", refresh_source=_MARKER, refresh_publish_status=handed_in
                 )
@@ -914,7 +914,7 @@ class TestCR03RunnerGuard:
         """The catch-all arm heal-DELETEs the cash_settlement series row. On a
         protected refresh nothing downstream can put that back."""
         from services.analytics_runner import run_csv_strategy_analytics
-        from fastapi import HTTPException
+        from services.job_failure import CsvComputationFailed
 
         rows = [
             {"date": "2024-01-01", "daily_return": 0.005},
@@ -929,7 +929,7 @@ class TestCR03RunnerGuard:
                        new=AsyncMock(return_value=(None, True))), \
                  patch("services.basis_series.derive_basis_series",
                        side_effect=RuntimeError("metrics blew up")):
-                with pytest.raises(HTTPException):
+                with pytest.raises(CsvComputationFailed):
                     await run_csv_strategy_analytics(
                         "s1",
                         refresh_source=marker,

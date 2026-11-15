@@ -449,16 +449,15 @@ async def test_s07_encrypt_key_missing_kek_is_permanent_500(exchange_router):
 
 @pytest.fixture
 def internal_client(monkeypatch):
-    from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     from routers.internal import router, _reset_kek_alert, _reset_rate_limit
+    from tests.app_factory import build_test_app
 
     monkeypatch.setenv("INTERNAL_API_TOKEN", "test-token")
     _reset_rate_limit()
     _reset_kek_alert()
-    app = FastAPI()
-    app.include_router(router)
+    app = build_test_app(router)
     return TestClient(app)
 
 

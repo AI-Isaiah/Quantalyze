@@ -47,10 +47,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
-from fastapi import HTTPException
 from postgrest.exceptions import APIError
 
 from services.analytics_runner import PaginatedSelectTruncated
+from services.job_failure import (
+    CsvComputationFailed,
+    CsvInsufficientHistory,
+    CsvMalformedDenominatorConfig,
+)
 from services.job_worker import (
     DispatchOutcome,
     run_derive_broker_dailies_job,
@@ -136,9 +140,9 @@ async def _drive_insufficient_history() -> _Outcome:
 
     sb = _make_supabase_mock([{"date": "2024-01-01", "daily_return": 0.005}])
     with patch("services.analytics_runner.get_supabase", return_value=sb):
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(CsvInsufficientHistory) as exc:
             await run_csv_strategy_analytics("strat-insufficient")
-    assert exc.value.status_code == 400
+    assert exc.value.error_kind == "permanent"
     return _Outcome(
         failed_payloads=_failed(_mock_upserts(sb)),
         logger_name=_RUNNER_LOGGER,
@@ -180,9 +184,9 @@ async def _drive_malformed_config() -> _Outcome:
         "services.analytics_runner.get_benchmark_returns",
         new=AsyncMock(return_value=(None, True)),
     ):
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(CsvMalformedDenominatorConfig) as exc:
             await run_csv_strategy_analytics("strat-config")
-    assert exc.value.status_code == 422
+    assert exc.value.error_kind == "permanent"
     return _Outcome(
         failed_payloads=_failed(_mock_upserts(sb)),
         logger_name=_RUNNER_LOGGER,
@@ -208,9 +212,9 @@ async def _drive_unrecoverable() -> _Outcome:
         "services.basis_series.compute_all_metrics",
         side_effect=RuntimeError("compute_all_metrics blew up"),
     ):
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(CsvComputationFailed) as exc:
             await run_csv_strategy_analytics("strat-unrecoverable")
-    assert exc.value.status_code == 500
+    assert exc.value.error_kind == "unknown"
     return _Outcome(
         failed_payloads=_failed(_mock_upserts(sb)),
         logger_name=_RUNNER_LOGGER,
@@ -251,9 +255,9 @@ async def _drive_unrecoverable_reissue() -> _Outcome:
         "services.basis_series.compute_all_metrics",
         side_effect=RuntimeError("compute_all_metrics blew up"),
     ):
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(CsvComputationFailed) as exc:
             await run_csv_strategy_analytics("strat-reissue")
-    assert exc.value.status_code == 500
+    assert exc.value.error_kind == "unknown"
     # The re-issue is the only failed stamp that landed; it carries no marker
     # columns by design (see the key-set note in analytics_runner.py).
     assert len(landed) == 1 and "computing_started_at" not in landed[0]

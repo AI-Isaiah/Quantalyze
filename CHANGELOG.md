@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.133.49.0] - 2026-11-16 — Phase 215 TESTREACH: every test that guards money math or error contracts actually runs, and test apps match production
+
+A CI-only phase with no product behaviour change. Tests that ran in no environment now run in CI or are listed with a reason. Test apps are built with the production error handlers. The CSV worker no longer raises an HTTP exception, and the two key-step code rosters are derived per route. No migration (SC-8). Verification passed 9/9.
+
+### Added
+- **One production installer for the app-global error handlers.** The 422, 429 and venue-transient 424 handlers moved unchanged from `main.py` into `services/app_error_handlers.py`, with `install_app_exception_handlers(app)`. `main.py` calls it and re-exports the handler names. The bodies are the same code, so every response is byte-identical.
+- **A test app factory.** `tests/app_factory.py` `build_test_app` installs the same handlers. All 21 test modules that mounted a bare `FastAPI()` (25 construction sites) now use it. An AST scan fails on any new `FastAPI(` outside the factory and on any use of slowapi's default 429 handler, with empty allowlists and a vacuity floor.
+- **A saturation alert on the shared anonymous teaser bucket.** When `/process-key`'s anonymous bucket refuses a request, the 429 handler logs a warning and sends one Sentry event per limit window per process (fingerprint `anon-bucket-saturated`). The event runs after the 429 is built and cannot change it. The handler adds no IP, header, claim or correlation id. A failure inside the alert is logged, never silent. `anon_bucket_key(scope)` is now the one spelling of the bucket key; the string and the 30/hour limit are unchanged.
+- **Worker domain exceptions for the CSV runner.** `services/job_failure.py` adds `WorkerJobFailure` and four subclasses for the four former `HTTPException` raises in `run_csv_strategy_analytics`. `classify_exception` maps them to the same `(ErrorKind, message)` as before (404 unknown, 400 permanent, 422 permanent with its cause suffix, 500 unknown), so persisted job failures are unchanged. The runner's re-raise arm is now `except WorkerJobFailure`, so the permanent 400 is never re-wrapped as a retried 500.
+- **Per-route derived key-step rosters.** `src/lib/wizardKeyRosters.ts` builds `KNOWN_CREATE_WITH_KEY_CODES` (38) and `KNOWN_ADD_KEY_CODES` (33) as two separate Sets. Classifier codes derive live from `VENUE_WIRE_CODE_TO_VERDICT`; the cascade and per-route own codes are typed once and pinned both ways to scans of their sources. `ConnectKeyStep.tsx` and `MultiKeyConnectStep.tsx` import them, and about 520 lines of hand-typed rows are gone. A frozen pin proves both rosters keep exactly their previous members.
+- **One lane helper for live-DB tests.** `tests/live_db_dsn.py` reads `LANE_DB_URL` only. Under `CI=true` a missing lane fails by name, never skips. Before any write it requires a loopback host, a local server address and the stock database comment, so a test can never reach shared TEST or PROD. It never reads the shared-TEST DSN.
+
+### Changed
+- **24 live-DB cases in 7 modules now run on the CI lane** instead of skipping: trigger RLS audit, CSV dual-axis, per-key RLS, persist, resend correlation RLS, sync-trades fills and the trades `is_fill` RLS case. Six of them had never run and were stale against the current schema; they were repaired against it. The trigger audit's claim is scoped to its kind.
+- **The KPI parity oracle runs in every pytest run.** The `HAS_PY_ENV` gate is gone; the five money-math parity cases pass.
+- **The binance replay cases are retired** with a dated reason: no binance cassette can be recorded (CI runners get a 451 and there is no live test key). okx and bybit keep the replay shape covered, and a missing cassette now fails instead of skipping.
+- **24 simulator router tests now run in CI.** Their `CI=true` skip named a FastAPI version CI no longer uses; they pass on the pinned `fastapi==0.161.1`. This includes the 404 "Portfolio not found" ownership check.
+- **The drain and transition test modules fail instead of skipping** when the lane has no profile row.
+- `ci.yml` comments in the `python` job are corrected; no command, export or step changed.
+
+### Tests
+- `test_app_factory_parity.py`: handler identity with `main.app`, a canary 422 that never echoes a secret, the production 429, and the regrowth scans.
+- `test_process_key_scope_rejection_statuses.py` pins every arm of `_scope_rejected` at today's status (founder decision 2026-11-15, Option A: pin, change nothing). The five permanent codes and the `VALIDATION_UNEXPECTED` fallback answer 403 with `recoverable` false. The CSV rule family answers 424 with `recoverable` true. The validate-only path answers 200 with `ok` false. A loose `in (403, 424)` assertion is now `== 424`.
+- `test_csv_rule_family_oracle.py` enumerates the CSV `first_rule.upper()` code family by executing the validator, fails on a check that does not map into the family, and fails on a non-literal rule value. `seam-venue-vocabulary.invariant.test.ts` gains the sibling `CSV_RULE_CODE_FAMILY` scan: every member needs a `CSV_RULE_LABELS` key or a reasoned exemption.
+- `test_job_failure.py` pins old-versus-new classification equivalence for the four raise sites with hand-typed literals. The raw-5xx census moves from 12 sites to 11 and 9 triples to 8.
+- `test_anon_bucket_alert.py` covers the alert, its dedupe window, silence on tenant and ceiling refusals, a raising capture, and one case on the real sentry-sdk with an in-memory transport.
+- `test_live_db_dsn.py` and `test_live_db_reach_roster.py`: the resolver's skip and fail branches, the xdist sentinel, a `CANNOT_RUN_ON_LANE` roster of 9 cases with reasons, an AST scan that no test reads the shared-TEST DSN, and a scan that every environment-gated skip under `tests/` is listed with a reason. `critical-regressions.test.ts` gains a positive pin that the `python` job exports `LANE_DB_URL`.
+- `wizardKeyRosters.test.ts` and the re-pointed wizard and seam guards; the owner test that read `TODOS.md` is replaced by an invariant that each step imports its roster.
+- Every fix has a revert-RED proof, recorded in the phase summaries.
+
+### Notes
+- **No product behaviour change.** Every 422, 429 and 424 status, body and header, every persisted job failure, and both roster member sets are unchanged. Review took three rounds (seven MEDIUM findings fixed, final status clean), and the security audit closed 25 of 25 threats.
+- **Follow-ups outside this PR.** (1) A malformed CSV is still told a retry can succeed (424, `recoverable` true); that fix is its own phase, booked after merge. (2) The anonymous-bucket alert pages nobody until someone creates a Sentry issue-alert rule on the `anon_bucket_saturated` tag.
+- **Measured, not changed.** About 27 lane-gated cases appear not to run in CI and are not explained by this phase. `test_compute_similarity_sql.py::test_immutable_parallel_safe_flags` still skips on the lane (listed in the roster). `routers/portfolio.py` still raises `HTTPException` on a worker path, where the cron reads the status codes. `scripts/repro-key-flow.sh` still has stale cassette-count prose.
+- The CI `python` job's skip count should drop against the 68 baseline at `3f29f1539`, and `test_xdist_group_is_real.py` runs only in CI.
+
+### Removed
+- TODOS entries closed by this phase: `D-161-01` (the CSV `first_rule.upper()` code family), `ROSTER-DERIVE-01` (hand-typed key-step rosters), and the five formerly homeless Phase 140.1 findings: "Tests that run in NO environment", the bare-`FastAPI()` modules, the 403-vs-422 split, "Worker raises an HTTP exception" and the anonymous teaser bucket saturation alert.
+
 ## [0.133.48.1] - 2026-11-14 — records: close 212 WIZTRUTH, 213 KEYFLOW, 214 FRESHTRUTH; baseline re-dump
 
 Records PR for three phases whose code is already on `main`: 212 as #1274 (v0.133.46.0), 213 as #1273 (v0.133.47.0) and 214 as #1275 (v0.133.48.0). It carries their phase artifacts, the founder's 2026-11-14 answers, the `phase complete` runs, the Phase 214 SC-4 PROD reading, and the baseline re-dump that turns `main`'s `sql-gate-lint` green again. There is no source, test or script change.

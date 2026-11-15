@@ -71,8 +71,6 @@ from typing import Any
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
 
 # Import every router that registers a limit, so `limiter._route_limits` is
 # fully populated no matter which tests pytest collected first.
@@ -83,6 +81,7 @@ import routers.optimizer  # noqa: F401
 import routers.portfolio  # noqa: F401
 import routers.simulator  # noqa: F401
 from services import rate_limit as rl
+from tests.app_factory import build_test_app
 
 import pytest as _pytest
 
@@ -703,10 +702,8 @@ class TestClassClosure:
 
         monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda _aid: None)
 
-        app = FastAPI()
+        app = build_test_app(match_mod.router)
         app.state.limiter = rl.limiter
-        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-        app.include_router(match_mod.router)
 
         # NOTE (ship-review 2026-08-18): a unique X-Service-Key does NOT isolate —
 # the claimless arm of tenant_or_platform_key keys on request PATH only
@@ -813,9 +810,8 @@ def _probe_app() -> FastAPI:
     dedicated app is the only way to drive the default through real requests
     without mutating the production app object.
     """
-    app = FastAPI()
+    app = build_test_app()
     app.state.limiter = rl.limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.add_api_route(
         _DEFAULT_KEY_PROBE_PATH, _default_key_probe_limited, methods=["GET"]
     )
@@ -1028,10 +1024,8 @@ def _simulator_app() -> FastAPI:
     """
     import routers.simulator as simulator_mod
 
-    app = FastAPI()
+    app = build_test_app(simulator_mod.router)
     app.state.limiter = rl.limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-    app.include_router(simulator_mod.router)
     return app
 
 
@@ -1052,16 +1046,25 @@ def _simulator_call(client: TestClient, claim: str) -> Any:
 def _assert_not_the_in_handler_429(resp: Any) -> None:
     """The 429 under test must be slowapi's, not `_check_simulator_user_rate`'s.
 
-    The in-handler quota answers through `services.error_contract.service_error`
-    with `code: "RATE_LIMITED"` nested under `detail`; slowapi's
-    `_rate_limit_exceeded_handler` answers a flat "Rate limit exceeded" body.
-    Naming the discriminator here means a future change that made the in-handler
+    Both refusals carry the code ``RATE_LIMITED`` now, so the text cannot tell
+    them apart: production's slowapi handler (installed by the test app factory)
+    answers a TOP-LEVEL ``code`` with ``detail`` a STRING, while the in-handler
+    quota answers through `services.error_contract.service_error` with the
+    envelope NESTED under ``detail`` (a dict carrying ``code``). The decorator
+    shape is asserted positively, so a future change that made the in-handler
     check fire first would redden rather than quietly re-point this gate at the
     wrong mechanism.
     """
-    assert "RATE_LIMITED" not in resp.text, (
+    body = resp.json()
+    assert not isinstance(body.get("detail"), dict), (
         "the 429 came from the IN-HANDLER per-user quota "
         f"(`_check_simulator_user_rate`), not from the slowapi decorator: {resp.text[:300]}"
+    )
+    assert body.get("code") == "RATE_LIMITED" and isinstance(
+        body.get("detail"), str
+    ), (
+        "the 429 does not carry the slowapi decorator's shape (top-level "
+        f"`code` RATE_LIMITED, `detail` a string): {resp.text[:300]}"
     )
 
 

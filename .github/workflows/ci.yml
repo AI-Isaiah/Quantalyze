@@ -5821,13 +5821,18 @@ jobs:
           # ⛔ The lane DSN is NOT exported as TEST_SUPABASE_DB_URL: that is the
           # shared-TEST secret's name, and it would un-skip 20+ psycopg modules
           # this phase does not scope in (RESEARCH Anti-Patterns).
+          # 2026-11-15 (Phase 215): the 7 psycopg modules that read that name now
+          # resolve LANE_DB_URL through tests/live_db_dsn.py and DO run on the lane.
+          # The shared-TEST name stays unexported: they would be aimed at shared TEST.
           printf 'SUPABASE_TEST_URL=%s\n' "${api_url}" >> "${GITHUB_ENV}"
           printf 'SUPABASE_TEST_SERVICE_KEY=%s\n' "${service_key}" >> "${GITHUB_ENV}"
           # Phase 191 D-09 (2026-11-05): the metadata-merge probe
           # (tests/test_compute_job_metadata_merge_live.py) needs a RAW DSN, because it
           # holds a row lock on one psycopg connection while a second one blocks on it,
-          # which PostgREST cannot express. The name is LANE_DB_URL so the psycopg modules
-          # gated on TEST_SUPABASE_DB_URL stay skipped. The DSN is the loopback one
+          # which PostgREST cannot express. The name is LANE_DB_URL, not the shared-TEST name.
+          # 2026-11-15 (Phase 215): the psycopg modules once gated on TEST_SUPABASE_DB_URL
+          # now read LANE_DB_URL through the test helper and run on the lane (they stayed
+          # skipped before). The DSN is the loopback one
           # `--assert-local-handoff` above already refused when it was not, and the probe
           # re-checks the host and the connected server before it writes. The probe FAILS
           # (never skips) when this variable is absent under CI=true.
