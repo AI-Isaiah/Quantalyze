@@ -14,7 +14,7 @@ import pytest
 from tests import conftest
 from tests.live_db_dsn import SHARED_TEST_DSN_VAR, resolve_lane_postgrest, resolve_live_db_dsn
 
-_LANE_DSN = "postgresql://postgres:postgres@127.0.0.1:54422/postgres"
+_LANE_DSN = "postgresql://postgres@127.0.0.1:54422/postgres"
 _NON_LOOPBACK_DSN = "postgresql://postgres@db.abcdefghijklmnop.supabase.co:5432/postgres"
 # A dummy value: the helper must never connect to, or even read, the shared-TEST variable.
 _SHARED_TEST_DUMMY = "postgresql://postgres@shared-test.invalid:5432/postgres"
