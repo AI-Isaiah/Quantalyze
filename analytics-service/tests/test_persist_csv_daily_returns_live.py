@@ -1,8 +1,8 @@
 """Phase 19.1 / Plan 05 — Live-DB tests for the csv_daily_returns table.
 
-Gated on TEST_SUPABASE_DB_URL. See MEMORY reference_test_supabase_project.md
-for qmnijlgmdhviwzwfyzlc setup. CI without secrets skips cleanly with a verbose
-``reason=`` (Pitfall 4: silent skips are Rule 12 violations).
+Phase 215: resolves its DSN through the ``live_db_dsn`` fixture (``tests/live_db_dsn.py``), so it
+runs on the CI python job's local-stack lane via LANE_DB_URL, skips on a dev machine without the
+lane values, and FAILS under CI=true without them (silent skips are Rule 12 violations).
 
 ⚠️ Phase 145 (deferred-items.md #4): the ``persist_csv_daily_returns`` RPC
 this file was named for was DROPped by migration 20260819120000 — its guards
@@ -36,68 +36,41 @@ cannot express the persisted-table + worker contract these three encode):
      does not leak a Python traceback to the user-visible computation_error
      field and does not poison subsequent jobs.
 
-Tests 9-11 additionally require SUPABASE_URL + SUPABASE_SERVICE_KEY (the
-analytics-runner uses the Supabase Python client via get_supabase()) — they
-skip independently if those are unset, so a partial credential set still
-exercises Tests 1-8.
+Tests 9-11 additionally need a PostgREST client for the analytics runner (it builds its client
+through ``get_supabase()``, which reads SUPABASE_URL + SUPABASE_SERVICE_KEY). Those names are NOT
+exported: the tests build a lane client from SUPABASE_TEST_URL / SUPABASE_TEST_SERVICE_KEY (which the
+python job exports) and patch ``services.analytics_runner.get_supabase`` to return it. Under CI=true
+without those variables they FAIL; locally they skip.
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 import uuid
 from typing import Iterator
+from unittest.mock import AsyncMock
 
 import psycopg
 import pytest
 from psycopg.rows import dict_row
+from supabase import create_client
 
-
-# ---------------------------------------------------------------------------
-# Module-level skip gate (Tests 1-11 all need a live psycopg DSN).
-#
-# Verbose ``reason=`` per Pitfall 4 — silent skips violate Rule 12 (fail loud).
-# A reader of the CI output should be able to tell whether the suite was
-# intentionally skipped (no DSN configured) versus accidentally never run.
-# ---------------------------------------------------------------------------
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TEST_SUPABASE_DB_URL"),
-    reason="Live test Supabase project not configured (TEST_SUPABASE_DB_URL unset). "
-    "See MEMORY reference_test_supabase_project.md for the qmnijlgmdhviwzwfyzlc setup. "
-    "Tests 1-11 cover PR #272 hardening invariants + W3 edge cases.",
-)
-
-
-# Worker-pipeline tests (9-11) additionally need the supabase-py client env
-# the analytics-runner uses (get_supabase() reads SUPABASE_URL + SUPABASE_SERVICE_KEY).
-_WORKER_PIPELINE_REASON = (
-    "SUPABASE_URL or SUPABASE_SERVICE_KEY unset — analytics_runner.get_supabase() "
-    "needs both to talk to qmnijlgmdhviwzwfyzlc. Tests 9-11 invoke the runner "
-    "directly to assert terminal-state contracts (W3 edge cases); without both "
-    "env vars the runner cannot construct its Supabase client."
-)
-
-
-def _worker_pipeline_env_present() -> bool:
-    return bool(os.environ.get("SUPABASE_URL")) and bool(
-        os.environ.get("SUPABASE_SERVICE_KEY")
-    )
+from services.db import _force_http1
+from tests.live_db_dsn import connect_live_db, resolve_lane_postgrest
 
 
 # ---------------------------------------------------------------------------
 # Connection fixtures
 # ---------------------------------------------------------------------------
 @pytest.fixture
-def service_role_conn() -> Iterator[psycopg.Connection]:
-    """psycopg connection with autocommit=True against the TEST Supabase DSN.
+def service_role_conn(live_db_dsn: str) -> Iterator[psycopg.Connection]:
+    """psycopg connection with autocommit=True against the local-stack lane.
 
-    DSN must point at qmnijlgmdhviwzwfyzlc; never production. Mirrors the
-    canonical pattern in test_resend_correlation_rls.py.
+    ``connect_live_db`` refuses anything but the lane before returning; never TEST, never
+    production. Mirrors the canonical pattern in test_resend_correlation_rls.py.
     """
-    dsn = os.environ["TEST_SUPABASE_DB_URL"]
-    conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+    conn = connect_live_db(live_db_dsn, autocommit=True, row_factory=dict_row)
     try:
         yield conn
     finally:
@@ -244,7 +217,7 @@ def _invoke_csv_runner(strategy_id: str) -> None:
     """
     from services.analytics_runner import run_csv_strategy_analytics
 
-    # The runner raises HTTPException on the insufficient-history branch
+    # The runner raises CsvInsufficientHistory (a WorkerJobFailure) on the insufficient-history branch
     # (still writes computation_status='failed' first). Other failures
     # raise after _mark_unrecoverable lands. Either way, the terminal
     # row is visible to the polling helper.
@@ -320,8 +293,13 @@ class TestNoRedundantIndex:
     ``(api_key_id, date)`` non-partial unique index for the per-key axis.
 
     The "no redundant index" intent is preserved: the expected set is EXACTLY
-    the three indexes the dual-axis design needs — the surrogate PK and the two
-    per-axis unique arbiters — with no extra/duplicate index. A future migration
+    the four indexes the design needs — the surrogate PK, the two per-axis unique
+    arbiters and the Phase 36 partial ``(allocator_id, date)`` read index — with no
+    extra/duplicate index.
+
+    2026-11-15 (Phase 215): the Phase 36 index (migration 20260625120000, serves the
+    allocator Overview read and its owner RLS policy) was added to the set. This module
+    never ran in CI before the lane migration, so the pin had gone stale for months. A future migration
     that re-adds a redundant secondary (e.g. a plain strategy_date_idx on top of
     the unique one) makes this set unequal and fails the test."""
 
@@ -340,11 +318,13 @@ class TestNoRedundantIndex:
                 "csv_daily_returns_pkey",  # surrogate BIGINT id PK
                 "csv_daily_returns_strategy_date_key",  # recreated strategy uniqueness
                 "csv_daily_returns_api_key_date_key",  # per-key axis uniqueness
+                "csv_daily_returns_allocator_date_idx",  # Phase 36 partial allocator read index
             ]
         )
         assert index_names == expected, (
             f"Expected EXACTLY the dual-axis index set {expected!r} (surrogate PK "
-            f"+ the two non-partial per-axis unique arbiters), got {index_names!r}. "
+            f"+ the two non-partial per-axis unique arbiters + the Phase 36 allocator "
+            f"read index), got {index_names!r}. "
             f"After Phase 35 the (strategy_id, date) uniqueness is an explicit "
             f"unique index (not the PK); a redundant extra/duplicate index — or a "
             f"missing per-axis arbiter — fails this pin."
@@ -354,10 +334,6 @@ class TestNoRedundantIndex:
 # ===========================================================================
 # Tests 9-11 — W3 edge-case suite (Plan 02 cannot be modified retroactively)
 # ===========================================================================
-@pytest.mark.skipif(
-    not _worker_pipeline_env_present(),
-    reason=_WORKER_PIPELINE_REASON,
-)
 class TestEdgeCaseTerminalStates:
     """W3 revision 2026-05-22.
 
@@ -371,7 +347,34 @@ class TestEdgeCaseTerminalStates:
     `computing` row at the 90s deadline is the W3 regression sentinel
     (T-19.1-25) — _poll_analytics_terminal raises AssertionError on that
     edge so the failure is visible.
+
+    Phase 215: the runner builds its own client through ``get_supabase()``, which reads
+    SUPABASE_URL / SUPABASE_SERVICE_KEY (never exported here). The autouse fixture below hands it
+    a lane client built from the lane's SUPABASE_TEST_* variables instead, and fails under
+    CI=true when they are missing. The client is deliberately left unwrapped: a census test
+    requires every module that wraps a lane client to define its own ``_need_supabase`` guard.
     """
+
+    @pytest.fixture(autouse=True)
+    def _runner_uses_the_lane_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        url, key = resolve_lane_postgrest()
+        client = _force_http1(create_client(url, key))
+        monkeypatch.setattr("services.analytics_runner.get_supabase", lambda: client)
+        # The runner's benchmark leg builds its OWN client from SUPABASE_URL (which
+        # `import main` points at shared TEST on a developer machine) and, with no
+        # cached prices, fetches live from the network in CI. (None, True) is the
+        # runner's own "no benchmark" default (`benchmark_rets, benchmark_stale =
+        # None, True`), so the metrics persist as if the fetch had failed.
+        monkeypatch.setattr(
+            "services.analytics_runner.get_benchmark_returns",
+            AsyncMock(return_value=(None, True)),
+        )
+
+    def test_the_benchmark_leg_is_stubbed_so_no_non_lane_client_is_built(self) -> None:
+        """The runner's benchmark leg must never reach a client of its own (MD-01)."""
+        from services import analytics_runner
+
+        assert isinstance(analytics_runner.get_benchmark_returns, AsyncMock)
 
     def test_single_row_csv_terminal_state(
         self, service_role_conn: psycopg.Connection
@@ -381,7 +384,7 @@ class TestEdgeCaseTerminalStates:
         computation_error mentioning insufficient history.
 
         (We do NOT accept `complete_with_warnings` here because the runner
-        explicitly raises HTTPException(400, 'Insufficient CSV history')
+        explicitly raises CsvInsufficientHistory ("400: Insufficient CSV history")
         after marking status='failed' — see analytics_runner.py:1490.)
         """
         owner = _create_test_user(service_role_conn)

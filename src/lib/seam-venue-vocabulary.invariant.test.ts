@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { stripCommentsPreserveLines } from "./source-scan";
 import {
+  CSV_RULE_LABELS,
   VENUE_WIRE_CODE_TO_VERDICT,
   VENUE_WIRE_CODES_WITHOUT_VERDICT,
 } from "./wizardErrors";
@@ -73,6 +74,17 @@ import {
  * and they never reach `classifyKeyValidationError`. The guard asserts below
  * that this site is SEEN and yields no literal, so a NEW dynamic emitter
  * appearing elsewhere reds rather than passing unnoticed.
+ *
+ * ⭐ 2026-11-15 (Phase 215 SC-7a, D-161-01): THE FAMILY IS NOW ENUMERATED. The
+ * paragraph above stays as lineage; it described the guard before this note.
+ * The dynamic emitter still yields no literal of its own, and the family it opens
+ * is now named by `CSV_RULE_CODE_FAMILY` (a SIBLING of the derived population, so
+ * `EXPECTED_EMITTED_CODES`, its floor and the exemption tables are untouched) and
+ * by the pytest oracle `analytics-service/tests/test_csv_rule_family_oracle.py`,
+ * which runs the validator. Each member has a `CSV_RULE_LABELS` key or a reasoned
+ * entry in `CSV_RULE_FAMILY_EXEMPTIONS`, so a rule added to `csv_validator.py`
+ * without a disposition reds by name. The blind-spot assertion below is kept as
+ * is: it still guards against a second dynamic emitter elsewhere.
  */
 
 /**
@@ -195,10 +207,22 @@ const SCAN_EXCLUSIONS: readonly ScanExclusion[] = [
     // exclusion hides nothing reachable. The pin is a count, not an allowlist
     // of sites: the next fixture literal in this subtree moves it again and
     // has to be argued again.
-    removesSites: 60,
+    //
+    // 60 → 64 (2026-11-15, Phase 215 SC-7b / plan 08). ⛔ NOTHING WAS EXCLUDED —
+    // the SUBTREE grew by one file. `test_process_key_scope_rejection_statuses.py`
+    // pins the status of every arm of the /process-key rejection gate, and its
+    // fixture `ValidationResult`s carry four `error_code=` sites: two forward the
+    // parametrised code, one is the `None` of the VALIDATION_UNEXPECTED fallback,
+    // and one is the literal MONOTONIC_DATES for the validate-only arm. The one
+    // new code is a REAL csv_adapter wire code (first_rule.upper() of the
+    // monotonic_dates rule), so like COLUMN_IN_DATAFRAME above it is a faithful
+    // mirror of production in a file that emits to no user. It is a member of
+    // CSV_RULE_CODE_FAMILY at the foot of this file, where its disposition lives.
+    removesSites: 64,
     removesCodes: [
       "COLUMN_IN_DATAFRAME",
       "CSV_PARSE_FAILED",
+      "MONOTONIC_DATES",
       "SOME_FUTURE_CODE",
       "SOME_FUTURE_UNLISTABLE_CODE",
     ],
@@ -1624,5 +1648,177 @@ describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeSc
     // never reaches the un-narrowed line at all.
     expect(KEYWORD_ARG_RE.exec('"NOT_A_KWARG"')).toBeNull();
     expect(KEYWORD_ARG_RE.exec("code == \"CMP\"")).toBeNull();
+  });
+});
+
+/**
+ * ── THE CSV RULE FAMILY (Phase 215 SC-7a, D-161-01) ─────────────────────────
+ *
+ * `csv_adapter.py` sets `error_code=first_rule.upper()`, so every rule the
+ * validator can report first is a wire code. The literal scan above cannot see
+ * them. This block enumerates them from `csv_validator.py`'s source and requires
+ * each to have a label or a reasoned exemption.
+ *
+ * SIBLING, NOT JOINED to the derived population: that population is literal
+ * `error_code` sites, and joining the family would move `EXPECTED_EMITTED_CODES`,
+ * its floor and the verdict exemption table, none of which are about this.
+ *
+ * Its INDEPENDENT twin is `analytics-service/tests/test_csv_rule_family_oracle.py`,
+ * which executes the validator instead of reading it. Test (4) below compares the
+ * two, so a rule one derivation sees and the other does not reds too.
+ */
+const VALIDATOR_PATH = "analytics-service/services/csv_validator.py";
+const ADAPTER_PATH = "analytics-service/services/ingestion/csv_adapter.py";
+const ORACLE_PATH = "analytics-service/tests/test_csv_rule_family_oracle.py";
+
+/** The wire code as `csv_adapter` builds it, minus an argument: `coerce_dtype('x')` -> `COERCE_DTYPE`. */
+const csvWireKey = (rule: string): string =>
+  rule.replace(/\([^)]*\)\s*$/, "").trim().toUpperCase();
+
+/**
+ * Pandera BUILT-IN check names appear in no source literal, so a text scan cannot
+ * find them; the pytest oracle finds them by running the schemas on broken frames
+ * and owns the evidence. They are hand-typed here, and test (4) holds them equal
+ * to the oracle's set. CSV_VALIDATION_FAILED is what the adapter emits when the
+ * error list is empty (it lives in `csv_adapter.py`, not the validator).
+ */
+const HAND_TYPED_NON_LITERAL_MEMBERS: readonly string[] = [
+  "COERCE_DTYPE",
+  "COLUMN_IN_DATAFRAME",
+  "CSV_VALIDATION_FAILED",
+  "DTYPE",
+  "NOT_NULLABLE",
+];
+
+/** The members a text scan of the validator is expected to add to the five above. */
+const csvRuleCodeFamily = (): Set<string> => {
+  const src = stripCommentsPreserveLines(
+    readFileSync(join(process.cwd(), VALIDATOR_PATH), "utf8"),
+    "py",
+  );
+  const found = new Set<string>(HAND_TYPED_NON_LITERAL_MEMBERS);
+  for (const m of src.matchAll(/"rule":\s*"([A-Za-z0-9_]+)"/g)) {
+    found.add(csvWireKey(m[1]));
+  }
+  for (const m of src.matchAll(/\berror\s*=\s*"([A-Za-z0-9_]+)"/g)) {
+    found.add(csvWireKey(m[1]));
+  }
+  return found;
+};
+
+const CSV_RULE_CODE_FAMILY: ReadonlySet<string> = csvRuleCodeFamily();
+
+/**
+ * Members with no `CSV_RULE_LABELS` key, each with a MEASURED reason. Same
+ * discipline as `VENUE_WIRE_CODES_WITHOUT_VERDICT`: over 80 characters, no
+ * placeholder. Hand-typed, so a new member has to be argued by a person.
+ */
+const CSV_RULE_FAMILY_EXEMPTIONS: Readonly<Record<string, string>> = {
+  AUTO_NORMALIZED_PERCENT_FORM:
+    "An info flag, not an error: the validator appends it to info_flags when it " +
+    "divides a percent-form daily_return column by 100, and it is never the " +
+    "errors[0] that csv_adapter upper-cases into error_code, so it never reaches " +
+    "a user as a rejection code or a rule label.",
+  DATE_FORMAT_NORMALIZED:
+    "An info flag, not an error: the validator appends it to info_flags when it " +
+    "re-reads an unambiguous day-first date column, and it is never the " +
+    "errors[0] that csv_adapter upper-cases into error_code, so it never reaches " +
+    "a user as a rejection code or a rule label.",
+  DATE_FORMAT_AMBIGUOUS:
+    "A producer-authored error rule that carries its own sentence in the message " +
+    "field; CsvValidationEnvelope shows that sentence for a rule with no label " +
+    "(hasCsvRuleLabel is false), which CsvValidationEnvelope.producer-parity.test.tsx " +
+    "pins, so a CSV_RULE_LABELS key would replace the better text with a generic one.",
+  PARSE_ERROR:
+    "A producer-authored error rule that carries its own sentence in the message " +
+    "field (the file could not be read as a table); CsvValidationEnvelope shows " +
+    "that sentence for a rule with no label, which the producer-parity test pins, " +
+    "so a CSV_RULE_LABELS key would replace the specific text with a generic one.",
+  EMPTY:
+    "A producer-authored error rule that carries its own sentence in the message " +
+    "field (the file has no data rows); CsvValidationEnvelope shows that sentence " +
+    "for a rule with no label, which the producer-parity test pins, so a " +
+    "CSV_RULE_LABELS key would replace the specific text with a generic one.",
+  TOO_MANY_ROWS:
+    "A producer-authored error rule that carries its own sentence in the message " +
+    "field (the row cap and the file's count); CsvValidationEnvelope shows that " +
+    "sentence for a rule with no label, which the producer-parity test pins, so a " +
+    "CSV_RULE_LABELS key would replace the specific numbers with a generic label.",
+  CSV_VALIDATION_FAILED:
+    "The adapter's own fallback code for an empty error list, not a rule name. " +
+    "It is a registered WizardErrorCode with its own title, cause and fix in " +
+    "wizardErrors.ts, so it is resolved by the code table rather than by the " +
+    "per-rule CSV_RULE_LABELS table.",
+};
+
+/** Hand-typed: the family size measured 2026-11-15 (5 custom + 4 built-in + 7 bespoke + 2 flags + 1 fallback). */
+const CSV_RULE_FAMILY_FLOOR = 19;
+
+describe("CSV rule family (Phase 215 SC-7a, D-161-01)", () => {
+  it("(1) every family member has a CSV_RULE_LABELS key or a reasoned exemption", () => {
+    const labelled = new Set(Object.keys(CSV_RULE_LABELS).map(csvWireKey));
+    const undisposed = [...CSV_RULE_CODE_FAMILY]
+      .filter((c) => !labelled.has(c) && !(c in CSV_RULE_FAMILY_EXEMPTIONS))
+      .sort();
+    expect(
+      undisposed,
+      "These rules can become the wire error_code (csv_adapter upper-cases the " +
+        "first failing rule) and have neither a CSV_RULE_LABELS key nor an entry " +
+        "in CSV_RULE_FAMILY_EXEMPTIONS. Add a label, or an exemption with a " +
+        "measured reason, and add the rule to the pytest oracle's EXPECTED_FAMILY.",
+    ).toEqual([]);
+  });
+
+  it("(2) no exemption is stale, and none is also labelled", () => {
+    const labelled = new Set(Object.keys(CSV_RULE_LABELS).map(csvWireKey));
+    const stale = Object.keys(CSV_RULE_FAMILY_EXEMPTIONS)
+      .filter((c) => !CSV_RULE_CODE_FAMILY.has(c))
+      .sort();
+    expect(stale, "an exemption names a rule the validator no longer has").toEqual([]);
+    const both = Object.keys(CSV_RULE_FAMILY_EXEMPTIONS)
+      .filter((c) => labelled.has(c))
+      .sort();
+    expect(both, "a labelled rule must not also carry an exemption").toEqual([]);
+    for (const [code, reason] of Object.entries(CSV_RULE_FAMILY_EXEMPTIONS)) {
+      expect(reason.length, `${code}'s exemption reason is a stub`).toBeGreaterThan(80);
+      expect(reason.toLowerCase()).not.toContain("todo");
+    }
+  });
+
+  it("(3) the family is not vacuous", () => {
+    expect(CSV_RULE_CODE_FAMILY.size).toBeGreaterThanOrEqual(CSV_RULE_FAMILY_FLOOR);
+  });
+
+  it("(4) the scan agrees with the pytest oracle that executes the validator", () => {
+    const oracle = readFileSync(join(process.cwd(), ORACLE_PATH), "utf8");
+    const setOf = (name: string): string[] => {
+      const block = new RegExp(`${name}\\s*=\\s*frozenset\\(\\s*\\{([^}]*)\\}`).exec(oracle);
+      expect(block, `${name} not found in ${ORACLE_PATH}`).not.toBeNull();
+      return [...block![1].matchAll(/"([A-Z0-9_]+)"/g)].map((m) => m[1]);
+    };
+    const oracleErrors = new Set([
+      ...setOf("CUSTOM_CHECKS"),
+      ...setOf("PANDERA_BUILTINS"),
+      ...setOf("BESPOKE_RULES"),
+      ...setOf("ADAPTER_FALLBACK"),
+    ]);
+    const oracleFlags = new Set(setOf("INFO_FLAG_RULES"));
+    expect(oracleErrors.size).toBeGreaterThanOrEqual(CSV_RULE_FAMILY_FLOOR - oracleFlags.size);
+    expect([...CSV_RULE_CODE_FAMILY].sort()).toEqual(
+      [...oracleErrors, ...oracleFlags].sort(),
+    );
+    // The two flags are exactly the exemptions that say "info flag".
+    expect([...oracleFlags].sort()).toEqual(
+      Object.entries(CSV_RULE_FAMILY_EXEMPTIONS)
+        .filter(([, reason]) => reason.startsWith("An info flag"))
+        .map(([code]) => code)
+        .sort(),
+    );
+  });
+
+  it("(5) the adapter still emits the fallback code and upper-cases the first rule", () => {
+    const adapter = readFileSync(join(process.cwd(), ADAPTER_PATH), "utf8");
+    expect(adapter).toContain("first_rule.upper()");
+    expect(adapter).toContain('"CSV_VALIDATION_FAILED"');
   });
 });

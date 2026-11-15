@@ -4223,35 +4223,26 @@ class TestTradesIsFillRls:
     column may leak api_key info / external order metadata if RLS is
     silently bypassed.
 
-    Live-DB gated test: skips when TEST_SUPABASE_DB_URL is not set
-    (mirrors test_sync_trades_preserves_fills.py + test_resend_correlation_rls.py).
+    Live-DB test: the DSN comes from the ``live_db_dsn`` fixture (``tests/live_db_dsn.py``),
+    so it runs on the CI python job's lane via LANE_DB_URL, skips locally without it and
+    fails under CI=true (mirrors test_sync_trades_preserves_fills.py + test_resend_correlation_rls.py).
     Inserts is_fill=true rows for two distinct strategies via service-
     role; switches to anon role and asserts cross-allocator SELECT
     returns 0 rows (either RLS or the GRANT layer denies — both are a
     pass).
     """
 
-    pytestmark = pytest.mark.skipif(
-        not __import__("os").environ.get("TEST_SUPABASE_DB_URL"),
-        reason="Live test Supabase project not configured (TEST_SUPABASE_DB_URL unset).",
-    )
-
-    def test_anon_role_denied_select_is_fill_rows(self) -> None:
+    def test_anon_role_denied_select_is_fill_rows(self, live_db_dsn: str) -> None:
         """Insert two is_fill rows for two different strategies; the anon
         role must NOT see either (no per-row data leak via raw_data)."""
-        import os
         import uuid
 
-        if not os.environ.get("TEST_SUPABASE_DB_URL"):
-            pytest.skip("TEST_SUPABASE_DB_URL not set")
+        # psycopg is a hard dependency of the lane modules (tests/live_db_dsn.py imports it at
+        # module level), so a missing install errors here rather than skipping silently.
+        from psycopg.rows import dict_row
 
-        try:
-            import psycopg
-            from psycopg.rows import dict_row
-        except ImportError:
-            pytest.skip("psycopg not installed")
+        from tests.live_db_dsn import connect_live_db
 
-        dsn = os.environ["TEST_SUPABASE_DB_URL"]
         user_a = str(uuid.uuid4())
         user_b = str(uuid.uuid4())
         strategy_a = str(uuid.uuid4())
@@ -4259,15 +4250,16 @@ class TestTradesIsFillRls:
         fill_a = f"fill-{uuid.uuid4().hex[:12]}"
         fill_b = f"fill-{uuid.uuid4().hex[:12]}"
 
-        conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        conn = connect_live_db(live_db_dsn, autocommit=True, row_factory=dict_row)
         try:
             with conn.cursor() as cur:
-                # Seed two strategies.
+                # Seed two strategies. 2026-11-15 (Phase 215): profiles.id references
+                # auth.users, so the seed creates the auth user (the auth trigger makes the profile).
                 for uid, sid in ((user_a, strategy_a), (user_b, strategy_b)):
                     cur.execute(
-                        "INSERT INTO public.profiles (id, role, created_at) "
-                        "VALUES (%s, 'manager', now())",
-                        (uid,),
+                        "INSERT INTO auth.users (id, email, raw_user_meta_data) "
+                        "VALUES (%s, %s, '{}'::jsonb)",
+                        (uid, f"audit-g12a5-{uid[:8]}@quantalyze-test.invalid"),
                     )
                     cur.execute(
                         "INSERT INTO public.strategies (id, user_id, name, status, created_at) "
@@ -4335,7 +4327,7 @@ class TestTradesIsFillRls:
                     (strategy_a, strategy_b),
                 )
                 cur.execute(
-                    "DELETE FROM public.profiles WHERE id IN (%s, %s)",
+                    "DELETE FROM auth.users WHERE id IN (%s, %s)",
                     (user_a, user_b),
                 )
             conn.close()

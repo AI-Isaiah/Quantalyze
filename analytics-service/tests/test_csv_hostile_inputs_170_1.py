@@ -32,10 +32,10 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from services.csv_validator import validate_csv
+from tests.app_factory import build_test_app
 
 MARKER = "ZXQCELL"
 
@@ -230,9 +230,8 @@ def test_a_ragged_row_after_the_first_data_row_keeps_its_pandas_parse_error() ->
 def csv_client():
     import routers.csv as csv_router
 
-    app = FastAPI()
+    app = build_test_app(csv_router.router)
     app.state.limiter = csv_router.limiter
-    app.include_router(csv_router.router)
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -395,9 +394,8 @@ def process_key_client(monkeypatch):
     import routers.process_key as process_key_router
 
     monkeypatch.setenv("INTERNAL_API_TOKEN", _TOKEN)
-    app = FastAPI()
+    app = build_test_app(process_key_router.router)
     app.state.limiter = process_key_router.limiter
-    app.include_router(process_key_router.router)
     # The 500 case must be observed as the client sees it (a response), not as
     # the exception re-raised into the test.
     return TestClient(app, raise_server_exceptions=False)

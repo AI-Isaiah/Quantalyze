@@ -19,8 +19,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
-from fastapi import HTTPException
-
+from services.allocated_capital import ReturnsDenominatorConfigError
+from services.job_failure import (
+    CsvComputationFailed,
+    CsvInsufficientHistory,
+    CsvMalformedDenominatorConfig,
+    CsvStrategyNotFound,
+)
 from services.metrics import MetricsResult
 
 
@@ -212,7 +217,7 @@ async def test_mark_complete_stamps_computed_at_with_db_clock_literal() -> None:
 
 @pytest.mark.asyncio
 async def test_csv_analytics_insufficient_history() -> None:
-    """Test 2 — 1 row → HTTPException(400) AND a final upsert sets
+    """Test 2 — 1 row → CsvInsufficientHistory (PERMANENT, never the 500) AND a final upsert sets
     computation_status='failed' with 'Insufficient CSV history' in the
     computation_error string."""
     from services.analytics_runner import run_csv_strategy_analytics
@@ -221,11 +226,13 @@ async def test_csv_analytics_insufficient_history() -> None:
     sb = _make_supabase_mock(rows)
 
     with patch("services.analytics_runner.get_supabase", return_value=sb):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(CsvInsufficientHistory) as exc_info:
             await run_csv_strategy_analytics("test-strategy-uuid")
 
-    assert exc_info.value.status_code == 400
-    assert "Insufficient CSV history" in exc_info.value.detail
+    # PERMANENT: it must not be re-wrapped by the catch-all as the retried 500.
+    assert exc_info.value.error_kind == "permanent"
+    assert exc_info.value.message == "400: Insufficient CSV history"
+    assert not isinstance(exc_info.value, CsvComputationFailed)
 
     upsert_calls = sb.table.return_value.upsert.call_args_list
     failed = [c for c in upsert_calls if c.args[0].get("computation_status") == "failed"]
@@ -314,10 +321,11 @@ async def test_mark_unrecoverable_preserves_pre_stamped_guard_flags() -> None:
                new=AsyncMock(return_value=(pd.Series([0.001] * 10), False))), \
          patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("transient blip mid-compute")):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(CsvComputationFailed) as exc_info:
             await run_csv_strategy_analytics("test-strategy-uuid")
 
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.error_kind == "unknown"
+    assert exc_info.value.message == "500: CSV analytics computation failed"
 
     upsert_calls = sb.table.return_value.upsert.call_args_list
     failed = [c for c in upsert_calls if c.args[0].get("computation_status") == "failed"]
@@ -345,7 +353,7 @@ async def test_mark_unrecoverable_logs_warning_before_reraise(
     raises AND the failure-path _mark_unrecoverable upsert ALSO raises
     (simulating DB unreachable), the runner must log a logger.warning
     referencing strategy_id and the inner exception BEFORE re-raising
-    the outer 500 HTTPException. Without this log evidence, a stuck
+    the outer CsvComputationFailed (the 500). Without this log evidence, a stuck
     'computing' row leaves operators blind.
     """
     from services.analytics_runner import run_csv_strategy_analytics
@@ -388,12 +396,12 @@ async def test_mark_unrecoverable_logs_warning_before_reraise(
          patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("compute_all_metrics blew up")):
         caplog.set_level(logging.WARNING, logger="quantalyze.analytics.runner")
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(CsvComputationFailed) as exc_info:
             await run_csv_strategy_analytics("test-strategy-uuid")
 
     # Outer 500 must still re-raise.
-    assert exc_info.value.status_code == 500
-    assert "CSV analytics computation failed" in exc_info.value.detail
+    assert exc_info.value.error_kind == "unknown"
+    assert exc_info.value.message == "500: CSV analytics computation failed"
 
     # PR #273 regression assertion — the warning must fire before re-raise.
     warning_records = [
@@ -440,10 +448,11 @@ async def test_csv_analytics_unrecoverable_stamps_csv_source_flag() -> None:
                new=AsyncMock(return_value=(None, True))), \
          patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("compute_all_metrics blew up")):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(CsvComputationFailed) as exc_info:
             await run_csv_strategy_analytics("test-strategy-uuid")
 
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.error_kind == "unknown"
+    assert exc_info.value.message == "500: CSV analytics computation failed"
 
     upsert_calls = sb.table.return_value.upsert.call_args_list
     failed = [c for c in upsert_calls if c.args[0].get("computation_status") == "failed"]
@@ -559,7 +568,7 @@ async def test_csv_analytics_paginated_truncation_writes_specific_error() -> Non
 @pytest.mark.asyncio
 async def test_csv_analytics_missing_strategy_raises_404() -> None:
     """Test 6 — WR-01 (19.1-REVIEW). A strategy_id that does not exist in
-    the `strategies` table must raise HTTPException(404) BEFORE the
+    the `strategies` table must raise CsvStrategyNotFound (was HTTP 404) BEFORE the
     runner touches strategy_analytics. Without this probe, a deleted-
     between-enqueue-and-dispatch race would land a spurious
     strategy_analytics row and then fail with a misleading
@@ -585,11 +594,13 @@ async def test_csv_analytics_missing_strategy_raises_404() -> None:
     table.upsert.return_value = MagicMock(execute=MagicMock())
 
     with patch("services.analytics_runner.get_supabase", return_value=sb):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(CsvStrategyNotFound) as exc_info:
             await run_csv_strategy_analytics("deleted-strategy-uuid")
 
-    assert exc_info.value.status_code == 404
-    assert "Strategy not found" in exc_info.value.detail
+    # Phase 215 SC-4: a worker domain exception, not an HTTP one. `unknown` = retried,
+    # and the message keeps the legacy "404:" prefix so the persisted text is unchanged.
+    assert exc_info.value.error_kind == "unknown"
+    assert exc_info.value.message == "404: Strategy not found"
     # Spurious strategy_analytics upsert must NOT have been written —
     # the probe gates the entire pipeline.
     upsert_calls = table.upsert.call_args_list
@@ -1234,7 +1245,7 @@ async def test_csv_runner_csv_crypto_is_365() -> None:
 async def test_csv_runner_malformed_config_is_permanent_not_transient() -> None:
     """S1: a malformed returns_denominator_config raises
     ReturnsDenominatorConfigError INSIDE the metrics block. The runner must
-    disposition it PERMANENT (HTTPException 422 → classify_exception permanent) and
+    disposition it PERMANENT (CsvMalformedDenominatorConfig → classify_exception permanent) and
     stamp failed — NOT let the generic `except Exception` downgrade it to a
     transient 500 that retries forever."""
     from services.analytics_runner import run_csv_strategy_analytics
@@ -1246,9 +1257,12 @@ async def test_csv_runner_malformed_config_is_permanent_not_transient() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(CsvMalformedDenominatorConfig) as exc_info:
             await run_csv_strategy_analytics("s")
-    assert exc_info.value.status_code == 422  # 4xx → classify_exception PERMANENT
+    assert exc_info.value.error_kind == "permanent"
+    assert exc_info.value.message == "422: Malformed returns_denominator_config"
+    # Raised `from` the config error: the persisted text carries the cause suffix.
+    assert isinstance(exc_info.value.__cause__, ReturnsDenominatorConfigError)
     # A failed stamp with csv_source preserved was written to strategy_analytics.
     sa = sb.table("strategy_analytics")
     upserts = [
@@ -1972,7 +1986,7 @@ async def test_cumulative_method_failure_write_gains_no_stamp() -> None:
     rows = [{"date": "2024-01-01", "daily_return": 0.005}]  # 1 row: cannot derive
     sb = _make_supabase_mock(rows)
     with patch("services.analytics_runner.get_supabase", return_value=sb):
-        with pytest.raises(HTTPException):
+        with pytest.raises(CsvInsufficientHistory):
             await run_csv_strategy_analytics("cumulative-method-fail-uuid")
     failed = [
         c for c in sb.table.return_value.upsert.call_args_list
@@ -2133,10 +2147,11 @@ async def test_terminal_failure_heals_cash_series_row() -> None:
                new=AsyncMock(return_value=(None, True))), \
          patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("transient blip mid-compute")):
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(CsvComputationFailed) as exc:
             await run_csv_strategy_analytics("s")
 
-    assert exc.value.status_code == 500
+    assert exc.value.error_kind == "unknown"
+    assert exc.value.message == "500: CSV analytics computation failed"
     assert len(deletes) == 1, (
         f"the terminal arm must heal-delete the cash series exactly once; got {deletes!r}"
     )

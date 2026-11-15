@@ -2128,8 +2128,12 @@ describe("Critical regression guards", () => {
         expectNoMatch(
           body,
           /^\s+TEST_SUPABASE_DB_URL=/m,
-          "ci.yml python exports TEST_SUPABASE_DB_URL — that is the shared-TEST secret's name, and exporting the lane DSN under it silently un-skips 20+ psycopg modules this phase does not scope in (RESEARCH Anti-Patterns, Phase 164.9.4)",
+          "ci.yml python exports TEST_SUPABASE_DB_URL — that is the shared-TEST secret's name, and exporting the lane DSN under it silently un-skips 20+ psycopg modules this phase does not scope in (RESEARCH Anti-Patterns, Phase 164.9.4) (CORRECTED 2026-11-15, Phase 215: the psycopg modules now resolve LANE_DB_URL through tests/live_db_dsn.py and DO run on the lane; exporting the shared-TEST name is still forbidden because it would aim them at shared TEST)",
         );
+        expect(
+          /printf 'LANE_DB_URL=%s\\n' "\$\{db_url\}" >> "\$\{GITHUB_ENV\}"/.test(body),
+          "ci.yml python no longer exports LANE_DB_URL through $GITHUB_ENV — the migrated psycopg modules (tests/live_db_dsn.py) fail under CI=true without it, so the python job would go red (Phase 215)",
+        ).toBe(true);
       });
 
       // Phase 164.9.4 D-08, 2026-09-27, the `e2e-seeded` twin of the `it` above

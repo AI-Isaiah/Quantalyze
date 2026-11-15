@@ -23,35 +23,15 @@ owns; UUID-format validation is upstream (Next.js layer).
 
 from __future__ import annotations
 
-import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from tests._curve_fixtures import curve_from_returns
-
-# CI version-drift quarantine. analytics-service pins fastapi==0.115.12 +
-# pydantic==2.11.3. The body-vs-query auto-detection in that version chokes
-# on `req: SimulatorRequest` without `Annotated[..., Body()]`, returning
-# 422 for valid JSON bodies. Local dev runs newer fastapi (0.135+) where
-# the auto-detection works, so the tests prove the regression coverage
-# locally. The fix is a one-line production change in routers/simulator.py
-# (add `Annotated[SimulatorRequest, Body()]`), landed in PR 0.24.2.0
-# behavior batch. Until then, body-parsing tests are CI-skipped to
-# unblock the rest of the G15-001 coverage.
-_BODY_PARSER_SKIP = pytest.mark.skipif(
-    os.getenv("CI", "").lower() == "true",
-    reason=(
-        "FastAPI 0.115.12 body-vs-query auto-detection returns 422 for "
-        "JSON bodies when the route handler uses `req: SimulatorRequest` "
-        "without Annotated[..., Body()]. Production routers/simulator.py "
-        "has the same shape — fix lands in PR 0.24.2.0 (G15-046 / fastapi "
-        "annotation refactor). Tests pass locally on fastapi>=0.135."
-    ),
-)
+from tests.app_factory import build_test_app
 
 
 def _two_day_curve(day1: float, day2: float) -> list[dict]:
@@ -75,7 +55,7 @@ def supabase_mock():
 
 @pytest.fixture
 def client(monkeypatch, supabase_mock):
-    """Bare FastAPI app with routers.simulator mounted.
+    """Factory app with routers.simulator mounted.
 
     Per ``test_process_key.py`` we wire ``app.state.limiter`` so the
     slowapi @limiter.limit decorator's middleware probe does not raise,
@@ -123,9 +103,8 @@ def client(monkeypatch, supabase_mock):
         MagicMock(return_value=None),
     )
 
-    app = FastAPI()
+    app = build_test_app(simulator_router.router)
     app.state.limiter = simulator_router.limiter
-    app.include_router(simulator_router.router)
     return TestClient(app)
 
 
@@ -280,7 +259,6 @@ class TestRequestValidation:
 # ---------------------------------------------------------------------------
 
 
-@_BODY_PARSER_SKIP
 class TestPortfolioNotFound:
     def test_portfolio_not_owned_returns_404(self, client, supabase_mock):
         """Defense-in-depth ownership check: portfolios row for
@@ -311,7 +289,6 @@ class TestPortfolioNotFound:
 # ---------------------------------------------------------------------------
 
 
-@_BODY_PARSER_SKIP
 class TestCandidateNotPublished:
     def test_unpublished_candidate_returns_404(self, client, supabase_mock):
         """The strategies query filters on .eq('status', 'published').
@@ -337,7 +314,6 @@ class TestCandidateNotPublished:
 # ---------------------------------------------------------------------------
 
 
-@_BODY_PARSER_SKIP
 class TestEmptyPortfolio:
     def test_portfolio_with_no_strategies_returns_400(self, client, supabase_mock):
         """portfolio_strategies returns [] → 400 'No strategies found in
@@ -361,7 +337,6 @@ class TestEmptyPortfolio:
 # ---------------------------------------------------------------------------
 
 
-@_BODY_PARSER_SKIP
 class TestPortfolioStrategyCapC19:
     def test_oversized_portfolio_returns_413_before_corr_matmul(self, client, supabase_mock):
         """NEW-C19-07: the simulator builds an (N+1)-column DataFrame + df.corr()
@@ -392,7 +367,6 @@ class TestPortfolioStrategyCapC19:
 # ---------------------------------------------------------------------------
 
 
-@_BODY_PARSER_SKIP
 class TestCandidateAlreadyPresent:
     def test_candidate_already_in_portfolio_returns_400(self, client, supabase_mock):
         """If the candidate is already a portfolio strategy, the ADD
@@ -419,7 +393,6 @@ class TestCandidateAlreadyPresent:
 # ---------------------------------------------------------------------------
 
 
-@_BODY_PARSER_SKIP
 class TestGatherErrorPrecedence:
     """The three initial reads now run concurrently via ``asyncio.gather``
     (G15-012), but the router's docstring promises the post-gather check
@@ -480,7 +453,6 @@ class TestGatherErrorPrecedence:
 # ---------------------------------------------------------------------------
 
 
-@_BODY_PARSER_SKIP
 class TestReturnsDataMissing:
     def test_no_returns_for_portfolio_strategies_returns_400(self, client, supabase_mock):
         """portfolio_strategies has rows but strategy_analytics returns
@@ -572,7 +544,6 @@ def _build_returns_records(n: int, start: str = "2026-01-01") -> list[dict]:
     )
 
 
-@_BODY_PARSER_SKIP
 class TestHappyPathAndWeightNormalisation:
     def _stage_happy(self, supabase_mock, *, portfolio_strategies_data):
         _table_router(
@@ -766,7 +737,6 @@ class TestM0978_RecordsToSeriesNullEmpty:
         assert isinstance(series.index, pd.DatetimeIndex)
         assert series.iloc[0] == 0.01
 
-    @_BODY_PARSER_SKIP
     def test_candidate_empty_list_returns_series_yields_400(
         self, client, supabase_mock
     ):
@@ -804,7 +774,6 @@ class TestM0978_RecordsToSeriesNullEmpty:
 # ---------------------------------------------------------------------------
 
 
-@_BODY_PARSER_SKIP
 class TestAnalyticsComputationError:
     def test_simulate_add_candidate_raises_returns_500(
         self, client, supabase_mock, monkeypatch
@@ -849,9 +818,8 @@ class TestAnalyticsComputationError:
         # Re-mount with raise_server_exceptions=False for this test only.
         from routers import simulator as simulator_router
 
-        app = FastAPI()
+        app = build_test_app(simulator_router.router)
         app.state.limiter = simulator_router.limiter
-        app.include_router(simulator_router.router)
         tc = _TC(app, raise_server_exceptions=False)
 
         r = tc.post(
@@ -1245,7 +1213,6 @@ class TestG15_005_RateLimitIsTenantKeyed:
 # ---------------------------------------------------------------------------
 
 
-@_BODY_PARSER_SKIP
 class TestG15_007_ExceptionAuditAndCorrelationId:
     """G15-007 — when ``simulate_add_candidate`` raises, the route MUST:
       (a) return a 500 (preserved from pre-fix behaviour),
@@ -1301,9 +1268,8 @@ class TestG15_007_ExceptionAuditAndCorrelationId:
             "routers.simulator.simulate_add_candidate", _boom
         )
 
-        app = FastAPI()
+        app = build_test_app(simulator_router.router)
         app.state.limiter = simulator_router.limiter
-        app.include_router(simulator_router.router)
         tc = TestClient(app, raise_server_exceptions=False)
 
         cid = "test-corr-id-g15-007"
@@ -1385,9 +1351,8 @@ class TestG15_007_ExceptionAuditAndCorrelationId:
             "routers.simulator.simulate_add_candidate", _boom
         )
 
-        app = FastAPI()
+        app = build_test_app(simulator_router.router)
         app.state.limiter = simulator_router.limiter
-        app.include_router(simulator_router.router)
         tc = TestClient(app, raise_server_exceptions=False)
 
         r = tc.post(
@@ -1472,7 +1437,6 @@ class TestM0975_0976_RecordsToSeriesToleratesMalformed:
         raw = [{"ts": "2026-01-01", "val": 0.01}, {"foo": "bar"}]
         assert records_to_series(raw, name="s-1") is None
 
-    @_BODY_PARSER_SKIP
     def test_malformed_portfolio_returns_row_does_not_500(
         self, client, supabase_mock
     ):
@@ -1566,7 +1530,6 @@ class TestM0974_RequestFieldMinLength:
 # ---------------------------------------------------------------------------
 
 
-@_BODY_PARSER_SKIP
 class TestM0972_SingleStrategyAnalyticsQuery:
     """M-0972 (performance) — portfolio + candidate returns must be fetched
     in ONE ``strategy_analytics`` query (`.in_(portfolio_ids + [candidate])`)
@@ -1662,7 +1625,6 @@ class TestM0973_IndependentFetchesParallelised:
             "event loop is not blocked)."
         )
 
-    @_BODY_PARSER_SKIP
     def test_initial_fetches_run_concurrently(self, monkeypatch):
         """Behavioural proof: the three initial reads overlap in time.
 
@@ -1674,7 +1636,6 @@ class TestM0973_IndependentFetchesParallelised:
         import threading
         import time
 
-        from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
         from routers import simulator as simulator_router
@@ -1729,9 +1690,8 @@ class TestM0973_IndependentFetchesParallelised:
             "routers.simulator.log_audit_event", MagicMock(return_value=None)
         )
 
-        app = FastAPI()
+        app = build_test_app(simulator_router.router)
         app.state.limiter = simulator_router.limiter
-        app.include_router(simulator_router.router)
         tc = TestClient(app)
 
         r = tc.post(
@@ -1850,7 +1810,6 @@ class TestS1_PerUserRateLimit:
         )
 
 
-@_BODY_PARSER_SKIP
 class TestS1_PerUserRateLimitIntegration:
     """S1 integration: the handler returns 429 for a user over budget, while a
     different user on the same TestClient (same remote IP) sails through."""

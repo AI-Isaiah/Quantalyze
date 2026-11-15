@@ -3399,9 +3399,8 @@ async def test_csv_insufficient_history_arm_omits_series_completeness():
     """Terminal arm (<2 rows). A failed run must never author a trust verdict —
     and must not wipe one either: omission preserves whatever the producer last
     stamped, so a re-run heals rather than the failure laundering the series."""
-    from fastapi import HTTPException
-
     from services.analytics_runner import run_csv_strategy_analytics
+    from services.job_failure import CsvInsufficientHistory
 
     sb = _csv_supabase_mock(
         [{"date": "2024-01-01", "daily_return": 0.005}],
@@ -3410,10 +3409,10 @@ async def test_csv_insufficient_history_arm_omits_series_completeness():
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=([], False))):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(CsvInsufficientHistory) as exc_info:
             await run_csv_strategy_analytics("s1")
 
-    assert exc_info.value.status_code == 400
+    assert exc_info.value.error_kind == "permanent"
     assert any(u.get("computation_status") == "failed" for u in sb.upserts), (
         "expected the insufficient-history failure stamp"
     )
@@ -3451,11 +3450,10 @@ async def test_csv_truncation_arm_omits_series_completeness():
 
 @pytest.mark.asyncio
 async def test_csv_config_error_arm_omits_series_completeness():
-    """Terminal arm (ReturnsDenominatorConfigError → 422 permanent)."""
-    from fastapi import HTTPException
-
+    """Terminal arm (ReturnsDenominatorConfigError → CsvMalformedDenominatorConfig, permanent)."""
     from services.analytics_runner import run_csv_strategy_analytics
     from services.allocated_capital import ReturnsDenominatorConfigError
+    from services.job_failure import CsvMalformedDenominatorConfig
 
     sb = _csv_supabase_mock(_CSV_ROWS_3D, existing_flags={"csv_source": True})
 
@@ -3467,10 +3465,10 @@ async def test_csv_config_error_arm_omits_series_completeness():
                side_effect=_boom), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=([], False))):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(CsvMalformedDenominatorConfig) as exc_info:
             await run_csv_strategy_analytics("s1")
 
-    assert exc_info.value.status_code == 422
+    assert exc_info.value.error_kind == "permanent"
     assert any(u.get("computation_status") == "failed" for u in sb.upserts), (
         "expected the config-failed stamp"
     )
@@ -3481,9 +3479,8 @@ async def test_csv_config_error_arm_omits_series_completeness():
 async def test_csv_unrecoverable_arm_omits_series_completeness():
     """Terminal catch-all arm. Every other failure branch drains here, so this is
     the widest opportunity for a verdict to be fabricated or wiped."""
-    from fastapi import HTTPException
-
     from services.analytics_runner import run_csv_strategy_analytics
+    from services.job_failure import CsvComputationFailed
 
     # Two rows that both sanitize away → derive_basis_series raises ValueError
     # (<2 finite) → the generic catch-all.
@@ -3497,10 +3494,10 @@ async def test_csv_unrecoverable_arm_omits_series_completeness():
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=([], False))):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(CsvComputationFailed) as exc_info:
             await run_csv_strategy_analytics("s1")
 
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.error_kind == "unknown"
     assert any(u.get("computation_status") == "failed" for u in sb.upserts), (
         "expected the unrecoverable failure stamp"
     )

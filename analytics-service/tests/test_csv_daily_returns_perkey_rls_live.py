@@ -1,7 +1,8 @@
 """Phase 35 (DAILIES-04) — Cross-tenant RLS for per-key csv_daily_returns rows.
 
-Gated on TEST_SUPABASE_DB_URL (same gate as test_persist_csv_daily_returns_live).
-CI without secrets skips cleanly with a verbose ``reason=`` (Rule 12).
+Resolves its DSN through the ``live_db_dsn`` fixture (``tests/live_db_dsn.py``): it runs on the
+CI python job's local-stack lane via LANE_DB_URL, skips on a dev machine without the lane
+values, and FAILS under CI=true without them (Phase 215: never a silent skip).
 
 This is the criterion-4 tenant-isolation gate. Migration 20260624120000 added a
 new owner SELECT policy:
@@ -26,7 +27,6 @@ rows — an error-code assertion would not catch a leak):
 """
 from __future__ import annotations
 
-import os
 import uuid
 from typing import Iterator
 
@@ -34,25 +34,19 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
+from tests.live_db_dsn import connect_live_db
 from tests.test_persist_csv_daily_returns_live import (
     _cleanup,
     _create_test_user,
     _set_authenticated,
 )
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TEST_SUPABASE_DB_URL"),
-    reason="Live test Supabase project not configured (TEST_SUPABASE_DB_URL unset). "
-    "See MEMORY reference_test_supabase_project.md for the qmnijlgmdhviwzwfyzlc setup. "
-    "This is the DAILIES-04 cross-tenant RLS gate for per-key csv_daily_returns rows.",
-)
 
 
 @pytest.fixture
-def service_role_conn() -> Iterator[psycopg.Connection]:
-    """psycopg connection (autocommit) against the TEST Supabase DSN."""
-    dsn = os.environ["TEST_SUPABASE_DB_URL"]
-    conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+def service_role_conn(live_db_dsn: str) -> Iterator[psycopg.Connection]:
+    """psycopg connection (autocommit) against the local-stack lane (guarded by ``connect_live_db``)."""
+    conn = connect_live_db(live_db_dsn, autocommit=True, row_factory=dict_row)
     try:
         yield conn
     finally:

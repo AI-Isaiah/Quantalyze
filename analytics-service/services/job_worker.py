@@ -92,6 +92,7 @@ if TYPE_CHECKING:
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
 from services.geo_block import is_geo_blocked
+from services.job_failure import WorkerJobFailure
 from services.closed_sets import (  # B8b: single-sourced closed sets, re-exported
     CRYPTO_VENUES,
     MT5_DISABLED_DETAIL,
@@ -1328,6 +1329,19 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # otherwise let a RuntimeError subclass fall through to ``unknown`` (retried).
     if isinstance(exc, BybitUnifiedFlowReadError):
         return ("permanent", str(exc)[:500])
+
+    # Phase 215 SC-4: the CSV runner's four former HTTP raise sites are worker domain
+    # exceptions now (``services/job_failure.py``). Same ``(kind, text)`` the HTTP arm
+    # below produced for each (a 404 and a 500 both land on ``unknown``, a 400 and a
+    # 422 on ``permanent``), with the same cause-suffix rule, so the persisted
+    # ``compute_jobs`` row is byte-identical (``tests/test_job_failure.py`` pins it).
+    # Placed immediately above the HTTPException arm, which is KEPT for its other callers.
+    if isinstance(exc, WorkerJobFailure):
+        failure_text = exc.message
+        failure_cause = getattr(exc, "__cause__", None)
+        if failure_cause is not None:
+            failure_text = f"{failure_text} (cause: {repr(failure_cause)[:180]})"
+        return (exc.error_kind, failure_text[:500])
 
     # FastAPI HTTPException — analytics_runner raises 400 for "Insufficient
     # trade history" and similar pre-condition failures that no amount of

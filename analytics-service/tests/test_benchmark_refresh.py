@@ -45,11 +45,11 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pandas as pd
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routers import cron as cron_mod
 from services import benchmark as benchmark_mod
+from tests.app_factory import build_test_app
 
 ROUTE = "/api/benchmark-refresh"
 
@@ -224,8 +224,7 @@ def table(monkeypatch: pytest.MonkeyPatch) -> _FakeTable:
 
 @pytest.fixture
 def client(table: _FakeTable) -> Iterator[TestClient]:
-    app = FastAPI()
-    app.include_router(cron_mod.router)
+    app = build_test_app(cron_mod.router)
     yield TestClient(app, raise_server_exceptions=False)
 
 

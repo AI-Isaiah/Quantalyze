@@ -33,7 +33,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import slowapi
 import slowapi.extension
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 # H-0806: this module used to run an `_ensure_real_third_party()` purge that
@@ -79,6 +78,7 @@ slowapi.Limiter = slowapi.extension.Limiter  # type: ignore[attr-defined]
 sys.modules.pop("routers.process_key", None)
 
 import routers.process_key as process_key_router  # noqa: E402
+from tests.app_factory import build_test_app  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -88,23 +88,21 @@ import routers.process_key as process_key_router  # noqa: E402
 
 @pytest.fixture
 def app(monkeypatch):
-    """Mount routers/process_key.py in a bare FastAPI app for isolated unit tests.
+    """Mount routers/process_key.py in a factory app for isolated unit tests.
 
     The slowapi limiter is plumbed in via `app.state.limiter` so the
     `@limiter.limit("100/hour")` decorator's middleware probe does not
-    raise. We do NOT register the RateLimitExceeded exception handler —
-    rate limiting is not exercised in unit tests (each test fires at most
-    a couple of requests, well under 100/hour) and the import of
-    `slowapi.errors` is fragile under sibling-test sys.modules pollution.
+    raise. The factory installs production's exception handlers (including
+    the 429); rate limiting is not exercised here (each test fires at most
+    a couple of requests, well under 100/hour).
     """
     monkeypatch.setenv(
         "INTERNAL_API_TOKEN",
         "a" * 64,  # H-12: 64 chars, no newline.
     )
 
-    app = FastAPI()
+    app = build_test_app(process_key_router.router)
     app.state.limiter = process_key_router.limiter
-    app.include_router(process_key_router.router)
     return app
 
 
@@ -497,7 +495,6 @@ def test_internal_api_token_no_newline_regression(monkeypatch):
     the production invariant.
     """
     from fastapi.testclient import TestClient
-    from fastapi import FastAPI
 
     # Production env value is exactly 64 bytes with no newline. The
     # below asserts are documentation of the invariant the deploy step
@@ -515,9 +512,8 @@ def test_internal_api_token_no_newline_regression(monkeypatch):
     # If a future maintainer accidentally inserts `.strip()` to "fix" the
     # newline issue, this test surfaces the silent bypass.
     monkeypatch.setenv("INTERNAL_API_TOKEN", ("a" * SHAPE_LEN) + "\n")
-    app_isolated = FastAPI()
+    app_isolated = build_test_app(process_key_router.router)
     app_isolated.state.limiter = process_key_router.limiter
-    app_isolated.include_router(process_key_router.router)
     test_client = TestClient(app_isolated)
     r = test_client.post(
         "/process-key",
@@ -3210,22 +3206,17 @@ def test_cross_language_claim_from_ts_client_buckets_to_tenant(monkeypatch):
 
 @pytest.fixture
 def throttled_client(monkeypatch):
-    """A TestClient with the 429 handler registered and limiter storage reset.
+    """A TestClient on a factory app (production's 429 handler) with limiter storage reset.
 
-    The module-level `app` fixture deliberately omits the RateLimitExceeded
-    handler because rate limiting is not exercised there. These tests DO
-    exercise it, so they need their own app — and they need the module-global
+    The module-level `app` fixture does not exercise rate limiting. These tests
+    DO, so they need their own app — and they need the module-global
     `memory://` storage wiped either side, since it is process-wide (G-3).
+    The 429 handler is production's, installed by `build_test_app`.
     """
-    from slowapi import _rate_limit_exceeded_handler
-    from slowapi.errors import RateLimitExceeded
-
     monkeypatch.setenv("INTERNAL_API_TOKEN", _CLAIM_SECRET)
 
-    app = FastAPI()
+    app = build_test_app(process_key_router.router)
     app.state.limiter = process_key_router.limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-    app.include_router(process_key_router.router)
 
     process_key_router.limiter.reset()
     # raise_server_exceptions=False: an ADMITTED request runs the real handler
@@ -4908,7 +4899,8 @@ def test_sync_pipeline_rejection_also_forwards_the_breakdown(client):
             headers=_auth_headers(),
         )
 
-    assert r.status_code in (403, 424), r.text
+    # 424 exactly; the per-arm statuses are pinned in test_process_key_scope_rejection_statuses.py.
+    assert r.status_code == 424, r.text
     body = r.json()
     assert body["ok"] is False
     rows = body["debug_context"]["pandera_errors"]

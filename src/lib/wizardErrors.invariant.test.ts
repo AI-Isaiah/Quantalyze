@@ -10,6 +10,16 @@ import { stripCommentsPreserveLines } from "./source-scan";
 // the real Map is what makes a NEW row join this file's population with no test
 // edit — the property the 153.7-02 roster regression needed and did not have.
 import { VENUE_WIRE_CODE_TO_VERDICT } from "./wizardErrors";
+// Phase 215 / SC-5 — the two key-step rosters are no longer declared in the step
+// files; they are derived in this module, so their members are read from the
+// LIVE exports instead of parsed out of step source text.
+import {
+  ADD_KEY_OWN_CODES,
+  CREATE_WITH_KEY_OWN_CODES,
+  KEY_CLASSIFIER_CASCADE_CODES,
+  KNOWN_ADD_KEY_CODES,
+  KNOWN_CREATE_WITH_KEY_CODES,
+} from "./wizardKeyRosters";
 
 /**
  * Phase 142.2-07 / MT5-04 (D-05) — A WIZARD ERROR CODE IS INERT UNLESS IT LANDS
@@ -22,9 +32,9 @@ import { VENUE_WIRE_CODE_TO_VERDICT } from "./wizardErrors";
  *
  *   1. the `WizardErrorCode` union in `wizardErrors.ts` (and, with it, the
  *      `WIZARD_ERROR_COPY` record, which TypeScript makes total over the union);
- *   2. `KNOWN_CREATE_WITH_KEY_CODES` in `ConnectKeyStep.tsx`, for codes from
+ *   2. `KNOWN_CREATE_WITH_KEY_CODES` (derived in `wizardKeyRosters.ts`, read by `ConnectKeyStep.tsx`), for codes from
  *      `strategies/create-with-key`;
- *   3. `KNOWN_ADD_KEY_CODES` in `MultiKeyConnectStep.tsx`, for codes from
+ *   3. `KNOWN_ADD_KEY_CODES` (derived in `wizardKeyRosters.ts`, read by `MultiKeyConnectStep.tsx`), for codes from
  *      `strategies/composite/add-key`.
  *
  * Miss the union and the code cannot be typed. Miss the ROSTER and the code
@@ -586,6 +596,27 @@ function deriveRoster(source: string, name: string): string[] {
 }
 
 /**
+ * The two key-step rosters, read from the LIVE exports (Phase 215 / SC-5, 2026-11-15).
+ *
+ * They are built in `wizardKeyRosters.ts` from non-literal unions, so a source
+ * scan of the step files finds no declaration and `deriveRoster` would return
+ * `[]` for them, which satisfies every "the missing set is empty" assertion in
+ * this file. Every other roster is still parsed from source.
+ */
+const LIVE_KEY_ROSTERS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["KNOWN_CREATE_WITH_KEY_CODES", KNOWN_CREATE_WITH_KEY_CODES],
+  ["KNOWN_ADD_KEY_CODES", KNOWN_ADD_KEY_CODES],
+]);
+
+/** A roster's members: the live export for the two key rosters, else the source scan. */
+function rosterOf(rosterFile: string, rosterName: string): string[] {
+  const live = LIVE_KEY_ROSTERS.get(rosterName);
+  return live !== undefined
+    ? [...live]
+    : deriveRoster(stripped(rosterFile), rosterName);
+}
+
+/**
  * The wire→wizard ALIAS TABLE's pairs, read out of its declaration (153.1-06).
  *
  * ── WHY THE COVERAGE LAW NEEDS THIS AT ALL ──────────────────────────────────
@@ -980,11 +1011,10 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
   const aliasTarget = (code: string): string | undefined => alias.get(code);
 
   const derived = ROUTES.map((r) => {
-    const rosterSource = stripped(r.rosterFile);
     return {
       ...r,
       codes: deriveEmittedCodes(stripped(r.route), r.statusRe),
-      roster: new Set(deriveRoster(rosterSource, r.rosterName)),
+      roster: new Set(rosterOf(r.rosterFile, r.rosterName)),
     };
   });
 
@@ -1909,7 +1939,7 @@ describe("[153.7 review W-153.7-1] every CLASSIFIER-returned code is admitted by
     "%s: the roster parsed, and it is not a stub",
     (label) => {
       const step = CLASSIFIER_STEPS.find((s) => s.label === label)!;
-      const roster = deriveRoster(stripped(step.rosterFile), step.rosterName);
+      const roster = rosterOf(step.rosterFile, step.rosterName);
       expect(
         roster.length,
         `${step.rosterName} parsed as ${roster.length} members. A roster that ` +
@@ -1925,7 +1955,7 @@ describe("[153.7 review W-153.7-1] every CLASSIFIER-returned code is admitted by
     "%s: no classifier verdict can reach the step and be rejected as unrecognised",
     (label) => {
       const step = CLASSIFIER_STEPS.find((s) => s.label === label)!;
-      const roster = new Set(deriveRoster(stripped(step.rosterFile), step.rosterName));
+      const roster = new Set(rosterOf(step.rosterFile, step.rosterName));
 
       const missing = reachable
         .filter((code) => !alias.has(code) && !roster.has(code))
@@ -1990,49 +2020,60 @@ describe("[153.7 review W-153.7-1] every CLASSIFIER-returned code is admitted by
   });
 
   /**
-   * ⭐ W-153.7-2 — A CLASS FIX WITH NO OWNER IS A CLASS FIX THAT DOES NOT HAPPEN.
+   * 2026-11-15, Phase 215 SC-5 — THE W-153.7-2 OWNER TEST IS REPLACED BY THE
+   * INVARIANT IT STOOD FOR.
    *
-   * Both rosters' docblocks assigned the derived-roster class fix to *"Phase 153
-   * / WIZFORM-02"*. That requirement is ticked **COMPLETE** in `REQUIREMENTS.md`
-   * as of 2026-08-14 — and 153.7 grew both lists anyway — so the pointer named a
-   * closed requirement and the work became nobody's. It was not in `TODOS.md`
-   * either (grepped by the verifier).
+   * It used to assert that `TODOS.md` carried an item for the derived-roster class
+   * fix and that both step files cited it, a referential-integrity check between a
+   * comment and the backlog. That fix has shipped: the two rosters are built in
+   * `wizardKeyRosters.ts`, the backlog item is deleted in the same PR, and a test
+   * that reads `TODOS.md` to keep an entry alive is the wrong shape (CLAUDE.md,
+   * "TODOS.md holds open work only"). What the entry protected was that the rosters
+   * are not hand-typed per step, so that is what is pinned: neither step declares
+   * a local roster, and each imports its roster from the module.
    *
-   * ⛔ THIS IS NOT A PROSE-STYLE ASSERTION, and the distinction matters under
-   * this project's stopping rule: it is a two-sided REFERENTIAL INTEGRITY check
-   * between a comment and the single backlog file. It reds if the citation is
-   * removed from either roster (ownerless again) **or** if the `TODOS.md` item is
-   * deleted while the comments still point at it (a dangling pointer, which is
-   * the same defect wearing the other shoe). Neither side can be "fixed" by
-   * editing the other into agreement without the owner actually existing.
-   *
-   * The ID is deliberately a short stable token rather than a sentence, so a
-   * reword of either docblock cannot break this while the ownership survives.
+   * ⚠️ READ THE COMMENT-STRIPPED SOURCE: both step files still NAME the roster in
+   * prose, and a raw scan would count that mention as a declaration.
    */
-  it("[W-153.7-2] both rosters cite a LIVE owner for the derived-roster class fix", () => {
-    const OWNER_ID = "ROSTER-DERIVE-01";
-
-    const todos = readFileSync(join(REPO, "TODOS.md"), "utf-8");
-    expect(
-      todos.includes(OWNER_ID),
-      `TODOS.md carries no ${OWNER_ID} item, but both key-step rosters cite it ` +
-        `as the owner of the derived-roster class fix. A dangling pointer is ` +
-        `the same defect as no pointer: add the item back, or re-point both ` +
-        `docblocks at whoever really owns it.`,
-    ).toBe(true);
-
+  it("[W-153.7-2] neither key step declares a local roster literal, and each imports the derived one", () => {
     for (const step of CLASSIFIER_STEPS) {
-      // ⚠️ Read the RAW source, not the comment-stripped one. The citation IS a
-      // comment — `stripped()` would blank exactly what is under test.
-      const raw = readFileSync(step.rosterFile, "utf-8");
+      const source = stripped(step.rosterFile);
       expect(
-        raw.includes(OWNER_ID),
-        `${step.rosterName}'s docblock no longer cites ${OWNER_ID}. That roster ` +
-          `is hand-typed and something has to own deriving it; without a live ` +
-          `citation the class fix is nobody's, which is exactly how it sat ` +
-          `pointed at a CLOSED requirement from 2026-08-06 to 2026-08-14.`,
+        new RegExp(`\\bconst\\s+${step.rosterName}\\b`).test(source),
+        `${step.rosterName} is declared in ${step.rosterFile} again. The roster ` +
+          `is derived per route in src/lib/wizardKeyRosters.ts; a local ` +
+          `hand-typed set is the duplication that module replaced.`,
+      ).toBe(false);
+      expect(
+        new RegExp(
+          `import\\s*\\{[^}]*\\b${step.rosterName}\\b[^}]*\\}\\s*from\\s*"@/lib/wizardKeyRosters"`,
+        ).test(source),
+        `${step.rosterFile} no longer imports ${step.rosterName} from ` +
+          `@/lib/wizardKeyRosters, so the membership check it runs reads some ` +
+          `other roster than the one this file's guards read.`,
       ).toBe(true);
     }
+  });
+
+  /**
+   * 215-07 — THE CASCADE TUPLE IS TYPED ONCE AND PINNED, NOT COMPUTED.
+   *
+   * `classifyKeyValidationError`'s literal returns stay literal (the scanner above
+   * reads exactly those), so `KEY_CLASSIFIER_CASCADE_CODES` is a second hand-typed
+   * list of the same fact. Both directions against the scan, so a new cascade arm
+   * cannot join the classifier without joining the tuple, and a retired arm cannot
+   * leave a dead row behind.
+   */
+  it("KEY_CLASSIFIER_CASCADE_CODES equals the scanned cascade, both directions", () => {
+    const scanned = new Set(cascade);
+    const typed = new Set<string>(KEY_CLASSIFIER_CASCADE_CODES);
+    expect(typed.size, "KEY_CLASSIFIER_CASCADE_CODES holds a duplicate").toBe(
+      KEY_CLASSIFIER_CASCADE_CODES.length,
+    );
+    expect({
+      scannedButNotTyped: [...scanned].filter((c) => !typed.has(c)).sort(),
+      typedButNotScanned: [...typed].filter((c) => !scanned.has(c)).sort(),
+    }).toEqual({ scannedButNotTyped: [], typedButNotScanned: [] });
   });
 
   /**
@@ -2115,12 +2156,106 @@ describe("[153.7 review W-153.7-1] every CLASSIFIER-returned code is admitted by
     ).toBe(true);
     for (const step of CLASSIFIER_STEPS) {
       expect(
-        deriveRoster(stripped(step.rosterFile), step.rosterName),
+        rosterOf(step.rosterFile, step.rosterName),
         `${step.rosterName} gained SEAM_MISCONFIGURED. That is a hand-typed ` +
           `allow-list edit for a code the ONE shared table already answers ` +
           `(coverage-law row 1), and it contradicts that step's own docblock.`,
       ).not.toContain("SEAM_MISCONFIGURED");
     }
+  });
+});
+
+/**
+ * [215-07 SC-5] EACH ROUTE'S OWN-CODE TUPLE IS ITS EMITTED-CODE CONTRACT.
+ *
+ * `wizardKeyRosters.ts` types one tuple per route (`CREATE_WITH_KEY_OWN_CODES`,
+ * `ADD_KEY_OWN_CODES`) and builds each roster from it plus the classifier-returned
+ * codes. The tuple is the contract and the route source is its oracle: it must
+ * equal, both directions, the route's literal 400 emitters, its 409 emitters, its
+ * `RATE_LIMITED` limiter twin and its three permission refusals. A new route code
+ * with no tuple row reds by name (the step would render UNKNOWN with a Retry), and
+ * so does a tuple row the route no longer emits.
+ *
+ * The three sources have different visibility, which is why they are three:
+ *   - 400 and 409 are derived by `deriveEmittedCodes` over the comment-stripped route.
+ *   - `RATE_LIMITED` rides `throttledBody` inside `rateLimitDenyJson`, which the
+ *     scanner cannot see (the 429 twin below records it), so it is hand-typed here
+ *     and checked as a `code:` literal in the route source.
+ *   - the permission refusals pass a COMPUTED code (a ternary), so the scanner
+ *     cannot see them either; hand-typed here and checked as string literals.
+ */
+describe("[215-07 SC-5] each route's own-code tuple equals its emitted-code contract, both directions", () => {
+  /** HAND-TYPED. The three codes both routes' read-only check chooses between. */
+  const PERMISSION_TERNARY_CODES = [
+    "KEY_HAS_TRADING_PERMS",
+    "KEY_HAS_WITHDRAW_PERMS",
+    "KEY_NOT_READ_ONLY",
+  ];
+  /** HAND-TYPED per route, measured under emitterRe("409") on the stripped source. */
+  const CASES = [
+    {
+      label: "create-with-key",
+      tuple: CREATE_WITH_KEY_OWN_CODES as readonly string[],
+      codes409: [
+        "DRAFT_ALREADY_EXISTS",
+        "DRAFT_SESSION_COLLISION",
+        "KEY_ORPHANED",
+        "KEY_REUSE_UNAVAILABLE",
+        "KEY_VENUE_ALREADY_CONNECTED",
+        "VENUE_ALREADY_CONNECTED",
+      ],
+    },
+    {
+      label: "composite/add-key",
+      tuple: ADD_KEY_OWN_CODES as readonly string[],
+      codes409: ["DRAFT_ALREADY_EXISTS"],
+    },
+  ];
+
+  it.each(CASES.map((c) => c.label))("%s: the tuple is the route's contract", (label) => {
+    const c = CASES.find((x) => x.label === label)!;
+    const route = ROUTES.find((r) => r.label === label)!;
+    const source = stripped(route.route);
+    const scan400 = deriveEmittedCodes(source, "400");
+    const scan409 = deriveEmittedCodes(source, "409");
+
+    // NOT VACUOUS. Hand-typed floors (13 and 1 measured at 08451cfcc), never the
+    // tuple's own length: an empty scan would otherwise make an empty tuple "equal".
+    expect(scan400.length, `${label}: the 400 scan came back near empty`).toBeGreaterThanOrEqual(12);
+    expect(scan409.length, `${label}: the 409 scan came back empty`).toBeGreaterThanOrEqual(1);
+    expect([...new Set(scan409)].sort(), `${label}: the 409 vocabulary moved`).toEqual(
+      [...c.codes409].sort(),
+    );
+
+    // The two hand-typed sources must themselves be in the route.
+    expect(
+      /\bcode:\s*"RATE_LIMITED"/.test(source),
+      `${label} no longer carries a \`code: "RATE_LIMITED"\` literal, so the tuple's RATE_LIMITED row is dead.`,
+    ).toBe(true);
+    for (const code of PERMISSION_TERNARY_CODES) {
+      expect(
+        source.includes(`"${code}"`),
+        `${label} no longer carries "${code}", so the tuple's permission row is dead.`,
+      ).toBe(true);
+    }
+
+    const contract = new Set<string>([
+      ...scan400,
+      ...c.codes409,
+      "RATE_LIMITED",
+      ...PERMISSION_TERNARY_CODES,
+    ]);
+    const typed = new Set<string>(c.tuple);
+    expect(typed.size, `${label}: the own-code tuple holds a duplicate`).toBe(c.tuple.length);
+    expect(
+      {
+        emittedButNotInTuple: [...contract].filter((x) => !typed.has(x)).sort(),
+        inTupleButNotEmitted: [...typed].filter((x) => !contract.has(x)).sort(),
+      },
+      `${label}'s own-code tuple in wizardKeyRosters.ts no longer equals what the ` +
+        `route emits. "emittedButNotInTuple" codes would render UNKNOWN with a ` +
+        `Retry control at the step; "inTupleButNotEmitted" are dead rows.`,
+    ).toEqual({ emittedButNotInTuple: [], inTupleButNotEmitted: [] });
   });
 });
 
@@ -2162,7 +2297,7 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
   const alias = new Map(deriveAliasPairs(unionSource));
   const route = ROUTES.find((r) => r.label === "create-with-key")!;
   const codes = deriveEmittedCodes(stripped(route.route), "409");
-  const roster = new Set(deriveRoster(stripped(route.rosterFile), route.rosterName));
+  const roster = new Set(rosterOf(route.rosterFile, route.rosterName));
 
   /**
    * HAND-TYPED, measured under `emitterRe("409")` on the comment-stripped
@@ -2316,7 +2451,7 @@ describe("[164.2-04] create-with-key's 429 refusals clear ConnectKeyStep's roste
   const union = new Set(deriveUnionMembers(unionSource));
   const route = ROUTES.find((r) => r.label === "create-with-key")!;
   const routeSource = stripped(route.route);
-  const roster = new Set(deriveRoster(stripped(route.rosterFile), route.rosterName));
+  const roster = new Set(rosterOf(route.rosterFile, route.rosterName));
 
   /** Occurrences of a `code: "X"` literal, on comment-stripped source. */
   const codeLiteralCount = (source: string, code: string): number =>
@@ -2619,7 +2754,7 @@ describe("[164.2-05] the other three userActionLimiter routes answer RATE_LIMITE
           "this route is then zero for the wrong reason.",
       ).toBeGreaterThan(2_000);
       expect(
-        deriveRoster(stripped(r.rosterFile), r.rosterName).length,
+        rosterOf(r.rosterFile, r.rosterName).length,
         `${r.rosterName} parsed as empty — membership below would fail for a ` +
           "confusing reason and a wholesale parse failure would hide behind it.",
       ).toBeGreaterThan(0);
@@ -2654,7 +2789,7 @@ describe("[164.2-05] the other three userActionLimiter routes answer RATE_LIMITE
     "%s: RATE_LIMITED is a union member AND admitted by that route's roster",
     (label) => {
       const r = LIMITER_ROUTES.find((x) => x.label === label)!;
-      const roster = new Set(deriveRoster(stripped(r.rosterFile), r.rosterName));
+      const roster = new Set(rosterOf(r.rosterFile, r.rosterName));
       expect(
         union.has("RATE_LIMITED"),
         "RATE_LIMITED has no WizardErrorCode member, so formatKeyError falls " +

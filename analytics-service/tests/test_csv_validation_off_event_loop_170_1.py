@@ -36,6 +36,7 @@ import pytest
 from fastapi import FastAPI
 
 from services import csv_validator
+from tests.app_factory import build_test_app
 
 SLOW_SECONDS = 1.0
 MAX_TICK_GAP = 0.5
@@ -72,17 +73,15 @@ def _process_key_router():
 
 def _csv_app() -> FastAPI:
     csv_router = _csv_router()
-    app = FastAPI()
+    app = build_test_app(csv_router.router)
     app.state.limiter = csv_router.limiter
-    app.include_router(csv_router.router)
     return app
 
 
 def _process_key_app() -> FastAPI:
     process_key_router = _process_key_router()
-    app = FastAPI()
+    app = build_test_app(process_key_router.router)
     app.state.limiter = process_key_router.limiter
-    app.include_router(process_key_router.router)
     return app
 
 

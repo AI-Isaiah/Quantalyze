@@ -34,10 +34,10 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routers.internal import router, _reset_rate_limit
+from tests.app_factory import build_test_app
 
 
 @pytest.fixture
@@ -54,8 +54,7 @@ def client(monkeypatch):
     monkeypatch.delenv("MT5_VALIDATION_GATEWAY_HOST", raising=False)
     monkeypatch.delenv("MT5_VALIDATION_GATEWAY_PORT", raising=False)
     _reset_rate_limit()
-    app = FastAPI()
-    app.include_router(router)
+    app = build_test_app(router)
     return TestClient(app)
 
 

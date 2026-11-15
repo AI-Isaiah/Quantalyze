@@ -148,6 +148,17 @@ TENANT_CLAIM_HEADER: Final[str] = "X-Tenant-Claim"
 #: The payload the public teaser mints. Everything anonymous shares ONE bucket.
 ANON_PAYLOAD: Final[str] = "public"
 
+
+def anon_bucket_key(scope: str) -> str:
+    """The ONE spelling of the shared anonymous bucket's limiter key.
+
+    Used by both key functions below, by ``/process-key``'s limit provider and by
+    the saturation alert in ``services/app_error_handlers.py``, so the bucket and
+    everything that reasons about it cannot drift apart.
+    """
+    return f"{scope}:anon"
+
+
 #: Refuse to do HMAC work on an oversized header. A claim is
 #: ``<uuid>.<10-digit-epoch>.<64-hex>`` ≈ 110 chars; 512 is generous.
 _CLAIM_MAX_CHARS: Final[int] = 512
@@ -334,7 +345,7 @@ def tenant_rate_limit_key(request: Request, scope: str) -> str:
     try:
         payload = verify_tenant_claim(request)
         if payload == ANON_PAYLOAD:
-            return f"{scope}:anon"
+            return anon_bucket_key(scope)
         if payload is not None:
             return f"{scope}:t:{payload}"
         log.warning(
@@ -424,7 +435,7 @@ def tenant_or_platform_key(request: Request, scope: str) -> str:
     try:
         payload = verify_tenant_claim(request)
         if payload == ANON_PAYLOAD:
-            return f"{scope}:anon"
+            return anon_bucket_key(scope)
         if payload is not None:
             return f"{scope}:t:{payload}"
         return _platform_bucket(request)

@@ -41,10 +41,10 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import routers.process_key as process_key_router
+from tests.app_factory import build_test_app
 
 # A valid UUID — the route validates X-Correlation-Id and mints a fresh one if
 # it is malformed, so it must be well-formed to round-trip into the envelope.
@@ -55,9 +55,8 @@ _TOKEN = "a" * 64
 @pytest.fixture
 def app(monkeypatch):
     monkeypatch.setenv("INTERNAL_API_TOKEN", _TOKEN)
-    application = FastAPI()
+    application = build_test_app(process_key_router.router)
     application.state.limiter = process_key_router.limiter
-    application.include_router(process_key_router.router)
     return application
 
 

@@ -1,9 +1,9 @@
 """Coverage for routers/match.py endpoints and helpers.
 
 The FastAPI surface (POST /api/match/recompute, GET /api/match/eval,
-POST /api/match/cron-recompute) is exercised against a bare FastAPI app —
-no main.py middleware, no live Supabase, no Sentry. Mocking targets the
-module-level Supabase factory only.
+POST /api/match/cron-recompute) is exercised against a factory FastAPI app
+(production's exception handlers, no main.py middleware), no live Supabase, no
+Sentry. Mocking targets the module-level Supabase factory only.
 """
 
 from __future__ import annotations
@@ -20,9 +20,10 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import Request
 from fastapi.testclient import TestClient
 from services import rate_limit as _rl
+from tests.app_factory import build_test_app
 
 
 def _engine_state_str(value: bool) -> str:
@@ -72,7 +73,7 @@ def _reset_limiter_buckets():
 
 @pytest.fixture(scope="module")
 def client() -> TestClient:
-    """Bare FastAPI app with routers.match mounted — no middleware.
+    """Factory app (production 422/429 handlers) with routers.match mounted — no middleware.
 
     Module-scoped so the FastAPI app + router include only happen once per
     test file. Tests monkeypatch module-level globals on `routers.match`,
@@ -80,8 +81,7 @@ def client() -> TestClient:
     """
     from routers.match import router
 
-    app = FastAPI()
-    app.include_router(router)
+    app = build_test_app(router)
     return TestClient(app)
 
 

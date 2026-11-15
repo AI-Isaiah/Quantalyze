@@ -54,9 +54,13 @@ from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
 from postgrest.exceptions import APIError
 
+from services.job_failure import (
+    CsvComputationFailed,
+    CsvInsufficientHistory,
+    WorkerJobFailure,
+)
 from services.strategy_analytics_provenance import (
     PROVENANCE_JOB_ID_KEY,
     PROVENANCE_SOURCE_KEY,
@@ -256,8 +260,8 @@ def _db_execute_router(harness: _Harness) -> Any:
     return _side_effect
 
 
-async def _run(harness: _Harness, *, job_id: str | None) -> HTTPException:
-    """Drive the CSV runner into its catch-all failure arm; return the 500."""
+async def _run(harness: _Harness, *, job_id: str | None) -> WorkerJobFailure:
+    """Drive the CSV runner into a failure arm; return the worker failure it raised."""
     from services.analytics_runner import run_csv_strategy_analytics
 
     with patch("services.analytics_runner.get_supabase", return_value=harness.sb), \
@@ -268,7 +272,7 @@ async def _run(harness: _Harness, *, job_id: str | None) -> HTTPException:
          patch("services.basis_series.persist_basis_series", new=MagicMock()), \
          patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("compute_all_metrics blew up")):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(WorkerJobFailure) as exc_info:
             await run_csv_strategy_analytics(_STRATEGY_ID, job_id=job_id)
     return exc_info.value
 
@@ -557,14 +561,14 @@ async def test_pgrst204_marker_miss_records_the_failure_at_a_non_p10_writer() ->
 
     Without the helper's arm the APIError leaves ``_mark_failed``, propagates
     out of ``run_csv_strategy_analytics`` as itself rather than as the runner's
-    400, and NOTHING lands — the row keeps whatever ``_mark_computing`` left.
+    CsvInsufficientHistory, and NOTHING lands — the row keeps whatever ``_mark_computing`` left.
     """
     harness = _build_harness(
         _marker_schema_cache_miss(), target="_mark_failed", series=_ROWS[:1]
     )
 
     exc = await _run(harness, job_id=_JOB_ID)
-    assert exc.status_code == 400, (
+    assert isinstance(exc, CsvInsufficientHistory) and exc.error_kind == "permanent", (
         "the runner's own insufficient-history exit must still be the outcome; a "
         "500 here means the miss escaped and this test is measuring the wrong arm"
     )
@@ -607,7 +611,7 @@ async def test_marker_23514_still_records_the_failure() -> None:
     harness = _build_harness(_check_violation())
 
     exc = await _run(harness, job_id=_JOB_ID)
-    assert exc.status_code == 500
+    assert isinstance(exc, CsvComputationFailed) and exc.error_kind == "unknown"
 
     writes = _terminal_writes(harness)
     assert len(writes) == 2, (
@@ -648,7 +652,7 @@ async def test_non_23514_is_not_answered_by_dropping_provenance(
 
     caplog.set_level(logging.WARNING, logger="quantalyze.analytics.runner")
     exc = await _run(harness, job_id=_JOB_ID)
-    assert exc.status_code == 500
+    assert isinstance(exc, CsvComputationFailed) and exc.error_kind == "unknown"
 
     assert harness.observed == [boom]
     writes = _terminal_writes(harness)
@@ -671,7 +675,7 @@ async def test_stamped_terminal_write_on_the_normal_path() -> None:
     harness = _build_harness(None)
 
     exc = await _run(harness, job_id=_JOB_ID)
-    assert exc.status_code == 500
+    assert isinstance(exc, CsvComputationFailed) and exc.error_kind == "unknown"
 
     writes = _terminal_writes(harness)
     assert len(writes) == 1, f"expected exactly one terminal write, got {writes!r}"
@@ -693,7 +697,7 @@ async def test_no_job_id_writes_both_markers_null() -> None:
     harness = _build_harness(None)
 
     exc = await _run(harness, job_id=None)
-    assert exc.status_code == 500
+    assert isinstance(exc, CsvComputationFailed) and exc.error_kind == "unknown"
 
     writes = _terminal_writes(harness)
     assert len(writes) == 1

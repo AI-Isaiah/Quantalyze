@@ -62,7 +62,12 @@ from services.metrics import periods_per_year_for_asset_class
 # would be one nobody can reason about. Two `adapter.validate` call sites below
 # had no enclosing try at all before this phase.
 from services.mt5_client import Mt5SessionAbandoned
-from services.rate_limit import limiter, platform_ceiling_key, tenant_rate_limit_key
+from services.rate_limit import (
+    anon_bucket_key,
+    limiter,
+    platform_ceiling_key,
+    tenant_rate_limit_key,
+)
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
 
 if TYPE_CHECKING:
@@ -145,7 +150,11 @@ def _process_key_limit_for(key: str) -> str:
     and a second decorator whose key function returned ``""`` for non-anon
     traffic would make slowapi log an ERROR on every authenticated call.
     """
-    return _PROCESS_KEY_ANON_LIMIT if key == "process_key:anon" else _PROCESS_KEY_TENANT_LIMIT
+    return (
+        _PROCESS_KEY_ANON_LIMIT
+        if key == anon_bucket_key("process_key")
+        else _PROCESS_KEY_TENANT_LIMIT
+    )
 
 
 def _process_key_ceiling_limit_for(key: str) -> str:

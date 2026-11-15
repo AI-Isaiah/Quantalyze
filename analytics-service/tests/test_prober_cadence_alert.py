@@ -25,11 +25,11 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routers import cron as cron_mod
 from services import ops_alert
+from tests.app_factory import build_test_app
 
 _REAL_SCHEDULE_FOUNDER_EMAIL = ops_alert._schedule_founder_email
 
@@ -76,7 +76,7 @@ def _stub_founder_email(monkeypatch):
 
 @pytest.fixture
 def client() -> TestClient:
-    """Bare FastAPI app with routers.cron mounted — no SERVICE_KEY middleware.
+    """Factory app (production 422/429 handlers) with routers.cron mounted — no SERVICE_KEY middleware.
 
     The middleware guard itself is proven separately, driving the REAL
     `main.app` stack (see
@@ -86,8 +86,7 @@ def client() -> TestClient:
     claim runs through the full app.
     """
     cron_mod._reset_prober_cadence_alert()
-    app = FastAPI()
-    app.include_router(cron_mod.router)
+    app = build_test_app(cron_mod.router)
     test_client = TestClient(app)
     yield test_client
     cron_mod._reset_prober_cadence_alert()
@@ -454,8 +453,7 @@ async def test_the_email_post_never_logs_or_bodies_the_service_key(
     monkeypatch.setenv("SERVICE_KEY", _CANARY_SERVICE_KEY)
     cron_mod._reset_prober_cadence_alert()
 
-    app = FastAPI()
-    app.include_router(cron_mod.router)
+    app = build_test_app(cron_mod.router)
     transport = httpx.ASGITransport(app=app)
     with caplog.at_level("ERROR"):
         async with httpx.AsyncClient(

@@ -1,8 +1,8 @@
 """Phase 35 (DAILIES-01) — Live-DB tests for the dual-axis csv_daily_returns.
 
-Gated on TEST_SUPABASE_DB_URL (same gate as test_persist_csv_daily_returns_live).
-CI without secrets skips cleanly with a verbose ``reason=`` (Rule 12: silent
-skips are a fail-loud violation).
+Resolves its DSN through the ``live_db_dsn`` fixture (``tests/live_db_dsn.py``): it runs on the
+CI python job's local-stack lane via LANE_DB_URL, skips on a dev machine without the lane
+values, and FAILS under CI=true without them (Phase 215: never a silent skip).
 
 After migration 20260624120000_csv_daily_returns_per_key_axis, csv_daily_returns
 carries BOTH the existing strategy axis AND a new per-key axis:
@@ -18,11 +18,10 @@ carries BOTH the existing strategy axis AND a new per-key axis:
 These tests prove the load-bearing DDL behaviors that the unit tests (which mock
 the DB) cannot: the NULLs-distinct coexistence on both axes, both upsert
 arbiters resolving (no 42P10), and the three CHECK rejections (23514). They run
-against the live PG17 TEST instance where the migration is applied.
+against the local-stack lane, where the migration is applied.
 """
 from __future__ import annotations
 
-import os
 import uuid
 from typing import Iterator
 
@@ -33,28 +32,22 @@ from psycopg.rows import dict_row
 # Reuse the proven live-test harness from the persist suite — same TEST DSN,
 # same auth.users/profiles seeding (the on_auth_user_created trigger creates the
 # profiles row api_keys.user_id FK→profiles needs), same FK-safe teardown.
+from tests.live_db_dsn import connect_live_db
 from tests.test_persist_csv_daily_returns_live import (
     _cleanup,
     _create_test_strategy,
     _create_test_user,
 )
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TEST_SUPABASE_DB_URL"),
-    reason="Live test Supabase project not configured (TEST_SUPABASE_DB_URL unset). "
-    "See MEMORY reference_test_supabase_project.md for the qmnijlgmdhviwzwfyzlc setup. "
-    "These tests pin the Phase 35 dual-axis csv_daily_returns DDL (DAILIES-01).",
-)
 
 
 @pytest.fixture
-def service_role_conn() -> Iterator[psycopg.Connection]:
-    """psycopg connection (autocommit) against the TEST Supabase DSN.
+def service_role_conn(live_db_dsn: str) -> Iterator[psycopg.Connection]:
+    """psycopg connection (autocommit) against the local-stack lane.
 
-    DSN must point at qmnijlgmdhviwzwfyzlc; never production.
+    ``connect_live_db`` refuses anything but the lane before returning; never TEST, never production.
     """
-    dsn = os.environ["TEST_SUPABASE_DB_URL"]
-    conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+    conn = connect_live_db(live_db_dsn, autocommit=True, row_factory=dict_row)
     try:
         yield conn
     finally:
@@ -335,20 +328,37 @@ class TestCheckConstraintsReject:
         try:
             with service_role_conn.transaction():
                 with service_role_conn.cursor() as cur:
-                    with pytest.raises(psycopg.errors.CheckViolation) as exc:
-                        # api_key_id set but allocator_id NULL — violates
-                        # csv_daily_returns_per_key_allocator. (The owner-coherence
-                        # BEFORE trigger also guards allocator_id, but the CHECK is
-                        # the constraint this test pins.)
+                    # api_key_id set but allocator_id NULL. Two guards refuse it: the
+                    # owner-coherence BEFORE trigger (fires first, RaiseException) and the
+                    # csv_daily_returns_per_key_allocator CHECK (CheckViolation) behind it.
+                    # 2026-11-15 (Phase 215): this case never ran in CI before the lane
+                    # migration and still expected the CHECK to be the one that fires, which
+                    # the BEFORE trigger makes unreachable through an INSERT. Either refusal
+                    # is the property under test; the CHECK's existence is pinned below.
+                    with pytest.raises(
+                        (psycopg.errors.CheckViolation, psycopg.errors.RaiseException)
+                    ) as exc:
                         cur.execute(
                             "INSERT INTO public.csv_daily_returns "
                             "(api_key_id, allocator_id, strategy_id, date, daily_return) "
                             "VALUES (%s, NULL, NULL, %s, %s)",
                             (key, "2024-03-07", 0.01),
                         )
-            assert "csv_daily_returns_per_key_allocator" in str(exc.value), (
-                f"per-key row without allocator must violate the per-key CHECK; "
-                f"got {exc.value!r}"
+            msg = str(exc.value)
+            assert "csv_daily_returns_per_key_allocator" in msg or "allocator_id" in msg, (
+                f"per-key row without allocator must be refused by the per-key CHECK or the "
+                f"owner-coherence trigger; got {exc.value!r}"
+            )
+            with service_role_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint "
+                    "WHERE conrelid = 'public.csv_daily_returns'::regclass "
+                    "AND conname = 'csv_daily_returns_per_key_allocator'"
+                )
+                row = cur.fetchone()
+            assert row is not None and "allocator_id IS NOT NULL" in row["def"], (
+                "the per-key CHECK csv_daily_returns_per_key_allocator is missing or no longer "
+                f"requires allocator_id; got {row!r}"
             )
         finally:
             _cleanup_keys(service_role_conn, [key])

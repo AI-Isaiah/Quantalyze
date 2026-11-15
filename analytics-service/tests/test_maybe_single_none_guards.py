@@ -21,8 +21,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from tests.app_factory import build_test_app
 
 try:
     import routers.internal as internal_router
@@ -106,8 +106,7 @@ def test_get_key_permissions_returns_404_for_unknown_key(monkeypatch):
     monkeypatch.setattr(internal_router, "_consume_rate_limit", lambda _kid: True)
     monkeypatch.setattr(internal_router, "get_supabase", lambda: _FakeSupabase())
 
-    app = FastAPI()
-    app.include_router(internal_router.router)
+    app = build_test_app(internal_router.router)
     client = TestClient(app, raise_server_exceptions=False)
 
     resp = client.post("/internal/keys/does-not-exist/permissions")

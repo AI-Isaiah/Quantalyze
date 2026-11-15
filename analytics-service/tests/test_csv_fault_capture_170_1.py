@@ -37,12 +37,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import sentry_sdk
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 
 from sentry_init import _redact_before_send
+from tests.app_factory import build_test_app
 
 MARKER = "ZXQCELL"
 THIS_FILE = "test_csv_fault_capture_170_1.py"
@@ -183,9 +183,8 @@ def test_redaction_hook_redacts_the_csv_upload_body_for_every_event_not_only_our
 def csv_client():
     import routers.csv as csv_router
 
-    app = FastAPI()
+    app = build_test_app(csv_router.router)
     app.state.limiter = csv_router.limiter
-    app.include_router(csv_router.router)
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -337,9 +336,8 @@ def test_process_key_event_does_not_carry_the_uploaded_file(
     from services import csv_validator
 
     monkeypatch.setenv("INTERNAL_API_TOKEN", _TOKEN)
-    app = FastAPI()
+    app = build_test_app(process_key_router.router)
     app.state.limiter = process_key_router.limiter
-    app.include_router(process_key_router.router)
     client = TestClient(app, raise_server_exceptions=False)
 
     raw = f"date,daily_return\n2024-01-01,{MARKER}\n".encode()

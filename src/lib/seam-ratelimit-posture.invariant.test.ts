@@ -4,6 +4,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { NextRequest } from "next/server";
+import {
+  KNOWN_ADD_KEY_CODES,
+  KNOWN_CREATE_WITH_KEY_CODES,
+} from "./wizardKeyRosters";
 
 /**
  * 140.4-13 / SEAMRIM-05 — A LIMITER MISCONFIGURATION IS NOT A THROTTLE.
@@ -561,9 +565,25 @@ const WIZARD_ROSTER_FILES = [
 
 describe("[140.4-16 / WR-11] no wizard roster is SHADOWED into a different answer", () => {
   const wireTable = extractWireTable();
-  const rosters = WIZARD_ROSTER_FILES.flatMap((f) =>
-    extractRosters(f).map((r) => ({ ...r, file: f })),
-  );
+  const rosters = [
+    ...WIZARD_ROSTER_FILES.flatMap((f) =>
+      extractRosters(f).map((r) => ({ ...r, file: f })),
+    ),
+    // Phase 215 / SC-5 (2026-11-15) — the two key-step rosters are derived in
+    // `wizardKeyRosters.ts` and declared in no step file, so the scan above
+    // cannot find them; read them live (each code answers itself, as for a Set
+    // roster). The pinned name list and the non-empty checks are unchanged.
+    ...[
+      ["KNOWN_CREATE_WITH_KEY_CODES", KNOWN_CREATE_WITH_KEY_CODES],
+      ["KNOWN_ADD_KEY_CODES", KNOWN_ADD_KEY_CODES],
+    ].map(([name, set]) => ({
+      name: name as string,
+      answers: new Map(
+        [...(set as ReadonlySet<string>)].map((c): [string, string] => [c, c]),
+      ),
+      file: "src/lib/wizardKeyRosters.ts",
+    })),
+  ];
 
   /** Every (roster, code) the translate-first hop decides instead of the roster. */
   function shadowed(r: { answers: Map<string, string> }) {

@@ -24,11 +24,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import sentry_sdk
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sentry_sdk.transport import Transport
 
 import sentry_init
+from tests.app_factory import build_test_app
 
 MARKER = "ZXQTXNCELLMARKER"
 CSV_BYTES = (
@@ -98,9 +98,8 @@ def _process_key_router():
 def client(monkeypatch, transport):
     monkeypatch.setenv("INTERNAL_API_TOKEN", _TOKEN)
     process_key_router = _process_key_router()
-    app = FastAPI()
+    app = build_test_app(process_key_router.router)
     app.state.limiter = process_key_router.limiter
-    app.include_router(process_key_router.router)
     process_key_router.limiter.reset()  # process-wide in-memory storage
     yield TestClient(app)
     process_key_router.limiter.reset()

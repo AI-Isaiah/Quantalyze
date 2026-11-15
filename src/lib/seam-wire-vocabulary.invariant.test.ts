@@ -5,6 +5,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stripCommentsPreserveLines } from "./source-scan";
 import {
+  KNOWN_ADD_KEY_CODES,
+  KNOWN_CREATE_WITH_KEY_CODES,
+} from "./wizardKeyRosters";
+import {
   CSV_CAUSE_FALSE_AT_EMISSION,
   CSV_CAUSE_TRUE_AT_EMISSION,
 } from "@/app/(dashboard)/strategies/new/wizard/steps/CsvValidationEnvelope";
@@ -366,9 +370,27 @@ const ROSTER_SCAN_FILES = readdirSync(join(process.cwd(), WIZARD_STEPS_DIR))
   .sort();
 
 const WIRE_TABLE = extractWireTable();
-const ROSTERS = ROSTER_SCAN_FILES.flatMap((f) =>
-  extractRosters(f).map((r) => ({ ...r, file: f })),
-);
+/**
+ * The two key-step rosters, read from the LIVE exports (Phase 215 / SC-5,
+ * 2026-11-15). They are built in `wizardKeyRosters.ts` from non-literal unions
+ * and no step file declares them any more, so the source scan above cannot find
+ * them. Their answers map each code to itself, exactly as the scan reads a Set
+ * roster. The vacuity fence and the pinned name list below are unchanged.
+ */
+const LIVE_KEY_ROSTERS: Array<{ name: string; answers: Map<string, string> }> = [
+  ["KNOWN_CREATE_WITH_KEY_CODES", KNOWN_CREATE_WITH_KEY_CODES],
+  ["KNOWN_ADD_KEY_CODES", KNOWN_ADD_KEY_CODES],
+].map(([name, set]) => ({
+  name: name as string,
+  answers: new Map([...(set as ReadonlySet<string>)].map((c) => [c, c])),
+}));
+
+const ROSTERS = [
+  ...ROSTER_SCAN_FILES.flatMap((f) =>
+    extractRosters(f).map((r) => ({ ...r, file: f })),
+  ),
+  ...LIVE_KEY_ROSTERS.map((r) => ({ ...r, file: "src/lib/wizardKeyRosters.ts" })),
+];
 
 describe("[140.5-05] AGREEMENT — where the roster and the wire table overlap, they answer the same", () => {
   it("VACUITY FENCE — both sides parsed, and the Record side parsed on its KEYS", () => {
