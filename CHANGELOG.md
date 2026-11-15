@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.133.49.1] - 2026-11-16 — records: close 215 TESTREACH; book CSVSTATUS
+
+Records PR for Phase 215, whose code is already on `main` as #1278 (v0.133.49.0). It carries the phase artifacts, the `phase complete` run and the booking of the follow-up phase the founder decided on 2026-11-15. There is no source, test, script or migration change.
+
+### Added
+- **Phase artifacts for 215** (8 plans and summaries, context, discussion log, research, patterns, review, security, validation and verification) under `.planning/phases/`, copied from `feat/215-testreach`. The VERIFICATION is `passed` 9/9 and already carries `verified_at_sha` and `drift_subjects`, with no `covered_*` keys and no repo-global ledger in `drift_subjects`.
+- **Phase 216 CSVSTATUS booked** with `/gsd-phase add`: a malformed CSV upload answers 422 with `recoverable: false`, so the wizard stops offering Retry; auth and scope rejections stay 403 and venue blips stay 424. It re-points the status pins Phase 215 set on `_scope_rejected` in `routers/process_key.py`. Founder decision 2026-11-15, Option A ("Pin today, book fix") in `215-CONTEXT.md`. Not started.
+
+### Changed
+- **ROADMAP and STATE for 215, carried from the phase branch:** the overview bullet is ticked (completed 2026-11-16), the Progress row reads 8/8 Complete, and the eight plan rows replace the `TBD` stub.
+- **`phase complete 215`.** The ROADMAP was already complete from the branch's own run, and the branch's run had padded the Status cell to `Complete    `, which was normalised to `Complete`. No prose was lost, because the cell read `Not started`. The handler moved STATE to "ready to plan Phase 155.1" and set `state.json` `next` to "plan phase 155.1". Both were reverted by hand for the parallel phases: done 155 and 207-215; 155.1 waits on the founder (weekend spike run 1 done 2026-11-14 with verdict GO, the market-hours run due Monday 2026-11-16), as do 155.2 and 157.
+- **The `phase.add` handler's output was reshaped to this repo's booking form.** It wrote the whole 284-character description as the phase title and warned that it was goal-shaped. The title is now short, and the detail moved to `**Goal:**`. The handler also reset the `state.json` `next` label to a bare "Advance to the next step", which was restored. It does not add a Progress row, a `state.json` phase entry or a STATE Roadmap Evolution line, so these were written by hand, as for 212-215. STATE progress now reads 10 of 14 phases, 70 of 70 plans, 71%.
+
+### Notes
+- No `TODOS.md` change is needed. #1278 already deleted the entries 215 closed (`D-161-01`, `ROSTER-DERIVE-01` and the five formerly homeless Phase 140.1 findings), and no tracked file still cites them as open.
+- The 215 validation report is still `draft` (`phase complete` warned). This is recorded, not changed.
+
 ## [0.133.49.0] - 2026-11-16 — Phase 215 TESTREACH: every test that guards money math or error contracts actually runs, and test apps match production
 
 A CI-only phase with no product behaviour change. Tests that ran in no environment now run in CI or are listed with a reason. Test apps are built with the production error handlers. The CSV worker no longer raises an HTTP exception, and the two key-step code rosters are derived per route. No migration (SC-8). Verification passed 9/9.
