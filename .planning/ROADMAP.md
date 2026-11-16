@@ -144,7 +144,8 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 212: WIZTRUTH — the wizard and key screens name the real cause, and every remedy they offer can work** - Wizard and key-screen truth; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out** - Key and draft flow, four founder decisions; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases (completed 2026-11-14)
-- [ ] **Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production** - CI-only test reach; independent of the MT5 phases
+- [x] **Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production** - CI-only test reach; independent of the MT5 phases (completed 2026-11-16)
+- [ ] **Phase 216: CSVSTATUS — a malformed CSV upload answers 422 and the wizard stops offering Retry** - CSV upload status split, founder decision 2026-11-15; independent of the MT5 phases
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
 
@@ -260,7 +261,8 @@ Plans:
 | 212. WIZTRUTH | 9/9 | Complete | 2026-11-14 |
 | 213. KEYFLOW | 12/12 | Complete | 2026-11-14 |
 | 214. FRESHTRUTH | 7/7 | Complete | 2026-11-14 |
-| 215. TESTREACH | 0/? | Not started | - |
+| 215. TESTREACH | 8/8 | Complete | 2026-11-16 |
+| 216. CSVSTATUS | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.18)
 
@@ -528,7 +530,7 @@ Plans:
 **Goal:** CI-only phase: no product behaviour changes. Every test guarding money math or an error contract runs in some environment, and test apps are built the way production builds them. Today the `HAS_PY_ENV` money-math KPI parity cases never run. Pytest cases gated on `TEST_SUPABASE_DB_URL` skip in the `python` job, which exports `LANE_DB_URL`. The binance cassettes are missing. Test modules mount a bare `FastAPI()` that never sees the app-global 422/429 handlers. The worker raises `HTTPException`, which can never render. The two key-step code rosters are hand-typed. Closes TODOS "Tests that run in NO environment", the bare-`FastAPI()` entry, "Worker raises an HTTP exception", `ROSTER-DERIVE-01`, `D-161-01`, the 403-vs-422 split and the teaser-bucket saturation alert. Booked by the founder 2026-11-14 from the FIX NOW triage.
 **Requirements**: TBD
 **Depends on:** Nothing. Independent of the v1.18 MT5 phases and of the other FIX NOW phases.
-**Plans:** 0 plans
+**Plans:** 8/8 plans complete
 **Success Criteria** (what must be TRUE):
 1. The `HAS_PY_ENV` parity tests run in CI, or are removed with a recorded reason.
 2. Tests gated on `TEST_SUPABASE_DB_URL` run on `LANE_DB_URL`, or each is listed with why it cannot.
@@ -541,7 +543,24 @@ Plans:
 9. Each fix has a test that goes RED when it is reverted.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 215 to break down)
+- [x] 215-01-PLAN.md — the KPI parity oracle runs in every pytest run; binance replay cases retired, a missing cassette fails (SC-1, SC-6)
+- [x] 215-02-PLAN.md — live-DB tests resolve the lane DSN through one helper and run on the lane; cannot-run roster (SC-2)
+- [x] 215-03-PLAN.md — one production installer for the app-global handlers and a test app factory, first ten modules (SC-3)
+- [x] 215-04-PLAN.md — the last eleven bare-app modules on the factory, AST regrowth scan (SC-3)
+- [x] 215-05-PLAN.md — anonymous teaser bucket saturation alert (SC-7c)
+- [x] 215-06-PLAN.md — the CSV runner raises worker domain exceptions classified byte-identically (SC-4)
+- [x] 215-07-PLAN.md — the two key-step rosters derived per route in wizardKeyRosters (SC-5)
+- [x] 215-08-PLAN.md — every scope-rejection arm pinned at today's status; CSV rule family enumerated (SC-7a, SC-7b)
+
+### Phase 216: CSVSTATUS — a malformed CSV upload answers 422 and the wizard stops offering Retry
+
+**Goal:** A malformed CSV upload answers 422 with `recoverable: false`, so the wizard stops offering Retry for a file that will fail again. Auth and scope rejections stay 403, and venue blips stay 424. Re-points the status pins Phase 215 set on `_scope_rejected` in `routers/process_key.py`. Founder decision 2026-11-15 (Option A in 215-CONTEXT.md).
+**Requirements**: TBD
+**Depends on:** Phase 215
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 216 to break down)
 
 ---
 

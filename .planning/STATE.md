@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155 and 207-214 complete; 155.1, 155.2 and 157 wait on the founder; 215 held by the founder)
+current_phase_name: parallel phases (155 and 207-215 complete; 155.1, 155.2 and 157 wait on the founder; 216 CSVSTATUS booked, not started)
 status: executing
-stopped_at: Phases 212, 213 and 214 complete; records landed together
-last_updated: "2026-11-14T23:05:46.364Z"
-last_activity: 2026-11-14
-last_activity_desc: Phases 212, 213 and 214 complete
-state_head: 2d1020dd547f14ff7a9ca65021ecd3e4ee2e7bb9
+stopped_at: Phase 215 complete; records landed
+last_updated: "2026-11-15T23:10:43.212Z"
+last_activity: 2026-11-16
+last_activity_desc: Phase 215 complete
+state_head: b1ef61e57189fd899f3f21cbafdaa6e48d600dfa
 progress:
-  total_phases: 13
-  completed_phases: 9
-  total_plans: 62
-  completed_plans: 62
-  percent: 69
+  total_phases: 14
+  completed_phases: 10
+  total_plans: 70
+  completed_plans: 70
+  percent: 71
 ---
 
 ## ⭐ STATE lineage
@@ -175,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 155 PARITYHARNESS and 207 RETRYPROP through 214 FRESHTRUTH complete; 215 TESTREACH not started, held by the founder
+Phase: parallel — 155 PARITYHARNESS and 207 RETRYPROP through 215 TESTREACH complete
 Plan: per phase (see each phase directory)
-Status: 155.1 SERVERCLOCK waits on the founder: weekend spike run 1 done 2026-11-14 with verdict GO, the market-hours run is scheduled for Monday 2026-11-16; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session
-Last activity: 2026-11-14 — Phases 212, 213 and 214 complete (records landed in one PR)
-Progress: [███████░░░] 69%
+Status: 155.1 SERVERCLOCK waits on the founder: weekend spike run 1 done 2026-11-14 with verdict GO, the market-hours run is scheduled for Monday 2026-11-16; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session; 216 CSVSTATUS booked 2026-11-16, not started
+Last activity: 2026-11-16 — Phase 215 complete (verification passed 9/9; records PR closes it and books CSVSTATUS)
+Progress: [███████░░░] 71%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -710,6 +710,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 213 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): KEYFLOW, a key and its draft can never be silently mixed up and every key state has a way out (four founder decisions)
 - Phase 214 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): FRESHTRUTH, refresh work and freshness readings match what can actually change (0.3: closed records)
 - Phase 215 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): TESTREACH, CI-only: every test guarding money math or error contracts runs and test apps match production
+- Phase 216 added (2026-11-16, /gsd-phase add, founder decision 2026-11-15, Option A in 215-CONTEXT.md): CSVSTATUS, a malformed CSV upload answers 422 with recoverable false so the wizard stops offering Retry; auth and scope stay 403, venue blips stay 424
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 - Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
 
@@ -1807,7 +1808,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-14T07:30:26.000Z
-**Stopped At:** Phases 212, 213 and 214 complete; records landed together
+**Stopped At:** Phase 215 complete; records landed
 **Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z

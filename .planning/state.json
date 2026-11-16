@@ -66,13 +66,18 @@
     {
       "number": "215",
       "name": "TESTREACH",
+      "status": "complete"
+    },
+    {
+      "number": "216",
+      "name": "CSVSTATUS",
       "status": "pending"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (155.1 waits for the founder's Monday 2026-11-16 market-hours spike run; 155.2 and 157 wait for the founder's trading-day session; 215 TESTREACH is held by the founder)",
-    "reason": "Phases 155 and 207-214 complete; 9 of 13"
+    "label": "Advance to the next step (155.1 waits for the founder's Monday 2026-11-16 market-hours spike run; 155.2 and 157 wait for the founder's trading-day session; 216 CSVSTATUS booked 2026-11-16)",
+    "reason": "Phases 155 and 207-215 complete; 10 of 14"
   },
-  "updated_at": "2026-11-14T23:05:46.396Z"
+  "updated_at": "2026-11-15T23:35:22.080Z"
 }
