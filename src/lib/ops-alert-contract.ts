@@ -17,6 +17,8 @@ export const OPS_ALERT_SOURCES = [
   "mt5_validation_terminal",
   "mt5_terminal_scrub",
   "mt5_relaunch_debt",
+  // Phase 155.1 / D-01: a server-clock mismatch refused a derive.
+  "mt5_server_clock",
   "cron_sync",
   "backfill",
   "prod_prober",

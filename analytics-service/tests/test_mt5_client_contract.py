@@ -1758,6 +1758,14 @@ def test_public_surface_is_exactly_the_contract():
         # deletes its saved-account database through ONE committed remote
         # constant, takes one int flag, and issues no `initialize()` at all.
         "scrub_terminal_account_data",
+        # Phase 155.1 / D-D (2026-11-17) — the server-clock tick read. It returns
+        # tick TIMES and counts only (never a price, a volume or a symbol name), in
+        # ONE crossing through a committed remote expression, and wraps no trade
+        # path; `symbol_info_tick` stays forbidden as a client-side attribute
+        # (`test_read_only_surface_no_trade_methods`, unchanged) because the name
+        # appears only inside that committed string. Precedent: terminal_info
+        # (153.3 / D-31), the other named exception to the narrow surface.
+        "server_tick_times",
     }
 
 
@@ -1862,9 +1870,13 @@ def test_a_failing_read_emits_its_event_and_reraises_the_identical_error():
 
 
 def test_every_mt5_round_trip_emits_its_stage_event():
-    """Every one of the TEN MT5 round-trips emits — asserted by driving each
+    """Every one of the ELEVEN MT5 round-trips emits — asserted by driving each
     method against the double and comparing the collected stage names to a
     hand-typed set.
+
+    ⭐ `server_tick_times` (Phase 155.1) is the eleventh: the committed tick-time
+    expression is one crossing, driven here through the `_snapshot_client` harness
+    so "add the method, forget the bracket" is caught for it too.
 
     ⭐ `history_deals_materialize` is the tenth, and it is here because it was
     MISSING for a whole phase: the per-deal materialization was untimed, so the 30s
@@ -1888,9 +1900,13 @@ def test_every_mt5_round_trip_emits_its_stage_event():
     # close() and release() BOTH latch `_closed`, so one instance can exercise
     # only one of them — the second client is what makes close() reachable.
     closer = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+    tick_client, _evaluated = _snapshot_client(
+        None, evaluate=lambda _src: ("answered", 3, 2, 2, 1_700_000_000_000)
+    )
 
     with capture_logs() as captured:
         client.login(123456, "investor-pw", "Broker-Demo")  # initialize + login
+        tick_client.server_tick_times()
         client.account_info()
         client.terminal_info()
         client.history_deals_get(0, 1)
@@ -1910,6 +1926,7 @@ def test_every_mt5_round_trip_emits_its_stage_event():
         "close",
         "release",
         "restart",
+        "server_tick_times",
     }
     # Not vacuous: every event carries the two fields the whole exercise is for.
     for event in _stage_events(captured):
@@ -5735,6 +5752,348 @@ def test_SESSION_SNAPSHOT_without_a_transport_fails_loud_and_is_fenced():
     bump_mt5_terminal_epoch(fenced.terminal_key)
     with pytest.raises(Mt5SessionAbandoned):
         fenced.session_snapshot(expected_login=1, expected_server="s")
+    assert len(evaluated) == 1, "the abandoned read crossed the wire"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 155.1 plan 06 / D-D, D-04, D-05, D-20(a) — the ONE tick-time method.
+#
+# D-D admits exactly one exception to the read-only surface: `server_tick_times`.
+# That exception holds only while the committed remote expression reads no price
+# (D-04) and changes no terminal state (D-05). `test_read_only_surface_no_trade_
+# methods` inspects client-side attributes, so it cannot see inside the string;
+# the pin below is what stops either being added to the string silently.
+# --------------------------------------------------------------------------- #
+
+_TICK_TIMES_ALLOWED_MT5_CALLS = frozenset({"symbols_get", "symbol_info_tick", "last_error"})
+# Attribute reads on the far-side symbol objects. Every OTHER attribute read in the
+# expression is an mt5 call name, checked separately against the set above.
+_TICK_TIMES_ALLOWED_ATTRIBUTES = frozenset({"visible", "name"})
+# The only field read off a tick by `getattr`: the time. `bid`, `ask`, `last` and
+# `volume` are prices and sizes and must never join this set (D-04).
+_TICK_TIMES_ALLOWED_GETATTR_FIELDS = frozenset({"time_msc"})
+
+
+def test_SERVER_TICK_TIMES_the_remote_source_is_a_committed_literal_that_can_only_read_tick_times():
+    """D-04 / D-05 / T-155.1-20. The expression crosses the arbitrary-remote-code
+    channel, so it must be an AST string CONSTANT with no interpolation marker,
+    parse as ONE expression, and its only calls on `mt5` must be the three reads.
+    A price read (`bid`, `ask`, `last`, `volume`) would breach D-04; an added
+    `symbol_select` would change terminal state (D-05). Neither is visible to
+    `test_read_only_surface_no_trade_methods`, which inspects client-side
+    attributes and never reads inside this string, so THIS pin is the only gate."""
+    source = pathlib.Path(mt5_client_mod.__file__).read_text()
+    assigned = [
+        node.value
+        for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "_REMOTE_SERVER_TICK_TIMES_SRC"
+            for t in node.targets
+        )
+    ]
+    assert len(assigned) == 1
+    value = assigned[0]
+    assert isinstance(value, ast.Constant) and isinstance(value.value, str)
+    src = value.value
+    assert src == mt5_client_mod._REMOTE_SERVER_TICK_TIMES_SRC
+    for marker in ("{", "}", "%(", "%s", "%d", "__", "import"):
+        assert marker not in src, f"{marker!r} in the tick-times source"
+
+    tree = ast.parse(src, mode="eval")
+    lambda_params = {
+        arg.arg
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Lambda)
+        for arg in node.args.args
+    }
+    comprehension_targets = {
+        n.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.comprehension)
+        for n in ast.walk(node.target)
+        if isinstance(n, ast.Name)
+    }
+
+    mt5_calls: set[str] = set()
+    mt5_call_funcs: set[int] = set()
+    other_calls: set[str] = set()
+    getattr_fields: set[object] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "mt5"
+        ):
+            mt5_calls.add(func.attr)
+            mt5_call_funcs.add(id(func))
+        elif isinstance(func, ast.Name):
+            other_calls.add(func.id)
+            if func.id == "getattr":
+                assert len(node.args) >= 2 and isinstance(node.args[1], ast.Constant), (
+                    "getattr must name its field as a string literal"
+                )
+                getattr_fields.add(node.args[1].value)
+        elif isinstance(func, ast.Lambda):
+            other_calls.add("<lambda>")
+        else:
+            other_calls.add(ast.dump(func))
+    assert mt5_calls == _TICK_TIMES_ALLOWED_MT5_CALLS, mt5_calls
+
+    # Every attribute read that is NOT the func of an `mt5.<call>()` must be one of
+    # the two symbol-object fields: a bare `mt5.<attr>` or `tick.bid` lands here.
+    plain_attrs = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and id(node) not in mt5_call_funcs
+    }
+    assert plain_attrs <= _TICK_TIMES_ALLOWED_ATTRIBUTES, plain_attrs
+    assert getattr_fields == _TICK_TIMES_ALLOWED_GETATTR_FIELDS, getattr_fields
+
+    local_names = lambda_params | comprehension_targets
+    assert other_calls <= local_names | {
+        "<lambda>", "len", "max", "getattr", "isinstance", "str"
+    }, (
+        other_calls
+    )
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert names <= local_names | {
+        "mt5", "len", "max", "getattr", "isinstance", "bool", "int", "float", "str"
+    }, names
+
+
+class _TickDouble:
+    """A far-side tick that exposes ONLY its time fields. Touching anything else
+    (`bid`, `ask`, `last`, `volume`) raises, so an expression that reads a price
+    fails the test that evaluates it (D-04). Copied from `test_mt5_spike_tick.py`
+    rather than imported, so this file stays self-contained."""
+
+    def __init__(self, time_msc: object) -> None:
+        self.time = time_msc // 1000 if isinstance(time_msc, int) else None
+        self.time_msc = time_msc
+
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"the tick-times expression read a non-time field: {name}")
+
+
+class _TickTimesBridge:
+    """The `mt5` the committed tick-times expression reads through, far-side. It has
+    NO `symbol_select`: calling it would raise AttributeError (D-05), and `calls`
+    records every call it did get."""
+
+    def __init__(self, symbols, ticks=None, last_error=(-10005, "IPC timeout")):
+        self.symbols = symbols
+        self.ticks = ticks or {}
+        self.error = last_error
+        self.calls: list[str] = []
+
+    def symbols_get(self):
+        self.calls.append("symbols_get")
+        return self.symbols
+
+    def symbol_info_tick(self, name):
+        self.calls.append(f"symbol_info_tick:{name}")
+        return self.ticks.get(name)
+
+    def last_error(self):
+        self.calls.append("last_error")
+        return self.error
+
+
+def _tick_symbol(name: str, visible: bool = True):
+    return types.SimpleNamespace(name=name, visible=visible)
+
+
+_TICK_OLDER_MS = 1_763_380_000_000
+_TICK_NEWEST_MS = 1_763_380_005_000
+
+
+def _four_symbol_bridge() -> _TickTimesBridge:
+    """Four symbols: three in Market Watch (two answer, one answers None), one hidden
+    symbol that must never be asked for a tick."""
+    return _TickTimesBridge(
+        [
+            _tick_symbol("AAA"),
+            _tick_symbol("BBB"),
+            _tick_symbol("CCC"),
+            _tick_symbol("HIDDEN", visible=False),
+        ],
+        ticks={
+            "AAA": _TickDouble(_TICK_OLDER_MS),
+            "BBB": _TickDouble(_TICK_NEWEST_MS),
+            "HIDDEN": _TickDouble(_TICK_NEWEST_MS + 1),
+        },
+    )
+
+
+def test_SERVER_TICK_TIMES_returns_the_newest_tick_time_and_touches_no_price():
+    """D-04 / D-05 / D-20(a). Evaluated offline against ticks that RAISE on any
+    non-time attribute, the committed expression reads only `time_msc`, asks only
+    visible symbols for a tick, never selects a symbol, and the parsed result is
+    counts plus one time. A price read would trip `_TickDouble`; a `symbol_select`
+    would be an AttributeError on a bridge that has none."""
+    bridge = _four_symbol_bridge()
+    client, evaluated = _snapshot_client(bridge)
+
+    result = client.server_tick_times()
+
+    assert evaluated == [mt5_client_mod._REMOTE_SERVER_TICK_TIMES_SRC]
+    assert result == mt5_client_mod.Mt5ServerTickTimes(
+        symbols_total=4,
+        symbols_visible=3,
+        symbols_answered=2,
+        newest_time_msc=_TICK_NEWEST_MS,
+    )
+    assert bridge.calls == [
+        "symbols_get",
+        "symbol_info_tick:AAA",
+        "symbol_info_tick:BBB",
+        "symbol_info_tick:CCC",
+    ], "the hidden symbol was asked for a tick, or a non-read call was made"
+
+
+def test_SERVER_TICK_TIMES_the_far_side_result_is_plain_scalars():
+    """D-20(a). rpyc's brine copies a tuple BY VALUE only when every item is a
+    scalar; one non-scalar turns the whole result into a netref whose every index is
+    another crossing, and a tick object leaking out would carry prices. The result
+    is a tuple of plain ints and one str tag, for both the answered and the
+    unanswered-listing shape."""
+    for bridge in (_four_symbol_bridge(), _TickTimesBridge(None)):
+        raw = eval(  # noqa: S307 — the committed source, offline
+            mt5_client_mod._REMOTE_SERVER_TICK_TIMES_SRC, {"mt5": bridge}
+        )
+        assert type(raw) is tuple, raw
+        for item in raw:
+            assert type(item) in (int, str), (type(item), raw)
+        assert type(raw[0]) is str
+
+
+def test_SERVER_TICK_TIMES_an_unanswered_listing_raises_with_the_far_side_code():
+    """D-07 as narrowed by D-20(a). `symbols_get()` returning None is an ERROR, not
+    an empty Market Watch: it raises a typed `Mt5ClientError` carrying the code the
+    far side's `last_error()` gave, read right after the None. Conflating it with
+    the honest empty listing would let a dead terminal read as 'no symbols'."""
+    bridge = _TickTimesBridge(None, last_error=(-10004, "No IPC connection"))
+    client, _ = _snapshot_client(bridge)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.server_tick_times()
+
+    assert exc_info.value.code == -10004
+    assert bridge.calls == ["symbols_get", "last_error"]
+
+
+def test_SERVER_TICK_TIMES_an_empty_listing_is_zero_counts_and_no_time_not_an_error():
+    """D-07. An empty listing is an honest answer. It parses to zero counts and
+    `newest_time_msc is None` (the far side's -1 sentinel never reaches the caller
+    as a time), so the assessment can say 'unmeasured' instead of reading 1970."""
+    client, _ = _snapshot_client(_TickTimesBridge([]))
+
+    result = client.server_tick_times()
+
+    assert result == mt5_client_mod.Mt5ServerTickTimes(0, 0, 0, None)
+
+
+def test_SERVER_TICK_TIMES_a_tick_with_no_int_time_is_answered_but_never_the_newest():
+    """D-04. A visible symbol whose tick carries a non-int `time_msc` is counted as
+    answered, but must not become the newest time: only an int time can be one. This
+    pins the `-1` sentinel to 'no int time seen', not 'no tick seen'."""
+    bridge = _TickTimesBridge(
+        [_tick_symbol("AAA")], ticks={"AAA": _TickDouble("not-a-number")}
+    )
+    client, _ = _snapshot_client(bridge)
+
+    result = client.server_tick_times()
+
+    assert result == mt5_client_mod.Mt5ServerTickTimes(1, 1, 1, None)
+
+
+def test_SERVER_TICK_TIMES_a_zero_time_msc_is_absent_not_the_newest():
+    """SF-M2. A never-quoted symbol answers a tick whose `time_msc` is 0. It is
+    counted as answered, but 0 is not a tick time: a listing where EVERY answering
+    symbol reads 0 must parse to `newest_time_msc is None` (`no_tick`), not 0 (which
+    would assess as `tick_time_out_of_range`), and a 0 beside a real time never wins."""
+    all_zero = _TickTimesBridge(
+        [_tick_symbol("AAA"), _tick_symbol("BBB")],
+        ticks={"AAA": _TickDouble(0), "BBB": _TickDouble(0)},
+    )
+    client, _ = _snapshot_client(all_zero)
+    assert client.server_tick_times() == mt5_client_mod.Mt5ServerTickTimes(2, 2, 2, None)
+
+    mixed = _TickTimesBridge(
+        [_tick_symbol("AAA"), _tick_symbol("BBB")],
+        ticks={"AAA": _TickDouble(0), "BBB": _TickDouble(_TICK_OLDER_MS)},
+    )
+    client, _ = _snapshot_client(mixed)
+    assert client.server_tick_times() == mt5_client_mod.Mt5ServerTickTimes(
+        2, 2, 2, _TICK_OLDER_MS
+    )
+
+
+@pytest.mark.parametrize(
+    "returned",
+    [
+        pytest.param(
+            ["answered", 4, 3, 2, _TICK_NEWEST_MS], id="a-list-a-netref-would-look-like"
+        ),
+        pytest.param(("answered", 4, 3, 2), id="short"),
+        pytest.param(("surprise", 1), id="unknown-tag"),
+        pytest.param((), id="empty-tuple"),
+        pytest.param(("answered", 4, True, 2, _TICK_NEWEST_MS), id="bool-in-an-int-slot"),
+        pytest.param(("answered", 4, 3, 2, "1763380005000"), id="str-in-the-time-slot"),
+        pytest.param(("listing_unanswered", True), id="bool-error-code"),
+    ],
+)
+def test_SERVER_TICK_TIMES_a_malformed_result_raises_the_scrubbed_typed_error(returned):
+    """T-155.1-21 / D-07. The far side returns untrusted values. A list (what a
+    netref looks like), a short or empty tuple, an unknown tag, and a bool where an
+    int belongs (`True` is an `int` in Python) each raise `Mt5ClientError` with the
+    fixed malformed-shape text and code 0, never a half-parsed result, and the
+    message echoes nothing the far side sent."""
+    client, _ = _snapshot_client(None, evaluate=lambda _src: returned)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.server_tick_times()
+
+    assert exc_info.value.code == 0
+    assert "malformed shape" in str(exc_info.value)
+    assert "1763380005000" not in str(exc_info.value)
+
+
+def test_SERVER_TICK_TIMES_a_transport_raise_is_scrubbed_and_typed():
+    """T-155.1-22 / D-20(a). Like every read: a raw remote traceback never escapes
+    unscrubbed. A credential-shaped string in the transport's raise becomes a typed
+    `Mt5ClientError` that does not carry it."""
+
+    def _boom(_src):
+        raise RuntimeError("remote traceback: password='hunter2' server='Broker'")
+
+    client, _ = _snapshot_client(None, evaluate=_boom)
+
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.server_tick_times()
+
+    assert "hunter2" not in str(exc_info.value)
+
+
+def test_SERVER_TICK_TIMES_without_a_transport_fails_loud_and_is_fenced():
+    """D-20(a) / D-36. No `_MetaTrader5__conn` means the expression cannot run
+    bridge-side, and a per-symbol netref fallback would cost one crossing per field
+    and read prices client-side: it RAISES. And an abandoned session is refused at
+    the fence BEFORE anything crosses the wire (one eval across the two calls)."""
+    connect, _fake, _rec = _make({"no_transport": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError):
+        client.server_tick_times()
+
+    fenced, evaluated = _snapshot_client(_four_symbol_bridge())
+    fenced.server_tick_times()  # binds
+    bump_mt5_terminal_epoch(fenced.terminal_key)
+    with pytest.raises(Mt5SessionAbandoned):
+        fenced.server_tick_times()
     assert len(evaluated) == 1, "the abandoned read crossed the wire"
 
 

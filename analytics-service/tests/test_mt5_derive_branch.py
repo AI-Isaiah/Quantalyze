@@ -106,9 +106,17 @@ class _FakeRpycConn:
     mean the close paths here were silently walking a route production never takes.
     """
 
-    def __init__(self, calls: list) -> None:
+    def __init__(self, calls: list, tick_answer: object = None) -> None:
         self._calls = calls
         self.close_calls = 0
+        # Phase 155.1 — what the committed server-tick expression returns. The
+        # default is "no ticks" (`unmeasured` / `no_tick`), which never refuses a
+        # derive, so every derive test that does not care about the clock reading
+        # keeps its outcome. An exception instance is RAISED instead (a far-side
+        # failure, which `_guarded_read` turns into a scrubbed `Mt5ClientError`).
+        self.tick_answer = (
+            ("answered", 0, 0, 0, -1) if tick_answer is None else tick_answer
+        )
         # rpyc classic's remote-namespace seam (MT5DEAL-01). `history_deals_get`
         # materializes deals on the FAR side of the wire, because doing it here
         # costs one round-trip per deal per field — MEASURED 60ms/deal live, 29.9s
@@ -121,6 +129,13 @@ class _FakeRpycConn:
         self.execute_calls += 1
         self._calls.append("execute")
         exec(src, self.namespace)  # noqa: S102 — running the real source is the point
+
+    def eval(self, src: str) -> object:
+        # Phase 155.1: the ONE server-tick crossing (`Mt5Client.server_tick_times`).
+        self._calls.append("eval")
+        if isinstance(self.tick_answer, Exception):
+            raise self.tick_answer
+        return self.tick_answer
 
     def close(self):
         self.close_calls += 1
@@ -145,6 +160,7 @@ class _FakeMt5Transport:
         second_account: dict | None = None,
         post_read_exc: Exception | None = None,
         deals_by_call: list[list[dict]] | None = None,
+        tick_answer: object = None,
     ) -> None:
         self._account = account
         self._deals = deals
@@ -182,7 +198,7 @@ class _FakeMt5Transport:
         self._post_read_exc = post_read_exc
         self._account_info_calls = 0
         self.calls: list[str] = []
-        self._MetaTrader5__conn = _FakeRpycConn(self.calls)
+        self._MetaTrader5__conn = _FakeRpycConn(self.calls, tick_answer)
 
     def initialize(self, **kwargs):
         # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
@@ -268,7 +284,17 @@ def _build_ctx(
     asset_class: str = "traditional",
     connects: list | None = None,
 ) -> tuple[MagicMock, dict]:
-    capture: dict = {"upserts": [], "rpc_calls": [], "deletes": [], "updates": []}
+    # `inserts` (155.1): `(table, payload)` per `tbl.insert`, and `order` is the
+    # combined upsert/insert sequence by table name so "the reading is written
+    # before everything else" is observable.
+    capture: dict = {
+        "upserts": [],
+        "rpc_calls": [],
+        "deletes": [],
+        "updates": [],
+        "inserts": [],
+        "order": [],
+    }
     ctx = MagicMock()
     ctx.exchange = _session(transport, connects=connects)
     ctx.supabase = MagicMock()
@@ -280,11 +306,21 @@ def _build_ctx(
 
         def _upsert(payload: object, **kw: object) -> MagicMock:
             capture["upserts"].append((name, payload, kw.get("on_conflict")))
+            capture["order"].append(("upsert", name))
             stub = MagicMock()
             stub.execute.return_value = MagicMock(data=1)
             return stub
 
         tbl.upsert.side_effect = _upsert
+
+        def _insert(payload: object, **kw: object) -> MagicMock:
+            capture["inserts"].append((name, payload))
+            capture["order"].append(("insert", name))
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=[payload], count=1)
+            return stub
+
+        tbl.insert.side_effect = _insert
 
         def _delete(**kw: object) -> MagicMock:
             capture["deletes"].append(name)
@@ -481,6 +517,9 @@ async def test_mt5_routes_one_backbone(monkeypatch) -> None:
         "execute",
         "history_deals_get",
         "execute",
+        # 155.1 / D-06, D-20(d): the ONE server-tick crossing sits after the settle
+        # loop and BEFORE the POST bracket, so the bracket covers it.
+        "eval",
         "account_info",
     ]
 
@@ -1761,9 +1800,9 @@ async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
     assert result.error_kind == "transient"
     assert len(connects) == 2, "the POST-bracket mismatch must also restart"
     # The deal read DID run (PRE passed), then the POST bracket re-read and rejected
-    # — the first ten terminal calls are the full read sequence (a trailing
+    # — the first eleven terminal calls are the full read sequence (a trailing
     # "shutdown" from the bounded restart follows).
-    assert transport.calls[:10] == [
+    assert transport.calls[:11] == [
         "initialize",
         "login",
         "account_info",
@@ -1778,6 +1817,9 @@ async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
         "execute",
         "history_deals_get",
         "execute",
+        # 155.1 / D-06, D-20(d): the ONE server-tick crossing sits after the settle
+        # loop and BEFORE the POST bracket, so the bracket covers it.
+        "eval",
         "account_info",
     ]
     assert "shutdown" in transport.calls  # the bounded restart fired
@@ -1875,6 +1917,9 @@ async def test_mt5_post_read_transient_blip_is_not_permanent(monkeypatch) -> Non
         "execute",
         "history_deals_get",
         "execute",
+        # 155.1 / D-06, D-20(d): the ONE server-tick crossing sits after the settle
+        # loop and BEFORE the POST bracket, so the bracket covers it.
+        "eval",
         "account_info",
     ]
     # NO permanent user-blame stamp and NO partial series (the economic read
@@ -2554,7 +2599,10 @@ def test_every_new_derive_message_is_blame_free_for_the_mt5_classifier() -> None
     (``compute_jobs.error_message``, ``computation_error``). Run through the REAL
     classifier none may read as a credential or wrong-server verdict, and none may
     carry an amount, a login or a server."""
-    from services.mt5_server_clock import MT5_SERVER_CLOCK_CONFIG_MESSAGES
+    from services.mt5_server_clock import (
+        MT5_SERVER_CLOCK_CONFIG_MESSAGES,
+        Mt5ServerClockMismatchError,
+    )
     from services.mt5_validation import (
         _AUTH_PHRASES,
         _WRONG_SERVER_PHRASES,
@@ -2563,7 +2611,17 @@ def test_every_new_derive_message_is_blame_free_for_the_mt5_classifier() -> None
 
     assert _WRONG_SERVER_PHRASES and _AUTH_PHRASES
     assert MT5_SERVER_CLOCK_CONFIG_MESSAGES
+    # Phase 155.1: the mismatch text (rule id and two offsets in hours) is written into
+    # `compute_jobs.error_message` behind the derive prefix, across the rule/offset grid.
+    mismatch_texts = [
+        "derive_broker_dailies: "
+        + str(Mt5ServerClockMismatchError(rule=rule, expected_offset_s=exp, measured_offset_s=got))
+        for rule in ("eu", "us", "fixed")
+        for exp, got in ((10800, 7200), (7200, 10800), (7200, 5400), (-3600, 18000))
+    ]
     texts = [
+        *mismatch_texts,
+        jw._MT5_CLOCK_READING_INSERT_MESSAGE,
         jw._MT5_CURRENCY_BLANK_MESSAGE,
         jw._MT5_BTC_CLOSES_UNREADABLE_MESSAGE,
         jw._MT5_CURRENCY_CHANGED_MESSAGE,
@@ -2733,3 +2791,328 @@ async def test_a_clock_configuration_fault_fails_transient_and_makes_no_terminal
     )
     assert not any(u[0] == "strategy_analytics" for u in capture["upserts"]), "the handler writes no row"
     assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+
+
+# ---------------------------------------------------------------------------
+# Phase 155.1 SERVERCLOCK (MT5-06) tracer — one leased derive reads the server
+# clock live, assesses it under the configured rule, and persists the reading as
+# the derive's first write.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_leased_derive_reads_the_server_clock_and_persists_a_match_reading(
+    monkeypatch,
+) -> None:
+    """The whole tracer path, offline: the committed tick-time crossing runs on the
+    session after the PRE account check, the worker's UTC now is taken right after it,
+    a fresh tick under the configured rule is assessed ``match``, and the reading row is
+    inserted BEFORE every upsert while the derive still ends DONE.
+
+    The reading is the evidence criterion 3 of MT5-06 needs (a weekday ``match`` row per
+    key). Without the insert the whole phase has no data, and an insert that follows any
+    other write could not refuse a mis-bucketed day before it was written. All values are
+    hand-typed: the tick is the fixed instant plus the +2 h that the US rule gives a broker
+    on 2026-11-17 (after both autumn transitions), minus 200 ms of transit.
+    """
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_TIME_RULE", "us")
+    monkeypatch.delenv("MT5_SERVER_UTC_OFFSET_S", raising=False)
+    fixed_now = datetime(2026, 11, 17, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("services.mt5_read._tick_read_now", lambda: fixed_now)
+    newest_tick_ms = int(fixed_now.timestamp() * 1000) + 7_200_000 - 200
+    transport = _FakeMt5Transport(
+        account={
+            "equity": 110_500.0,
+            "balance": 110_500.0,
+            "currency": "USD",
+            "login": 123456,
+            "server": "Broker-Live",
+        },
+        deals=_canonical_deals(),
+        tick_answer=("answered", 1416, 14, 14, newest_tick_ms),
+    )
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    readings = [p for t, p in capture["inserts"] if t == "mt5_server_clock_readings"]
+    assert len(readings) == 1, capture["inserts"]
+    row = readings[0]
+    assert row["verdict"] == "match"
+    assert row["reason"] is None
+    assert row["measured_offset_s"] == 7200 == row["expected_offset_s"]
+    assert row["configured_rule"] == "us"
+    assert row["api_key_id"] == "key-mt5"
+    assert row["job_id"] == "j-mt5"
+    assert row["symbols_visible"] == 14 and row["symbols_answered"] == 14
+    assert row["newest_tick_wall_ms"] == newest_tick_ms
+    # D-17: the server name is hashed, never stored.
+    assert "Broker-Live" not in repr(row)
+    assert isinstance(row["server_label_hash"], str) and len(row["server_label_hash"]) == 64
+    # The reading is written FIRST: before every upsert, so a refusal could precede them.
+    order = capture["order"]
+    assert order[0] == ("insert", "mt5_server_clock_readings"), order
+    assert any(kind == "upsert" for kind, _ in order), order
+
+
+# ---------------------------------------------------------------------------
+# Phase 155.1 plan 03 — every derive arm the server-clock reading creates:
+# mismatch (refuse AND page), unmeasured (never refuse), a raising tick read
+# (never a credential verdict) and a failing reading insert (never swallowed).
+# ---------------------------------------------------------------------------
+_PLANTED_SERVER = "Planted-Server-Value"
+_CLOCK_NOW = datetime(2026, 10, 28, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _clock_readings(capture: dict) -> list[dict]:
+    return [p for t, p in capture["inserts"] if t == "mt5_server_clock_readings"]
+
+
+def _clock_derive_env(monkeypatch, *, rule: str = "us") -> None:
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_TIME_RULE", rule)
+    monkeypatch.delenv("MT5_SERVER_UTC_OFFSET_S", raising=False)
+    monkeypatch.setattr("services.mt5_read._tick_read_now", lambda: _CLOCK_NOW)
+
+
+def _clock_transport(tick_answer: object = None) -> _FakeMt5Transport:
+    return _FakeMt5Transport(
+        account={
+            "equity": 110_500.0,
+            "balance": 110_500.0,
+            "currency": "USD",
+            "login": 123456,
+            "server": _PLANTED_SERVER,
+        },
+        deals=_canonical_deals(),
+        tick_answer=tick_answer,
+    )
+
+
+def _recording_page(monkeypatch) -> AsyncMock:
+    """Replace the module global ``job_worker.ops_alert`` (the name the derive resolves at
+    call time) with a recording stub, in the conftest ``mt5_outage_pages`` idiom. The real
+    module is left alone: other suites read it."""
+    import types
+
+    from services import ops_alert
+
+    page = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        jw,
+        "ops_alert",
+        types.SimpleNamespace(page=page, scrub_alert_detail=ops_alert.scrub_alert_detail),
+    )
+    return page
+
+
+@pytest.mark.asyncio
+async def test_a_server_clock_mismatch_refuses_the_derive_pages_once_and_keeps_its_reading(
+    monkeypatch, caplog
+) -> None:
+    """D-01: a mismatch must refuse the derive AND be heard. A refusal nobody hears about
+    would make the clock check silent in practice, and a page that leaked the server name
+    would breach D-17, so the alert detail is the rule id and two offsets in HOURS only.
+
+    A true eu broker (+2 h on 2026-10-28, after the EU autumn change and before the US one)
+    read under the ``us`` rule (+3 h) is the real-world mismatch. The reading is kept as the
+    evidence, and not one other write happens: no analytics row, no daily, no nav mark, no
+    currency stamp. The planted server value must appear nowhere."""
+    import logging
+    import re
+
+    from services.mt5_server_clock import Mt5ServerClockMismatchError
+
+    _clock_derive_env(monkeypatch, rule="us")
+    page = _recording_page(monkeypatch)
+    newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) + 7_200_000 - 100
+    transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms))
+    ctx, capture = _build_ctx(transport)
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics"):
+        with _apply(_patches(ctx)):
+            result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    expected_text = str(
+        Mt5ServerClockMismatchError(rule="us", expected_offset_s=10800, measured_offset_s=7200)
+    )
+    assert result.error_message == "derive_broker_dailies: " + expected_text
+    errors = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "arm=server_clock_mismatch" in r.getMessage()
+    ]
+    assert len(errors) == 1, [r.getMessage() for r in caplog.records]
+    # WR-02: the page names the first key only, so the log line names every key.
+    assert "api_key_id=key-mt5" in errors[0], errors[0]
+
+    readings = _clock_readings(capture)
+    assert len(readings) == 1, capture["inserts"]
+    assert readings[0]["verdict"] == "mismatch"
+    assert re.fullmatch(r"[0-9a-f]{64}", readings[0]["server_label_hash"])
+    # Nothing else was written: the refusal precedes every analytics write.
+    assert capture["inserts"] == [("mt5_server_clock_readings", readings[0])]
+    assert capture["upserts"] == [], capture["upserts"]
+    assert capture["updates"] == [], capture["updates"]
+    assert capture["rpc_calls"] == [], capture["rpc_calls"]
+
+    page.assert_awaited_once()
+    assert page.await_args.args == ("mt5_server_clock", "clock_mismatch")
+    assert page.await_args.kwargs["event"] == "outage"
+    detail = page.await_args.kwargs["detail"]
+    assert "rule=us expected=+3h measured=+2h" in detail, detail
+    assert not re.search(r"\d{5,}", detail), detail
+    # SF-M4 / WR-02: the page tags the FIRST key only, as a tag only, and no server value rides along (D-17).
+    assert page.await_args.kwargs["extra_tags"] == {"first_api_key_id": "key-mt5"}
+
+    leaky = [result.error_message or "", detail] + [r.getMessage() for r in caplog.records]
+    for text in leaky:
+        assert _PLANTED_SERVER not in text, text
+        assert readings[0]["server_label_hash"] not in text, text
+    assert _PLANTED_SERVER not in repr(readings[0])
+
+
+@pytest.mark.asyncio
+async def test_an_unmeasured_server_clock_reading_is_kept_and_the_derive_proceeds(
+    monkeypatch,
+) -> None:
+    """D-10: a reading with no tick (a closed market, a weekend) is unmeasured, and an
+    unmeasured reading must never refuse or page, or every weekend derive would fail. The
+    reading is still kept with its reason, so the weekend gap is visible in the evidence."""
+    _clock_derive_env(monkeypatch, rule="us")
+    page = _recording_page(monkeypatch)
+    transport = _clock_transport()  # the default double answers "no ticks"
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    readings = _clock_readings(capture)
+    assert len(readings) == 1, capture["inserts"]
+    assert readings[0]["verdict"] == "unmeasured"
+    assert readings[0]["reason"] == "no_tick"
+    assert not any(
+        c.args and c.args[0] == "mt5_server_clock" for c in page.await_args_list
+    ), page.await_args_list
+
+
+@pytest.mark.asyncio
+async def test_a_raising_tick_read_is_unmeasured_and_never_a_credential_verdict(
+    monkeypatch,
+) -> None:
+    """D-20(b): a tick crossing that raises must never turn into a verdict on the user's
+    credentials. The far-side error text here is deliberately auth-shaped (one phrase from
+    ``_AUTH_PHRASES``); a derive that routed it through the login classifier would stamp the
+    key rejected and tell the user to fix a password that is fine. It is recorded
+    unmeasured with reason ``tick_read_failed`` and the derive ends DONE."""
+    from services.mt5_validation import _AUTH_PHRASES
+
+    _clock_derive_env(monkeypatch, rule="us")
+    page = _recording_page(monkeypatch)
+    transport = _clock_transport(RuntimeError(_AUTH_PHRASES[0]))
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert result.error_kind != "permanent"
+    readings = _clock_readings(capture)
+    assert len(readings) == 1, capture["inserts"]
+    assert readings[0]["verdict"] == "unmeasured"
+    assert readings[0]["reason"] == "tick_read_failed"
+    # The classify arm was never reached: no rejected-credentials stamp on the key.
+    assert not any(
+        t == "api_keys" and "rejected" in repr(p).lower() for t, p in capture["updates"]
+    ), capture["updates"]
+    assert not any(
+        t == "strategy_analytics" and "password" in repr(p).lower()
+        for t, p, _ in capture["upserts"]
+    ), capture["upserts"]
+    assert not any(
+        c.args and c.args[0] == "mt5_server_clock" for c in page.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attempts", "pages"),
+    [(1, False), (3, True)],
+    ids=["non_final_attempt_no_page", "final_attempt_pages_once"],
+)
+# N2-M1: a numeric SQLSTATE (23514 CHECK) is a 5-digit run the page-detail scrubber would mask,
+# so the code must reach the page as a tag; 42P01 is the alphanumeric (missing table) control.
+@pytest.mark.parametrize("sqlstate", ["42P01", "23514"])
+async def test_a_failing_server_clock_reading_insert_fails_the_derive_transient(
+    monkeypatch, caplog, attempts: int, pages: bool, sqlstate: str
+) -> None:
+    """Criterion 3 of MT5-06 needs the rows, so a reading that cannot be written must be
+    LOUD: the derive ends FAILED ``transient`` (retried, healed once a missing table lands)
+    with a closed-set text, and writes nothing else. The handler's generic path would class a
+    PostgREST error ``unknown`` and echo its text, which can carry row values; the derive
+    names the arm itself, logging the exception CLASS only."""
+    import logging
+
+    from postgrest.exceptions import APIError
+
+    _clock_derive_env(monkeypatch, rule="us")
+    page = _recording_page(monkeypatch)
+    transport = _clock_transport()
+    ctx, capture = _build_ctx(transport)
+    real_table = ctx.supabase.table.side_effect
+
+    def _table(name: str):
+        tbl = real_table(name)
+        if name == "mt5_server_clock_readings":
+            def _boom(payload: object, **kw: object):
+                raise APIError(
+                    {"message": f"row contains {_PLANTED_SERVER}", "code": sqlstate, "details": "", "hint": ""}
+                )
+
+            tbl.insert.side_effect = _boom
+        return tbl
+
+    ctx.supabase.table.side_effect = _table
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics"):
+        with _apply(_patches(ctx)):
+            result = await run_derive_broker_dailies_job(
+                {**_job(), "attempts": attempts, "max_attempts": 3}
+            )
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert result.error_message == jw._MT5_CLOCK_READING_INSERT_MESSAGE
+    assert _PLANTED_SERVER not in (result.error_message or "")
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "arm=server_clock_reading_insert" in r.getMessage()
+    ]
+    assert len(lines) == 1, [r.getMessage() for r in caplog.records]
+    assert "APIError" in lines[0] and _PLANTED_SERVER not in lines[0]
+    # SF-H2: the SQLSTATE is logged (a missing table, a CHECK and a grant are different
+    # faults), never the message text that carries the planted row value.
+    assert f"code={sqlstate}" in lines[0], lines[0]
+    # WR-02: the page names the first key only, so the log line names every key.
+    assert "api_key_id=key-mt5" in lines[0], lines[0]
+    assert capture["upserts"] == [] and capture["updates"] == [] and capture["rpc_calls"] == []
+    if not pages:
+        # WR-03: a non-final attempt may be a blip or the deploy-window missing table that the
+        # retry heals, so it is logged (above) and retried, never paged.
+        page.assert_not_awaited()
+        return
+    # SF-H2: on the final attempt a deterministic insert fault is persistent, so it pages once,
+    # with the closed-set reason; the job outcome above is unchanged (D-03).
+    page.assert_awaited_once()
+    assert page.await_args.args == ("mt5_server_clock", "reading_insert_failed")
+    assert page.await_args.kwargs["event"] == "outage"
+    detail = page.await_args.kwargs["detail"]
+    # N2-M1: the code is a tag (tags are not scrubbed), never part of the scrubbed detail.
+    assert page.await_args.kwargs["extra_tags"] == {
+        "first_api_key_id": "key-mt5",
+        "sqlstate": sqlstate,
+    }
+    for text in [detail, repr(page.await_args)] + [r.getMessage() for r in caplog.records]:
+        assert _PLANTED_SERVER not in text, text

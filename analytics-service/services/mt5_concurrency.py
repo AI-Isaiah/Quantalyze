@@ -120,7 +120,8 @@ def mt5_derive_read_bound_s(*, read_s: float, wait_s: float, fresh: bool) -> flo
     """The outer ``asyncio.wait_for`` bound for ONE ``read_mt5_deal_ledger`` call.
 
     A cached read keeps the plain wedge detector, ``read_s`` (login + PRE
-    ``account_info`` + one ``history_deals_get`` + POST ``account_info``). A FRESH
+    ``account_info`` + one ``history_deals_get`` + one ``server_tick_times`` crossing +
+    POST ``account_info``). A FRESH
     read adds the whole settle budget ``wait_s`` AND one trailing read's own timeout
     (``_MT5_HISTORY_TRAILING_READ_S``): the loop's deadline is checked before every
     sleep, so no read starts after it, but the last one can start right at it.
@@ -128,6 +129,19 @@ def mt5_derive_read_bound_s(*, read_s: float, wait_s: float, fresh: bool) -> flo
     ``read_s`` and ``wait_s`` are passed in (not read here) so each call site keeps
     resolving them from its OWN module; the trailing allowance is read from this
     module at call time.
+
+    ⭐ Phase 155.1 (MT5-06, D-06): the server-clock tick crossing is part of ``read_s`` and
+    the bound is NOT widened for it. The production crossing runs ``symbols_get`` over the
+    broker's whole symbol list on the far side (about 1416 symbols on MM2) plus the tick loop
+    over the visible symbols, in ONE rpyc round trip. Its far-side cost is UNMEASURED: the
+    spike's 0.043-0.252 s figure timed a 14-symbol tick loop only, and the 4.7-7.3 s listing
+    figure was client-side netref iteration, which the committed expression replaces, so
+    neither measures the production expression. The evidence that confirms or reopens this
+    decision is the ``crossing_elapsed_s`` that the clock leg
+    (``scripts/mt5_spike.py --leg clock``) prints when the founder runs it after deploy. That
+    is a phase verification human item, read against ``_MT5_DERIVE_READ_TIMEOUT_S``, and the
+    founder decides on any reopening. A hung tick crossing is a wedge like any other read,
+    which the existing timeout and restart arm handles.
     """
     if not fresh:
         return read_s

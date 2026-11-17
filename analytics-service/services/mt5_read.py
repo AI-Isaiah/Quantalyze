@@ -53,11 +53,12 @@ exactly that cycle.
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable
-from datetime import datetime
-from typing import Any, Final
+from datetime import datetime, timezone
+from typing import Any, Final, NamedTuple
 
 from services.account_unit import (
     AccountCurrencyBlank,
@@ -65,7 +66,12 @@ from services.account_unit import (
     AccountCurrencyUnsupported,
     classify_account_currency,
 )
-from services.mt5_client import Mt5ClientError, Mt5Session, note_mt5_history_settled
+from services.mt5_client import (
+    Mt5ClientError,
+    Mt5ServerTickTimes,
+    Mt5Session,
+    note_mt5_history_settled,
+)
 from services.mt5_concurrency import (
     _MT5_HISTORY_POLL_S,
     _MT5_HISTORY_STABLE_INTERVALS,
@@ -73,6 +79,8 @@ from services.mt5_concurrency import (
     _Mt5PostReadVerificationError,
 )
 from services.mt5_probe import assert_expected_login
+
+logger = logging.getLogger("quantalyze.analytics.mt5_read")
 
 # WR-02 — MT5 deal-fetch upper-bound margin. ``history_deals_get``'s upper bound is
 # built from UTC ``now``, but MT5 deal ``time`` values are in the broker's SERVER
@@ -104,6 +112,30 @@ assert _MT5_DEAL_FETCH_MARGIN_S >= _MT5_MAX_SERVER_UTC_OFFSET_S, (
 # Pitfall 1), a real sleep would add a poll interval to every fresh-login test.
 _clock: Callable[[], float] = time.monotonic
 _sleep: Callable[[float], None] = time.sleep
+
+
+def _tick_read_now() -> datetime:
+    """The worker's UTC now, taken immediately after the server-tick crossing
+    returns (155.1 / D-08). Module level so a test can pin the instant. The
+    caller's own ``now`` dates from before the lease and is far too stale for a
+    5 s residual bound."""
+    return datetime.now(timezone.utc)
+
+
+class Mt5DealLedgerRead(NamedTuple):
+    """What ``read_mt5_deal_ledger`` returns: the PRE ``account_info``, the deals
+    and the server-clock tick read taken between the deal read and the POST
+    bracket (155.1 / D-06, D-20(d)).
+
+    ``tick`` is ``None`` exactly when ``tick_read_failed`` is True (the tick call
+    raised ``Mt5ClientError``, D-20(b)). ``tick_read_at`` is the worker's UTC now
+    right after that crossing, the instant the offset is measured against."""
+
+    info: dict[str, Any]
+    deals: list[dict[str, Any]]
+    tick: Mt5ServerTickTimes | None
+    tick_read_failed: bool
+    tick_read_at: datetime
 
 
 class Mt5HistoryUnsettledError(Exception):
@@ -215,9 +247,11 @@ def read_mt5_deal_ledger(
     *,
     now: datetime,
     settle_history: bool = False,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> Mt5DealLedgerRead:
     """Log in and read the FULL deal history, bracketed by the MT5CONC-02 login
-    assertions. Returns ``(pre_account_info, deals)``.
+    assertions. Returns ``Mt5DealLedgerRead(info, deals, tick, tick_read_failed,
+    tick_read_at)``: the PRE ``account_info``, the deals, and (155.1) one
+    server-clock tick read taken inside the PRE/POST bracket.
 
     ⭐ 164.6.6.3 / D-04 — ``settle_history=True`` is for a FRESH login (the caller
     decides, BEFORE ``login()``, via ``mt5_client.mt5_history_wait_due``): MT5
@@ -265,6 +299,34 @@ def read_mt5_deal_ledger(
         # D-04: the poll window sits BEFORE the POST bracket, so the POST bracket
         # also covers it (a mid-wait re-login by another actor is still caught).
         deals, settled = _settle_deal_history(session, info, deals, now=now)
+    # ⭐ Phase 155.1 / D-06, D-20(b), D-20(d) — ONE server-clock tick read, on the
+    # same session, after the deal read and the settle loop and BEFORE the POST
+    # bracket below, so a mid-read re-login by another actor is caught for the
+    # reading exactly as it is for the deals: a reading can never be attributed
+    # to the wrong key. ONLY this call is wrapped, and only for `Mt5ClientError`:
+    # a failed tick read is `unmeasured` / `tick_read_failed` and must never reach
+    # the derive's credential classify arm (a scrubbed terminal text could match
+    # an auth phrase and permanently fail a working key). Transport timeouts INSIDE
+    # the crossing ARE converted to `Mt5ClientError` by `_guarded_read`, so they
+    # land here as `tick_read_failed`. Only `Mt5SessionAbandoned`,
+    # `Mt5AccountMismatchError` and the caller's outer `asyncio.TimeoutError` are
+    # not `Mt5ClientError` and propagate untouched. The WARNING names the stage
+    # and the exception's integer `code` (0 for a converted transport fault, the
+    # far side's `last_error()` code for an unanswered listing) so those causes
+    # are distinguishable: never the text, never a server value (D-17).
+    tick: Mt5ServerTickTimes | None
+    try:
+        tick = session.client.server_tick_times()
+        tick_read_failed = False
+    except Mt5ClientError as exc:
+        tick = None
+        tick_read_failed = True
+        logger.warning(
+            "mt5 server tick read failed (stage=server_tick_times code=%s) — the "
+            "clock reading is unmeasured, the read continues (155.1 / D-20(b))",
+            getattr(exc, "code", None),
+        )
+    tick_read_at = _tick_read_now()
     # POST-read login bracket (MT5CONC-02): re-read account_info and
     # re-assert, catching a mid-read terminal re-login by another actor
     # (the cross-process net for the module-level lock's documented
@@ -289,4 +351,10 @@ def read_mt5_deal_ledger(
         # this key cached on this terminal. Never on a single read, the equity
         # skip, or any raise above.
         note_mt5_history_settled(session.client.terminal_key)
-    return info, deals
+    return Mt5DealLedgerRead(
+        info=info,
+        deals=deals,
+        tick=tick,
+        tick_read_failed=tick_read_failed,
+        tick_read_at=tick_read_at,
+    )

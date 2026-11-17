@@ -2273,6 +2273,103 @@ def _parse_session_snapshot(
     )
 
 
+# Phase 155.1 / D-D, D-04, D-05, D-20(a) (2026-11-17) — THE SERVER CLOCK'S TICK
+# TIMES, READ BRIDGE-SIDE IN ONE RPYC CROSSING.
+#
+# ⛔ WHY ONE COMMITTED EXPRESSION AND NOT `_materialize`. The MT5 server clock is
+# read off the newest tick's `time_msc` across the terminal's visible Market Watch
+# symbols (they reproduce MQL5 `TimeCurrent`). `_materialize` copies every field of
+# whatever it is handed, which for a tick includes bid, ask, last and volume, and
+# D-04 says a price is never materialised or returned. This expression reads ONLY
+# `visible`, `name` and `time_msc`, and returns plain ints, which rpyc's brine
+# copies BY VALUE: one `conn.eval` is one crossing however many symbols it walks on
+# the far side (the spike measured the client-side per-symbol netref route at 4.7 to
+# 7.3 s for the listing alone). Symbol names never cross the wire.
+#
+# ⛔ A PLAIN LITERAL EXPRESSION, NOT AN F-STRING, AND NEVER ASSEMBLED AT RUN TIME
+# (the rpyc channel is the unauthenticated arbitrary-remote-code channel T-134-03
+# names, as for `_REMOTE_SESSION_SNAPSHOT_SRC`). It takes NO argument. It never
+# calls `symbol_select` (that changes terminal state, D-05). The name of the
+# forbidden client-side `symbol_info_tick` attribute appears here only INSIDE this
+# committed string, which `test_read_only_surface_no_trade_methods` does not read.
+#
+# What it returns, one of two shapes, tagged:
+#   ("listing_unanswered", <last_error code>)
+#   ("answered", symbols_total, symbols_visible, symbols_answered, newest_time_msc)
+# `newest_time_msc` is `-1` when no visible symbol answered with an int `time_msc`.
+# `last_error()` is read on the far side IMMEDIATELY after the `None` listing, as
+# `_raise_last` does, and only its CODE crosses.
+#
+# ⚠️ Never exercised against the live bridge from this checkout: the committed
+# snapshot constant carries the same caveat (`.planning/WINDOWS.md` entry 68), and
+# the spike runs only exercised the client-side netref route. Phase 155.1 plan 02's
+# `--leg clock` spike leg is the live-proof pointer for the bytes below.
+_REMOTE_SERVER_TICK_TIMES_SRC = """
+(lambda scalar: (lambda symbols:
+    ("listing_unanswered", scalar(mt5.last_error()[0]))
+    if symbols is None
+    else (lambda ticks: (
+        "answered",
+        len(symbols),
+        len(ticks),
+        len([t for t in ticks if t is not None]),
+        max([scalar(getattr(t, "time_msc", None)) for t in ticks
+             if t is not None and isinstance(getattr(t, "time_msc", None), int)
+             and getattr(t, "time_msc", None) > 0] or [-1]),
+    ))([mt5.symbol_info_tick(s.name) for s in symbols if s.visible])
+)(mt5.symbols_get()))(
+    lambda value: value
+    if value is None or isinstance(value, (bool, int, float, str))
+    else str(value)
+)
+"""
+
+
+class Mt5ServerTickTimes(NamedTuple):
+    """What ``Mt5Client.server_tick_times`` read: tick TIMES and counts only.
+
+    ⛔ NO SYMBOL NAME, NO PRICE, NO VOLUME (D-04). ``symbols_total`` is the whole
+    listing, ``symbols_visible`` the Market Watch subset a tick was asked of,
+    ``symbols_answered`` how many of those returned a tick. ``newest_time_msc`` is
+    the newest tick's ``time_msc`` (the broker wall clock encoded as if it were UTC,
+    the deal ``time`` encoding), or ``None`` when no visible symbol answered.
+    """
+
+    symbols_total: int
+    symbols_visible: int
+    symbols_answered: int
+    newest_time_msc: int | None
+
+
+def _is_plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _parse_server_tick_times(raw: Any) -> Mt5ServerTickTimes:
+    """Validate the far-side tuple. ⛔ ``type(raw) is tuple`` first: a result that
+    came back as a netref is refused WITHOUT being indexed, since each index of a
+    netref is another crossing. An unanswered listing is the D-07 ``None`` to typed
+    raise; any other shape is a scrubbed, value-free malformed-shape error."""
+    if type(raw) is not tuple or not raw:
+        raise Mt5ClientError(0, "MT5 server tick times returned a malformed shape")
+    tag = raw[0]
+    if tag == "listing_unanswered" and len(raw) == 2 and _is_plain_int(raw[1]):
+        raise Mt5ClientError(raw[1], "MT5 symbol listing was not answered")
+    if (
+        tag == "answered"
+        and len(raw) == 5
+        and all(_is_plain_int(item) for item in raw[1:])
+    ):
+        newest = raw[4]
+        return Mt5ServerTickTimes(
+            symbols_total=raw[1],
+            symbols_visible=raw[2],
+            symbols_answered=raw[3],
+            newest_time_msc=None if newest == -1 else newest,
+        )
+    raise Mt5ClientError(0, "MT5 server tick times returned a malformed shape")
+
+
 class Mt5Client:
     """Read-only narrowing facade over `mt5linux.MetaTrader5` (RPyC). Synchronous
     by construction — rpyc classic is blocking. See module docstring."""
@@ -3061,6 +3158,37 @@ class Mt5Client:
 
         raw = self._guarded_read(_remote_call, stage="session_snapshot")
         return _parse_session_snapshot(raw, expected_login, expected_server)
+
+    def server_tick_times(self) -> Mt5ServerTickTimes:
+        """The newest tick TIME across the visible Market Watch symbols, in ONE
+        rpyc crossing (Phase 155.1 / D-D, D-04, D-05, D-20(a)).
+
+        It returns tick TIMES and counts only: never a price, a volume or a symbol
+        name, and it never calls ``symbol_select``. The tick is read on the far side
+        of the wire through the committed ``_REMOTE_SERVER_TICK_TIMES_SRC``, so the
+        forbidden ``symbol_info_tick`` attribute is never touched client-side (its
+        name appears only inside that committed string), and no tick is ever routed
+        through ``_materialize``, which would copy the prices.
+
+        ⛔ An unanswered symbol listing, a far-side raise, a dead transport or a
+        malformed result RAISES a typed, scrubbed ``Mt5ClientError`` (D-07 as
+        narrowed by D-20(a)). The caller decides what that means.
+        """
+        # WIZFORM-ABANDON / D-36 — ahead of `_guarded_read` and `_timed`.
+        self._assert_live("server_tick_times")
+        conn = getattr(self._mt5, "_MetaTrader5__conn", None)
+        if conn is None:
+            # The same seam `session_snapshot` depends on. A per-symbol netref
+            # fallback would cost one crossing per field, so fail loud.
+            raise Mt5ClientError(
+                0, "MT5 rpyc transport is not reachable for the server tick times"
+            )
+
+        def _remote_call() -> Any:
+            return conn.eval(_REMOTE_SERVER_TICK_TIMES_SRC)
+
+        raw = self._guarded_read(_remote_call, stage="server_tick_times")
+        return _parse_server_tick_times(raw)
 
     def history_deals_get(self, from_ts: Any, to_ts: Any) -> list[dict[str, Any]]:
         """Deals in [from_ts, to_ts) as native dicts. `None` is an ERROR -> typed

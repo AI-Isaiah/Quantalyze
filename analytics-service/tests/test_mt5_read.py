@@ -23,6 +23,7 @@ No live terminal, no ``mt5linux`` install, no network, no credential.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -193,6 +194,36 @@ def test_post_read_transport_blip_is_not_a_client_error() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 155.1 / SF-H1 — a failed tick read says WHICH failure it was.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("tick_answer", "expected_code"),
+    [
+        (("listing_unanswered", -10004), -10004),  # far side's last_error() code
+        (RuntimeError("rpyc timed out"), 0),  # transport fault, converted by _guarded_read
+    ],
+)
+def test_a_failed_tick_read_logs_its_code_and_stage_never_the_text(
+    caplog: pytest.LogCaptureFixture, tick_answer: object, expected_code: int
+) -> None:
+    """The class name is always `Mt5ClientError`, so a bridge blip, an unanswered
+    listing and an rpyc timeout read the same in the log. The integer `code` and the
+    stage tell them apart; the exception text (a server value, D-17) never appears."""
+    transport = _FakeMt5Transport(
+        account=_account(_EXPECTED_LOGIN), deals=_DEALS, tick_answer=tick_answer
+    )
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.mt5_read"):
+        got = read_mt5_deal_ledger(_session(transport), now=_NOW)
+
+    assert got.tick_read_failed is True
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(messages) == 1, messages
+    assert f"stage=server_tick_times code={expected_code}" in messages[0]
+    assert "rpyc timed out" not in messages[0]
+
+
+# ---------------------------------------------------------------------------
 # WR-02 — the deal-fetch upper-bound margin travelled with the read.
 # ---------------------------------------------------------------------------
 def test_deal_fetch_upper_bound_carries_the_server_offset_margin() -> None:
@@ -280,7 +311,8 @@ def test_returns_the_pre_snapshot_and_discards_the_post_one() -> None:
     )
     session = _session(transport)
 
-    info, deals = read_mt5_deal_ledger(session, now=_NOW)
+    read = read_mt5_deal_ledger(session, now=_NOW)
+    info, deals = read.info, read.deals
 
     assert info["equity"] == 110_500.0, (
         "the PRE snapshot is the economic anchor; the POST re-read is "
@@ -308,12 +340,11 @@ def _terminal_key() -> str:
 
 
 def _settle_read(transport: _FakeMt5Transport) -> list[dict[str, Any]]:
-    _info, deals = read_mt5_deal_ledger(
+    return read_mt5_deal_ledger(
         _session(transport),
         now=_NOW,
         settle_history=True,
-    )
-    return deals
+    ).deals
 
 
 def test_cached_account_reads_once(_mt5_read_never_sleeps_for_real) -> None:

@@ -1117,7 +1117,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS ship, rebased on Phase 210 PUBLICTRUTH): combined with Phase 210's +2 arms (830 -> 832) and +8 file steps on origin/main, so arm counts read Phase 211's value +2 and step counts +8.
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): `armsSeen` 848 -> 864, the +16 twinned arms in four existing gates (staleness I-N +6, composite CL +1, fan-out NA1-NA4 and SK1-SK3 +7, dedup FINALIZE-WIZARD-SHAPE and CSV-FINALIZE-SHAPE +2). MEASURED: this file's run read `expected 864 to be 848`, and `--parse-only` printed `coverage: files 82/109`, `arms: 0/864/0`; the exit-0 SUBSET run of the four gates printed `arms: 109/109/0`, `biting: 109`. No file joined.
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, review round 1 fix): `armsSeen` 864 -> 867, the +3 twinned arms NA5, NA6 and SK4 in test_ledger_refresh_fanout.sql. MEASURED: `--parse-only` read `arms: 0/867/0`.
-    expect(armsSeen).toBe(867);
+    // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): `armsSeen` 867 -> 891, the 24 twinned arms of the NEW gate test_mt5_server_clock_readings.sql. MEASURED: this file's run read `expected 891 to be 867`; `--parse-only` printed `coverage: files 83/110`, `arms: 0/891/0`, and the `--file` diagnostic run printed `arms: 24/24/0`, `biting: 24`.
+    expect(armsSeen).toBe(891);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1169,7 +1170,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS ship, rebased on Phase 210 PUBLICTRUTH): combined with Phase 210's +2 arms (830 -> 832) and +8 file steps on origin/main, so arm counts read Phase 211's value +2 and step counts +8.
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): `stepsSeen` 965 -> 981, +16 file steps contributed by the 16 new twins. MEASURED, not derived: this file's run read `expected 981 to be 965`.
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, review round 1 fix): `stepsSeen` 981 -> 984, +3 file steps (one edit step per new twin: NA5, NA6, SK4).
-    expect(stepsSeen).toBe(984);
+    // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): `stepsSeen` 984 -> 1008, +24 file steps (one edit step per twin) contributed by the NEW gate test_mt5_server_clock_readings.sql. MEASURED: the sibling pin read `expected 1008 to be 984` and `--parse-only` printed `coverage: files 83/110`, `arms: 0/891/0`, and the `--file` diagnostic run printed `arms: 24/24/0`, `biting: 24`.
+    expect(stepsSeen).toBe(1008);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2137,7 +2139,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS ship, rebased on Phase 210 PUBLICTRUTH): combined with Phase 210's +2 arms (830 -> 832) and +8 file steps on origin/main, so arm counts read Phase 211's value +2 and step counts +8.
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): `needles.length` 965 -> 981, the same +16 file steps as `stepsSeen`. MEASURED: this file's run read `expected 981 to be 965`.
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, review round 1 fix): `needles.length` 981 -> 984, the same +3 file steps as `stepsSeen`.
-    expect(needles.length).toBe(984);
+    // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): `needles.length` 984 -> 1008, the same +24 file steps as `stepsSeen`, from the NEW gate test_mt5_server_clock_readings.sql. MEASURED: the sibling pin read `expected 1008 to be 984` and `--parse-only` printed `coverage: files 83/110`, `arms: 0/891/0`, and the `--file` diagnostic run printed `arms: 24/24/0`, `biting: 24`.
+    expect(needles.length).toBe(1008);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2747,7 +2750,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-04 (Phase 191 REFUSALRACE, plan 03): `filesTotal` 106 -> 107, the NEW gate test_compute_job_metadata_merge.sql; the narrowed runner run printed `coverage: files 80/107`. MEASURED: this file's run read `expected 107 to be 106`.
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): `filesTotal` 107 -> 108, the NEW gate test_contact_requests_insert_intro_authz.sql. MEASURED: this file's run read `expected 108 to be 107`; `coverage: files 81/108`, `arms: 0/830/0` from `--parse-only`, and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (15 annotated arms); the FULL local run was not run on this host (disk).
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS, plan 06): `filesTotal` 108 -> 109, the NEW gate test_enqueue_dedup_record_retract.sql. MEASURED: this file's run read `expected 109 to be 108`; `--parse-only` (`coverage: files 82/109`, `arms: 0/845/0`) and the exit-0 SUBSET run of the new gate test_enqueue_dedup_record_retract.sql (15 annotated arms) printed `coverage: files 82/109`.
-    expect(corpus.filesTotal).toBe(109);
+    // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): `filesTotal` 109 -> 110, the NEW gate test_mt5_server_clock_readings.sql. MEASURED: this file's run read `expected 110 to be 109`; `--parse-only` printed `coverage: files 83/110`.
+    expect(corpus.filesTotal).toBe(110);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2839,7 +2843,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-04 (Phase 191 REFUSALRACE, plan 03): `filesAnnotated` 79 -> 80, moving WITH `filesTotal`; the by-name list below gained test_compute_job_metadata_merge.sql.
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): `filesAnnotated` 80 -> 81, moving WITH `filesTotal`; the by-name list below gained test_contact_requests_insert_intro_authz.sql. Read off `coverage: files 81/108`, `arms: 0/830/0` from `--parse-only`, and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (15 annotated arms); the FULL local run was not run on this host (disk).
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS, plan 06): `filesAnnotated` 81 -> 82, moving WITH `filesTotal`; the by-name list below gained test_enqueue_dedup_record_retract.sql. Read off `--parse-only` (`coverage: files 82/109`, `arms: 0/845/0`) and the exit-0 SUBSET run of the new gate test_enqueue_dedup_record_retract.sql (15 annotated arms).
-    expect(corpus.filesAnnotated).toBe(82);
+    // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): `filesAnnotated` 82 -> 83, moving WITH `filesTotal`; the by-name list gained test_mt5_server_clock_readings.sql; the NEW gate test_mt5_server_clock_readings.sql. MEASURED: `--parse-only` printed `coverage: files 83/110`, `arms: 0/891/0`, and the `--file` diagnostic run printed `arms: 24/24/0`, `biting: 24`.
+    expect(corpus.filesAnnotated).toBe(83);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       // ⭐ ADDED 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): the per-key unique-index gate (6 arms) for migration 20261011120000.
@@ -2932,6 +2937,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // same-strategy terminal mark waits on the per-strategy bridge lock.
       "test_mark_rpc_bridge_advisory_lock.sql",
       "test_metrics_by_basis_write.sql",
+      // ⭐ ADDED 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): the server-clock readings write-once and value-rule gate (24 twinned arms) for migration 20261117120000.
+      "test_mt5_server_clock_readings.sql",
       // ⭐ ADDED 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): the okx archive rebuild gate (15 arms).
       "test_okx_archive_rebuild.sql",
       // ⭐ ADDED 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): the ops_staleness_check gate (14 arms).
@@ -3416,7 +3423,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-04 (Phase 191 REFUSALRACE, plan 03): `filesTotal` 106 -> 107, the NEW gate test_compute_job_metadata_merge.sql; the narrowed runner run printed `coverage: files 80/107`. MEASURED: this file's run read `expected 107 to be 106`.
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): `filesTotal` 107 -> 108, the NEW gate test_contact_requests_insert_intro_authz.sql; `coverage: files 81/108`, `arms: 0/830/0` from `--parse-only`, and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (15 annotated arms); the FULL local run was not run on this host (disk).
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS, plan 06): `filesTotal` 108 -> 109, the NEW gate test_enqueue_dedup_record_retract.sql. MEASURED: this file's run read `expected 109 to be 108`; `--parse-only` (`coverage: files 82/109`, `arms: 0/845/0`) and the exit-0 SUBSET run of the new gate test_enqueue_dedup_record_retract.sql (15 annotated arms) printed `coverage: files 82/109`.
-    expect(corpus.filesTotal).toBe(109);
+    // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): `filesTotal` 109 -> 110, the NEW gate test_mt5_server_clock_readings.sql. MEASURED: this file's run read `expected 110 to be 109`; `--parse-only` printed `coverage: files 83/110`.
+    expect(corpus.filesTotal).toBe(110);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3463,7 +3471,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02): 83 -> 79, moving WITH `filesAnnotated`; the by-name list lost the four retired gate files.
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): `annotatedFiles` 80 -> 81, moving WITH `filesAnnotated`; `coverage: files 81/108`, `arms: 0/830/0` from `--parse-only`, and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (15 annotated arms); the FULL local run was not run on this host (disk).
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS, plan 06): `annotatedFiles` 81 -> 82, moving WITH `filesAnnotated`; `--parse-only` (`coverage: files 82/109`, `arms: 0/845/0`) and the exit-0 SUBSET run of the new gate test_enqueue_dedup_record_retract.sql (15 annotated arms).
-    expect(corpus.annotatedFiles).toHaveLength(82);
+    // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): `annotatedFiles` 82 -> 83, moving WITH `filesAnnotated`; the NEW gate test_mt5_server_clock_readings.sql. MEASURED: `--parse-only` printed `coverage: files 83/110`, `arms: 0/891/0`, and the `--file` diagnostic run printed `arms: 24/24/0`, `biting: 24`.
+    expect(corpus.annotatedFiles).toHaveLength(83);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

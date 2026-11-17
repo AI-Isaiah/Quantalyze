@@ -1353,7 +1353,14 @@
 // (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `No defects in the SUBSET`, `exit=0`. Per-file line:
 // `test_enqueue_dedup_record_retract.sql: sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`. The FULL local run was NOT run on this host (see the ARMS_FLOOR block below
 // for the reason); CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the authoritative full run. WAIVED_CEILING stays 0 - no waiver was added.
-export const FILES_FLOOR = 82;
+// RAISED 82 -> 83 2026-11-17 (Phase 155.1 SERVERCLOCK plan 05): +1 file, test_mt5_server_clock_readings.sql (migration 20261117120000, the write-once and value-rule gate for
+// public.mt5_server_clock_readings and its trigger function enforce_mt5_server_clock_readings_write_once: twenty-four identities, each carrying a prose RED-UNDER and a machine
+// RED-UNDER-M twin), so 83 of 110 files. MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`, exit 0: `coverage: files 83/110`, `arms: 0/891/0   (executed/annotated/waived)`,
+// `pending: 0`, `No static defects`, and by the exit-0-by-design DIAGNOSTIC run `--file supabase/tests/test_mt5_server_clock_readings.sql` recorded by plan 04: `arms: 24/24/0`, `biting: 24`,
+// `lane-invocations: 24` (the two independent tallies AGREE), every arm `RED (identity ok)`. Per-file line: `test_mt5_server_clock_readings.sql: sections 9 / judged 0 / annotated 24 / waived 0 /
+// biting 0` in the parse-only table (that mode executes nothing). The FULL local run was NOT run on this host; CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the authoritative
+// full run. WAIVED_CEILING stays 0 - no waiver was added.
+export const FILES_FLOOR = 83;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3465,7 +3472,12 @@ export const FILES_FLOOR = 82;
 // `test_ledger_refresh_fanout.sql: sections 47 / judged 47 / annotated 47 / waived 0 / biting 47`, each of NA5, NA6 and SK4 `RED (identity ok)`. NOT MEASURED by a FULL local run (about 9 GB free
 // against the roughly 15 GB it needs), so 867 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA is the run that compares it with a real
 // biting count. WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 867;
+// RAISED 867 -> 891 2026-11-17 (Phase 155.1 SERVERCLOCK plan 05): +24 arms, each twinned, in the one NEW gate test_mt5_server_clock_readings.sql (FILES_FLOOR 82 -> 83, see its block above).
+// MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`, exit 0: `coverage: files 83/110`, `arms: 0/891/0   (executed/annotated/waived)`, `pending: 0`, `No static defects`
+// (867 at HEAD plus the 24 the new gate declares), and by plan 04's DIAGNOSTIC run over that one gate: `arms: 24/24/0`, `biting: 24`, `lane-invocations: 24`, every arm `RED (identity ok)`.
+// NOT MEASURED by a FULL local run, so 891 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA is the run that compares it with a real
+// biting count. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 891;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
