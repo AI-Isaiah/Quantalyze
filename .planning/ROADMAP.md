@@ -191,7 +191,7 @@ Plans:
 **Goal:** The worker measures the MT5 server's UTC offset live inside every leased derive, checks it against the configured `Mt5ServerClock` rule, and keeps each reading write-once, so a wrong or changed offset is caught by the system, not by a person reading a chart. It is a data-integrity product change, not harness code: the harness itself never touches the gateway. Research Phase B.
 **Requirements**: MT5-06
 **Depends on:** Nothing (first of the milestone; runs in parallel with 155)
-**Plans:** TBD
+**Plans:** 6/6 plans executed
 **UI hint**: no
 
 Research flag (`/gsd-plan-phase --research-phase`): a live spike on whether the tick read answers through `mt5linux` on Wine for visible Market Watch symbols, whether its time uses the same encoding as a deal's `time`, what an investor session's Market Watch holds, and how fresh ticks are during session breaks. Check what the parked MT5SERVERLEARN branch (164.6.6.3.6) holds first. Any spike run with `MT5_SPIKE_INVESTOR_PASSWORD` comes before 157's rotation.
@@ -205,8 +205,20 @@ Research flag (`/gsd-plan-phase --research-phase`): a live spike on whether the 
 4. The readings show, per key, whether MM2, MM3 and FX-AI_V share one server rule, without a server name in tracked text. A split is reported to the founder before the 155.2 session, because the single worker-wide rule would then be wrong for at least one account (the per-server clock is a Future requirement this would bring forward).
 5. At least one real near-midnight deal from the DST divergence week (2026-10-25..11-01) is preselected, and a test pins its UTC day and goes RED under the wrong rule (`eu` against `us`). Last leg, read in the 155.2 session: the founder's terminal-displayed time for that deal lands on the UTC day of (terminal-displayed server time − the offset in force).
 
+⛔ **CHANGED 2026-11-16 (founder, "One more live read"): D-18's preselection method.** No PROD table stores an MT5 deal's broker wall time, so criterion 5's deal is preselected by one read-only live leg, `analytics-service/scripts/mt5_spike.py --leg band`, run by the founder like tick runs 1-3 and before 157's password rotation, not by a PROD read through the MCP. It prints only wall date, wall time and an eu/us-differs flag per in-band deal. Recorded in `155.1-CONTEXT.md` (D-18 note, D-19, D-20). ⛔ **RULED 2026-11-17 (founder, "Real hour, built deal"):** the band run found no real MM2 deal in 02:00–02:59 wall, the only hour where `eu` and `us` disagree that week, so criterion 5's pinned test uses a constructed deal time in that hour on a real wall date of the week (e.g. 2026-10-30), labelled as constructed and never presented as a real deal, and it must go RED under the wrong rule; MM2's real 2026-10-30 03:00:00 deal may be pinned as the agreeing boundary.
+
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 155.1-01-PLAN.md — tracer: one leased derive reads `Mt5Client.server_tick_times` inside the account bracket, assesses it, and inserts a write-once reading (table DDL plus parity pin) (Wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 155.1-02-PLAN.md — oracle tests from the spike readings, criterion-5 constructed 02:30 time on 2026-10-30 plus the real 03:00 boundary, founder-run `--leg clock` live proof (Wave 2)
+- [x] 155.1-03-PLAN.md — mismatch pages `mt5_server_clock` (both languages), derive arms for mismatch, unmeasured, tick read failure and insert failure (Wave 2)
+- [x] 155.1-04-PLAN.md — write-once trigger with the FK cascade let through, keep-data rollback, SQL gate on a private lane with every arm biting (Wave 2)
+- [x] 155.1-06-PLAN.md — `server_tick_times` contract hardening: AST pin on the committed remote expression and offline behaviour proofs (Wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 155.1-05-PLAN.md — census moves: mutation floors and pins, sql-tests anti-skip floors, function-corpus snapshot and ratchet row (Wave 3)
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -250,7 +262,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 155. PARITYHARNESS | 11/11 | Complete | 2026-11-14 |
-| 155.1. SERVERCLOCK | 0/? | Not started | - |
+| 155.1. SERVERCLOCK | 6/6 | In Progress (shipped v0.133.50.0; post-deploy UAT pending) | - |
 | 155.2. LIVEPARITY | 0/? | Not started | - |
 | 157. FOUNDER-CONFIRM | 0/? | Not started | - |
 | 207. RETRYPROP | 1/1 | Complete | 2026-11-14 |

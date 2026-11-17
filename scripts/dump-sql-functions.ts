@@ -392,19 +392,11 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  // ⭐ 2026-11-17: Phase 155.1 SERVERCLOCK plan 05 adds one `snapshot-only` row, for the
-  // write-once trigger function of public.mt5_server_clock_readings (D-14). Its clearing
-  // condition is the re-dump taken after the migration has applied to PROD; that act turns
-  // the row into `ratchet-stale` and it is DELETED, as the Phase 211 row below was.
-  {
-    name: "enforce_mt5_server_clock_readings_write_once",
-    side: "snapshot-only",
-    capturedAt: "2026-11-17",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after 20261117120000_mt5_server_clock_readings.sql applies to PROD",
-    reason:
-      "Phase 155.1 D-14 defines the write-once trigger function in a forward migration that is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
+  // ⭐ 2026-11-17: the Phase 155.1 SERVERCLOCK plan 05 row
+  // (`enforce_mt5_server_clock_readings_write_once`, `snapshot-only`, captured
+  // 2026-11-17) is DELETED: its clearing condition, a re-dump taken after
+  // 20261117120000_mt5_server_clock_readings.sql applied to PROD, was met by the
+  // re-dump after the PROD apply of 357232af.
   // ⭐ 2026-11-14: the Phase 211 SYNCJOBS plan 03 row (`_record_enqueue_dedup`,
   // `snapshot-only`, captured 2026-11-14) is DELETED: its clearing condition, a
   // re-dump taken after 20261114130000_enqueue_dedup_record_retract.sql applied to

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.133.50.1] - 2026-11-17 — records: 155.1 SERVERCLOCK shipped, UAT pending; baseline re-dump
+
+Records PR for Phase 155.1, whose code is already on `main` as #1282 (v0.133.50.0). It carries the phase artifacts, marks 155.1 shipped and awaiting UAT, and lands the baseline re-dump that turns `main`'s `sql-gate-lint` green again, which also unblocks the Railway deploy of the analytics service. The only non-records change is the re-dump's one cleared `NAME_SET_RATCHET` row. There is no source, test or migration change.
+
+### Added
+- **Phase artifacts for 155.1** under `.planning/phases/`, copied from `feat/155.1-serverclock`: 6 plans and summaries, context, research, patterns, review, security, spike readings and runbook, validation, UAT and verification. The VERIFICATION already carries `verified_at_sha` and `drift_subjects`, with no `covered_*` keys and no repo-global ledger in `drift_subjects`.
+
+### Changed
+- **Baseline re-dump after the PROD apply of `357232af`.** `supabase/schema/baseline.sql`, `baseline-carried-migrations.txt` and `BASELINE.md` are byte-identical to the redump bot's commit `43084c5d7`, from Supabase Migrate run `44111377237`. sha256 `e8a2f5e3…` → `0a1a7771…`. Tables 67 → 68, policies 154, function statements 135 → 136 (133 → 134 distinct names), 0 data statements. Newly carried: `20261117120000_mt5_server_clock_readings.sql`. Re-checked locally on this branch: the `## Regenerating` secret grep has no hit; `baseline-content-drift: functions compared 136 — MATCH 133, DRIFT 3` (all three allowlisted), `SNAPSHOT_MISSING 0`, `findings 0`.
+- **`scripts/dump-sql-functions.ts`:** the Phase 155.1 `NAME_SET_RATCHET` row for `enforce_mt5_server_clock_readings_write_once` (`snapshot-only`, captured 2026-11-17) is deleted. The re-dump met its clearing condition. A dated comment records the deletion, as was done for the Phase 211 row. `dump-sql-functions.ts --check` now reports 134 vs 134 names with 0 ratcheted disagreements.
+- **ROADMAP:** the 155.1 section lists its six plans, all ticked, and carries the founder's 2026-11-16 and 2026-11-17 D-18 notes from the phase branch. The Progress row reads `6/6 | In Progress (shipped v0.133.50.0; post-deploy UAT pending)`, the form Phase 194 used while its browser UAT was open. The overview bullet stays unticked.
+- **STATE and `state.json`:** `## Current Position` says 155.1 shipped and awaits its post-deploy UAT. 155.2 and 157 still wait on the founder's trading-day session, which also waits on 155.1's weekday PROD reading row per key. Progress: 10 of 14 phases, 76 of 76 plans, 71%. 155.1 is `in_progress` in `state.json`.
+- VERSION and package.json 0.133.50.0 → 0.133.50.1.
+
+### Notes
+- **155.1 is not complete.** Its VERIFICATION is `human_needed`, with six items in `155.1-UAT.md`, and this repo's rule is complete = VERIFICATION `passed`. So `phase complete 155.1` was not run, and REQUIREMENTS keeps MT5-06 `Pending`. The phase closes after the founder's `--leg clock` run, the weekday PROD readings, and the 155.2 session that reads MT5-06's last leg.
+- The re-dump lands through this PR, not the bot's #1283, so that it gets a full CI run. #1283 claims the same version and is superseded.
+- No `TODOS.md` entry is closed, so none is deleted.
+
 ## [0.133.50.0] - 2026-11-17 — Phase 155.1 SERVERCLOCK: the worker reads the MT5 server clock in every derive and refuses a wrong offset
 
 A data-integrity product change. Every leased MT5 derive now measures the broker server's UTC offset live, checks it against the configured `Mt5ServerClock` rule, and keeps the reading in a write-once table. A wrong or changed offset now refuses the derive and pages, before any series write, so it is caught by the system and not by someone reading a chart. Requirement MT5-06; the terminal-displayed-time last leg is the 155.2 founder session. One migration, which auto-applies to TEST and then PROD on merge.

@@ -11,7 +11,7 @@
     {
       "number": "155.1",
       "name": "SERVERCLOCK",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "155.2",
@@ -76,8 +76,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (155.1 waits for the founder's Monday 2026-11-16 market-hours spike run; 155.2 and 157 wait for the founder's trading-day session; 216 CSVSTATUS booked 2026-11-16)",
-    "reason": "Phases 155 and 207-215 complete; 10 of 14"
+    "label": "Advance to the next step (155.1 shipped, awaiting post-deploy UAT: the founder's --leg clock run and a weekday PROD reading row per key; 155.2 and 157 wait for the founder's trading-day session; 216 CSVSTATUS booked 2026-11-16)",
+    "reason": "Phases 155 and 207-215 complete; 155.1 shipped, UAT pending; 10 of 14"
   },
-  "updated_at": "2026-11-15T23:35:22.080Z"
+  "updated_at": "2026-11-17T18:00:00.000Z"
 }
