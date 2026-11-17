@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.50.1] - 2026-11-17 — BASELINE: automated re-dump after the PROD apply of 357232af
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `44111377237`, after the PROD apply of merge `357232af`: sha256 `e8a2f5e3…` → `0a1a7771…`.
+- Shape, old → new: tables 67 → 68, policies 154 → 154, function statements 135 → 136, distinct function names 133 → 134, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261117120000_mt5_server_clock_readings.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-17` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.50.0 → 0.133.50.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=324 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 136 — MATCH 133, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `44111377237` succeeded, and this entry was composed by the `redump-pr` job. Run `44111377237` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.50.0] - 2026-11-17 — Phase 155.1 SERVERCLOCK: the worker reads the MT5 server clock in every derive and refuses a wrong offset
 
 A data-integrity product change. Every leased MT5 derive now measures the broker server's UTC offset live, checks it against the configured `Mt5ServerClock` rule, and keeps the reading in a write-once table. A wrong or changed offset now refuses the derive and pages, before any series write, so it is caught by the system and not by someone reading a chart. Requirement MT5-06; the terminal-displayed-time last leg is the 155.2 founder session. One migration, which auto-applies to TEST and then PROD on merge.

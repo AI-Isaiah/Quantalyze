@@ -4859,6 +4859,36 @@ $$;
 ALTER FUNCTION "public"."enforce_csv_daily_returns_owner_coherence"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."enforce_mt5_server_clock_readings_write_once"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    RAISE EXCEPTION 'mt5_server_clock_readings is write-once: a stored reading is never updated'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    IF pg_trigger_depth() > 1 THEN
+      RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'mt5_server_clock_readings is write-once: a stored reading is never deleted directly, only with its key'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  RETURN NEW;
+END
+$$;
+
+
+ALTER FUNCTION "public"."enforce_mt5_server_clock_readings_write_once"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."enforce_mt5_server_clock_readings_write_once"() IS 'Phase 155.1 SERVERCLOCK (D-14, D-20(c)). Refuses every UPDATE and every direct DELETE of a stored server-clock reading from any role, the table owner and BYPASSRLS roles included. Admits a DELETE only when it runs nested inside the api_keys foreign key cascade (trigger depth greater than one), so a key delete, delete_allocator_api_key and an account erasure still erase the readings. SECURITY INVOKER: it reads no table.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."enforce_strategy_keys_owner_coherence"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -14110,6 +14140,110 @@ COMMENT ON CONSTRAINT "match_decisions_kind_voluntary_modify_v2" ON "public"."ma
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."mt5_server_clock_readings" (
+    "id" bigint NOT NULL,
+    "api_key_id" "uuid" NOT NULL,
+    "job_id" "uuid",
+    "read_at" timestamp with time zone NOT NULL,
+    "configured_rule" "text" NOT NULL,
+    "verdict" "text" NOT NULL,
+    "reason" "text",
+    "newest_tick_wall_ms" bigint,
+    "raw_offset_s" numeric,
+    "measured_offset_s" bigint,
+    "expected_offset_s" bigint,
+    "residual_s" numeric,
+    "newest_tick_age_s" numeric,
+    "symbols_visible" integer,
+    "symbols_answered" integer,
+    "server_label_hash" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "mt5_server_clock_readings_counts_chk" CHECK (((("symbols_visible" IS NULL) OR ("symbols_visible" >= 0)) AND (("symbols_answered" IS NULL) OR ("symbols_answered" >= 0)))),
+    CONSTRAINT "mt5_server_clock_readings_hash_chk" CHECK ((("server_label_hash" IS NULL) OR ("server_label_hash" ~ '^[0-9a-f]{64}$'::"text"))),
+    CONSTRAINT "mt5_server_clock_readings_offsets_chk" CHECK ((("verdict" = 'unmeasured'::"text") OR (("measured_offset_s" IS NOT NULL) AND ("expected_offset_s" IS NOT NULL) AND (("verdict" = 'match'::"text") = ("measured_offset_s" = "expected_offset_s"))))),
+    CONSTRAINT "mt5_server_clock_readings_reason_chk" CHECK ((("reason" IS NULL) OR ("reason" = ANY (ARRAY['no_tick'::"text", 'tick_read_failed'::"text", 'residual_over_bound'::"text", 'tick_time_out_of_range'::"text", 'expected_unassertable'::"text"])))),
+    CONSTRAINT "mt5_server_clock_readings_reason_verdict_chk" CHECK ((("verdict" = 'unmeasured'::"text") = ("reason" IS NOT NULL))),
+    CONSTRAINT "mt5_server_clock_readings_rule_chk" CHECK (("configured_rule" = ANY (ARRAY['eu'::"text", 'us'::"text", 'fixed'::"text"]))),
+    CONSTRAINT "mt5_server_clock_readings_verdict_chk" CHECK (("verdict" = ANY (ARRAY['match'::"text", 'mismatch'::"text", 'unmeasured'::"text"])))
+);
+
+ALTER TABLE ONLY "public"."mt5_server_clock_readings" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."mt5_server_clock_readings" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."mt5_server_clock_readings" IS 'Phase 155.1 SERVERCLOCK (MT5-06, D-13..D-17). One row per live MT5 server-clock reading taken inside a leased derive: the newest tick time across the visible Market Watch symbols minus the worker''s UTC now, rounded to 900 s, assessed against the configured clock rule. Inserted for every verdict (match, mismatch, unmeasured) before the derive decides anything; only a mismatch refuses the derive. WRITE-ONCE: service_role holds SELECT and INSERT only (no UPDATE, DELETE or TRUNCATE), and a BEFORE UPDATE OR DELETE trigger refuses every UPDATE and direct DELETE from any role while the api_keys cascade still erases. SERVICE-ROLE ONLY by design: row level security is enabled and forced with no policy, anon and authenticated hold no privilege, and no UI reads the rows. Per key: erased with the key and with the account through ON DELETE CASCADE, kept on a soft disconnect. Carries a hash of the account server label, never the name.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."api_key_id" IS 'The API key whose derive took the reading. ON DELETE CASCADE from api_keys (and from auth.users through profiles) IS the erasure path: a hard key delete or an account erasure removes the readings, while a soft disconnect keeps them. Any delete guard added later MUST let that cascade through.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."job_id" IS 'The compute_jobs row of the derive that took the reading. NO foreign key on purpose: compute_jobs rows expire and a reading outlives them.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."read_at" IS 'The worker''s UTC now, taken right after the tick-time crossing returned: the instant the offset was measured against.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."configured_rule" IS 'The configured clock the reading was assessed against: eu, us, or fixed (the fixed-offset form). MT5_SERVER_TIME_RULE stays the only carrier of the rule; the reading is never written back as configuration (D-12).';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."reason" IS 'Why an unmeasured reading was not asserted: no_tick, tick_read_failed, residual_over_bound, tick_time_out_of_range or expected_unassertable. NULL exactly when the verdict is match or mismatch.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."newest_tick_wall_ms" IS 'The newest tick''s time_msc across the visible Market Watch symbols: the broker wall clock encoded as if it were UTC (the deal time encoding). NULL when no visible symbol answered or the tick read failed.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."raw_offset_s" IS 'The unrounded measured offset in seconds: newest tick wall time minus the worker UTC now.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."measured_offset_s" IS 'raw_offset_s rounded to the nearest 900 s.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."expected_offset_s" IS 'The configured clock''s offset at the newest tick''s wall instant. NULL in a repeated or skipped broker hour (unassertable, never a mismatch).';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."residual_s" IS 'The rounding residual, measured_offset_s minus raw_offset_s. A residual past 5 s makes the reading unmeasured.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."newest_tick_age_s" IS 'expected_offset_s minus raw_offset_s: the newest tick''s age PLUS any offset error. In a mismatch row the two cannot be told apart.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."symbols_visible" IS 'How many visible Market Watch symbols a tick was asked of.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."symbols_answered" IS 'How many of those symbols returned a tick.';
+
+
+
+COMMENT ON COLUMN "public"."mt5_server_clock_readings"."server_label_hash" IS 'Unsalted SHA-256 hex of the normalised account server label (D-17). Equality-only: it shows per key whether two accounts share one server and is never printed or logged. NULL when the account carried no server.';
+
+
+
+ALTER TABLE "public"."mt5_server_clock_readings" ALTER COLUMN "id" ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME "public"."mt5_server_clock_readings_id_seq"
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."notification_dispatches" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "notification_type" "text" NOT NULL,
@@ -15081,6 +15215,11 @@ ALTER TABLE ONLY "public"."match_decisions"
 
 
 
+ALTER TABLE ONLY "public"."mt5_server_clock_readings"
+    ADD CONSTRAINT "mt5_server_clock_readings_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."notification_dispatches"
     ADD CONSTRAINT "notification_dispatches_pkey" PRIMARY KEY ("id");
 
@@ -15706,6 +15845,10 @@ CREATE INDEX "match_decisions_original_holding_ref" ON "public"."match_decisions
 
 
 
+CREATE INDEX "mt5_server_clock_readings_key_read_at_idx" ON "public"."mt5_server_clock_readings" USING "btree" ("api_key_id", "read_at");
+
+
+
 CREATE UNIQUE INDEX "portfolio_alerts_dedup_unacked" ON "public"."portfolio_alerts" USING "btree" ("portfolio_id", "alert_type") WHERE (("acknowledged_at" IS NULL) AND ("alert_type" <> 'rebalance_drift'::"text"));
 
 
@@ -15975,6 +16118,10 @@ CREATE OR REPLACE TRIGGER "guard_wizard_draft_updates_trigger" BEFORE UPDATE ON 
 
 
 CREATE OR REPLACE TRIGGER "match_decisions_visibility_check" BEFORE INSERT ON "public"."match_decisions" FOR EACH ROW EXECUTE FUNCTION "public"."_match_decisions_visibility_check"();
+
+
+
+CREATE OR REPLACE TRIGGER "mt5_server_clock_readings_write_once" BEFORE DELETE OR UPDATE ON "public"."mt5_server_clock_readings" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_mt5_server_clock_readings_write_once"();
 
 
 
@@ -16328,6 +16475,11 @@ ALTER TABLE ONLY "public"."match_decisions"
 
 ALTER TABLE ONLY "public"."match_decisions"
     ADD CONSTRAINT "match_decisions_strategy_id_fkey" FOREIGN KEY ("strategy_id") REFERENCES "public"."strategies"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."mt5_server_clock_readings"
+    ADD CONSTRAINT "mt5_server_clock_readings_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE CASCADE;
 
 
 
@@ -17093,6 +17245,9 @@ CREATE POLICY "match_dec_service_all" ON "public"."match_decisions" USING (("aut
 
 
 ALTER TABLE "public"."match_decisions" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."mt5_server_clock_readings" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."notification_dispatches" ENABLE ROW LEVEL SECURITY;
@@ -17982,6 +18137,11 @@ REVOKE ALL ON FUNCTION "public"."enforce_csv_daily_returns_owner_coherence"() FR
 GRANT ALL ON FUNCTION "public"."enforce_csv_daily_returns_owner_coherence"() TO "anon";
 GRANT ALL ON FUNCTION "public"."enforce_csv_daily_returns_owner_coherence"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."enforce_csv_daily_returns_owner_coherence"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."enforce_mt5_server_clock_readings_write_once"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."enforce_mt5_server_clock_readings_write_once"() TO "service_role";
 
 
 
@@ -19033,6 +19193,16 @@ GRANT ALL ON TABLE "public"."match_candidates" TO "service_role";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."match_decisions" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."match_decisions" TO "authenticated";
 GRANT ALL ON TABLE "public"."match_decisions" TO "service_role";
+
+
+
+GRANT SELECT,INSERT ON TABLE "public"."mt5_server_clock_readings" TO "service_role";
+
+
+
+GRANT ALL ON SEQUENCE "public"."mt5_server_clock_readings_id_seq" TO "anon";
+GRANT ALL ON SEQUENCE "public"."mt5_server_clock_readings_id_seq" TO "authenticated";
+GRANT ALL ON SEQUENCE "public"."mt5_server_clock_readings_id_seq" TO "service_role";
 
 
 
