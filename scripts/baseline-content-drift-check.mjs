@@ -315,8 +315,19 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * `DRIFT _enqueue_compute_job_internal/10` (2 differing lines each) are new findings. All three are
  * EXPECTED until that re-dump, and NO allowlist row was added for any of them. Raising this floor
  * records the function joining the corpus; it does NOT suppress any finding.
+ *
+ * MOVED 2026-11-17 (Phase 155.1 SERVERCLOCK plan 05), 135 -> 136: one ADDITION, not a parser gain.
+ * `public.enforce_mt5_server_clock_readings_write_once()` enters the chain via forward migration
+ * 20261117120000_mt5_server_clock_readings.sql. MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on this tree: `functions compared 136 - MATCH 132,
+ * DRIFT 3, SNAPSHOT_MISSING 1, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `findings 1`. The one
+ * SNAPSHOT_MISSING finding is `enforce_mt5_server_clock_readings_write_once/0`, whose migration is
+ * not on PROD yet (recorded as a dated `snapshot-only` row in NAME_SET_RATCHET in
+ * scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply). It is EXPECTED until
+ * that re-dump, and NO allowlist row was added for it. Raising this floor records the function
+ * joining the corpus; it does NOT suppress any finding.
  */
-export const COMPARED_FLOOR = 135;
+export const COMPARED_FLOOR = 136;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

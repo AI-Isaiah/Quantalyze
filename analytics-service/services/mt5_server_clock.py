@@ -51,7 +51,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
-from typing import Literal
+from typing import Final, Literal
 
 MT5_SERVER_TIME_RULE_ENV = "MT5_SERVER_TIME_RULE"
 MT5_SERVER_UTC_OFFSET_ENV = "MT5_SERVER_UTC_OFFSET_S"
@@ -240,3 +240,144 @@ def _dst_window_utc(rule: str, year: int) -> tuple[int, int]:
             _utc_epoch(_nth_sunday(year, 11, 1), 6),
         )
     raise ValueError("unknown MT5 server-clock rule")
+
+
+# ---------------------------------------------------------------------------
+# Phase 155.1 SERVERCLOCK (MT5-06) — the live reading, assessed against the
+# configured clock. Pure and network-free like the rest of this leaf: it takes
+# the ALREADY-resolved ``Mt5ServerClock`` and never resolves a second one
+# (``test_one_clock_per_derive``).
+# ---------------------------------------------------------------------------
+
+# D-08: the measured offset is the newest tick's wall time minus the worker's UTC
+# now, rounded to this many seconds (a broker offset is a whole quarter hour).
+MT5_SERVER_CLOCK_ROUND_S: Final[int] = 900
+
+# D-19 (founder, 2026-11-16): a reading whose rounding residual exceeds this many
+# seconds is ``unmeasured``, never asserted. It is a margin over the 0.292 s
+# maximum residual in ``155.1-SPIKE-READINGS.md`` run 3 (the daily session break,
+# the worst of the three live runs). It is the ONLY bound: no plausibility class
+# and no freshness constant exist, because a tick's age cannot be observed apart
+# from the rule, so an off-rule offset is a ``mismatch`` (D-19).
+MT5_SERVER_CLOCK_RESIDUAL_BOUND_S: Final[float] = 5.0
+
+# The verdict and reason sets are CLOSED: the migration's named CHECKs mirror them
+# and ``tests/test_mt5_server_clock_readings_parity.py`` pins that they agree.
+MT5_SERVER_CLOCK_VERDICTS: Final = ("match", "mismatch", "unmeasured")
+MT5_SERVER_CLOCK_UNMEASURED_REASONS: Final = (
+    "no_tick",
+    "tick_read_failed",
+    "residual_over_bound",
+    "tick_time_out_of_range",
+    "expected_unassertable",
+)
+
+
+@dataclass(frozen=True)
+class Mt5ServerClockAssessment:
+    """One reading's verdict. ``raw_offset_s`` is the unrounded newest-tick minus
+    UTC-now, ``measured_offset_s`` its 900 s rounding, ``residual_s`` the rounding
+    residual (``measured - raw``), ``expected_offset_s`` the configured clock's
+    offset at the tick's wall instant, ``newest_tick_age_s`` is ``expected - raw``
+    (the tick's age PLUS any offset error: in a mismatch row the two cannot be
+    told apart). Each is ``None`` where the branch never got that far."""
+
+    verdict: str
+    reason: str | None
+    raw_offset_s: float | None
+    measured_offset_s: int | None
+    expected_offset_s: int | None
+    residual_s: float | None
+    newest_tick_age_s: float | None
+
+
+def assess_server_clock_reading(
+    clock: Mt5ServerClock,
+    *,
+    newest_tick_ms: int | None,
+    utc_now_ms: int,
+    tick_read_failed: bool = False,
+) -> Mt5ServerClockAssessment:
+    """Compare the live reading with the configured clock. NEVER raises.
+
+    Order (D-08, D-09, D-10, D-19): a failed tick read, no tick, an undatable tick
+    and a residual over the bound are ``unmeasured`` with their reason; an
+    ``expected`` of ``None`` (a repeated or skipped broker hour, D-09) is
+    ``unmeasured`` too; otherwise ``match`` when the rounded measured offset equals
+    the expected one, else ``mismatch``."""
+    if tick_read_failed:
+        return Mt5ServerClockAssessment(
+            "unmeasured", "tick_read_failed", None, None, None, None, None
+        )
+    if newest_tick_ms is None:
+        return Mt5ServerClockAssessment(
+            "unmeasured", "no_tick", None, None, None, None, None
+        )
+    raw = (newest_tick_ms - utc_now_ms) / 1000.0
+    measured = int(
+        round(raw / MT5_SERVER_CLOCK_ROUND_S) * MT5_SERVER_CLOCK_ROUND_S
+    )
+    residual = measured - raw
+    try:
+        expected = clock.instant_offset_s(newest_tick_ms // 1000)
+    except (ValueError, OverflowError, OSError):
+        # An undatable tick carries NO offsets: the reading's offsets are INTEGER
+        # columns and a tick this far out would not fit one, which would fail the
+        # insert (the first write of every derive) on every retry.
+        return Mt5ServerClockAssessment(
+            "unmeasured", "tick_time_out_of_range", None, None, None, None, None
+        )
+    age = None if expected is None else expected - raw
+    if abs(residual) > MT5_SERVER_CLOCK_RESIDUAL_BOUND_S:
+        return Mt5ServerClockAssessment(
+            "unmeasured", "residual_over_bound", raw, measured, expected, residual, age
+        )
+    if expected is None:
+        return Mt5ServerClockAssessment(
+            "unmeasured", "expected_unassertable", raw, measured, None, residual, None
+        )
+    return Mt5ServerClockAssessment(
+        "match" if measured == expected else "mismatch",
+        None,
+        raw,
+        measured,
+        expected,
+        residual,
+        age,
+    )
+
+
+def format_offset_hours(offset_s: int) -> str:
+    """An offset as signed hours and minutes: ``+2h``, ``+3h``, ``+5h30m``,
+    ``-1h45m``. HOURS, never seconds, because ``scrub_alert_detail`` replaces any
+    run of five or more digits and ``10800`` would read ``<digits>``."""
+    sign = "-" if offset_s < 0 else "+"
+    total = abs(offset_s)
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    text = f"{sign}{hours}h"
+    if minutes or seconds:
+        text += f"{minutes}m"
+    if seconds:
+        text += f"{seconds}s"
+    return text
+
+
+class Mt5ServerClockMismatchError(Exception):
+    """The live server clock disagrees with the configured rule (D-01, D-11).
+
+    The text carries the rule id and the two offsets in HOURS only: no server
+    name, no hash, no login, no environment-variable name. It is the single source
+    of the message the derive stores in ``compute_jobs.error_message``."""
+
+    def __init__(
+        self, *, rule: str, expected_offset_s: int, measured_offset_s: int
+    ) -> None:
+        self.rule = rule
+        self.expected_offset_s = expected_offset_s
+        self.measured_offset_s = measured_offset_s
+        super().__init__(
+            "MT5 server clock does not match the configured rule "
+            f"(rule={rule} expected={format_offset_hours(expected_offset_s)} "
+            f"measured={format_offset_hours(measured_offset_s)})"
+        )

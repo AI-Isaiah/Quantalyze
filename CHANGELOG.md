@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.133.50.0] - 2026-11-17 — Phase 155.1 SERVERCLOCK: the worker reads the MT5 server clock in every derive and refuses a wrong offset
+
+A data-integrity product change. Every leased MT5 derive now measures the broker server's UTC offset live, checks it against the configured `Mt5ServerClock` rule, and keeps the reading in a write-once table. A wrong or changed offset now refuses the derive and pages, before any series write, so it is caught by the system and not by someone reading a chart. Requirement MT5-06; the terminal-displayed-time last leg is the 155.2 founder session. One migration, which auto-applies to TEST and then PROD on merge.
+
+### Added
+- **`Mt5Client.server_tick_times`** (`services/mt5_client.py`): one tick-time-only read through the existing read discipline (`_assert_live`, `_guarded_read(stage="server_tick_times")`). The far side runs one committed expression, `_REMOTE_SERVER_TICK_TIMES_SRC`, that may call only `last_error`, `symbols_get` and `symbol_info_tick` and read only `time_msc`, `visible` and `name`. The reply is parsed strictly; anything else raises a typed `Mt5ClientError` with scrubbed text. `symbol_info_tick` stays on the forbidden list for every other path.
+- **The server-clock assessment** (`services/mt5_server_clock.py`): offset = newest tick wall time minus UTC now, rounded to 900 s, with a 5 s residual bound (founder decision D-19). Verdicts are `match`, `mismatch` and `unmeasured`, and `unmeasured` carries one of `no_tick`, `tick_read_failed`, `residual_over_bound`, `tick_time_out_of_range` or `expected_unassertable`. Only `mismatch` refuses.
+- **`public.mt5_server_clock_readings`** (migration `20261117120000`): one row per derive reading with BIGINT offsets, NUMERIC raw offset, residual and tick age, eight named CHECKs and a key index. RLS is enabled and forced with no policy. Every role's privileges are revoked, then `service_role` gets SELECT and INSERT only. A SECURITY INVOKER trigger refuses every UPDATE and every direct DELETE, and lets the `api_keys` ON DELETE CASCADE through by `pg_trigger_depth() > 1`, so deleting a key or an account still erases its readings. The row stores an unsalted SHA-256 of the server label, used for equality only, never the label (D-17). A manual rollback keeps every row.
+- **`services/mt5_server_clock_reading.py`**: the row builder and the server-label hash.
+- **The `mt5_server_clock` ops-alert source** in `services/ops_alert.py` and `src/lib/ops-alert-contract.ts`, with the parity test.
+- **Spike legs for the founder** in `scripts/mt5_spike.py`: `--leg tick` (the live server-clock spike, with a runbook), `--leg band` (the criterion-5 divergence-week deal read) and `--leg clock`, which runs the production `server_tick_times` bytes and reports `crossing_elapsed_s`. All three redact login, password and server, and none runs in CI.
+
+### Changed
+- **`read_mt5_deal_ledger`** (`services/mt5_read.py`) reads the server tick inside the PRE/POST `account_info` login bracket and returns it with the ledger. A failed tick read is `tick_read_failed`, never a credential verdict. The warning logs the stage and the integer code only.
+- **`run_derive_broker_dailies_job`** (`services/job_worker.py`) inserts the reading first, for every verdict. On `mismatch` it pages `mt5_server_clock` / `clock_mismatch` with the rule and both offsets in hours, then returns FAILED transient before any nav or dailies write. A failed reading insert returns FAILED transient with a closed-set message, logs the SQLSTATE, and pages `reading_insert_failed` only on the final attempt. Pages carry the SQLSTATE and the first key's uuid as tags and no server value; the logs name every key. Every new derive message is classified transient by the MT5 login classifier, so no clock fault can permanently fail a working key.
+- `services/mt5_concurrency.py`: docstring only. The 40 s read bound is not widened (plan 03); the founder's `--leg clock` reading confirms or reopens that.
+
+### Fixed
+- Review fixes before ship, from three review rounds and two silent-failure hunts:
+  - The tick-read warning now carries the failure's code and stage, and its comment says correctly which timeouts become `tick_read_failed` (SF-H1).
+  - A listing whose every symbol reports `time_msc == 0` now reads `no_tick`, not a 1970 offset (SF-M2).
+  - A failed reading insert is logged with its SQLSTATE and paged on the final attempt only, so a one-off blip does not page (SF-H2, WR-03).
+  - The SQLSTATE rides as a page tag, because the alert scrubber masks 5-digit runs in the detail (N2-M1).
+  - Both clock arms log the key id, and the page tag is named `first_api_key_id` because pages are windowed per hour (SF-M4, WR-02).
+  - An extra crossing-latency log line was added and then reverted, because the `mt5.stage` event already records `duration_ms` for `server_tick_times` (SF-M1, WR-04).
+
+### Tests
+- `test_mt5_server_clock_reading.py` holds oracle tests from hand literals of the spike readings. It includes the criterion-5 pin: a **constructed** wall time of 2026-10-30 02:30:00, labelled constructed, gives 2026-10-29 under `us` and 2026-10-30 under `eu`, so the wrong rule goes RED. The real 03:00:00 deal is pinned separately as the boundary where both rules agree (founder ruling 2026-11-17).
+- New test files: `test_mt5_server_clock_readings_parity.py` (row-to-table parity), `test_mt5_spike_tick.py`, `test_mt5_spike_band.py` and `test_mt5_spike_clock.py`.
+- Extended test files:
+  - `test_mt5_client_contract.py`: an AST pin on the committed expression, plus behaviour proofs for malformed replies, scrubbed transport text and the all-zero tick case.
+  - `test_mt5_derive_branch.py`: every derive arm of the reading, with planted-server-value sweeps.
+  - `test_mt5_read.py`: the tick-failure code logging.
+- `supabase/tests/test_mt5_server_clock_readings.sql`: 24 arms, all 24 biting on the pg-lane.
+- **Censuses moved with the new gate:** `FILES_FLOOR` 82 to 83 and `ARMS_FLOOR` 867 to 891 in `scripts/mutation-floors.mjs`. In `ci.yml` `sql-tests`, `SENTINEL_FLOOR` goes 29 to 30 and `ARMS_FLOOR` 480 to 504. `COMPARED_FLOOR` goes 135 to 136. One dated `snapshot-only` `NAME_SET_RATCHET` row is added, plus the function snapshot `supabase/schema/functions/enforce_mt5_server_clock_readings_write_once.sql`, and the vitest pins are updated.
+- Fixes were proved by reverting each one, seeing its test go RED, and restoring from a byte backup. Full analytics suite locally: 15077 passed, 93 skipped. The xdist-only check was deselected, because the host has no pytest-xdist; it runs in CI. mypy strict is clean.
+
+### Notes
+- **Verification is `human_needed`**, with 5/5 offline halves verified. Six items wait for the deploy or the founder:
+  1. The founder's `--leg clock` run and its `crossing_elapsed_s`.
+  2. At least one weekday PROD reading per MT5 key.
+  3. `server_label_hash` equal or not across the keys.
+  4. `MT5_SERVER_TIME_RULE` re-read on both worker services. Any value other than the correct rule refuses every derive on the first night.
+  5. Market Watch holding a live-quoting symbol on the terminals not yet probed.
+  6. The 155.2 last leg.
+- migration-reviewer and rls-policy-auditor are both clean. The security audit closed 23 of 23 threats. One risk is accepted under D-19: about 1.1% false mismatches if every visible symbol is stale.
+- `baseline-content-drift-check` reports one expected `SNAPSHOT_MISSING` for the new trigger function until the post-apply baseline re-dump, which also deletes the ratchet row.
+- **Declined review findings** (recorded in the phase review):
+  - SF-M3, a final-attempt user stamp: D-03 forbids copy changes.
+  - WR-01, widening the read bound: routed to the founder's clock-leg reading.
+- No `TODOS.md` entry is closed by this phase, so none is deleted.
+
 ## [0.133.49.1] - 2026-11-16 — records: close 215 TESTREACH; book CSVSTATUS
 
 Records PR for Phase 215, whose code is already on `main` as #1278 (v0.133.49.0). It carries the phase artifacts, the `phase complete` run and the booking of the follow-up phase the founder decided on 2026-11-15. There is no source, test, script or migration change.

@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     # it. `_make_mt5_session` imports the class lazily at RUNTIME (see below), which
     # keeps the module-import-does-not-require-mt5linux contract intact.
 
+from services import ops_alert
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
 from services.geo_block import is_geo_blocked
@@ -377,6 +378,14 @@ _MT5_CURRENCY_BLANK_MESSAGE: Final[str] = (
 # be formed. A read fault, never a verdict on the key: transient, nothing written.
 _MT5_BTC_CLOSES_UNREADABLE_MESSAGE: Final[str] = (
     "derive_broker_dailies: the stored BTC prices were not readable — retrying"
+)
+# Phase 155.1 / criterion 3 of MT5-06 — the server-clock reading could not be written. A
+# fault of OUR database, never a verdict on the key: transient, nothing else written. The text
+# is closed-set and value-free (no row value, no server, no PostgREST text), and carries no
+# `_WRONG_SERVER_PHRASES` / `_AUTH_PHRASES` member, because it lands in the re-classifiable
+# `compute_jobs.error_message`.
+_MT5_CLOCK_READING_INSERT_MESSAGE: Final[str] = (
+    "derive_broker_dailies: the MT5 server clock reading could not be stored — retrying"
 )
 _MT5_CURRENCY_CHANGED_MESSAGE: Final[str] = (
     "derive_broker_dailies: the MT5 account currency differs from the one stored — "
@@ -7156,7 +7165,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # The next nightly derive is a new job, so a corrected variable heals the row.
             from services.mt5_server_clock import (
                 Mt5ServerClockConfigError,
+                Mt5ServerClockMismatchError,
+                assess_server_clock_reading,
+                format_offset_hours,
                 resolve_mt5_server_clock,
+            )
+            from services.mt5_server_clock_reading import (
+                MT5_SERVER_CLOCK_READINGS_TABLE,
+                build_mt5_server_clock_reading_row,
             )
 
             try:
@@ -7329,7 +7345,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _mt5_fresh = mt5_history_wait_due(
                         _mt5_session.client.terminal_key, ctx.key_row.get("id")
                     )
-                    _mt5_info, _mt5_deals = await asyncio.wait_for(
+                    _mt5_read = await asyncio.wait_for(
                         asyncio.to_thread(
                             read_mt5_deal_ledger,
                             _mt5_session,
@@ -7342,6 +7358,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             fresh=_mt5_fresh,
                         ),
                     )
+                    _mt5_info = _mt5_read.info
+                    _mt5_deals = _mt5_read.deals
                     # 167.2.1.1.1 D-03: ``account_info`` (the mark's equity and balance) came
                     # back with this read.
                     _mark_read_at = _utc_now()
@@ -7613,6 +7631,151 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         ),
                         error_kind="transient",
                     )
+
+            # ⭐ Phase 155.1 SERVERCLOCK (MT5-06) / D-01, D-06, D-10, D-11, D-12 — the live
+            # server-clock reading the read helper took inside the PRE/POST bracket, assessed
+            # against the ONE `_mt5_clock` resolved above (never resolved again), persisted
+            # write-once, and only then decided on. It sits AFTER the lease block and BEFORE
+            # every write below (the currency stamps, the nav mark, the dailies), so a
+            # mismatch refuses before anything is written.
+            #
+            # The row is inserted for EVERY verdict, so the evidence exists before any
+            # decision and a refusal still leaves its reading. ⛔ A failing insert (a missing
+            # table in the deploy window included) is NOT tolerated: the derive ends FAILED
+            # transient (arm=server_clock_reading_insert, plan 03) and retries, and it heals
+            # once the migration lands, because the readings are the evidence criterion 3
+            # needs. No PGRST204 tolerance here.
+            #
+            # ⛔ The server NAME is never logged: the row carries its hash only (D-17). The
+            # reading is never written back as configuration (D-12): `MT5_SERVER_TIME_RULE`
+            # stays the only carrier.
+            _mt5_tick = _mt5_read.tick
+            _mt5_clock_assessment = assess_server_clock_reading(
+                _mt5_clock,
+                newest_tick_ms=None if _mt5_tick is None else _mt5_tick.newest_time_msc,
+                utc_now_ms=int(_mt5_read.tick_read_at.timestamp() * 1000),
+                tick_read_failed=_mt5_read.tick_read_failed,
+            )
+            _mt5_clock_row = build_mt5_server_clock_reading_row(
+                api_key_id=str(ctx.key_row["id"]),
+                job_id=job.get("id"),
+                read_at=_mt5_read.tick_read_at,
+                clock=_mt5_clock,
+                assessment=_mt5_clock_assessment,
+                newest_tick_wall_ms=(
+                    None if _mt5_tick is None else _mt5_tick.newest_time_msc
+                ),
+                symbols_visible=None if _mt5_tick is None else _mt5_tick.symbols_visible,
+                symbols_answered=(
+                    None if _mt5_tick is None else _mt5_tick.symbols_answered
+                ),
+                server=_mt5_info.get("server"),
+            )
+
+            def _insert_mt5_clock_reading() -> None:
+                ctx.supabase.table(MT5_SERVER_CLOCK_READINGS_TABLE).insert(
+                    _mt5_clock_row
+                ).execute()
+
+            try:
+                await db_execute(_insert_mt5_clock_reading)
+            except Exception as _clock_insert_exc:  # noqa: BLE001 — closed-set transient return
+                # The handler's generic path would class a PostgREST error `unknown` and echo
+                # its text, which can carry row values. Name the arm instead: the exception
+                # CLASS only in the log, a closed-set text in `error_message`, and the derive
+                # ends here (never tolerated, never continued) so the dailies stay unwritten.
+                logger.error(
+                    "derive_broker_dailies: mt5 server clock reading insert failed "
+                    "(job=%s api_key_id=%s arm=server_clock_reading_insert error_class=%s "
+                    "code=%s) — retrying, nothing else written",
+                    job.get("id"),
+                    ctx.key_row["id"],
+                    type(_clock_insert_exc).__name__,
+                    # SQLSTATE / PostgREST code only, never the message text (it can carry
+                    # row values): a missing table (42P01), a CHECK (23514) and a missing
+                    # grant (42501) are different faults and the class alone cannot tell them.
+                    getattr(_clock_insert_exc, "code", None),
+                )
+                # SF-H2 / WR-03: a deterministic insert fault (a CHECK, a grant) fails EVERY MT5
+                # derive, so it must be heard, not only retried. But a one-off blip or the
+                # deploy-window missing table heals on retry, so page ONLY on the final attempt
+                # (the same shape the history-unsettled arm uses). `page` never raises and windows
+                # one capture per (source, cause, event) per hour; the closed-set reason carries
+                # no row value and the job outcome below is unchanged (D-03).
+                _clock_attempts = job.get("attempts")
+                _clock_max_attempts = job.get("max_attempts")
+                _clock_is_final = (
+                    isinstance(_clock_attempts, int)
+                    and isinstance(_clock_max_attempts, int)
+                    and _clock_attempts >= _clock_max_attempts
+                )
+                if _clock_is_final:
+                    await ops_alert.page(
+                        "mt5_server_clock",
+                        "reading_insert_failed",
+                        event="outage",
+                        detail="reading insert failed",
+                        # Windowed per (source, cause, event) per hour: the page names the
+                        # first key only, the ERROR log above names every key (D-17: a uuid).
+                        # The SQLSTATE rides as a tag, not in ``detail``: ``scrub_alert_detail``
+                        # masks any 5+ digit run, so a numeric code (23514 CHECK, 42501 grant)
+                        # would reach the page as ``<digits>`` (N2-M1).
+                        extra_tags={
+                            "first_api_key_id": str(ctx.key_row["id"]),
+                            "sqlstate": str(getattr(_clock_insert_exc, "code", None)),
+                        },
+                    )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=_MT5_CLOCK_READING_INSERT_MESSAGE,
+                    error_kind="transient",
+                )
+            if _mt5_clock_assessment.verdict == "mismatch":
+                # D-01 / D-11: the named error is the single source of the message text. It is
+                # CONSTRUCTED, not raised: the derive returns a DispatchResult the way the 175
+                # config-fault arm does, transient (175 / D-04) so retries are bounded and a
+                # corrected rule heals on the next derive. `unmeasured` and `match` fall through
+                # unchanged (D-10: only a mismatch refuses). The two offsets are non-None here
+                # (the assessment asserts a verdict only with both).
+                _mt5_clock_mismatch = Mt5ServerClockMismatchError(
+                    rule=_mt5_clock.rule,
+                    expected_offset_s=_mt5_clock_assessment.expected_offset_s or 0,
+                    measured_offset_s=_mt5_clock_assessment.measured_offset_s or 0,
+                )
+                logger.error(
+                    "derive_broker_dailies: mt5 server clock does not match the "
+                    "configured rule (job=%s api_key_id=%s arm=server_clock_mismatch "
+                    "rule=%s expected=%s measured=%s) — refusing before any write",
+                    job.get("id"),
+                    ctx.key_row["id"],
+                    _mt5_clock.rule,
+                    format_offset_hours(_mt5_clock_mismatch.expected_offset_s),
+                    format_offset_hours(_mt5_clock_mismatch.measured_offset_s),
+                )
+                # D-01 / D-11: a mismatch is never silent. Awaited on the event loop (never
+                # inside `to_thread`); `page` never raises and windows one capture per
+                # (source, cause, event) per hour, so three keys mismatching in one night page
+                # once and retries do not flood. The detail is the rule id and two offsets in
+                # HOURS only: `scrub_alert_detail` turns any 5+ digit run (10800) into
+                # `<digits>`, and no server value, hash or login belongs in an alert (D-17).
+                await ops_alert.page(
+                    "mt5_server_clock",
+                    "clock_mismatch",
+                    event="outage",
+                    detail=(
+                        f"rule={_mt5_clock.rule} "
+                        f"expected={format_offset_hours(_mt5_clock_mismatch.expected_offset_s)} "
+                        f"measured={format_offset_hours(_mt5_clock_mismatch.measured_offset_s)}"
+                    ),
+                    # Windowed per (source, cause, event) per hour: the page names the first
+                    # key only, the ERROR log above names every key (D-17: a uuid).
+                    extra_tags={"first_api_key_id": str(ctx.key_row["id"])},
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=f"derive_broker_dailies: {_mt5_clock_mismatch}",
+                    error_kind="transient",
+                )
 
             # ⭐ 164.6.6.2 / D-01, D-04 — the account's unit, from the PRE ``account_info`` the
             # read already returned (no second ``account_info()``: the session rosters must not

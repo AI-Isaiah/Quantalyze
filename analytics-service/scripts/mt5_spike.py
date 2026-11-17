@@ -56,6 +56,18 @@ USAGE
   cd analytics-service && python -m scripts.mt5_spike > /tmp/mt5_spike_report.json
   echo "exit=$?"
 
+  # Phase 155.1 SERVERCLOCK: only the tick leg (one login, no other leg):
+  cd analytics-service && python -m scripts.mt5_spike --leg tick
+
+  # Phase 155.1 criterion 5: only the divergence-band deal leg (one login, one
+  # deal read; prints wall date, wall time and an eu/us flag per in-band deal):
+  cd analytics-service && python -m scripts.mt5_spike --leg band
+
+  # Phase 155.1 post-deploy live proof (founder-run only): one login, the PRODUCTION
+  # Mt5Client.server_tick_times bytes, assessed against both rules; prints counts,
+  # offsets, residual, verdicts and the crossing's elapsed seconds only:
+  cd analytics-service && python -m scripts.mt5_spike --leg clock
+
 EXIT CODES
 ----------
   0  success — sanitized go/no-go JSON printed to stdout
@@ -65,6 +77,7 @@ EXIT CODES
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -77,7 +90,7 @@ from scripts.deribit_ground_truth import (  # noqa: F401 - ScopeViolationError r
     assert_sanitized,
     sanitize_evidence,
 )
-from services.mt5_client import Mt5Client, Mt5ClientError
+from services.mt5_client import Mt5AccountMismatchError, Mt5Client, Mt5ClientError
 
 # MT5 order-request constants (numeric, well-known). The leg-2 probe is an
 # order_check ONLY — it validates margin/funds and does NOT place an order.
@@ -433,6 +446,600 @@ def run_spike(
     return report
 
 
+# -- Phase 155.1 SERVERCLOCK: the tick leg (`--leg tick`) -----------------------
+#
+# WHY: 155.1 admits ONE narrow tick-time method on Mt5Client (D-D), and its design
+# (symbol set, rounding, freshness bound) waits on five live facts this leg
+# measures (155.1-CONTEXT.md `<spike>`):
+#   1. does the tick read answer for visible Market Watch symbols, and for a deal
+#      symbol that is NOT visible, without symbol_select;
+#   2. can the visible set be listed read-only;
+#   3. is tick time in the deal `time` encoding (broker wall clock as if UTC);
+#   4. how many symbols an investor session's Market Watch holds;
+#   5. how old the newest tick is.
+#
+# Mt5Client forbids `symbol_info_tick` by construction (the contract test's
+# forbidden list), so this leg logs in THROUGH Mt5Client and then reads the raw
+# terminal handle the client holds. That bypass is confined to this supervised,
+# founder-run spike; it is not a pattern for product code.
+#
+# OUTPUT HYGIENE: counts, offsets, ages, booleans and verdicts only. Symbol names
+# stay in memory and never enter the report; raw exceptions are reported by TYPE
+# name and terminal error CODE only, never by message.
+
+_TICK_DEAL_DAYS = 30
+_TICK_MAX_SYMBOLS = 200
+_TICK_ROUND_S = 900
+_TICK_FRESH_S = 120.0
+_BROKER_DST_OFFSETS_S = frozenset({7200, 10800})
+_MAX_PLAUSIBLE_OFFSET_S = 13 * 3600
+
+
+def _raw_terminal(client: Any) -> Any:
+    """The raw mt5linux handle behind a logged-in Mt5Client (spike-only bypass)."""
+    return client._mt5  # noqa: SLF001 - see the tick-leg header
+
+
+def _last_error_code(raw: Any) -> int | None:
+    try:
+        err = raw.last_error()
+        return int(err[0])
+    except Exception:  # noqa: BLE001 - a diagnostic read must never mask the leg
+        return None
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _read_tick_times(raw: Any, name: str) -> tuple[int, int] | None:
+    """(time, time_msc) of one symbol's last tick, or None when the terminal has
+    no tick for it. Reads ONLY the two time fields; prices are never touched."""
+    tick = raw.symbol_info_tick(name)
+    if tick is None:
+        return None
+    return int(tick.time), int(tick.time_msc)
+
+
+def _leg_tick(
+    factory: Callable[..., Any],
+    host: str,
+    port: int,
+    login: int,
+    investor_pw: str,
+    server: str,
+    utc_now_fn: Callable[[], datetime],
+    redact: Callable[[Any], str],
+    raw_of: Callable[[Any], Any],
+) -> dict[str, Any]:
+    from services.mt5_server_clock import server_clock_for_rule
+
+    client = None
+    try:
+        client = factory(host, port)
+        client.login(login, investor_pw, server)
+        raw = raw_of(client)
+
+        # Item 2 + 4: the read-only listing and the Market Watch count.
+        t0 = time.monotonic()
+        try:
+            symbols = raw.symbols_get()
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "listing": {
+                    "observation": "error",
+                    "error_type": type(exc).__name__,
+                    "last_error_code": _last_error_code(raw),
+                },
+                "verdict": "INCONCLUSIVE",
+                "verdict_reasons": ["symbol listing raised"],
+            }
+        if symbols is None:
+            return {
+                "listing": {"observation": "none", "last_error_code": _last_error_code(raw)},
+                "verdict": "INCONCLUSIVE",
+                "verdict_reasons": ["symbol listing returned None"],
+            }
+        visible = [str(s.name) for s in symbols if bool(s.visible)]
+        listing = {
+            "observation": "ok",
+            "symbols_total": len(symbols),
+            "visible_count": len(visible),
+            "elapsed_s": round(time.monotonic() - t0, 3),
+        }
+        asked = visible[:_TICK_MAX_SYMBOLS]
+
+        # Item 1 (visible) + 3 + 5: tick times for the visible set.
+        t1 = time.monotonic()
+        times: list[tuple[int, int]] = []
+        none_count = 0
+        error_types: set[str] = set()
+        for name in asked:
+            try:
+                got = _read_tick_times(raw, name)
+            except Exception as exc:  # noqa: BLE001
+                error_types.add(type(exc).__name__)
+                continue
+            if got is None:
+                none_count += 1
+            else:
+                times.append(got)
+        now = utc_now_fn()
+        visible_ticks = {
+            "asked": len(asked),
+            "skipped_over_cap": len(visible) - len(asked),
+            "answered": len(times),
+            "none": none_count,
+            "errors": len(asked) - len(times) - none_count,
+            "error_types": sorted(error_types),
+            "elapsed_s": round(time.monotonic() - t1, 3),
+            "time_matches_time_msc": (
+                all(t == tm // 1000 for t, tm in times) if times else None
+            ),
+        }
+
+        # Item 1 (non-visible): one deal symbol outside Market Watch, no symbol_select.
+        deals = client.history_deals_get(now - timedelta(days=_TICK_DEAL_DAYS), now)
+        deal_symbols = {
+            str(d["symbol"]) for d in deals if isinstance(d.get("symbol"), str) and d["symbol"]
+        }
+        visible_set = set(visible)
+        hidden = sorted(deal_symbols - visible_set)
+        nonvisible: dict[str, Any] = {
+            "deal_window_days": _TICK_DEAL_DAYS,
+            "deal_count": len(deals),
+            "deal_symbols": len(deal_symbols),
+            "deal_symbols_visible": len(deal_symbols & visible_set),
+        }
+        if not deals:
+            nonvisible["observation"] = "no_deals"
+        elif not hidden:
+            nonvisible["observation"] = "no_candidate"
+        else:
+            try:
+                got = _read_tick_times(raw, hidden[0])
+                nonvisible["observation"] = "none" if got is None else "answered"
+                if got is None:
+                    nonvisible["last_error_code"] = _last_error_code(raw)
+            except Exception as exc:  # noqa: BLE001
+                nonvisible["observation"] = "error"
+                nonvisible["error_type"] = type(exc).__name__
+                nonvisible["last_error_code"] = _last_error_code(raw)
+
+        report: dict[str, Any] = {
+            "listing": listing,
+            "visible_ticks": visible_ticks,
+            "nonvisible_deal_symbol": nonvisible,
+        }
+        reasons: list[str] = []
+        if not times:
+            if asked and not error_types:
+                report["verdict"] = "NO-GO"
+                reasons.append("no visible symbol answered the tick read")
+            else:
+                report["verdict"] = "INCONCLUSIVE"
+                reasons.append(
+                    "Market Watch is empty" if not asked else "tick reads raised"
+                )
+            report["verdict_reasons"] = reasons
+            return report
+
+        # Item 3 + 5: offset, encoding, freshness.
+        now_s = now.timestamp()
+        newest_ms = max(tm for _, tm in times)
+        newest_wall_s = newest_ms / 1000.0
+        raw_offset_s = newest_wall_s - now_s
+        rounded = int(round(raw_offset_s / _TICK_ROUND_S) * _TICK_ROUND_S)
+        expected = {
+            rule: server_clock_for_rule(rule).instant_offset_s(int(newest_wall_s))
+            for rule in ("eu", "us")
+        }
+        if rounded in _BROKER_DST_OFFSETS_S:
+            encoding = "broker_wall_clock"
+        elif rounded == 0:
+            encoding = "utc"
+        else:
+            encoding = "inconclusive"
+        age_vs_rule = {
+            rule: (round(exp - raw_offset_s, 3) if exp is not None else None)
+            for rule, exp in expected.items()
+        }
+        lags = [newest_ms / 1000.0 - tm / 1000.0 for _, tm in times]
+        report["offset"] = {
+            "raw_offset_s": round(raw_offset_s, 3),
+            "rounded_offset_s": rounded,
+            "rounding_s": _TICK_ROUND_S,
+            "residual_s": round(rounded - raw_offset_s, 3),
+            "plausible": abs(rounded) <= _MAX_PLAUSIBLE_OFFSET_S,
+            "encoding": encoding,
+            "expected_offset_s": expected,
+            "matches_rule": {rule: exp == rounded for rule, exp in expected.items()},
+        }
+        report["freshness"] = {
+            "newest_tick_age_s_vs_rule": age_vs_rule,
+            "lag_behind_newest_s": {
+                "median": _median(lags),
+                "max": round(max(lags), 3),
+            },
+            "symbols_within_60s_of_newest": sum(1 for x in lags if x <= 60),
+            "symbols_within_900s_of_newest": sum(1 for x in lags if x <= 900),
+        }
+
+        # Item 3, deal side: a past deal in the same encoding is never later than
+        # the server clock's newest tick. Necessary, not sufficient: the real
+        # proof is criterion 5's near-midnight deal read in the 155.2 session.
+        deal_times = [
+            (int(d["time"]), d.get("time_msc"))
+            for d in deals
+            if isinstance(d.get("time"), (int, float))
+        ]
+        if deal_times:
+            latest_t = max(t for t, _ in deal_times)
+            report["deal_encoding"] = {
+                "latest_deal_minus_newest_tick_s": round(latest_t - newest_wall_s, 3),
+                "latest_deal_minus_utc_now_s": round(latest_t - now_s, 3),
+                "deal_time_matches_time_msc": all(
+                    t == int(tm) // 1000 for t, tm in deal_times if isinstance(tm, (int, float))
+                ),
+                "consistent": latest_t <= newest_wall_s + 1,
+            }
+        else:
+            report["deal_encoding"] = {"observation": "no_deals", "consistent": None}
+
+        fresh = all(a is not None and abs(a) <= _TICK_FRESH_S for a in age_vs_rule.values())
+        if encoding != "broker_wall_clock":
+            reasons.append(f"tick encoding {encoding}")
+        if not fresh:
+            reasons.append(f"newest tick older than {_TICK_FRESH_S:.0f}s (closed market or break?)")
+        if report["deal_encoding"].get("consistent") is False:
+            reasons.append("latest deal is later than the newest tick")
+        report["verdict"] = "GO" if not reasons else "INCONCLUSIVE"
+        report["verdict_reasons"] = reasons
+        return report
+    except Mt5ClientError as exc:
+        return {
+            "observation": "error",
+            "error": {"code": exc.code, "message": redact(exc)},
+            "verdict": "INCONCLUSIVE",
+            "verdict_reasons": ["Mt5Client raised"],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "observation": "error",
+            "error": {"code": None, "type": type(exc).__name__},
+            "verdict": "INCONCLUSIVE",
+            "verdict_reasons": ["unexpected error"],
+        }
+    finally:
+        _safe_close(client)
+
+
+def run_tick_spike(
+    env: dict[str, str],
+    *,
+    client_factory: Callable[..., Any],
+    utc_now_fn: Callable[[], datetime] | None = None,
+    raw_of: Callable[[Any], Any] = _raw_terminal,
+) -> dict[str, Any]:
+    """Run ONLY the 155.1 tick leg: one login, read-only, no other leg."""
+    login = int(env["MT5_SPIKE_LOGIN"])
+    investor_pw = env["MT5_SPIKE_INVESTOR_PASSWORD"]
+    server = env["MT5_SPIKE_SERVER"]
+    redact = _make_redactor(login, investor_pw, None, server)
+    leg = _leg_tick(
+        client_factory,
+        env["MT5_SPIKE_HOST"],
+        int(env["MT5_SPIKE_PORT"]),
+        login,
+        investor_pw,
+        server,
+        utc_now_fn or (lambda: datetime.now(timezone.utc)),
+        redact,
+        raw_of,
+    )
+    return {"server_clock_tick": leg, "verdict": leg["verdict"]}
+
+
+# -- Phase 155.1 SERVERCLOCK: the band leg (`--leg band`) -----------------------
+#
+# WHY: criterion 5 (MT5-06) needs ONE real deal from the DST divergence week whose
+# UTC day differs between the `eu` and `us` server-clock rules, so a pinned test
+# can go RED under the wrong rule. No PROD table stores a deal's broker wall time
+# (155.1-RESEARCH.md, "Criterion 5"), so the founder changed D-18 (2026-11-16,
+# "One more live read") to this read-only live leg, run the same way as tick
+# runs 1-3, before 157 rotates the spike password.
+#
+# What it reads: ONE login, then `history_deals_get` through Mt5Client over a
+# window padded two days either side, filtered client-side by the deal's own
+# broker wall date (deal `time` is the broker wall clock as if UTC). Each deal's
+# class is decided by the product seam itself (`mt5_deals.deal_utc_day`) under
+# both rules, so the leg cannot disagree with the code the test will pin.
+#
+# The band is wall time-of-day 01:00:00-03:59:59: within an hour of UTC midnight
+# under either rule during the divergence week (eu +2 h, us +3 h). Offline the
+# rules disagree only for 02:00-02:59; the wider band lets the `differs` column
+# show that edge on real data instead of assuming it.
+#
+# OUTPUT HYGIENE: per in-band deal only its wall date, wall time and whether the
+# eu and us UTC days differ, plus counts. No ticket, order or position id, no
+# symbol, volume, price, profit, comment, login or server.
+
+_BAND_FIRST_WALL_DATE = "2026-10-26"
+_BAND_LAST_WALL_DATE = "2026-11-01"
+_BAND_FETCH_FROM = datetime(2026, 10, 24, tzinfo=timezone.utc)
+_BAND_FETCH_TO = datetime(2026, 11, 3, tzinfo=timezone.utc)
+_BAND_FIRST_HOUR = 1
+_BAND_LAST_HOUR = 3
+_BAND_MAX_ROWS = 200
+
+
+def _leg_band(
+    factory: Callable[..., Any],
+    host: str,
+    port: int,
+    login: int,
+    investor_pw: str,
+    server: str,
+    redact: Callable[[Any], str],
+) -> dict[str, Any]:
+    from services.mt5_deals import deal_utc_day
+    from services.mt5_server_clock import server_clock_for_rule
+
+    eu = server_clock_for_rule("eu")
+    us = server_clock_for_rule("us")
+    client = None
+    try:
+        client = factory(host, port)
+        client.login(login, investor_pw, server)
+        deals = client.history_deals_get(_BAND_FETCH_FROM, _BAND_FETCH_TO)
+
+        in_week = 0
+        undatable = 0
+        rows: list[dict[str, Any]] = []
+        for deal in deals:
+            t = deal.get("time")
+            if isinstance(t, bool) or not isinstance(t, (int, float)):
+                undatable += 1
+                continue
+            wall = datetime.fromtimestamp(int(t), tz=timezone.utc)
+            wall_date = wall.date().isoformat()
+            if not (_BAND_FIRST_WALL_DATE <= wall_date <= _BAND_LAST_WALL_DATE):
+                continue
+            in_week += 1
+            if not (_BAND_FIRST_HOUR <= wall.hour <= _BAND_LAST_HOUR):
+                continue
+            try:
+                differs = deal_utc_day(int(t), eu) != deal_utc_day(int(t), us)
+            except Exception:  # noqa: BLE001 - counted as undatable, never dropped silently
+                undatable += 1
+                continue
+            rows.append(
+                {
+                    "wall_date": wall_date,
+                    "wall_time": wall.strftime("%H:%M:%S"),
+                    "eu_us_utc_day_differs": differs,
+                }
+            )
+
+        rows.sort(key=lambda r: (r["wall_date"], r["wall_time"]))
+        differs_count = sum(1 for r in rows if r["eu_us_utc_day_differs"])
+        report: dict[str, Any] = {
+            "wall_dates": [_BAND_FIRST_WALL_DATE, _BAND_LAST_WALL_DATE],
+            "wall_band": f"{_BAND_FIRST_HOUR:02d}:00:00-{_BAND_LAST_HOUR:02d}:59:59",
+            "deals_fetched": len(deals),
+            "deals_in_week": in_week,
+            "deals_in_band": len(rows),
+            "deals_differing": differs_count,
+            "undatable": undatable,
+            "rows_over_cap": max(0, len(rows) - _BAND_MAX_ROWS),
+            "in_band": rows[:_BAND_MAX_ROWS],
+        }
+        reasons: list[str] = []
+        if undatable:
+            reasons.append(f"{undatable} deal(s) without a datable time")
+        if differs_count == 0:
+            reasons.append("no deal whose eu and us UTC days differ")
+        report["verdict"] = "GO" if not reasons else "INCONCLUSIVE"
+        report["verdict_reasons"] = reasons
+        return report
+    except Mt5ClientError as exc:
+        return {
+            "observation": "error",
+            "error": {"code": exc.code, "message": redact(exc)},
+            "verdict": "INCONCLUSIVE",
+            "verdict_reasons": ["Mt5Client raised"],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "observation": "error",
+            "error": {"code": None, "type": type(exc).__name__},
+            "verdict": "INCONCLUSIVE",
+            "verdict_reasons": ["unexpected error"],
+        }
+    finally:
+        _safe_close(client)
+
+
+def run_band_spike(
+    env: dict[str, str],
+    *,
+    client_factory: Callable[..., Any],
+) -> dict[str, Any]:
+    """Run ONLY the 155.1 band leg: one login, one deal read, no other leg."""
+    login = int(env["MT5_SPIKE_LOGIN"])
+    investor_pw = env["MT5_SPIKE_INVESTOR_PASSWORD"]
+    server = env["MT5_SPIKE_SERVER"]
+    redact = _make_redactor(login, investor_pw, None, server)
+    leg = _leg_band(
+        client_factory,
+        env["MT5_SPIKE_HOST"],
+        int(env["MT5_SPIKE_PORT"]),
+        login,
+        investor_pw,
+        server,
+        redact,
+    )
+    return {"divergence_band_deals": leg, "verdict": leg["verdict"]}
+
+
+# -- Phase 155.1 SERVERCLOCK: the clock leg (`--leg clock`) ---------------------
+#
+# WHY: `Mt5Client.server_tick_times` runs ONE committed remote expression
+# (`_REMOTE_SERVER_TICK_TIMES_SRC`) on the Wine-side Python, and that exact string
+# has never run live (155.1-RESEARCH.md, A2). If it failed live, every derive's
+# reading would degrade to `unmeasured` / `tick_read_failed` (D-20(b)) and the
+# weekday `match` rows would never appear. The tick leg above measured a hand-built
+# raw route; THIS leg calls the production method, so it proves the committed bytes
+# right after the phase deploys, without waiting for the nightly derive.
+#
+# It also reports `crossing_elapsed_s`, the monotonic wall time of that one call
+# (far-side `symbols_get` over the whole symbol list, the visible-symbol tick loop
+# and the rpyc round trip). It is the only measurement of the production
+# expression's crossing cost and is EVIDENCE for a human decision (Plan 03's choice
+# not to widen the derive read bound), never a threshold: it does not move the
+# verdict.
+#
+# FOUNDER-RUN ONLY. Nothing in the repo or its tests runs this against a gateway.
+#
+# OUTPUT HYGIENE: counts, offsets, residual, verdicts, reasons and the elapsed
+# seconds. No id, symbol, login, server or amount; every error string goes through
+# the by-value redactor.
+
+
+def _utc_epoch_ms(moment: datetime) -> int:
+    """A UTC datetime as whole epoch milliseconds, in integer arithmetic (a float
+    ``timestamp()`` could land a millisecond off)."""
+    return (moment - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(milliseconds=1)
+
+
+def _leg_clock(
+    factory: Callable[..., Any],
+    host: str,
+    port: int,
+    login: int,
+    investor_pw: str,
+    server: str,
+    utc_now_fn: Callable[[], datetime],
+    monotonic_fn: Callable[[], float],
+    redact: Callable[[Any], str],
+) -> dict[str, Any]:
+    from services.mt5_probe import assert_expected_login
+    from services.mt5_server_clock import (
+        assess_server_clock_reading,
+        server_clock_for_rule,
+    )
+
+    client = None
+    crossing_elapsed_s: float | None = None
+    try:
+        client = factory(host, port)
+        client.login(login, investor_pw, server)
+        assert_expected_login(client.account_info(), login=login)
+
+        tick = None
+        error: dict[str, Any] | None = None
+        started = monotonic_fn()
+        try:
+            # The PRODUCTION method, never the raw symbols_get / symbol_info_tick
+            # route: the point is to run the committed remote bytes live.
+            tick = client.server_tick_times()
+        except Mt5ClientError as exc:
+            error = {"code": exc.code, "message": redact(exc)}
+        finally:
+            crossing_elapsed_s = round(monotonic_fn() - started, 3)
+        utc_now_ms = _utc_epoch_ms(utc_now_fn())
+
+        newest = None if tick is None else tick.newest_time_msc
+        verdicts: dict[str, Any] = {}
+        for rule in ("eu", "us"):
+            verdicts[rule] = assess_server_clock_reading(
+                server_clock_for_rule(rule),
+                newest_tick_ms=newest,
+                utc_now_ms=utc_now_ms,
+                tick_read_failed=error is not None,
+            )
+        us = verdicts["us"]
+        report: dict[str, Any] = {
+            "symbols_total": None if tick is None else tick.symbols_total,
+            "symbols_visible": None if tick is None else tick.symbols_visible,
+            "symbols_answered": None if tick is None else tick.symbols_answered,
+            "raw_offset_s": None if us.raw_offset_s is None else round(us.raw_offset_s, 3),
+            "measured_offset_s": us.measured_offset_s,
+            "residual_s": None if us.residual_s is None else round(us.residual_s, 3),
+            "crossing_elapsed_s": crossing_elapsed_s,
+            "verdict_eu": verdicts["eu"].verdict,
+            "verdict_us": us.verdict,
+            "reason": us.reason,
+        }
+        if error is not None:
+            report["error"] = error
+        if us.verdict == "match":
+            report["verdict"] = "GO"
+        elif us.verdict == "mismatch" or us.reason == "tick_read_failed":
+            report["verdict"] = "NO-GO"
+        else:
+            report["verdict"] = "INCONCLUSIVE"
+        return report
+    except Mt5AccountMismatchError:
+        # Deliberately no message: it names both logins.
+        return {
+            "observation": "error",
+            "crossing_elapsed_s": crossing_elapsed_s,
+            "reason": "login_mismatch",
+            "verdict": "NO-GO",
+        }
+    except Mt5ClientError as exc:
+        return {
+            "observation": "error",
+            "error": {"code": exc.code, "message": redact(exc)},
+            "crossing_elapsed_s": crossing_elapsed_s,
+            "reason": "mt5_client_raised",
+            "verdict": "INCONCLUSIVE",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "observation": "error",
+            "error": {"code": None, "type": type(exc).__name__},
+            "crossing_elapsed_s": crossing_elapsed_s,
+            "reason": "unexpected_error",
+            "verdict": "INCONCLUSIVE",
+        }
+    finally:
+        _safe_close(client)
+
+
+def run_clock_spike(
+    env: dict[str, str],
+    *,
+    client_factory: Callable[..., Any],
+    utc_now_fn: Callable[[], datetime] | None = None,
+    monotonic_fn: Callable[[], float] | None = None,
+) -> dict[str, Any]:
+    """Run ONLY the 155.1 clock leg: one login, one production tick-time call."""
+    login = int(env["MT5_SPIKE_LOGIN"])
+    investor_pw = env["MT5_SPIKE_INVESTOR_PASSWORD"]
+    server = env["MT5_SPIKE_SERVER"]
+    redact = _make_redactor(login, investor_pw, None, server)
+    leg = _leg_clock(
+        client_factory,
+        env["MT5_SPIKE_HOST"],
+        int(env["MT5_SPIKE_PORT"]),
+        login,
+        investor_pw,
+        server,
+        utc_now_fn or (lambda: datetime.now(timezone.utc)),
+        monotonic_fn or time.monotonic,
+        redact,
+    )
+    return {"server_clock_live": leg, "verdict": leg["verdict"]}
+
+
 def _default_client_factory(host: str, port: int) -> Mt5Client:
     """Construct the real read-only Mt5Client (the SAME contract 135/136 use).
     mt5linux is imported lazily inside the client's transport, so this factory
@@ -453,7 +1060,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="MT5 feasibility spike — four-leg go/no-go harness (MT5SPIKE-01)."
     )
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--leg",
+        choices=("all", "tick", "band", "clock"),
+        default="all",
+        help=(
+            "'tick' runs ONLY the Phase 155.1 server-clock tick leg (one login); "
+            "'band' runs ONLY the Phase 155.1 divergence-band deal leg (one login); "
+            "'clock' runs ONLY the Phase 155.1 post-deploy live proof of the "
+            "production server_tick_times (one login)."
+        ),
+    )
+    args = parser.parse_args(argv)
 
     missing = [name for name in _REQUIRED_ENV if not os.getenv(name)]
     if missing:
@@ -472,7 +1090,14 @@ def main(argv: list[str] | None = None) -> int:
     server = os.getenv("MT5_SPIKE_SERVER")
 
     try:
-        report = run_spike(env, client_factory=_default_client_factory)
+        if args.leg == "tick":
+            report = run_tick_spike(env, client_factory=_default_client_factory)
+        elif args.leg == "band":
+            report = run_band_spike(env, client_factory=_default_client_factory)
+        elif args.leg == "clock":
+            report = run_clock_spike(env, client_factory=_default_client_factory)
+        else:
+            report = run_spike(env, client_factory=_default_client_factory)
     except ScopeViolationError as exc:
         # Scope strings are not secrets — print the fail-loud reason verbatim.
         print(str(exc), file=sys.stderr)
