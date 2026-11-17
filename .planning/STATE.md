@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155 and 207-215 complete; 155.1, 155.2 and 157 wait on the founder; 216 CSVSTATUS booked, not started)
+current_phase_name: parallel phases (155 and 207-215 complete; 155.1 shipped, awaiting post-deploy UAT; 155.2 and 157 wait on the founder; 216 CSVSTATUS booked, not started)
 status: executing
-stopped_at: Phase 215 complete; records landed
-last_updated: "2026-11-15T23:10:43.212Z"
-last_activity: 2026-11-16
-last_activity_desc: Phase 215 complete
-state_head: b1ef61e57189fd899f3f21cbafdaa6e48d600dfa
+stopped_at: Phase 155.1 shipped (v0.133.50.0); records landed, post-deploy UAT pending
+last_updated: "2026-11-17T18:00:00.000Z"
+last_activity: 2026-11-17
+last_activity_desc: Phase 155.1 shipped, UAT pending
+state_head: 357232affc0617a3595a72af0a26fa08ffee5595
 progress:
   total_phases: 14
   completed_phases: 10
-  total_plans: 70
-  completed_plans: 70
+  total_plans: 76
+  completed_plans: 76
   percent: 71
 ---
 
@@ -177,8 +177,8 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: parallel — 155 PARITYHARNESS and 207 RETRYPROP through 215 TESTREACH complete
 Plan: per phase (see each phase directory)
-Status: 155.1 SERVERCLOCK waits on the founder: weekend spike run 1 done 2026-11-14 with verdict GO, the market-hours run is scheduled for Monday 2026-11-16; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session; 216 CSVSTATUS booked 2026-11-16, not started
-Last activity: 2026-11-16 — Phase 215 complete (verification passed 9/9; records PR closes it and books CSVSTATUS)
+Status: 155.1 SERVERCLOCK shipped 2026-11-17 as #1282 (v0.133.50.0, migration applied to TEST and PROD), 6/6 plans, VERIFICATION human_needed with 6 UAT items in 155.1-UAT.md; it awaits the Railway deploy, the founder's `--leg clock` live run and a weekday PROD reading row per key, and closes after the 155.2 session reads MT5-06's last leg; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session, which also waits on 155.1's weekday PROD reading row per key; 216 CSVSTATUS booked 2026-11-16, not started
+Last activity: 2026-11-17 — Phase 155.1 SERVERCLOCK shipped; records PR carries its artifacts and the baseline re-dump, phase stays open for UAT
 Progress: [███████░░░] 71%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
