@@ -190,13 +190,22 @@ Any item that does not return its expected answer is an ABORT: do not run Step B
   `MT5_SERVER_UTC_OFFSET_S` alone (the fixed form, whole seconds) or, once Phase 175 is live,
   `MT5_SERVER_TIME_RULE` alone (`eu`: daylight saving from the last Sunday of March to the last
   Sunday of October, at 01:00 UTC; `us`: from the second Sunday of March to the first Sunday of
-  November, at 02:00 New York time; both +2 h outside daylight saving and +3 h inside it). The
-  setting must give today's reading. Record the date, the whole-hour difference and the setting
-  (a rule id or a whole-hour count) in the SUMMARY of the plan being executed, never the server
-  name, a login or a balance. **Abort if** the setting is absent on any of those services, both
-  variables are set, or the setting disagrees with the reading, because a flow made in the hour
-  after a mark's read is then filed on the wrong side of it (Phase 167.2.1.1.1 REVIEW-3 WR-02,
-  Phase 175).
+  November, at 02:00 New York time; both +2 h outside daylight saving and +3 h inside it). Also
+  read `MT5_SERVER_TIME_RULES` on both of those services (Phase 217): the setting that applies
+  to THIS server is its map entry if it has one, otherwise the default above, and either must
+  give today's reading. Both services must carry the same map value; the grammar is in
+  `docs/runbooks/mt5-go-live.md` step 3. The setting must give today's reading. Record the date,
+  the whole-hour difference and the setting (a rule id or a whole-hour count; if a map entry
+  applies, the rule and the hash PREFIX only, never the full hash) in the SUMMARY of the plan
+  being executed, never the server name, a login or a balance. **Abort if** the setting is absent
+  on any of those services, both default variables are set, `MT5_SERVER_TIME_RULES` is malformed
+  or differs between the two services, or the setting that applies to this server disagrees with
+  the reading, because a flow made in the hour after a mark's read is then filed on the wrong
+  side of it (Phase 167.2.1.1.1 REVIEW-3 WR-02, Phase 175). Since 2026-11-18 (Phase 217, Q2) the
+  worker no longer refuses a server without a map entry whose reading disagrees with the
+  default: it pages `unmapped_clock_mismatch` and continues, which can mis-date days, so this
+  abort is now the operator's only stop for that case. The fix is a map entry, set on both
+  services before the deploy.
 
 ## Step B — the move
 

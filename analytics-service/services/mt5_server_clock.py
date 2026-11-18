@@ -55,6 +55,10 @@ from typing import Final, Literal
 
 MT5_SERVER_TIME_RULE_ENV = "MT5_SERVER_TIME_RULE"
 MT5_SERVER_UTC_OFFSET_ENV = "MT5_SERVER_UTC_OFFSET_S"
+# Phase 217 SERVERRULE (Q1): the per-server map, `<64-hex server hash>=<eu|us|utc>`
+# entries separated by commas. The two variables above stay the DEFAULT, for every
+# server the map does not name.
+MT5_SERVER_TIME_RULES_ENV: Final = "MT5_SERVER_TIME_RULES"
 MT5_DST_RULE_IDS: frozenset[str] = frozenset({"eu", "us"})
 
 _STANDARD_OFFSET_S = 7200
@@ -86,11 +90,17 @@ _MALFORMED_OFFSET_MESSAGE = (
     "MT5_SERVER_UTC_OFFSET_S must be a whole number of seconds within plus or "
     "minus 13 hours — fail loud"
 )
+_MALFORMED_RULES_MESSAGE = (
+    "MT5_SERVER_TIME_RULES must be comma-separated entries of a 64-character "
+    "lower-case hex server hash, '=', then 'eu', 'us' or 'utc', with each hash at "
+    "most once — fail loud"
+)
 MT5_SERVER_CLOCK_CONFIG_MESSAGES: tuple[str, ...] = (
     _NEITHER_SET_MESSAGE,
     _UNKNOWN_RULE_MESSAGE,
     _BOTH_SET_MESSAGE,
     _MALFORMED_OFFSET_MESSAGE,
+    _MALFORMED_RULES_MESSAGE,
 )
 
 
@@ -199,6 +209,76 @@ def resolve_mt5_server_clock(environ: Mapping[str, str] | None = None) -> Mt5Ser
     if not offset:
         raise Mt5ServerClockConfigError(_NEITHER_SET_MESSAGE)
     return fixed_server_clock(_parse_fixed_offset_s(offset))
+
+
+_HEX_DIGITS: Final = frozenset("0123456789abcdef")
+_SERVER_HASH_LEN: Final = 64
+_RULES_MAP_VALUES: Final = frozenset({"eu", "us", "utc"})
+
+
+@dataclass(frozen=True)
+class Mt5ServerClockSelection:
+    """The clock chosen for one account server and whether the map named it.
+
+    ``mapped`` is the RETURNED flag, never derived by comparing ``clock`` with the
+    default: a server mapped to the same rule as the default is still mapped, and
+    that is what keeps its mismatch a refusal (Phase 217 Q2)."""
+
+    clock: Mt5ServerClock
+    mapped: bool
+
+
+def parse_mt5_server_time_rules(
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Mt5ServerClock]:
+    """The per-server clock map from ``MT5_SERVER_TIME_RULES`` (Phase 217, Q1).
+
+    Grammar: comma-separated ``<hash>=<rule>`` entries. Each entry and each side of
+    the ``=`` is stripped, empty entries are skipped, the rule is lower-cased and
+    the hash is NOT (a hash is exactly 64 lower-case hex digits, checked by
+    character set so upper case and non-ASCII are faults). ``rule`` is ``eu``,
+    ``us`` or ``utc``; ``utc`` is the fixed offset 0 and exists only as a map value
+    (it is not a valid ``MT5_SERVER_TIME_RULE``). A hash named twice is a fault
+    whatever its values. Unset, empty and all-blank give an empty map.
+
+    Any fault raises ``Mt5ServerClockConfigError`` with the one closed text, which
+    never carries any part of the value (T-134-01). A bad map must never degrade
+    to an empty one: that would date a mapped server under the wrong rule."""
+    source = os.environ if environ is None else environ
+    raw = source.get(MT5_SERVER_TIME_RULES_ENV) or ""
+    rules: dict[str, Mt5ServerClock] = {}
+    for part in raw.split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        key, separator, value = entry.partition("=")
+        key = key.strip()
+        value = value.strip().lower()
+        if (
+            not separator
+            or len(key) != _SERVER_HASH_LEN
+            or not set(key) <= _HEX_DIGITS
+            or key in rules
+            or value not in _RULES_MAP_VALUES
+        ):
+            raise Mt5ServerClockConfigError(_MALFORMED_RULES_MESSAGE)
+        rules[key] = (
+            fixed_server_clock(0) if value == "utc" else server_clock_for_rule(value)
+        )
+    return rules
+
+
+def select_mt5_server_clock(
+    default: Mt5ServerClock,
+    rules: Mapping[str, Mt5ServerClock],
+    server_hash: str | None,
+) -> Mt5ServerClockSelection:
+    """The clock for one account server: its map entry, else ``default``. The hash is
+    the caller's (``server_label_hash``); ``None`` (a blank or missing server) is
+    never looked up and takes the default, unmapped."""
+    if server_hash is not None and server_hash in rules:
+        return Mt5ServerClockSelection(clock=rules[server_hash], mapped=True)
+    return Mt5ServerClockSelection(clock=default, mapped=False)
 
 
 def _wall_year(wall_epoch_s: int) -> int:

@@ -34,8 +34,10 @@ def server_label_hash(server: object) -> str | None:
     (RESOLVED)" Q5):
 
     * UNSALTED and unkeyed: no HMAC, no Railway secret. The table is service-role
-      only (D-15) and its one consumer is the per-key equality check of criterion
-      4, so a keyed hash would add a secret for no reader who could exploit
+      only (D-15) and the hash has two uses: the per-key equality check of
+      criterion 4, and (Phase 217) the lookup key of the operator map
+      ``MT5_SERVER_TIME_RULES``, which needs the hash in the clear to be written
+      at all. A keyed hash would add a secret for no reader who could exploit
       reversal.
     * EQUALITY ONLY: two readings carry the same hash exactly when the normalised
       names are equal (``normalise_mt5_server``: trim, then case-fold).

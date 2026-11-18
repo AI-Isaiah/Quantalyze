@@ -2877,15 +2877,22 @@ def _clock_derive_env(monkeypatch, *, rule: str = "us") -> None:
     monkeypatch.setattr("services.mt5_read._tick_read_now", lambda: _CLOCK_NOW)
 
 
-def _clock_transport(tick_answer: object = None) -> _FakeMt5Transport:
+_NO_SERVER = object()  # `account_info()` carries no `server` key at all
+
+
+def _clock_transport(
+    tick_answer: object = None, *, server: object = _PLANTED_SERVER
+) -> _FakeMt5Transport:
+    account: dict[str, object] = {
+        "equity": 110_500.0,
+        "balance": 110_500.0,
+        "currency": "USD",
+        "login": 123456,
+    }
+    if server is not _NO_SERVER:
+        account["server"] = server
     return _FakeMt5Transport(
-        account={
-            "equity": 110_500.0,
-            "balance": 110_500.0,
-            "currency": "USD",
-            "login": 123456,
-            "server": _PLANTED_SERVER,
-        },
+        account=account,
         deals=_canonical_deals(),
         tick_answer=tick_answer,
     )
@@ -2908,11 +2915,69 @@ def _recording_page(monkeypatch) -> AsyncMock:
     return page
 
 
+def _planted_server_hash() -> str:
+    """The independent oracle for the planted server's label hash: SHA-256 of the trimmed,
+    case-folded name, computed here with ``hashlib`` and never with the code under test."""
+    import hashlib
+
+    return hashlib.sha256(_PLANTED_SERVER.strip().casefold().encode("utf-8")).hexdigest()
+
+
 @pytest.mark.asyncio
+async def test_a_server_mapped_to_utc_persists_a_fixed_zero_match_reading(monkeypatch) -> None:
+    """Phase 217 Q1 tracer. A server that keeps UTC (tick at now minus transit, offset 0)
+    would be a ``us`` mismatch under the default and end ``failed_final``. The map names it
+    ``utc`` (the fixed offset 0), so its derive passes the 155.1 clock guard, files a
+    ``match`` reading under configured_rule ``fixed`` and persists its days.
+
+    The default is forced to ``us`` on purpose: the suite default (fixed 0) EQUALS the utc
+    clock, so with the default left alone this test would pass with the selection deleted."""
+    _clock_derive_env(monkeypatch, rule="us")
+    server_hash = _planted_server_hash()
+    monkeypatch.setenv("MT5_SERVER_TIME_RULES", f"{server_hash}=utc")
+    page = _recording_page(monkeypatch)
+    newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) - 100
+    transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms))
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    readings = _clock_readings(capture)
+    assert len(readings) == 1, capture["inserts"]
+    row = readings[0]
+    assert row["verdict"] == "match"
+    assert row["configured_rule"] == "fixed"
+    assert row["expected_offset_s"] == 0 and row["measured_offset_s"] == 0
+    assert row["server_label_hash"] == server_hash
+    assert not any(c.args and c.args[0] == "mt5_server_clock" for c in page.await_args_list)
+    assert capture["upserts"], "the derive must have persisted its days"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("map_rule", "tick_ahead_ms", "expected_s", "measured_s", "detail_fragment"),
+    [
+        # A map entry EQUAL to the default still marks the server mapped, so it refuses
+        # (T-217-05: `mapped` is a returned flag, never `clock != default`).
+        pytest.param(
+            "us", 7_200_000, 10800, 7200, "rule=us expected=+3h measured=+2h", id="map-equals-default"
+        ),
+        # On 2026-10-28 EU daylight saving has ended (the last Sunday of October was the
+        # 25th) and US daylight saving has not (the first Sunday of November is the 1st), so
+        # a +3h tick would MATCH the `us` default. Only the mapped `eu` clock (+2h) refuses.
+        pytest.param(
+            "eu", 10_800_000, 7200, 10800, "rule=eu expected=+2h measured=+3h", id="map-differs-from-default"
+        ),
+    ],
+)
 async def test_a_server_clock_mismatch_refuses_the_derive_pages_once_and_keeps_its_reading(
-    monkeypatch, caplog
+    monkeypatch, caplog, map_rule: str, tick_ahead_ms: int, expected_s: int, measured_s: int,
+    detail_fragment: str,
 ) -> None:
-    """D-01: a mismatch must refuse the derive AND be heard. A refusal nobody hears about
+    """D-01: a mismatch of a MAPPED server must refuse the derive AND be heard (Phase 217:
+    the refusal is kept for every server the map names; an unmapped server writes and alerts
+    instead, see the unmapped test below). A refusal nobody hears about
     would make the clock check silent in practice, and a page that leaked the server name
     would breach D-17, so the alert detail is the rule id and two offsets in HOURS only.
 
@@ -2926,8 +2991,9 @@ async def test_a_server_clock_mismatch_refuses_the_derive_pages_once_and_keeps_i
     from services.mt5_server_clock import Mt5ServerClockMismatchError
 
     _clock_derive_env(monkeypatch, rule="us")
+    monkeypatch.setenv("MT5_SERVER_TIME_RULES", f"{_planted_server_hash()}={map_rule}")
     page = _recording_page(monkeypatch)
-    newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) + 7_200_000 - 100
+    newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) + tick_ahead_ms - 100
     transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms))
     ctx, capture = _build_ctx(transport)
     with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics"):
@@ -2937,7 +3003,9 @@ async def test_a_server_clock_mismatch_refuses_the_derive_pages_once_and_keeps_i
     assert result.outcome == DispatchOutcome.FAILED
     assert result.error_kind == "transient"
     expected_text = str(
-        Mt5ServerClockMismatchError(rule="us", expected_offset_s=10800, measured_offset_s=7200)
+        Mt5ServerClockMismatchError(
+            rule=map_rule, expected_offset_s=expected_s, measured_offset_s=measured_s
+        )
     )
     assert result.error_message == "derive_broker_dailies: " + expected_text
     errors = [
@@ -2963,7 +3031,7 @@ async def test_a_server_clock_mismatch_refuses_the_derive_pages_once_and_keeps_i
     assert page.await_args.args == ("mt5_server_clock", "clock_mismatch")
     assert page.await_args.kwargs["event"] == "outage"
     detail = page.await_args.kwargs["detail"]
-    assert "rule=us expected=+3h measured=+2h" in detail, detail
+    assert detail_fragment in detail, detail
     assert not re.search(r"\d{5,}", detail), detail
     # SF-M4 / WR-02: the page tags the FIRST key only, as a tag only, and no server value rides along (D-17).
     assert page.await_args.kwargs["extra_tags"] == {"first_api_key_id": "key-mt5"}
@@ -2973,6 +3041,93 @@ async def test_a_server_clock_mismatch_refuses_the_derive_pages_once_and_keeps_i
         assert _PLANTED_SERVER not in text, text
         assert readings[0]["server_label_hash"] not in text, text
     assert _PLANTED_SERVER not in repr(readings[0])
+
+
+@pytest.mark.asyncio
+async def test_an_unmapped_server_clock_mismatch_persists_and_pages_once(
+    monkeypatch, caplog
+) -> None:
+    """Phase 217 Q2, the dated FOUNDER OVERRIDE of 155.1 D-01 for UNMAPPED servers only: a
+    server the map does not name whose reading disagrees with the default rule is no longer
+    refused. Its mismatch reading is written (the evidence), ONE ``unmapped_clock_mismatch``
+    page is raised, and the derive continues under the default rule and persists its days.
+    Accepted cost: mis-dated days can be written for such a server until it is mapped.
+
+    Same planted +2h server as the mapped refusal test, no map entry. Neither the server name
+    nor its hash may appear in any message, detail, tag or log record (D-17)."""
+    import logging
+    import re
+
+    _clock_derive_env(monkeypatch, rule="us")
+    page = _recording_page(monkeypatch)
+    newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) + 7_200_000 - 100
+    transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms))
+    ctx, capture = _build_ctx(transport)
+    with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics"):
+        with _apply(_patches(ctx)):
+            result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    readings = _clock_readings(capture)
+    assert len(readings) == 1, capture["inserts"]
+    assert readings[0]["verdict"] == "mismatch"
+    assert readings[0]["configured_rule"] == "us"
+    # The derive really persisted, and the reading went in BEFORE any write.
+    assert capture["upserts"], "the unmapped path must continue and persist its days"
+    assert capture["order"][0] == ("insert", "mt5_server_clock_readings"), capture["order"]
+
+    page.assert_awaited_once()
+    assert page.await_args.args == ("mt5_server_clock", "unmapped_clock_mismatch")
+    assert page.await_args.kwargs["event"] == "outage"
+    detail = page.await_args.kwargs["detail"]
+    assert "rule=us expected=+3h measured=+2h" in detail, detail
+    assert not re.search(r"\d{5,}", detail), detail
+    assert page.await_args.kwargs["extra_tags"] == {"first_api_key_id": "key-mt5"}
+    assert not any(
+        c.args[:2] == ("mt5_server_clock", "clock_mismatch") for c in page.await_args_list
+    )
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    drift = [m for m in errors if "arm=server_clock_unmapped_drift" in m]
+    assert len(drift) == 1, errors
+    assert "api_key_id=key-mt5" in drift[0], drift[0]
+    # The mapped arm name is a refusal; no ERROR record may carry it on this path.
+    assert not [m for m in errors if "arm=server_clock_mismatch" in m], errors
+
+    for text in [result.error_message or "", detail, repr(page.await_args)] + [
+        r.getMessage() for r in caplog.records
+    ]:
+        assert _PLANTED_SERVER not in text, text
+        assert readings[0]["server_label_hash"] not in text, text
+    assert _PLANTED_SERVER not in repr(readings[0])
+
+
+@pytest.mark.asyncio
+async def test_a_map_entry_for_another_server_does_not_rescue_a_mismatch(
+    monkeypatch,
+) -> None:
+    """J5: the map is keyed by the server's own hash. An entry for a DIFFERENT server (a
+    hand-typed hash that is not the planted one) must leave this server unmapped, so its
+    mismatch takes the unmapped path (write, page ``unmapped_clock_mismatch``, continue)
+    and is neither refused as mapped nor passed as a match under the other entry's rule."""
+    other_hash = "c0" * 32
+    assert other_hash != _planted_server_hash()
+    _clock_derive_env(monkeypatch, rule="us")
+    monkeypatch.setenv("MT5_SERVER_TIME_RULES", f"{other_hash}=utc")
+    page = _recording_page(monkeypatch)
+    newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) + 7_200_000 - 100
+    transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms))
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    readings = _clock_readings(capture)
+    assert len(readings) == 1 and readings[0]["verdict"] == "mismatch"
+    assert readings[0]["configured_rule"] == "us"
+    page.assert_awaited_once()
+    assert page.await_args.args == ("mt5_server_clock", "unmapped_clock_mismatch")
+    assert capture["upserts"]
 
 
 @pytest.mark.asyncio
@@ -3045,8 +3200,14 @@ async def test_a_raising_tick_read_is_unmeasured_and_never_a_credential_verdict(
 # N2-M1: a numeric SQLSTATE (23514 CHECK) is a 5-digit run the page-detail scrubber would mask,
 # so the code must reach the page as a tag; 42P01 is the alphanumeric (missing table) control.
 @pytest.mark.parametrize("sqlstate", ["42P01", "23514"])
+# Phase 217 J9: the insert arm sits ABOVE the mapped/unmapped split, so a failing insert
+# refuses for every verdict, including an UNMAPPED mismatch (which would otherwise continue).
+@pytest.mark.parametrize(
+    "tick_ahead_ms",
+    [pytest.param(None, id="no-tick"), pytest.param(7_200_000, id="unmapped-mismatch")],
+)
 async def test_a_failing_server_clock_reading_insert_fails_the_derive_transient(
-    monkeypatch, caplog, attempts: int, pages: bool, sqlstate: str
+    monkeypatch, caplog, attempts: int, pages: bool, sqlstate: str, tick_ahead_ms: int | None
 ) -> None:
     """Criterion 3 of MT5-06 needs the rows, so a reading that cannot be written must be
     LOUD: the derive ends FAILED ``transient`` (retried, healed once a missing table lands)
@@ -3059,7 +3220,12 @@ async def test_a_failing_server_clock_reading_insert_fails_the_derive_transient(
 
     _clock_derive_env(monkeypatch, rule="us")
     page = _recording_page(monkeypatch)
-    transport = _clock_transport()
+    tick = (
+        None
+        if tick_ahead_ms is None
+        else ("answered", 1416, 14, 14, int(_CLOCK_NOW.timestamp() * 1000) + tick_ahead_ms - 100)
+    )
+    transport = _clock_transport(tick)
     ctx, capture = _build_ctx(transport)
     real_table = ctx.supabase.table.side_effect
 
@@ -3098,6 +3264,10 @@ async def test_a_failing_server_clock_reading_insert_fails_the_derive_transient(
     # WR-02: the page names the first key only, so the log line names every key.
     assert "api_key_id=key-mt5" in lines[0], lines[0]
     assert capture["upserts"] == [] and capture["updates"] == [] and capture["rpc_calls"] == []
+    # J9: the unmapped-drift page never fires when the reading could not be written.
+    assert not any(
+        c.args[:2] == ("mt5_server_clock", "unmapped_clock_mismatch") for c in page.await_args_list
+    )
     if not pages:
         # WR-03: a non-final attempt may be a blip or the deploy-window missing table that the
         # retry heals, so it is logged (above) and retried, never paged.
@@ -3116,3 +3286,224 @@ async def test_a_failing_server_clock_reading_insert_fails_the_derive_transient(
     }
     for text in [detail, repr(page.await_args)] + [r.getMessage() for r in caplog.records]:
         assert _PLANTED_SERVER not in text, text
+
+
+# ---------------------------------------------------------------------------
+# Phase 217 SERVERRULE — the per-server map at the job level (grammar, dating,
+# normalisation, blank server, malformed map, unmeasured).
+# ---------------------------------------------------------------------------
+
+
+def _wall_deposit_at_0130_deals() -> list[dict]:
+    """Sibling of ``_winter_deposit_after_the_read_deals`` with the deposit at broker WALL
+    2025-11-11 01:30. Under a UTC+2 rule that is true 2025-11-10T23:30Z (the previous UTC day,
+    BEFORE the stored mark's read at 00:10Z); under UTC+0 it is true 2025-11-11T01:30Z. The
+    wall 02:30 of the sibling stays on one UTC day under both and could not tell them apart."""
+
+    def _wall(y: int, mo: int, d: int, h: int, mi: int = 0) -> int:
+        return int(datetime(y, mo, d, h, mi, tzinfo=timezone.utc).timestamp())
+
+    deposit_wall = _wall(2025, 11, 11, 1, 30)
+    zero = {"swap": 0.0, "commission": 0.0, "fee": 0.0}
+    return [
+        {"type": 0, "entry": 1, "profit": 500.0, "time": _wall(2025, 11, 9, 12), **zero},
+        {"type": 2, "profit": 50_000.0, "time": deposit_wall, "time_msc": deposit_wall * 1000, **zero},
+        {"type": 1, "entry": 1, "profit": 100.0, "time": _wall(2025, 11, 12, 12), **zero},
+    ]
+
+
+async def _derive_with_server_and_observe_apply_marks() -> tuple[object, MagicMock]:
+    """``_derive_and_observe_apply_marks`` with the 01:30 deposit and an account that names
+    its server, so the per-server map can see it."""
+    from services.nav_marks_apply import apply_marks as real_apply_marks
+
+    mark = StoredMark(
+        "2025-11-10", "2025-11-11T00:10:00+00:00", "mt5", 100_500.0, 0.0, 100_500.0, "USD", 0.0
+    )
+    transport = _FakeMt5Transport(
+        account={
+            "equity": 150_600.0,
+            "balance": 150_600.0,
+            "currency": "USD",
+            "login": 123456,
+            "server": _PLANTED_SERVER,
+        },
+        deals=_wall_deposit_at_0130_deals(),
+    )
+    ctx, _capture = _build_ctx(transport)
+    with _apply(_patches(ctx)), patch(
+        "services.job_worker.read_key_marks", new=MagicMock(return_value=[mark])
+    ), patch("services.job_worker.apply_marks", wraps=real_apply_marks) as spy:
+        result = await run_derive_broker_dailies_job(_job())
+    return result, spy
+
+
+@pytest.mark.asyncio
+async def test_a_utc_mapped_server_dates_the_winter_deposit_by_its_own_clock(
+    monkeypatch,
+) -> None:
+    """J2: the map changes which DAY a deal is filed on, not only the reading. Same account,
+    same deposit at broker wall 2025-11-11 01:30, default rule ``us`` (UTC+2 in November):
+    unmapped, the deposit is true 23:30Z the previous day and is filed on 2025-11-10; mapped
+    to ``utc`` (UTC+0) it is true 01:30Z and is filed on 2025-11-11. Both days hand-typed."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_TIME_RULE", "us")
+    monkeypatch.delenv("MT5_SERVER_UTC_OFFSET_S", raising=False)
+
+    unmapped_result, unmapped_spy = await _derive_with_server_and_observe_apply_marks()
+    assert unmapped_result.outcome == DispatchOutcome.DONE, unmapped_result.error_message
+    assert unmapped_spy.call_count == 1
+    assert unmapped_spy.call_args.args[1] == {"2025-11-10": 50_000.0}
+
+    monkeypatch.setenv("MT5_SERVER_TIME_RULES", f"{_planted_server_hash()}=utc")
+    mapped_result, mapped_spy = await _derive_with_server_and_observe_apply_marks()
+    assert mapped_result.outcome == DispatchOutcome.DONE, mapped_result.error_message
+    assert mapped_spy.call_count == 1
+    assert mapped_spy.call_args.args[1] == {"2025-11-11": 50_000.0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key_names", "mapped"),
+    [
+        pytest.param("normalised", True, id="key-is-the-hash-of-the-normalised-name"),
+        pytest.param("raw", False, id="key-is-the-hash-of-the-raw-name"),
+    ],
+)
+async def test_the_server_name_is_normalised_before_the_map_lookup(
+    monkeypatch, key_names: str, mapped: bool
+) -> None:
+    """J6: the terminal returns the name as typed. The lookup key is the hash of the TRIMMED,
+    CASE-FOLDED name (the same normalisation the reading row's hash uses), so a name arriving
+    as ``"  Planted-SERVER-Value "`` is mapped by the key of ``planted-server-value`` and NOT
+    by the key of the raw string. The server keeps UTC and the default is ``us``, so a mapped
+    server matches (no page) and an unmapped one is a mismatch under the default (one page)."""
+    import hashlib
+
+    arriving = "  Planted-SERVER-Value "
+    raw_hash = hashlib.sha256(arriving.encode("utf-8")).hexdigest()
+    normalised_hash = hashlib.sha256(b"planted-server-value").hexdigest()
+    assert raw_hash != normalised_hash
+    _clock_derive_env(monkeypatch, rule="us")
+    key = normalised_hash if key_names == "normalised" else raw_hash
+    monkeypatch.setenv("MT5_SERVER_TIME_RULES", f"{key}=utc")
+    page = _recording_page(monkeypatch)
+    newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) - 100
+    transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms), server=arriving)
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    (row,) = _clock_readings(capture)
+    assert row["server_label_hash"] == normalised_hash
+    if mapped:
+        assert row["verdict"] == "match" and row["configured_rule"] == "fixed"
+        page.assert_not_awaited()
+    else:
+        assert row["verdict"] == "mismatch" and row["configured_rule"] == "us"
+        page.assert_awaited_once()
+        assert page.await_args.args == ("mt5_server_clock", "unmapped_clock_mismatch")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [pytest.param(_NO_SERVER, id="missing-key"), pytest.param("   ", id="blank-string")],
+)
+async def test_a_blank_server_falls_back_to_the_default_rule(monkeypatch, server: object) -> None:
+    """J7: an account whose terminal names no server (missing or blank) has no hash, so it is
+    never looked up: it takes the DEFAULT rule, does not crash, and writes a reading whose hash
+    is NULL. The map holds a ``utc`` entry for some other server and the tick is +3h, which
+    MATCHES the ``us`` default on 2026-10-28 (and would mismatch the map's ``utc``), so a match
+    reading under rule ``us`` proves the default served this account."""
+    _clock_derive_env(monkeypatch, rule="us")
+    monkeypatch.setenv("MT5_SERVER_TIME_RULES", f"{'c0' * 32}=utc")
+    page = _recording_page(monkeypatch)
+    newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) + 10_800_000 - 100
+    transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms), server=server)
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    (row,) = _clock_readings(capture)
+    assert row["server_label_hash"] is None
+    assert row["configured_rule"] == "us" and row["verdict"] == "match"
+    page.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rules_value", "planted"),
+    [
+        pytest.param("no-equals-sign", "no-equals-sign", id="no-equals"),
+        pytest.param(f"{'ab' * 32}=summer", "summer", id="unknown-rule-value"),
+        pytest.param(f"{'AB' * 32}=utc", "AB" * 32, id="uppercase-hex-key"),
+        pytest.param(f"{'ab' * 32}=us,{'ab' * 32}=eu", "ab" * 32, id="duplicate-hash"),
+        pytest.param(f"{'ab' * 31}=utc", "ab" * 31, id="short-key"),
+        pytest.param("VALID-MAP", None, id="valid-map-but-no-default-variable"),
+    ],
+)
+async def test_a_malformed_rules_map_fails_transient_and_makes_no_terminal_read(
+    monkeypatch, caplog, rules_value: str, planted: str | None
+) -> None:
+    """J8 / T-217-01: a malformed ``MT5_SERVER_TIME_RULES`` is an operator fault, parsed in
+    the same pre-read ``try`` as the default clock. EVERY MT5 derive ends FAILED ``transient``
+    with the closed value-free text, one ``arm=server_clock_config`` ERROR line, no terminal
+    call, no write. It must never degrade to an empty map. The last case is the other half: a
+    VALID map does not rescue a faulty default (neither default variable set)."""
+    import logging
+
+    from services.mt5_server_clock import MT5_SERVER_CLOCK_CONFIG_MESSAGES
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    if rules_value == "VALID-MAP":
+        rules_value = f"{_planted_server_hash()}=utc"
+        monkeypatch.delenv("MT5_SERVER_UTC_OFFSET_S", raising=False)
+        monkeypatch.delenv("MT5_SERVER_TIME_RULE", raising=False)
+    monkeypatch.setenv("MT5_SERVER_TIME_RULES", rules_value)
+    transport = _clock_transport()
+    ctx, capture = _build_ctx(transport)
+    with caplog.at_level(logging.ERROR, logger="quantalyze.analytics"):
+        with _apply(_patches(ctx)):
+            result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    fault_lines = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.ERROR and "arm=server_clock_config" in r.getMessage()
+    ]
+    assert len(fault_lines) == 1, [r.getMessage() for r in caplog.records]
+    message = result.error_message or ""
+    prefix = "derive_broker_dailies: "
+    assert message.startswith(prefix), message
+    assert message[len(prefix):] in MT5_SERVER_CLOCK_CONFIG_MESSAGES, message
+    if planted is not None:
+        assert planted not in message, message
+        assert planted not in fault_lines[0], fault_lines[0]
+    assert transport.calls == [], (
+        f"a clock fault must end the derive before the terminal is touched; got {transport.calls!r}"
+    )
+    assert capture["upserts"] == [] and capture["inserts"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_mapped_server_with_no_tick_continues_without_a_page(monkeypatch) -> None:
+    """J11 (D-10 for a mapped server): a mapped server whose terminal answers no tick (a closed
+    market) is ``unmeasured``, never a refusal and never a page, and its reading is kept with
+    the rule it was assessed under (``fixed`` for ``utc``)."""
+    _clock_derive_env(monkeypatch, rule="us")
+    monkeypatch.setenv("MT5_SERVER_TIME_RULES", f"{_planted_server_hash()}=utc")
+    page = _recording_page(monkeypatch)
+    transport = _clock_transport()  # the default double answers "no ticks"
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    (row,) = _clock_readings(capture)
+    assert row["verdict"] == "unmeasured" and row["reason"] == "no_tick"
+    assert row["configured_rule"] == "fixed"
+    page.assert_not_awaited()

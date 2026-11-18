@@ -260,8 +260,10 @@ def deal_utc_day(time_value: Any, server_utc_offset_s: int | Mt5ServerClock) -> 
     broker's daylight-saving rule (Phase 175, D-01) and gives the offset in force
     at THIS deal's own wall second. Subtract it BEFORE bucketing so a
     near-midnight deal cannot drift onto the wrong day (Pitfall 1). Which clock
-    is configured is the worker setting resolved by
-    ``mt5_server_clock.resolve_mt5_server_clock``; checking it against the live
+    is configured is the worker default resolved by
+    ``mt5_server_clock.resolve_mt5_server_clock`` or, since Phase 217, the
+    per-server entry chosen by ``mt5_server_clock.select_mt5_server_clock``;
+    checking it against the live
     server is Phase 155's (MT5-06), not this seam's.
 
     A missing / undatable / non-numeric / non-finite time RAISES — a deal we
