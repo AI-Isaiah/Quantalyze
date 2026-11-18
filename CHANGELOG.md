@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.50.2] - 2026-11-18 — records: book 217 SERVERRULE; 155.1 UAT items 1-4 pass
+
+Records-only PR. It books Phase 217 after the first nightly derive with the 155.1 clock guard, and moves STATE to match the 155.1 UAT readings. No source, test or migration change.
+
+### Added
+- **Phase 217 SERVERRULE** (founder decision 2026-11-18, "Book per-server rule"): the MT5 server time rule is chosen per broker server instead of once per worker, so a server that keeps UTC passes the 155.1 clock guard. The rule stays configuration and is never written back from a reading (155.1 D-12). It gets a ROADMAP overview bullet, a section, a Progress row and a phase directory, plus a STATE Roadmap Evolution entry.
+
+### Why
+- The 2026-11-18 00:40 UTC derive wrote clock readings for ten MT5 keys on four broker servers. Nine match at +2h. One key, on a server that keeps UTC, measured +0h against the `us` rule's +2h on all six attempts, and its derive ended `failed_final`. The guard refused as designed and nothing wrong was written, but that key's dailies stop updating until 217 ships. Its derive on 2026-11-17, before the deploy, had finished `done`.
+
+### Changed
+- **STATE and `state.json`:** 155.1 UAT items 1-4 pass. Item 1 is the clock leg on 2026-11-17 (GO, crossing 0.049 s against the 40 s bound). Items 2 and 3 are one matching weekday PROD row each for MM2, MM3 and FX-AI_V, all on one shared server hash. Item 4 is the `MT5_SERVER_TIME_RULE=us` re-read. Items 5 and 6 belong to the founder's 155.2 session, which can go ahead now. 216 CSVSTATUS is in progress.
+- VERSION and package.json 0.133.50.1 → 0.133.50.2.
+
+### Notes
+- 155.1 is still not complete: its VERIFICATION stays `human_needed` until items 5 and 6 are read. The readings themselves are recorded in `155.1-SPIKE-READINGS.md` on the phase branch and reach `main` with the 155.1 close.
+- No `TODOS.md` entry is closed, so none is deleted.
+
 ## [0.133.50.1] - 2026-11-17 — records: 155.1 SERVERCLOCK shipped, UAT pending; baseline re-dump
 
 Records PR for Phase 155.1, whose code is already on `main` as #1282 (v0.133.50.0). It carries the phase artifacts, marks 155.1 shipped and awaiting UAT, and lands the baseline re-dump that turns `main`'s `sql-gate-lint` green again, which also unblocks the Railway deploy of the analytics service. The only non-records change is the re-dump's one cleared `NAME_SET_RATCHET` row. There is no source, test or migration change.

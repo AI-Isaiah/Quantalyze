@@ -76,8 +76,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (155.1 shipped, awaiting post-deploy UAT: the founder's --leg clock run and a weekday PROD reading row per key; 155.2 and 157 wait for the founder's trading-day session; 216 CSVSTATUS booked 2026-11-16)",
+    "label": "Advance to the next step (155.1 shipped, UAT items 1-4 pass, 5-6 in the founder's session; 155.2 and 157 wait for the founder's trading-day session; 216 CSVSTATUS in progress; 217 SERVERRULE booked 2026-11-18)",
     "reason": "Phases 155 and 207-215 complete; 155.1 shipped, UAT pending; 10 of 14"
   },
-  "updated_at": "2026-11-17T18:00:00.000Z"
+  "updated_at": "2026-11-18T14:00:00.000Z"
 }
