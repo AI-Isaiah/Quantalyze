@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.52.1] - 2026-11-18 — records: close 217 SERVERRULE
+
+Records PR for Phase 217, whose code is already on `main` as #1288 (v0.133.52.0). It carries the phase artifacts and closes the phase. No source, test or migration change.
+
+### Added
+- **Phase artifacts for 217** under `.planning/phases/`, from the phase branch: context, discussion log, research, patterns, validation, two plans and their summaries, review, review disposition, security and verification. The VERIFICATION is `passed` with `verified_at_sha` and `drift_subjects`, and has no `covered_*` keys.
+- **PROJECT.md decision row** for the per-server time rule, including the founder's override of 155.1 D-01 for unmapped servers ("Write and alert").
+
+### Changed
+- **ROADMAP:** the 217 overview bullet is ticked `(completed 2026-11-18)`, both plan rows are ticked, and the Progress row reads `2/2 | Complete | 2026-11-18`.
+- **STATE and `state.json`:** progress is 12 of 15 phases, 79 of 79 plans, 80%. 217 is `complete`. The position keeps the parallel-phase form.
+- VERSION and package.json 0.133.52.0 → 0.133.52.1.
+
+### Notes
+- **Railway configuration, set before the #1288 merge:** `MT5_SERVER_TIME_RULES` maps the UTC-keeping server's full hash to `utc` on both analytics workers. It was set first so that the unmapped-mismatch write path could never date that key's days under the `us` rule. The value was checked with the shipped parser (1 entry, fixed offset 0) and confirmed byte-equal on both services.
+- After the deploy, the next derive for that key should write a `match` reading with `configured_rule = fixed`.
+- `202-MT5-CLOCK-LEAD-01` stays open. No `TODOS.md` entry is closed, so none is deleted.
+
 ## [0.133.52.0] - 2026-11-18 — Phase 217 SERVERRULE: the MT5 server time rule is chosen per broker server
 
 The worker now picks the MT5 server clock per broker server instead of once per worker. A server that keeps UTC can be given a `utc` rule, so its derive passes the Phase 155.1 clock guard instead of ending `failed_final`. The rule is still configuration and is never written back from a reading (155.1 D-12). Founder decisions 2026-11-18: Q1 "Railway map by hash" and Q2 "Write and alert".

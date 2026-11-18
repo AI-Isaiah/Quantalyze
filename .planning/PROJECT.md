@@ -431,6 +431,7 @@ layer. Full per-phase detail: `.planning/MILESTONES.md` + `milestones/v1.6-*`.
 | **v1.21: b3's `window_truncated` is intended behaviour (Phase 203)** | The token is one boolean over unequal member windows, classed benign and outside the blocking set; recorded with evidence, not fixed. | ✓ Good (v1.21 RESID-02) |
 | **v1.21: composer range stored as dates (founder 2026-11-13, "Book a fix")** | Indices drift when the axis grows at the front; the "kept when the series grows" contract is re-pinned to mean the same dates are kept. | — Pending (next milestone, `201.1-COMPOSER-RANGE-AS-DATES`) |
 | **v1.21 close: skip gsd-tools' `audit-open` pre-close check, record it (founder 2026-11-13)** | It refuses on seven archived VERIFICATION statuses outside its closed set; rewriting historical verdicts is not acceptable. Upstream issue drafted. | — Pending (until gsd-core reads archived reports leniently) |
+| **v1.18: MT5 server time rule per broker server, by full server-label hash (Phase 217, founder 2026-11-18)** | `MT5_SERVER_TIME_RULES` maps hash to eu/us/utc; the default variables stay for unmapped servers; `utc` is fixed offset 0, so no migration. Founder override of 155.1 D-01: an unmapped mismatch writes and pages instead of refusing, accepting mis-dated days until the server is mapped. | — Pending (post-deploy UAT: the UTC key's next derive writes a `match` reading) |
 
 ## Evolution
 
@@ -526,4 +527,4 @@ the WCAG-AA floor stay green.
 </details>
 
 ---
-*Last updated: 2026-11-13 at v1.18 resume (after v1.21 closed, audit tech_debt, 32/32). Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.*
+*Last updated: 2026-11-18 after Phase 217 (previously 2026-11-13 at v1.18 resume (after v1.21 closed, audit tech_debt, 32/32). Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.)*

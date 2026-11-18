@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155 and 207-216 complete; 155.1 shipped, UAT items 1-4 pass; 155.2 and 157 wait on the founder; 217 SERVERRULE in progress)
+current_phase_name: parallel phases (155 and 207-217 complete; 155.1 shipped, UAT items 1-4 pass; 155.2 and 157 wait on the founder)
 status: executing
-stopped_at: Phase 216 CSVSTATUS shipped (v0.133.51.0) and complete
+stopped_at: Phase 217 SERVERRULE shipped (v0.133.52.0) and complete
 last_updated: "2026-11-18T14:45:18.329Z"
 last_activity: 2026-11-18
-last_activity_desc: Phase 216 complete; 217 SERVERRULE in progress
+last_activity_desc: Phase 217 complete
 state_head: b788cf8f9c6b2628e8489361c5e50bc098d28953
 progress:
   total_phases: 15
-  completed_phases: 11
-  total_plans: 77
-  completed_plans: 77
-  percent: 73
+  completed_phases: 12
+  total_plans: 79
+  completed_plans: 79
+  percent: 80
 ---
 
 ## ⭐ STATE lineage
@@ -175,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 155 PARITYHARNESS and 207 RETRYPROP through 216 CSVSTATUS complete
+Phase: parallel — 155 PARITYHARNESS and 207 RETRYPROP through 217 SERVERRULE complete
 Plan: per phase (see each phase directory)
-Status: 155.1 SERVERCLOCK shipped 2026-11-17 as #1282 (v0.133.50.0, migration applied to TEST and PROD), 6/6 plans, VERIFICATION human_needed with 6 UAT items in 155.1-UAT.md; UAT items 1 (clock leg GO 2026-11-17), 2 and 3 (per-key PROD readings 2026-11-18, one shared server hash) and 4 pass; it closes after the 155.2 session reads MT5-06's last leg; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session, which can go ahead now; 216 CSVSTATUS shipped 2026-11-18 as #1286 (v0.133.51.0) and complete; 217 SERVERRULE in progress
-Last activity: 2026-11-18 — Phase 216 CSVSTATUS shipped as #1286 and closed; 217 SERVERRULE in progress
-Progress: [███████░░░] 73%
+Status: 155.1 SERVERCLOCK shipped 2026-11-17 as #1282 (v0.133.50.0, migration applied to TEST and PROD), 6/6 plans, VERIFICATION human_needed with 6 UAT items in 155.1-UAT.md; UAT items 1 (clock leg GO 2026-11-17), 2 and 3 (per-key PROD readings 2026-11-18, one shared server hash) and 4 pass; it closes after the 155.2 session reads MT5-06's last leg; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session, which can go ahead now; 216 CSVSTATUS shipped 2026-11-18 as #1286 (v0.133.51.0) and complete; 217 SERVERRULE shipped 2026-11-18 as #1288 (v0.133.52.0) and complete, with MT5_SERVER_TIME_RULES set on both workers before the merge
+Last activity: 2026-11-18 — Phase 217 SERVERRULE shipped as #1288 and closed
+Progress: [████████░░] 80%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 

@@ -146,7 +146,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production** - CI-only test reach; independent of the MT5 phases (completed 2026-11-16)
 - [x] **Phase 216: CSVSTATUS — a malformed CSV upload answers 422 and the wizard stops offering Retry** - CSV upload status split, founder decision 2026-11-15; independent of the MT5 phases (completed 2026-11-18)
-- [ ] **Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server** - A UTC-keeping broker server passes the 155.1 clock guard; founder decision 2026-11-18; follows 155.1
+- [x] **Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server** - A UTC-keeping broker server passes the 155.1 clock guard; founder decision 2026-11-18; follows 155.1 (completed 2026-11-18)
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
 
@@ -276,7 +276,7 @@ Plans:
 | 214. FRESHTRUTH | 7/7 | Complete | 2026-11-14 |
 | 215. TESTREACH | 8/8 | Complete | 2026-11-16 |
 | 216. CSVSTATUS | 1/1 | Complete | 2026-11-18 |
-| 217. SERVERRULE | 0/? | In progress | - |
+| 217. SERVERRULE | 2/2 | Complete | 2026-11-18 |
 
 ### Requirement Coverage (v1.18)
 
@@ -579,12 +579,18 @@ Plans:
 ### Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server
 
 **Goal:** The MT5 server time rule is chosen per broker server, not once per worker. A server that keeps UTC (measured offset 0) gets a `utc` rule, so its derive passes the Phase 155.1 clock guard instead of ending `failed_final`. The rule stays configuration and is never written back from a reading (155.1 D-12). Trigger: the 2026-11-18 PROD readings after the first nightly derive with the guard. One MT5 key on one server (hash prefix 13a451cff998) measured +0h against the `us` rule's +2h on all six attempts, and its derive ended `failed_final`. The other nine MT5 keys, on three servers, match at +2h. Founder decision 2026-11-18 ("Book per-server rule").
+**Founder decisions 2026-11-18 (discuss):** Q1 "Railway map by hash (Recommended)": a new Railway variable `MT5_SERVER_TIME_RULES` maps each full server-label hash to `eu`, `us` or `utc`; `MT5_SERVER_TIME_RULE` stays the default for unmapped servers; a malformed map fails loud as a configuration fault; the map is set on both worker services BEFORE the 217 deploy (corrected same day). `utc` is fixed offset 0, stored as `configured_rule='fixed'`, so no migration.
+⛔ **FOUNDER OVERRIDE of 155.1 D-01 (Q2 "Write and alert", the non-recommended option), unmapped servers only:** a server with no map entry whose measured offset mismatches the default rule no longer refuses. The derive writes the reading, pages, and persists under the default rule. **Accepted cost:** mis-dated days can be written for such a server until it is mapped. A mapped server that mismatches its own rule, a malformed map and a reading-insert failure still refuse. Also recorded in `217-CONTEXT.md`.
 **Requirements**: TBD
 **Depends on:** Phase 155.1
-**Plans:** 0 plans
+**Plans:** 2/2 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 217 to break down)
+**Wave 1**
+- [x] 217-01-PLAN.md — per-server clock selection in the stdlib leaf and the derive; mapped mismatch refuses, unmapped mismatch writes and pages (Q2); malformed map faults pre-read; tests with neuter evidence
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 217-02-PLAN.md — runbooks document MT5_SERVER_TIME_RULES (grammar, utc, no-echo validation, failure modes, set on both worker services before deploy)
 
 ---
 
