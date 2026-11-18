@@ -61,7 +61,10 @@ def client(monkeypatch):
 
 
 def _teaser_post(client, validation: ValidationResult, session: str):
-    """POST the teaser flow with the adapter's validate() returning ``validation``."""
+    """POST the teaser flow with the adapter's validate() returning ``validation``.
+
+    Returns ``(response, supabase_mock)``.
+    """
     adapter = MagicMock()
     adapter.validate = AsyncMock(return_value=validation)
     fake = _build_supabase_mock(existing_row=None, insert_id=f"ver-{session}")
@@ -83,11 +86,14 @@ def _teaser_post(client, validation: ValidationResult, session: str):
             headers=_auth_headers(),
         )
     adapter.fetch_raw.assert_not_called()
-    return r
+    return r, fake
 
 
 def _csv_post(client, validation: ValidationResult, session: str):
-    """POST the synchronous CSV flow (the route csv_adapter's codes arrive on)."""
+    """POST the synchronous CSV flow (the route csv_adapter's codes arrive on).
+
+    Returns ``(response, supabase_mock)``.
+    """
     adapter = MagicMock()
     adapter.validate = AsyncMock(return_value=validation)
     fake = _build_supabase_mock(existing_row=None, insert_id=f"ver-{session}")
@@ -110,7 +116,7 @@ def _csv_post(client, validation: ValidationResult, session: str):
             headers=_auth_headers(),
         )
     adapter.fetch_raw.assert_not_called()
-    return r
+    return r, fake
 
 
 # (a) The five permanent codes: 403, recoverable false. ``valid`` mirrors what
@@ -126,7 +132,7 @@ def _csv_post(client, validation: ValidationResult, session: str):
     ],
 )
 def test_permanent_codes_answer_403_not_recoverable(client, error_code, valid):
-    r = _teaser_post(
+    r, _ = _teaser_post(
         client,
         ValidationResult(
             valid=valid,
@@ -146,7 +152,7 @@ def test_permanent_codes_answer_403_not_recoverable(client, error_code, valid):
 
 # (b) OUR OWN fallback: no error code, a write-capable key.
 def test_validation_unexpected_fallback_answers_403_not_recoverable(client):
-    r = _teaser_post(
+    r, _ = _teaser_post(
         client,
         ValidationResult(
             valid=True,
@@ -183,7 +189,7 @@ def test_validation_unexpected_fallback_answers_403_not_recoverable(client):
     ],
 )
 def test_csv_validator_verdict_answers_422_not_recoverable(client, error_code):
-    r = _csv_post(
+    r, fake = _csv_post(
         client,
         ValidationResult(
             valid=False,
@@ -199,6 +205,18 @@ def test_csv_validator_verdict_answers_422_not_recoverable(client, error_code):
     assert body["ok"] is False
     assert body["code"] == error_code
     assert body["recoverable"] is False
+    # The best-effort draft transition must still run BEFORE the 422 return, so
+    # the verdict is recorded on the verification row. Hoisting the 422 arm above
+    # the rpc would leave every assertion above green and drop this record.
+    draft_calls = [
+        c
+        for c in fake.rpc.call_args_list
+        if c.args
+        and c.args[0] == "transition_strategy_verification"
+        and c.args[1].get("p_new_status") == "draft"
+    ]
+    assert draft_calls, "the CSV rejection must transition the verification to draft"
+    assert draft_calls[0].args[1]["p_metadata"]["errors"][0]["code"] == error_code
 
 
 # (c2) The verdicts that stay 424 with recoverable true. Each row proves one
@@ -214,7 +232,7 @@ def test_csv_validator_verdict_answers_422_not_recoverable(client, error_code):
     ],
 )
 def test_retryable_verdicts_stay_424_recoverable(client, poster, error_code):
-    r = poster(
+    r, _ = poster(
         client,
         ValidationResult(
             valid=False,
