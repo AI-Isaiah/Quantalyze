@@ -200,6 +200,40 @@ item, not a knob. Two gateways would need two accounts and a routing rule as wel
    with the automatic-retries sentence). Take the reading on a weekday while a liquid
    symbol ticks; the procedure and the record format are pre-flight P6 of
    `docs/runbooks/navmtm-chain-move-go-live.md`.
+   Per-server rule (Phase 217, 2026-11-18): a broker server whose clock differs from that
+   default gets its own entry in `MT5_SERVER_TIME_RULES`, set on every Railway service that
+   runs the analytics worker (at the time of writing `quantalyze-analytics` and
+   `quantalyze-analytics-backfill`, with the same value on both); every server without an
+   entry keeps the default variables above. The grammar is comma-separated entries
+   `<64-hex>=eu|us|utc`: the key is the server's full 64-character lower-case hex
+   `server_label_hash`, each hash appears at most once, whitespace around `=` and around
+   entries is ignored, the value is case-insensitive, and an upper-case hex key is refused.
+   `utc` is a fixed offset of 0, so its readings show `configured_rule = fixed` with an
+   expected offset of 0. To read a key's full hash, run the marker query first, then the
+   read-only `SELECT DISTINCT server_label_hash FROM public.mt5_server_clock_readings WHERE
+   api_key_id = '<key uuid>'`, and never paste the result into tracked text (a hash prefix is
+   fine). Validate the candidate before it goes into Railway with a check that prints a count
+   and never the value, run from `analytics-service/` (it calls `parse_mt5_server_time_rules`;
+   `CANDIDATE` is a shell variable holding the proposed value):
+   ```bash
+   MT5_SERVER_TIME_RULES="$CANDIDATE" python3 -c \
+     "from services.mt5_server_clock import parse_mt5_server_time_rules as p; print(len(p()))"
+   ```
+   It prints the number of entries; a malformed value raises the closed
+   `MT5_SERVER_TIME_RULES must be comma-separated entries ...` error, which never carries any
+   part of the value. Failure behaviour: a malformed map fails EVERY MT5 derive before the
+   terminal is touched, as a transient configuration error: the derive retries, then goes
+   `failed_final` and stamps the strategy with the automatic-retries sentence. A server mapped
+   to a rule its live reading disagrees with refuses, as before. Per Q2, a dated founder
+   override of 155.1 D-01 (2026-11-18), a server WITHOUT an entry whose reading disagrees
+   with the default no longer refuses: it writes the `mismatch` reading, pages
+   `unmapped_clock_mismatch` and persists under the default, which can mis-date days until
+   the server is mapped. Order the work: set `MT5_SERVER_TIME_RULES` on both worker services
+   BEFORE deploying the worker that reads it (an older worker ignores an unknown variable, and
+   the new worker, which now persists an unmapped mismatch, must already find the entry for
+   the known UTC server, hash prefix `13a451cff998`, so that key never writes under the `us`
+   default), then confirm the next derive for that
+   key writes a `match` reading under `configured_rule = fixed`.
 4. **⛔ TURN OFF the terminal's external-Python trade disable — every MT5 validation
    fails while it is on (153.3 / D-31).** In the same VNC session, open
    *Tools → Options → Expert Advisors* and clear the option **"Disable automatic trading

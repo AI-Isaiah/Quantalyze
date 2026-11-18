@@ -37,6 +37,7 @@ from services.mt5_server_clock import (
     MT5_SERVER_CLOCK_UNMEASURED_REASONS,
     MT5_SERVER_CLOCK_VERDICTS,
     assess_server_clock_reading,
+    fixed_server_clock,
     server_clock_for_rule,
 )
 from services.mt5_server_clock_reading import (
@@ -154,3 +155,33 @@ def test_the_verdicts_reasons_and_rules_are_each_admitted_by_a_named_check() -> 
         MT5_SERVER_CLOCK_UNMEASURED_REASONS
     )
     assert _constraint_literals(text, "mt5_server_clock_readings_rule_chk") == set(_RULES)
+
+
+def test_a_fixed_zero_clock_row_fits_the_existing_checks() -> None:
+    """Phase 217 R1: a server mapped to ``utc`` is the fixed offset 0, so its reading row
+    carries ``configured_rule = 'fixed'`` and ``expected_offset_s = 0``. Both are already
+    admitted by the applied migration (the rule CHECK lists ``fixed``), so Phase 217 needs no
+    migration: this pins that the row stays inside the table's key set and rule CHECK."""
+    clock = fixed_server_clock(0)
+    now = datetime(2026, 10, 28, 12, 0, 0, tzinfo=timezone.utc)
+    now_ms = int(now.timestamp() * 1000)
+    newest = now_ms - 100
+    row = build_mt5_server_clock_reading_row(
+        api_key_id="key-1",
+        job_id="job-1",
+        read_at=now,
+        clock=clock,
+        assessment=assess_server_clock_reading(
+            clock, newest_tick_ms=newest, utc_now_ms=now_ms
+        ),
+        newest_tick_wall_ms=newest,
+        symbols_visible=14,
+        symbols_answered=14,
+        server="Some-Server",
+    )
+    text = _migration_text()
+    assert set(row) == _columns(text) - _DEFAULTED_COLUMNS
+    assert row["configured_rule"] == "fixed"
+    assert row["configured_rule"] in _constraint_literals(text, "mt5_server_clock_readings_rule_chk")
+    assert row["expected_offset_s"] == 0
+    assert row["verdict"] == "match"

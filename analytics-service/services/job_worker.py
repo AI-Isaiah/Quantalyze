@@ -7168,15 +7168,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 Mt5ServerClockMismatchError,
                 assess_server_clock_reading,
                 format_offset_hours,
+                parse_mt5_server_time_rules,
                 resolve_mt5_server_clock,
+                select_mt5_server_clock,
             )
             from services.mt5_server_clock_reading import (
                 MT5_SERVER_CLOCK_READINGS_TABLE,
                 build_mt5_server_clock_reading_row,
+                server_label_hash,
             )
 
             try:
-                _mt5_clock = resolve_mt5_server_clock()
+                # Phase 217 SERVERRULE: the DEFAULT clock and the per-server map are both
+                # configuration, so both fault here, before any terminal call. The clock
+                # for THIS account server is chosen after the read (`_mt5_selection`).
+                _mt5_default_clock = resolve_mt5_server_clock()
+                _mt5_server_rules = parse_mt5_server_time_rules()
             except Mt5ServerClockConfigError as _clock_exc:
                 logger.error(
                     "derive_broker_dailies: mt5 server clock configuration fault "
@@ -7634,7 +7641,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
             # ⭐ Phase 155.1 SERVERCLOCK (MT5-06) / D-01, D-06, D-10, D-11, D-12 — the live
             # server-clock reading the read helper took inside the PRE/POST bracket, assessed
-            # against the ONE `_mt5_clock` resolved above (never resolved again), persisted
+            # against the ONE `_mt5_clock` selected for this account server (Phase 217: the
+            # default resolved above or the server's map entry, chosen once below), persisted
             # write-once, and only then decided on. It sits AFTER the lease block and BEFORE
             # every write below (the currency stamps, the nav mark, the dailies), so a
             # mismatch refuses before anything is written.
@@ -7647,8 +7655,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # needs. No PGRST204 tolerance here.
             #
             # ⛔ The server NAME is never logged: the row carries its hash only (D-17). The
-            # reading is never written back as configuration (D-12): `MT5_SERVER_TIME_RULE`
-            # stays the only carrier.
+            # reading is never written back as configuration (D-12): the rule comes from the
+            # default variable or from a per-server map entry (`MT5_SERVER_TIME_RULES`) and
+            # from nothing else.
+            #
+            # Phase 217 SERVERRULE (Q1): the clock is chosen per account server, from the hash
+            # of the PRE `account_info().server` (the same function the reading row hashes
+            # with, so the chosen rule and the row's hash are equal by construction). A blank
+            # or missing server is unmapped. This is the ONLY binding of `_mt5_clock`.
+            _mt5_server_hash = server_label_hash(_mt5_info.get("server"))
+            _mt5_selection = select_mt5_server_clock(
+                _mt5_default_clock, _mt5_server_rules, _mt5_server_hash
+            )
+            _mt5_clock = _mt5_selection.clock
             _mt5_tick = _mt5_read.tick
             _mt5_clock_assessment = assess_server_clock_reading(
                 _mt5_clock,
@@ -7742,40 +7761,72 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     expected_offset_s=_mt5_clock_assessment.expected_offset_s or 0,
                     measured_offset_s=_mt5_clock_assessment.measured_offset_s or 0,
                 )
-                logger.error(
-                    "derive_broker_dailies: mt5 server clock does not match the "
-                    "configured rule (job=%s api_key_id=%s arm=server_clock_mismatch "
-                    "rule=%s expected=%s measured=%s) — refusing before any write",
-                    job.get("id"),
-                    ctx.key_row["id"],
-                    _mt5_clock.rule,
-                    format_offset_hours(_mt5_clock_mismatch.expected_offset_s),
-                    format_offset_hours(_mt5_clock_mismatch.measured_offset_s),
+                _mt5_clock_detail = (
+                    f"rule={_mt5_clock.rule} "
+                    f"expected={format_offset_hours(_mt5_clock_mismatch.expected_offset_s)} "
+                    f"measured={format_offset_hours(_mt5_clock_mismatch.measured_offset_s)}"
                 )
-                # D-01 / D-11: a mismatch is never silent. Awaited on the event loop (never
-                # inside `to_thread`); `page` never raises and windows one capture per
-                # (source, cause, event) per hour, so three keys mismatching in one night page
-                # once and retries do not flood. The detail is the rule id and two offsets in
-                # HOURS only: `scrub_alert_detail` turns any 5+ digit run (10800) into
-                # `<digits>`, and no server value, hash or login belongs in an alert (D-17).
-                await ops_alert.page(
-                    "mt5_server_clock",
-                    "clock_mismatch",
-                    event="outage",
-                    detail=(
-                        f"rule={_mt5_clock.rule} "
-                        f"expected={format_offset_hours(_mt5_clock_mismatch.expected_offset_s)} "
-                        f"measured={format_offset_hours(_mt5_clock_mismatch.measured_offset_s)}"
-                    ),
-                    # Windowed per (source, cause, event) per hour: the page names the first
-                    # key only, the ERROR log above names every key (D-17: a uuid).
-                    extra_tags={"first_api_key_id": str(ctx.key_row["id"])},
-                )
-                return DispatchResult(
-                    outcome=DispatchOutcome.FAILED,
-                    error_message=f"derive_broker_dailies: {_mt5_clock_mismatch}",
-                    error_kind="transient",
-                )
+                if not _mt5_selection.mapped:
+                    # ⭐ Phase 217 SERVERRULE Q2 — the dated FOUNDER OVERRIDE of 155.1 D-01,
+                    # for an UNMAPPED server only (a server the map does not name, so it is
+                    # read under the default rule). The reading is already written above and
+                    # one page is raised, but the derive CONTINUES under the default rule
+                    # (no return): a refusal would end such a server `failed_final` until an
+                    # operator maps it. ⚠️ Accepted cost: mis-dated days can be written for it
+                    # until it is mapped; the `mismatch` reading and this page are the
+                    # evidence. A MAPPED server below still refuses, even when its map entry
+                    # equals the default. The arm name differs from the mapped one on purpose
+                    # (a filter on `arm=server_clock_mismatch` must keep meaning "refused").
+                    # Never the server name or its hash (D-17).
+                    logger.error(
+                        "derive_broker_dailies: mt5 server clock does not match the "
+                        "default rule for a server with no map entry (job=%s api_key_id=%s "
+                        "arm=server_clock_unmapped_drift rule=%s expected=%s measured=%s) — "
+                        "continuing under the default rule",
+                        job.get("id"),
+                        ctx.key_row["id"],
+                        _mt5_clock.rule,
+                        format_offset_hours(_mt5_clock_mismatch.expected_offset_s),
+                        format_offset_hours(_mt5_clock_mismatch.measured_offset_s),
+                    )
+                    await ops_alert.page(
+                        "mt5_server_clock",
+                        "unmapped_clock_mismatch",
+                        event="outage",
+                        detail=_mt5_clock_detail,
+                        extra_tags={"first_api_key_id": str(ctx.key_row["id"])},
+                    )
+                else:
+                    logger.error(
+                        "derive_broker_dailies: mt5 server clock does not match the "
+                        "configured rule (job=%s api_key_id=%s arm=server_clock_mismatch "
+                        "rule=%s expected=%s measured=%s) — refusing before any write",
+                        job.get("id"),
+                        ctx.key_row["id"],
+                        _mt5_clock.rule,
+                        format_offset_hours(_mt5_clock_mismatch.expected_offset_s),
+                        format_offset_hours(_mt5_clock_mismatch.measured_offset_s),
+                    )
+                    # D-01 / D-11: a mismatch is never silent. Awaited on the event loop (never
+                    # inside `to_thread`); `page` never raises and windows one capture per
+                    # (source, cause, event) per hour, so three keys mismatching in one night page
+                    # once and retries do not flood. The detail is the rule id and two offsets in
+                    # HOURS only: `scrub_alert_detail` turns any 5+ digit run (10800) into
+                    # `<digits>`, and no server value, hash or login belongs in an alert (D-17).
+                    await ops_alert.page(
+                        "mt5_server_clock",
+                        "clock_mismatch",
+                        event="outage",
+                        detail=_mt5_clock_detail,
+                        # Windowed per (source, cause, event) per hour: the page names the first
+                        # key only, the ERROR log above names every key (D-17: a uuid).
+                        extra_tags={"first_api_key_id": str(ctx.key_row["id"])},
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=f"derive_broker_dailies: {_mt5_clock_mismatch}",
+                        error_kind="transient",
+                    )
 
             # ⭐ 164.6.6.2 / D-01, D-04 — the account's unit, from the PRE ``account_info`` the
             # read already returned (no second ``account_info()``: the session rosters must not

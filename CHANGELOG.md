@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.133.52.0] - 2026-11-18 — Phase 217 SERVERRULE: the MT5 server time rule is chosen per broker server
+
+The worker now picks the MT5 server clock per broker server instead of once per worker. A server that keeps UTC can be given a `utc` rule, so its derive passes the Phase 155.1 clock guard instead of ending `failed_final`. The rule is still configuration and is never written back from a reading (155.1 D-12). Founder decisions 2026-11-18: Q1 "Railway map by hash" and Q2 "Write and alert".
+
+### Added
+- **`MT5_SERVER_TIME_RULES`, a per-server map** (`analytics-service/services/mt5_server_clock.py`). The value is comma-separated `<64-hex server_label_hash>=eu|us|utc` entries. `MT5_SERVER_TIME_RULE` / `MT5_SERVER_UTC_OFFSET_S` stay the default for every server the map does not name.
+  - `parse_mt5_server_time_rules` is strict. A key must be exactly 64 lower-case hex characters, the value must be `eu`, `us` or `utc` (case-insensitive), and each hash may appear only once. Whitespace around entries and around `=` is ignored. Unset or empty gives an empty map.
+  - Any fault raises one closed, value-free message, the fifth entry of `MT5_SERVER_CLOCK_CONFIG_MESSAGES`. A malformed map never degrades to an empty one.
+  - `utc` is the fixed offset 0. It is a map value only: `MT5_SERVER_TIME_RULE=utc` is still an unknown-rule fault.
+  - `Mt5ServerClockSelection` and `select_mt5_server_clock` return the chosen clock and a `mapped` flag. The flag is returned, never derived by comparing the clock with the default.
+- **A new ops_alert cause, `unmapped_clock_mismatch`**, on the existing `mt5_server_clock` source, with its own hourly window.
+
+### Changed
+- **`run_derive_broker_dailies_job` chooses the clock per account server** (`analytics-service/services/job_worker.py`).
+  - The default clock and the map are both parsed in the one pre-read `try`, so every configuration fault still fails the derive transient before any terminal call, with the same `arm=server_clock_config` log.
+  - After the read, the clock is selected once from `server_label_hash` of the PRE `account_info().server`. That is the same value the reading row stores, so the rule chosen and the row's hash are equal by construction. A blank or missing server is unmapped. `_mt5_clock` is bound once, and every offset site uses it.
+- **⛔ Founder override of 155.1 D-01 (Q2 "Write and alert", 2026-11-18), for UNMAPPED servers only.** A server with no map entry whose reading mismatches the default rule no longer refuses. The reading row is written as before (verdict `mismatch`). The derive logs `arm=server_clock_unmapped_drift`, pages `unmapped_clock_mismatch` and continues under the default rule. **Accepted cost:** days can be mis-dated for such a server until it is mapped.
+- **What still refuses, unchanged:**
+  - a MAPPED server whose reading mismatches its own rule (`arm=server_clock_mismatch`, `clock_mismatch` page, transient), including a map entry equal to the default;
+  - a malformed map and every default configuration fault, before any terminal call;
+  - a failed reading insert, for every verdict.
+- **Runbooks:**
+  - `docs/runbooks/mt5-go-live.md` step 3 documents the variable, its grammar, `utc` as fixed 0 (readings show `configured_rule = fixed`, expected 0), the read-only hash lookup (marker query first), a validation command that prints a count and never the value, every failure mode including Q2 and its cost, and the order: set the map on both analytics worker services BEFORE deploying.
+  - `docs/runbooks/navmtm-chain-move-go-live.md` pre-flight P6 now reads the map on both services, and adds an abort when the map is malformed or differs between them.
+- Stale comments and docstrings that said `MT5_SERVER_TIME_RULE` is the only carrier are corrected in `job_worker.py`, `mt5_server_clock_reading.py` (`server_label_hash`) and `mt5_deals.py` (`deal_utc_day`).
+
+### Tests
+- New and adapted tests in `tests/test_mt5_server_clock.py`, `tests/test_mt5_derive_branch.py` and `tests/test_mt5_server_clock_readings_parity.py`:
+  - the map grammar and fault table, with the closed message and no echo of the value;
+  - a utc-mapped server under a `us` default writes a fixed-zero `match` reading and persists;
+  - the mapped refusal, parametrized with a map equal to the default and one different from it;
+  - an unmapped mismatch writes the reading first, persists, pages `unmapped_clock_mismatch` once and never pages `clock_mismatch`;
+  - a map entry for another server does not rescue a mismatch;
+  - server-name normalisation before the lookup, and the blank server staying unmapped;
+  - a malformed map fails transient with no terminal read;
+  - no server name or hash in any log, alert or error;
+  - the one-clock-per-derive AST pin, adapted to the parse/read/select order.
+- `tests/conftest.py` clears `MT5_SERVER_TIME_RULES` per test.
+- **Can-fail evidence.** Four neuters, each restored from a byte backup and checked with `cmp`, turned their cases RED: the selection, the mapped refusal, the unmapped continuation, and the malformed map (duplicate check removed, then the parser degraded to an empty map).
+- Full analytics-service suite: 15120 passed, 93 skipped (+42 passed, skips unchanged), coverage 94.67%. mypy strict is clean.
+
+### Notes
+- **No migration.** The readings table's `configured_rule` CHECK already admits `fixed`. The applied migration's column COMMENT, which describes a worker-wide rule, is kept as lineage.
+- **Operator step before merge:** set `MT5_SERVER_TIME_RULES` on both analytics worker services, with the full hash of the server prefixed `13a451cff998` mapped to `utc`. After deploy, confirm that key's next derive writes a `match` reading with `configured_rule = fixed`.
+- Review: gsd-code-reviewer and the silent-failure-hunter found nothing at MEDIUM or above, so there was no fixer round. LOW and INFO findings are recorded in the phase REVIEW only. Verification passed 7/7, and security reports 10/10 threats closed with `threats_open: 0`.
+- `TODOS.md` `202-MT5-CLOCK-LEAD-01` is not closed by this phase and stays open. No `TODOS.md` entry is closed, so none is deleted.
+- VERSION and package.json move from 0.133.51.1 to 0.133.52.0.
+
 ## [0.133.51.1] - 2026-11-18 — records: close 216 CSVSTATUS
 
 Records PR for Phase 216, whose code is already on `main` as #1286 (v0.133.51.0). It carries the phase artifacts and closes the phase. No source, test or migration change.

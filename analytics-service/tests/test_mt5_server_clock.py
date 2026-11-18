@@ -30,7 +30,9 @@ from services.mt5_server_clock import (
     Mt5ServerClock,
     Mt5ServerClockConfigError,
     fixed_server_clock,
+    parse_mt5_server_time_rules,
     resolve_mt5_server_clock,
+    select_mt5_server_clock,
     server_clock_for_rule,
 )
 from services.nav_marks_apply import AppliedMark, apply_marks
@@ -349,6 +351,7 @@ def test_a_fixed_clock_returns_its_offset_at_every_instant_without_a_year() -> N
 
 _RULE = "MT5_SERVER_TIME_RULE"
 _OFFSET = "MT5_SERVER_UTC_OFFSET_S"
+_RULES = "MT5_SERVER_TIME_RULES"
 
 
 @pytest.mark.parametrize(
@@ -388,6 +391,9 @@ _FAULTS: list[tuple[dict[str, str], str | None]] = [
     ({_OFFSET: "1_000"}, "1_000"),
     ({_OFFSET: "+-5"}, "+-5"),
     ({_OFFSET: "+"}, None),
+    # Phase 217 P5: `utc` is a map VALUE only. As the default rule it stays an unknown id,
+    # so the default's closed set (and its table above) did not widen.
+    ({_RULE: "utc"}, "utc"),
 ]
 
 
@@ -407,15 +413,19 @@ def test_the_resolver_fails_loud_with_a_closed_value_free_message(
 
 
 def test_each_configuration_fault_has_its_own_message() -> None:
-    """Four faults (neither set, unknown rule id, both set, malformed integer), four
-    distinct texts, and the table above reaches every one of them."""
-    assert len(MT5_SERVER_CLOCK_CONFIG_MESSAGES) == 4
-    assert len(set(MT5_SERVER_CLOCK_CONFIG_MESSAGES)) == 4
+    """Five faults (neither set, unknown rule id, both set, malformed integer, malformed
+    per-server map), five distinct texts, and the tables reach every one of them."""
+    assert len(MT5_SERVER_CLOCK_CONFIG_MESSAGES) == 5
+    assert len(set(MT5_SERVER_CLOCK_CONFIG_MESSAGES)) == 5
     seen: set[str] = set()
     for environ, _planted in _FAULTS:
         with pytest.raises(Mt5ServerClockConfigError) as raised:
             resolve_mt5_server_clock(environ)
         seen.add(str(raised.value))
+    # Phase 217: the map parser is the only producer of the fifth text.
+    with pytest.raises(Mt5ServerClockConfigError) as raised:
+        parse_mt5_server_time_rules({_RULES: "no-equals-sign"})
+    seen.add(str(raised.value))
     assert seen == set(MT5_SERVER_CLOCK_CONFIG_MESSAGES)
     for message in MT5_SERVER_CLOCK_CONFIG_MESSAGES:
         assert message.endswith("— fail loud")
@@ -490,7 +500,7 @@ _CLOCK_RELPATH = "services/mt5_server_clock.py"
 # The files the CI mypy line covers: three packages plus four top-level modules.
 _SCANNED_PACKAGES = ("services", "routers", "models")
 _SCANNED_MODULES = ("main.py", "main_worker.py", "main_worker_healthz.py", "sentry_init.py")
-_SETTING_NAMES = frozenset({_OFFSET, _RULE})
+_SETTING_NAMES = frozenset({_OFFSET, _RULE, _RULES})
 # Calls that carry the broker's offset into the deal arithmetic.
 _OFFSET_SITE_CALLS = frozenset(
     {
@@ -598,7 +608,11 @@ def test_single_reader() -> None:
         elif constants:
             offenders.append(f"{path.relative_to(_ANALYTICS_ROOT)}: {sorted(set(constants))}")
     # Positive control: the predicate still matches the one file that is allowed to hold them.
-    assert clock_constants.count(_OFFSET) >= 1 and clock_constants.count(_RULE) >= 1, (
+    assert (
+        clock_constants.count(_OFFSET) >= 1
+        and clock_constants.count(_RULE) >= 1
+        and clock_constants.count(_RULES) >= 1
+    ), (
         f"the predicate no longer finds the settings in {_CLOCK_RELPATH}: {clock_constants}"
     )
     assert offenders == [], (
@@ -607,15 +621,172 @@ def test_single_reader() -> None:
 
 
 def test_one_clock_per_derive() -> None:
-    """Pitfall 4: ``run_derive_broker_dailies_job`` resolves the broker clock exactly once,
-    binds it to ``_mt5_clock``, and every one of the six offset-carrying calls uses that
-    name, so no two sites of one derive can see different clocks."""
+    """Pitfall 4 (Phase 175), generalised by Phase 217: ``run_derive_broker_dailies_job``
+    resolves the DEFAULT clock once, parses the per-server map once, SELECTS one clock for
+    the account server once after the read, binds it to ``_mt5_clock`` exactly once, and the
+    assessment, the reading row and every one of the six offset-carrying calls use that name,
+    so no two sites of one derive can see different clocks."""
     path = _ANALYTICS_ROOT / "services/job_worker.py"
     scope = _function(ast.parse(path.read_text(), filename=str(path)), "run_derive_broker_dailies_job")
 
-    assert len(_calls_to(scope, {"resolve_mt5_server_clock"})) == 1
-    assert _resolve_bound_to(scope, "_mt5_clock") == 1
+    resolves = _calls_to(scope, {"resolve_mt5_server_clock"})
+    parses = _calls_to(scope, {"parse_mt5_server_time_rules"})
+    selects = _calls_to(scope, {"select_mt5_server_clock"})
+    assert len(resolves) == 1 and len(parses) == 1 and len(selects) == 1
+    assert _resolve_bound_to(scope, "_mt5_default_clock") == 1
+    assert _resolve_bound_to(scope, "_mt5_clock") == 0
+
+    # `_mt5_clock` has exactly one binding, and it is the selection's clock.
+    clock_assigns = [
+        node
+        for node in ast.walk(scope)
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+        and any(
+            isinstance(target, ast.Name) and target.id == "_mt5_clock"
+            for target in (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            )
+        )
+    ]
+    assert len(clock_assigns) == 1, f"{len(clock_assigns)} bindings of _mt5_clock"
+
+    # The assessment and the reading row both receive the Name `_mt5_clock`.
+    for name in ("assess_server_clock_reading", "build_mt5_server_clock_reading_row"):
+        (call,) = _calls_to(scope, {name})
+        passed = [kw.value for kw in call.keywords if kw.arg == "clock"] or call.args[:1]
+        assert len(passed) == 1 and isinstance(passed[0], ast.Name), name
+        assert passed[0].id == "_mt5_clock", f"{name} receives {ast.dump(passed[0])}"
+
+    # The default clock is read only as an argument of the select call.
+    default_loads = [
+        node
+        for node in ast.walk(scope)
+        if isinstance(node, ast.Name)
+        and node.id == "_mt5_default_clock"
+        and isinstance(node.ctx, ast.Load)
+    ]
+    select_args = {id(arg) for arg in selects[0].args}
+    assert len(default_loads) == 1 and id(default_loads[0]) in select_args
+
     sites = _calls_to(scope, _OFFSET_SITE_CALLS)
     assert len(sites) == 6, f"{len(sites)} offset-carrying calls: {[_call_name(c) for c in sites]}"
     stray = [_call_name(c) for c in sites if not _passes_clock(c, "_mt5_clock")]
     assert stray == [], f"offset sites that do not pass _mt5_clock: {stray}"
+
+    # Ordering: configuration first, then the terminal read (the ledger Name handed to
+    # `asyncio.to_thread`, which is a Name and not a Call), then the selection, then the
+    # first site that uses the offset.
+    ledger_reads = [
+        node.lineno
+        for node in ast.walk(scope)
+        if isinstance(node, ast.Name) and node.id == "read_mt5_deal_ledger"
+    ]
+    assert ledger_reads, "the terminal read is no longer found: the ordering pin is vacuous"
+    assert max(resolves[0].lineno, parses[0].lineno) < min(ledger_reads)
+    assert min(ledger_reads) < selects[0].lineno < min(c.lineno for c in sites)
+
+
+# ---------------------------------------------------------------------------
+# Phase 217 SERVERRULE - the per-server map (tracer)
+# ---------------------------------------------------------------------------
+
+# Hand-typed hashes: never computed with the code under test.
+_H1 = "13a451cff998" + "0" * 52
+_H2 = "ab" * 32
+
+
+def test_a_rules_map_entry_selects_its_clock_by_full_hash() -> None:
+    """Q1 + utc-is-fixed-0: the map is keyed by the FULL hash; ``utc`` is the fixed offset
+    0 (stored as rule ``fixed``) and ``eu`` is case-insensitive. A hash the map does not
+    name takes the default, unmapped."""
+    rules = parse_mt5_server_time_rules({_RULES: f"{_H1}=utc,{_H2}=EU"})
+    assert rules == {_H1: fixed_server_clock(0), _H2: server_clock_for_rule("eu")}
+    default = server_clock_for_rule("us")
+    hit = select_mt5_server_clock(default, rules, _H1)
+    assert (hit.clock, hit.mapped) == (fixed_server_clock(0), True)
+    assert hit.clock.rule == "fixed"
+    miss = select_mt5_server_clock(default, rules, "c" * 64)
+    assert (miss.clock, miss.mapped) == (default, False)
+
+
+def test_the_rules_map_grammar_strips_whitespace_and_ignores_empty_parts() -> None:
+    """P1 (decided and pinned, A3): whitespace around an entry and around the ``=`` is
+    stripped, the rule is case-insensitive, empty entries are skipped, and an unset, empty or
+    all-blank variable is the empty map (the default clock then serves every server)."""
+    assert parse_mt5_server_time_rules({_RULES: f"  {_H1} = UTC , ,{_H2}=eu  "}) == {
+        _H1: fixed_server_clock(0),
+        _H2: server_clock_for_rule("eu"),
+    }
+    assert parse_mt5_server_time_rules({_RULES: f",,{_H1}=us,"}) == {
+        _H1: server_clock_for_rule("us")
+    }
+    for blank in ({}, {_RULES: ""}, {_RULES: "   "}, {_RULES: " , ,"}):
+        assert parse_mt5_server_time_rules(blank) == {}
+
+
+def test_the_rules_map_reads_the_process_environment_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_RULES, f"{_H1}=utc")
+    assert parse_mt5_server_time_rules() == {_H1: fixed_server_clock(0)}
+    monkeypatch.delenv(_RULES)
+    assert parse_mt5_server_time_rules() == {}
+
+
+_H1_UPPER = _H1.upper()  # "13A451CFF998" + zeros: still 64 hex digits, wrong case
+
+# (environment, a fragment of the value that no message may echo). Hand-typed keys.
+_RULES_FAULTS = [
+    pytest.param({_RULES: "no-equals-sign"}, "no-equals-sign", id="no-equals"),
+    pytest.param({_RULES: _H1}, _H1, id="key-only"),
+    pytest.param({_RULES: f"{_H1[:63]}=us"}, _H1[:63], id="key-63-chars"),
+    pytest.param({_RULES: f"{_H1}0=us"}, f"{_H1}0", id="key-65-chars"),
+    pytest.param({_RULES: f"{_H1_UPPER}=us"}, _H1_UPPER, id="uppercase-hex-key"),
+    pytest.param({_RULES: f"{'g' * 64}=us"}, "g" * 64, id="non-hex-character"),
+    pytest.param({_RULES: f"{'é' * 64}=us"}, "é" * 64, id="non-ascii-key"),
+    pytest.param({_RULES: "=us"}, "=us", id="empty-key"),
+    pytest.param({_RULES: f"{_H1}=fixed"}, "fixed", id="value-fixed"),
+    pytest.param({_RULES: f"{_H1}=summer"}, "summer", id="value-summer"),
+    pytest.param({_RULES: f"{_H1}="}, _H1, id="value-empty"),
+    pytest.param({_RULES: f"{_H1}=us,{_H1}=us"}, _H1, id="duplicate-same-value"),
+    pytest.param({_RULES: f"{_H1}=us,{_H1}=eu"}, _H1, id="duplicate-different-value"),
+    pytest.param({_RULES: f"{_H1}=us=eu"}, "us=eu", id="two-equals-signs"),
+    pytest.param({_RULES: f"{_H2}=us,oops"}, "oops", id="good-entry-then-bad-entry"),
+]
+
+
+@pytest.mark.parametrize(("environ", "planted"), _RULES_FAULTS)
+def test_a_malformed_rules_map_fails_loud_with_a_closed_value_free_message(
+    environ: dict[str, str], planted: str
+) -> None:
+    """P2 / T-217-01 / T-217-02: every malformed map raises the ONE closed text, which names
+    the variable and never any part of the value. A bad map must never degrade to an empty
+    map (that would date a mapped server under the wrong rule)."""
+    with pytest.raises(Mt5ServerClockConfigError) as raised:
+        parse_mt5_server_time_rules(environ)
+    message = str(raised.value)
+    assert message in MT5_SERVER_CLOCK_CONFIG_MESSAGES
+    assert _RULES in message
+    assert planted not in message
+
+
+def test_selection_flags_a_mapping_even_when_it_equals_the_default() -> None:
+    """P4 / T-217-05: ``mapped`` is the returned flag, never ``clock != default``. A server
+    mapped to the same rule as the default is still mapped, and that is what keeps its
+    mismatch a refusal."""
+    default = server_clock_for_rule("us")
+    rules = {_H1: server_clock_for_rule("us")}
+    hit = select_mt5_server_clock(default, rules, _H1)
+    assert hit.mapped is True and hit.clock == default
+    assert select_mt5_server_clock(default, rules, _H2).mapped is False
+
+
+def test_a_missing_server_hash_is_never_looked_up() -> None:
+    """P4: a blank or missing server has no hash; it takes the default, unmapped, even when
+    the map is non-empty and even when the map would hold a ``None`` key."""
+    default = server_clock_for_rule("eu")
+    rules: dict[str, Mt5ServerClock] = {_H1: fixed_server_clock(0)}
+    miss = select_mt5_server_clock(default, rules, None)
+    assert (miss.clock, miss.mapped) == (default, False)
+    sneaky: dict[str, Mt5ServerClock] = {None: fixed_server_clock(0)}  # type: ignore[dict-item]
+    assert select_mt5_server_clock(default, sneaky, None).mapped is False

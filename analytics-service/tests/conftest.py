@@ -448,6 +448,8 @@ def _mt5_known_servers_admit_the_suites_synthetic_servers(monkeypatch):
 def _mt5_server_clock_defaults_to_the_fixed_zero_form(monkeypatch):
     monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "0")
     monkeypatch.delenv("MT5_SERVER_TIME_RULE", raising=False)
+    # Phase 217: a shell or CI per-server map must not leak into the MT5 tests.
+    monkeypatch.delenv("MT5_SERVER_TIME_RULES", raising=False)
 
 
 # Phase 134 (smoothed_mtm kill-switch): the v1.14 smoothed THIRD pass ships DARK
