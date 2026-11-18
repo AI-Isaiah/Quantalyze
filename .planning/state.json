@@ -71,13 +71,18 @@
     {
       "number": "216",
       "name": "CSVSTATUS",
-      "status": "pending"
+      "status": "complete"
+    },
+    {
+      "number": "217",
+      "name": "SERVERRULE",
+      "status": "in_progress"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (155.1 shipped, UAT items 1-4 pass, 5-6 in the founder's session; 155.2 and 157 wait for the founder's trading-day session; 216 CSVSTATUS in progress; 217 SERVERRULE booked 2026-11-18)",
-    "reason": "Phases 155 and 207-215 complete; 155.1 shipped, UAT pending; 10 of 14"
+    "label": "Advance to the next step (155.1 shipped, UAT items 1-4 pass, 5-6 in the founder's session; 155.2 and 157 wait for the founder's trading-day session; 217 SERVERRULE in progress)",
+    "reason": "Phases 155 and 207-216 complete; 155.1 shipped, UAT pending; 11 of 15"
   },
-  "updated_at": "2026-11-18T14:00:00.000Z"
+  "updated_at": "2026-11-18T14:45:18.357Z"
 }
