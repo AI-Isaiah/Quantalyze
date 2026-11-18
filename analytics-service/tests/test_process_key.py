@@ -4899,10 +4899,11 @@ def test_sync_pipeline_rejection_also_forwards_the_breakdown(client):
             headers=_auth_headers(),
         )
 
-    # 424 exactly; the per-arm statuses are pinned in test_process_key_scope_rejection_statuses.py.
-    assert r.status_code == 424, r.text
+    # 422 exactly; the per-arm statuses are pinned in test_process_key_scope_rejection_statuses.py.
+    assert r.status_code == 422, r.text
     body = r.json()
     assert body["ok"] is False
+    assert body["recoverable"] is False
     rows = body["debug_context"]["pandera_errors"]
     assert rows == [
         {

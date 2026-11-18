@@ -162,10 +162,11 @@ def test_validation_unexpected_fallback_answers_403_not_recoverable(client):
     assert body["recoverable"] is False
 
 
-# (c) The CSV rule family: 424 with recoverable true TODAY. This is the arm the
-# module docstring's follow-up names. ``COERCE_DTYPE('DATETIME64[NS]')`` is the
-# argument-carrying form pandera's coerce_dtype failure produces after
-# ``.upper()``.
+# (c) A CSV validator verdict: 422 with recoverable false (Phase 216 contract).
+# It is a deterministic input fault: an identical retry of the same bytes and
+# ``fmt`` fails identically, so it is the CALLER class at 422 and not retryable.
+# ``COERCE_DTYPE('DATETIME64[NS]')`` is the argument-carrying form pandera's
+# coerce_dtype failure produces after ``.upper()``.
 @pytest.mark.parametrize(
     "error_code",
     [
@@ -175,12 +176,11 @@ def test_validation_unexpected_fallback_answers_403_not_recoverable(client):
         "CSV_VALIDATION_FAILED",
         "DAILY_RETURN_LOWER_BOUND",
         "COERCE_DTYPE('DATETIME64[NS]')",
+        "CSV_TOO_LARGE",
+        "CSV_FORMAT_UNSUPPORTED",
     ],
 )
-def test_csv_rule_family_answers_424_recoverable_true_today(client, error_code):
-    # TODAY'S BEHAVIOUR, pinned, not endorsed: a retry of the same bytes cannot
-    # succeed, so ``recoverable`` true is wrong for a malformed CSV. See the
-    # module docstring: the fix is a separate phase, and it updates this case.
+def test_csv_validator_verdict_answers_422_not_recoverable(client, error_code):
     r = _csv_post(
         client,
         ValidationResult(
@@ -192,11 +192,11 @@ def test_csv_rule_family_answers_424_recoverable_true_today(client, error_code):
         ),
         "csv-" + "".join(c for c in error_code if c.isalnum()),
     )
-    assert r.status_code == 424, r.text
+    assert r.status_code == 422, r.text
     body = r.json()
     assert body["ok"] is False
     assert body["code"] == error_code
-    assert body["recoverable"] is True
+    assert body["recoverable"] is False
 
 
 # (d) The permanent set is exactly the five literals above, so a new permanent
