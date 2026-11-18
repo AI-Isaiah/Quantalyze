@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.133.51.0] - 2026-11-18 — Phase 216 CSVSTATUS: a malformed CSV upload answers 422 recoverable false
+
+`/process-key`'s synchronous rejection gate stops telling a caller that a retry of the same CSV file can succeed. This is the follow-up the founder booked on 2026-11-15 (215-CONTEXT, Option A "Pin today, book fix"), and it re-points the per-arm status pins Phase 215 set on the gate.
+
+### Changed
+- **A CSV validator verdict now answers 422 with `recoverable: false`, not 424 with `recoverable: true`** (`analytics-service/routers/process_key.py`, a new arm in the `_scope_rejected` block).
+  - The arm fires when `body.source == "csv"` and the adapter set a code other than `CSV_UPSTREAM_FAIL`. That covers the upper-cased rule family, `CSV_VALIDATION_FAILED`, `CSV_TOO_LARGE` and `CSV_FORMAT_UNSUPPORTED`. Each is a deterministic input fault that fails again on an identical retry, which is STATUS_CONTRACT's CALLER class.
+  - `recoverable=False` is passed explicitly, because `_envelope_error`'s derivation would return True for these codes.
+  - The envelope is unchanged otherwise, and the projected `pandera_errors` rows still forward. The best-effort draft transition still runs before the return.
+  - The new arm logs `process_key.csv_validation_rejected`.
+- **Unchanged, by decision:**
+  - `CSV_UPSTREAM_FAIL` stays 424 with `recoverable: true`. It is our internal fault inside `validate_csv`, so a retry can succeed.
+  - Non-CSV sources keep the PYAPIFIX-02 shape: 403 with `recoverable: false` for the five permanent codes and our `VALIDATION_UNEXPECTED` fallback, and 424 with `recoverable: true` for every venue code. `PERMANENT_VALIDATION_ERROR_CODES` is not edited.
+  - The validate-only arm keeps answering 200 `ok:false`.
+- **Stale status comments corrected.** These are the 403 arm's comment in `process_key.py` and the `postProcessKey` docblock in `src/lib/process-key-client.ts`. The docblock change is comments only; the client still forwards status and body verbatim.
+
+### Tests
+- **`test_process_key_scope_rejection_statuses.py` is re-pinned on purpose, with literals:**
+  - CSV verdicts answer 422 with `recoverable` false, now including `CSV_TOO_LARGE` and `CSV_FORMAT_UNSUPPORTED`.
+  - New 424 rows pin `CSV_UPSTREAM_FAIL` on the CSV source and a CSV-looking code on the teaser source. Together they prove the discriminator is the source, not the code string.
+  - The CSV 422 case also asserts the draft transition and its error code. This closes the review finding SFH M-1, MEDIUM, data integrity.
+  - The module docstring describes the new contract.
+- `test_sync_pipeline_rejection_also_forwards_the_breakdown` moves to 422 with `recoverable` false and keeps its PII assertion.
+- The `removesSites` count in `seam-venue-vocabulary.invariant.test.ts` moves from 64 to 65, for the one added parametrised `error_code=` site. The code list is unchanged.
+- **Can-fail evidence:** five neuters, each restored from a byte backup and checked with `cmp`, turned their cases RED. They covered the status, `recoverable`, the `CSV_UPSTREAM_FAIL` clause, the source clause and the draft transition.
+
+### Notes
+- **No live wizard surface changes at this release.** None of the four `postProcessKey` callers reaches this arm today. `csv-validate` sends `step: "validate"` and returns 200 before the gate, and CSV finalize goes to its RPC directly. So the ROADMAP phrase "the wizard stops offering Retry" describes the route contract, not something a user sees now. The status move is breaker-inert, because 4xx never records.
+- Review: gsd-code-reviewer found 0 MEDIUM+. The silent-failure-hunter found one MEDIUM (M-1), fixed and confirmed in round 2. Verification passed 9/9, and security reports 5/5 threats closed with `threats_open: 0`. LOW and INFO findings are recorded in the phase REVIEW only.
+- No `TODOS.md` entry is closed, so none is deleted.
+- VERSION and package.json move from 0.133.50.2 to 0.133.51.0.
+
 ## [0.133.50.2] - 2026-11-18 — records: book 217 SERVERRULE; 155.1 UAT items 1-4 pass
 
 Records-only PR. It books Phase 217 after the first nightly derive with the 155.1 clock guard, and moves STATE to match the 155.1 UAT readings. No source, test or migration change.

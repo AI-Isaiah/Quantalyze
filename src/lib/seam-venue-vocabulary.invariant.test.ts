@@ -218,7 +218,14 @@ const SCAN_EXCLUSIONS: readonly ScanExclusion[] = [
     // monotonic_dates rule), so like COLUMN_IN_DATAFRAME above it is a faithful
     // mirror of production in a file that emits to no user. It is a member of
     // CSV_RULE_CODE_FAMILY at the foot of this file, where its disposition lives.
-    removesSites: 64,
+    //
+    // 64 → 65 (2026-11-18, Phase 216 CSVSTATUS). NOTHING WAS EXCLUDED — the
+    // SUBTREE grew by one site. The same file gained the one parametrised
+    // `error_code=` construction in `test_retryable_verdicts_stay_424_recoverable`
+    // (rows CSV_UPSTREAM_FAIL and MONOTONIC_DATES). The code list does NOT move:
+    // CSV_UPSTREAM_FAIL is a real csv_adapter emitter already in the population,
+    // and MONOTONIC_DATES is already in `removesCodes`.
+    removesSites: 65,
     removesCodes: [
       "COLUMN_IN_DATAFRAME",
       "CSV_PARSE_FAILED",

@@ -2037,6 +2037,46 @@ async def process_key(
                 correlation_id=correlation_id,
                 error=str(_rpc_err),
             )
+        # Phase 216 CSVSTATUS (founder decision, ROADMAP Phase 216 and
+        # 215-CONTEXT Option A) — CSV VALIDATOR VERDICT. A CSV validator
+        # verdict is the caller's input at fault, and a retry of the same bytes
+        # cannot succeed, so it is STATUS_CONTRACT's CALLER class: 422, and
+        # `recoverable` is STATED False because _envelope_error's derivation
+        # would return True for these codes (none of them is a route-terminal
+        # or permanent code).
+        #
+        # The discriminator is the request SOURCE, not the code string: the
+        # CSV rule family is open-ended (`first_rule.upper()` in csv_adapter)
+        # so it cannot be named in an allow-list, and venue codes must keep the
+        # PYAPIFIX-02 default-transient shape below. CSV_UPSTREAM_FAIL is
+        # excluded because it is the adapter's internal-fault code (an
+        # exception inside validate_csv): a retry can succeed, so it falls
+        # through to the 424 pre-gate.
+        #
+        # This arm precedes the pre-gate because the pre-gate would otherwise
+        # claim every CSV code as venue-transient.
+        if (
+            body.source == "csv"
+            and val.error_code is not None
+            and val.error_code != "CSV_UPSTREAM_FAIL"
+        ):
+            log.warning(
+                "process_key.csv_validation_rejected",
+                reject_code=_reject_code,
+                verification_id=verification_id,
+                correlation_id=correlation_id,
+            )
+            return JSONResponse(
+                status_code=422,
+                content=_envelope_error(
+                    _reject_code,
+                    val.human_message,
+                    correlation_id,
+                    verification_id,
+                    recoverable=False,
+                    source_debug_context=val.debug_context,
+                ),
+            )
         # PYAPIFIX-02 (H-1, Phase 140.1.1) — VENUE-TRANSIENT PRE-GATE. This
         # MUST precede the 403 return below, mirroring long_fetch.py:296-319
         # where the transient escape comes first and the scope verdict second.
@@ -2101,10 +2141,12 @@ async def process_key(
         # identical retry cannot succeed, and a 4xx is breaker-inert.
         #
         # The gate above is deliberately unified, so this covers ordinary
-        # validation failures (`not val.valid` — AUTH_FAILED, PERMISSION_DENIED,
-        # a malformed CSV) as well as the two scope arms. They are all
-        # caller-credential/input faults, and one return site means the security
-        # arm cannot drift back to a success status while the others move.
+        # validation failures (`not val.valid` — AUTH_FAILED, PERMISSION_DENIED)
+        # as well as the two scope arms. They are all caller-credential/input
+        # faults, and one return site means the security arm cannot drift back
+        # to a success status while the others move. A CSV validator verdict
+        # leaves earlier, at the Phase 216 422 arm, and a venue code at the
+        # PYAPIFIX-02 424 pre-gate.
         #
         # The body is unchanged: the route's own top-level DESIGN-05 envelope,
         # not error_contract's `body.detail` one. Same envelope as the 401/422
