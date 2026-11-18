@@ -146,6 +146,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production** - CI-only test reach; independent of the MT5 phases (completed 2026-11-16)
 - [ ] **Phase 216: CSVSTATUS — a malformed CSV upload answers 422 and the wizard stops offering Retry** - CSV upload status split, founder decision 2026-11-15; independent of the MT5 phases
+- [ ] **Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server** - A UTC-keeping broker server passes the 155.1 clock guard; founder decision 2026-11-18; follows 155.1
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
 
@@ -274,7 +275,8 @@ Plans:
 | 213. KEYFLOW | 12/12 | Complete | 2026-11-14 |
 | 214. FRESHTRUTH | 7/7 | Complete | 2026-11-14 |
 | 215. TESTREACH | 8/8 | Complete | 2026-11-16 |
-| 216. CSVSTATUS | 0/? | Not started | - |
+| 216. CSVSTATUS | 0/? | In progress | - |
+| 217. SERVERRULE | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.18)
 
@@ -573,6 +575,16 @@ Plans:
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 216 to break down)
+
+### Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server
+
+**Goal:** The MT5 server time rule is chosen per broker server, not once per worker. A server that keeps UTC (measured offset 0) gets a `utc` rule, so its derive passes the Phase 155.1 clock guard instead of ending `failed_final`. The rule stays configuration and is never written back from a reading (155.1 D-12). Trigger: the 2026-11-18 PROD readings after the first nightly derive with the guard. One MT5 key on one server (hash prefix 13a451cff998) measured +0h against the `us` rule's +2h on all six attempts, and its derive ended `failed_final`. The other nine MT5 keys, on three servers, match at +2h. Founder decision 2026-11-18 ("Book per-server rule").
+**Requirements**: TBD
+**Depends on:** Phase 155.1
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 217 to break down)
 
 ---
 

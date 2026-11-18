@@ -2,7 +2,7 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155 and 207-215 complete; 155.1 shipped, awaiting post-deploy UAT; 155.2 and 157 wait on the founder; 216 CSVSTATUS booked, not started)
+current_phase_name: parallel phases (155 and 207-215 complete; 155.1 shipped, awaiting post-deploy UAT; 155.2 and 157 wait on the founder; 216 CSVSTATUS in progress; 217 SERVERRULE booked, not started)
 status: executing
 stopped_at: Phase 155.1 shipped (v0.133.50.0); records landed, post-deploy UAT pending
 last_updated: "2026-11-17T18:00:00.000Z"
@@ -177,7 +177,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: parallel — 155 PARITYHARNESS and 207 RETRYPROP through 215 TESTREACH complete
 Plan: per phase (see each phase directory)
-Status: 155.1 SERVERCLOCK shipped 2026-11-17 as #1282 (v0.133.50.0, migration applied to TEST and PROD), 6/6 plans, VERIFICATION human_needed with 6 UAT items in 155.1-UAT.md; it awaits the Railway deploy, the founder's `--leg clock` live run and a weekday PROD reading row per key, and closes after the 155.2 session reads MT5-06's last leg; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session, which also waits on 155.1's weekday PROD reading row per key; 216 CSVSTATUS booked 2026-11-16, not started
+Status: 155.1 SERVERCLOCK shipped 2026-11-17 as #1282 (v0.133.50.0, migration applied to TEST and PROD), 6/6 plans, VERIFICATION human_needed with 6 UAT items in 155.1-UAT.md; UAT items 1 (clock leg GO 2026-11-17), 2 and 3 (per-key PROD readings 2026-11-18, one shared server hash) and 4 pass; it closes after the 155.2 session reads MT5-06's last leg; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session, which can go ahead now; 216 CSVSTATUS in progress; 217 SERVERRULE booked 2026-11-18, not started
 Last activity: 2026-11-17 — Phase 155.1 SERVERCLOCK shipped; records PR carries its artifacts and the baseline re-dump, phase stays open for UAT
 Progress: [███████░░░] 71%
 
@@ -711,6 +711,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 214 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): FRESHTRUTH, refresh work and freshness readings match what can actually change (0.3: closed records)
 - Phase 215 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): TESTREACH, CI-only: every test guarding money math or error contracts runs and test apps match production
 - Phase 216 added (2026-11-16, /gsd-phase add, founder decision 2026-11-15, Option A in 215-CONTEXT.md): CSVSTATUS, a malformed CSV upload answers 422 with recoverable false so the wizard stops offering Retry; auth and scope stay 403, venue blips stay 424
+- Phase 217 added (2026-11-18, /gsd-phase add, founder "Book per-server rule"): SERVERRULE, the MT5 server time rule is chosen per broker server, so a UTC-keeping server passes the 155.1 clock guard; trigger: the 2026-11-18 PROD readings (one key on a UTC server measured +0h against +2h, derive failed_final)
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 - Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
 
