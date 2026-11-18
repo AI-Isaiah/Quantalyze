@@ -759,14 +759,17 @@ export async function postProcessKey(
    *       Python envelope forwarded VERBATIM at 403. No change required here;
    *       the callers' `if (!result.ok) return result.response` already emits it.
    *   403 ordinary validation failure            → the SAME arm. `_scope_rejected`
-   *       is a three-arm OR behind one return, so `not val.valid` moved to 403
-   *       beside the two scope arms. A caller branching on the status renders an
-   *       ordinary validation failure as "you're not allowed".
+   *       is a three-arm OR behind one return, so an ordinary non-CSV
+   *       `not val.valid` moved to 403 beside the two scope arms. Since Phase 216
+   *       a CSV validator verdict on this gate answers 422 `recoverable:false`
+   *       (still `{ok:false, response}`, forwarded verbatim, so no caller change).
+   *       A caller branching on the status renders an ordinary validation failure
+   *       as "you're not allowed".
    *   200 with `body.ok === false`               → `{ok:true, status:200, body}`.
    *       THIS is the case that makes a status branch wrong on the other side:
    *       `validate-only` answers 200 with `ok:false` on the IDENTICAL
-   *       `not val.valid` predicate that `_scope_rejected` answers 403 on
-   *       (fold-in M-6 from the 140.1 code review; STATUS_CONTRACT.md records
+   *       `not val.valid` predicate that `_scope_rejected` answers 403 on (or 422
+   *       for a CSV verdict) (fold-in M-6 from the 140.1 code review; STATUS_CONTRACT.md records
    *       the carve-out nowhere). A consumer branching on STATUS is therefore
    *       wrong on one of the two paths no matter which status it picks.
    *       Branching on `body.ok` is correct on both — do NOT "simplify" it back.
@@ -780,10 +783,9 @@ export async function postProcessKey(
    * — but it still sees DRIFT (a 2xx whose body is the wrong shape), so it is
    * not dead and must not be deleted on the strength of the short-circuit alone.
    *
-   * The 403-vs-422 split is deliberately HOMELESS and stays homeless: 403 is not
-   * wrong (all three arms are CALLER-class and breaker-inert) but it is coarse.
-   * It needs its own plan; handling the envelope by `ok` makes it a non-issue
-   * here either way.
+   * Phase 216 gave the CSV validator verdict its 422 (CALLER class, breaker-inert,
+   * `recoverable:false`). Handling the envelope by `ok` keeps the status a
+   * non-issue here.
    *
    * ---------------------------------------------------------------------------
    * 140.5-03 / SEAMPROSE-02 — WHY THE `Retry-After` RELAY BELOW IS NOT THE

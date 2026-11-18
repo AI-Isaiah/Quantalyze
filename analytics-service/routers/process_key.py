@@ -2141,10 +2141,12 @@ async def process_key(
         # identical retry cannot succeed, and a 4xx is breaker-inert.
         #
         # The gate above is deliberately unified, so this covers ordinary
-        # validation failures (`not val.valid` — AUTH_FAILED, PERMISSION_DENIED,
-        # a malformed CSV) as well as the two scope arms. They are all
-        # caller-credential/input faults, and one return site means the security
-        # arm cannot drift back to a success status while the others move.
+        # validation failures (`not val.valid` — AUTH_FAILED, PERMISSION_DENIED)
+        # as well as the two scope arms. They are all caller-credential/input
+        # faults, and one return site means the security arm cannot drift back
+        # to a success status while the others move. A CSV validator verdict
+        # leaves earlier, at the Phase 216 422 arm, and a venue code at the
+        # PYAPIFIX-02 424 pre-gate.
         #
         # The body is unchanged: the route's own top-level DESIGN-05 envelope,
         # not error_contract's `body.detail` one. Same envelope as the 401/422
