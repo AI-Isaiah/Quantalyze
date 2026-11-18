@@ -145,7 +145,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 213: KEYFLOW — a key and its draft can never be silently mixed up, and every key state has a way out** - Key and draft flow, four founder decisions; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 214: FRESHTRUTH — refresh work and freshness readings match what can actually change** - Refresh and freshness truth; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production** - CI-only test reach; independent of the MT5 phases (completed 2026-11-16)
-- [ ] **Phase 216: CSVSTATUS — a malformed CSV upload answers 422 and the wizard stops offering Retry** - CSV upload status split, founder decision 2026-11-15; independent of the MT5 phases
+- [x] **Phase 216: CSVSTATUS — a malformed CSV upload answers 422 and the wizard stops offering Retry** - CSV upload status split, founder decision 2026-11-15; independent of the MT5 phases (completed 2026-11-18)
 - [ ] **Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server** - A UTC-keeping broker server passes the 155.1 clock guard; founder decision 2026-11-18; follows 155.1
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
@@ -275,8 +275,8 @@ Plans:
 | 213. KEYFLOW | 12/12 | Complete | 2026-11-14 |
 | 214. FRESHTRUTH | 7/7 | Complete | 2026-11-14 |
 | 215. TESTREACH | 8/8 | Complete | 2026-11-16 |
-| 216. CSVSTATUS | 0/? | In progress | - |
-| 217. SERVERRULE | 0/? | Not started | - |
+| 216. CSVSTATUS | 1/1 | Complete | 2026-11-18 |
+| 217. SERVERRULE | 0/? | In progress | - |
 
 ### Requirement Coverage (v1.18)
 
@@ -571,10 +571,10 @@ Plans:
 **Goal:** A malformed CSV upload answers 422 with `recoverable: false`, so the wizard stops offering Retry for a file that will fail again. Auth and scope rejections stay 403, and venue blips stay 424. Re-points the status pins Phase 215 set on `_scope_rejected` in `routers/process_key.py`. Founder decision 2026-11-15 (Option A in 215-CONTEXT.md).
 **Requirements**: TBD
 **Depends on:** Phase 215
-**Plans:** 0 plans
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 216 to break down)
+- [x] 216-01-PLAN.md — a CSV validator verdict at the /process-key rejection gate answers 422 recoverable false, pinned, with the can-fail control
 
 ### Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server
 

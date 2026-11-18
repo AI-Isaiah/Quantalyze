@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.133.51.1] - 2026-11-18 — records: close 216 CSVSTATUS
+
+Records PR for Phase 216, whose code is already on `main` as #1286 (v0.133.51.0). It carries the phase artifacts and closes the phase. No source, test or migration change.
+
+### Added
+- **Phase artifacts for 216** under `.planning/phases/`, from the phase branch: context, discussion log, one plan and its summary, review, security, validation and verification. The VERIFICATION is `passed`, carries `verified_at_sha` and `drift_subjects`, and has no `covered_*` keys. Research was skipped after the researcher stalled, and the skip is recorded in CONTEXT.
+
+### Changed
+- **ROADMAP:** the 216 overview bullet is ticked `(completed 2026-11-18)`, its plan row is ticked, and the Progress row reads `1/1 | Complete | 2026-11-18`. The 217 SERVERRULE row reads `In progress`.
+- **STATE and `state.json`:** `phase complete 216` ran. Its single-phase position rewrite was hand-restored to the parallel-phase form, as recorded in CLAUDE.md. Progress is 11 of 15 phases, 77 of 77 plans, 73%. 217 is `in_progress`.
+- VERSION and package.json 0.133.51.0 → 0.133.51.1.
+
+### Notes
+- No `TODOS.md` entry is closed, so none is deleted.
+
 ## [0.133.51.0] - 2026-11-18 — Phase 216 CSVSTATUS: a malformed CSV upload answers 422 recoverable false
 
 `/process-key`'s synchronous rejection gate stops telling a caller that a retry of the same CSV file can succeed. This is the follow-up the founder booked on 2026-11-15 (215-CONTEXT, Option A "Pin today, book fix"), and it re-points the per-arm status pins Phase 215 set on the gate.
