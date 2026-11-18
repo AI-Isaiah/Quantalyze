@@ -1,8 +1,7 @@
-"""Per-arm status pin for the ``/process-key`` ``_scope_rejected`` gate (Phase 215 SC-7b).
+"""Per-arm status pin for the ``/process-key`` ``_scope_rejected`` gate.
 
-Founder decision 2026-11-15, "Option A — pin today, book the fix": every arm of
-the synchronous rejection gate in ``routers/process_key.py`` is pinned here at
-the status and ``recoverable`` value it answers TODAY, and no behaviour changes.
+Every arm of the synchronous rejection gate in ``routers/process_key.py`` is
+pinned here at the status and ``recoverable`` value it answers.
 
 The arms, by what the adapter's ``ValidationResult`` carries:
 
@@ -12,16 +11,19 @@ The arms, by what the adapter's ``ValidationResult`` carries:
   succeed;
 * OUR OWN ``VALIDATION_UNEXPECTED`` fallback (a write-capable key, no code to
   name it) answers **403** with ``recoverable`` false;
-* every OTHER code answers **424** with ``recoverable`` true. That includes the
-  CSV rule family, which ``csv_adapter`` upper-cases from the first failing rule
-  into ``error_code`` (plus ``CSV_VALIDATION_FAILED`` when no rule is named).
+* a CSV validator verdict (the ``csv`` source with a non-null code other than
+  ``CSV_UPSTREAM_FAIL``: the upper-cased rule family, ``CSV_VALIDATION_FAILED``,
+  ``CSV_TOO_LARGE``, ``CSV_FORMAT_UNSUPPORTED``) answers **422** with
+  ``recoverable`` false: a deterministic input fault, the same bytes fail the
+  same rule on every retry;
+* ``CSV_UPSTREAM_FAIL`` (the adapter's internal-fault code) and every OTHER
+  code, venue codes included, answer **424** with ``recoverable`` true;
+* the validate-only step (``_run_validate_only``) stays **200** with ``ok``
+  false.
 
-FOLLOW-UP, named here and deliberately NOT done: a malformed CSV is answered 424
-with ``recoverable`` true, which tells the user a retry can succeed when it
-cannot (the same bytes fail the same rule). The fix is its own phase, booked by
-the coordinator after Phase 215 merges. When that phase changes the CSV arm, the
-CSV cases below are the pin it must update on purpose, and they should say what
-the new status and ``recoverable`` are, not be deleted.
+Lineage: Phase 215 pinned the old CSV arm at 424 under founder decision
+Option A, "pin today, book the fix". Phase 216 CSVSTATUS made that fix and
+changed the CSV cases on purpose.
 
 The expected values are literals. Nothing here reads a status out of the router.
 """
@@ -199,6 +201,37 @@ def test_csv_validator_verdict_answers_422_not_recoverable(client, error_code):
     assert body["recoverable"] is False
 
 
+# (c2) The verdicts that stay 424 with recoverable true. Each row proves one
+# clause of the Phase 216 arm. The first: the adapter's internal-fault code is
+# retryable, so it is not a malformed file. The second: the request SOURCE
+# discriminates, not the code string, so a CSV-looking code on a venue flow
+# keeps the PYAPIFIX-02 default-transient shape.
+@pytest.mark.parametrize(
+    "poster,error_code",
+    [
+        pytest.param(_csv_post, "CSV_UPSTREAM_FAIL", id="csv-upstream-fail"),
+        pytest.param(_teaser_post, "MONOTONIC_DATES", id="teaser-csv-looking-code"),
+    ],
+)
+def test_retryable_verdicts_stay_424_recoverable(client, poster, error_code):
+    r = poster(
+        client,
+        ValidationResult(
+            valid=False,
+            read_only=None,
+            error_code=error_code,
+            human_message="Validation did not complete.",
+            debug_context={},
+        ),
+        "retryable-" + "".join(c for c in error_code if c.isalnum()),
+    )
+    assert r.status_code == 424, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == error_code
+    assert body["recoverable"] is True
+
+
 # (d) The permanent set is exactly the five literals above, so a new permanent
 # code (which would move an arm from 424 to 403) forces a decision in this file.
 def test_permanent_set_is_exactly_the_five_pinned_codes():
@@ -213,9 +246,10 @@ def test_permanent_set_is_exactly_the_five_pinned_codes():
     )
 
 
-# The sibling arm that answers differently. Out of the founder's stated scope,
-# pinned so the follow-up phase does not rediscover it: the validate-only step
-# answers HTTP 200 with ok false for an invalid validation, not 403 or 424.
+# The sibling arm that answers differently. Phase 216 left it at 200 on
+# purpose (CONTEXT: the validate-only arm is out of scope, the wizard renders
+# its per-row verdicts from a 200): the validate-only step answers HTTP 200
+# with ok false for an invalid validation, not 403, 422 or 424.
 def test_validate_only_invalid_answers_200_ok_false(client):
     adapter = MagicMock()
     adapter.validate = AsyncMock(
