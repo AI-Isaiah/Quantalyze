@@ -133,7 +133,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 ### Phases (v1.18)
 
 - [x] **Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down** - A PROD census per account, a read-only capture of our side, provenance-locked oracle intake, a compare engine shown RED on broken inputs, and the agent-checkable halves of MT5-09 and MT5-15 measured; no founder needed (completed 2026-11-14)
-- [ ] **Phase 155.1: SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading** - One narrow tick-time read, asserted against the configured rule inside the leased derive and persisted write-once by a pure-DDL migration; parallel with 155, no trading day needed
+- [x] **Phase 155.1: SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading** - One narrow tick-time read, asserted against the configured rule inside the leased derive and persisted write-once by a pure-DDL migration; parallel with 155, no trading day needed (completed 2026-11-19)
 - [ ] **Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%** - The founder's scripted session on MM2, MM3 and FX-AI_V, Gate A and Gate B per account, every surface the same, every gap fixed at its root or ruled on; after 155, session after the 155.1 deploy
 - [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
 - [x] **Phase 207: RETRYPROP — every error page's Try again button works** - Boundaries use Next's real `retry` prop; independent of the MT5 phases (completed 2026-11-14)
@@ -147,6 +147,8 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production** - CI-only test reach; independent of the MT5 phases (completed 2026-11-16)
 - [x] **Phase 216: CSVSTATUS — a malformed CSV upload answers 422 and the wizard stops offering Retry** - CSV upload status split, founder decision 2026-11-15; independent of the MT5 phases (completed 2026-11-18)
 - [x] **Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server** - A UTC-keeping broker server passes the 155.1 clock guard; founder decision 2026-11-18; follows 155.1 (completed 2026-11-18)
+- [ ] **Phase 218: SELFHEAL — the wizard's MT5 key check heals an owed terminal scrub itself** - Wizard self-heal of the post-deploy scrub plus two resume-banner fixes, founder decisions 2026-11-19; independent of the MT5 parity phases
+- [ ] **Phase 219: ACCOUNTEMAIL — the signed-in account shows its email and can change it** - Account email display and change, founder decision 2026-11-19; independent of the MT5 parity phases
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
 
@@ -192,7 +194,7 @@ Plans:
 **Goal:** The worker measures the MT5 server's UTC offset live inside every leased derive, checks it against the configured `Mt5ServerClock` rule, and keeps each reading write-once, so a wrong or changed offset is caught by the system, not by a person reading a chart. It is a data-integrity product change, not harness code: the harness itself never touches the gateway. Research Phase B.
 **Requirements**: MT5-06
 **Depends on:** Nothing (first of the milestone; runs in parallel with 155)
-**Plans:** 6/6 plans executed
+**Plans:** 6/6 plans complete
 **UI hint**: no
 
 Research flag (`/gsd-plan-phase --research-phase`): a live spike on whether the tick read answers through `mt5linux` on Wine for visible Market Watch symbols, whether its time uses the same encoding as a deal's `time`, what an investor session's Market Watch holds, and how fresh ticks are during session breaks. Check what the parked MT5SERVERLEARN branch (164.6.6.3.6) holds first. Any spike run with `MT5_SPIKE_INVESTOR_PASSWORD` comes before 157's rotation.
@@ -263,7 +265,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 155. PARITYHARNESS | 11/11 | Complete | 2026-11-14 |
-| 155.1. SERVERCLOCK | 6/6 | In Progress (shipped v0.133.50.0; post-deploy UAT pending) | - |
+| 155.1. SERVERCLOCK | 6/6 | Complete | 2026-11-19 |
 | 155.2. LIVEPARITY | 0/? | Not started | - |
 | 157. FOUNDER-CONFIRM | 0/? | Not started | - |
 | 207. RETRYPROP | 1/1 | Complete | 2026-11-14 |
@@ -277,6 +279,8 @@ Plans:
 | 215. TESTREACH | 8/8 | Complete | 2026-11-16 |
 | 216. CSVSTATUS | 1/1 | Complete | 2026-11-18 |
 | 217. SERVERRULE | 2/2 | Complete | 2026-11-18 |
+| 218. SELFHEAL | 0/0 | Not started | - |
+| 219. ACCOUNTEMAIL | 0/0 | Not started | - |
 
 ### Requirement Coverage (v1.18)
 
@@ -591,6 +595,27 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [x] 217-02-PLAN.md — runbooks document MT5_SERVER_TIME_RULES (grammar, utc, no-echo validation, failure modes, set on both worker services before deploy)
+
+### Phase 218: SELFHEAL — the wizard's MT5 key check heals an owed terminal scrub itself
+
+**Goal:** When the validation terminal owes a scrub (the boot mark set after every analytics deploy, or relaunch debt), the wizard's MT5 key check pays the scrub inline under the lease, as the worker path already does (`run_owed_validation_scrub_in_lease`), and then runs the check in the same request, so no user sees an error. The protection stays: no probe ever runs on an unscrubbed terminal. If the inline scrub fails, the answer names the real cause and never says the terminal is "briefly busy". Trigger: the founder's session 2026-11-19 13:14Z, where the wizard showed `KEY_MT5_TERMINAL_BUSY` ("Our MetaTrader terminal is briefly busy") for trace outcome `scrub_owed`, the `report_scrub_owed_refusal` arm in `routers/exchange.py`, the first wizard validation after the Phase 217 deploy. The scrub finished in about 6 s and the manual Retry passed. This reverses the accepted cost "the first validation after each analytics deploy is refused" (Phase 164.6.6.1 D-08). Founder decision 2026-11-19 ("Book a fix: wizard waits (Recommended)"; "it was an incorrect error message ... why did it not just scrub itself and retry, sort of healed itself").
+**Widened 2026-11-19 (founder, "Fix in Phase 218 (Recommended)"), two wizard-resume findings from the same session (157 FCONF-01):** (1) in a browser without the local draft pointer, the "We saved your progress" banner renders while the draft's step is already mounted underneath it, so the Resume / Start fresh choice is pre-made; the wizard must hold the step until the founder chooses (`WizardClient.tsx` step initializer vs `deriveWizardResumeOverrides` in `src/lib/wizard/localStorage.ts`). (2) The banner copy says "paste your API secret again" for every API draft; it must match the key type (an MT5 key re-enters an investor password) and say nothing about re-entry when the resumed step needs none. Same-browser silent resume (matching pointer) stays: founder ruling 2026-11-19 "(a) the silent return is fine".
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 219: ACCOUNTEMAIL — the signed-in account shows its email and can change it
+
+**Goal:** A signed-in user can see which email their account uses and change it. The account or settings page shows the signed-in email, and a change goes through Supabase Auth's own confirm-by-email flow, never a direct write. Trigger: the founder's session 2026-11-19, where the founder could not tell which email to sign in with in a private window, because Quantalyze shows the account email nowhere and offers no way to change it. Founder decision 2026-11-19 ("Book a phase (Recommended)").
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
 
 ---
 

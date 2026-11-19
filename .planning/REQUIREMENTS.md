@@ -24,7 +24,7 @@
 
 ### MT5 verification (carried requirements)
 
-- [ ] **MT5-06**: The MT5 server-UTC offset is measured live inside the worker's leased derive (D-D), asserted against the configured `Mt5ServerClock` rule (Phase 175's `MT5_SERVER_TIME_RULE` is the carrier; the reading asserts it and is never written back as config), and persisted write-once; a near-midnight real deal from a DST divergence week lands on the UTC day of (terminal-displayed server time − the offset in force). ⚠️ Restated 2026-11-13: the August text named `MT5_SOAK_SERVER_OFFSET_MIN` (superseded by Phase 175) and "the day the terminal shows" (the terminal shows server days; our series buckets by UTC day).
+- [x] **MT5-06**: The MT5 server-UTC offset is measured live inside the worker's leased derive (D-D), asserted against the configured `Mt5ServerClock` rule (Phase 175's `MT5_SERVER_TIME_RULE` is the carrier; the reading asserts it and is never written back as config), and persisted write-once; a near-midnight real deal from a DST divergence week lands on the UTC day of (terminal-displayed server time − the offset in force). ⚠️ Restated 2026-11-13: the August text named `MT5_SOAK_SERVER_OFFSET_MIN` (superseded by Phase 175) and "the day the terminal shows" (the terminal shows server days; our series buckets by UTC day).
 - [ ] **MT5-07**: Rendered performance matches an external oracle within `MT5_PARITY_TOLERANCE` as defined in D-B: Gate A (pre-`S`, closed-trade balance basis) against the terminal's All-History export, and Gate B (from `S`, open P&L included) against broker statements and the weekend reading (D-C, D-E), over windows that end before the run day.
 - [ ] **MT5-08**: The verification runs against the live funded accounts MM2, MM3 and FX-AI_V, with the founder at the terminal on a trading day; a demo, the v1.15 soak account or a weekend-only run does not satisfy it (the weekend reading is an edge input, not the run).
 - [ ] **MT5-09**: Every surface that renders strategy performance shows the same, correct MT5 numbers for these accounts. ⚠️ Re-mapped 2026-11-13: the portfolio PDF (retired in Phase 195 TRIM) and `scenario-blend-panels.ts` (deleted) are dropped; the current surface list is fixed at discuss-phase, cited by symbol.
@@ -64,7 +64,7 @@
 | PARITY-02 | Phase 155 | Complete |
 | PARITY-03 | Phase 155 | Complete |
 | PARITY-04 | Phase 155 | Complete |
-| MT5-06 | Phase 155.1 | Pending |
+| MT5-06 | Phase 155.1 | Complete |
 | MT5-07 | Phase 155.2 | Pending |
 | MT5-08 | Phase 155.2 | Pending |
 | MT5-09 | Phase 155.2 | Pending |
