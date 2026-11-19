@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155 and 207-217 complete; 155.1 shipped, UAT items 1-4 pass; 155.2 and 157 wait on the founder)
+current_phase_name: parallel phases (155, 155.1 and 207-217 complete; 155.2, 157, 218 and 219 open)
 status: executing
-stopped_at: Phase 217 SERVERRULE shipped (v0.133.52.0) and complete
-last_updated: "2026-11-18T14:45:18.329Z"
-last_activity: 2026-11-18
-last_activity_desc: Phase 217 complete
-state_head: b788cf8f9c6b2628e8489361c5e50bc098d28953
+stopped_at: Phase 155.1 complete after the founder session; 218 and 219 booked
+last_updated: "2026-11-19T13:51:38.533Z"
+last_activity: 2026-11-19
+last_activity_desc: Founder session; Phase 155.1 complete; 218 SELFHEAL and 219 ACCOUNTEMAIL booked
+state_head: efb535683b1baf1b39a103439fd32691d7a9ff0c
 progress:
-  total_phases: 15
-  completed_phases: 12
+  total_phases: 17
+  completed_phases: 13
   total_plans: 79
   completed_plans: 79
-  percent: 80
+  percent: 76
 ---
 
 ## ⭐ STATE lineage
@@ -175,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 155 PARITYHARNESS and 207 RETRYPROP through 217 SERVERRULE complete
+Phase: parallel — 155 PARITYHARNESS, 155.1 SERVERCLOCK and 207 RETRYPROP through 217 SERVERRULE complete
 Plan: per phase (see each phase directory)
-Status: 155.1 SERVERCLOCK shipped 2026-11-17 as #1282 (v0.133.50.0, migration applied to TEST and PROD), 6/6 plans, VERIFICATION human_needed with 6 UAT items in 155.1-UAT.md; UAT items 1 (clock leg GO 2026-11-17), 2 and 3 (per-key PROD readings 2026-11-18, one shared server hash) and 4 pass; it closes after the 155.2 session reads MT5-06's last leg; 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM wait for the founder's trading-day session, which can go ahead now; 216 CSVSTATUS shipped 2026-11-18 as #1286 (v0.133.51.0) and complete; 217 SERVERRULE shipped 2026-11-18 as #1288 (v0.133.52.0) and complete, with MT5_SERVER_TIME_RULES set on both workers before the merge
-Last activity: 2026-11-18 — Phase 217 SERVERRULE shipped as #1288 and closed
-Progress: [████████░░] 80%
+Status: the founder's trading-day session ran 2026-11-19: 155.1 UAT items 5 and 6 passed and 155.1 closed (MT5-06 complete); 155.2 LIVEPARITY terminal readings and classic All-History Reports for MM2, MM3 and FX-AI_V are captured in the gitignored capture directory, still owing the weekend reading and broker statements; 157 FOUNDER-CONFIRM FCONF-01 observed (silent same-browser resume accepted by the founder, banner shown in a fresh browser), FCONF-02/03 and the FCONF-04 rotation still open; 218 SELFHEAL and 219 ACCOUNTEMAIL booked from the session
+Last activity: 2026-11-19 — founder session; Phase 155.1 closed; 218 SELFHEAL and 219 ACCOUNTEMAIL booked
+Progress: [████████░░] 76%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -712,6 +712,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 215 added (2026-11-14, /gsd-phase add, founder FIX NOW triage): TESTREACH, CI-only: every test guarding money math or error contracts runs and test apps match production
 - Phase 216 added (2026-11-16, /gsd-phase add, founder decision 2026-11-15, Option A in 215-CONTEXT.md): CSVSTATUS, a malformed CSV upload answers 422 with recoverable false so the wizard stops offering Retry; auth and scope stay 403, venue blips stay 424
 - Phase 217 added (2026-11-18, /gsd-phase add, founder "Book per-server rule"): SERVERRULE, the MT5 server time rule is chosen per broker server, so a UTC-keeping server passes the 155.1 clock guard; trigger: the 2026-11-18 PROD readings (one key on a UTC server measured +0h against +2h, derive failed_final)
+- Phase 218 added (2026-11-19, /gsd-phase add, founder "Book a fix: wizard waits (Recommended)"): SELFHEAL, the wizard's MT5 key check pays an owed terminal scrub inline and runs the check in the same request instead of answering KEY_MT5_TERMINAL_BUSY; widened the same day (founder "Fix in Phase 218 (Recommended)") with two resume-banner fixes; trigger: the founder session's first wizard validation after the 217 deploy
+- Phase 219 added (2026-11-19, /gsd-phase add, founder "Book a phase (Recommended)"): ACCOUNTEMAIL, the signed-in account shows its email and can change it through Supabase Auth's confirm-by-email flow; trigger: the founder could not tell which email to sign in with
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 - Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
 
@@ -1809,7 +1811,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-14T07:30:26.000Z
-**Stopped At:** Phase 216 complete; records landed
+**Stopped At:** Founder session 2026-11-19; Phase 155.1 complete; 218 and 219 booked
 **Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z

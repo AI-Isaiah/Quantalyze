@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.133.52.2] - 2026-11-19 — records: close 155.1 SERVERCLOCK; book 218 SELFHEAL and 219 ACCOUNTEMAIL
+
+Records PR from the founder's trading-day session on 2026-11-19. It closes Phase 155.1 and books two phases the session surfaced. No source, test or migration change.
+
+### Added
+- **Phase 218 SELFHEAL** (founder "Book a fix: wizard waits (Recommended)"): when the validation terminal owes a scrub, which happens on the first check after every analytics deploy, the wizard's MT5 key check pays the scrub inline and runs the check in the same request. Today it answers `KEY_MT5_TERMINAL_BUSY`, "Our MetaTrader terminal is briefly busy". Widened the same day (founder "Fix in Phase 218 (Recommended)") with two resume-banner fixes: the wizard holds the draft's step until Resume or Start fresh is chosen, and the banner copy matches the key type.
+- **Phase 219 ACCOUNTEMAIL** (founder "Book a phase (Recommended)"): the signed-in account shows its email and can change it through Supabase Auth's confirm-by-email flow.
+- **155.1 readings** from the phase branch: the post-deploy clock leg (GO, crossing 0.049 s) and the per-key PROD readings after the first nightly derive.
+
+### Changed
+- **155.1 UAT is complete, 6 of 6 pass.** Item 5: live Market Watch on FX-AI_V and MM2 in the founder's desktop terminal; MM3 passed on its 2026-11-19 PROD readings by founder decision. Item 6: the terminal-displayed times of all seven in-band MM2 deals from the band run equal the bridge's wall times to the second, so the real 2026-10-30 03:00:00 deal lands on UTC day 2026-10-30 under the `us` offset in force.
+- **155.1 VERIFICATION** is `passed`, and `phase complete 155.1` ran: MT5-06 is Complete in REQUIREMENTS, the overview bullet is ticked `(completed 2026-11-19)` and the Progress row reads `6/6 | Complete | 2026-11-19`.
+- **STATE and `state.json`:** progress is 13 of 17 phases, 79 of 79 plans, 76%. The position keeps the parallel-phase form.
+- VERSION and package.json 0.133.52.1 → 0.133.52.2.
+
+### Notes
+- The 155.2 terminal readings and the classic All-History Reports for MM2, MM3 and FX-AI_V are in the gitignored capture directory only. 155.2 still owes the weekend reading and the broker statements.
+- Found during the session and handed to 155.2's planning: the parity report parser refuses a real MT5 classic report, because the real Deals header uses bold `td` cells and adds a hidden Cost column, while the synthetic fixture used `th` cells.
+- 157 FCONF-01 was observed in the same sitting: a same-browser resume is silent, which the founder accepted, and a fresh browser shows the banner. FCONF-02, FCONF-03 and the FCONF-04 rotation are still open.
+- No `TODOS.md` entry is closed, so none is deleted.
+
 ## [0.133.52.1] - 2026-11-18 — records: close 217 SERVERRULE
 
 Records PR for Phase 217, whose code is already on `main` as #1288 (v0.133.52.0). It carries the phase artifacts and closes the phase. No source, test or migration change.
