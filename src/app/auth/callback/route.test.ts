@@ -95,6 +95,64 @@ describe("GET /auth/callback", () => {
     expect(loc.pathname).toBe("/dashboard");
   });
 
+  // Phase 219 D-04: the email-change confirmation link carries
+  // next=/profile?tab=account (encoded). safeNextPath must accept the decoded
+  // value and the redirect must keep its query on BOTH verification branches.
+  it("lands an encoded next=/profile?tab=account on the Account tab (PKCE code branch)", async () => {
+    const res = await callGet(
+      "http://localhost:3000/auth/callback?code=pkce-abc&next=%2Fprofile%3Ftab%3Daccount",
+    );
+
+    expect(res.headers.get("location")).toBe(
+      "http://localhost:3000/profile?tab=account",
+    );
+    expect(authState.exchangeCalls).toEqual(["pkce-abc"]);
+  });
+
+  it("lands an encoded next=/profile?tab=account on the Account tab (token_hash email_change branch)", async () => {
+    const res = await callGet(
+      "http://localhost:3000/auth/callback?token_hash=h&type=email_change&next=%2Fprofile%3Ftab%3Daccount",
+    );
+
+    expect(res.headers.get("location")).toBe(
+      "http://localhost:3000/profile?tab=account",
+    );
+    expect(authState.verifyCalls).toEqual([
+      { type: "email_change", token_hash: "h" },
+    ]);
+    expect(authState.exchangeCalls).toHaveLength(0);
+  });
+
+  // Phase 219 MD-01: under "Secure email change" the first confirmation link
+  // lands here with a `message` and neither `code` nor `token_hash`. That click
+  // worked, so the user goes back to `next` with a marker, not to /login.
+  it("sends a message-only callback (first email-change link) back to next with email_change=partial", async () => {
+    const res = await callGet(
+      "http://localhost:3000/auth/callback?message=Confirmation%20link%20accepted&next=%2Fprofile%3Ftab%3Daccount",
+    );
+
+    expect(res.status).toBe(307);
+    const loc = new URL(res.headers.get("location")!);
+    expect(loc.pathname).toBe("/profile");
+    expect(loc.searchParams.get("tab")).toBe("account");
+    expect(loc.searchParams.get("email_change")).toBe("partial");
+    expect(loc.searchParams.get("error")).toBeNull();
+    // Nothing was verified, so no session exchange was attempted.
+    expect(authState.exchangeCalls).toHaveLength(0);
+    expect(authState.verifyCalls).toHaveLength(0);
+  });
+
+  it("keeps the open-redirect guard on the message-only branch", async () => {
+    const res = await callGet(
+      "http://localhost:3000/auth/callback?message=accepted&next=https://evil.example/phish",
+    );
+
+    const loc = new URL(res.headers.get("location")!);
+    expect(loc.host).toBe("localhost:3000");
+    expect(loc.pathname).toBe("/onboarding");
+    expect(loc.searchParams.get("email_change")).toBe("partial");
+  });
+
   it("propagates auth error to /login on PKCE failure", async () => {
     authState.exchangeResult = { error: { message: "invalid grant" } };
 

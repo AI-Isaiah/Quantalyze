@@ -1176,7 +1176,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 107 -> 108, the intro-authorization gate file (test_contact_requests_insert_intro_authz.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 108 file(s); …' to match /scanned 107 file/`; `--parse-only` printed `coverage: files 81/108`.
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS, plan 06): 108 -> 109, the enqueue-dedup gate file (test_enqueue_dedup_record_retract.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 109 file(s); …' to match /scanned 108 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 109 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`; `--parse-only` printed `coverage: files 82/109`.
     // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): 109 -> 110, the server-clock readings gate file (test_mt5_server_clock_readings.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 110 file(s); …' to match /scanned 109 file/`, and `node scripts/lint-sql-gates.mjs` printed `scanned 110 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s)`.
-    expect(res.out).toMatch(/scanned 110 file/);
+    // ⭐ CURRENCY 2026-11-19 (Phase 219 ACCOUNTEMAIL, plan 03): 110 -> 111, the profiles.email sync gate file (test_profiles_email_sync.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 111 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
+    expect(res.out).toMatch(/scanned 111 file/);
     expect(res.status, res.out).toBe(0);
   });
 

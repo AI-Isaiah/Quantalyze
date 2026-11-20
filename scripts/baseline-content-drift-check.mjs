@@ -326,8 +326,19 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply). It is EXPECTED until
  * that re-dump, and NO allowlist row was added for it. Raising this floor records the function
  * joining the corpus; it does NOT suppress any finding.
+ *
+ * MOVED 2026-11-19 (Phase 219 ACCOUNTEMAIL plan 03), 136 -> 137: one ADDITION, not a parser gain.
+ * `public.sync_profile_email_from_auth()` enters the chain via forward migration
+ * 20261119120000_sync_profile_email_from_auth.sql. MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on this tree: `functions compared 137 - MATCH 133,
+ * DRIFT 3, SNAPSHOT_MISSING 1, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `findings 1`. The one
+ * SNAPSHOT_MISSING finding is `sync_profile_email_from_auth/0`, whose migration is not on PROD yet
+ * (recorded as a dated `snapshot-only` row in NAME_SET_RATCHET in scripts/dump-sql-functions.ts,
+ * cleared by the re-dump taken after the apply). It is EXPECTED until that re-dump, and NO
+ * allowlist row was added for it. Raising this floor records the function joining the corpus; it
+ * does NOT suppress any finding.
  */
-export const COMPARED_FLOOR = 136;
+export const COMPARED_FLOOR = 137;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */
