@@ -177,7 +177,21 @@ export type WizardErrorCode =
   // check or another user is using the terminal: at the owed-scrub gate that is false.
   // NOT in `OUR_DEFECT_KEY_ERROR_CODES`: a held terminal is contention, not our defect, and
   // the existing scrub-owed alert already pages a scrub that is genuinely missed.
+  // ⛔ CORRECTED 2026-11-19 (Phase 218): the first of the two emitters above is gone. The
+  // owed-scrub gate now heals inline and, when it cannot, answers `MT5_TERMINAL_NOT_READY`
+  // (`KEY_MT5_TERMINAL_NOT_READY`, the next member). Since Phase 218 the ONLY emitter of
+  // this code is `except Mt5TerminalBusyError`, the held lease. The paragraph above is kept
+  // as lineage.
   | "KEY_MT5_TERMINAL_BUSY"
+  // Phase 218 (SELFHEAL) — OUR validation terminal owed a scrub or a relaunch from an
+  // earlier check, the wizard tried to pay it inline under the lease it already holds, and
+  // the terminal still could not be made ready, so the check did not run. Wire
+  // `MT5_TERMINAL_NOT_READY` (424, flat, `recoverable=True`) maps here through
+  // `VENUE_WIRE_CODE_TO_VERDICT`. A code DISTINCT from `MT5_TERMINAL_BUSY` because nothing
+  // else holds the terminal at this emitter, so "busy" would be false. RECOVERABLE: the
+  // scrub retries on the next check. NOT in `OUR_DEFECT_KEY_ERROR_CODES`: the Python scrub
+  // already raises a per-cause ERROR alert, and capturing again Next-side would double-page.
+  | "KEY_MT5_TERMINAL_NOT_READY"
   // Phase 142.2 / MT5-04 (D-05) — THE FOUR CAUSES `KEY_INVALID_FORMAT` USED TO
   // SWALLOW. The two wizard connect routes (`strategies/create-with-key` and
   // `strategies/composite/add-key`) answered ONE code at TWELVE guards each —
@@ -2068,6 +2082,9 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // Recoverable: the terminal frees up in seconds, so Retry is real advice and renders.
   // Slot 2 ("Your draft is saved.") is gated to the connect surface: the rotate-secret
   // dialog has no draft.
+  // ⛔ CORRECTED 2026-11-19 (Phase 218): this copy now serves the held-lease emitter ONLY.
+  // The owed-scrub gate answers `KEY_MT5_TERMINAL_NOT_READY` below. The "true at BOTH
+  // emitters" paragraph above is kept as lineage; the copy is still true at its one emitter.
   KEY_MT5_TERMINAL_BUSY: {
     title: "Our MetaTrader terminal is briefly busy.",
     cause:
@@ -2081,6 +2098,32 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     docsHref: "/security",
     // `clear_and_retry` is in `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so
     // `buildEnvelope` derives `recoverable: true`, agreeing with the wire's `recoverable`.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  // Phase 218 (SELFHEAL) — our MetaTrader terminal could not be made ready for this check.
+  // Wire `MT5_TERMINAL_NOT_READY` (424) maps here. The copy is STATIC and true at its ONLY
+  // emitter, the owed gate's refusal in `_validate_mt5_key_probe`, on both of its branches:
+  // an inline scrub that did not end `scrubbed`, and a scrub that finished but left less
+  // than the probe floor (plan 02). "Could not be made ready for it" is true of every
+  // non-`scrubbed` kind (abandoned, refused, failed, relaunch_unverified, skipped_probe_in_flight)
+  // and of the floor breach, so the cause makes no timing claim.
+  // ⛔ No "busy" (nothing else holds the terminal here) and no "been alerted" (the Python
+  // scrub pages per cause, and this key is not in `OUR_DEFECT_KEY_ERROR_CODES`).
+  // Recoverable: `clear_and_retry` is in `RECOVERABLE_ACTIONS`, so `buildEnvelope` derives
+  // `recoverable: true`, agreeing with the wire. Slot 2 is gated to the connect surface: the
+  // rotate-secret dialog has no draft.
+  KEY_MT5_TERMINAL_NOT_READY: {
+    title: "Our MetaTrader terminal could not be made ready for this check.",
+    cause:
+      "The terminal we check MT5 keys on needed a reset before this check and could not be made ready for it, so the check did not run. Nothing about your account was sent to your broker and nothing was stored.",
+    fix: [
+      "Try again in a minute.",
+      "If it keeps failing, send the correlation id below through the contact form.",
+      "Your draft is saved.",
+    ],
+    fixRequires: [null, null, REQUIRES_CONNECT_SURFACE],
+    docsHref: "/security",
     actions: ["clear_and_retry", "request_call"],
   },
 
@@ -5223,6 +5266,11 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // `KEY_NETWORK_TIMEOUT`. The table is resolved BEFORE the substring cascade, so this
   // row is the ONLY recognition path: no cascade needle is added for this cause.
   ["MT5_TERMINAL_BUSY", { code: "KEY_MT5_TERMINAL_BUSY", status: 424 }],
+  // Phase 218 (SELFHEAL) — the owed gate's refusal after its inline scrub did not make the
+  // terminal ready answers this wire code at 424 (`MT5_TERMINAL_BUSY` keeps the held lease
+  // only). Same mechanism: the table is resolved BEFORE the cascade, so this row is the
+  // ONLY recognition path and no cascade needle is added.
+  ["MT5_TERMINAL_NOT_READY", { code: "KEY_MT5_TERMINAL_NOT_READY", status: 424 }],
 ]);
 
 /**
@@ -6384,6 +6432,12 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // `UNKNOWN`, whose copy names no cause. The copy gates the draft bullet to the
       // connect surface, so this dialog shows Retry and no draft claim.
       "KEY_MT5_TERMINAL_BUSY",
+      // 218 (SELFHEAL) — `rotate_key_secret` runs the same `_validate_mt5_key_probe`, whose
+      // owed gate answers wire `MT5_TERMINAL_NOT_READY` (424) when its inline scrub does not
+      // make the terminal ready. Omit this line and the dialog renders `UNKNOWN`. The copy
+      // gates the draft bullet to the connect surface, so this dialog shows Retry and no
+      // draft claim.
+      "KEY_MT5_TERMINAL_NOT_READY",
     ]),
   ],
 ]);

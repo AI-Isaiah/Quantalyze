@@ -888,6 +888,31 @@ describe("PATCH /api/keys/[id]/rotate-secret — 164.6.5 R2-SFH-10: our-defect v
     expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
   });
 
+  /**
+   * Phase 218 (SELFHEAL) — the BUSY twin's sibling. `rotate_key_secret` runs the same
+   * `_validate_mt5_key_probe`, whose owed gate answers the flat 424 `MT5_TERMINAL_NOT_READY`
+   * after an unhealed inline scrub. The Python scrub pages per cause, so no Next-side capture.
+   */
+  it("[218] a not-ready MT5 terminal answers KEY_MT5_TERMINAL_NOT_READY/424 and is NOT captured", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 424, {
+        detail:
+          "Our MetaTrader terminal could not be made ready for this check. Try again in a minute.",
+        code: "MT5_TERMINAL_NOT_READY",
+        recoverable: true,
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(424);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("KEY_MT5_TERMINAL_NOT_READY");
+    expect(envelope.code).not.toBe("UNKNOWN");
+    // D-04: a failed validation mutates nothing.
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
   it("a caller-fault verdict (KEY_AUTH_FAILED) is NOT captured — the predicate is the our-defect set, not every failure", async () => {
     mockResilientFetch.mockResolvedValue(
       seamResponse(false, 400, {

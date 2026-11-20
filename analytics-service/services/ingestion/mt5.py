@@ -288,6 +288,11 @@ class Mt5Adapter:
             # and after `skipped_probe_in_flight` a probe thread is still on the
             # terminal. So it refuses with the worker's transient disposition and
             # releases; the next attempt pays the scrub again.
+            # ⛔ CORRECTED 2026-11-19 (Phase 218): "unlike the wizard, which refuses" is
+            # no longer true. The wizard now pays an owed scrub inline too
+            # (`pay_owed_validation_scrub_in_lease` in `routers/exchange.py`, bounded by
+            # its own envelope) and refuses only when that scrub does not end `scrubbed`.
+            # The sentence above is kept as lineage.
             if (
                 mt5_scrub_owed(terminal_key) or mt5_relaunch_debt(terminal_key)
             ) and not await run_owed_validation_scrub_in_lease(

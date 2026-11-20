@@ -832,6 +832,12 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   // ARRIVAL gate: a new Python error_code with no TypeScript disposition falls through
   // the substring cascade, which is what this file exists to prevent.
   "MT5_TERMINAL_BUSY",
+  // 218 (SELFHEAL) - minted by `_validate_mt5_key_probe`'s owed gate when its inline scrub
+  // did not make the terminal ready (routers/exchange.py), a `VenueTransientHTTPException`
+  // 424 with `recoverable=True`. `MT5_TERMINAL_BUSY` keeps the held lease only. Takes a
+  // KEY_MT5_TERMINAL_NOT_READY verdict row at 424. Added here because this roster is the
+  // ARRIVAL gate.
+  "MT5_TERMINAL_NOT_READY",
   // 164.6.5 / criterion 5 (D-12/D-13) — minted by `_validate_mt5_key_probe`'s
   // `Mt5ClientError` handler when the client error's code is one of MT5's IPC
   // transport codes (our own terminal bridge, never the exchange). Takes a
@@ -951,6 +957,12 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * agrees with the derived emitter set at 47 (read off that assertion's own failure,
  * which listed 47 derived against 46 typed, not a hand tally).
  * 0.6 x 47 = 28.2, floored to 28 - the rule MOVES the floor this time.
+ *
+ * 28 stays 28 (2026-11-19, Phase 218 plan 03): `MT5_TERMINAL_NOT_READY` arrives, the code
+ * the owed gate answers after an unhealed inline scrub. The hand-typed roster holds 48 codes
+ * with it, and the set-equality assertion below agrees with the derived emitter set at 48
+ * (the arrival assertion's own failure message was read for the delta, not a hand tally).
+ * 0.6 x 48 = 28.8, floored to 28 - same rule, no move.
  */
 const DERIVED_FLOOR = 28;
 

@@ -479,12 +479,14 @@ test.describe("Phase 94 — wizard resumability (WIZ-03 / WIZ-05)", () => {
     await loginViaForm(page, allocator.email, allocator.password);
 
     // 3. Resume: the draft-resume query hydrates initialDraft → WizardClient
-    //    inits step "sync_preview" (no Resume-banner click needed; the step
-    //    useState initializer keys off initialDraft, WizardClient.tsx:143-144).
+    //    resumes onto step "sync_preview". Phase 218: this fresh browser has no
+    //    local draft pointer, so the "We saved your progress" banner holds the
+    //    step until the owner chooses; click Resume first.
     await page.goto("/strategies/new/wizard");
     await expect(page).toHaveURL(/\/strategies\/new\/wizard(?!\/csv)/, {
       timeout: 10_000,
     });
+    await page.getByTestId("wizard-resume").click({ timeout: 15_000 });
 
     // The completed snapshot materializes from the SEEDED rows — the composite
     // "Use this composite and continue" CTA (SyncPreviewStep.tsx:1450-1451)

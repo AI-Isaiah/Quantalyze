@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.133.58.0] - 2026-11-20 — Phase 218 SELFHEAL: the wizard's MT5 key check heals an owed terminal scrub itself
+
+On 2026-11-19 13:14 UTC the founder's first wizard MT5 key check after the Phase 217 deploy answered `KEY_MT5_TERMINAL_BUSY` ("Our MetaTrader terminal is briefly busy"). The validation terminal owed its post-deploy scrub, the owed gate refused, the scheduled scrub finished in about 6 s, and a manual Retry passed. The founder asked why it did not just scrub itself and retry. It does now. This reverses the accepted cost of Phase 164.6.6.1 D-08 ("the first validation after each analytics deploy is refused") and its Decision 6.
+
+### Changed
+- **The owed gate pays the scrub inline.** When the validation terminal owes a scrub (the boot mark or relaunch debt), `_validate_mt5_key_probe` in `routers/exchange.py` runs it under the lease it already holds, through the new never-raises `pay_owed_validation_scrub_in_lease` in `services/mt5_terminal_scrub.py`, and then probes in the same request. A healed check logs INFO and an `owed_scrub` stage event with outcome `scrub_healed`.
+- **No probe after a non-scrubbed kind.** `abandoned`, `refused`, `failed`, `relaunch_unverified` and `skipped_probe_in_flight` answer the new flat 424 `MT5_TERMINAL_NOT_READY` (recoverable). `skipped_no_house_credentials` answers the existing 500 `MT5_VALIDATION_UNCONFIGURED`, because only an operator can fix it. Both refuse before any client is built and set `trace.outcome = "scrub_unhealed"`. `MT5_TERMINAL_BUSY` now comes only from the held-lease arm.
+- **The budget does not move.** The inline scrub's event-loop wait is clamped to `min(30 s, 75 s − 5 s record − 40 s floor)`. The probe gets the rest of the 75 s envelope anchored at lease acquisition, and a heal that leaves under 40 s refuses with `MT5_TERMINAL_NOT_READY`. The server worst case stays 105 s inside the 120 000 ms client ceiling, and the ordering test states the accepted floor-below-stage inversion. The wizard bound applies to the wait only, never to the scrub thread's own deadline. New knobs: `MT5_VALIDATE_SCRUB_BUDGET_S` and `MT5_VALIDATE_PROBE_FLOOR_S`, documented in `docs/runbooks/mt5-go-live.md`.
+- **Park-skip noise.** A `budget_exhausted` park skip caused by the inline scrub logs INFO instead of paging; a skip the probe alone caused still pages.
+- **The wizard names the cause.** New `KEY_MT5_TERMINAL_NOT_READY` in `src/lib/wizardErrors.ts`: copy, a `VENUE_WIRE_CODE_TO_VERDICT` row and the rotate-secret dialog roster. Its copy says neither "busy" nor "been alerted" and makes no timing claim. Every surface that renders the BUSY card has a twin test for the new key.
+- **The resume banner holds the step.** In a browser without the local draft pointer, `WizardClient.tsx` mounts no step under "We saved your progress" until Resume or Start fresh is chosen, and step-view telemetry waits for the chosen step. Same-browser silent resume is unchanged (founder ruling 2026-11-19).
+- **Banner copy by key type.** `src/lib/wizard/resume-banner.ts` names the investor password for an MT5 draft and the API secret otherwise, and says nothing about re-entry when the resumed step needs none (`sync_preview` has no secret input). CSV keeps its re-select copy.
+- `analytics-service/docs/STATUS_CONTRACT.md`: row S-31 added for `MT5_TERMINAL_NOT_READY`, S-30 narrowed to the held-lease arm, tally corrected with dated notes. Dated corrections in the `ingestion/mt5.py` and `routers/exchange.py` comments that described the wizard refusing.
+- VERSION and package.json 0.133.56.2 → 0.133.58.0 (0.133.57.0 is taken by an open PR).
+
+### Fixed
+- Review round 1: the hydration effect now settles `hydrated` in a `finally`, so a throw after the draft load cannot strand a draft user on a blank wizard. One alert per inline-scrub refusal with its real cause (the gate no longer also calls `report_scrub_owed_refusal`, which had paged a second time as "missed"); a raise escaping the scrub alerts as `failed`. No scrub thread starts when less than `_MIN_INLINE_SCRUB_WAIT_S` (10 s) of the wizard budget remains.
+- Review round 2: a stale `wizardErrors.test.ts` pin on the removed reporter call; an import-time `_check_inline_scrub_budget()` logs one ERROR naming the three env knobs when overrides clamp the inline budget below the scrub minimum.
+- Commit security review: an inline scrub abandoned at the wizard's bound left its thread running to the scrub's own, longer deadline after the lease was released, invisible to the next scrub. `_scrub_decide` now registers the scrub thread's done-event the way a probe's is registered, so the next scrub's W-1 wait covers it (and so any probe, since the owed mark stays set after `abandoned`). The thread deadline is unchanged, because shortening it would starve the relaunch.
+- `e2e/composite-onboarding.spec.ts` clicks Resume before expecting the resumed step: the fresh e2e browser has no local draft pointer, so the banner now holds the step.
+
+### Tests
+- pytest: inline heal, each non-scrubbed kind (no client, no login), the floor, the clamp, park noise, the budget ordering, one alert per refusal, the no-thread guard, an abandoned thread holding off the next scrub, and the misconfiguration log. Censuses moved with dated lineage: vocabulary roster 47 → 48, dialog envelope 37 → 38, parity distinct codes 10 → 11, the frozen rosters, the C9 fixture, `_GUARDED_SYMBOLS`, and the D-07 UNCONFIGURED raise count 3 → 4.
+- vitest: the banner hold, including a throw during hydration, the banner copy matrix, the new key on five surfaces. Every gate was neutered once and seen RED, then restored from a byte backup.
+
+### Notes
+- Known limit, recorded and not fixed: `failed` (the profile tripwire) and `relaunch_unverified` (-6) answer recoverable although only an operator can clear them, so a Retry can repeat while the scrub's per-cause alert pages.
+- Post-deploy observation, not a gate: the first wizard MT5 check after this deploy should succeed without Retry, with an `owed_scrub` `scrub_healed` event in the Railway logs.
+- Review survivors at Info only stay in the phase's REVIEW.md: the startup ERROR fires before Sentry starts, the clamp expression is written twice, and `%.0f` can round a sub-minimum clamp up.
+- `report_scrub_owed_refusal` has no production caller now; it is left in place.
+- No `TODOS.md` entry is closed, so none is deleted.
+
 ## [0.133.56.2] - 2026-11-20 — delete the stale NAME_SET_RATCHET row for sync_profile_email_from_auth
 
 ### Fixed

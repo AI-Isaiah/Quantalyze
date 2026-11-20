@@ -1637,6 +1637,39 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/composite/add-key — Sen
     expect(rpcMock).not.toHaveBeenCalled();
     await expectNoCapture();
   });
+
+  /**
+   * Phase 218 (SELFHEAL) — the BUSY twin's sibling. The owed gate's refusal after an
+   * unhealed inline scrub answers `MT5_TERMINAL_NOT_READY`; the Python scrub already pages
+   * per cause, so it is not captured here and its copy never claims an alert.
+   */
+  it("[218] a not-ready MT5 terminal renders KEY_MT5_TERMINAL_NOT_READY/424 and is NOT captured", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("Our MetaTrader terminal could not be made ready for this check."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 424,
+          seamCode: "MT5_TERMINAL_NOT_READY",
+          recoverable: true,
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(424);
+    const text = await res.text();
+    const json = JSON.parse(text);
+    expect(json.code).toBe("KEY_MT5_TERMINAL_NOT_READY");
+    expect(json.code).not.toBe("UNKNOWN");
+    expect(text).not.toContain("been alerted");
+    expect(text.toLowerCase()).not.toContain("busy");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await expectNoCapture();
+  });
 });
 
 /**

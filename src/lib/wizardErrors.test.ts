@@ -2347,8 +2347,15 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 102 to be 101") with the
    * entry added and the pin unmoved, never counted, and it moves in lockstep with the
    * declaration in the SEAMUX-04 block.
+   *
+   * ⚠️ 102 → 103 (2026-11-19, Phase 218 plan 03): one arrival,
+   * `KEY_MT5_TERMINAL_NOT_READY`. Its actions are `clear_and_retry` and `request_call`;
+   * neither is in `DESTRUCTIVE_ACTIONS`, so the "destructive class is FOUR entries"
+   * receipt below is unchanged. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE
+   * ("expected 103 to be 102") with the entry added and the pin unmoved, never counted,
+   * and it moves in lockstep with the declaration in the SEAMUX-04 block.
    */
-  const EXPECTED_TABLE_SIZE = 102;
+  const EXPECTED_TABLE_SIZE = 103;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2549,15 +2556,18 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
 
     // A call counts only when it STARTS a line: a commented-out call (`# alert(...)`) must
     // not satisfy the pin, which is the exact neuter this test exists to catch.
-    // The three raise sites, found by their code literal. Exactly three: a fourth would be
-    // an arm this pin does not know to check, and a missing one a lost emitter.
+    // The raise sites, found by their code literal. Exactly four: a fifth would be an arm
+    // this pin does not know to check, and a missing one a lost emitter.
+    // ⚠️ 3 -> 4 at Phase 218 (SELFHEAL, read off this assertion's own failure message,
+    // "expected 4 to be 3"): the owed gate's `skipped_no_house_credentials` refusal, the
+    // 4th arm, whose capture is pinned below.
     const raises: number[] = [];
     for (const m of router.matchAll(/"MT5_VALIDATION_UNCONFIGURED",/g)) raises.push(m.index!);
     expect(
       raises.length,
-      "routers/exchange.py no longer has exactly three MT5_VALIDATION_UNCONFIGURED raises: " +
+      "routers/exchange.py no longer has exactly four MT5_VALIDATION_UNCONFIGURED raises: " +
         "re-derive which arms the card's 'we have been alerted' rests on",
-    ).toBe(3);
+    ).toBe(4);
 
     // Arm 1, the validation endpoint: the alert precedes the raise.
     const callAt = (src: string, name: string): number =>
@@ -2604,6 +2614,38 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
     expect(
       callAt(relogin.slice(helperStart, helperStart + 2500), "sentry_sdk\\.capture_message") > -1,
       "alert_mt5_validation_timeout_chain_inverted no longer calls sentry_sdk.capture_message",
+    ).toBe(true);
+
+    // Arm 4 (Phase 218), the owed gate's `skipped_no_house_credentials` refusal: the inline
+    // scrub that returned that kind has already alerted (`_scrub_under_lease` calls
+    // `_alert_scrub_failed` on every non-scrubbed kind, one Sentry capture per cause per
+    // window). Review round 1 (IN-01) removed the gate's second page through
+    // `report_scrub_owed_refusal`, so the scrub call preceding the raise is what backs it.
+    const scrubCall = callAt(router, "kind = await pay_owed_validation_scrub_in_lease");
+    expect(
+      scrubCall > -1 && scrubCall < raises[3],
+      "the owed-gate arm no longer pays the scrub before it raises " +
+        "MT5_VALIDATION_UNCONFIGURED, so 'we have been alerted' is unsubstantiated there",
+    ).toBe(true);
+    expect(
+      callAt(router, "report_scrub_owed_refusal"),
+      "the owed gate pages twice again",
+    ).toBe(-1);
+    const scrub = readFileSync(
+      join(process.cwd(), "analytics-service", "services", "mt5_terminal_scrub.py"),
+      "utf-8",
+    );
+    const underLease = scrub.slice(scrub.indexOf("async def _scrub_under_lease("));
+    expect(
+      underLease.includes("if kind != SCRUB_KIND_SCRUBBED:\n        _alert_scrub_failed("),
+      "_scrub_under_lease no longer alerts on every non-scrubbed kind, so the " +
+        "house-credentials-unset arm answers without a capture",
+    ).toBe(true);
+    expect(
+      scrub.includes(
+        "SCRUB_KIND_SKIPPED_NO_HOUSE_CREDENTIALS: _CAUSE_HOUSE_CREDENTIALS_UNSET",
+      ),
+      "the house-credentials kind lost its alert cause",
     ).toBe(true);
   });
 
@@ -3121,8 +3163,17 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * exemption. Its one stored-state claim, "We stopped before saving anything", is true
    * on both emitters because each refuses before any write. The value was READ OFF THIS
    * GUARD'S OWN FAILURE MESSAGE ("expected 102 to be 101"), never counted.
+   *
+   * **103 at Phase 218 plan 03** (`KEY_MT5_TERMINAL_NOT_READY`). Read against all five
+   * FORBIDDEN fragments by hand before the number moved, and it takes no exemption.
+   * It mentions no notification, no trade fetching, no session field name, and it
+   * deliberately does NOT say "been alerted": the key is not in
+   * `OUR_DEFECT_KEY_ERROR_CODES`. The one stored-state claim, "Nothing about your account
+   * was sent to your broker and nothing was stored", is OBSERVABLE: the owed gate refuses
+   * before any client is built, so no login or write has happened. The value was READ OFF
+   * THIS GUARD'S OWN FAILURE MESSAGE ("expected 103 to be 102"), never counted.
    */
-  const EXPECTED_TABLE_SIZE = 102;
+  const EXPECTED_TABLE_SIZE = 103;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(

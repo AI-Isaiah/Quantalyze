@@ -128,6 +128,9 @@ MT5_SERVER_UNKNOWN_DETAIL = (
 # ⛔ It must be TRUE at BOTH emitters. At the owed-scrub gate nothing else is running,
 # so it must never say another check is using the connection. "was busy and could not
 # take this check yet" is true of an owed scrub and of a held lease alike.
+# ⛔ CORRECTED 2026-11-19 (Phase 218): since Phase 218 its ONLY emitter is the held-lease
+# `except Mt5TerminalBusyError` arm. The owed-scrub gate pays the scrub inline and refuses
+# with MT5_TERMINAL_NOT_READY_DETAIL below instead. The paragraph above is kept as lineage.
 # ⛔ Do not use the words "timeout" or "rate", "ip"+"allow", "probe", "trading" or
 # "withdraw": `tests/test_mt5_server_known.py::
 # test_terminal_busy_detail_collides_with_no_cascade_needle` sweeps every needle of the
@@ -135,6 +138,21 @@ MT5_SERVER_UNKNOWN_DETAIL = (
 MT5_TERMINAL_BUSY_DETAIL = (
     "Our MetaTrader connection was busy and could not take this check yet. "
     "Try again in a minute."
+)
+
+# Phase 218 (SELFHEAL) - the refusal when the inline scrub could not make the validation
+# terminal ready for THIS check. Emitted only by the owed gate in
+# `routers/exchange.py::_validate_mt5_key_probe`: a scrub kind other than `scrubbed`, or
+# (plan 02) a scrub that left less than the probe floor. The text is written to be true
+# for both: the check did not run, and a retry in a minute is the remedy.
+# ⛔ It is forwarded VERBATIM by the dashboard key forms, so, as for the BUSY detail above,
+# it names none of "terminal", "lease", "queue" or "lock" (WIZFORM-03) and no needle of
+# the TypeScript classifier's substring cascade; `tests/test_mt5_server_known.py::
+# test_terminal_not_ready_detail_collides_with_no_cascade_needle` sweeps it.
+# ⛔ It never says another check is using the connection: nothing else is running here.
+MT5_TERMINAL_NOT_READY_DETAIL = (
+    "Our MetaTrader connection could not be made ready for this check, so it did "
+    "not run. Try again in a minute."
 )
 
 

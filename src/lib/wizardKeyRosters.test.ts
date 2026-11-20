@@ -20,6 +20,11 @@ import {
  * decision, never to make a failing derivation pass. The arrays are literals on
  * purpose: sizing or building them from the exports under test would make the
  * pin unable to fail.
+ *
+ * +1 each at 2026-11-19 (Phase 218 plan 03): `KEY_MT5_TERMINAL_NOT_READY` arrives with its
+ * `VENUE_WIRE_CODE_TO_VERDICT` row (wire `MT5_TERMINAL_NOT_READY`, 424), a deliberate roster
+ * decision (CONTEXT: a new wire code distinct from the busy one). Inserted in sorted
+ * position in both arrays; the vacuity floors below did not move.
  */
 const FROZEN_CREATE_WITH_KEY_215: readonly string[] = [
   "DRAFT_ALREADY_EXISTS",
@@ -37,6 +42,7 @@ const FROZEN_CREATE_WITH_KEY_215: readonly string[] = [
   "KEY_MT5_MASTER_PASSWORD",
   "KEY_MT5_SERVER_UNKNOWN",
   "KEY_MT5_TERMINAL_BUSY",
+  "KEY_MT5_TERMINAL_NOT_READY",
   "KEY_MT5_TERMINAL_UNRESPONSIVE",
   "KEY_MT5_VALIDATION_UNCONFIGURED",
   "KEY_MT5_WRONG_SERVER",
@@ -78,6 +84,7 @@ const FROZEN_ADD_KEY_215: readonly string[] = [
   "KEY_MT5_MASTER_PASSWORD",
   "KEY_MT5_SERVER_UNKNOWN",
   "KEY_MT5_TERMINAL_BUSY",
+  "KEY_MT5_TERMINAL_NOT_READY",
   "KEY_MT5_TERMINAL_UNRESPONSIVE",
   "KEY_MT5_VALIDATION_UNCONFIGURED",
   "KEY_MT5_WRONG_SERVER",

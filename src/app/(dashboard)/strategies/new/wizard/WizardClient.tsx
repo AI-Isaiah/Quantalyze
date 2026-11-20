@@ -38,6 +38,7 @@ import {
   type WizardStepKey,
 } from "@/lib/wizard/localStorage";
 import { wizardFetch } from "@/lib/wizard/wizard-correlation";
+import { resumeBannerBody, resumeSecretKind } from "@/lib/wizard/resume-banner";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { CtaLocation } from "@/lib/analytics";
 // Phase 154 / WIZCONT-01: TYPE-ONLY import (erased at build). The draft shape
@@ -289,6 +290,15 @@ export function WizardClient({
   const [showResumeBanner, setShowResumeBanner] = useState<boolean>(false);
   const [hydrated, setHydrated] = useState<boolean>(false);
 
+  // Phase 218 (CONTEXT `### Wizard resume banner`): while a draft's resume
+  // choice is pending, the banner is the ONLY content. Whether a choice is
+  // pending is knowable only after the async `loadWizardState` settles, so the
+  // draft step must not mount before hydration either. Otherwise the step (and
+  // its effects, e.g. the sync poll) is already running under the banner and
+  // the choice is pre-made. `loadWizardState` never throws, so `hydrated`
+  // always settles. Declared here, ahead of the effects that read it.
+  const stepHeld = Boolean(initialDraft) && (!hydrated || showResumeBanner);
+
   const [syncSnapshot, setSyncSnapshot] = useState<SyncPreviewSnapshot | null>(
     null,
   );
@@ -456,118 +466,125 @@ export function WizardClient({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const loaded = await loadWizardState();
-      if (cancelled) return;
-      // Phase 164.2.1 / SESSIONID-FENCE — the key THIS mount will submit
-      // under, and `null` when it will submit under none.
-      //
-      // Hoisted into a local rather than passed inline because the decline
-      // warning below has to read the SAME value; recomputing the expression
-      // there would let the two drift apart, and a triage label computed from a
-      // different key than the gate saw is worse than no label.
-      //
-      // API branch: deliberately the SAME expression that seeds the
-      // `apiKeyId` state above, so the gate compares the stored token against
-      // exactly the key the submission carries; reading the state variable
-      // here instead would make the comparison depend on render timing.
-      //
-      // ⛔ CSV branch: a LITERAL `null`, and this ternary is what makes the
-      // "no key on the CSV branch" sentences in `localStorage.ts` true by
-      // CONSTRUCTION rather than merely usually-true. `ContributionWizard
-      // Overlay` passes `preselectKey` regardless of source and renders the
-      // "CSV upload" pill under a live preselect, so "Finish setup → on key
-      // B" followed by "CSV upload" arrives here with a preselect in hand.
-      // A CSV submission carries no key, so a key comparison on this branch
-      // can never decline anything MEANINGFUL — the only thing it can do is
-      // strip a live CSV session id together with the `failedCsvSubmitSig`
-      // burn riding on it (the gate emits the pair or neither), which is
-      // precisely the RT-3 hazard of a fresh id with the burn gone. Claiming
-      // no key is therefore the honest claim, not a loophole. Pinned by
-      // `ContributionWizardOverlay.csv-preselect-burn.test.tsx`.
-      const incomingApiKeyId =
-        source === "csv"
-          ? null
-          : (initialDraft?.api_key_id ?? preselectKey?.id ?? null);
-      const overrides = deriveWizardResumeOverrides(
-        loaded,
-        source,
-        initialDraft?.id ?? null,
-        incomingApiKeyId,
-      );
-      // Phase 164.2.1 / SESSIONID-FENCE — THE DECLINE MUST NOT BE SILENT.
-      //
-      // `deriveWizardResumeOverrides` refuses by OMISSION — it just does not
-      // emit `wizardSessionId` — so the branch below cannot tell a decline from
-      // "nothing was stored", an unverifiable payload, or a fresh tab nonce.
-      // Every other refusal in the storage module says so on the console
-      // (`localStorage_payload_refused: …`); this one decides which idempotency
-      // token the submission carries, and a key-resolution regression that
-      // declined EVERY API resume would be indistinguishable in production from
-      // the fence working. A payload that LOADED and HELD a session id which
-      // did not come back is therefore reported here.
-      //
-      // ⛔ NEVER the key ids or the session id themselves — a coarse reason
-      // only, and no user data.
-      //
-      // ⚠️ The reason is a TRIAGE LABEL recomputed at this call site, NOT the
-      // gate. It is deliberately written to degrade rather than lie: anything it
-      // cannot account for — including a condition the derivation grows later —
-      // falls through to "other" instead of being mislabelled as a key refusal.
-      if (loaded?.wizardSessionId && !overrides.wizardSessionId) {
-        let reason = "other";
-        if ((loaded.source ?? "api") !== source) {
-          reason = "source_mismatch";
-        } else if (incomingApiKeyId !== null) {
-          if (typeof loaded.apiKeyId !== "string") {
-            // Payloads written before this phase carry no key at all — the
-            // accepted one-time cost on the record (CONTEXT.md D-02). Named
-            // apart from a real mismatch so the transient post-ship population
-            // is not read as a live defect.
-            reason = "stored_key_absent";
-          } else if (loaded.apiKeyId !== incomingApiKeyId) {
-            reason = "key_mismatch";
-          }
-        } else if (source === "api" && typeof loaded.apiKeyId === "string") {
-          // Phase 213 / KEYFLOW decision (a) — this mount named NO key (no draft,
-          // no preselect) and the stored pointer holds one, so
-          // `deriveWizardResumeOverrides` declined its session id. Fixed string:
-          // never the key id.
-          reason = "incoming_key_unknown";
-        }
-        // COUNTABLE, not merely diagnosable. A console warning is a Sentry
-        // breadcrumb; it cannot answer "how often does this fence fire in
-        // production", which is the only question that distinguishes working
-        // correctly from an over-declining regression. `step` carries the
-        // reason label — never a key id, never a session id.
-        trackForQuantsEventClient("wizard_session_id_not_restored", {
-          step: reason,
-        });
-        console.warn(
-          `[wizard] session_id_not_restored: ${reason} — submitting under a fresh token`,
+      try {
+        const loaded = await loadWizardState();
+        if (cancelled) return;
+        // Phase 164.2.1 / SESSIONID-FENCE — the key THIS mount will submit
+        // under, and `null` when it will submit under none.
+        //
+        // Hoisted into a local rather than passed inline because the decline
+        // warning below has to read the SAME value; recomputing the expression
+        // there would let the two drift apart, and a triage label computed from a
+        // different key than the gate saw is worse than no label.
+        //
+        // API branch: deliberately the SAME expression that seeds the
+        // `apiKeyId` state above, so the gate compares the stored token against
+        // exactly the key the submission carries; reading the state variable
+        // here instead would make the comparison depend on render timing.
+        //
+        // ⛔ CSV branch: a LITERAL `null`, and this ternary is what makes the
+        // "no key on the CSV branch" sentences in `localStorage.ts` true by
+        // CONSTRUCTION rather than merely usually-true. `ContributionWizard
+        // Overlay` passes `preselectKey` regardless of source and renders the
+        // "CSV upload" pill under a live preselect, so "Finish setup → on key
+        // B" followed by "CSV upload" arrives here with a preselect in hand.
+        // A CSV submission carries no key, so a key comparison on this branch
+        // can never decline anything MEANINGFUL — the only thing it can do is
+        // strip a live CSV session id together with the `failedCsvSubmitSig`
+        // burn riding on it (the gate emits the pair or neither), which is
+        // precisely the RT-3 hazard of a fresh id with the burn gone. Claiming
+        // no key is therefore the honest claim, not a loophole. Pinned by
+        // `ContributionWizardOverlay.csv-preselect-burn.test.tsx`.
+        const incomingApiKeyId =
+          source === "csv"
+            ? null
+            : (initialDraft?.api_key_id ?? preselectKey?.id ?? null);
+        const overrides = deriveWizardResumeOverrides(
+          loaded,
+          source,
+          initialDraft?.id ?? null,
+          incomingApiKeyId,
         );
+        // Phase 164.2.1 / SESSIONID-FENCE — THE DECLINE MUST NOT BE SILENT.
+        //
+        // `deriveWizardResumeOverrides` refuses by OMISSION — it just does not
+        // emit `wizardSessionId` — so the branch below cannot tell a decline from
+        // "nothing was stored", an unverifiable payload, or a fresh tab nonce.
+        // Every other refusal in the storage module says so on the console
+        // (`localStorage_payload_refused: …`); this one decides which idempotency
+        // token the submission carries, and a key-resolution regression that
+        // declined EVERY API resume would be indistinguishable in production from
+        // the fence working. A payload that LOADED and HELD a session id which
+        // did not come back is therefore reported here.
+        //
+        // ⛔ NEVER the key ids or the session id themselves — a coarse reason
+        // only, and no user data.
+        //
+        // ⚠️ The reason is a TRIAGE LABEL recomputed at this call site, NOT the
+        // gate. It is deliberately written to degrade rather than lie: anything it
+        // cannot account for — including a condition the derivation grows later —
+        // falls through to "other" instead of being mislabelled as a key refusal.
+        if (loaded?.wizardSessionId && !overrides.wizardSessionId) {
+          let reason = "other";
+          if ((loaded.source ?? "api") !== source) {
+            reason = "source_mismatch";
+          } else if (incomingApiKeyId !== null) {
+            if (typeof loaded.apiKeyId !== "string") {
+              // Payloads written before this phase carry no key at all — the
+              // accepted one-time cost on the record (CONTEXT.md D-02). Named
+              // apart from a real mismatch so the transient post-ship population
+              // is not read as a live defect.
+              reason = "stored_key_absent";
+            } else if (loaded.apiKeyId !== incomingApiKeyId) {
+              reason = "key_mismatch";
+            }
+          } else if (source === "api" && typeof loaded.apiKeyId === "string") {
+            // Phase 213 / KEYFLOW decision (a) — this mount named NO key (no draft,
+            // no preselect) and the stored pointer holds one, so
+            // `deriveWizardResumeOverrides` declined its session id. Fixed string:
+            // never the key id.
+            reason = "incoming_key_unknown";
+          }
+          // COUNTABLE, not merely diagnosable. A console warning is a Sentry
+          // breadcrumb; it cannot answer "how often does this fence fire in
+          // production", which is the only question that distinguishes working
+          // correctly from an over-declining regression. `step` carries the
+          // reason label — never a key id, never a session id.
+          trackForQuantsEventClient("wizard_session_id_not_restored", {
+            step: reason,
+          });
+          console.warn(
+            `[wizard] session_id_not_restored: ${reason} — submitting under a fresh token`,
+          );
+        }
+        if (overrides.wizardSessionId) {
+          setWizardSessionId(overrides.wizardSessionId);
+        }
+        // RT-3 — re-seat the burn alongside the session id it retired.
+        // `deriveWizardResumeOverrides` emits the two together or not at all, so
+        // the fence can never be armed against an id the burn never applied to.
+        if (overrides.failedCsvSubmitSig) {
+          failedCsvSubmitSigRef.current = overrides.failedCsvSubmitSig;
+        }
+        if (overrides.step) {
+          setStep(overrides.step);
+        }
+        if (overrides.strategyName !== undefined) {
+          setStrategyName(overrides.strategyName);
+        }
+        if (overrides.showResumeBanner) {
+          setShowResumeBanner(true);
+        }
+        if (initialDraft) {
+          setSavedAt(Date.now());
+        }
+      } catch (err) {
+        // A throw after the load (derivation, tracking, a setter) must not strand a
+        // draft user on a blank wizard: `stepHeld` reads `hydrated`, so it settles in `finally`.
+        console.error("[wizard] hydration failed", err);
+      } finally {
+        if (!cancelled) setHydrated(true);
       }
-      if (overrides.wizardSessionId) {
-        setWizardSessionId(overrides.wizardSessionId);
-      }
-      // RT-3 — re-seat the burn alongside the session id it retired.
-      // `deriveWizardResumeOverrides` emits the two together or not at all, so
-      // the fence can never be armed against an id the burn never applied to.
-      if (overrides.failedCsvSubmitSig) {
-        failedCsvSubmitSigRef.current = overrides.failedCsvSubmitSig;
-      }
-      if (overrides.step) {
-        setStep(overrides.step);
-      }
-      if (overrides.strategyName !== undefined) {
-        setStrategyName(overrides.strategyName);
-      }
-      if (overrides.showResumeBanner) {
-        setShowResumeBanner(true);
-      }
-      if (initialDraft) {
-        setSavedAt(Date.now());
-      }
-      setHydrated(true);
     })();
     return () => {
       cancelled = true;
@@ -602,12 +619,13 @@ export function WizardClient({
     // then the LS-hydration effect updates wizardSessionId (and possibly
     // step), retriggering this effect under the resumed identity. The
     // funnel would see two step_view_N events per resume.
-    if (!hydrated) return;
+    // 218: a held step is not viewed; the event fires when the chosen step mounts.
+    if (!hydrated || stepHeld) return;
     trackForQuantsEventClient(`wizard_step_view_${STEP_INDEX[step]}` as const, {
       wizard_session_id: wizardSessionId,
       step,
     });
-  }, [hydrated, step, wizardSessionId]);
+  }, [hydrated, stepHeld, step, wizardSessionId]);
 
   // F6 (H-0187/M-0238): read `step` through a ref inside the auth listener so
   // the subscription does NOT tear down + re-subscribe on every step
@@ -1397,9 +1415,11 @@ export function WizardClient({
               We saved your progress.
             </p>
             <p className="mt-1 text-caption text-text-muted">
-              {source === "csv"
-                ? "A CSV upload draft from an earlier session is ready. Re-select the file and continue."
-                : "A draft from an earlier session is ready. Secrets are never stored in your browser, so you will need to paste your API secret again."}
+              {resumeBannerBody({
+                source: source === "csv" ? "csv" : "api",
+                secretKind: resumeSecretKind(initialDraft.supported_exchanges),
+                resumeStep: draftResumeStep,
+              })}
             </p>
             <div className="mt-3 flex gap-2">
               <Button size="sm" onClick={handleResume} data-testid="wizard-resume">
@@ -1434,7 +1454,7 @@ export function WizardClient({
           </div>
         )}
 
-        {source === "api" ? (
+        {!stepHeld && (source === "api" ? (
           <>
             {step === "connect_key" && (
               // Phase 88 / ONB-01: the multi-key step. Its State A delegates to
@@ -1897,7 +1917,7 @@ export function WizardClient({
               />
             )}
           </>
-        )}
+        ))}
       </WizardChrome>
 
       <Modal

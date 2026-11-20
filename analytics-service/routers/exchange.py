@@ -24,6 +24,7 @@ from services.closed_sets import (
     MT5_WRONG_SERVER_DETAIL,
     MT5_SERVER_UNKNOWN_DETAIL,
     MT5_TERMINAL_BUSY_DETAIL,
+    MT5_TERMINAL_NOT_READY_DETAIL,
 )
 from services.mt5_client import (
     Mt5Client,
@@ -50,7 +51,10 @@ from services.mt5_handover import HOLDER_VALIDATION, SITE_VALIDATE_WIZARD
 # from this site's held lease. A service leaf over mt5_client / mt5_concurrency /
 # mt5_relogin; it never imports `routers.*`.
 from services.mt5_terminal_scrub import (
-    report_scrub_owed_refusal,
+    _MIN_INLINE_SCRUB_WAIT_S,
+    SCRUB_KIND_SCRUBBED,
+    SCRUB_KIND_SKIPPED_NO_HOUSE_CREDENTIALS,
+    pay_owed_validation_scrub_in_lease,
     schedule_validation_terminal_scrub,
 )
 # Phase 164.6.6 D-02 / D-05 — the ONE reader of the validation terminal's endpoint
@@ -128,6 +132,21 @@ logger = logging.getLogger("quantalyze.analytics")
 # response, in its own lease (D-08), so it adds no term to the 105s server worst
 # case; an owed scrub REFUSES this request (the recoverable 424) rather than
 # running inside it.
+# ⛔ CORRECTED 2026-11-19 (Phase 218): an owed scrub no longer refuses this request. The
+# owed gate pays the scrub INLINE under the lease it already holds and runs the check in
+# the same request; it refuses only when that scrub does not end `scrubbed`. The 75 s
+# envelope is anchored at lease acquisition, so scrub time comes out of the probe's
+# timeout and the server worst case stays 105 s. The sentence above is kept as lineage.
+#
+# Phase 218 envelope arithmetic: E - S - record = 75 - 30 - 5 = 40 = FLOOR
+# (`_MT5_VALIDATE_PROBE_FLOOR_S`), so the floor holds by construction with ZERO slack.
+# Accepted residue: a scrub that ends `scrubbed` within a hair of its 30 s bound, whose
+# cron row write also runs close to its 5 s ceiling, leaves just under 40 s and refuses
+# with `MT5_TERMINAL_NOT_READY`; recoverable, the mark is already cleared, the Retry
+# probes at once. The worst case stays 20 + 75 + 10 = 105 s because the scrub runs
+# INSIDE the envelope. The floor sitting below the stage ceiling is an inversion
+# accepted only when scrub and probe are both slow (218-CONTEXT "Amended after
+# research" "Budget"). The constants carry the full derivation.
 # --------------------------------------------------------------------------- #
 
 # The per-call MT5 IPC ceilings for the INTERACTIVE validate chain (D-25). Named
@@ -169,6 +188,70 @@ _MT5_VALIDATE_STAGE_TIMEOUT_S: Final[float] = MT5_VALIDATE_REQUEST_TIMEOUT_S + 5
 # Env-overridable following the mt5_concurrency.py derived-constant convention, so
 # Phase 155 can retune from measurement without a deploy of new code.
 _MT5_VALIDATE_DEADLINE_S: Final[float] = float(os.getenv("MT5_VALIDATE_DEADLINE_S", "75.0"))
+
+# Phase 218 (SELFHEAL) - the event-loop bound on the owed gate's inline scrub (the W-1
+# wait plus the blocking scrub together), about 5 x the measured 6 s scrub, per
+# 218-CONTEXT "Amended after research" "Budget". It bounds the WAIT only: the scrub
+# thread keeps its own, longer deadline so the credentialed relaunch can still verify.
+_MT5_INLINE_SCRUB_BUDGET_S: Final[float] = float(
+    os.getenv("MT5_VALIDATE_SCRUB_BUDGET_S", "30.0")
+)
+
+# Phase 218 (SELFHEAL) - the least envelope the probe may start with after an inline
+# scrub (research option B). 75 - 30 - 5 = 40 = this floor, so it holds BY CONSTRUCTION
+# with ZERO slack: the clamp below keeps `_MT5_INLINE_SCRUB_BUDGET_S + record` from ever
+# exceeding `E - FLOOR`. Accepted residue: a scrub that ends `scrubbed` within a hair
+# of its 30 s bound, whose cron row write also runs close to its 5 s ceiling, leaves
+# just under 40 s and refuses with `MT5_TERMINAL_NOT_READY`. That refusal is
+# recoverable and the mark is already cleared, so the Retry probes at once; the
+# measured scrub is about 6 s and a row write takes milliseconds, so it takes both
+# terms near their ceilings together. The server worst case stays 20 + 75 + 10 = 105 s
+# because the scrub runs INSIDE the envelope (anchored at lease acquisition), not
+# beside it. The floor sits BELOW `_MT5_VALIDATE_STAGE_TIMEOUT_S` on purpose: that
+# inversion is accepted only when the scrub and the probe are both slow (218-CONTEXT
+# "Amended after research" "Budget"); `tests/test_mt5_validate.py` pins it by name.
+_MT5_VALIDATE_PROBE_FLOOR_S: Final[float] = float(
+    os.getenv("MT5_VALIDATE_PROBE_FLOOR_S", "40.0")
+)
+
+# The cron-row write the inline scrub awaits before it returns (`_scrub_under_lease`),
+# so it is a real term of the envelope beside the scrub's own wait. Mirrors
+# `mt5_terminal_scrub._SCRUB_RECORD_TIMEOUT_S`; pinned equal by test.
+_MT5_INLINE_SCRUB_RECORD_S: Final[float] = 5.0
+
+
+def _check_inline_scrub_budget() -> None:
+    """Phase 218 review round 2 (WR-01): name a misconfigured envelope at startup.
+
+    The owed gate clamps the inline scrub's budget to
+    `min(budget, deadline - record - probe_floor)`. A clamp at or below
+    `_MIN_INLINE_SCRUB_WAIT_S` makes the scrub refuse to start on EVERY owed
+    validation (reported as `abandoned`, a timing cause), so the terminal is never
+    healed from the wizard. That is a configuration fault, not a timing one: log
+    it as an ERROR naming the env knobs. The defaults clamp to 30 s and stay silent.
+    """
+    clamped = max(
+        0.0,
+        min(
+            _MT5_INLINE_SCRUB_BUDGET_S,
+            _MT5_VALIDATE_DEADLINE_S
+            - _MT5_INLINE_SCRUB_RECORD_S
+            - _MT5_VALIDATE_PROBE_FLOOR_S,
+        ),
+    )
+    if clamped <= _MIN_INLINE_SCRUB_WAIT_S:
+        logger.error(
+            "MT5 validate envelope misconfigured: the inline scrub budget clamps to "
+            "%.0fs, at or below the %.0fs minimum a scrub is started with, so every "
+            "owed wizard validation will refuse as abandoned without scrubbing. "
+            "Check MT5_VALIDATE_SCRUB_BUDGET_S, MT5_VALIDATE_DEADLINE_S and "
+            "MT5_VALIDATE_PROBE_FLOOR_S.",
+            clamped,
+            _MIN_INLINE_SCRUB_WAIT_S,
+        )
+
+
+_check_inline_scrub_budget()
 
 # The bound on releasing our own transport — deliberately SMALL and deliberately
 # OUTSIDE the end-to-end deadline (see the finally block). Mirrors the magnitude of
@@ -1093,6 +1176,12 @@ async def _validate_mt5_key_probe(
             emit_mt5_stage_event(
                 "lease_wait", lease_started_at, ok=True, terminal_key=terminal_key
             )
+            # Phase 218: set by the owed gate when it pays the scrub inline, so the
+            # probe's deadline is measured from lease acquisition (the envelope anchor).
+            healed_inline = False
+            inline_scrub_elapsed_s = 0.0
+            probe_timeout = _MT5_VALIDATE_DEADLINE_S
+            lease_held_at = 0.0
             # ⭐ Phase 164.6.6.1 D-08 — THE OWED GATE. A terminal still marked
             # scrub-owed (a previous validation's scrub has not verified yet) or
             # carrying relaunch debt (ended and not seen house-verified) may hold a
@@ -1100,6 +1189,11 @@ async def _validate_mt5_key_probe(
             # second client in over the first, or hang on an account-less terminal.
             # So this validation is REFUSED with the existing recoverable 424, and
             # the owed scrub is scheduled; nothing is connected, logged in or probed.
+            # ⛔ CORRECTED 2026-11-19 (Phase 218): this gate no longer refuses an owed
+            # terminal and no longer schedules. It pays the scrub inline under the held
+            # lease (`pay_owed_validation_scrub_in_lease`) and the check runs in the same
+            # request; it refuses (before any client is built) only when that scrub does
+            # not end `scrubbed`. The paragraph above is kept as lineage.
             #
             # ⛔ DECISION 6 — why the wizard refuses rather than paying the scrub
             # in-request: the scrub and its credentialed relaunch are 5 rpyc
@@ -1107,6 +1201,11 @@ async def _validate_mt5_key_probe(
             # which fits neither the 75 s deadline / 60 s stage chain nor the
             # 120 s client ceiling. The worker, with no client budget, pays it
             # inline instead (`services/ingestion/mt5.py`).
+            # ⛔ CORRECTED 2026-11-19 (Phase 218): Decision 6 is reversed for the wizard.
+            # The measured scrub is about 6 s, not 275 s: the 275 s figure assumed every
+            # crossing at the 55 s interactive bound. The wizard now pays inline, bounded
+            # by `_MT5_INLINE_SCRUB_BUDGET_S`, and refuses only on a non-`scrubbed` kind.
+            # The paragraph above is kept as lineage.
             #
             # ⛔ REPORT BEFORE SCHEDULE. The reporter reads whether a scrub was
             # already pending BEFORE this request: pending (a validation queued
@@ -1122,34 +1221,100 @@ async def _validate_mt5_key_probe(
             # refused while that one's scrub waits (the founder-visible cost that
             # partly reverses D-29's queue-instead-of-fail).
             if mt5_scrub_owed(terminal_key) or mt5_relaunch_debt(terminal_key):
-                report_scrub_owed_refusal(site=SITE_VALIDATE_WIZARD, key=terminal_key)
-                schedule_validation_terminal_scrub(
-                    host, port, site=SITE_VALIDATE_WIZARD, probe_thread_done=None
+                # Phase 218: the envelope anchor. Read ONLY inside the owed branch so the
+                # unowed path keeps its HEAD read count of exactly two (the deadline
+                # stamp and the park gate). `scrub_started_at` is the `perf_counter`
+                # clock `lease_started_at` uses, for the stage event's duration.
+                lease_held_at = _park_clock()
+                scrub_started_at = time.perf_counter()
+                # The event-loop bound, CLAMPED so an env override of
+                # `MT5_VALIDATE_SCRUB_BUDGET_S` can never push scrub + cron row + probe
+                # floor past the envelope (and so past D-26's client ceiling). At the
+                # defaults the clamp is exactly 30 s. Read at call time.
+                kind = await pay_owed_validation_scrub_in_lease(
+                    host,
+                    port,
+                    site=SITE_VALIDATE_WIZARD,
+                    budget_s=max(
+                        0.0,
+                        min(
+                            _MT5_INLINE_SCRUB_BUDGET_S,
+                            _MT5_VALIDATE_DEADLINE_S
+                            - _MT5_INLINE_SCRUB_RECORD_S
+                            - _MT5_VALIDATE_PROBE_FLOOR_S,
+                        ),
+                    ),
                 )
-                trace.outcome = "scrub_owed"
-                # Phase 164.6.6.3.2 D-02 (2026-10-07): the code now names the cause. This
-                # arm answered NETWORK_UNAVAILABLE, so the wizard told the user a network
-                # timeout when OUR terminal was refusing the check. Same flat 424, still
-                # recoverable (the scrub clears in seconds), `trace.outcome` unchanged so
-                # Railway logs still tell this apart from `lease_busy`. The detail is true
-                # here as well as at the lease site: nothing else is running at THIS arm.
-                # Edited in place; the lease arm below is a second in-place edit, not a
-                # shared helper.
-                raise VenueTransientHTTPException(
-                    status_code=424,
-                    code="MT5_TERMINAL_BUSY",
-                    detail=MT5_TERMINAL_BUSY_DETAIL,
-                    recoverable=True,
+                emit_mt5_stage_event(
+                    "owed_scrub",
+                    scrub_started_at,
+                    ok=kind == SCRUB_KIND_SCRUBBED,
+                    terminal_key=terminal_key,
+                    outcome="scrub_healed"
+                    if kind == SCRUB_KIND_SCRUBBED
+                    else "scrub_" + kind,
+                )
+                # The single post-scrub clock read, taken for every kind so the floor
+                # can be decided before the refusal. The envelope left for the probe.
+                inline_scrub_elapsed_s = _park_clock() - lease_held_at
+                remaining = _MT5_VALIDATE_DEADLINE_S - inline_scrub_elapsed_s
+                # ⭐ THE PROBE FLOOR (218-SC-4, research option B). A scrub that ended
+                # `scrubbed` but left less than `_MT5_VALIDATE_PROBE_FLOOR_S` would have
+                # its probe cut off by the deadline mid-login, so the request refuses
+                # instead. The `owed_scrub` event above says `scrub_healed` (the scrub
+                # DID finish and the mark is cleared) and the request then ends
+                # `scrub_unhealed`: together that reads "scrubbed, but too late to
+                # probe". Owed branch only: the unowed path has no scrub to floor.
+                if kind != SCRUB_KIND_SCRUBBED or remaining < _MT5_VALIDATE_PROBE_FLOOR_S:
+                    # No alert on a non-`scrubbed` kind: the scrub already paged with its
+                    # real per-cause label and wrote its cron row (`_scrub_under_lease`, or
+                    # the sibling's own `failed` alert when a raise escaped it). The inline
+                    # path never adds the key to `_PENDING_SCRUB_KEYS`, so
+                    # `report_scrub_owed_refusal` here would page a second time under the
+                    # wrong cause (review round 1, IN-01). The floor breach has nothing to
+                    # page about: that scrub verified and nothing is owed.
+                    if kind == SCRUB_KIND_SCRUBBED:
+                        logger.warning(
+                            "validate_key: owed MT5 terminal scrub paid inline but left "
+                            "%.0fs of the %.0fs envelope, under the %.0fs probe floor; "
+                            "refusing, the Retry probes at once",
+                            remaining,
+                            _MT5_VALIDATE_DEADLINE_S,
+                            _MT5_VALIDATE_PROBE_FLOOR_S,
+                        )
+                    trace.outcome = "scrub_unhealed"
+                    if kind == SCRUB_KIND_SKIPPED_NO_HOUSE_CREDENTIALS:
+                        # An env gap, not a transient: the house credential is unset.
+                        raise service_error(
+                            500,
+                            "MT5_VALIDATION_UNCONFIGURED",
+                            dependency="mt5-gateway",
+                            retryable=False,
+                            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+                        )
+                    # NOT scheduling a scrub here: the post-check `finally` schedules only
+                    # when a login was attempted (still False on a refusal), and
+                    # scheduling would race the user's Retry into `lease_busy`.
+                    raise VenueTransientHTTPException(
+                        status_code=424,
+                        code="MT5_TERMINAL_NOT_READY",
+                        detail=MT5_TERMINAL_NOT_READY_DETAIL,
+                        recoverable=True,
+                    )
+                probe_timeout = remaining
+                healed_inline = True
+                logger.info(
+                    "validate_key: owed MT5 terminal scrub paid inline, check continues"
                 )
             # D-07 part 2 — where the deadline starts, so the park can read how much
             # of it is still unspent.
-            deadline_started_at = _park_clock()
+            deadline_started_at = lease_held_at if healed_inline else _park_clock()
             try:
                 # ⭐ THE ONE END-TO-END DEADLINE (D-03). It bounds connect + probe TOGETHER;
                 # the release in the finally is deliberately NOT inside it (see below).
                 try:
                     info, probe, terminal = await asyncio.wait_for(
-                        _connect_and_probe(), timeout=_MT5_VALIDATE_DEADLINE_S
+                        _connect_and_probe(), timeout=probe_timeout
                     )
                 except asyncio.TimeoutError:
                     # The end-to-end deadline fired — the stages themselves were outlived, so
@@ -1386,11 +1551,31 @@ async def _validate_mt5_key_probe(
                             elif probe_disqualified is not None:
                                 park_skip = probe_disqualified
                             elif (
-                                _MT5_VALIDATE_DEADLINE_S
+                                park_budget_left := _MT5_VALIDATE_DEADLINE_S
                                 - (_park_clock() - deadline_started_at)
                             ) < _MT5_PARK_MIN_BUDGET_S:
                                 park_skip = "budget_exhausted"
-                            if park_skip is not None:
+                            if (
+                                park_skip == "budget_exhausted"
+                                and healed_inline
+                                and park_budget_left + inline_scrub_elapsed_s
+                                >= _MT5_PARK_MIN_BUDGET_S
+                            ):
+                                # CONTEXT "Amended after research" "Park skip after a
+                                # healed inline scrub" + RESEARCH assumption A6: THIS
+                                # request's inline scrub is what spent the budget (the
+                                # park would have fit without it), and the post-check
+                                # scrub scheduled on every post-login exit ends and
+                                # relaunches the terminal, so the master-password
+                                # session does not outlive the check. INFO, no page.
+                                # Any other skip, and a healed request whose probe
+                                # alone spent the budget, still pages below.
+                                logger.info(
+                                    "validate_key: park skipped (budget_exhausted) after "
+                                    "an inline owed scrub; the post-check scrub ends and "
+                                    "relaunches the terminal"
+                                )
+                            elif park_skip is not None:
                                 report_park_skipped(park_skip, site=SITE_VALIDATE_WIZARD)
                             else:
                                 try:
@@ -1462,6 +1647,9 @@ async def _validate_mt5_key_probe(
         # minute". The two sites are two in-place edits, never a shared helper, and
         # `trace.outcome` stays `lease_busy` so Railway logs still tell them apart. The
         # paragraph above is kept as lineage.
+        # ⛔ CORRECTED 2026-11-19 (Phase 218): the owed-scrub gate no longer answers
+        # MT5_TERMINAL_BUSY; it answers MT5_TERMINAL_NOT_READY (STATUS_CONTRACT S-31).
+        # This arm is the only MT5_TERMINAL_BUSY site left (S-30).
         #
         # WHY this arm: it is genuinely RECOVERABLE — the terminal frees up — so
         # "try again" is honest advice rather than a shrug, which is what

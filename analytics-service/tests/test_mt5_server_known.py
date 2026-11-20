@@ -309,6 +309,22 @@ def test_terminal_busy_detail_collides_with_no_cascade_needle():
     assert not ("ip" in lower and "allow" in lower), "collides with the ip+allow branch"
 
 
+def test_terminal_not_ready_detail_collides_with_no_cascade_needle():
+    """Phase 218 (SELFHEAL). The owed gate's refusal detail is forwarded VERBATIM by the
+    dashboard key forms, where a 4xx `detail` is classified by the SAME substring cascade,
+    so the wire code must be the only way it is recognised. Twinned from the BUSY sweep
+    above, plus the WIZFORM-03 words ("terminal", "lease", "queue", "lock") and "busy": it
+    must not read as the held-lease refusal, and it must not name internals."""
+    from services.closed_sets import MT5_TERMINAL_NOT_READY_DETAIL
+
+    lower = MT5_TERMINAL_NOT_READY_DETAIL.lower()
+    hits = [n for n in _CASCADE_NEEDLES if n in lower]
+    assert hits == [], f"MT5_TERMINAL_NOT_READY_DETAIL collides with cascade needle(s) {hits}"
+    assert not ("ip" in lower and "allow" in lower), "collides with the ip+allow branch"
+    banned = [w for w in ("terminal", "lease", "queue", "lock", "busy") if w in lower]
+    assert banned == [], f"MT5_TERMINAL_NOT_READY_DETAIL says {banned}"
+
+
 # ---------------------------------------------------------------------------
 # Phase 164.6.6.3 plan 05 (D-09, D-10, D-11, D-14) - the router disposition.
 #
