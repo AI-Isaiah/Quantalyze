@@ -972,13 +972,19 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     // apart. Every unit arm feeds a hand-written row, so without these pins an SQL that emits
     // an always-empty 7th field would stay green and a narrowed lane trigger would pass OK.
     expect(sqlLive, "the catalogue's 7th field no longer reads the trigger's UPDATE OF columns from t.tgattr").toMatch(/\bunnest\(t\.tgattr\b/);
-    expect(sqlLive, "the catalogue's 7th field no longer resolves tgattr numbers to column names through pg_attribute").toMatch(
-      /JOIN pg_attribute a ON a\.attrelid = t\.tgrelid AND a\.attnum = u\.attnum/,
+    // The join is anchored at BOTH ends: the subquery must run straight from the unnest into the
+    // join and close right after it, so a trailing `WHERE false`, `AND false` or `attnum + 1`
+    // (a dead expression that keeps the pinned text but empties or skews the field) cannot slip by.
+    expect(sqlLive, "the catalogue's 7th field no longer selects FROM the unnest of t.tgattr straight into the pg_attribute join").toMatch(
+      /FROM unnest\(t\.tgattr::int2\[\]\) AS u\(attnum\)\s+JOIN pg_attribute/,
+    );
+    expect(sqlLive, "the catalogue's 7th field no longer resolves tgattr numbers to column names through pg_attribute, or carries a filter after the join that can empty it").toMatch(
+      /JOIN pg_attribute a ON a\.attrelid = t\.tgrelid AND a\.attnum = u\.attnum\), ''\)/,
     );
     expect(sqlLive, "the catalogue's 7th field no longer joins the columns with string_agg").toContain("string_agg(a.attname::text, ','");
     expect(
       sqlLive,
-      "the catalogue's 7th field has no coalesce(..., '') empty default — a trigger with no UPDATE OF columns would null the whole row concatenation and print as a blank line the gate skips",
+      "the catalogue's 7th field has no coalesce(..., '') empty default — a trigger with no UPDATE OF columns would null the whole row concatenation, the row would print as a blank line the gate skips, and the declared trigger would then read as MISSING",
     ).toMatch(/coalesce\(\(SELECT string_agg\([\s\S]*?\),\s*''\)\s*\n\s*FROM pg_trigger/);
     const migText = readdirSync(REPO_ROOT + "supabase/migrations")
       .filter((f) => f.endsWith(".sql"))
