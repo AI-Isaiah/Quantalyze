@@ -791,6 +791,15 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       expect(r.out).toContain("DIFFERS  auth.users trigger on_email_change: update-of columns lane=name declared=email");
     });
 
+    it("OK when the lane lists its UPDATE OF columns unsorted (phone,email against declared email, phone)", () => {
+      const r = gate({ [A]: UPDATE_OF_SQL("email, phone") }, [A], [...META, UPDATE_OF_ROW("phone,email")]);
+      expect(
+        r.status,
+        `a lane column order the SQL does not sort was read as drift — the lane-side re-sort in parseCatalogue is gone:\n${r.out}`,
+      ).toBe(0);
+      expect(r.out).toMatch(/^nonpublic-fidelity: auth-users-triggers=1\/1 cron-jobs=0\/0 drift=0 verdict OK$/m);
+    });
+
     it("DRIFT when a declared plain AFTER UPDATE has UPDATE OF columns on the lane (widened the other way)", () => {
       const plain = "CREATE TRIGGER on_email_change AFTER UPDATE ON auth.users FOR EACH ROW EXECUTE FUNCTION sync_email();\n";
       const r = gate({ [A]: plain }, [A], [...META, UPDATE_OF_ROW("email")]);
@@ -958,6 +967,19 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       .join("\n");
     expect(sqlLive, "the catalogue no longer reads cron.job").toMatch(/\bFROM cron\.job\b/);
     expect(sqlLive, "the catalogue no longer excludes internal triggers").toContain("NOT t.tgisinternal");
+    // ⭐ Phase 220 (SFH-01): the 7th field. tgtype is 17 for a plain AFTER UPDATE and for an
+    // AFTER UPDATE OF email trigger alike, so this field is the ONLY thing that tells them
+    // apart. Every unit arm feeds a hand-written row, so without these pins an SQL that emits
+    // an always-empty 7th field would stay green and a narrowed lane trigger would pass OK.
+    expect(sqlLive, "the catalogue's 7th field no longer reads the trigger's UPDATE OF columns from t.tgattr").toMatch(/\bunnest\(t\.tgattr\b/);
+    expect(sqlLive, "the catalogue's 7th field no longer resolves tgattr numbers to column names through pg_attribute").toMatch(
+      /JOIN pg_attribute a ON a\.attrelid = t\.tgrelid AND a\.attnum = u\.attnum/,
+    );
+    expect(sqlLive, "the catalogue's 7th field no longer joins the columns with string_agg").toContain("string_agg(a.attname::text, ','");
+    expect(
+      sqlLive,
+      "the catalogue's 7th field has no coalesce(..., '') empty default — a trigger with no UPDATE OF columns would null the whole row concatenation and print as a blank line the gate skips",
+    ).toMatch(/coalesce\(\(SELECT string_agg\([\s\S]*?\),\s*''\)\s*\n\s*FROM pg_trigger/);
     const migText = readdirSync(REPO_ROOT + "supabase/migrations")
       .filter((f) => f.endsWith(".sql"))
       .map((f) => read(`supabase/migrations/${f}`))
