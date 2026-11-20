@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.56.1] - 2026-11-20 — BASELINE: automated re-dump after the PROD apply of d4f93d47
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `44725236453`, after the PROD apply of merge `d4f93d47`: sha256 `0a1a7771…` → `0558f094…`.
+- Shape, old → new: tables 68 → 68, policies 154 → 154, function statements 136 → 137, distinct function names 134 → 135, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261119120000_sync_profile_email_from_auth.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-20` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.56.0 → 0.133.56.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=325 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 137 — MATCH 134, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `44725236453` succeeded, and this entry was composed by the `redump-pr` job. Run `44725236453` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.56.0] - 2026-11-20 — Phase 220 EXTRACTOR: the local-stack extractor folds `UPDATE OF` auth.users triggers and compares their columns
 
 CI-only. The local-stack non-public extractor (`scripts/local-stack/nonpublic-objects.mjs`) refused any `AFTER UPDATE OF <columns>` trigger on `auth.users`. Phase 219's migration `20261119120000_sync_profile_email_from_auth.sql` creates exactly that (`on_auth_user_email_updated`, `AFTER UPDATE OF email`), so the first baseline re-dump that carries it would have made every lane boot FATAL (`sql-tests`, `frontend-local-stack`, `frontend-live-db-lane`, `python`, `e2e-seeded`). This release lets the bot re-dump PR #1294 land safely. Main's `sql-gate-lint` (`SNAPSHOT_MISSING sync_profile_email_from_auth/0`, red since merge `d4f93d474`) goes green when #1294 merges after this release, not from this release itself. Phase branch: 11 commits (2 code and test, 2 review test fixes, 7 planning records), squashed here with no `.planning/` paths.

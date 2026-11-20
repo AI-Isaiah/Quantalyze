@@ -11161,6 +11161,31 @@ COMMENT ON FUNCTION "public"."strategy_shares_enforce_monotonic_generation"() IS
 
 
 
+CREATE OR REPLACE FUNCTION "public"."sync_profile_email_from_auth"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+BEGIN
+  IF current_setting('quantalyze.sanitize_in_progress', true) = 'on' THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW.email IS DISTINCT FROM OLD.email THEN
+    UPDATE public.profiles SET email = NEW.email WHERE id = NEW.id;
+  END IF;
+
+  RETURN NEW;
+END
+$$;
+
+
+ALTER FUNCTION "public"."sync_profile_email_from_auth"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."sync_profile_email_from_auth"() IS 'Phase 219 ACCOUNTEMAIL (D-06). Copies a changed auth.users.email into the derived public.profiles.email for the same id. Skips an unchanged address and skips entirely while quantalyze.sanitize_in_progress is on, so account erasure is never fought. Runs with its owner''s rights and a pinned search_path; EXECUTE revoked from PUBLIC, anon and authenticated (a trigger function is checked at CREATE TRIGGER, not at fire time).';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."sync_strategy_analytics_status"("p_strategy_id" "uuid", "p_trigger_job_id" "uuid" DEFAULT NULL::"uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -18583,6 +18608,11 @@ GRANT ALL ON FUNCTION "public"."strategy_shares_enforce_monotonic_generation"() 
 
 
 
+REVOKE ALL ON FUNCTION "public"."sync_profile_email_from_auth"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."sync_profile_email_from_auth"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."sync_strategy_analytics_status"("p_strategy_id" "uuid", "p_trigger_job_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."sync_strategy_analytics_status"("p_strategy_id" "uuid", "p_trigger_job_id" "uuid") TO "service_role";
 
@@ -18867,7 +18897,6 @@ GRANT SELECT("description"),UPDATE("description") ON TABLE "public"."profiles" T
 
 
 GRANT SELECT("email") ON TABLE "public"."profiles" TO "service_role";
-GRANT UPDATE("email") ON TABLE "public"."profiles" TO "authenticated";
 
 
 
