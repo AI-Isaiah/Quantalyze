@@ -137,3 +137,29 @@ AssertionError: the catalogue's 7th field no longer reads the trigger's UPDATE O
 Each SFH-01 element also checked on its own against a text-level mutation of the live SQL: dropping the coalesce turns only the coalesce pin RED, dropping the `pg_attribute` join only the join pin, dropping `string_agg` the `string_agg` and coalesce pins, and swapping out `t.tgattr` only the `tgattr` pin.
 
 IN-02 (the same point as SFH-02) is closed by the SFH-02 arm. LR-01 and the other Info items were not touched, per scope.
+
+## SFH-01 round 2 fix record (commit 573457fc6)
+
+Round 1's four textual pins stayed green against three dead-expression mutants that keep the pinned text: `... a.attnum = u.attnum WHERE false), '')`, `... AND false), '')` and `... = u.attnum + 1), '')`. The first two empty the 7th field, so a narrowed lane trigger would pass OK. Test-only fix in `src/__tests__/local-stack-lane-wiring.test.ts`:
+
+- The join pin now ends at the subquery's close: `JOIN pg_attribute a ON a\.attrelid = t\.tgrelid AND a\.attnum = u\.attnum\), ''\)`.
+- A new pin asserts the FROM clause runs straight into the join: `FROM unnest\(t\.tgattr::int2\[\]\) AS u\(attnum\)\s+JOIN pg_attribute`.
+- The coalesce pin's message now says the declared trigger would then read as MISSING.
+
+Evidence (byte backup with `cp`, restored with `cp`, `cmp` clean; file 74 passed (74) after restore). Vitest run with `WHERE false` applied to `nonpublic-catalogue.sql`:
+
+```
+ × load_baseline() loads the non-public objects after reference data and gates them before the replay, through the superuser for the trigger and the catalogue and the loading role for cron 20ms
+AssertionError: the catalogue's 7th field no longer resolves tgattr numbers to column names through pg_attribute, or carries a filter after the join that can empty it: expected 'SET search_path TO pg_catalog; -- so …' to match /JOIN pg_attribute a ON a\.attrelid = …/
+ Tests  1 failed | 73 passed (74)
+```
+
+Node regex check against the comment-stripped live SQL (the same text `sqlLive` holds):
+
+```
+real           from:ok join:ok
+WHERE false    from:ok join:RED
+AND false      from:ok join:RED
+attnum + 1     from:ok join:RED
+```
+
