@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155, 155.1, 207-217 and 218 complete; 219 shipped, awaiting the founder's live re-test; 155.2, 157 and 220 open)
+current_phase_name: parallel phases (155, 155.1, 207-218 and 220 complete; 219 shipped, awaiting the founder's live re-test; 155.2 and 157 open)
 status: executing
-stopped_at: Phase 219 shipped (#1291 and #1299); records landed, founder live re-test pending
-last_updated: "2026-11-20T18:50:00.000Z"
+stopped_at: Phase 220 complete (shipped as #1296)
+last_updated: "2026-11-20T18:58:29.550Z"
 last_activity: 2026-11-20
-last_activity_desc: Phase 219 ACCOUNTEMAIL shipped, UAT pending (#1299 merged as b87eb7c07)
-state_head: b87eb7c07a1adb866c6ef4051a05be90b2f2cd12
+last_activity_desc: Phase 220 EXTRACTOR complete (#1296 merged as d188fef84)
+state_head: d188fef84aec725f5d31ca1b6bfd2924c9c57be7
 progress:
   total_phases: 18
-  completed_phases: 14
-  total_plans: 92
-  completed_plans: 92
-  percent: 78
+  completed_phases: 15
+  total_plans: 93
+  completed_plans: 93
+  percent: 83
 ---
 
 ## ⭐ STATE lineage
@@ -175,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 155 PARITYHARNESS, 155.1 SERVERCLOCK, 207 RETRYPROP through 217 SERVERRULE and 218 SELFHEAL complete
+Phase: parallel — 155 PARITYHARNESS, 155.1 SERVERCLOCK, 207 RETRYPROP through 218 SELFHEAL and 220 EXTRACTOR complete
 Plan: per phase (see each phase directory)
-Status: the founder's trading-day session ran 2026-11-19: 155.1 UAT items 5 and 6 passed and 155.1 closed (MT5-06 complete); 155.2 LIVEPARITY terminal readings and classic All-History Reports for MM2, MM3 and FX-AI_V are captured in the gitignored capture directory, still owing the weekend reading and broker statements; 157 FOUNDER-CONFIRM FCONF-01 observed (silent same-browser resume accepted by the founder, banner shown in a fresh browser), FCONF-02/03 and the FCONF-04 rotation still open; 218 SELFHEAL and 219 ACCOUNTEMAIL booked from the session; 218 SELFHEAL shipped as #1293 (v0.133.58.0) and closed 2026-11-20; 219 ACCOUNTEMAIL shipped as #1291 (v0.133.53.0) and its gap closure as #1299 (v0.133.60.0, migration applied to TEST and PROD), 9/9 plans, VERIFICATION human_needed; the after-deploy Auth flip ran 2026-11-20 (Secure email change OFF, Secure password change ON, Confirm email still on, read back), and 219 closes after the founder's live re-test of the one-link, password-gated email change; 220 EXTRACTOR shipped as #1296 and its records are owed
-Last activity: 2026-11-20 — Phase 219 ACCOUNTEMAIL shipped; records PR carries its artifacts, phase stays open for the founder's live re-test
-Progress: [████████░░] 78%
+Status: the founder's trading-day session ran 2026-11-19: 155.1 UAT items 5 and 6 passed and 155.1 closed (MT5-06 complete); 155.2 LIVEPARITY terminal readings and classic All-History Reports for MM2, MM3 and FX-AI_V are captured in the gitignored capture directory, still owing the weekend reading and broker statements; 157 FOUNDER-CONFIRM FCONF-01 observed (silent same-browser resume accepted by the founder, banner shown in a fresh browser), FCONF-02/03 and the FCONF-04 rotation still open; 218 SELFHEAL and 219 ACCOUNTEMAIL booked from the session; 218 SELFHEAL shipped as #1293 (v0.133.58.0) and closed 2026-11-20; 219 ACCOUNTEMAIL shipped as #1291 (v0.133.53.0) and its gap closure as #1299 (v0.133.60.0, migration applied to TEST and PROD), 9/9 plans, VERIFICATION human_needed; the after-deploy Auth flip ran 2026-11-20 (Secure email change OFF, Secure password change ON, Confirm email still on, read back), and 219 closes after the founder's live re-test of the one-link, password-gated email change; 220 EXTRACTOR shipped as #1296 (v0.133.56.0), after which the bot re-dump #1294 and the ratchet-row delete #1298 landed, and closed 2026-11-20
+Last activity: 2026-11-20 — Phase 220 EXTRACTOR complete (#1296 merged as d188fef84)
+Progress: [████████░░] 83%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1812,7 +1812,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-14T07:30:26.000Z
-**Stopped At:** Phase 219 ACCOUNTEMAIL shipped, founder live re-test pending (#1299 merged as b87eb7c07)
+**Stopped At:** Phase 220 EXTRACTOR complete (#1296 merged as d188fef84)
 **Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z
