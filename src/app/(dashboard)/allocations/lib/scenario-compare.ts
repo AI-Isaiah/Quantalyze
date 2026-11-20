@@ -128,6 +128,14 @@ export interface ScenarioCompareInputs {
    * instead of reading them as 0 (T-KL1-SCOPE). Optional: absent builds today's units.
    */
   tinyBaseDaysByApiKeyId?: Record<string, string[]>;
+  /**
+   * 155.2 G2 — each key's exchange (api_key_id → exchange), the same map the composer
+   * builds from `payload.apiKeys`. Passed to the per-key builder so every per-key column
+   * derives its legs' asset class from the venue (`assetClassForExchange`): a pure-MT5
+   * book annualizes risk at 252 here exactly as in the composer, and any crypto key keeps
+   * 365. Optional: absent leaves each leg class-null, which the blend reads as 365.
+   */
+  exchangeByApiKeyId?: Record<string, string>;
   equityByApiKeyId?: Record<string, number>;
   /**
    * WR-03 — carried for PARITY with the live payload only. `computeMetricsForDraft`
@@ -241,6 +249,8 @@ export function computeDraftColumn(
         // 188 D-07: the days each key was left out of, so this column reads them
         // the way the SSR live baseline and the stored book do.
         liveInputs.tinyBaseDaysByApiKeyId ?? {},
+        // 155.2 G2: the venue decides each leg's risk clock, as in the composer.
+        liveInputs.exchangeByApiKeyId ?? {},
       ),
       draft.addedStrategies,
       liveInputs.addedStrategyReturnsLookup as Record<

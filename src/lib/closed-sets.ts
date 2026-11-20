@@ -609,6 +609,32 @@ export function isCryptoExchange(exchange: string | null | undefined): boolean {
 }
 
 /**
+ * The asset class of a per-key leg, derived from its key's exchange (155.2 G2,
+ * MT5-10). This is the ONE place a per-key leg's class comes from its venue.
+ *
+ * - a crypto venue (`isCryptoExchange`) → `"crypto"`
+ * - any other SUPPORTED venue (a forex/CFD venue such as mt5) → `"traditional"`
+ * - absent, empty or not a SUPPORTED_EXCHANGES member → `null`
+ *
+ * `null` is deliberate: it flows into `blendPeriodsPerYear`'s unknown→365
+ * conservative rule (RANK-06), so a leg whose exchange was not supplied can
+ * never drop a blend onto the flattering 252 clock.
+ *
+ * Never compares against a venue name: the class comes from set membership, so
+ * a venue added to SUPPORTED_EXCHANGES costs one row there, not a call-site sweep.
+ * Case-insensitive, like `isCryptoExchange`.
+ */
+export function assetClassForExchange(
+  exchange: string | null | undefined,
+): "crypto" | "traditional" | null {
+  if (!exchange) return null;
+  if (!(SUPPORTED_EXCHANGES as readonly string[]).includes(exchange.toLowerCase())) {
+    return null;
+  }
+  return isCryptoExchange(exchange) ? "crypto" : "traditional";
+}
+
+/**
  * Trading periods per year for annualization, keyed off a strategy's
  * `asset_class`. 'crypto' → 365 (7-day markets), everything else → 252
  * (weekday markets — the conservative default that matches the pre-#597

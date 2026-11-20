@@ -3136,6 +3136,20 @@ export function ScenarioComposer({
     [payload.apiKeys],
   );
 
+  // 155.2 G2 — api_key_id → exchange, from the same `payload.apiKeys` the label
+  // map reads. The venue decides each per-key leg's risk clock through
+  // `assetClassForExchange` inside the builder, so a pure-MT5 book annualizes
+  // at 252 and any crypto key keeps the blend at 365. The compare panel gets
+  // the identical map (AllocationsTabs → ScenarioComparePanel), so both
+  // surfaces annualize one book on one clock.
+  const exchangeByApiKeyId = useMemo(
+    () =>
+      Object.fromEntries(
+        (payload.apiKeys ?? []).map((k) => [k.id, k.exchange]),
+      ),
+    [payload.apiKeys],
+  );
+
   // Per-key strategy set — wrapped in a useMemo on its inputs. One
   // StrategyForBuilder per api_key_id (id === api_key_id), RAW equity-share
   // weights, default selected=true.
@@ -3172,6 +3186,7 @@ export function ScenarioComposer({
       equityByApiKeyId,
       apiKeyLabelById,
       payload.tinyBaseDaysByApiKeyId ?? {},
+      exchangeByApiKeyId,
     );
   }, [
     payload.perKeyReturnsByApiKeyId,
@@ -3179,6 +3194,7 @@ export function ScenarioComposer({
     payload.tinyBaseDaysByApiKeyId,
     equityByApiKeyId,
     apiKeyLabelById,
+    exchangeByApiKeyId,
   ]);
 
   // The per-key path is active only in book mode + the book gate satisfied. When

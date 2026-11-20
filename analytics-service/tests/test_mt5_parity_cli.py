@@ -38,7 +38,7 @@ from services.mt5_parity import (
 from services.mt5_parity_capture import load_bundle, load_capture, seal_capture
 from services.mt5_parity_intake import load_worksheet
 from services.mt5_parity_report import parse_report
-from services.mt5_server_clock import server_clock_for_rule
+from services.mt5_server_clock import fixed_server_clock, server_clock_for_rule
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = SERVICE_ROOT / "tests" / "fixtures" / "mt5_parity"
@@ -641,3 +641,69 @@ def test_cli_red_proof_leaves_the_committed_fixtures_alone(tmp_path: Path) -> No
     before = {p.name: _sha(p) for p in sorted(FIXTURES.iterdir()) if p.is_file()}
     assert main(_red_args(tmp_path)) == 0
     assert {p.name: _sha(p) for p in sorted(FIXTURES.iterdir()) if p.is_file()} == before
+
+
+# ------------------------------------------------------------ CLI: --clock-rule forms
+# The full verdict judges each account on the clock its derive used (Phase 217), so the
+# CLI must take every form the worker takes. A clock the CLI cannot name would force a
+# verdict on the wrong day placement, which is a silent parity miss, not a refusal.
+
+
+def _clock_seen_by_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rule: str | None
+) -> Any:
+    import scripts.mt5_parity_run as run
+
+    seen: list[Any] = []
+    real = run.evaluate_windows
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["clock"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(run, "evaluate_windows", spy)
+    extra = () if rule is None else ("--clock-rule", rule)
+    assert main(_verdict_args(tmp_path, extra=extra)) == 0
+    assert len(seen) == 1
+    return seen[0]
+
+
+def test_cli_verdict_clock_rule_utc_is_the_fixed_zero_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _clock_seen_by_verdict(tmp_path, monkeypatch, "utc") == fixed_server_clock(0)
+
+
+def test_cli_verdict_clock_rule_fixed_seconds_is_that_fixed_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _clock_seen_by_verdict(tmp_path, monkeypatch, "fixed:7200") == fixed_server_clock(7200)
+
+
+def test_cli_verdict_clock_rule_eu_and_default_us(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _clock_seen_by_verdict(tmp_path, monkeypatch, "eu") == server_clock_for_rule("eu")
+    assert _clock_seen_by_verdict(tmp_path, monkeypatch, None) == US
+
+
+@pytest.mark.parametrize(
+    "bad", ["xx", "fixed:abc", "fixed:", "fixed:1_000", "fixed:50400", "fixed:-50400", "UTC "]
+)
+def test_cli_refuses_a_malformed_clock_rule_by_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], bad: str
+) -> None:
+    with pytest.raises(SystemExit) as exited:
+        main(_verdict_args(tmp_path, extra=("--clock-rule", bad)))
+    assert exited.value.code == 2
+    err = capsys.readouterr().err
+    assert "--clock-rule" in err and "Traceback" not in err
+    assert not (tmp_path / "verdict.json").exists()
+
+
+def test_cli_clock_rule_accepts_the_13_hour_bound_and_signed_offsets() -> None:
+    from scripts.mt5_parity_run import _clock_from_rule
+
+    assert _clock_from_rule("fixed:46800") == fixed_server_clock(46800)
+    assert _clock_from_rule("fixed:-46800") == fixed_server_clock(-46800)
+    assert _clock_from_rule("fixed:+3600") == fixed_server_clock(3600)

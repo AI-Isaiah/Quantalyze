@@ -420,6 +420,49 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
   });
 
   // -------------------------------------------------------------------------
+  // T_AT5e (155.2 G2, T-155.2-16) — the compare panel's payload carries the
+  //          api_key_id → exchange map built from the dashboard's `apiKeys`.
+  //          The panel declares it OPTIONAL, so the compiler cannot catch the
+  //          line being deleted; this arm can. Without it the compare columns
+  //          read every per-key leg as class-null (365) while the composer next
+  //          to them reads an MT5 book at 252.
+  // -------------------------------------------------------------------------
+  it("T_AT5e the compare panel payload carries the exchange map built from the dashboard's apiKeys", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => [] }) as Response),
+    );
+    const mkKey = (id: string, exchange: string) => ({
+      id,
+      exchange,
+      label: "Desk",
+      is_active: true,
+      sync_status: null,
+      last_sync_at: null,
+      account_balance_usdt: null,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+    });
+    setSearchParams("tab=scenario");
+    vi.mocked(ScenarioComparePanel).mockClear();
+    render(
+      <AllocationsTabs
+        {...STUB_PROPS}
+        apiKeys={[mkKey("key-a", "mt5"), mkKey("key-b", "binance")]}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("saved-list-fire-compare"));
+    await screen.findByTestId("scenario-compare-panel-body");
+    const payload = vi.mocked(ScenarioComparePanel).mock.calls.at(-1)![0].payload;
+    expect(payload.exchangeByApiKeyId).toEqual({
+      "key-a": "mt5",
+      "key-b": "binance",
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // T_AT5c (Plan 23-05) — the ScenarioStub rollback path renders NEITHER the
   //          list NOR the compare panel (the new surfaces are V2-only).
   // -------------------------------------------------------------------------

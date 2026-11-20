@@ -50,6 +50,7 @@ from services.mt5_parity import (
     WindowRefused,
     classify_breach,
     evaluate_account,
+    evaluate_windows,
     gate_a_legs,
     identity_leg,
     leg_passes,
@@ -598,6 +599,63 @@ def test_a_native_unit_account_is_never_compared_across_units(tmp_path: Path) ->
     assert verdict.passed is False
     for name in ("start_level", "end_level", "cum_return", "day_placement"):
         assert legs[name].reason == "not_measurable:unit_mismatch", name
+
+
+_UNIT_LEGS = ("start_level", "end_level", "cum_return", "day_placement")
+
+
+def test_a_usd_native_unit_account_is_measured(tmp_path: Path) -> None:
+    # The marks migration documents that a USD-family account stores native_unit 'USD'.
+    # The writer books are USD, so that is the same unit, not a mismatch.
+    def usd(data: dict[str, Any]) -> None:
+        for row in _marks(data):
+            row["native_unit"] = "USD"
+            row["nav_native"] = row["nav_usd"]
+            row["open_pnl_native"] = row["open_pnl_usd"]
+
+    verdict = _evaluate(_capture(tmp_path, usd), GATE_A)
+    legs = _legs(verdict)
+    for name in _UNIT_LEGS:
+        assert legs[name].reason != "not_measurable:unit_mismatch", name
+        assert legs[name].gap is not None, name
+    assert verdict.passed is True
+
+
+def test_a_non_usd_report_currency_is_never_compared_to_usd_books(tmp_path: Path) -> None:
+    # native_unit NULL (no mark-side evidence) but the founder read the Report currency
+    # as EUR: the Report is EUR and the books are USD, so the legs must refuse.
+    def eur(data: dict[str, Any]) -> None:
+        for reading in data["accounts"]["SYN-A"]["readings"]:
+            if reading["id"] == "account_currency":
+                reading["value"] = "EUR"
+
+    sheet = _worksheet(eur, tmp_path=tmp_path)
+    verdict = _evaluate(_capture(tmp_path, name="eurrun"), GATE_A, sheet=sheet)
+    legs = _legs(verdict)
+    assert verdict.passed is False
+    for name in _UNIT_LEGS:
+        assert legs[name].reason == "not_measurable:unit_mismatch", name
+
+
+def test_a_gate_a_only_verdict_is_never_final_green(tmp_path: Path) -> None:
+    # A real (non-synthetic) worksheet whose only judged window is Gate A and passes:
+    # a gate never judged is not a parity pass.
+    def real(data: dict[str, Any]) -> None:
+        data["synthetic"] = False
+
+    sheet = _worksheet(real, tmp_path=tmp_path)
+    verdict = evaluate_windows(
+        _capture(tmp_path, name="gaterun"),
+        "k1",
+        sheet,
+        (GATE_A,),
+        oracle_deals=_deals(),
+        clock=US,
+        run_day=RUN_DAY,
+    )
+    assert verdict.rehearsal is False
+    assert all(a.passed for a in verdict.accounts) and verdict.accounts
+    assert verdict.final_green is False
 
 
 def test_a_deal_the_engine_cannot_classify_is_not_measurable_not_a_crash(

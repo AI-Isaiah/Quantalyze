@@ -69,10 +69,25 @@ def test_every_imported_annotation_key_is_explained() -> None:
 
 
 def test_marks_and_method_keys_are_explained_except_the_value_dependent_one() -> None:
-    for key in ("marks_since", "marks_covered_from", "marks_trailing_since", "cumulative_method", "native_unit"):
+    for key in ("marks_since", "marks_covered_from", "marks_trailing_since", "cumulative_method", "native_unit", "csv_source"):
         assert classify_flag(key, "x") == "explained_acceptable", key
     assert "mark_gap_days" in MARKS_KEYS
     assert "mark_gap_days" not in FLAG_CLASSIFICATION
+
+
+def test_csv_source_is_a_provenance_marker_and_never_explains_a_warned_status() -> None:
+    # csv_source says which pipeline wrote the row. It is deliberately in neither guard
+    # tuple, so a row warned with csv_source alone still has an unnamed warning cause.
+    assert "csv_source" not in (*NAV_TWR_GUARD_KEYS, *NAV_TWR_LEGACY_GUARD_KEYS)
+    assert "csv_source" not in NAV_TWR_ANNOTATION_KEYS
+    row = {
+        "computation_status": "complete_with_warnings",
+        "computed_at": "2026-11-14T03:00:00Z",
+        "data_quality_flags": {"csv_source": True},
+    }
+    readings, findings = classify_account_flags("SYN-A", row)
+    assert [r.flag_class for r in readings] == ["explained_acceptable"]
+    assert [f.subject for f in findings] == ["computation_status"]
 
 
 def test_mark_gap_days_is_judged_by_its_value() -> None:

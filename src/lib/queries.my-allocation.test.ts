@@ -1782,6 +1782,74 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     expect(result.liveBaselineMetrics.equity.length).toBeGreaterThan(0);
   });
 
+  it("155.2 G2 SSR call site: two mt5 keys give the 252-basis live baseline, not the 365 one", async () => {
+    // The call site builds the id-to-exchange map from the key rows it already
+    // loaded. Dropping that argument silently falls back to {} and 365, so this
+    // test must go RED then.
+    const PERKEY_B = [
+      -0.04, 0.05, -0.03, 0.04, -0.05, 0.03, -0.04, 0.05, -0.02, 0.04, -0.05,
+      0.03, -0.04,
+    ];
+    state.apiKeys = ["key-A", "key-B"].map((id) => ({
+      id,
+      user_id: "user-1",
+      exchange: "mt5",
+      label: id,
+      is_active: true,
+      sync_status: "synced",
+      last_sync_at: "2026-05-08T00:00:00Z",
+      account_balance_usdt: 30_000,
+      created_at: "2026-01-01T00:00:00Z",
+    }));
+    state.allocatorHoldings = ["key-A", "key-B"].map((api_key_id) => ({
+      allocator_id: "user-1",
+      symbol: "EURUSD",
+      quantity: 1,
+      mark_price: 30_000,
+      value_usd: 30_000,
+      venue: "mt5",
+      holding_type: "spot",
+      updated_at: "2026-05-13T04:00:00+00:00",
+      asof: ASOF[ASOF.length - 1],
+      api_key_id,
+    }));
+    state.csvDailyReturns = [
+      ...ASOF.map((date, i) => ({
+        api_key_id: "key-A", allocator_id: "user-1", date, daily_return: PERKEY_A[i],
+      })),
+      ...ASOF.map((date, i) => ({
+        api_key_id: "key-B", allocator_id: "user-1", date, daily_return: PERKEY_B[i],
+      })),
+    ];
+
+    const { getMyAllocationDashboard, liveBaselineMetricsFromPerKeyDailies } =
+      await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const perKey = {
+      "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })),
+      "key-B": ASOF.map((date, i) => ({ date, value: PERKEY_B[i] })),
+    };
+    const noMap = liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, perKey);
+    const mt5 = liveBaselineMetricsFromPerKeyDailies(
+      result.holdingsSummary,
+      perKey,
+      {},
+      { "key-A": "mt5", "key-B": "mt5" },
+    );
+    expect(noMap.sharpe).not.toBeNull();
+    expect(result.liveBaselineMetrics.sharpe).not.toBeNull();
+    // The dashboard sits on the 252 basis...
+    expect(result.liveBaselineMetrics.sharpe).toBe(mt5.sharpe);
+    // ...which is sqrt(252/365) of the 365 reading, to the engine's 3-decimal
+    // sharpe rounding (a 365 dashboard would give a ratio of exactly 1).
+    const ratio = noMap.sharpe! / result.liveBaselineMetrics.sharpe!;
+    const r = Math.sqrt(365 / 252);
+    expect(Math.abs(ratio - r)).toBeLessThanOrEqual(
+      (0.0005 * (1 + r)) / Math.abs(result.liveBaselineMetrics.sharpe!),
+    );
+  });
+
   it("fallback branch: no per-key rows → gate=false → the honest emptyDefault (AUM preserved, all metrics null) — ENGINE-04", async () => {
     activeKeyA();
     seedHoldingsKeyA();
@@ -2497,6 +2565,56 @@ describe("liveBaselineMetricsFromPerKeyDailies — financial edge branches (Phas
       { "key-A": series([0.03, -0.02, 0.04, -0.01]) },
     );
     expect(single.avgRho).toBeNull();
+  });
+
+  // 155.2 G2: each per-key leg's risk clock derives from its key's exchange.
+  // The Sharpe scales with sqrt(periodsPerYear), so the no-map (365) over the
+  // 252-basis ratio is sqrt(365/252) when, and only when, every leg is mt5.
+  // The engine rounds sharpe to 3 decimals (scenario.ts), so the ratio of two
+  // rounded values is exact only to that rounding: each side is off by at most
+  // 0.0005, which bounds the ratio's error by 0.0005 * (1 + ratio) / denominator.
+  // That is far tighter than the gap between 252 and 365 (ratio 1.2035 vs 1).
+  const MT5_SQRT_RATIO = Math.sqrt(365 / 252);
+  const expectSqrtBasisRatio = (noMapSharpe: number, mt5Sharpe: number) => {
+    const bound = (0.0005 * (1 + MT5_SQRT_RATIO)) / Math.abs(mt5Sharpe);
+    expect(Math.abs(noMapSharpe / mt5Sharpe - MT5_SQRT_RATIO)).toBeLessThanOrEqual(bound);
+  };
+  const g2Series = {
+    "key-A": series([0.03, -0.02, 0.04, -0.01, 0.02]),
+    "key-B": series([-0.01, 0.02, -0.03, 0.02, 0.01]),
+  };
+  const g2Holdings = () => [spot("key-A", 60_000), spot("key-B", 40_000)];
+
+  it("155.2 G2: a pure-mt5 book annualizes risk on 252 (sharpe = no-map sharpe / sqrt(365/252))", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const noMap = liveBaselineMetricsFromPerKeyDailies(g2Holdings(), g2Series);
+    const mt5 = liveBaselineMetricsFromPerKeyDailies(g2Holdings(), g2Series, {}, {
+      "key-A": "mt5",
+      "key-B": "mt5",
+    });
+    expect(noMap.sharpe).not.toBeNull();
+    expect(mt5.sharpe).not.toBeNull();
+    // Falsifiable: a 365 basis on an mt5 book would make the ratio 1.
+    expectSqrtBasisRatio(noMap.sharpe!, mt5.sharpe!);
+  });
+
+  it("155.2 G2: a book with any crypto leg stays on 365 (same sharpe as the no-map call)", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const noMap = liveBaselineMetricsFromPerKeyDailies(g2Holdings(), g2Series);
+    const mixed = liveBaselineMetricsFromPerKeyDailies(g2Holdings(), g2Series, {}, {
+      "key-A": "mt5",
+      "key-B": "binance",
+    });
+    expect(mixed.sharpe).toBe(noMap.sharpe);
+  });
+
+  it("155.2 G2 (T-155.2-18): an mt5 key beside a key whose exchange is unknown stays on 365", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const noMap = liveBaselineMetricsFromPerKeyDailies(g2Holdings(), g2Series);
+    const partial = liveBaselineMetricsFromPerKeyDailies(g2Holdings(), g2Series, {}, {
+      "key-A": "mt5",
+    });
+    expect(partial.sharpe).toBe(noMap.sharpe);
   });
 
   it("BLEND-02: live-baseline Sharpe rides the √365 blend basis (every per-key leg is a crypto venue); twr/maxDd/avgRho basis-invariant", async () => {

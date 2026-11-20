@@ -7,6 +7,7 @@ import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identit
 import { extractAnalytics, EMPTY_ANALYTICS, seriesEndOf, isUuid } from "./utils";
 import {
   annualizationPeriods,
+  assetClassForExchange,
   blendPeriodsPerYear,
   deriveEmptySeriesState,
   isRankableAnalyticsRow,
@@ -3444,6 +3445,7 @@ export function liveBaselineMetricsFromPerKeyDailies(
   holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"],
   perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
   tinyBaseDaysByApiKeyId: Readonly<Record<string, readonly string[]>> = {},
+  exchangeByApiKeyId: Readonly<Record<string, string>> = {},
 ): MyAllocationDashboardPayload["liveBaselineMetrics"] {
   // D2: AUM is unchanged — summed from holdings equity contribution, identical
   // to the gate=false emptyDefault branch (`emptyLiveBaselineMetrics`).
@@ -3500,14 +3502,15 @@ export function liveBaselineMetricsFromPerKeyDailies(
       sharpe: null,
       volatility: null,
       max_drawdown: null,
-      // Phase 84 (BLEND-02): a per-key unit IS a connected exchange data source
-      // (id === api_key_id), and every SUPPORTED_EXCHANGE is a crypto venue today
-      // (isCryptoExchange, closed-sets.ts) — so a per-key leg is a crypto leg
-      // under the blend rule (84-CONTEXT.md D). This feeds blendPeriodsPerYear at
-      // the computeScenario call below → the live-baseline blend annualizes √365.
-      // When a non-crypto venue is ever added to SUPPORTED_EXCHANGES this literal
-      // must derive from the key's exchange instead.
-      asset_class: "crypto",
+      // Phase 84 (BLEND-02), reworked by 155.2 (G2): a per-key unit IS a connected
+      // exchange data source (id === api_key_id), and its class derives from that
+      // key's exchange through assetClassForExchange (closed-sets.ts), the same
+      // helper the composer builder uses. A pure-MT5 book therefore annualizes
+      // risk on 252 at the computeScenario call below, and any crypto leg keeps
+      // the blend on 365. An absent or unknown exchange is null, which
+      // blendPeriodsPerYear reads as 365 (RANK-06), so a caller that passes no
+      // map never moves a crypto book.
+      asset_class: assetClassForExchange(exchangeByApiKeyId[apiKeyId]),
       // 188 D-07: only a key with named days carries the field.
       ...(tinyBaseDaysByApiKeyId[apiKeyId]?.length
         ? { undefined_return_days: tinyBaseDaysByApiKeyId[apiKeyId] }
@@ -3532,9 +3535,9 @@ export function liveBaselineMetricsFromPerKeyDailies(
   const state: ScenarioState = { selected, weights, startDates };
   const cache = buildDateMapCache(strategies);
   // Every unit in this helper is selected=true by construction (set above), so
-  // blendPeriodsPerYear over `strategies` reads the whole active blend. Every leg
-  // carries asset_class "crypto" (per-key = crypto venue), so the live baseline
-  // annualizes √365 (BLEND-02). A future pure-tradfi key would return 252 here.
+  // blendPeriodsPerYear over `strategies` reads the whole active blend. Each leg's
+  // class comes from its key's exchange (155.2 G2): a pure-MT5 book reads 252, any
+  // crypto leg (or an unclassifiable one) keeps √365 (BLEND-02).
   const liveCM = computeScenario(
     strategies,
     state,
@@ -5897,6 +5900,9 @@ export const getMyAllocationDashboard = cache(
           contributingHoldings,
           contributingPerKeyReturns,
           tinyBaseDaysByKeyId,
+          // 155.2 G2: the venue decides each leg's risk clock. Built from the key
+          // rows already loaded above; no extra read.
+          Object.fromEntries(apiKeys.map((k) => [k.id, k.exchange])),
         )
       : emptyLiveBaselineMetrics(phase07.holdingsSummary);
 

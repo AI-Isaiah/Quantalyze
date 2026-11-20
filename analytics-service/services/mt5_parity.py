@@ -58,6 +58,11 @@ MT5_PARITY_TOLERANCE: Final[float] = 0.01
 # tolerance so every consumer reads one definition.
 MT5_INCEPTION_IDENTITY_BAND: Final[float] = 0.001
 
+# The key_inputs books and the marks' ``*_usd`` columns are written in USD. A Report in
+# any other unit (a mark ``native_unit`` or the worksheet's account currency) is never
+# compared against them.
+WRITER_BASIS_UNIT: Final = "USD"
+
 WITHIN_TOLERANCE: Final = "within_tolerance"
 PRE_MARK_REALIZED_BASIS: Final = "pre_mark_realized_basis"
 EDGE_INSTANT_MISMATCH: Final = "edge_instant_mismatch"
@@ -262,7 +267,14 @@ def _legs_under(
         use_deals = deals if deals is not None else ctx.oracle_deals
         if use_clock is None or not use_deals:
             return None
-        return gate_a_legs(ctx.capture, ctx.ordinal, use_deals, ctx.window, use_clock)
+        return gate_a_legs(
+            ctx.capture,
+            ctx.ordinal,
+            use_deals,
+            ctx.window,
+            use_clock,
+            account_currency=_account_currency(ctx.readings),
+        )
     return gate_b_legs(
         ctx.capture, ctx.ordinal, ctx.readings, ctx.window, realized_edges=realized_edges
     )
@@ -707,8 +719,33 @@ def identity_leg(our_ratio: float | None, oracle_ratio: float | None) -> LegResu
     )
 
 
-def _native_unit_present(capture: Capture, ordinal: str) -> bool:
-    return any(r.get("native_unit") is not None for r in account_rows(capture, ordinal, "marks"))
+def _is_writer_unit(unit: str) -> bool:
+    return unit.strip().upper() == WRITER_BASIS_UNIT
+
+
+def _account_currency(readings: tuple[Reading, ...]) -> str | None:
+    """The worksheet's ``account_currency`` reading as text, or ``None`` when there is
+    none. Readings that disagree return a value that is not the writer basis, so an
+    ambiguous currency refuses and never measures."""
+    values = [str(r.value) for r in readings if r.id == "account_currency"]
+    if not values:
+        return None
+    if all(_is_writer_unit(v) for v in values):
+        return WRITER_BASIS_UNIT
+    return next(v for v in values if not _is_writer_unit(v))
+
+
+def _unit_mismatch(capture: Capture, ordinal: str, account_currency: str | None) -> bool:
+    """True when the Report and the writer books cannot be compared as one unit: a mark
+    row whose ``native_unit`` is set and is not the writer basis, or a Report currency
+    reading that is not the writer basis. A ``native_unit`` of USD, the form the marks
+    migration documents for a USD-family account, is the writer basis itself."""
+    if any(
+        unit is not None and not _is_writer_unit(str(unit))
+        for unit in (r.get("native_unit") for r in account_rows(capture, ordinal, "marks"))
+    ):
+        return True
+    return account_currency is not None and not _is_writer_unit(account_currency)
 
 
 def _all_not_measurable(what: str) -> tuple[LegResult, ...]:
@@ -721,6 +758,8 @@ def gate_a_legs(
     oracle_deals: tuple[Mapping[str, Any], ...],
     window: Window,
     clock: Mt5ServerClock,
+    *,
+    account_currency: str | None = None,
 ) -> tuple[LegResult, ...]:
     """The five Gate A legs in ``LegName`` order, each a gap in points of the oracle's
     level at the window start (``MT5_PARITY_TOLERANCE``), except the identity, which is
@@ -729,8 +768,9 @@ def gate_a_legs(
     Realized-balance basis only: a missing input makes that leg not measurable and
     never a pass. The money legs compare money, not ``r_t``: the Report carries no
     position id, so the oracle fold uses the day-level rule on flow days while
-    production used the timed rule. A native-unit account is never compared across
-    units (the writer basis is USD, the Report is native)."""
+    production used the timed rule. An account is never compared across
+    units: a mark ``native_unit`` or a Report currency other than the USD writer basis
+    reads ``not_measurable:unit_mismatch``."""
     if window.gate != "A":
         raise ValueError("gate_a_legs evaluates Gate A windows only")
     if not oracle_deals:
@@ -741,7 +781,7 @@ def gate_a_legs(
         return _all_not_measurable("oracle_deals")
 
     books = _our_books(capture, ordinal)
-    unit_mismatch = _native_unit_present(capture, ordinal)
+    unit_mismatch = _unit_mismatch(capture, ordinal, account_currency)
     base = _oracle_level(oracle, window.start)
     oracle_end = _oracle_level(oracle, window.end)
     base_ok = base is not None and base > 0.0
@@ -1129,7 +1169,9 @@ def evaluate_account(
     legs: tuple[LegResult, ...]
     if window.gate == "A":
         assert clock is not None  # narrowed by the check above
-        legs = gate_a_legs(capture, ordinal, deals, window, clock)
+        legs = gate_a_legs(
+            capture, ordinal, deals, window, clock, account_currency=_account_currency(readings)
+        )
     elif oracle_deals is not None and not oracle_deals:
         # Validated, but with no oracle deal the flow and weekend-gap checks were
         # vacuous: nothing about this account's oracle is established.
