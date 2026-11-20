@@ -37,8 +37,8 @@
  *     at that point is a no-op, and a name NO carried call ever schedules is named.
  *
  * ⛔ IT REFUSES BY DEFAULT. A shape this module cannot prove safe is MEASURE_FAIL (exit
- * 2), never skipped: a trigger carrying a WHEN clause, `UPDATE OF`, REFERENCING or
- * CONSTRAINT; ENABLE/DISABLE TRIGGER on an auth table; a trigger on any auth table
+ * 2), never skipped: a trigger carrying a WHEN clause, REFERENCING or CONSTRAINT;
+ * ENABLE/DISABLE TRIGGER on an auth table; a trigger on any auth table
  * other than `users`; auth trigger DDL inside a dollar body; a cron argument that is
  * not a `'…'` or `$tag$…$tag$` literal (an identifier, `||`, a cast, `format(`, a
  * variable), an unclosed argument list, the wrong arity, a `cron.alter_job` or
@@ -73,7 +73,11 @@
  * --check RE-DERIVES the declared set from the migrations. ⛔ It never reads the SQL
  * `--emit` wrote, so a partly applied or altered emit file cannot vouch for itself. Cron
  * jobs are compared BYTE-EXACT on name, schedule and command (sha256 prefixes printed,
- * never the text), plus `active`, `username = --cron-owner` and `database`. It prints one
+ * never the text), plus `active`, `username = --cron-owner` and `database`. Auth.users
+ * triggers are compared on tgtype, tgenabled, function and update-of columns: an
+ * `UPDATE OF` column list is folded and compared as a SET against the catalogue's 7th
+ * trigger field, order not significant (tgtype is 17 for a plain AFTER UPDATE and for
+ * AFTER UPDATE OF email alike, so the columns are the only tell). It prints one
  * MISSING / EXTRA / DIFFERS / DUPLICATE line per finding, then
  *   nonpublic-fidelity: auth-users-triggers=<lane>/<declared> cron-jobs=<lane>/<declared> drift=<n> verdict OK|DRIFT|MEASURE_FAIL
  * EXIT 0 = OK, 1 = DRIFT, 2 = MEASURE_FAIL (also: an empty catalogue, a missing meta
