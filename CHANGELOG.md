@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.60.1] - 2026-11-20 — BASELINE: automated re-dump after the PROD apply of b87eb7c0
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `44790317370`, after the PROD apply of merge `b87eb7c0`: sha256 `0558f094…` → `5a096883…`.
+- Shape, old → new: tables 68 → 68, policies 154 → 154, function statements 137 → 138, distinct function names 135 → 136, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261120120000_auth_user_has_password.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-20` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.60.0 → 0.133.60.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=326 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 138 — MATCH 135, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `44790317370` succeeded, and this entry was composed by the `redump-pr` job. Run `44790317370` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.60.0] - 2026-11-20 — Phase 219 ACCOUNTEMAIL gap: password-gated email change, one confirmation link, late-click landing
 
 Closes the gap recorded against Phase 219 (shipped as 0.133.53.0) on 2026-11-20. Three findings: the Account tab's change-email form needed no proof that the person at the keyboard knows the account's password, the change sent two confirmation links, and a link clicked a few minutes late dropped the person on a page that told them nothing. 38 commits: 16 touch code, 22 are planning records.
