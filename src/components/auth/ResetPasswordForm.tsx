@@ -19,11 +19,26 @@ import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
  * "Auth session missing!" from Supabase. We surface that as a friendly
  * "open the link from your email" message rather than the raw error.
  *
+ * A signed-in user whose session is older than 24 h (for example a
+ * password-less partner-import user following the Account tab's "Set a
+ * password" link) meets `reauthentication_needed` once Secure password change
+ * is ON (GD-07). The form then sends a code with `reauthenticate()` and retries
+ * `updateUser({ password, nonce })`. A recovery session is always new, so the
+ * recovery-link path never sees the prompt.
+ *
  * The length floor is `MIN_PASSWORD_LENGTH` from `@/lib/auth/password-policy`
  * — the ONE place the client floor is written, and where the measured hosted
  * policy it mirrors is recorded (SEC-01). It used to be a local constant here,
  * independent of SignupForm's own literal.
  */
+
+const CODE_SENT =
+  "For your security, we sent a code to your email. Enter it below to set your password.";
+
+const CODE_RESENT = "We sent a new code to your email.";
+const CODE_INVALID =
+  "That code is not right or has expired. Send a new code and try again.";
+const CODE_SEND_FAILED = "Could not send a code. Please try again.";
 
 export function ResetPasswordForm() {
   const [password, setPassword] = useState("");
@@ -31,6 +46,10 @@ export function ResetPasswordForm() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [noSession, setNoSession] = useState(false);
+  const [step, setStep] = useState<"password" | "code">("password");
+  const [code, setCode] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const [resending, setResending] = useState(false);
   const router = useRouter();
 
   async function handleSubmit(e: React.FormEvent) {
@@ -49,15 +68,45 @@ export function ResetPasswordForm() {
     setLoading(true);
 
     const supabase = createClient();
-    const { error: updateError } = await supabase.auth.updateUser({ password });
+    const { data, error: updateError } = await supabase.auth.updateUser(
+      step === "code" ? { password, nonce: code.trim() } : { password },
+    );
 
     if (updateError) {
+      // GD-07: matched on the error code, never on message text.
+      if (updateError.code === "reauthentication_needed" && step === "password") {
+        // The one automatic send. Every later send is the explicit resend control.
+        const { error: sendError } = await supabase.auth.reauthenticate();
+        if (sendError) {
+          setError(sendError.message.trim() || CODE_SEND_FAILED);
+        } else {
+          setStep("code");
+          setNotice(CODE_SENT);
+          setCode("");
+        }
+        setLoading(false);
+        return;
+      }
+      const isReauthCode = updateError.code?.startsWith("reauth") ?? false;
       // Supabase returns "Auth session missing!" when the user lands here
       // without a recovery session (e.g. typed /reset-password directly,
       // or the link expired). Show the recovery affordance instead of the
       // raw error so they know what to do next.
-      if (/session/i.test(updateError.message)) {
+      if (!isReauthCode && /session/i.test(updateError.message)) {
         setNoSession(true);
+        setLoading(false);
+        return;
+      }
+      if (step === "code") {
+        // A failed nonce retry never re-sends and never falls back to an
+        // un-nonced call; the typed code is cleared, the passwords are kept.
+        setError(
+          updateError.code === "reauthentication_not_valid"
+            ? CODE_INVALID
+            : updateError.message.trim() || CODE_INVALID,
+        );
+        setNotice(null);
+        setCode("");
         setLoading(false);
         return;
       }
@@ -66,7 +115,25 @@ export function ResetPasswordForm() {
       return;
     }
 
-    router.push("/login?reset=1");
+    // updateUser keeps the session, and the proxy bounces a signed-in user off
+    // /login to the role home, where neither note would show. So a signed-in
+    // user returns to the Account tab with its own confirmation (GR1-MD-02).
+    router.push(
+      data?.user ? "/profile?tab=account&password_set=1" : "/login?reset=1",
+    );
+  }
+
+  async function handleResend() {
+    setError(null);
+    setResending(true);
+    const { error: sendError } = await createClient().auth.reauthenticate();
+    if (sendError) {
+      setError(sendError.message.trim() || CODE_SEND_FAILED);
+    } else {
+      setNotice(CODE_RESENT);
+      setCode("");
+    }
+    setResending(false);
   }
 
   if (noSession) {
@@ -107,10 +174,40 @@ export function ResetPasswordForm() {
         minLength={MIN_PASSWORD_LENGTH}
         autoComplete="new-password"
       />
+      {step === "code" && (
+        <>
+          {notice && (
+            <p role="status" className="text-sm text-text-secondary">
+              {notice}
+            </p>
+          )}
+          <Input
+            label="Code from your email"
+            type="text"
+            name="reauth_code"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            required
+            inputMode="numeric"
+            autoComplete="one-time-code"
+          />
+        </>
+      )}
       {error && <p className="text-sm text-negative">{error}</p>}
       <Button type="submit" disabled={loading} className="w-full">
         {loading ? "Updating password..." : "Update password"}
       </Button>
+      {step === "code" && (
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={loading || resending}
+          onClick={handleResend}
+          className="w-full"
+        >
+          Send a new code
+        </Button>
+      )}
     </form>
   );
 }

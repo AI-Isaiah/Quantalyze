@@ -15,6 +15,10 @@ import { createClient } from "@/lib/supabase/server";
  *     /auth/callback?token_hash=<hash>&type=<signup|email_change|recovery|invite>
  *     → verifyOtp validates the hash and issues a session.
  *
+ * Email change (Phase 219): the change request's `next` carries the marker
+ * `email_change=confirmed`; a failed PKCE exchange honours it (GD-03), and the
+ * first link of the two-link flow replaces it with `email_change=partial`.
+ *
  * PRODUCTION CONFIGURATION (Supabase dashboard, NOT in repo):
  *   1. Authentication → Email → ensure "Confirm email" is ON.
  *   2. Authentication → URL Configuration → "Site URL" must match
@@ -74,6 +78,33 @@ function safeNextPath(raw: string | null): string {
   return raw;
 }
 
+/**
+ * Phase 219 GD-03: does the ALREADY safeNextPath-filtered `next` carry the
+ * email-change marker `email_change=confirmed`?
+ *
+ * Root cause (PROD auth logs 2026-11-20): GoTrue's PKCE flow state, created by
+ * the change request, lives only minutes. A link clicked later fails the code
+ * exchange (422 flow_state_expired) AFTER Auth already completed the change,
+ * and the `/login?error` landing made the proxy bounce the signed-in user to
+ * the role home page. The code branch uses this to land that click on the
+ * Account tab instead.
+ *
+ * Why it is safe: the failed exchange minted no session and this only chooses
+ * the redirect target; the target is a same-origin path safeNextPath already
+ * accepted (the argument is its return value, never the raw parameter); the
+ * proxy still sends a signed-out user to /login; and the Account tab reads the
+ * truth from auth.getUser(), never the marker alone. Used by the code branch
+ * only. The value must be exactly `confirmed`, the one the app itself sends.
+ */
+function carriesEmailChangeConfirmed(
+  safeNext: string,
+  req: NextRequest,
+): boolean {
+  return (
+    new URL(safeNext, req.url).searchParams.get("email_change") === "confirmed"
+  );
+}
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
@@ -86,6 +117,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (error) {
+      // GD-03: an expired PKCE flow state on the final email-change link still
+      // lands on the Account tab; any other failed exchange goes to /login.
+      if (carriesEmailChangeConfirmed(safeNext, req)) {
+        // Code and status only: never the code, verifier or tokens.
+        console.error(
+          "[auth/callback] email-change exchange failed:",
+          error.code ?? "unknown",
+          error.status ?? "no-status",
+        );
+        return NextResponse.redirect(new URL(safeNext, req.url));
+      }
       return loginRedirect(req, error.message);
     }
     return NextResponse.redirect(new URL(safeNext, req.url));
@@ -113,6 +155,21 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (url.searchParams.get("message")) {
     const dest = new URL(safeNext, req.url);
     dest.searchParams.set("email_change", "partial");
+    return NextResponse.redirect(dest);
+  }
+
+  // GR1-MD-01: when GoTrue's /verify itself fails (expired, already used or
+  // scanner-consumed token) it redirects here with `error` / `error_code` and no
+  // code, token_hash or message. With the email-change marker in the accepted
+  // `next`, land on the Account tab WITHOUT the marker, so the tab shows Auth's
+  // real state instead of a success claim; /login would bounce a signed-in user
+  // to the role home.
+  if (
+    (url.searchParams.get("error") || url.searchParams.get("error_code")) &&
+    carriesEmailChangeConfirmed(safeNext, req)
+  ) {
+    const dest = new URL(safeNext, req.url);
+    dest.searchParams.delete("email_change");
     return NextResponse.redirect(dest);
   }
 

@@ -46,6 +46,9 @@ const API_ROOT = join(process.cwd(), "src/app/api");
 const WRAPPER = new Set([
   "bridge/outcome/route.ts",
   "bridge/outcome/dismiss/route.ts",
+  // Phase 219 gap (GD-02): the account email change is withAuthLimited, so the
+  // password check runs only after validation and the limiter.
+  "account/email/route.ts",
 ]);
 
 const CANONICAL = new Set([

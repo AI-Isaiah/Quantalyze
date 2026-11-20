@@ -35,6 +35,7 @@ const { routerReplace } = vi.hoisted(() => ({ routerReplace: vi.fn() }));
 const searchParamsState = {
   tab: null as string | null,
   emailChange: null as string | null,
+  passwordSet: null as string | null,
 };
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: routerReplace, push: vi.fn(), refresh: vi.fn() }),
@@ -45,7 +46,9 @@ vi.mock("next/navigation", () => ({
         ? searchParamsState.tab
         : k === "email_change"
           ? searchParamsState.emailChange
-          : null,
+          : k === "password_set"
+            ? searchParamsState.passwordSet
+            : null,
     toString: () =>
       searchParamsState.tab ? `tab=${searchParamsState.tab}` : "",
   }),
@@ -68,6 +71,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", mockFetch as unknown as typeof globalThis.fetch);
   searchParamsState.tab = null;
   searchParamsState.emailChange = null;
+  searchParamsState.passwordSet = null;
 });
 afterEach(() => {
   vi.clearAllMocks();
@@ -415,6 +419,70 @@ describe("ProfileTabs: the Account tab sign-in email (Phase 219)", () => {
     );
 
     expect(screen.getByTestId("account-email-first-link")).toBeInTheDocument();
+  });
+
+  // T13 (GD-04): the confirmed marker reaches the section; with no pending
+  // address Auth has finished, and the note names the server-read email.
+  it("GD-04: ?email_change=confirmed with nothing pending shows the done note", () => {
+    searchParamsState.tab = "account";
+    searchParamsState.emailChange = "confirmed";
+    render(
+      <ProfileTabs
+        profile={PROFILE_FIXTURE}
+        accountEmail="new@quantalyze.test"
+        pendingEmail={null}
+      />,
+    );
+
+    expect(screen.getByTestId("account-email-confirmed")).toHaveTextContent(
+      "Your sign-in email is now new@quantalyze.test.",
+    );
+  });
+
+  // GR1-MD-02: /reset-password sends a signed-in user back here with the marker.
+  it("GR1-MD-02: ?password_set=1 shows the password-set note on the Account tab", () => {
+    searchParamsState.tab = "account";
+    searchParamsState.passwordSet = "1";
+    render(
+      <ProfileTabs
+        profile={PROFILE_FIXTURE}
+        accountEmail="new@quantalyze.test"
+        pendingEmail={null}
+      />,
+    );
+
+    expect(screen.getByTestId("account-password-set")).toHaveTextContent(
+      "Your password is set.",
+    );
+  });
+
+  it("GD-04: ?email_change=confirmed with a pending address shows the pending panel and no done note", () => {
+    searchParamsState.tab = "account";
+    searchParamsState.emailChange = "confirmed";
+    render(
+      <ProfileTabs
+        profile={PROFILE_FIXTURE}
+        accountEmail="auth@quantalyze.test"
+        pendingEmail="next@quantalyze.test"
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("next@quantalyze.test");
+    expect(screen.queryByTestId("account-email-confirmed")).toBeNull();
+  });
+
+  it("GD-04: the partial marker does not produce the done note", () => {
+    searchParamsState.tab = "account";
+    searchParamsState.emailChange = "partial";
+    render(
+      <ProfileTabs
+        profile={PROFILE_FIXTURE}
+        accountEmail="auth@quantalyze.test"
+        pendingEmail={null}
+      />,
+    );
+
+    expect(screen.queryByTestId("account-email-confirmed")).toBeNull();
   });
 
   it("MD-01: without the marker the note is absent", () => {
