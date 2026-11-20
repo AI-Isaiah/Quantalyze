@@ -663,7 +663,7 @@ export async function seedStrategyWithHistory(opts: {
   // through enough variation to render meaningfully without random noise.
   const dailyGrowth = opts.dailyGrowth;
   let level = 1;
-  const series = Array.from({ length: opts.days }, (_, i) => ({
+  const fullSeries = Array.from({ length: opts.days }, (_, i) => ({
     date: new Date(anchorMs - (opts.days - i) * 86_400_000)
       .toISOString()
       .slice(0, 10),
@@ -671,12 +671,15 @@ export async function seedStrategyWithHistory(opts: {
       dailyGrowth === undefined
         ? 1 + Math.sin(i / 30) * 0.05 * (i / Math.max(1, opts.days))
         : (level *= 1 + growthReturn(dailyGrowth, i)),
-  })).slice(dailyGrowth === undefined ? 1 : 0);
+  }));
+  const series = fullSeries.slice(dailyGrowth === undefined ? 1 : 0);
   // Phase 155.2-15: the analytics writer stores a curve with no 1.0 base point, and the
   // stored-curve readers now read the first stored point against an implicit 1.0. The
   // default branch's i=0 point is exactly 1.0, a base point the writer never writes, so it
   // is dropped: every remaining date keeps its value and its return, and no 0.0 day is
   // invented. The dailyGrowth branch already starts at 1 * (1 + r0), so it is unchanged.
+  // `daily_returns` below is a separate seeded field built from `fullSeries` by index, so it
+  // keeps its own axis and values byte-for-byte.
 
   // 3. Build a minimal monthly_returns grid (used by Panel 4 + Yearly view)
   //    only when we have enough data.
@@ -757,7 +760,7 @@ export async function seedStrategyWithHistory(opts: {
   // `returns_series` (sin-based, finite, no RNG). Shape matches DailyPoint
   // ({date, value}) as normalizeDailyReturns expects on the returns route.
   const dailyReturns = opts.withDailyReturns
-    ? series.map((p, i) => ({
+    ? fullSeries.map((p, i) => ({
         date: p.date,
         value:
           dailyGrowth === undefined
