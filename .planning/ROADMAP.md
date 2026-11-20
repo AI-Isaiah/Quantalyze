@@ -149,6 +149,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server** - A UTC-keeping broker server passes the 155.1 clock guard; founder decision 2026-11-18; follows 155.1 (completed 2026-11-18)
 - [ ] **Phase 218: SELFHEAL — the wizard's MT5 key check heals an owed terminal scrub itself** - Wizard self-heal of the post-deploy scrub plus two resume-banner fixes, founder decisions 2026-11-19; independent of the MT5 parity phases
 - [ ] **Phase 219: ACCOUNTEMAIL — the signed-in account shows its email and can change it** - Account email display and change, founder decision 2026-11-19; independent of the MT5 parity phases
+- [ ] **Phase 220: EXTRACTOR — the baseline re-dump carrying the 219 migration can land and main goes green** - CI-only: the local-stack extractor accepts `UPDATE OF` auth.users triggers, then the bot re-dump lands; independent of the MT5 parity phases
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
 
@@ -281,6 +282,7 @@ Plans:
 | 217. SERVERRULE | 2/2 | Complete | 2026-11-18 |
 | 218. SELFHEAL | 0/0 | Not started | - |
 | 219. ACCOUNTEMAIL | 0/0 | Not started | - |
+| 220. EXTRACTOR | 0/0 | Not started | - |
 
 ### Requirement Coverage (v1.18)
 
@@ -610,6 +612,16 @@ Plans:
 ### Phase 219: ACCOUNTEMAIL — the signed-in account shows its email and can change it
 
 **Goal:** A signed-in user can see which email their account uses and change it. The account or settings page shows the signed-in email, and a change goes through Supabase Auth's own confirm-by-email flow, never a direct write. Trigger: the founder's session 2026-11-19, where the founder could not tell which email to sign in with in a private window, because Quantalyze shows the account email nowhere and offers no way to change it. Founder decision 2026-11-19 ("Book a phase (Recommended)").
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 220: EXTRACTOR — the baseline re-dump carrying the 219 migration can land and main goes green
+
+**Goal:** The local-stack non-public extractor (`scripts/local-stack/nonpublic-objects.mjs`) accepts an `AFTER UPDATE OF <columns>` trigger on `auth.users`, records its columns and compares them against the catalogue so column drift is a finding, so the baseline re-dump that carries Phase 219's migration `20261119120000` can land without making every lane boot FATAL, and main's `sql-gate-lint` goes green again. Owns `TODOS.md` `[219-EXTRACTOR-UPDATE-OF]` (fix direction, gate and red and green cases as written there). Trigger: main CI has been red since merge `d4f93d474` (`sql-gate-lint` `SNAPSHOT_MISSING sync_profile_email_from_auth/0`), which holds back the Railway analytics deploy for 155.2 and 218. The bot re-dump PR #1294 (`automation/baseline-redump`) merges only after this fix lands. CI-only phase, outside the in-flight limit. Booked 2026-11-20 by the orchestrator under the standing milestone goal.
 **Requirements**: TBD
 **Depends on:** none (independent of the MT5 parity phases)
 **Plans:** 0 plans
