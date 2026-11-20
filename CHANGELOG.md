@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.133.59.0] - 2026-11-20 — Phase 155.2 LIVEPARITY gap closure: stored curves read their first-day return, and a key-mode derive re-derives its lagging linked strategy
+
+Gap closure for two founder rulings of 2026-11-20 (`155.2-RULINGS.md`), plans 155.2-15 and 155.2-16, shipped before plan 155.2-12's recapture so that the recapture sees both changes. The phase stays open: the weekend reading, the broker statements, the browser surface read and MT5-GOAL-01 are founder steps still owed.
+
+### Changed
+- **A stored cumulative curve now reads as n daily returns, not n-1** (G3-1 (a), plan 15). The analytics writer stores the curve as `(1+r).cumprod()` or `1 + cumsum` with no base point, so day 0 is `w0 - 1` against an implicit 1.0. The stored-row readers in both runtimes now emit it: TS `resolveDailyReturnSeries` (`src/lib/factsheet/resolve-series.ts`, `fromBase`) and Python `daily_returns_from_row` (`services/wealth_returns.py`, `from_base`). Every curve-derived surface (the composer returns route, factsheets, compare, match, simulator, the parity capture) now sees the same n observations as the persisted factsheet scalar, so the route Sharpe matches the factsheet cell at 3 significant figures. The change applies to every venue.
+  - The raw functions `equityCurveToDailyReturns` and `curve_to_daily_returns` keep the old pairing, because their callers' curves have no 1.0 base (the allocator blended equity, both `ReturnHistogram` calls).
+  - A curve of `STORED_CURVE_MAX_POINTS` (5000, the writer's `cap_data_points`) or more never emits day 0, because its head may have been cut.
+  - The verify-strategy trim site reads a trimmed curve with the old pairing (`from_base=not cut`). A null or non-list curve is never treated as cut.
+  - A curve whose first stored element is dropped by normalization (malformed or missing date, a non-object) keeps the old pairing, so no day is invented (review WR-01).
+  - `countedSeriesColumn` counts N returns for N stored points. The factsheet cache key moved from `factsheet-v2-payload-v25` to `-v26`.
+- **A key-mode `derive_broker_dailies` now re-derives each directly linked strategy whose analytics lag the per-key series** (G4-1 (b), plan 16). Before this, key-mode wrote only per-key rows and never refreshed the strategy, and a lag of 1 to 4 days was invisible to every refresher for the venues cron_sync does not derive daily. The new `_enqueue_linked_strategy_recompute` (`services/job_worker.py`) enqueues the strategy-mode derive chain head, which runs the compute. As the founder confirmed on 2026-11-20, it carries the single-key fan-out's `ledger-refresh` marker and composites are excluded. It applies only when the strategy already has analytics whose last return date (`ledger_refresh_staleness`) is behind the per-key series. It applies the fan-out's full admission rules:
+  - the 20-hour attempt cooldown;
+  - the weekly caps for paused marks and for a series a completed refresh cannot move;
+  - the in-flight guard.
+
+  It runs before the compose epilogue at both key-mode exits and is bounded at 30 s, so it can never skip the epilogue or change the job outcome. Scope: the staleness view serves deribit, sfox and mt5, the venues cron_sync's daily derive does not cover. No migration.
+
+### Tests
+- Hand-computed day-0 literals in the shared `wealth_to_returns_oracle.json`, read by both runtimes, including a dropped-head case. An n=4 Sharpe pin (11.619 against 7.937 for n-1). The census test re-pinned to all n days, asserting day 0 equals the run's first input on both curve methods. A three-case verify-strategy trim test. The native conversion pinned in both twins.
+- `test_key_mode_linked_strategy_recompute.py` covers both exits: the cooldown, the weekly caps, the in-flight statuses, binance getting no enqueue, failure isolation, and a hanging helper cut off at the bound while the epilogue still runs.
+- Every gate was proven able to fail: the fix was neutered in a byte copy, the test went RED, and the file was restored from the byte backup.
+- About 17 test files' expected values moved to day 0 by hand arithmetic, and stored-curve fixtures moved to the writer's base-less shape.
+
+### Notes
+- The e2e seeder's default curves started at a 1.0 base point the analytics writer never stores. Under the day-0 read that point became an invented 0.0 first day and moved the `svg-chart-parity` goldens on the first CI run. The seeder now drops that point (three series in `e2e/helpers/seed-test-project.ts`), which keeps every date's value and return.
+- The seeder's separate `daily_returns` field is built from the unsliced series, so it stays byte-identical to before. Building it from the sliced series shifted every date's value by one index and moved the composer's desktop reading (`layout-narrow`). The `narrowcharts-desktop-1280.json` fixture is not regenerated, because that reading did not legitimately change.
+- Review: gsd-code-reviewer and silent-failure-hunter. Round 1 found 4 MEDIUM, all fixed in a fixer round: WR-01 (an invented day 0 after a dropped head), WR-02 (the venue scope was undocumented and a test double overstated it), WR-03 (the cooldown copied only the 20-hour arm) and SF-01 (no time bound). Round 2 is clean.
+- Known limit, recorded: the helper restates the fan-out's admission rule from migration 20261114152300 in Python, and no drift check ties the two together yet.
+- After deploy, plan 155.2-12 needs a key-mode derive (the 05:30 UTC nightly or a manual one) and a recompute before its recapture.
+- No `TODOS.md` entry is closed, so none is deleted.
+- VERSION and package.json 0.133.58.1 → 0.133.59.0.
+
 ## [0.133.58.1] - 2026-11-20 — records: close 218 SELFHEAL
 
 Records PR for Phase 218, whose code is already on `main` as #1293 (v0.133.58.0, squash 294ab9848). It carries the phase artifacts and closes the phase. No source, test or migration change.
