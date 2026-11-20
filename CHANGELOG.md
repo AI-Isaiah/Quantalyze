@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.133.56.2] - 2026-11-20 — delete the stale NAME_SET_RATCHET row for sync_profile_email_from_auth
+
+### Fixed
+- **`snapshot-drift` is green again.** The baseline re-dump #1294 now carries `sync_profile_email_from_auth`, so `scripts/dump-sql-functions.ts --check` reported its `snapshot-only` `NAME_SET_RATCHET` row (Phase 219, captured 2026-11-19) as `ratchet-stale` and asked for it to be deleted. The row is deleted, with a dated note in its place, following the Phase 155.1 row before it. The bot branch takes no human commits while its PR is open, so this follows #1294 as its own PR.
+
 ## [0.133.56.1] - 2026-11-20 — BASELINE: automated re-dump after the PROD apply of d4f93d47
 
 ### Changed
