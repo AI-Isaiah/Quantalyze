@@ -392,19 +392,11 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  // ⭐ 2026-11-20: Phase 219 ACCOUNTEMAIL gap closure plan 08 adds one `snapshot-only` row,
-  // for the password-presence probe the change-email route reads (GD-05a). Same clearing
-  // condition as the Phase 219 plan 03 row deleted below: the re-dump taken after the
-  // migration has applied to PROD turns the row into `ratchet-stale` and it is DELETED.
-  {
-    name: "auth_user_has_password",
-    side: "snapshot-only",
-    capturedAt: "2026-11-20",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after 20261120120000_auth_user_has_password.sql applies to PROD",
-    reason:
-      "Phase 219 GD-05a defines the password-presence function in a forward migration that is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
+  // ⭐ 2026-11-20: the Phase 219 ACCOUNTEMAIL gap closure plan 08 row
+  // (`auth_user_has_password`, `snapshot-only`, captured 2026-11-20) is DELETED: its
+  // clearing condition, a re-dump taken after
+  // 20261120120000_auth_user_has_password.sql applied to PROD, landed as #1301, and the
+  // gate then reported it `ratchet-stale`.
   // ⭐ 2026-11-20: the Phase 219 ACCOUNTEMAIL plan 03 row
   // (`sync_profile_email_from_auth`, `snapshot-only`, captured 2026-11-19) is
   // DELETED: its clearing condition, a re-dump taken after
