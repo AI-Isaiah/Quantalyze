@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.133.54.1] - 2026-11-20 — records: book 220 EXTRACTOR
+
+Planning-only release: books Phase 220 EXTRACTOR. No code changes.
+
+### Added
+- **Phase 220 EXTRACTOR booked** (ROADMAP overview bullet, phase section and Progress row; STATE roadmap evolution and current phase name). It is CI-only. It teaches the local-stack non-public extractor (`scripts/local-stack/nonpublic-objects.mjs`) to accept an `AFTER UPDATE OF <columns>` trigger on `auth.users` and to compare its columns against the catalogue, so that the baseline re-dump carrying the 219 migration `20261119120000` can land without making every lane boot FATAL. It owns `TODOS.md` `[219-EXTRACTOR-UPDATE-OF]`.
+
+### Notes
+- Main's `sql-gate-lint` has been red since merge `d4f93d474` with exactly one finding, `SNAPSHOT_MISSING sync_profile_email_from_auth/0`, and `frontend` is red only because it aggregates that job. That holds back the Railway analytics deploy. The bot re-dump PR #1294 clears the finding, but it must merge only after Phase 220 lands.
+
 ## [0.133.54.0] - 2026-11-20 — Phase 155.2 LIVEPARITY (plans 01-10): the parity harness reads a real MT5 Report, and per-key MT5 legs annualize on their own venue's class
 
 A mid-phase ship. Plans 01-10 of Phase 155.2 are agent work, and plan 155.2-12 needs them deployed and recomputed before it can recapture and judge Gate A and Gate B. The phase stays open: the weekend reading, the broker statements, the browser surface read (criterion 3), the founder rulings and MT5-GOAL-01 are founder steps still owed.
