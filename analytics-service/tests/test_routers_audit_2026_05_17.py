@@ -524,6 +524,67 @@ def test_trim_returns_series_caller_mutation_does_not_leak_to_input():
     )
 
 
+def _spy_on_the_row_reader(portfolio_mod, monkeypatch):
+    """Record the ``from_base`` each ``daily_returns_from_row`` call in the router gets,
+    passing the call through to the real reader."""
+    seen: list[object] = []
+    real = portfolio_mod.daily_returns_from_row
+
+    def _spy(row, **kwargs):
+        seen.append(kwargs.get("from_base", "unset"))
+        return real(row, **kwargs)
+
+    monkeypatch.setattr(portfolio_mod, "daily_returns_from_row", _spy)
+    return seen
+
+
+def test_verify_strategy_reads_a_cut_curve_with_the_old_pairing_and_a_whole_one_from_the_base(
+    monkeypatch,
+):
+    """G3-1 (a), T-155.2-38: the stored curve is read against its implicit 1.0 base (day 0 =
+    w0 - 1), but the H-0594 trim keeps only the trailing ``cap`` levels of a longer curve, and
+    a head that was cut has no 1.0 base: its first level is a multi-year cumulative return, and
+    booking it as one day would fabricate a return. So the router passes ``from_base=False``
+    exactly when the trim cut the curve.
+
+    Three cases through the REAL ``verify_strategy`` (the harness of the C7 tests): a curve
+    over the cap (cut -> False), a curve within it (whole -> True), and a null and a malformed
+    curve beside a normal candidate (never cut, so True, and the matching loop must still reach
+    a decision rather than abort into ``matching_unavailable``)."""
+    import pandas as pd
+
+    from routers import portfolio as portfolio_mod
+    from tests.test_correlation_residue_sites import _c7_verify, _noise
+
+    idx = pd.date_range("2024-01-02", periods=60, freq="D")
+    target = _noise(idx, seed=91)
+
+    # (1) over the cap: 60 stored levels, cap 40 -> the trim cuts, the head is not a base.
+    seen = _spy_on_the_row_reader(portfolio_mod, monkeypatch)
+    _c7_verify(target, {"long": target.copy()}, cap=40)
+    assert seen == [False], seen
+
+    # (2) within the cap (the default 750): nothing is cut, the curve is whole.
+    seen = _spy_on_the_row_reader(portfolio_mod, monkeypatch)
+    _c7_verify(target, {"whole": target.copy()})
+    assert seen == [True], seen
+
+    # (3) a null curve and a malformed (non-list) curve beside a normal candidate: the trim
+    # passes a non-list through unchanged, so nothing is "cut" and ``len(None)`` is never taken.
+    seen = _spy_on_the_row_reader(portfolio_mod, monkeypatch)
+    out = _c7_verify(
+        target,
+        {"same": target.copy()},
+        raw_rows={
+            "null_curve": {"returns_series": None, "daily_returns": None},
+            "malformed_curve": {"returns_series": {"not": "a list"}, "daily_returns": None},
+        },
+    )
+    assert sorted(seen) == [True, True, True], seen
+    assert out["matching_status"] == "matched", out["matching_status"]
+    assert out["matched_strategy_id"] == "same"
+
+
 def test_build_monthly_returns_dedupes_duplicate_dates():
     """audit-2026-05-07 red-team (MED conf 8) — `_build_monthly_returns`
     MUST be idempotent under duplicate dates. Upstream

@@ -274,6 +274,15 @@ class TestKeyMode:
         ] == [], (
             f"key-mode must NOT enqueue compute_analytics_from_csv; got {enqueues!r}"
         )
+        # G4-1 (b) (Phase 155.2 plan 16): this assertion NARROWED from "no strategy-keyed enqueue
+        # at all" to "no strategy-mode derive when the key backs no strategy". Key mode now
+        # re-enters the strategy-mode derive_broker_dailies for each DIRECTLY linked strategy whose
+        # analytics end before the per-key series (tests/test_key_mode_linked_strategy_recompute.py
+        # pins that). This key backs none (the strategies read answers no row), so nothing
+        # strategy-keyed may be enqueued here.
+        assert [c for c in enqueues if c[1].get("p_strategy_id") is not None] == [], (
+            f"a key backing no strategy must enqueue no strategy-mode derive; got {enqueues!r}"
+        )
         # NO strategy_analytics stamp (there is no per-key analytics row).
         sa_upserts = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
         assert sa_upserts == [], (

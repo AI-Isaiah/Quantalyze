@@ -31,12 +31,13 @@ from services.wealth_returns import daily_returns_from_row
 from tests._curve_fixtures import curve_from_returns
 
 # Day 0's return builds the first stored level, so the curve is 1.0, 1.2, 1.1,
-# 1.25 and reads back as the day 1..3 returns below (day 0 has no predecessor).
+# 1.25 and reads back as ALL FOUR returns below (G3-1 (a): the curve is anchored at an
+# implicit 1.0, so day 0 = 1.0 - 1 = 0.0 by difference and 1.0 / 1 - 1 = 0.0 by ratio).
 _DATES = ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05"]
 _RUN_RETURNS = [0.0, 0.20, -0.10, 0.15]
-_SIMPLE_READ = [0.20, -0.10, 0.15]  # by difference: what the writer was given
-# by ratio on the same levels: 1.2/1 - 1, 1.1/1.2 - 1, 1.25/1.1 - 1
-_GEOMETRIC_READ = [0.20, 1.1 / 1.2 - 1.0, 1.25 / 1.1 - 1.0]
+_SIMPLE_READ = [0.0, 0.20, -0.10, 0.15]  # by difference: what the writer was given
+# by ratio on the same levels: 1.0/1 - 1, 1.2/1 - 1, 1.1/1.2 - 1, 1.25/1.1 - 1
+_GEOMETRIC_READ = [0.0, 0.20, 1.1 / 1.2 - 1.0, 1.25 / 1.1 - 1.0]
 _SIMPLE_FLAGS: dict[str, Any] = {"cumulative_method": "simple"}
 
 
@@ -54,7 +55,7 @@ def _simple_row(sid: str) -> dict[str, Any]:
 
 
 def _assert_simple_reading(series: pd.Series, what: str) -> None:
-    assert [d.strftime("%Y-%m-%d") for d in series.index] == _DATES[1:], what
+    assert [d.strftime("%Y-%m-%d") for d in series.index] == _DATES, what
     assert list(series.to_numpy()) == pytest.approx(_SIMPLE_READ, abs=1e-12), (
         f"{what}: a simple-method curve was not read by difference. Read by ratio "
         f"it would be {[round(v, 6) for v in _GEOMETRIC_READ]}: the router dropped "

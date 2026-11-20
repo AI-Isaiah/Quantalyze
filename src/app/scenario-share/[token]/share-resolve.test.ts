@@ -1004,25 +1004,26 @@ describe("resolveSharedScenario — returns_series resolution (SCEN-01)", () => 
 
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok");
-    // Differencing consumes the base point: 12 wealth points → 11 returns.
-    expect(result.portfolioDaily).toHaveLength(KNOWN_RETURNS.length);
-    // The three literals the plan hand-computed: 1.05/1.0−1, 0.945/1.05−1,
+    // G3-1 (a): the stored curve is anchored at an implicit 1.0, so the 12 wealth points
+    // (the 1.0 base point included) read as 12 returns: day 0 = 1.0 / 1 − 1 = 0.0.
+    expect(result.portfolioDaily).toHaveLength(KNOWN_RETURNS.length + 1);
+    // Day 0, then the three literals the plan hand-computed: 1.05/1.0−1, 0.945/1.05−1,
     // 1.0395/0.945−1.
-    expect(result.portfolioDaily[0].value).toBeCloseTo(0.05, 10);
-    expect(result.portfolioDaily[1].value).toBeCloseTo(-0.1, 10);
-    expect(result.portfolioDaily[2].value).toBeCloseTo(0.1, 10);
-    // …and the whole series round-trips back to the oracle.
+    expect(result.portfolioDaily[0].value).toBeCloseTo(0.0, 10);
+    expect(result.portfolioDaily[1].value).toBeCloseTo(0.05, 10);
+    expect(result.portfolioDaily[2].value).toBeCloseTo(-0.1, 10);
+    expect(result.portfolioDaily[3].value).toBeCloseTo(0.1, 10);
+    // …and the whole series round-trips back to the oracle (0.0 for the base day).
     result.portfolioDaily.forEach((p, i) => {
-      expect(p.value).toBeCloseTo(KNOWN_RETURNS[i], 10);
+      expect(p.value).toBeCloseTo(i === 0 ? 0 : KNOWN_RETURNS[i - 1], 10);
     });
   });
 
-  it("SC1b-share: a PRODUCTION-shaped index (first element 1+r_0, no base row) yields N−1 returns — day one's return is unrecoverable", () => {
-    // The writer never persists a 1.0 base row, so on real data differencing
-    // consumes the first STORED point: N points → N−1 returns, the return baked
-    // into element 0 (+5% here) is permanently absent, and the derived series
-    // starts one day later than the stored curve. This is the honest companion
-    // to SC1-share's anchored fixture (which recovers all N by construction).
+  it("SC1b-share: a PRODUCTION-shaped index (first element 1+r_0, no base row) yields N returns — day one's return is recovered", () => {
+    // The writer never persists a 1.0 base row. Before G3-1 (a) differencing consumed the
+    // first STORED point (N points → N−1 returns, the +5% baked into element 0 absent);
+    // reading element 0 against the implicit 1.0 recovers it: N points → N returns, the
+    // derived series starts on the stored curve's first date.
     const wealth = makeWealthIndex("2026-01-01", KNOWN_RETURNS).slice(1);
     expect(wealth[0].value).toBeCloseTo(1.05, 10); // (1 + r_0), NOT a 1.0 base
 
@@ -1030,16 +1031,16 @@ describe("resolveSharedScenario — returns_series resolution (SCEN-01)", () => 
 
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok");
-    // N stored points → N−1 returns; metrics.n counts them honestly.
-    expect(result.portfolioDaily).toHaveLength(KNOWN_RETURNS.length - 1);
-    expect(result.metrics.n).toBe(KNOWN_RETURNS.length - 1);
-    // The recovered series is KNOWN_RETURNS[1..] — day one's +0.05 is absent.
-    expect(result.portfolioDaily[0].value).toBeCloseTo(-0.1, 10);
+    // N stored points → N returns; metrics.n counts them honestly.
+    expect(result.portfolioDaily).toHaveLength(KNOWN_RETURNS.length);
+    expect(result.metrics.n).toBe(KNOWN_RETURNS.length);
+    // The recovered series is KNOWN_RETURNS itself — day one's +0.05 (1.05 / 1 − 1) is present.
+    expect(result.portfolioDaily[0].value).toBeCloseTo(0.05, 10);
     result.portfolioDaily.forEach((p, i) => {
-      expect(p.value).toBeCloseTo(KNOWN_RETURNS[i + 1], 10);
+      expect(p.value).toBeCloseTo(KNOWN_RETURNS[i], 10);
     });
-    // The derived start date shifts one day later than the anchored variant's.
-    expect(result.portfolioDaily[0].date).toBe("2026-01-03");
+    // The derived series starts on the stored curve's first date.
+    expect(result.portfolioDaily[0].date).toBe("2026-01-02");
   });
 
   it("SC3-share: the wealth index is DIFFERENCED at the wiring, never forwarded raw", () => {
@@ -1051,11 +1052,13 @@ describe("resolveSharedScenario — returns_series resolution (SCEN-01)", () => 
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok");
     // A raw forward emits the wealth points AS returns — day one would be the
-    // 1.0 base read as a +100% day, and the length would be the full 12.
+    // 1.0 base read as a +100% day. The length no longer tells the two apart since
+    // G3-1 (a) (12 points → 12 returns); the values do: day 0 is 1.0 / 1 − 1 = 0.0 and
+    // day 1 is 1.05 / 1.0 − 1 = +0.05, never 1.0 and 1.05.
     expect(result.portfolioDaily[0].value).not.toBeCloseTo(1.0, 10);
-    expect(result.portfolioDaily).not.toHaveLength(wealth.length);
-    // Off-by-one pinned in the positive direction too.
-    expect(result.metrics.n).toBe(KNOWN_RETURNS.length);
+    expect(result.portfolioDaily[1].value).toBeCloseTo(0.05, 10);
+    // Day 0 is read now, so n counts it.
+    expect(result.metrics.n).toBe(KNOWN_RETURNS.length + 1);
   });
 
   it("164.6.6.2.2 D-05: returnsMethodById 'simple' reads the stored curve as DIFFERENCES; omitted keeps geometric", () => {
@@ -1083,17 +1086,19 @@ describe("resolveSharedScenario — returns_series resolution (SCEN-01)", () => 
     );
     expect(simple.kind).toBe("ok");
     if (simple.kind !== "ok") throw new Error("expected ok");
-    expect(simple.portfolioDaily).toHaveLength(KNOWN_RETURNS.length);
+    // G3-1 (a): the 1.0 base point reads as day 0 = 1 − 1 = 0.0, then the known returns.
+    expect(simple.portfolioDaily).toHaveLength(KNOWN_RETURNS.length + 1);
     simple.portfolioDaily.forEach((p, i) => {
-      expect(p.value).toBeCloseTo(KNOWN_RETURNS[i], 10);
+      expect(p.value).toBeCloseTo(i === 0 ? 0 : KNOWN_RETURNS[i - 1], 10);
     });
 
     // No method map: geometric, so day 2 is 0.95 / 1.05 - 1 = -0.0952..., not -0.1.
     const geometric = resolveSharedScenario(scRow(null), {}, { [SC_STRAT]: simpleCurve });
     expect(geometric.kind).toBe("ok");
     if (geometric.kind !== "ok") throw new Error("expected ok");
-    expect(geometric.portfolioDaily[1].value).toBeCloseTo(0.95 / 1.05 - 1, 10);
-    expect(Math.abs(geometric.portfolioDaily[1].value - -0.1)).toBeGreaterThan(0.004);
+    // (index 2 now: index 0 is day 0 = 1 / 1 − 1 = 0.0.)
+    expect(geometric.portfolioDaily[2].value).toBeCloseTo(0.95 / 1.05 - 1, 10);
+    expect(Math.abs(geometric.portfolioDaily[2].value - -0.1)).toBeGreaterThan(0.004);
   });
 
   it("returnsSeriesById omitted / id absent → the pre-147 daily_returns-only projection, unchanged", () => {
@@ -1252,7 +1257,9 @@ describe("resolveSharedScenario — BTC leg converts to USD before the blend (16
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok");
     expect(result.portfolioDaily.map((p) => p.date)).toEqual(
-      [2, 3, 4, ...Array.from({ length: 17 }, (_, j) => 7 + j)].map((i) => dates[i]),
+      // G3-1 (a): day 0 is read (1.0 / 1 - 1 = 0.0, the converter's interval anchor), so day 1
+      // is now priced over [day 0, day 1] on flat BTC: 1.1 * 1 - 1 = 0.1. Days 5 and 6 are absent.
+      [1, 2, 3, 4, ...Array.from({ length: 17 }, (_, j) => 7 + j)].map((i) => dates[i]),
     );
     for (const p of result.portfolioDaily) expect(p.value).toBeCloseTo(0.1, 9);
   });

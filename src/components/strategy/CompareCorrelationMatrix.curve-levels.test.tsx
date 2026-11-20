@@ -25,17 +25,28 @@ const DATES: string[] = Array.from({ length: N + 1 }, (_, i) =>
 /** Deterministic zero-mean wobble (no randomness). */
 const wobble = (i: number): number => Math.sin(i * 1.3) + 0.5 * Math.cos(i * 0.41);
 
-/** Geometric curve: w_k = w_{k-1} * (1 + r_k), seeded at 1. */
+/**
+ * Geometric curve as the writer stores it: NO base point, the first level is 1 + r_0 (the curve
+ * is anchored at an implicit 1.0, G3-1 (a)), then w_k = w_{k-1} * (1 + r_k).
+ */
 function geometricCurve(rs: number[]): number[] {
-  const out = [1];
-  for (const r of rs) out.push(out[out.length - 1] * (1 + r));
+  const out: number[] = [];
+  let level = 1;
+  for (const r of rs) {
+    level *= 1 + r;
+    out.push(level);
+  }
   return out;
 }
 
-/** Arithmetic curve: w_k = w_{k-1} + r_k, seeded at 1. */
+/** Arithmetic curve as the writer stores it: first level 1 + r_0, then w_k = w_{k-1} + r_k. */
 function simpleCurve(rs: number[]): number[] {
-  const out = [1];
-  for (const r of rs) out.push(out[out.length - 1] + r);
+  const out: number[] = [];
+  let level = 1;
+  for (const r of rs) {
+    level += r;
+    out.push(level);
+  }
   return out;
 }
 
@@ -70,15 +81,20 @@ describe("WR-05 CompareCorrelationMatrix correlates daily returns, not curve lev
     const a = geometricCurve(mirrorA);
     const b = geometricCurve(mirrorB);
     // Premise: both curves rise (the level-on-level reading would be near +1).
-    expect(a[N]).toBeGreaterThan(1.5);
-    expect(b[N]).toBeGreaterThan(1.5);
+    expect(a[N - 1]).toBeGreaterThan(1.5);
+    expect(b[N - 1]).toBeGreaterThan(1.5);
     expect(pairCell([item("a", a), item("b", b)])).toBe("-1.00");
   });
 
-  it("identical daily returns on curves of different levels read +1.00", () => {
+  it("proportional daily returns on curves of different levels read +1.00", () => {
+    // G3-1 (a): a stored curve is anchored at 1.0, so its level cannot be rescaled without
+    // changing its day 0 (a 250x copy would read a 249.x first day). Curves of different levels
+    // come from different returns: here b's daily returns are exactly 2 * a's, so the Pearson
+    // correlation of the returns is +1.00 although the levels differ in magnitude.
     const a = geometricCurve(mirrorA);
-    const scaled = a.map((v) => v * 250);
-    expect(pairCell([item("a", a), item("scaled", scaled)])).toBe("1.00");
+    const doubled = geometricCurve(mirrorA.map((r) => 2 * r));
+    expect(doubled[N - 1]).toBeGreaterThan(a[N - 1] * 1.5);
+    expect(pairCell([item("a", a), item("doubled", doubled)])).toBe("1.00");
   });
 
   it("a simple (arithmetic) curve is differenced, not divided: mirror-image increments read -1.00", () => {

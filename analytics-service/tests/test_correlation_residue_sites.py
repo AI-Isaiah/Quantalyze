@@ -72,15 +72,15 @@ def _zeros_like(leg: pd.Series) -> pd.Series:
 
 def _stored_curve(returns: pd.Series) -> list[dict[str, object]]:
     """The stored SHAPE of ``returns`` (Phase 164.6.6.2.2): the cumulative wealth
-    curve, with a level-1.0 base day one calendar day before the first return so
-    reading it back through ``daily_returns_from_row`` yields ``returns`` on every
-    one of its own dates. For a NAV constant-yield leg the read-back is the same
-    ``w_k / w_{k-1} - 1`` the platform takes, so the ~1e-16 residue the dispersion
-    floor is built for survives the round trip."""
-    base = (returns.index[0] - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    curve exactly as the writer stores it, with NO base point (the first stored level
+    is ``1 + r_0`` on the first return's own date). G3-1 (a): the curve is anchored at
+    an implicit 1.0, so reading it back through ``daily_returns_from_row`` yields
+    ``returns`` on every one of its own dates, day 0 included. For a NAV constant-yield
+    leg the read-back is the same ``w_k / w_{k-1} - 1`` the platform takes, so the ~1e-16
+    residue the dispersion floor is built for survives the round trip."""
     return curve_from_returns(
-        [0.0] + [float(v) for v in returns],
-        [base] + [d.strftime("%Y-%m-%d") for d in returns.index],
+        [float(v) for v in returns],
+        [d.strftime("%Y-%m-%d") for d in returns.index],
     )
 
 
@@ -373,17 +373,15 @@ def _c6_supabase(
     D-06 makes an update that matches no row raise.
 
     The strategy row carries the stored SHAPE (Phase 164.6.6.2.2): ``returns_series``
-    is the cumulative wealth curve, not the daily returns. A base day one calendar
-    day before the first return holds level 1.0, so reading the curve back through
-    the boundary yields ``returns`` on every one of its own dates. For a NAV
-    constant-yield leg that read-back is the same ``w_k / w_{k-1} - 1`` the platform
-    takes, with the same ~1e-16 residue the dispersion floor is built for.
+    is the cumulative wealth curve, not the daily returns, with NO base point (the
+    first stored level is ``1 + r_0`` on the first return's own date, as the writer
+    stores it). G3-1 (a): the curve is anchored at an implicit 1.0, so reading it back
+    through the boundary yields ``returns`` on every one of its own dates, day 0
+    included. For a NAV constant-yield leg that read-back is the same
+    ``w_k / w_{k-1} - 1`` the platform takes, with the same ~1e-16 residue the
+    dispersion floor is built for.
     """
-    base = (returns.index[0] - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    records = curve_from_returns(
-        [0.0] + [float(v) for v in returns],
-        [base] + [d.strftime("%Y-%m-%d") for d in returns.index],
-    )
+    records = _stored_curve(returns)
     pa = MagicMock()
     pa.insert.return_value.execute.return_value = MagicMock(data=[{"id": "analytics-1"}])
     pa.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(data=[])

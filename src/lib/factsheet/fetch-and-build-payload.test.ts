@@ -365,9 +365,17 @@ const PARITY: Fixture[] = [
     reason: "malformed_series",
   },
   {
-    name: "single-key, returns_series-only curve of two wealth points (one return)",
-    row: single({ returns_series: wealthCurve(2) }),
+    // G3-1 (a): the boundary, both sides. MIN_FACTSHEET_SERIES_POINTS = 2 returns. One stored
+    // curve point is one return (w0 - 1 against the implicit 1.0 base): still short. Two stored
+    // points are two returns (they were one return before day 0 was read): buildable.
+    name: "single-key, returns_series-only curve of one wealth point (one return)",
+    row: single({ returns_series: wealthCurve(1) }),
     reason: "too_few_points",
+  },
+  {
+    name: "single-key, returns_series-only curve of two wealth points (two returns, day 0 included)",
+    row: single({ returns_series: wealthCurve(2) }),
+    reason: null,
   },
   {
     // 167.2.1-REVIEW-SFH-R2 N-5: the builder reads `daily_returns` whenever it

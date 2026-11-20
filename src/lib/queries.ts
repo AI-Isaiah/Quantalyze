@@ -2020,9 +2020,11 @@ export interface OwnCapitalStrategy {
 function figureRecordScalars(input: {
   series: ReadonlyArray<{ date: string }>;
   /**
-   * 194.2 D-02: the stored curve's first date (`curveRecordStart`). A curve-derived series never
-   * carries day 0, so `series[0]` is the SECOND curve date; the record starts at this one, as the
-   * factsheet and every SQL reader do. Null/absent: the series' own first date (CSV-derived).
+   * 194.2 D-02: the stored curve's first date (`curveRecordStart`). Before G3-1 (a) (Phase 155.2
+   * plan 15) a curve-derived series never carried day 0, so `series[0]` was the SECOND curve date;
+   * it now carries day 0 and `series[0]` is this date, except for a curve at the writer cap. The
+   * record starts at this one, as the factsheet and every SQL reader do. Null/absent: the series'
+   * own first date (CSV-derived).
    */
   recordSeriesStart?: string | null;
   dataQualityFlags: unknown;

@@ -20,11 +20,23 @@ present value logs one warning and reads geometric::
     geometric:  r_k = w_k / w_{k-1} - 1     both stored-adjacent levels finite and > 0
     simple:     r_k = w_k - w_{k-1}         both stored-adjacent levels finite
 
-Day 0 never emits (it has no stored predecessor). ABSENT-never-0: a day whose
-stored-adjacent level pair is unusable is absent from the output, never 0,
-never carried forward, never interpolated, and never bridged across a dropped
-level (the day after a bad level pairs with the bad level, so it is absent too).
-A non-positive level is legal on the simple curve and unusable on the geometric.
+Day 0 (G3-1 (a), Phase 155.2 plan 15). The writer stores a strategy curve WITHOUT
+a base point (``services/metrics.py``: ``(1 + r).cumprod()`` or ``1 + r.cumsum()``),
+so the first stored level is ``1 + r0`` and the curve is anchored at an implicit
+1.0. ``daily_returns_from_row`` therefore reads day 0 as ``w0 - 1`` (``from_base``,
+default True), on the same usability rule as every other day, and a stored curve
+reads as n daily returns, not n-1: the n observations the persisted factsheet
+metrics run on. A curve of :data:`STORED_CURVE_MAX_POINTS` points or more never
+emits day 0: the writer caps there (``cap_data_points``), so its head may have been
+cut and ``w0`` would be a multi-year cumulative return booked as one day. The raw
+:func:`curve_to_daily_returns` defaults to ``from_base=False`` because it is also
+called on curves with no 1.0 base.
+
+ABSENT-never-0: a day whose stored-adjacent level pair is unusable is absent from
+the output, never 0, never carried forward, never interpolated, and never bridged
+across a dropped level (the day after a bad level pairs with the bad level, so it
+is absent too). A non-positive level is legal on the simple curve and unusable on
+the geometric.
 
 Nothing usable returns ``None``, never an empty Series, so each caller's existing
 missing-returns accounting is unchanged. A row that holds a curve (or daily_returns)
@@ -64,6 +76,12 @@ logger = logging.getLogger("quantalyze.analytics")
 
 CURVE_GEOMETRIC = "geometric"
 CURVE_SIMPLE = "simple"
+
+# The writer's cap on a stored curve: ``cap_data_points`` in ``services/transforms.py``
+# keeps the most recent 5000 points. A curve at or above this length may have lost
+# its head, so ``from_base`` never reads day 0 from it. Pinned to that default and to
+# the TypeScript twin through ``stored_curve_max_points`` in the shared oracle.
+STORED_CURVE_MAX_POINTS = 5000
 
 
 def curve_method_from_flags(flags: Any, *, name: str = "") -> str:
@@ -164,19 +182,30 @@ def records_to_series(
 
 
 def curve_to_daily_returns(
-    levels: pd.Series | None, method: str, *, keep_absent: bool = False
+    levels: pd.Series | None,
+    method: str,
+    *,
+    keep_absent: bool = False,
+    from_base: bool = False,
 ) -> pd.Series | None:
     """Daily returns from a stored cumulative curve (sorted, deduped levels).
 
     ``method`` is :data:`CURVE_GEOMETRIC` or :data:`CURVE_SIMPLE`. Pairs each
     level with its STORED predecessor (``shift(1)``); a pair with a non-finite
     member (or, geometric, a non-positive one) is absent, so the day after a bad
-    level is absent too rather than bridged. Day 0 never emits. Returns None when
-    no day is formable.
+    level is absent too rather than bridged. Returns None when no day is formable.
 
-    ``keep_absent=True`` (WR-02, 164.6.6.2.2 review) keeps each absent day AFTER
-    day 0 in the output as a NaN placeholder at its own date instead of deleting
-    it. The one consumer is the native -> USD converter, which prices a day's
+    ``from_base=True`` (G3-1 (a), Phase 155.2 plan 15) pairs row 0 with an implicit
+    1.0 predecessor, so day 0 emits ``w0 - 1`` on the same usability rule as every
+    other day, while the curve has fewer than :data:`STORED_CURVE_MAX_POINTS`
+    points. Off by default: this function is also called on curves with no 1.0 base
+    (a blend's equity, a cut curve), where day 0 would be a fabricated return.
+    :func:`daily_returns_from_row`, which only sees a stored strategy curve, turns
+    it on. Without it day 0 never emits (no stored predecessor).
+
+    ``keep_absent=True`` (WR-02, 164.6.6.2.2 review) keeps each absent day, day 0
+    included under ``from_base``, in the output as a NaN placeholder at its own date
+    instead of deleting it. The one consumer is the native -> USD converter, which prices a day's
     native return by the BTC move over the interval ``[previous series date,
     this date]``: with the absent day deleted that interval silently grew to span
     the whole gap, so a one-day native return was multiplied by a multi-day price
@@ -184,10 +213,11 @@ def curve_to_daily_returns(
     the next day over its own single interval. A series built this way carries
     NaN and MUST go through the converter (which drops it), never into a blend.
     """
-    if levels is None or len(levels) < 2:
+    if levels is None or len(levels) < (1 if from_base else 2):
         return None
     cur = levels.astype(float)
-    prev = cur.shift(1)
+    emit_day_zero = from_base and len(cur) < STORED_CURVE_MAX_POINTS
+    prev = cur.shift(1, fill_value=1.0) if emit_day_zero else cur.shift(1)
     both_finite = np.isfinite(cur) & np.isfinite(prev)
     if method == CURVE_SIMPLE:
         mask = both_finite
@@ -198,7 +228,7 @@ def curve_to_daily_returns(
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             out = cur / prev - 1.0
     if keep_absent:
-        out = out.where(mask & np.isfinite(out)).iloc[1:]
+        out = out.where(mask & np.isfinite(out)).iloc[0 if emit_day_zero else 1 :]
         if not np.isfinite(out).any():
             return None
     else:
@@ -252,6 +282,7 @@ def daily_returns_from_row(
     *,
     name: str,
     keep_absent: bool = False,
+    from_base: bool = True,
 ) -> pd.Series | None:
     """The row's daily returns (D-02 order; see the module docstring).
 
@@ -266,6 +297,11 @@ def daily_returns_from_row(
     own single interval, not over the gap (see :func:`curve_to_daily_returns`).
     A USD row, and a row whose ``daily_returns`` column wins, come back exactly
     as without it, so a USD series can never carry a NaN placeholder.
+
+    ``from_base`` (default True, G3-1 (a)): the curve here is a stored strategy
+    curve anchored at an implicit 1.0, so day 0 is read as ``w0 - 1``. A caller
+    whose curve was cut before it reached this reader passes False (see
+    :func:`curve_to_daily_returns` for the rule and the cap).
     """
     if not isinstance(row, Mapping):
         return None
@@ -277,7 +313,22 @@ def daily_returns_from_row(
     flags = row.get("data_quality_flags")
     method = curve_method_from_flags(flags, name=name)
     native = isinstance(flags, Mapping) and parse_native_unit(flags.get("native_unit")) is not None
-    derived = curve_to_daily_returns(levels, method, keep_absent=keep_absent and native)
+    # WR-01 (155.2 gap review): day 0 is read against the implicit 1.0 only when the
+    # curve's FIRST STORED element survived normalization. A head that
+    # ``records_to_series`` dropped (non-dict, no date, unparseable date) leaves the
+    # second level as the first point, and reading that against 1.0 would book two
+    # days of compounding as one return: keep the n-1 pairing instead.
+    first = raw_curve[0] if isinstance(raw_curve, list) and raw_curve else None
+    head_kept = isinstance(first, dict) and bool(
+        pd.to_datetime(
+            pd.Series([first.get("date")], dtype=object), format="ISO8601", errors="coerce"
+        )
+        .notna()
+        .iloc[0]
+    )
+    derived = curve_to_daily_returns(
+        levels, method, keep_absent=keep_absent and native, from_base=from_base and head_kept
+    )
     if derived is None:
         # A row with NOTHING stored is the normal "no returns" case and stays
         # silent. A row that HOLDS a curve (or daily_returns) yet yields no day

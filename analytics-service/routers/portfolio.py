@@ -2693,9 +2693,22 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
                 # A dict-shaped `daily_returns` is passed through as stored.
                 existing: dict[str, pd.Series] = {}
                 for row in rows(sa_result):
+                    raw_curve = row.get("returns_series")
+                    trimmed_curve = _trim_returns_series(raw_curve)
+                    # G3-1 (a): a stored curve is read against its implicit 1.0 base
+                    # (day 0 = w0 - 1). A curve the trim CUT has lost its head, so its
+                    # first level is a multi-year cumulative return, not one day:
+                    # read it with the old pairing. Only a list can be cut; a null or
+                    # malformed curve passes through the trim unchanged (never
+                    # ``len(None)``), is not cut, and reaches the boundary as before.
+                    cut = (
+                        isinstance(raw_curve, list)
+                        and trimmed_curve is not None
+                        and len(trimmed_curve) < len(raw_curve)
+                    )
                     trimmed_row = {
                         **row,
-                        "returns_series": _trim_returns_series(row.get("returns_series")),
+                        "returns_series": trimmed_curve,
                         "daily_returns": _trim_returns_series(row.get("daily_returns")),
                     }
                     # ``keep_absent=True``: an undefined day stays a NaN so the USD
@@ -2703,7 +2716,10 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
                     # ``portfolio_bridge`` does; the ``dropna`` on ``aligned``
                     # discards it from the correlation either way.
                     s = daily_returns_from_row(
-                        trimmed_row, name=row["strategy_id"], keep_absent=True
+                        trimmed_row,
+                        name=row["strategy_id"],
+                        keep_absent=True,
+                        from_base=not cut,
                     )
                     if s is not None:
                         existing[row["strategy_id"]] = s

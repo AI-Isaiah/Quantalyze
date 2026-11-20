@@ -52,6 +52,16 @@ function normalizeCurve(raw: unknown): DailyPoint[] {
 }
 
 /**
+ * The writer's cap on a stored curve: `cap_data_points(returns_series)` in
+ * `analytics-service/services/transforms.py` keeps the MOST RECENT 5000 points
+ * (`max_points=5000`). A curve at or above this length may have lost its head, so
+ * its first level is not anchored at 1.0 and {@link equityCurveToDailyReturns}
+ * never reads day 0 from it (`fromBase`). Pinned to the writer's default and to the
+ * Python twin through `stored_curve_max_points` in the shared oracle.
+ */
+export const STORED_CURVE_MAX_POINTS = 5000;
+
+/**
  * Convert a stored cumulative curve into the daily-return series the
  * FactsheetPayload builder expects. The points are sorted by date and then
  * paired by STORED adjacency, without filtering first:
@@ -59,43 +69,64 @@ function normalizeCurve(raw: unknown): DailyPoint[] {
  *   geometric:  r_k = w_k / w_{k-1} - 1   both levels finite and > 0
  *   simple:     r_k = w_k - w_{k-1}       both levels finite
  *
- * Day 0 never emits (no stored predecessor). A day whose pair is unusable is
- * ABSENT: never 0, never carried, and never bridged across the bad level (the
- * day after a bad level pairs with the bad level, so it is absent too). A
- * non-positive level is legal on the simple curve and unusable on the
- * geometric. Duplicate dates are not deduped here (the Python twin dedupes;
- * the shared oracle leaves that rule out).
+ * Day 0 (`fromBase`, G3-1 (a), Phase 155.2 plan 15). The analytics writer stores a
+ * strategy's curve WITHOUT a base point: `services/metrics.py` writes
+ * `(1 + r).cumprod()` (geometric) or `1 + r.cumsum()` (simple), so the first stored
+ * level is `1 + r0` and the curve is anchored at an implicit 1.0. With `fromBase`
+ * true the first sorted point is paired with that implicit 1.0 predecessor and day
+ * 0 emits `w0 - 1` at its own date on the same usability rule as every other day
+ * (geometric needs w0 finite and > 0, simple needs w0 finite). A stored curve then
+ * reads as n daily returns, not n-1, which is the n observations the persisted
+ * factsheet metrics run on. A curve of {@link STORED_CURVE_MAX_POINTS} points or
+ * more never emits day 0: the writer caps there, so its head may have been cut and
+ * `w0` would be a multi-year cumulative return booked as one day.
+ *
+ * `fromBase` defaults to FALSE here on purpose. This raw function is also called
+ * directly on curves that have no 1.0 base: the allocator's blended equity wealth
+ * (`buildAllocatorPortfolioFactsheetPayload`) and the two `ReturnHistogram`
+ * curves (a scenario blend's series and a benchmark curve). Reading those against
+ * 1.0 would fabricate a return. The row-level reader
+ * {@link resolveDailyReturnSeries}, which only ever sees a stored strategy curve,
+ * turns it on.
+ *
+ * A day whose pair is unusable is ABSENT: never 0, never carried, and never
+ * bridged across the bad level (the day after a bad level pairs with the bad
+ * level, so it is absent too). A non-positive level is legal on the simple curve
+ * and unusable on the geometric. Duplicate dates are not deduped here (the Python
+ * twin dedupes; the shared oracle leaves that rule out).
  *
  * `analytics-service/services/wealth_returns.py` is the Python twin; both are
  * pinned to `analytics-service/tests/fixtures/wealth_to_returns_oracle.json`.
  *
- * Returns an empty array when the input has fewer than two points. The default
- * method is geometric, which is also what the allocator's own blended equity
- * wealth (a cumulative product of 1 + r) needs.
+ * Returns an empty array when the input has fewer than two points (fewer than one
+ * under `fromBase`). The default method is geometric, which is also what the
+ * allocator's own blended equity wealth (a cumulative product of 1 + r) needs.
  *
- * `keepAbsent` (WR-02, 164.6.6.2.2 review): keep every absent day AFTER day 0 in
- * the output as a `NaN` placeholder at its own date instead of deleting it. The
- * one consumer is {@link convertNativeReturnsToUsd}, which prices a day's native
- * return by the BTC move over `[previous series date, this date]`: with the
- * absent day deleted that interval silently grew to span the whole gap, so a
- * one-day native return was multiplied by a multi-day price move. With the
- * placeholder kept, the converter skips the NaN day and prices the next day over
- * its own single interval. A series built this way carries NaN and MUST go
- * through the converter (which drops it), never into a blend or a payload.
+ * `keepAbsent` (WR-02, 164.6.6.2.2 review): keep every absent day, day 0 included
+ * under `fromBase`, in the output as a `NaN` placeholder at its own date instead
+ * of deleting it. The one consumer is {@link convertNativeReturnsToUsd}, which
+ * prices a day's native return by the BTC move over `[previous series date, this
+ * date]`: with the absent day deleted that interval silently grew to span the
+ * whole gap, so a one-day native return was multiplied by a multi-day price move.
+ * With the placeholder kept, the converter skips the NaN day and prices the next
+ * day over its own single interval. A series built this way carries NaN and MUST
+ * go through the converter (which drops it), never into a blend or a payload.
  * Twin of `curve_to_daily_returns(keep_absent=True)`.
  */
 export function equityCurveToDailyReturns(
   points: DailyPoint[],
   method: CurveMethod = "geometric",
   keepAbsent = false,
+  fromBase = false,
 ): DailyReturn[] {
-  if (!Array.isArray(points) || points.length < 2) return [];
+  if (!Array.isArray(points) || points.length < (fromBase ? 1 : 2)) return [];
   const sorted = points
     .filter((p) => p && typeof p.date === "string")
     .sort((a, b) => a.date.localeCompare(b.date));
+  const emitDayZero = fromBase && sorted.length < STORED_CURVE_MAX_POINTS;
   const out: DailyReturn[] = [];
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = sorted[i - 1].value;
+  for (let i = emitDayZero ? 0 : 1; i < sorted.length; i++) {
+    const prev = i === 0 ? 1 : sorted[i - 1].value;
     const curr = sorted[i].value;
     const usable =
       Number.isFinite(prev) &&
@@ -130,25 +161,45 @@ export function equityCurveToDailyReturns(
  * `daily_returns` column is returned as stored) and is for the native -> USD
  * conversion only: see {@link equityCurveToDailyReturns}. Pass it as
  * `unit != null`, so a USD series can never carry a `NaN` placeholder.
+ *
+ * `fromBase` (default TRUE, G3-1 (a)): the curve here is always a stored strategy
+ * curve, anchored at an implicit 1.0, so day 0 is read as `w0 - 1`. A caller whose
+ * curve was cut before it got here passes false. See
+ * {@link equityCurveToDailyReturns} for the rule and the cap.
  */
 export function resolveDailyReturnSeries(
   dailyReturnsRaw: unknown,
   returnsSeriesRaw: unknown,
   method: CurveMethod = "geometric",
   keepAbsent = false,
+  fromBase = true,
 ): DailyReturn[] {
   const direct = normalizeDailyReturns(dailyReturnsRaw);
   if (direct.length > 0) return direct;
-  return equityCurveToDailyReturns(normalizeCurve(returnsSeriesRaw), method, keepAbsent);
+  // WR-01 (155.2 gap review): day 0 reads against the implicit 1.0 only when the curve's first
+  // STORED element survived `normalizeCurve`. A dropped head (non-object, non-string date) leaves
+  // the second level as the first point; reading that against 1.0 would book two days of
+  // compounding as one return, so the n-1 pairing stays. Twin of `daily_returns_from_row`.
+  const head: unknown = Array.isArray(returnsSeriesRaw) ? returnsSeriesRaw[0] : undefined;
+  const headKept =
+    !Array.isArray(returnsSeriesRaw) ||
+    (head !== null && typeof head === "object" && typeof (head as { date?: unknown }).date === "string");
+  return equityCurveToDailyReturns(
+    normalizeCurve(returnsSeriesRaw),
+    method,
+    keepAbsent,
+    fromBase && headKept,
+  );
 }
 
 /**
  * 194.2 (D-02) - the record's first return date for a CURVE-DERIVED series: the stored
  * `returns_series` curve's FIRST point, verbatim (the first stored element, never an earliest-valid
- * scan, so a malformed one stays malformed and reads `unreadable`). `equityCurveToDailyReturns`
- * never emits day 0, so a record started at the resolved series' first date begins one day later
- * than every list, percentile and SQL reader (`returns_series->0->>date`); this is the date they
- * read. Null when the series is not curve-derived (`daily_returns` wins whenever it normalizes to
+ * scan, so a malformed one stays malformed and reads `unreadable`). Since G3-1 (a) (Phase 155.2
+ * plan 15) the row reader emits day 0, so the resolved series' first date IS this date for a
+ * stored curve. It stays the one reading every list, percentile and SQL reader
+ * (`returns_series->0->>date`) shares, and it still differs from the series start for a curve
+ * at or above `STORED_CURVE_MAX_POINTS`, whose day 0 is not read. Null when the series is not curve-derived (`daily_returns` wins whenever it normalizes to
  * an entry, the same predicate `resolveDailyReturnSeries` applies), or when the first point carries
  * no date. The ONE helper the factsheet payload and the two Holdings producers (`queries.ts`) share,
  * so the record start cannot drift between them.

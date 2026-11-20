@@ -1025,7 +1025,10 @@ TIMEOUT_PER_KIND: dict[str, float] = {
 # ceiling that STRATEGY_ANALYTICS_REAP_THRESHOLD must exceed.
 #
 # Chain edges only. The routers/cron.py daily re-entry and
-# main_worker.WATCHDOG_PER_KIND_OVERRIDES are NOT chain edges.
+# main_worker.WATCHDOG_PER_KIND_OVERRIDES are NOT chain edges. Neither is the key-mode
+# linked-strategy re-entry (`_enqueue_linked_strategy_recompute`, G4-1 (b)): like the cron
+# re-entry it crosses targets (key to strategy) and is not a parented follow-on, so this map and
+# TestReaperThresholdInvariant stay unchanged.
 JOB_CHAIN_FOLLOW_ON: Final[dict[str, tuple[str, ...]]] = {
     # Tuple order is LOAD-BEARING: (ledger-backed tail, trade-backed tail) —
     # read by services/ingestion/long_fetch.py tail selection.
@@ -4259,6 +4262,236 @@ def _enqueue_allocator_compose(supabase: Any, allocator_id: str) -> None:
     ).execute()
 
 
+# G4-1 (b), Phase 155.2 plan 16 (WR-03: aligned with the fan-out's WHOLE admission). The helper
+# mirrors the single-key ledger fan-out's candidate query in
+# supabase/migrations/20261114152300_ledger_fanout_no_advance_weekly_cap.sql (the `AND NOT EXISTS`
+# attempt cooldown with its `CASE ... INTERVAL '7 days' ELSE INTERVAL '20 hours'` window, and the
+# `cj2` in-flight guard), so a nightly key fan-out adds at most one chain per strategy per window and
+# the two refreshers share one clock. No SQL function or view column exposes that admission, so it is
+# restated here; a change to the fan-out's admission must be mirrored in this helper.
+#   * `_LINKED_RECOMPUTE_COOLDOWN`: a recent derive_broker_dailies or compute_analytics_from_csv
+#     ATTEMPT (any status) holds the re-entry back for 20 hours.
+#   * `_LINKED_RECOMPUTE_WEEKLY_COOLDOWN`: the window is 7 days instead when (a) the marks have been
+#     paused 3 or more days (Phase 174 D-01/D-04: `strategy_analytics.data_quality_flags.
+#     marks_trailing_since`, an ISO day at least 3 days old), or (b) a completed refresh cannot move
+#     the series (Phase 214 FRESHTRUTH, founder Q1 = A, "Weekly cap, never exclude": the view reads
+#     it `series_behind`, its last return date is 8 or more days old, and BOTH a compute job and a
+#     derive job reached `done` on or after `last_return_date + 5` days).
+#   * `_LINKED_RECOMPUTE_INFLIGHT_STATUSES`: a strategy holding ANY in-flight job of ANY kind, with
+#     no age bound and `failed_retry` included, is never given a second derive: two concurrent
+#     derives for one strategy are what a venue that serialises on one shared terminal registry
+#     cannot absorb.
+_LINKED_RECOMPUTE_COOLDOWN: Final[timedelta] = timedelta(hours=20)
+_LINKED_RECOMPUTE_WEEKLY_COOLDOWN: Final[timedelta] = timedelta(days=7)
+_LINKED_RECOMPUTE_INFLIGHT_STATUSES: Final[tuple[str, ...]] = (
+    "pending",
+    "running",
+    "done_pending_children",
+    "failed_retry",
+)
+_LINKED_RECOMPUTE_ATTEMPT_KINDS: Final[tuple[str, ...]] = (
+    "derive_broker_dailies",
+    "compute_analytics_from_csv",
+)
+# SF-01: the bound on one whole `_enqueue_linked_strategy_recompute` call at either key-mode exit. Its
+# reads go through `db_read_with_retry` (up to ~364 s for one exhausted read) and its inner
+# `except Exception` never catches the dispatcher's `asyncio.CancelledError`, so an unbounded stall
+# would spend the job's 900 s budget and cancel the job BEFORE `_run_key_mode_compose_epilogue`,
+# although the per-key rows had already landed. The enqueue is additive, so it is cut off instead.
+_LINKED_RECOMPUTE_TIMEOUT_S: Final[float] = 30.0
+
+
+async def _enqueue_linked_strategy_recompute(
+    supabase: Any, *, api_key_id: str, per_key_last_day: str | None
+) -> list[str]:
+    """Founder ruling G4-1 (b): after a key-mode derive has written a per-key series, enqueue the
+    strategy-mode ``derive_broker_dailies`` (the chain head, which rewrites the STRATEGY-keyed
+    dailies and then chains ``compute_analytics_from_csv``) for every strategy this key backs
+    DIRECTLY whose analytics end before the per-key series. Returns the strategy ids enqueued.
+
+    WHY the chain head and not compute alone: ``run_csv_strategy_analytics`` reads the strategy-keyed
+    ``csv_daily_returns`` rows while a key-mode derive writes only ``api_key_id``-keyed rows, so a
+    bare compute would re-publish the same stale strategy rows. The kind is the one ``cron_sync``
+    re-enters with (``_recompute_kind``).
+
+    WHY a re-entry is needed at all: ``cron_sync`` defers any key whose exchange is not in
+    ``EXCHANGE_CLASSES`` and ``DAILY_PNL_VENUES``, so an mt5, sfox or deribit strategy never gets
+    that daily derive, and the single-key ledger fan-out admits a strategy only once it reads stale
+    (a series older than 4 days). A lag of 1 to 4 days was invisible to every refresher.
+
+    Enqueued ONLY when every one of these holds: ``per_key_last_day`` is not None; the strategy is
+    selected by ``strategies.api_key_id = <this key>`` (never a payload id) and its status is in
+    ``ALLOWED_STRATEGY_STATUSES``; it ALREADY has a ``strategy_analytics`` row with at least one
+    dated point in its stored series (its FIRST compute stays with the wizard and sync paths, so a
+    never-computed strategy is never pulled in by the nightly fan-out); that last point is before
+    ``per_key_last_day``; the strategy holds no in-flight job of any kind
+    (``_LINKED_RECOMPUTE_INFLIGHT_STATUSES``); and no derive or compute attempt was created inside
+    the fan-out's cooldown, ``_LINKED_RECOMPUTE_COOLDOWN`` (20 hours) or the weekly
+    ``_LINKED_RECOMPUTE_WEEKLY_COOLDOWN`` where the fan-out applies it (see the constants' comment).
+
+    The enqueue carries the single-key fan-out's ``ledger-refresh`` marker, so a failed background
+    refresh keeps a published factsheet published (Phase 161.1 D-15). No correlation_id is sent, so
+    nothing retracts a marker. A dedup onto an in-flight unmarked job discards it, the existing
+    REUSE-01 rule: protection is never laundered.
+
+    VENUE SCOPE, by design: ``ledger_refresh_staleness`` is ledger-venue-scoped (its final
+    ``WHERE sv.exchanges && lv.venues``, venues ``deribit``, ``sfox``, ``mt5`` in migration
+    20261114151700), so this re-entry only ever sees strategies on those venues. That is the
+    set ``cron_sync``'s daily strategy derive does NOT serve (it defers a key whose exchange is not
+    in ``EXCHANGE_CLASSES`` and ``DAILY_PNL_VENUES``). A binance, okx or bybit strategy gets no row
+    from the view, so it is skipped here with no log: ``cron_sync`` re-derives it daily, and the
+    residual lag for those venues is at most the day between the 05:30 key fan-out and that cron.
+    Do not read this helper as venue-agnostic.
+
+    EXCLUDED, by design: (1) COMPOSITES. A composite's recompute is ``stitch_composite``, which
+    re-crawls every member itself, and the composite fan-out already refuses MT5-member composites
+    ("on mt5 no composites"); a key that is only a composite member (``strategy_keys``) backs no
+    strategy directly and gets nothing here. (2) ALLOCATOR-ONLY keys: they back no strategy, and the
+    allocator compose epilogue already serves them.
+
+    A failure for one strategy is logged with ``logger.exception`` naming the key and the strategy
+    and never stops the next strategy. The caller wraps this in its own outer try as well."""
+    if per_key_last_day is None:
+        return []
+    from routers.cron import ALLOWED_STRATEGY_STATUSES
+
+    per_key_end = date.fromisoformat(per_key_last_day)
+
+    def _read_strategies() -> list[dict[str, Any]]:
+        return rows(
+            supabase.table("strategies")
+            .select("id, status")
+            .eq("api_key_id", api_key_id)
+            .execute()
+        )
+
+    strategy_rows = await db_read_with_retry(_read_strategies)
+    enqueued: list[str] = []
+    for srow in strategy_rows:
+        sid = srow.get("id")
+        if not isinstance(sid, str) or srow.get("status") not in ALLOWED_STRATEGY_STATUSES:
+            continue
+        try:
+
+            # The strategy's last return date is read from ``ledger_refresh_staleness``, the single
+            # SQL home of that predicate (its ``lr`` lateral: the latest object element whose date
+            # is YYYY-MM-DD), so this re-entry and the single-key ledger fan-out read ONE
+            # definition. It is NULL for a strategy with no analytics row and for one whose series
+            # holds no dated point, which is exactly the "never computed" skip. Reading the stored
+            # curve here instead would add a second reader of the cumulative-curve column that
+            # tests/test_wealth_returns_census.py forbids outside its boundary.
+            def _read_last_return_date(sid: str = sid) -> dict[str, Any] | None:
+                return one(
+                    supabase.table("ledger_refresh_staleness")
+                    .select("last_return_date, stale_reason")
+                    .eq("strategy_id", sid)
+                    .maybe_single()
+                    .execute()
+                )
+
+            staleness_row = await db_read_with_retry(_read_last_return_date)
+            raw_end = None if staleness_row is None else staleness_row.get("last_return_date")
+            stale_reason = None if staleness_row is None else staleness_row.get("stale_reason")
+            if not isinstance(raw_end, str):
+                continue
+            last_end = date.fromisoformat(raw_end)
+            if last_end >= per_key_end:
+                continue
+
+            # In-flight guard, as the fan-out's `cj2`: ANY kind, the four statuses, no age bound.
+            def _read_in_flight(sid: str = sid) -> list[dict[str, Any]]:
+                return rows(
+                    supabase.table("compute_jobs")
+                    .select("id")
+                    .eq("strategy_id", sid)
+                    .in_("status", list(_LINKED_RECOMPUTE_INFLIGHT_STATUSES))
+                    .limit(1)
+                    .execute()
+                )
+
+            if await db_read_with_retry(_read_in_flight):
+                continue
+
+            # The fan-out's weekly window, both arms (see the constants' comment).
+            today = datetime.now(timezone.utc).date()
+
+            def _read_marks_flags(sid: str = sid) -> dict[str, Any] | None:
+                return one(
+                    supabase.table("strategy_analytics")
+                    .select("data_quality_flags")
+                    .eq("strategy_id", sid)
+                    .maybe_single()
+                    .execute()
+                )
+
+            analytics_row = await db_read_with_retry(_read_marks_flags)
+            flags = None if analytics_row is None else analytics_row.get("data_quality_flags")
+            paused_since = flags.get("marks_trailing_since") if isinstance(flags, dict) else None
+            weekly = (
+                isinstance(paused_since, str)
+                and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", paused_since) is not None
+                and paused_since <= (today - timedelta(days=3)).isoformat()
+            )
+            if not weekly and stale_reason == "series_behind" and (today - last_end).days >= 8:
+                completed_from = last_end + timedelta(days=5)
+                completed_floor = datetime(
+                    completed_from.year, completed_from.month, completed_from.day,
+                    tzinfo=timezone.utc,
+                ).isoformat()
+
+                def _read_completed(
+                    sid: str = sid, completed_floor: str = completed_floor
+                ) -> list[dict[str, Any]]:
+                    return rows(
+                        supabase.table("compute_jobs")
+                        .select("kind")
+                        .eq("strategy_id", sid)
+                        .eq("status", "done")
+                        .in_("kind", list(_LINKED_RECOMPUTE_ATTEMPT_KINDS))
+                        .gte("created_at", completed_floor)
+                        .execute()
+                    )
+
+                completed_kinds = {r.get("kind") for r in await db_read_with_retry(_read_completed)}
+                weekly = set(_LINKED_RECOMPUTE_ATTEMPT_KINDS) <= completed_kinds
+
+            window = _LINKED_RECOMPUTE_WEEKLY_COOLDOWN if weekly else _LINKED_RECOMPUTE_COOLDOWN
+            cutoff = (datetime.now(timezone.utc) - window).isoformat()
+
+            def _read_recent_attempt(sid: str = sid, cutoff: str = cutoff) -> list[dict[str, Any]]:
+                return rows(
+                    supabase.table("compute_jobs")
+                    .select("id")
+                    .eq("strategy_id", sid)
+                    .in_("kind", list(_LINKED_RECOMPUTE_ATTEMPT_KINDS))
+                    .gt("created_at", cutoff)
+                    .limit(1)
+                    .execute()
+                )
+
+            if await db_read_with_retry(_read_recent_attempt):
+                continue
+
+            payload = {
+                "p_strategy_id": sid,
+                "p_kind": "derive_broker_dailies",
+                "p_metadata": {
+                    "source": LEDGER_REFRESH_SINGLE_KEY_SOURCE,
+                    "enqueued_at": datetime.now(timezone.utc).isoformat(),
+                },
+            }
+            await db_execute(lambda: supabase.rpc("enqueue_compute_job", payload).execute())
+            enqueued.append(sid)
+        except Exception as exc:  # noqa: BLE001 - one strategy's failure never starves the next
+            logger.exception(
+                "derive_broker_dailies: failed to enqueue the linked-strategy recompute for "
+                "strategy %s on api_key %s (%s) - the strategy's analytics lag the per-key "
+                "series until the next refresh",
+                sid, api_key_id, type(exc).__name__,
+            )
+    return enqueued
+
+
 async def _name_key_whose_derive_overran(job: dict[str, Any]) -> None:
     """A key-mode ``derive_broker_dailies`` that overran its outer budget (the dispatcher's
     ``wait_for``) left no marker, so the key was carried flat and unnamed once its retries ran out
@@ -4737,8 +4970,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
       derivation, upserted keyed by (api_key_id, date) with the denormalized
       allocator_id (= api_keys.user_id, read from the preflight — never from the
       job payload). Key-mode does NOT enqueue compute_analytics_from_csv and does
-      NOT stamp strategy_analytics — those are strategy-keyed; per-key reads land
-      in Phase 36. The per-key series is "dark" (written, not yet read).
+      NOT stamp strategy_analytics — those are strategy-keyed. The per-key series is
+      read by the allocator surfaces (Phase 36 and later). G4-1 (b): after the
+      per-key write, at BOTH key-mode exits, key mode re-enters the strategy-mode
+      derive_broker_dailies (the chain head that rewrites the strategy-keyed dailies
+      and chains compute) for each directly linked strategy whose analytics end
+      before the per-key series, under the advance and 20-hour cooldown rule of
+      ``_enqueue_linked_strategy_recompute``; composites and allocator-only keys are
+      excluded there.
 
     Funding is INCLUDED in both modes because it is the dominant return driver
     for perp strategies and fetch_daily_pnl excludes it by design — a
@@ -10005,6 +10244,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # is stale beside the stated `dropped_day_pnl`. It is deleted here, else the
             # compose reads both as a double count (`key_inputs_mismatch`).
             _stale_days = _tiny_base_days_stored(meta, returns, _applied_marks, key_mode=True)
+            _short_exit_last_day: str | None = None
             if _applied_marks is not None and _applied_marks.covered_from is not None:
                 assert _applied_marks.terminal is not None  # marks exist, so a last mark does
                 # GC2-01: the one day this derive measured (at most one interpretable day) is
@@ -10028,6 +10268,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         .upsert(_measured, on_conflict="api_key_id,date")
                         .execute()
                     )
+                    _short_exit_last_day = max(str(r["date"]) for r in _measured)
                 _stale_start, _stale_end = _reconcile_hull(
                     [], [*_stale_days, _applied_marks.covered_from, _applied_marks.terminal[0]]
                 )
@@ -10043,6 +10284,38 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     ).in_("date", days).execute()
 
                 await db_execute(_stale_day_delete)
+            # G4-1 (b): the same linked-strategy re-entry as the >=2-day exit, through the same
+            # helper, BEFORE the epilogue and inside its own outer try. The per-key day is the last
+            # one THIS exit wrote (the measured mark-day row), or None when it wrote none.
+            try:
+                _linked_enqueued = await asyncio.wait_for(
+                    _enqueue_linked_strategy_recompute(
+                        ctx.supabase,
+                        api_key_id=api_key_id,
+                        per_key_last_day=_short_exit_last_day,
+                    ),
+                    timeout=_LINKED_RECOMPUTE_TIMEOUT_S,
+                )
+                if _linked_enqueued:
+                    logger.info(
+                        "derive_broker_dailies: enqueued the strategy-mode derive for %d linked "
+                        "strateg%s of api_key %s: %s",
+                        len(_linked_enqueued), "y" if len(_linked_enqueued) == 1 else "ies",
+                        api_key_id, _linked_enqueued,
+                    )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "derive_broker_dailies: linked-strategy recompute enqueue timed out after "
+                    "%.0fs for api_key %s; the strategy analytics lag the per-key series until "
+                    "the next refresh",
+                    _LINKED_RECOMPUTE_TIMEOUT_S, api_key_id,
+                )
+            except Exception:  # noqa: BLE001 - additive; the derive's writes have landed
+                logger.exception(
+                    "derive_broker_dailies: linked-strategy recompute enqueue failed for "
+                    "api_key %s",
+                    api_key_id,
+                )
             try:
                 await _run_key_mode_compose_epilogue()
             except NavReconstructionError as exc:
@@ -10374,8 +10647,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         await db_execute(_reconcile_span_delete)
 
     if is_key_mode:
-        # Per-key series is "dark" until Phase 36 — no compute_analytics_from_csv
-        # enqueue (that path is strategy-keyed), no strategy_analytics stamp.
+        # Key mode does NOT enqueue compute_analytics_from_csv itself (that path is strategy-keyed
+        # and would read strategy_id NULL) and does NOT stamp strategy_analytics. G4-1 (b): the
+        # per-key series runs ahead of a directly linked strategy's analytics, so the linked
+        # strategies' own derive chain is re-entered below, under the advance and cooldown rule.
         logger.info(
             "derive_broker_dailies: upserted %d per-key daily-return rows for "
             "api_key %s (allocator %s venue=%s realized=%d funding=%d "
@@ -10383,6 +10658,37 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             len(rows_payload), api_key_id, allocator_id, venue,
             len(realized), len(funding), meta.get("used_heuristic_capital"),
         )
+        # G4-1 (b): BEFORE the compose epilogue and inside its own outer try, so nothing it raises
+        # can skip the epilogue, reach the epilogue's NavReconstructionError handler, or change
+        # this DONE outcome. Same helper at the <2-day exit, so the two can never drift.
+        try:
+            _linked_enqueued = await asyncio.wait_for(
+                _enqueue_linked_strategy_recompute(
+                    ctx.supabase,
+                    api_key_id=api_key_id,
+                    per_key_last_day=max((str(r["date"]) for r in rows_payload), default=None),
+                ),
+                timeout=_LINKED_RECOMPUTE_TIMEOUT_S,
+            )
+            if _linked_enqueued:
+                logger.info(
+                    "derive_broker_dailies: enqueued the strategy-mode derive for %d linked "
+                    "strateg%s of api_key %s: %s",
+                    len(_linked_enqueued), "y" if len(_linked_enqueued) == 1 else "ies",
+                    api_key_id, _linked_enqueued,
+                )
+        except asyncio.TimeoutError:
+            logger.error(
+                "derive_broker_dailies: linked-strategy recompute enqueue timed out after %.0fs "
+                "for api_key %s; the strategy analytics lag the per-key series until the next "
+                "refresh",
+                _LINKED_RECOMPUTE_TIMEOUT_S, api_key_id,
+            )
+        except Exception:  # noqa: BLE001 - additive; the derive's writes have landed
+            logger.exception(
+                "derive_broker_dailies: linked-strategy recompute enqueue failed for api_key %s",
+                api_key_id,
+            )
         # F1(a): the SAME Option-B epilogue the <2-day short-circuit runs (one
         # helper, so the two key-mode exits can never drift on the persist/enqueue
         # contract).
