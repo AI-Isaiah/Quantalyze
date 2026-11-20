@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.133.54.0] - 2026-11-20 — Phase 155.2 LIVEPARITY (plans 01-10): the parity harness reads a real MT5 Report, and per-key MT5 legs annualize on their own venue's class
+
+A mid-phase ship. Plans 01-10 of Phase 155.2 are agent work, and plan 155.2-12 needs them deployed and recomputed before it can recapture and judge Gate A and Gate B. The phase stays open: the weekend reading, the broker statements, the browser surface read (criterion 3), the founder rulings and MT5-GOAL-01 are founder steps still owed.
+
+### Fixed
+- **The parity Report parser reads a real MT5 classic Report** (`analytics-service/services/mt5_parity_report.py`). Real MT5 (build 5830) writes the Deals header as bold `td` cells, not `th`, adds a hidden `Cost` column before Commission, and makes the totals footer span the visible width. The parser refused every real Report with `RowShapeRefused`. Now `_canonical_headers` accepts a header of one cell tag, each cell records whether it is hidden, `Cost` is a known header kept out of the money math, and the footer is detected by visible width. An unknown hidden header, a mixed `th`/`td` header and a deal-shaped row after the footer are still refused. On the founder's three real Reports it changed refused on all three to parsed on all three, with balance continuity passing (counts only, in the gitignored capture directory).
+- **The Gate A unit check no longer reads every USD mark as a mismatch** (`services/mt5_parity.py`). Any non-null mark `native_unit` counted as a mismatch, and USD-unit MT5 marks store `'USD'`, so every Gate A leg read `not_measurable:unit_mismatch`. That was also what the Phase 155 dress rehearsal printed, which blamed the synthetic oracle at the time. The check now compares against the USD writer basis and the Report's account currency, and still refuses a non-USD unit or a conflicting or empty currency reading.
+- **Per-key MT5 legs annualize on their venue's class, not a hard-coded crypto class.** The per-key builder, the scenario composer, the compare panel and the server live baseline gave every per-key leg `asset_class: "crypto"`, so a pure MT5 book was annualized at 365 instead of 252. A new shared `assetClassForExchange` (`src/lib/closed-sets.ts`) derives each leg's class from its key's exchange, and every call site threads the per-key exchange map (`scenario-adapter.ts`, `ScenarioComposer.tsx`, `AllocationsTabs.tsx` and `ScenarioComparePanel.tsx` through `scenario-compare.ts`, and `queries.ts` for the live baseline). It never compares with `'mt5'`. An absent or unknown exchange gives `null`, which blends at the conservative 365.
+
+### Added
+- **The verdict CLI takes every worker clock** (`scripts/mt5_parity_run.py`). `--clock-rule` accepts `eu`, `us`, `utc` and `fixed:<seconds>` within the worker's 13 h bound, and refuses anything else by name. The default stays `us`.
+- **csv_source is classed `explained_acceptable` from its writers** (`services/mt5_parity_findings.py`). The founder accepted it in writing on 2026-11-20 (`155.2-RULINGS.md` DQ-1, ruling (a)).
+
+### Tests
+- A real-shape synthetic Report fixture (synthetic values only) with refusal cases, Cost isolation, the visible-width footer and a UTF-16-LE twin. The twin is built in memory from the UTF-8 fixture, so no raw NUL bytes are committed.
+- The cross_store decomposition writer, and cross_store compared within `CROSS_STORE_ABS_TOL`. A missing day still counts as a difference.
+- Unit-predicate pairs (USD passes, non-USD refuses) with RED proofs. Per-leg class pins on the builder, composer, compare panel and live baseline, and on the surface harness cells. Clock-rule acceptance and refusal cases for the CLI.
+
+### Notes
+- Gate A on the trading day, judged on the sealed PROD capture: MM2 and FX-AI_V pass all five legs. MM3 fails start_level and day_placement, and is recorded as unexplained with its root cause pending. These are tracked as gap closure after the plan 12 recapture, and no founder ruling has been made on them. Values stay in the gitignored capture directory.
+- Review: gsd-code-reviewer and silent-failure-hunter found nothing Critical. Two non-user-facing MEDIUM findings are booked rather than fixed. WR-01: the verdict does not record its clock rule, and plan 12 passes one per account. WR-02: the Report's own currency row is not yet cross-checked.
+- No `TODOS.md` entry is closed, so none is deleted.
+- VERSION and package.json 0.133.53.0 → 0.133.54.0.
+
 ## [0.133.53.0] - 2026-11-19 — Phase 219 ACCOUNTEMAIL: the signed-in account shows its email and can change it
 
 The profile page's Account tab now shows the email the account signs in with, and lets the user change it. The change goes through Supabase Auth's own confirm-by-email flow (`auth.updateUser`); the app never writes `auth.users` itself. Once Auth applies a confirmed change, a database trigger copies the new address into the derived `public.profiles.email`. Phase branch: 28 commits (25 non-merge, 3 plan merges), squashed here into one release commit with no `.planning/` paths.

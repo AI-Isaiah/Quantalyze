@@ -11378,8 +11378,8 @@ describe("ScenarioComposer — Phase 84 BLEND-01 blend basis threading", () => {
   it("a book blend with a per-key (crypto) leg threads periodsPerYear=365 to computeScenario, and the engine Sharpe reflects the √365 basis (non-vacuous vs √252)", () => {
     openFigureGate();
     // A per-key book payload: buildPerKeyStrategyForBuilderSet tags each per-key
-    // leg asset_class 'crypto' (every SUPPORTED_EXCHANGE is a crypto venue), so
-    // blendPeriodsPerYear over the selected legs → 365.
+    // leg's asset_class from its key's exchange (155.2 G2); binance is a crypto
+    // venue, so blendPeriodsPerYear over the selected legs → 365.
     const payload = makePayload({
       apiKeys: [
         {
@@ -11429,6 +11429,81 @@ describe("ScenarioComposer — Phase 84 BLEND-01 blend basis threading", () => {
     expect(metrics!.sharpe).not.toBe(
       sampleBasisRatios(portfolioDaily, 252).sharpe,
     );
+  });
+
+  // 155.2 G2 (T-155.2-16) — the composer hands each key's exchange, from
+  // payload.apiKeys, to the per-key builder. Without that argument every leg is
+  // class-null and the blend reads 365, so a pure MT5 book would never reach
+  // 252. The mt5 test fails if the argument is dropped; the mixed test fails if
+  // a crypto key stops holding the blend at 365.
+  const mkBlendKey = (id: string, exchange: string) => ({
+    id,
+    exchange,
+    label: "Desk",
+    is_active: true,
+    sync_status: null,
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  });
+  const blendBookPayload = (keys: Array<[string, string]>) =>
+    makePayload({
+      apiKeys: keys.map(([id, exchange]) => mkBlendKey(id, exchange)),
+      holdingsSummary: keys.map(([id]) => ({
+        ...HOLDING_BTC,
+        value_usd: 100_000,
+        api_key_id: id,
+      })),
+      perKeyReturnsByApiKeyId: Object.fromEntries(
+        keys.map(([id]) => [id, BLEND_SERIES]),
+      ),
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: keys.map(([id]) => id),
+    });
+
+  it("155.2 G2: a book of only MT5 keys threads periodsPerYear=252 and the engine Sharpe reflects the 252 clock", () => {
+    openFigureGate();
+    render(
+      <ScenarioComposer
+        payload={blendBookPayload([
+          ["key-mt5-a", "mt5"],
+          ["key-mt5-b", "mt5"],
+        ])}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    expect(latestPeriodsPerYear()).toBe(252);
+    const metrics = lastKpiScenarioMetrics();
+    expect(metrics).toBeTruthy();
+    const portfolioDaily = (metrics!.portfolio_daily_returns ?? []).map(
+      (p) => p.value,
+    );
+    expect(portfolioDaily.length).toBeGreaterThanOrEqual(2);
+    expect(metrics!.sharpe).toBe(sampleBasisRatios(portfolioDaily, 252).sharpe);
+    expect(metrics!.sharpe).not.toBe(
+      sampleBasisRatios(portfolioDaily, 365).sharpe,
+    );
+  });
+
+  it("155.2 G2: a book with an MT5 key and a crypto key stays on the 365 clock", () => {
+    openFigureGate();
+    render(
+      <ScenarioComposer
+        payload={blendBookPayload([
+          ["key-mt5-a", "mt5"],
+          ["key-crypto-b", "binance"],
+        ])}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    expect(latestPeriodsPerYear()).toBe(365);
   });
 
   it("RANK-06: an all-unknown-asset_class added-only blend derives periodsPerYear=365 (a lazily-unresolved class is a projection gap, not a tradfi leg)", () => {

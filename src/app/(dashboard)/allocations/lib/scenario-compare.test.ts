@@ -843,8 +843,9 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     expect(m.effective_end).toBe(PK_DATES[39]);
     // twr is basis-invariant (return space) → unchanged by BLEND-01.
     expect(m.twr).toBeCloseTo(0.04074, 4);
-    // Phase 84 (BLEND-01) RE-BASELINE: per-key units carry asset_class 'crypto'
-    // (84-01), so this book blend now correctly annualizes on √365 — the whole
+    // Phase 84 (BLEND-01) RE-BASELINE: this book blend annualizes on √365 (the
+    // fixture passes no exchange map, so its per-key units are class-null, which
+    // the blend reads as 365; 155.2 G2) — the whole
     // point of the phase. The Sharpe moves from its pre-84 √252 value (10.45) to
     // 10.45·√(365/252) = 12.576; the underlying daily series (and twr) are
     // unchanged, only the RISK-clock basis. Pinning the new √365 value keeps this
@@ -954,9 +955,11 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     return { addedStrategyReturnsLookup: series, addedStrategyMetadataLookup };
   }
 
-  it("a per-key-membership draft (per-key units are crypto) annualizes on √365 — byte-identical to the engine at 365, distinct from 252", () => {
-    // Per-key units carry asset_class 'crypto' (84-01 buildPerKeyStrategyForBuilderSet),
-    // so a per-key blend rides √365. Oracle: the helper's metrics must be
+  it("a per-key-membership draft with no exchange map (per-key units are class-null) annualizes on √365 — byte-identical to the engine at 365, distinct from 252", () => {
+    // With no exchange map, buildPerKeyStrategyForBuilderSet leaves each per-key
+    // unit's asset_class null (155.2 G2 replaced the old hard-coded 'crypto'),
+    // and a null leg reads 365 (RANK-06), so a per-key blend rides √365.
+    // Oracle: the helper's metrics must be
     // BYTE-IDENTICAL (cagr stripped — the 84-06 clock carve-out) to a direct
     // computeScenario over the SAME per-key set at basis 365, and NOT equal to
     // the 252 reference. RED against the pre-change engine (per-key computed at
@@ -1240,7 +1243,8 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     expect(trad.periodsPerYear).toBe(252);
     expect(trad.metrics).toEqual(computeMetricsForDraft(d, tradIn));
 
-    // Live book: per-key units are crypto, so the gate-satisfied own book rides 365.
+    // Live book with no exchange map: per-key units are class-null, which the
+    // blend reads as 365 (the venue-derived 252 case is the G2 test below).
     const bookIn = perKeyLiveInputs({ "key-A": S }, { "key-A": 5000 });
     const book = computeDraftColumn(buildLiveBookDraft(true, ["key-A"]), bookIn, {
       liveBook: true,
@@ -1248,6 +1252,46 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     expect(book.periodsPerYear).toBe(365);
     expect(book.metrics).toEqual(
       computeMetricsForDraft(buildLiveBookDraft(true, ["key-A"]), bookIn, { liveBook: true }),
+    );
+  });
+
+  // 155.2 G2 (T-155.2-16): the compare column must annualize a per-key book on the
+  // same venue-derived clock as the composer. Dropping `liveInputs.exchangeByApiKeyId`
+  // from computeDraftColumn leaves every leg class-null, so the all-MT5 book reads 365
+  // and the first two assertions fail.
+  it("155.2 G2: an all-MT5 per-key book rides 252 when the exchange map is passed and 365 when it is omitted; one crypto key holds it at 365", () => {
+    const dates = buildDates("2024-01-02", 80);
+    const S = altReturns(dates, 0.01, -0.008);
+    const T = altReturns(dates, 0.012, -0.009);
+    const members = ["key-A", "key-B"];
+    const withMap = (exchanges: Record<string, string>): ScenarioCompareInputs => ({
+      ...perKeyLiveInputs({ "key-A": S, "key-B": T }, { "key-A": 5000, "key-B": 5000 }),
+      exchangeByApiKeyId: exchanges,
+    });
+    const colDraft = draft({ memberKeyIds: members });
+
+    const mt5 = computeDraftColumn(colDraft, withMap({ "key-A": "mt5", "key-B": "mt5" }));
+    const omitted = computeDraftColumn(
+      colDraft,
+      perKeyLiveInputs({ "key-A": S, "key-B": T }, { "key-A": 5000, "key-B": 5000 }),
+    );
+    const mixed = computeDraftColumn(
+      colDraft,
+      withMap({ "key-A": "mt5", "key-B": "binance" }),
+    );
+
+    expect(mt5.periodsPerYear).toBe(252);
+    expect(omitted.periodsPerYear).toBe(365);
+    expect(mixed.periodsPerYear).toBe(365);
+
+    // Non-vacuous: the basis reached the numbers, not just the reported value. Risk
+    // metrics ride √periodsPerYear (the engine rounds sharpe to 3 dp, so the ratio of
+    // two rounded values carries a rounding-level tolerance).
+    expect(mt5.metrics.sharpe).not.toBeNull();
+    expect(omitted.metrics.sharpe).not.toBeNull();
+    expect(omitted.metrics.sharpe! / mt5.metrics.sharpe!).toBeCloseTo(
+      Math.sqrt(365 / 252),
+      3,
     );
   });
 });

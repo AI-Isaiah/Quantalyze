@@ -57,6 +57,10 @@ REPORT_KNOWN_HEADERS: Final[frozenset[str]] = frozenset(
         "Profit",
         "Balance",
         "Comment",
+        # Build 5830 writes a hidden Cost column before Commission. It is known so the
+        # header is not refused, but it is not required and never read into any money
+        # field: the balance-continuity check is what shows it is not part of the math.
+        "Cost",
     }
 )
 REPORT_REQUIRED_HEADERS: Final[frozenset[str]] = frozenset(
@@ -208,6 +212,7 @@ class _Cell:
     tag: str
     text: str
     colspan: int
+    hidden: bool = False
 
 
 class _RowCollector(HTMLParser):
@@ -220,6 +225,7 @@ class _RowCollector(HTMLParser):
         self._row: list[_Cell] | None = None
         self._tag: str | None = None
         self._colspan = 1
+        self._hidden = False
         self._text: list[str] = []
 
     def _close_cell(self) -> None:
@@ -228,10 +234,16 @@ class _RowCollector(HTMLParser):
         if self._row is None:
             self._row = []
         self._row.append(
-            _Cell(self._tag, " ".join("".join(self._text).split()), self._colspan)
+            _Cell(
+                self._tag,
+                " ".join("".join(self._text).split()),
+                self._colspan,
+                self._hidden,
+            )
         )
         self._tag = None
         self._colspan = 1
+        self._hidden = False
         self._text = []
 
     def _close_row(self) -> None:
@@ -247,14 +259,18 @@ class _RowCollector(HTMLParser):
         elif tag in ("td", "th"):
             self._close_cell()
             colspan = 1
+            hidden = False
             for name, value in attrs:
                 if name == "colspan":
                     raw = (value or "").strip()
                     if not _COLSPAN_RE.match(raw) or int(raw) < 1:
                         raise RowShapeRefused("a cell carries an invalid colspan")
                     colspan = int(raw)
+                elif name == "class":
+                    hidden = "hidden" in (value or "").split()
             self._tag = tag
             self._colspan = colspan
+            self._hidden = hidden
         elif tag == "br" and self._tag is not None:
             self._text.append(" ")
 
@@ -315,7 +331,9 @@ def _is_deals_marker(row: list[_Cell]) -> bool:
 
 
 def _canonical_headers(header_row: list[_Cell]) -> tuple[str, ...]:
-    if any(c.tag != "th" or c.colspan != 1 for c in header_row):
+    # Either every header cell is a th (the synthetic shape) or every one is a td (the
+    # real build 5830 shape); a mix is refused, and so is any spanned cell.
+    if len({c.tag for c in header_row}) != 1 or any(c.colspan != 1 for c in header_row):
         raise RowShapeRefused("the Deals header row is not a row of plain header cells")
     by_fold = {h.casefold(): h for h in REPORT_KNOWN_HEADERS}
     names: list[str] = []
@@ -437,6 +455,10 @@ def parse_report(data: bytes) -> ParsedReport:
 
     names = _canonical_headers(rows[start + 1])
     width = len(names)
+    # A totals footer and the next section marker span only the VISIBLE columns, so a
+    # hidden column (the real Report's Cost) shortens them. A deal row still has to fill
+    # the full width, so this cannot let a short row pass as a deal.
+    visible = sum(1 for c in rows[start + 1] if not c.hidden)
 
     deals: list[dict[str, Any]] = []
     body = rows[start + 2 :]
@@ -447,7 +469,7 @@ def parse_report(data: bytes) -> ParsedReport:
             continue
         if (
             len(row) < width
-            and span == width
+            and span == visible
             and (row[0].tag == "th" or row[0].colspan > 1)
         ):
             # A footer or the next section marker. Nothing deal-shaped may follow it: a

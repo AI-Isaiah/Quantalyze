@@ -31,6 +31,7 @@
  * literal cannot pass through as an AddedStrategy at compile time.
  */
 import type { DailyPoint, ScenarioState, StrategyForBuilder } from "@/lib/scenario";
+import { assetClassForExchange } from "@/lib/closed-sets";
 import { type AddedStrategy } from "./scenario-state";
 
 /**
@@ -153,12 +154,18 @@ function buildAddedUnits(
  *   merge and projection copies unchanged; this builder and the SSR baseline are the
  *   only places that set it). Optional: absent or `{}` builds exactly today's units.
  *   A list for a key with no series creates no unit.
+ * @param exchangeByApiKeyId  155.2 G2 — api_key_id → the key's exchange (venue).
+ *   Each unit's `asset_class` derives from it through `assetClassForExchange`, so a
+ *   pure mt5 set blends on 252 and a mixed or crypto set on 365. A key missing from
+ *   the map (or the whole argument omitted) is null, which the blend reads as the
+ *   conservative 365, so an unwired caller never moves a crypto book.
  */
 export function buildPerKeyStrategyForBuilderSet(
   perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
   equityByApiKeyId: Record<string, number>,
   labelById: ReadonlyMap<string, string>,
   tinyBaseDaysByApiKeyId: Readonly<Record<string, readonly string[]>> = {},
+  exchangeByApiKeyId: Readonly<Record<string, string>> = {},
 ): { strategies: StrategyForBuilder[]; state: ScenarioState } {
   const strategies: StrategyForBuilder[] = [];
   const selected: Record<string, boolean> = {};
@@ -183,12 +190,12 @@ export function buildPerKeyStrategyForBuilderSet(
       sharpe: null,
       volatility: null,
       max_drawdown: null,
-      // Phase 84 (BLEND-01): a per-key unit IS a connected exchange data source,
-      // and every SUPPORTED_EXCHANGE is a crypto venue today (isCryptoExchange,
-      // closed-sets.ts) — so a per-key leg is a crypto leg under the blend rule
-      // (84-CONTEXT.md D). When a non-crypto venue is ever added to
-      // SUPPORTED_EXCHANGES this literal must derive from the key's exchange.
-      asset_class: "crypto",
+      // Phase 84 (BLEND-01) stamped every per-key leg crypto, on the premise that
+      // every SUPPORTED_EXCHANGE is a crypto venue. 155.2 G2 retired it: the class
+      // now derives from the key's exchange through the shared helper
+      // (assetClassForExchange, closed-sets.ts). An absent or unknown exchange is
+      // null, which the blend reads as the conservative 365 (RANK-06), never 252.
+      asset_class: assetClassForExchange(exchangeByApiKeyId[apiKeyId]),
       // 188 D-07: only a key with named days carries the field.
       ...(tinyBaseDaysByApiKeyId[apiKeyId]?.length
         ? { undefined_return_days: tinyBaseDaysByApiKeyId[apiKeyId] }

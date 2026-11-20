@@ -94,6 +94,13 @@ export interface ScenarioComparePanelProps {
      * out of those days. Optional so a narrow test payload still type-checks.
      */
     tinyBaseDaysByApiKeyId?: Record<string, string[]>;
+    /**
+     * 155.2 G2 — each key's exchange (api_key_id → exchange), the same map the composer
+     * builds from `payload.apiKeys`. Copied into the compare inputs so every per-key
+     * column derives its legs' asset class from the venue. Optional so a narrow test
+     * payload still type-checks.
+     */
+    exchangeByApiKeyId?: Record<string, string>;
   };
 }
 
@@ -241,6 +248,7 @@ function deriveCompareInputs(
     // this panel blend the owner's manager-side keys the composer excludes.
     contributingApiKeyIds: payload.contributingApiKeyIds,
     tinyBaseDaysByApiKeyId: payload.tinyBaseDaysByApiKeyId,
+    exchangeByApiKeyId: payload.exchangeByApiKeyId,
     equityByApiKeyId,
     perKeyDailiesGateSatisfied: payload.perKeyDailiesGateSatisfied,
   };

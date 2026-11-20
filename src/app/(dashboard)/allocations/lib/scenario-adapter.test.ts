@@ -21,6 +21,7 @@ import {
   mergeAddedIntoPerKeySet,
   type StrategyForBuilderId,
 } from "./scenario-adapter";
+import { blendPeriodsPerYear } from "@/lib/closed-sets";
 import type { DailyPoint, ScenarioState, StrategyForBuilder } from "@/lib/scenario";
 import type { AddedStrategy } from "./scenario-state";
 
@@ -354,9 +355,12 @@ describe("buildAddedOnlySet — the added-only engine set (ENGINE-04 preconditio
 // ─────────────────────────────────────────────────────────────────────────
 // Phase 84 Plan 01 (BLEND-01) — every adapter-built unit must carry an honest
 // asset_class so wave-2/3 call sites can derive blendPeriodsPerYear over the
-// active units. A per-key unit IS a connected exchange data source and every
-// SUPPORTED_EXCHANGE is a crypto venue today (isCryptoExchange, closed-sets.ts)
-// → per-key legs are crypto. Added units carry the metadata lookup's asset_class
+// active units. A per-key unit IS a connected exchange data source. Phase 84
+// stamped every per-key leg crypto on the premise that every SUPPORTED_EXCHANGE
+// is a crypto venue; 155.2 G2 retired that premise (mt5 is a SUPPORTED_EXCHANGE
+// and is not crypto), so a per-key leg's class now derives from its key's
+// exchange through assetClassForExchange (closed-sets.ts) — an absent exchange is
+// null, which the blend reads as the conservative 365. Added units carry the metadata lookup's asset_class
 // (null when the lookup entry is absent — the default-meta branch). This is a
 // pure metadata-population change: nothing reads asset_class yet, so every
 // pre-existing pin (raw weights, weight-0 added default, equivalence oracle)
@@ -386,11 +390,13 @@ describe("asset_class population on adapter units (Phase 84, BLEND-01)", () => {
     },
   };
 
-  it("AC1 per-key units each carry asset_class === 'crypto' (every SUPPORTED_EXCHANGE is crypto)", () => {
+  it("AC1 per-key units on crypto venues each carry asset_class === 'crypto' (the exchange map names binance/okx; 155.2 G2 stopped assuming it)", () => {
     const result = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS_60D, "key-B": RETURNS_60D },
       { "key-A": 70, "key-B": 30 },
       new Map(),
+      {},
+      { "key-A": "binance", "key-B": "okx" },
     );
     for (const s of result.strategies) {
       expect(s.asset_class).toBe("crypto");
@@ -412,11 +418,13 @@ describe("asset_class population on adapter units (Phase 84, BLEND-01)", () => {
     expect(b?.asset_class).toBeNull();
   });
 
-  it("AC4 mergeAddedIntoPerKeySet — per-key units 'crypto', added units lookup-value/null; weight-normalization byte-identical", () => {
+  it("AC4 mergeAddedIntoPerKeySet — crypto-venue per-key units 'crypto' (exchange map names binance/okx), added units lookup-value/null; weight-normalization byte-identical", () => {
     const perKey = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS_60D, "key-B": RETURNS_60D },
       { "key-A": 70, "key-B": 30 },
       new Map(),
+      {},
+      { "key-A": "binance", "key-B": "okx" },
     );
     const merged = mergeAddedIntoPerKeySet(
       perKey,
@@ -435,5 +443,48 @@ describe("asset_class population on adapter units (Phase 84, BLEND-01)", () => {
     expect(merged.state.weights["key-B"]).toBeCloseTo(0.3, 12);
     expect(merged.state.weights[A_ID]).toBe(0);
     expect(merged.state.weights[B_ID]).toBe(0);
+  });
+
+  // 155.2 G2 (MT5-10): the venue decides the risk clock of a per-key leg.
+  it("G2-1 a pure per-key mt5 set annualizes risk at 252 — a weekday venue must not be stamped as a 7-day crypto leg (that inflated Sharpe by sqrt(365/252))", () => {
+    const set = buildPerKeyStrategyForBuilderSet(
+      { k1: RETURNS_60D, k2: RETURNS_60D },
+      { k1: 50, k2: 50 },
+      new Map(),
+      {},
+      { k1: "mt5", k2: "mt5" },
+    );
+    for (const s of set.strategies) expect(s.asset_class).toBe("traditional");
+    expect(blendPeriodsPerYear(set.strategies)).toBe(252);
+  });
+
+  it("G2-2 a mixed crypto + mt5 per-key set stays 365 — the blend is calendar-daily the moment one leg trades weekends", () => {
+    const set = buildPerKeyStrategyForBuilderSet(
+      { k1: RETURNS_60D, k2: RETURNS_60D },
+      { k1: 50, k2: 50 },
+      new Map(),
+      {},
+      { k1: "mt5", k2: "binance" },
+    );
+    expect(blendPeriodsPerYear(set.strategies)).toBe(365);
+  });
+
+  it("G2-3 a per-key set built without the exchange map has null classes and stays 365 — a missing exchange must fail toward the conservative clock, never inflate Sharpe (T-155.2-14)", () => {
+    const set = buildPerKeyStrategyForBuilderSet(
+      { k1: RETURNS_60D, k2: RETURNS_60D },
+      { k1: 50, k2: 50 },
+      new Map(),
+    );
+    for (const s of set.strategies) expect(s.asset_class).toBeNull();
+    expect(blendPeriodsPerYear(set.strategies)).toBe(365);
+    // A key whose exchange is missing from an otherwise-mt5 map is also unknown.
+    const partial = buildPerKeyStrategyForBuilderSet(
+      { k1: RETURNS_60D, k2: RETURNS_60D },
+      { k1: 50, k2: 50 },
+      new Map(),
+      {},
+      { k1: "mt5" },
+    );
+    expect(blendPeriodsPerYear(partial.strategies)).toBe(365);
   });
 });

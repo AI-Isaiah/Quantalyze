@@ -193,3 +193,42 @@ describe("[MT5UI-01] NEXT_PUBLIC_MT5_ENABLED gates the MT5 wizard offer", () => 
     expect(off.canonicalizeWizardExchange("okx")).toBe("OKX");
   });
 });
+
+// ── 155.2 G2 / MT5-10 — assetClassForExchange ───────────────────────────────
+// A per-key leg's risk clock must come from its venue. These tests encode WHY:
+// a forex/CFD venue trades weekdays, so its risk clock is 252, and an unknown
+// venue must fail toward the conservative 365 clock rather than flatter Sharpe.
+describe("[155.2 G2] assetClassForExchange derives a per-key leg's class from its venue", () => {
+  it("a crypto venue is crypto, case-insensitively, because crypto markets trade 7 days a week (365 clock)", async () => {
+    const { assetClassForExchange } = await loadClosedSets();
+    expect(assetClassForExchange("binance")).toBe("crypto");
+    expect(assetClassForExchange("OKX")).toBe("crypto");
+  });
+
+  it("a supported non-crypto venue is traditional, because a forex/CFD venue trades weekdays (252 clock)", async () => {
+    const { assetClassForExchange } = await loadClosedSets();
+    expect(assetClassForExchange("mt5")).toBe("traditional");
+    expect(assetClassForExchange("MT5")).toBe("traditional");
+  });
+
+  it("an absent or unknown venue is null, so the blend reads it as the conservative 365 instead of guessing a class", async () => {
+    const { assetClassForExchange } = await loadClosedSets();
+    expect(assetClassForExchange(undefined)).toBeNull();
+    expect(assetClassForExchange(null)).toBeNull();
+    expect(assetClassForExchange("")).toBeNull();
+    expect(assetClassForExchange("not-a-venue")).toBeNull();
+    // Own-property only: inherited Object.prototype names are not venues.
+    expect(assetClassForExchange("constructor")).toBeNull();
+  });
+
+  it("feeds blendPeriodsPerYear: a pure mt5 blend is 252, mt5 + crypto is 365, mt5 + unknown stays 365 (T-155.2-14)", async () => {
+    const { assetClassForExchange, blendPeriodsPerYear } = await loadClosedSets();
+    const leg = (ex: string | undefined) => ({
+      asset_class: assetClassForExchange(ex),
+    });
+    expect(blendPeriodsPerYear([leg("mt5"), leg("mt5")])).toBe(252);
+    expect(blendPeriodsPerYear([leg("mt5"), leg("binance")])).toBe(365);
+    // The missing exchange must never inflate Sharpe by dropping to 252.
+    expect(blendPeriodsPerYear([leg("mt5"), leg(undefined)])).toBe(365);
+  });
+});

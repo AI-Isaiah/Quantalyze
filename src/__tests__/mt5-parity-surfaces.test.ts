@@ -293,6 +293,56 @@ interface CrossStore {
   first_differing_day: string | null;
 }
 
+/**
+ * CROSS_STORE_ABS_TOL: an ABSOLUTE tolerance on a DAILY RETURN, used by `cross_store` to tell float round-off
+ * from a real store divergence. The strategy series is `equityCurveToDailyReturns` of the stored cumulative
+ * curve (`curr / prev - 1` over a float cumprod, src/lib/factsheet/resolve-series.ts), so it differs from the
+ * per-key rows by round-off near 1e-16 per day. 1e-9 sits six orders of magnitude above that round-off and
+ * far below `MT5_PARITY_TOLERANCE` (analytics-service/services/mt5_parity.py), so a 1e-6 gap, and any missing
+ * day, is still a difference.
+ */
+const CROSS_STORE_ABS_TOL = 1e-9;
+
+/**
+ * Plan 155.2-04: every day of the union decomposed into exactly one of equal, missing from a compared store,
+ * a value gap at or below CROSS_STORE_ABS_TOL, or a material gap. Kept OFF the matrix (a WeakMap keyed by the
+ * account's matrix object) so surface-matrix.json keeps its schema; `writeCrossStoreDecomposition` serialises it.
+ */
+interface CrossStoreDecomposition {
+  days_compared: number;
+  missing: number;
+  below_tol: number;
+  material: number;
+  first_material_day: string | null;
+  /** The largest absolute gap on a material day, as a raw return difference (the writer divides by the tolerance). */
+  max_material_gap: number;
+}
+const decompositions = new WeakMap<AccountMatrix, CrossStoreDecomposition>();
+
+/** The largest |value - stored| over the compared stores for one day; null when any store lacks the day. */
+function dayGap(d: string, compared: Map<string, number>[], stored: Map<string, number>): number | null {
+  if (!compared.every((m) => m.has(d))) return null;
+  const ref = stored.get(d) as number;
+  return Math.max(...compared.map((m) => Math.abs((m.get(d) as number) - ref)));
+}
+
+function decomposeCrossStore(days: string[], compared: Map<string, number>[], stored: Map<string, number>): CrossStoreDecomposition {
+  const out: CrossStoreDecomposition = { days_compared: days.length, missing: 0, below_tol: 0, material: 0, first_material_day: null, max_material_gap: 0 };
+  for (const d of days) {
+    const gap = dayGap(d, compared, stored);
+    if (gap === null) out.missing++;
+    else if (gap === 0) continue;
+    else if (gap <= CROSS_STORE_ABS_TOL) out.below_tol++;
+    else {
+      // A non-finite gap is material by construction: it can never be read as round-off.
+      out.material++;
+      out.first_material_day ??= d;
+      out.max_material_gap = Math.max(out.max_material_gap, gap);
+    }
+  }
+  return out;
+}
+
 interface AccountMatrix {
   key_ordinal: string;
   label: string;
@@ -570,6 +620,11 @@ async function buildAccount(capture: CaptureData, ordinal: string): Promise<Acco
   const equityByKey: Record<string, number> = {};
   for (const h of holdings) equityByKey[h.api_key_id] = (equityByKey[h.api_key_id] ?? 0) + (holdingEquityContribution(h) ?? 0);
   const labelById = new Map(Object.keys(perKey).map((id) => [id, label] as const));
+  // 155.2 G2: every key in this capture is an mt5 key BY CONSTRUCTION - docs/runbooks/mt5-parity/capture-keymap.sql
+  // selects only `ak.exchange = 'mt5'` rows - so each per-key id maps to the venue string the api_keys row carries.
+  // The composer cell passes it as the builder's trailing argument, mirroring what production passes once the
+  // composer is wired (plan 06). The class itself still comes from assetClassForExchange, never from this file.
+  const exchangeByApiKeyId: Record<string, string> = Object.fromEntries(Object.keys(perKey).map((id) => [id, "mt5"]));
 
   const method = curveMethodFromFlags(dqf);
   const strategySeries = resolveDailyReturnSeries(analytics?.daily_returns, analytics?.returns_series, method);
@@ -633,7 +688,7 @@ async function buildAccount(capture: CaptureData, ordinal: string): Promise<Acco
     out.push(
       await guarded("allocations_live_baseline", "owner_visible", "native", () => {
         if (holdings.length === 0) return { state: "not_applicable", reason: "key_not_in_book" };
-        const baseline = liveBaselineMetricsFromPerKeyDailies(holdings, perKey);
+        const baseline = liveBaselineMetricsFromPerKeyDailies(holdings, perKey, {}, exchangeByApiKeyId);
         const book = liveBookFigures(baseline);
         const figures = { cumulative_return: fin(book.ytdTwr), last_return_date: book.seriesEndDay, cagr: null, sharpe: fin(book.sharpe), max_drawdown: fin(book.maxDd) };
         return figured(figures, { cagr: null, sharpe: shown(book.sharpeState), max_drawdown: ddState(figures.max_drawdown) }, "book_figures");
@@ -644,7 +699,7 @@ async function buildAccount(capture: CaptureData, ordinal: string): Promise<Acco
     out.push(
       await guarded("scenario_composer_book", "owner_visible", "native", () => {
         if (holdings.length === 0) return { state: "not_applicable", reason: "key_not_in_book" };
-        const set = buildPerKeyStrategyForBuilderSet(perKey, equityByKey, labelById);
+        const set = buildPerKeyStrategyForBuilderSet(perKey, equityByKey, labelById, {}, exchangeByApiKeyId);
         if (set.strategies.length === 0) return { state: "withheld", reason: "no_per_key_series" };
         const basis = blendPeriodsPerYear(set.strategies);
         const m = computeScenario(set.strategies, set.state, buildDateMapCache(set.strategies), basis);
@@ -716,17 +771,21 @@ async function buildAccount(capture: CaptureData, ordinal: string): Promise<Acco
   });
 
   // cross_store: the strategy_analytics series against the per-key csv_daily_returns and, when the key has any,
-  // the strategy-linked csv_daily_returns, day for day, exact equality. A day missing from a store, or valued
-  // differently in it, is a difference: the stores are never merged into one map.
+  // the strategy-linked csv_daily_returns, day for day, within CROSS_STORE_ABS_TOL. A day missing from a store is
+  // always a difference, and so is a value beyond the tolerance (a non-finite gap included): the stores are never
+  // merged into one map. Exact equality would report the round-off of differencing the cumulative curve.
   const csv = new Map<string, number>();
   for (const pts of Object.values(perKey)) for (const p of pts) csv.set(p.date, p.value);
   const linked = new Map(strategyLinked.map((p) => [p.date, p.value] as const));
   const stored = new Map(strategySeries.map((p) => [p.date, p.value] as const));
   const compared = linked.size > 0 ? [stored, csv, linked] : [stored, csv];
   const days = [...new Set(compared.flatMap((m) => [...m.keys()]))].sort();
-  const differing = days.filter((d) => !compared.every((m) => m.has(d) && m.get(d) === stored.get(d)));
+  const differing = days.filter((d) => {
+    const gap = dayGap(d, compared, stored);
+    return gap === null || !(gap <= CROSS_STORE_ABS_TOL);
+  });
 
-  return {
+  const account: AccountMatrix = {
     key_ordinal: ordinal,
     label,
     unit: String(keymap?.account_currency ?? "unknown"),
@@ -735,6 +794,8 @@ async function buildAccount(capture: CaptureData, ordinal: string): Promise<Acco
     cells,
     cross_store: { days_compared: days.length, days_differing: differing.length, first_differing_day: differing[0] ?? null },
   };
+  decompositions.set(account, decomposeCrossStore(days, compared, stored));
+  return account;
 }
 
 async function buildMatrix(capture: CaptureData): Promise<Matrix> {
@@ -761,6 +822,36 @@ function writeMatrix(matrix: Matrix, dir: string): string {
   mkdirSync(dir, { recursive: true });
   const path = join(dir, "surface-matrix.json");
   writeFileSync(path, JSON.stringify(matrix, null, 2));
+  return path;
+}
+
+/** MT5_PARITY_TOLERANCE keeps its one definition in Python; the TS side reads it rather than restating it. */
+function readParityTolerance(): number {
+  const src = readFileSync(join(REPO_ROOT, "analytics-service", "services", "mt5_parity.py"), "utf8");
+  const m = /^MT5_PARITY_TOLERANCE: Final\[float\] = ([0-9.eE+-]+)$/m.exec(src);
+  if (m === null) throw new Error("MT5_PARITY_TOLERANCE not found in mt5_parity.py");
+  return Number(m[1]);
+}
+
+/** Capture mode only: `derived/cross-store-decomposition.json`, `{label: {days_compared, missing, below_tol, material, ...}}`. */
+function writeCrossStoreDecomposition(matrix: Matrix, dir: string): string {
+  const tol = readParityTolerance();
+  const body: Record<string, unknown> = {};
+  for (const a of matrix.accounts) {
+    const d = decompositions.get(a);
+    if (d === undefined) throw new Error("account built without a cross-store decomposition");
+    body[a.label] = {
+      days_compared: d.days_compared,
+      missing: d.missing,
+      below_tol: d.below_tol,
+      material: d.material,
+      first_material_day: d.first_material_day,
+      max_material_gap_over_tolerance: d.max_material_gap / tol,
+    };
+  }
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "cross-store-decomposition.json");
+  writeFileSync(path, JSON.stringify(body, null, 2));
   return path;
 }
 
@@ -936,6 +1027,81 @@ describe("MT5-09 surface matrix: synthetic capture", () => {
     expect(extraDay.a.cross_store.days_compared).toBe(baseline.cross_store.days_compared + 1);
   });
 
+  it("155.2-04 decomposition: a clean synthetic capture has no missing, sub-tolerance or material day", async () => {
+    const a = accountA(await buildMatrix(syntheticCapture()));
+    expect(decompositions.get(a)).toEqual({
+      days_compared: a.cross_store.days_compared,
+      missing: 0,
+      below_tol: 0,
+      material: 0,
+      first_material_day: null,
+      max_material_gap: 0,
+    });
+  });
+
+  it("155.2-04 decomposition: a 1e-12 per-key gap is below_tol, a 1e-6 gap is material, a deleted per-key day is missing", async () => {
+    const perKeyRows = (mutate: (rows: Row[]) => void) => {
+      const parsed = JSON.parse(BUNDLE_BYTES.toString("utf8")) as {
+        raw: Record<string, { key_ordinal: string; slice_rows: Row[] }[]>;
+        labels: Record<string, string>;
+      };
+      const ordinal = Object.keys(parsed.labels).find((o) => parsed.labels[o] === "SYN-A")!;
+      const rows = parsed.raw["capture-returns.json"].find((w) => w.key_ordinal === ordinal)!.slice_rows;
+      const day = String(rows[0].date);
+      mutate(rows);
+      return buildMatrix(loadSyntheticFromBytes(Buffer.from(JSON.stringify(parsed), "utf8"))).then((m) => ({ day, a: accountA(m) }));
+    };
+    const nudge = (by: number) => (rows: Row[]) => void (rows[0].daily_return = (rows[0].daily_return as number) + by);
+
+    const tiny = await perKeyRows(nudge(1e-12));
+    expect(decompositions.get(tiny.a)).toMatchObject({ missing: 0, below_tol: 1, material: 0, first_material_day: null });
+
+    const big = await perKeyRows(nudge(1e-6));
+    expect(decompositions.get(big.a)).toMatchObject({ missing: 0, below_tol: 0, material: 1, first_material_day: big.day });
+    expect(decompositions.get(big.a)!.max_material_gap).toBeGreaterThan(CROSS_STORE_ABS_TOL);
+
+    const gone = await perKeyRows((rows) => void rows.splice(0, 1));
+    expect(decompositions.get(gone.a)).toMatchObject({ missing: 1, below_tol: 0, material: 0 });
+  });
+
+  it("155.2-04 cross_store tolerance: a 1e-12 per-key gap is not a divergence; a 1e-6 gap and a deleted day still are", async () => {
+    const perKeyRows = (mutate: (rows: Row[]) => void) => {
+      const parsed = JSON.parse(BUNDLE_BYTES.toString("utf8")) as {
+        raw: Record<string, { key_ordinal: string; slice_rows: Row[] }[]>;
+        labels: Record<string, string>;
+      };
+      const ordinal = Object.keys(parsed.labels).find((o) => parsed.labels[o] === "SYN-A")!;
+      const rows = parsed.raw["capture-returns.json"].find((w) => w.key_ordinal === ordinal)!.slice_rows;
+      const day = String(rows[0].date);
+      mutate(rows);
+      return buildMatrix(loadSyntheticFromBytes(Buffer.from(JSON.stringify(parsed), "utf8"))).then((m) => ({ day, a: accountA(m) }));
+    };
+    const nudge = (by: number) => (rows: Row[]) => void (rows[0].daily_return = (rows[0].daily_return as number) + by);
+
+    const tiny = await perKeyRows(nudge(1e-12));
+    expect(tiny.a.cross_store.days_differing).toBe(0);
+    expect(tiny.a.cross_store.first_differing_day).toBeNull();
+
+    const big = await perKeyRows(nudge(1e-6));
+    expect(big.a.cross_store.days_differing).toBe(1);
+    expect(big.a.cross_store.first_differing_day).toBe(big.day);
+
+    const gone = await perKeyRows((rows) => void rows.splice(0, 1));
+    expect(gone.a.cross_store.days_differing).toBe(1);
+    expect(gone.a.cross_store.first_differing_day).toBe(gone.day);
+  });
+
+  it("155.2-04 decomposition: capture mode writes one entry per label with the documented fields, ratio over the Python tolerance", async () => {
+    const matrix = await buildMatrix(syntheticCapture());
+    const written = writeCrossStoreDecomposition(matrix, mkdtempSync(join(tmpdir(), "mt5p-decomp-")));
+    const body = JSON.parse(readFileSync(written, "utf8")) as Record<string, Record<string, unknown>>;
+    expect(Object.keys(body).sort()).toEqual(matrix.accounts.map((a) => a.label).sort());
+    expect(Object.keys(body["SYN-A"]).sort()).toEqual(
+      ["days_compared", "first_material_day", "material", "max_material_gap_over_tolerance", "missing", "below_tol"].sort(),
+    );
+    expect(readParityTolerance()).toBeGreaterThan(0);
+  });
+
   it("is deterministic: the same bundle gives deep-equal matrices", async () => {
     const first = await buildMatrix(syntheticCapture());
     const second = await buildMatrix(syntheticCapture());
@@ -1059,6 +1225,7 @@ if (REAL_DIR !== undefined) {
       expect(matrix.accounts.length).toBeGreaterThan(0);
       const path = writeMatrix(matrix, join(REAL_DIR, "derived"));
       expect(existsSync(path)).toBe(true);
+      expect(existsSync(writeCrossStoreDecomposition(matrix, join(REAL_DIR, "derived")))).toBe(true);
     });
   });
 }

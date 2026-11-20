@@ -68,6 +68,12 @@ _EXPLAINED_EXTRA: Final[tuple[str, ...]] = (
     "marks_trailing_since",
     "cumulative_method",
     "native_unit",
+    # Provenance marker, not a warning: every writer is the CSV-to-analytics pipeline
+    # (run_csv_strategy_analytics, M-0657; the derive prestamp and failure stamps that
+    # feed or replace it). Trade, volume and exposure metrics are NULL there by design.
+    # Deliberately in neither guard tuple, so it never promotes computation_status.
+    # Proposed class only: the founder's written acceptance is a pending ruling (155.2).
+    "csv_source",
 )
 
 

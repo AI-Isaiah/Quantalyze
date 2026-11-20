@@ -11,6 +11,9 @@ A thin argparse wrapper; every decision lives in ``services.mt5_parity``,
         --worksheet W --report R --account LABEL --run-day YYYY-MM-DD \\
         --mutation (all | reclassify_balance | clock_shift_1h | drop_oldest_deal) --out-md F
 
+``--clock-rule`` (default ``us``) takes ``eu``, ``us``, ``utc`` or ``fixed:<seconds>``, the
+forms the worker takes, so each account is judged on the clock its derive used.
+
 ``--capture-dir`` is a sealed run directory; ``--capture-bundle`` is a synthetic bundle,
 sealed into a temporary directory. The windows are the given ``--gate-a-*`` and
 ``--gate-b-*`` pairs, or the picker's proposal for a gate left unset. A gate the picker cannot build is
@@ -62,7 +65,12 @@ from services.mt5_parity_intake import (
     require_complete,
 )
 from services.mt5_parity_report import load_oracle_deals, oracle_deals_bytes, parse_report
-from services.mt5_server_clock import server_clock_for_rule
+from services.mt5_server_clock import (
+    _MAX_FIXED_OFFSET_S,
+    Mt5ServerClock,
+    fixed_server_clock,
+    server_clock_for_rule,
+)
 
 EXIT_OK: Final = 0
 EXIT_REFUSED: Final = 2
@@ -92,7 +100,7 @@ class _Inputs:
     worksheet: Worksheet
     oracle_label: str
     deals_bytes: bytes
-    clock_rule: Literal["us", "eu"]
+    clock_rule: str
     run_day: date
     windows: tuple[Window, ...]
     synthetic_pair: bool
@@ -101,6 +109,32 @@ class _Inputs:
 def _refuse(error: BaseException) -> int:
     print(f"{type(error).__name__}: {error}", file=sys.stderr)
     return EXIT_REFUSED
+
+
+def _clock_rule_arg(text: str) -> str:
+    """A ``--clock-rule`` value: ``eu``, ``us``, ``utc`` or ``fixed:<seconds>``.
+
+    The fixed form takes ASCII digits with an optional sign within the worker's own
+    13 h bound; anything else is refused by name (T-155.2-24), never a traceback."""
+    if text in ("eu", "us", "utc"):
+        return text
+    if text.startswith("fixed:"):
+        raw = text[len("fixed:") :]
+        body = raw[1:] if raw[:1] in ("+", "-") else raw
+        if body.isascii() and body.isdigit() and abs(int(raw)) <= _MAX_FIXED_OFFSET_S:
+            return text
+    raise argparse.ArgumentTypeError(
+        f"--clock-rule must be eu, us, utc or fixed:<seconds> within 13 hours, got {text!r}"
+    )
+
+
+def _clock_from_rule(rule: str) -> Mt5ServerClock:
+    """The clock a validated ``--clock-rule`` names (utc is the fixed zero offset)."""
+    if rule == "utc":
+        return fixed_server_clock(0)
+    if rule.startswith("fixed:"):
+        return fixed_server_clock(int(rule[len("fixed:") :]))
+    return server_clock_for_rule(rule)
 
 
 def _add_inputs(parser: argparse.ArgumentParser) -> None:
@@ -116,7 +150,12 @@ def _add_inputs(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--account", required=True, help="a capture account label")
     parser.add_argument("--oracle-label", help="the worksheet account to compare against")
-    parser.add_argument("--clock-rule", choices=("us", "eu"), default="us")
+    parser.add_argument(
+        "--clock-rule",
+        type=_clock_rule_arg,
+        default="us",
+        help="the server clock the derive used: eu, us, utc or fixed:<seconds> (default: us)",
+    )
     parser.add_argument("--run-day", required=True, help="YYYY-MM-DD")
     for gate in ("a", "b"):
         parser.add_argument(f"--gate-{gate}-start", help="YYYY-MM-DD")
@@ -191,8 +230,8 @@ def _prepare(args: argparse.Namespace) -> _Inputs:
     bind_report(worksheet, oracle_label, report_bytes)
     parsed = parse_report(report_bytes)
     deals_bytes = oracle_deals_bytes(parsed)
-    rule: Literal["us", "eu"] = args.clock_rule
-    clock = server_clock_for_rule(rule)
+    rule: str = args.clock_rule
+    clock = _clock_from_rule(rule)
     windows: list[Window] = []
     proposed: tuple[Window, ...] | None = None
     for gate in ("A", "B"):
@@ -232,7 +271,7 @@ def _judge(inputs: _Inputs, deals_bytes: bytes) -> Verdict:
         inputs.worksheet,
         inputs.windows,
         oracle_deals=load_oracle_deals(deals_bytes),
-        clock=server_clock_for_rule(inputs.clock_rule),
+        clock=_clock_from_rule(inputs.clock_rule),
         run_day=inputs.run_day,
         oracle_label=inputs.oracle_label,
         capture_synthetic=inputs.synthetic_pair,

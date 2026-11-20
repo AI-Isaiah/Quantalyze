@@ -46,6 +46,8 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "mt5_parity"
 UTF8_BYTES = (FIXTURES / "report_synthetic.utf8.html").read_bytes()
 UTF16_BYTES = (FIXTURES / "report_synthetic.utf16le.html").read_bytes()
 UTF8_TEXT = UTF8_BYTES.decode("utf-8")
+REALSHAPE_BYTES = (FIXTURES / "report_realshape_synthetic.utf8.html").read_bytes()
+REALSHAPE_TEXT = REALSHAPE_BYTES.decode("utf-8")
 LEDGER = json.loads((FIXTURES / "ledger_synthetic.json").read_text(encoding="utf-8"))
 
 _CELL_RE = re.compile(r"<(t[dh])[^>]*>(.*?)</t[dh]>")
@@ -123,6 +125,18 @@ def test_both_fixtures_parse_to_the_ledger_deals_field_for_field() -> None:
     )  # fmt: skip
     # The Orders section (deal 2002 is an ORDER id) and the Summary are skipped.
     assert len(utf8.deals) == len(LEDGER["deals"])
+
+
+def test_a_realshape_report_parses_to_the_ledger() -> None:
+    # Why: the terminal's real All-History Report (build 5830) writes its Deals header
+    # as bold td cells with a hidden Cost column, not th cells. The parser must read
+    # that shape to the same deals as the th shape, or the oracle has no input.
+    assert 'class="hidden"' in REALSHAPE_TEXT  # the shape exists: no vacuous pass
+    parsed = parse_report(REALSHAPE_BYTES)
+    assert [dict(d) for d in parsed.deals] == _expected_ledger_deals()
+    assert parsed.deals == parse_report(UTF8_BYTES).deals
+    assert "Cost" in parsed.headers
+    assert len(parsed.headers) == 15
 
 
 def test_the_utf16le_twin_is_the_utf8_text_with_a_bom_byte_for_byte() -> None:
@@ -326,6 +340,90 @@ def test_a_repeated_deal_id_is_refused() -> None:
 
     with pytest.raises(RowShapeRefused, match="repeats"):
         parse_report(_bytes(_mutate(UTF8_TEXT, repeat)))
+
+
+# --- the real build 5830 shape (td header, hidden Cost) ----------------------------
+
+_REAL_HIDDEN_EMPTY = '<td class="hidden"></td>'
+_REAL_FOOTER_START = '<tr><td colspan="12"'
+_REAL_TIME_HEADER = "<td nowrap><b>Time</b></td>"
+_REAL_COST_HEADER = '<td nowrap class="hidden"><b>Cost</b></td>'
+
+
+def _realshape(*edits: tuple[str, str]) -> bytes:
+    """The real-shape fixture with plain string edits. Never routed through
+    ``_mutate``, which is hard-wired to the th header line. An edit whose target is
+    absent fails loudly, so a test cannot pass on an edit that changed nothing."""
+    text = REALSHAPE_TEXT
+    for old, new in edits:
+        assert old in text, f"edit target not in the real-shape fixture: {old!r}"
+        text = text.replace(old, new)
+    return text.encode("utf-8")
+
+
+def test_a_mixed_th_td_header_row_is_refused() -> None:
+    # Why: a header row that is half th and half td is a layout the parser has never
+    # seen, so it must not be read by guessing which cells are headers.
+    broken = _realshape((_REAL_TIME_HEADER, "<th nowrap><b>Time</b></th>"))
+    with pytest.raises(RowShapeRefused, match="plain header cells"):
+        parse_report(broken)
+
+
+def test_a_spanned_header_cell_is_refused() -> None:
+    # Why: a spanned header cell would shift every later column off its header.
+    broken = _realshape(
+        ("<td nowrap><b>Comment</b></td>", '<td nowrap colspan="2"><b>Comment</b></td>')
+    )
+    with pytest.raises(RowShapeRefused, match="plain header cells"):
+        parse_report(broken)
+
+
+def test_a_hidden_header_not_named_cost_is_refused_by_name() -> None:
+    # Why: a hidden column is never dropped blind. Only Cost is known; any other hidden
+    # header name could be money, so it stays an UnknownHeader refusal.
+    broken = _realshape((_REAL_COST_HEADER, _REAL_COST_HEADER.replace("Cost", "Gebuehr")))
+    with pytest.raises(UnknownHeader, match="Gebuehr"):
+        parse_report(broken)
+
+
+def test_a_nonzero_cost_never_enters_the_money_math() -> None:
+    # Why: Cost is a known header but not a money field. If it were added to profit,
+    # swap, commission or fee, the Balance column would stop following from the row.
+    assert REALSHAPE_TEXT.count(_REAL_HIDDEN_EMPTY) == len(LEDGER["deals"])
+    costed = parse_report(_realshape((_REAL_HIDDEN_EMPTY, '<td class="hidden">7.77</td>')))
+    zero = parse_report(REALSHAPE_BYTES)
+    assert costed.deals == zero.deals
+    for deal in costed.deals:
+        assert set(deal) == set(zero.deals[0])
+    assert [dict(d) for d in costed.deals] == _expected_ledger_deals()
+
+
+def test_a_visible_width_footer_ends_deals_but_a_full_width_row_does_not() -> None:
+    # Why: the real footer spans the 14 visible columns while the header has 15 cells
+    # (Cost is hidden). It must end the section, but only a full-width row is a deal, so
+    # a deal-shaped row placed after the footer must be refused, not silently dropped.
+    assert 'colspan="14">Deals<' in REALSHAPE_TEXT
+    parsed = parse_report(REALSHAPE_BYTES)
+    assert len(parsed.deals) == len(LEDGER["deals"])
+
+    lines = REALSHAPE_TEXT.split("\n")
+    foot = next(i for i, ln in enumerate(lines) if ln.startswith(_REAL_FOOTER_START))
+    full_width_row = lines[foot - 1]
+    assert full_width_row.count("<td") == 15  # the last deal row, 15 cells
+    lines.insert(foot + 1, full_width_row)
+    with pytest.raises(RowShapeRefused, match="follows a footer-shaped row"):
+        parse_report("\n".join(lines).encode("utf-8"))
+
+
+def test_the_realshape_utf16le_twin_parses_like_the_utf8_one() -> None:
+    # Built in memory rather than committed: a committed UTF-16 file carries raw NULs,
+    # which the planning-hygiene RAW-NUL rule keeps out of the repo. The real terminal
+    # writes a BOM followed by UTF-16-LE, which is exactly these bytes.
+    twin = b"\xff\xfe" + REALSHAPE_TEXT.encode("utf-16-le")
+    from_twin = parse_report(twin)
+    assert from_twin.encoding == "utf-16-le"
+    assert from_twin.deals == parse_report(REALSHAPE_BYTES).deals
+    assert [dict(d) for d in from_twin.deals] == _expected_ledger_deals()
 
 
 # --- empty -------------------------------------------------------------------------

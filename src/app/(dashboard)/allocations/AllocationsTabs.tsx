@@ -1152,9 +1152,10 @@ function ScenarioTabContent(props: MyAllocationDashboardPayload) {
   // explicitly, sourced from `props`, and annotate with
   // ScenarioComparePanelProps["payload"] so the compiler is the standing
   // contract gate — deleting a REQUIRED field here (or the panel widening its
-  // requirement) fails the build. An OPTIONAL field (`tinyBaseDaysByApiKeyId`)
-  // is not gated by the compiler; `AllocationsTabs.scenario-composer.test.tsx`
-  // (T_AT5d) pins it. Replaces the prior `props`→panel double-cast
+  // requirement) fails the build. The OPTIONAL fields (`tinyBaseDaysByApiKeyId`,
+  // `exchangeByApiKeyId`) are not gated by the compiler;
+  // `AllocationsTabs.scenario-composer.test.tsx` pins them (T_AT5d and T_AT5e
+  // respectively). Replaces the prior `props`→panel double-cast
   // (an unchecked type erasure) that silently masked any payload/panel drift
   // (T-66-08). No zod schema — the data is server-trusted
   // SSR props, so a structural narrow is proportionate (Don't-Hand-Roll).
@@ -1173,6 +1174,12 @@ function ScenarioTabContent(props: MyAllocationDashboardPayload) {
     contributingApiKeyIds: props.contributingApiKeyIds,
     // 188 D-07: the compare panel and the composer read the same tiny-base days.
     tinyBaseDaysByApiKeyId: props.tinyBaseDaysByApiKeyId,
+    // 155.2 G2: the same api_key_id → exchange map the composer builds, so the
+    // compare columns and the composer annualize one book on one venue-derived
+    // clock.
+    exchangeByApiKeyId: Object.fromEntries(
+      (props.apiKeys ?? []).map((k) => [k.id, k.exchange]),
+    ),
   };
 
   return (
