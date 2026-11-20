@@ -514,15 +514,24 @@ async def _scrub_decide(
     )
     if budget_s is not None and wait_timeout < _MIN_INLINE_SCRUB_WAIT_S:
         return SCRUB_KIND_ABANDONED, None
+    # ⛔ An abandoned scrub thread runs on to its own (longer) deadline after the
+    # caller's lease is released. Its done-event is registered like a probe's, so
+    # the next scrub's W-1 wait covers it and nothing crosses the terminal under it
+    # (the owed mark stays set after `abandoned`, so the next holder scrubs first).
+    thread_done = threading.Event()
+    _register_probe(key, thread_done)
+
+    def _scrub_then_signal() -> ScrubRelaunchResult:
+        try:
+            return _scrub_validation_terminal_blocking(
+                host, port, house, heal_deadline(_VALIDATION_SCRUB_BUDGET_S)
+            )
+        finally:
+            thread_done.set()
+
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(
-                _scrub_validation_terminal_blocking,
-                host,
-                port,
-                house,
-                heal_deadline(_VALIDATION_SCRUB_BUDGET_S),
-            ),
+            asyncio.to_thread(_scrub_then_signal),
             timeout=wait_timeout,
         )
     except TimeoutError:

@@ -1228,6 +1228,47 @@ async def test_TERMINAL_SCRUB_a_budget_shorter_than_the_scrub_ends_abandoned_wit
     await asyncio.sleep(0.05)
 
 
+async def test_TERMINAL_SCRUB_an_abandoned_scrub_thread_holds_off_the_next_scrub(
+    monkeypatch: pytest.MonkeyPatch,
+    sink: _FakeCronRuns,
+    captures: list[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """⛔ Security review (Phase 218): an inline scrub abandoned at the wizard's
+    bound leaves its thread running to the scrub's own, longer deadline after the
+    lease is released. Its done-event must be registered for the W-1 wait, so the
+    next scrub (and so any probe, since the owed mark stays set) waits for it
+    instead of crossing the shared terminal under it."""
+    finished = threading.Event()
+    release = threading.Event()
+
+    def _wedge() -> None:
+        release.wait(5.0)  # parked on an Event the test releases; 5 s is a deadman
+        finished.set()
+
+    _install_scrub_client(monkeypatch, {**_VERIFIED, "after_recycle_crossed": _wedge})
+    monkeypatch.setattr(mt5_terminal_scrub, "_MIN_INLINE_SCRUB_WAIT_S", 0.0)
+    key = _VAL_KEY
+    try:
+        kind = await mt5_terminal_scrub.pay_owed_validation_scrub_in_lease(
+            _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WIZARD, budget_s=0.2
+        )
+        assert kind == mt5_terminal_scrub.SCRUB_KIND_ABANDONED
+        # The abandoned thread is still on the terminal and is visible to W-1.
+        assert len(mt5_terminal_scrub._unfinished_probes(key)) == 1
+        # So the next scrub refuses rather than crossing under it.
+        next_kind = await mt5_terminal_scrub.pay_owed_validation_scrub_in_lease(
+            _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WIZARD, budget_s=0.2
+        )
+        assert next_kind == mt5_terminal_scrub.SCRUB_KIND_SKIPPED_PROBE_IN_FLIGHT
+    finally:
+        release.set()
+    assert await asyncio.to_thread(finished.wait, 5.0)
+    await asyncio.sleep(0.05)
+    # Once the thread ends, its event is set and W-1 no longer waits for it.
+    assert mt5_terminal_scrub._unfinished_probes(key) == []
+
+
 @pytest.mark.parametrize("budget_s", [0.0, 0.5])
 async def test_TERMINAL_SCRUB_a_budget_too_small_to_scrub_never_starts_the_thread(
     monkeypatch: pytest.MonkeyPatch,
