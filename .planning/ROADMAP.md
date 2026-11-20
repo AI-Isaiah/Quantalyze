@@ -624,10 +624,11 @@ Plans:
 **Goal:** The local-stack non-public extractor (`scripts/local-stack/nonpublic-objects.mjs`) accepts an `AFTER UPDATE OF <columns>` trigger on `auth.users`, records its columns and compares them against the catalogue so column drift is a finding, so the baseline re-dump that carries Phase 219's migration `20261119120000` can land without making every lane boot FATAL, and main's `sql-gate-lint` goes green again. Owns `TODOS.md` `[219-EXTRACTOR-UPDATE-OF]` (fix direction, gate and red and green cases as written there). Trigger: main CI has been red since merge `d4f93d474` (`sql-gate-lint` `SNAPSHOT_MISSING sync_profile_email_from_auth/0`), which holds back the Railway analytics deploy for 155.2 and 218. The bot re-dump PR #1294 (`automation/baseline-redump`) merges only after this fix lands. CI-only phase, outside the in-flight limit. Booked 2026-11-20 by the orchestrator under the standing milestone goal.
 **Requirements**: TBD
 **Depends on:** none (independent of the MT5 parity phases)
-**Plans:** 0 plans
+**Plans:** 1 plan
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [ ] 220-01-PLAN.md — tracer: the extractor folds `UPDATE OF <columns>`, the catalogue's 7th trigger field and a both-direction column compare; red/refusal arms shown RED by neutering; real-lane proof on the re-dump's baseline (Wave 1)
 
 ---
 
