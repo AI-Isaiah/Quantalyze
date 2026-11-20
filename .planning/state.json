@@ -86,7 +86,7 @@
     {
       "number": "219",
       "name": "ACCOUNTEMAIL",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "220",
@@ -99,5 +99,5 @@
     "label": "Advance to the next step (plan phase 155.2)",
     "reason": "Phase 3 of 18 — needs a plan"
   },
-  "updated_at": "2026-11-20T16:43:37.849Z"
+  "updated_at": "2026-11-20T18:50:00.000Z"
 }
