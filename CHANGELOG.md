@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.133.60.4] - 2026-11-20 — records: close 220 EXTRACTOR
+
+Records PR for Phase 220, whose code is on `main` as #1296 (v0.133.56.0, squash d188fef84). After it landed, the bot re-dump #1294 and the stale ratchet-row delete #1298 followed. This PR carries the phase artifacts and closes the phase. No source, test or migration change.
+
+### Added
+- **Phase artifacts for 220** under `.planning/phases/`, from the phase branch: context, one plan and its summary, review, security and verification. The review has nothing at MEDIUM or above; the silent-failure-hunter's SFH-01 (two rounds) and SFH-02 test-pin fixes are recorded in it. Security is `SECURED`, 8 of 8 threats closed. The VERIFICATION is `passed` (7/7) with `verified_at_sha` and `drift_subjects`, and has no `covered_*` keys.
+
+### Changed
+- `phase complete 220` ran: the overview bullet is ticked `(completed 2026-11-20)`, the Progress row reads `1/1 | Complete | 2026-11-20`, and `**Plans:** 1/1 plans complete`. The TBD stub, which the handler left in place, is replaced by hand with the one plan row.
+- **STATE and `state.json`:** progress is 15 of 18 phases, 93 of 93 plans, 83%. `phase complete` moved the position to 155.2 and set `status: planning`; both are restored by hand to the parallel-phase form, with 155.2 and 157 open and 219 awaiting the founder's live re-test.
+- VERSION and package.json 0.133.60.3 → 0.133.60.4.
+
+### Notes
+- `phase complete` warned that 220 has no VALIDATION.md (the Nyquist audit never ran for this CI-only phase). It also flagged a SUMMARY "file not on disk", which is a false positive: the reference is a `npx vitest run` command line.
+- `[219-EXTRACTOR-UPDATE-OF]`, which this phase owned, was already deleted from `TODOS.md` by #1296, so this PR closes no further entry.
+- This branch sits on top of the 219 records commit (0.133.60.3), so it merges after that PR.
+
 ## [0.133.60.3] - 2026-11-20 — records: 219 ACCOUNTEMAIL shipped, UAT pending
 
 Records PR for Phase 219, whose code is on `main` as #1291 (v0.133.53.0, plans 01-03, squash d4f93d474) and #1299 (v0.133.60.0, gap plans 04-09, squash b87eb7c07, migration applied to TEST and PROD), with the re-dump #1301. It carries the phase artifacts and marks the phase shipped with the founder's live re-test still owed. It does not close the phase. No source, test or migration change.
