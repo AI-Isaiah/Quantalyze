@@ -1450,8 +1450,11 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
     ],
   ]);
 
+  // maxBuffer: the tracked-path list crossed Node's 1 MiB default (1048576 bytes) at
+  // 1048612 bytes on 2026-11-20, so the default threw ENOBUFS. Same cap as
+  // scripts/check-planning-hygiene.ts `listTrackedFiles`.
   const TRACKED = new Set(
-    execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8" }).split("\0").filter(Boolean),
+    execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", maxBuffer: 1 << 28 }).split("\0").filter(Boolean),
   );
   const isTestFile = (f: string) =>
     /\.(test|spec)\.(ts|tsx|mjs|js)$/.test(f) || /^analytics-service\/tests\/.*\.py$/.test(f);

@@ -232,6 +232,11 @@ founder can take.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[219-CALLBACK-VERIFY-ERROR-LOG]` The callback's GoTrue `error` / `error_code` branch redirects without logging the error code** (logged 2026-11-20, Phase 219 ACCOUNTEMAIL gap review, MEDIUM, observability, not user-facing; owner: the next touch of `src/app/auth/callback/route.ts`)
+  - **What:** when GoTrue's `/verify` itself fails (expired, already used or scanner-consumed token) it redirects to `/auth/callback` with `error` / `error_code` and no code, token hash or message. Since the Phase 219 gap, a request whose accepted `next` carries the email-change marker lands on the Account tab for that case, and nothing is logged, so a run of failed verifies cannot be seen. The marker-path exchange failure already logs its code and status.
+  - **Fix direction:** log the `error_code` value only, sliced to a short length, in that branch. Never log `error_description`, which GoTrue fills with free text.
+  - **Gate:** a callback test that sends `error_code=otp_expired` with the marker and asserts the console line carries the code and not the description, shown RED before the fix.
+
 - [ ] **`[212-CONTACT-SUPPORT-SURVIVORS]` The SQL error copy and five Python strings still say "contact support", a channel that does not exist** (logged 2026-11-14, Phase 212 WIZTRUTH ship; user-facing)
   - **What:** Phase 212 replaced every in-app "contact support" pointer in `src` with the contact form. Two places sit outside that census:
     the `computation_error_copy` arms in `supabase/schema/functions/computation_error_copy.sql` (the permanent, transient, unknown and ELSE arms),

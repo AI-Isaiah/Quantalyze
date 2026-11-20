@@ -188,6 +188,8 @@ export function ProfileTabs({
             email={accountEmail}
             pendingEmail={pendingEmail}
             firstLinkAccepted={searchParams.get("email_change") === "partial"}
+            emailChangeConfirmed={searchParams.get("email_change") === "confirmed"}
+            passwordSet={searchParams.get("password_set") === "1"}
           />
           <div className="border-t border-border pt-8">
             <DeleteAccountButton />

@@ -129,6 +129,11 @@ const MUST_STAMP_NO_STORE: readonly string[] = [
   // links and composite memberships), read on the service role. Tenant data,
   // so it joins at creation, as the membership entry above did.
   "keys/feeds/route.ts",
+  // Phase 219 gap (plan 06) — POST /api/account/email: the 200 body echoes the
+  // caller's own pending address (`pending_email`), a tenant value, so it joins
+  // at creation like the entries above. Its route.test.ts also pins
+  // `private, no-store` on the 200, 400 and 409 arms.
+  "account/email/route.ts",
 ];
 
 describe("no-store coverage: audited tenant-data routes stamp NO_STORE_HEADERS", () => {
@@ -137,8 +142,9 @@ describe("no-store coverage: audited tenant-data routes stamp NO_STORE_HEADERS",
   // Lineage 2026-09-25 (Phase 167.2.1 D-01): 37 → 38, the membership route.
   // Lineage 2026-11-07 (Phase 195 WR-03): 38 → 37, portfolio-documents deleted.
   // Lineage 2026-11-10 (Phase 200 plan 01): 37 → 38, the keys feeds route.
-  it("locks the full audited tenant-data surface (38 routes)", () => {
-    expect(MUST_STAMP_NO_STORE.length).toBe(38);
+  // Lineage 2026-11-20 (Phase 219 gap, plan 06): 38 -> 39, the account email route.
+  it("locks the full audited tenant-data surface (39 routes)", () => {
+    expect(MUST_STAMP_NO_STORE.length).toBe(39);
     expect(new Set(MUST_STAMP_NO_STORE).size).toBe(MUST_STAMP_NO_STORE.length);
   });
 
