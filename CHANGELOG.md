@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.56.0] - 2026-11-20 — Phase 220 EXTRACTOR: the local-stack extractor folds `UPDATE OF` auth.users triggers and compares their columns
+
+CI-only. The local-stack non-public extractor (`scripts/local-stack/nonpublic-objects.mjs`) refused any `AFTER UPDATE OF <columns>` trigger on `auth.users`. Phase 219's migration `20261119120000_sync_profile_email_from_auth.sql` creates exactly that (`on_auth_user_email_updated`, `AFTER UPDATE OF email`), so the first baseline re-dump that carries it would have made every lane boot FATAL (`sql-tests`, `frontend-local-stack`, `frontend-live-db-lane`, `python`, `e2e-seeded`). This release lets the bot re-dump PR #1294 land safely. Main's `sql-gate-lint` (`SNAPSHOT_MISSING sync_profile_email_from_auth/0`, red since merge `d4f93d474`) goes green when #1294 merges after this release, not from this release itself. Phase branch: 11 commits (2 code and test, 2 review test fixes, 7 planning records), squashed here with no `.planning/` paths.
+
+### Fixed
+- **`UPDATE OF` triggers are folded, and their columns are compared, not just accepted.** `CREATE_SHAPE` accepts an `UPDATE OF <column list>` event inside the `OR` event list. The fold records the declared columns: names go through `ident()`, are sorted, and are compared as a set. The catalogue query (`scripts/local-stack/nonpublic-catalogue.sql`) adds a 7th trigger field with the trigger's `tgattr` column names, and `check()` reports `DIFFERS  auth.users trigger <name>: update-of columns lane=<x> declared=<y>` on any difference in either direction. tgtype is 17 for a plain `AFTER UPDATE` row trigger and for `AFTER UPDATE OF email` alike, so the column set is the only thing that tells them apart. A regex-only relaxation would have accepted column drift silently, which is why the entry was booked rather than patched.
+- **Refusals kept.** `WHEN`, `REFERENCING` and `CONSTRAINT` are still MEASURE_FAIL (exit 2). A 6-field catalogue trigger row is now an unrecognised line (MEASURE_FAIL), never read as "no columns". A declared column whose name contains a comma or pipe is refused at fold time.
+
+### Tests
+- `src/__tests__/local-stack-lane-wiring.test.ts`, the `nonpublic-objects.mjs — the auth.users trigger class (D-G)` block, goes from 8 to 20 arms, one `it(` each. Green: an exact `UPDATE OF` match that `--emit`s the statement's own bytes, column order not significant on either side, and mixed events with a quoted column. Red: four column-drift directions. MEASURE_FAIL: a 6-field row, `REFERENCING`, `CONSTRAINT`, and a comma in a column name. Each red and refusal arm was shown RED by neutering its code, then restored from a byte backup and checked with `cmp`.
+- The D-G wiring test now pins the catalogue's 7th-field expression (`unnest(t.tgattr::int2[])` joined to `pg_attribute`, `string_agg`, `coalesce(..., '')`). The join pin is anchored to the subquery's close, so a dead join (`WHERE false`, `AND false`, `attnum + 1`) goes RED (review SFH-01, two rounds). A lane row with its columns unsorted must still read OK (SFH-02).
+
+### Notes
+- **Proven on a real lane, not only on synthetic rows.** In a throwaway copy carrying the re-dump's `baseline.sql` and carried marker from `automation/baseline-redump`, `run.sh up` printed `auth-triggers=2` and `nonpublic-fidelity: auth-users-triggers=2/2 cron-jobs=15/15 drift=0 verdict OK`. The real catalogue rows read `...|17|O|public.sync_profile_email_from_auth()|email` and `...|5|O|public.handle_new_user()|`. Recreating the trigger as a plain `AFTER UPDATE` made `--check` exit 1 with `update-of columns lane=(none) declared=email`. On this release's own CI the 219 migration is still replayed, not folded, so CI exercises the new fold only through the unit arms until #1294 lands.
+- **Closed and deleted from `TODOS.md`:** `[219-EXTRACTOR-UPDATE-OF]`.
+- Review survivors (LOW and INFO only) stay in the phase's `REVIEW.md`. One is a pre-existing gap: `check()` does not compare a lane trigger's `WHEN` qualifier, arguments or deferrable flag, so the WHEN/REFERENCING/CONSTRAINT refusals apply only to the declared side.
+- The `run.sh --assert-local-handoff refuses a non-loopback handoff` arm (Phase 164.9.4, unchanged here) spawns `run.sh` about ten times and timed out at vitest's 5 s default under local load in some runs. This is pre-existing and not caused by this phase.
+
 ## [0.133.54.1] - 2026-11-20 — records: book 220 EXTRACTOR
 
 Planning-only release: books Phase 220 EXTRACTOR. No code changes.

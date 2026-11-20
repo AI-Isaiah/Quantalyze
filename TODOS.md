@@ -232,14 +232,6 @@ founder can take.
 
 ## 🟡 FIX MID-TERM
 
-- [ ] **`[219-EXTRACTOR-UPDATE-OF]` The local-stack non-public extractor refuses `AFTER UPDATE OF email ON auth.users`, so the first baseline re-dump that carries the Phase 219 migration makes every lane boot FATAL** (logged 2026-11-19, Phase 219 ACCOUNTEMAIL plan 03; MEDIUM, CI integrity: it blocks every local-stack lane boot)
-  - **What:** `scripts/local-stack/nonpublic-objects.mjs` folds `auth.users` trigger DDL from CARRIED migrations, and its `CREATE_SHAPE` refuses `UPDATE OF` (MEASURE_FAIL, exit 2). `20261119120000_sync_profile_email_from_auth.sql` creates `on_auth_user_email_updated` as `AFTER UPDATE OF email ON auth.users` (D-06, locked).
-  - **Why open:** today the migration is newer than the dump and is replayed (`node scripts/check-baseline-currency.mjs --replay-set` names it on its `baseline-replay:` line), so nothing is red. The first baseline re-dump that carries it makes every lane job FATAL at boot: `sql-tests`, `frontend-local-stack`, `frontend-live-db-lane`, `python` and `e2e-seeded`. The fix is not small: it touches `CREATE_SHAPE`, the fold record, the trigger row format of `nonpublic-catalogue.sql` (a new tgattr column), `check()`'s parse and comparison, and the red and green cases in `src/__tests__/local-stack-lane-wiring.test.ts`, which is the fidelity gate every lane boot runs. A regex-only relaxation would silently accept column drift, so it is booked rather than patched.
-  - **Fix direction:** accept `UPDATE OF <column list>` in `CREATE_SHAPE`; record the columns in the fold; add the trigger's tgattr column names to the `nonpublic-catalogue.sql` trigger row and parse them in `check()`; compare them so column drift is a finding. `WHEN`, `REFERENCING` and `CONSTRAINT` stay refused.
-  - **Gate:** a red case (the catalogue's columns differ from the declared ones) and a green case, in the existing `nonpublic-objects.mjs — the auth.users trigger class (D-G)` block of `src/__tests__/local-stack-lane-wiring.test.ts`.
-  - **Owner:** the phase that re-dumps `supabase/schema/baseline.sql` after `20261119120000` applies to PROD, the same re-dump that clears the `sync_profile_email_from_auth` NAME_SET_RATCHET row in `scripts/dump-sql-functions.ts`.
-  - **Trigger:** that re-dump, which must not land before the fix.
-
 - [ ] **`[212-CONTACT-SUPPORT-SURVIVORS]` The SQL error copy and five Python strings still say "contact support", a channel that does not exist** (logged 2026-11-14, Phase 212 WIZTRUTH ship; user-facing)
   - **What:** Phase 212 replaced every in-app "contact support" pointer in `src` with the contact form. Two places sit outside that census:
     the `computation_error_copy` arms in `supabase/schema/functions/computation_error_copy.sql` (the permanent, transient, unknown and ELSE arms),

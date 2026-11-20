@@ -21,8 +21,14 @@ SELECT 'meta|database|' || current_database();
 
 -- Every NON-internal trigger on auth.users (internal ones are the FK/constraint
 -- machinery PostgreSQL creates itself; no migration declares them).
+-- Seven `|` fields: trigger|table|name|tgtype|tgenabled|function|columns. The 7th is the
+-- `UPDATE OF` column list (tgattr, as attnames, comma-joined), EMPTY for a trigger with
+-- none. tgtype alone cannot tell AFTER UPDATE from AFTER UPDATE OF email (both 17).
 SELECT 'trigger|' || c.relname || '|' || t.tgname || '|' || t.tgtype::text || '|' || t.tgenabled::text
        || '|' || t.tgfoid::regprocedure::text
+       || '|' || coalesce((SELECT string_agg(a.attname::text, ',' ORDER BY a.attname)
+                             FROM unnest(t.tgattr::int2[]) AS u(attnum)
+                             JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = u.attnum), '')
   FROM pg_trigger t
   JOIN pg_class c ON c.oid = t.tgrelid
   JOIN pg_namespace n ON n.oid = c.relnamespace

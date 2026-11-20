@@ -712,7 +712,7 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     const TRIGGER_SQL =
       "CREATE TRIGGER on_signup\n  AFTER INSERT ON auth.users\n  FOR EACH ROW EXECUTE FUNCTION handle_signup();\n";
     const META = NONPUBLIC_META;
-    const TRIGGER_ROW = "trigger|users|on_signup|5|O|public.handle_signup()";
+    const TRIGGER_ROW = "trigger|users|on_signup|5|O|public.handle_signup()|";
     const A = "20260101000000_a.sql";
     const B = "20260102000000_b.sql";
 
@@ -726,6 +726,18 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       );
     });
 
+    it("OK on an exact UPDATE OF column match, and --emit writes the UPDATE OF statement's own bytes", () => {
+      const sql =
+        "CREATE TRIGGER on_email_change\n  AFTER UPDATE OF email ON auth.users\n  FOR EACH ROW EXECUTE FUNCTION sync_email();\n";
+      const r = gate({ [A]: sql }, [A], [...META, "trigger|users|on_email_change|17|O|public.sync_email()|email"]);
+      expect(r.status, `an exact UPDATE OF trigger was refused or drifted:\n${r.out}`).toBe(0);
+      expect(r.out).toMatch(/^nonpublic-fidelity: auth-users-triggers=1\/1 cron-jobs=0\/0 drift=0 verdict OK$/m);
+      expect(r.emitted.out).toContain(`auth-triggers=1 (on_email_change<-${A})`);
+      expect(r.emittedSql, "the emitted SQL is not the UPDATE OF statement's own bytes").toBe(
+        `SET search_path TO public;\n${sql.trimEnd()}\n`,
+      );
+    });
+
     it("DRIFT naming MISSING when the lane lacks a declared trigger", () => {
       const r = gate({ [A]: TRIGGER_SQL }, [A], META);
       expect(r.status, `the gate passed a lane with NO auth.users trigger:\n${r.out}`).toBe(1);
@@ -733,7 +745,7 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     });
 
     it("DRIFT naming EXTRA for a trigger no carried migration declares", () => {
-      const r = gate({ [A]: TRIGGER_SQL }, [A], [...META, TRIGGER_ROW, "trigger|users|undeclared|5|O|public.x()"]);
+      const r = gate({ [A]: TRIGGER_SQL }, [A], [...META, TRIGGER_ROW, "trigger|users|undeclared|5|O|public.x()|"]);
       expect(r.status, `an undeclared auth.users trigger passed the gate:\n${r.out}`).toBe(1);
       expect(r.out).toContain("EXTRA    auth.users trigger undeclared");
     });
@@ -764,6 +776,91 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       expect(r.status, `a WHEN-clause trigger was folded instead of refused:\n${r.out}`).toBe(2);
       expect(r.out).toMatch(/verdict MEASURE_FAIL$/m);
       expect(r.out).toContain(`${A} statement 1`);
+    });
+
+    // ⭐ Phase 220 EXTRACTOR: `UPDATE OF <columns>` is folded and its columns are COMPARED.
+    // tgtype is 17 for a plain AFTER UPDATE and AFTER UPDATE OF email alike, so the 7th
+    // catalogue field is the only thing that tells a widened or narrowed trigger apart.
+    const UPDATE_OF_SQL = (cols: string) =>
+      `CREATE TRIGGER on_email_change\n  AFTER UPDATE OF ${cols} ON auth.users\n  FOR EACH ROW EXECUTE FUNCTION sync_email();\n`;
+    const UPDATE_OF_ROW = (cols: string) => `trigger|users|on_email_change|17|O|public.sync_email()|${cols}`;
+
+    it("DRIFT when the lane's UPDATE OF columns differ from the declared ones (name vs email)", () => {
+      const r = gate({ [A]: UPDATE_OF_SQL("email") }, [A], [...META, UPDATE_OF_ROW("name")]);
+      expect(r.status, `column drift passed the gate:\n${r.out}`).toBe(1);
+      expect(r.out).toContain("DIFFERS  auth.users trigger on_email_change: update-of columns lane=name declared=email");
+    });
+
+    it("OK when the lane lists its UPDATE OF columns unsorted (phone,email against declared email, phone)", () => {
+      const r = gate({ [A]: UPDATE_OF_SQL("email, phone") }, [A], [...META, UPDATE_OF_ROW("phone,email")]);
+      expect(
+        r.status,
+        `a lane column order the SQL does not sort was read as drift — the lane-side re-sort in parseCatalogue is gone:\n${r.out}`,
+      ).toBe(0);
+      expect(r.out).toMatch(/^nonpublic-fidelity: auth-users-triggers=1\/1 cron-jobs=0\/0 drift=0 verdict OK$/m);
+    });
+
+    it("DRIFT when a declared plain AFTER UPDATE has UPDATE OF columns on the lane (widened the other way)", () => {
+      const plain = "CREATE TRIGGER on_email_change AFTER UPDATE ON auth.users FOR EACH ROW EXECUTE FUNCTION sync_email();\n";
+      const r = gate({ [A]: plain }, [A], [...META, UPDATE_OF_ROW("email")]);
+      expect(r.status, `a lane trigger narrowed to columns passed against a plain declaration:\n${r.out}`).toBe(1);
+      expect(r.out).toContain("update-of columns lane=email declared=(none)");
+    });
+
+    it("DRIFT when a declared UPDATE OF has no columns on the lane (a plain AFTER UPDATE there)", () => {
+      const r = gate({ [A]: UPDATE_OF_SQL("email") }, [A], [...META, UPDATE_OF_ROW("")]);
+      expect(r.status, `a plain AFTER UPDATE on the lane passed against UPDATE OF email:\n${r.out}`).toBe(1);
+      expect(r.out).toContain("update-of columns lane=(none) declared=email");
+    });
+
+    it("DRIFT when the lane's UPDATE OF list is NARROWED against the declared set", () => {
+      const r = gate({ [A]: UPDATE_OF_SQL("email, phone") }, [A], [...META, UPDATE_OF_ROW("email")]);
+      expect(r.status, `a narrowed column set passed the gate:\n${r.out}`).toBe(1);
+      expect(r.out).toContain("update-of columns lane=email declared=email,phone");
+    });
+
+    it("OK when the declared and lane UPDATE OF sets are equal in a different order", () => {
+      const r = gate({ [A]: UPDATE_OF_SQL("phone, email") }, [A], [...META, UPDATE_OF_ROW("email,phone")]);
+      expect(r.status, `column ORDER was read as drift:\n${r.out}`).toBe(0);
+      expect(r.out).toMatch(/verdict OK$/m);
+    });
+
+    it("OK on a mixed event list with a quoted UPDATE OF column, case kept and tgtype from bare keywords", () => {
+      const mixed =
+        'CREATE TRIGGER on_mixed BEFORE INSERT OR UPDATE OF "Email", phone OR DELETE ON auth.users FOR EACH ROW EXECUTE FUNCTION f();\n';
+      // ROW 1 + BEFORE 2 + INSERT 4 + DELETE 8 + UPDATE 16 = 31
+      const r = gate({ [A]: mixed }, [A], [...META, "trigger|users|on_mixed|31|O|public.f()|Email,phone"]);
+      expect(r.status, `a mixed event list with a quoted column did not fold to its catalogue row:\n${r.out}`).toBe(0);
+      expect(r.out).toMatch(/verdict OK$/m);
+    });
+
+    it("MEASURE_FAIL on a 6-field trigger row, never read as 'no columns'", () => {
+      const r = gate({ [A]: TRIGGER_SQL }, [A], [...META, "trigger|users|on_signup|5|O|public.handle_signup()"]);
+      expect(r.status, `a stale 6-field catalogue was accepted:\n${r.out}`).toBe(2);
+      expect(r.out).toContain("unrecognised catalogue line");
+    });
+
+    it("MEASURE_FAIL on a trigger carrying REFERENCING (a shape it cannot prove safe)", () => {
+      const ref =
+        "CREATE TRIGGER on_signup AFTER UPDATE ON auth.users REFERENCING NEW TABLE AS n FOR EACH STATEMENT EXECUTE FUNCTION handle_signup();\n";
+      const r = gate({ [A]: ref }, [A], [...META, TRIGGER_ROW]);
+      expect(r.status, `a REFERENCING trigger was folded instead of refused:\n${r.out}`).toBe(2);
+      expect(r.out).toMatch(/verdict MEASURE_FAIL$/m);
+      expect(r.out).toContain(`${A} statement 1`);
+    });
+
+    it("MEASURE_FAIL on a CONSTRAINT trigger, even one carrying UPDATE OF", () => {
+      const con =
+        "CREATE CONSTRAINT TRIGGER on_email_change AFTER UPDATE OF email ON auth.users FOR EACH ROW EXECUTE FUNCTION sync_email();\n";
+      const r = gate({ [A]: con }, [A], [...META, UPDATE_OF_ROW("email")]);
+      expect(r.status, `a CONSTRAINT trigger was folded instead of refused:\n${r.out}`).toBe(2);
+      expect(r.out).toMatch(/verdict MEASURE_FAIL$/m);
+    });
+
+    it("MEASURE_FAIL on a declared UPDATE OF column whose name carries a comma", () => {
+      const r = gate({ [A]: UPDATE_OF_SQL('"a,b"') }, [A], [...META, UPDATE_OF_ROW("a,b")]);
+      expect(r.status, `an UPDATE OF column the catalogue field cannot represent was folded:\n${r.out}`).toBe(2);
+      expect(r.out).toMatch(/verdict MEASURE_FAIL$/m);
     });
 
     it("MEASURE_FAIL on a catalogue read by a non-superuser (meta|superuser|f)", () => {
@@ -870,6 +967,25 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       .join("\n");
     expect(sqlLive, "the catalogue no longer reads cron.job").toMatch(/\bFROM cron\.job\b/);
     expect(sqlLive, "the catalogue no longer excludes internal triggers").toContain("NOT t.tgisinternal");
+    // ⭐ Phase 220 (SFH-01): the 7th field. tgtype is 17 for a plain AFTER UPDATE and for an
+    // AFTER UPDATE OF email trigger alike, so this field is the ONLY thing that tells them
+    // apart. Every unit arm feeds a hand-written row, so without these pins an SQL that emits
+    // an always-empty 7th field would stay green and a narrowed lane trigger would pass OK.
+    expect(sqlLive, "the catalogue's 7th field no longer reads the trigger's UPDATE OF columns from t.tgattr").toMatch(/\bunnest\(t\.tgattr\b/);
+    // The join is anchored at BOTH ends: the subquery must run straight from the unnest into the
+    // join and close right after it, so a trailing `WHERE false`, `AND false` or `attnum + 1`
+    // (a dead expression that keeps the pinned text but empties or skews the field) cannot slip by.
+    expect(sqlLive, "the catalogue's 7th field no longer selects FROM the unnest of t.tgattr straight into the pg_attribute join").toMatch(
+      /FROM unnest\(t\.tgattr::int2\[\]\) AS u\(attnum\)\s+JOIN pg_attribute/,
+    );
+    expect(sqlLive, "the catalogue's 7th field no longer resolves tgattr numbers to column names through pg_attribute, or carries a filter after the join that can empty it").toMatch(
+      /JOIN pg_attribute a ON a\.attrelid = t\.tgrelid AND a\.attnum = u\.attnum\), ''\)/,
+    );
+    expect(sqlLive, "the catalogue's 7th field no longer joins the columns with string_agg").toContain("string_agg(a.attname::text, ','");
+    expect(
+      sqlLive,
+      "the catalogue's 7th field has no coalesce(..., '') empty default — a trigger with no UPDATE OF columns would null the whole row concatenation, the row would print as a blank line the gate skips, and the declared trigger would then read as MISSING",
+    ).toMatch(/coalesce\(\(SELECT string_agg\([\s\S]*?\),\s*''\)\s*\n\s*FROM pg_trigger/);
     const migText = readdirSync(REPO_ROOT + "supabase/migrations")
       .filter((f) => f.endsWith(".sql"))
       .map((f) => read(`supabase/migrations/${f}`))
