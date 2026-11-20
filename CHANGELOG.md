@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.133.60.3] - 2026-11-20 — records: 219 ACCOUNTEMAIL shipped, UAT pending
+
+Records PR for Phase 219, whose code is on `main` as #1291 (v0.133.53.0, plans 01-03, squash d4f93d474) and #1299 (v0.133.60.0, gap plans 04-09, squash b87eb7c07, migration applied to TEST and PROD), with the re-dump #1301. It carries the phase artifacts and marks the phase shipped with the founder's live re-test still owed. It does not close the phase. No source, test or migration change.
+
+### Added
+- **Phase artifacts for 219** under `.planning/phases/`, from the gap branch, which holds the full set: context (with the gap decisions), discussion log, research, patterns, UI spec, validation, nine plans and their summaries, review (original review and gap review, each converged after two rounds with no open MEDIUM or higher) and verification. The VERIFICATION is `human_needed` with `verified_at_sha` and `drift_subjects`, and has no `covered_*` keys.
+- **VERIFICATION post-deploy record (2026-11-20):** the GD-06b after-deploy flip is done. Supabase Auth on PROD now reads Secure email change off (`mailer_secure_email_change_enabled` false) and Secure password change on (`security_update_password_require_reauthentication` true); Confirm email stays on (`mailer_autoconfirm` false). Values were read back after the Management API write. No human item is ticked.
+
+### Changed
+- **ROADMAP:** the TBD stub is replaced by the nine plan rows (three original plans in two waves, six gap plans in three waves), `**Plans:** 9/9 plans executed`, and the Progress row reads `9/9 | In Progress (shipped v0.133.53.0 and v0.133.60.0; post-deploy UAT pending)`. The overview bullet stays unticked.
+- **STATE and `state.json`:** 219 is `in_progress`; progress is 14 of 18 phases, 92 of 92 plans, 78%. Edited by hand. `phase complete` was not run, because the VERIFICATION is `human_needed` and complete means VERIFICATION passed.
+- VERSION and package.json 0.133.60.2 → 0.133.60.3.
+
+### Notes
+- **Open human item:** the founder's live re-test of the one-link, password-gated email change. The VERIFICATION's human list carries it and the other live-service checks.
+- **Known limit, accepted by the founder (GD-06a):** the password gate guards the app's form only. Auth's own `PUT /user` still accepts an email change from any valid session token without a password, and with Secure email change off only the new address confirms.
+- **Known limit (GD-02, corrected):** the per-user limiter (5 per 60 s, no lockout) is the only brute-force bound, and users share the server's per-IP GoTrue sign-in budget.
+- Phase 219 has no SECURITY.md on either phase branch, so none is carried. The review records migration-reviewer and rls-policy-auditor clean on both migrations.
+- No `TODOS.md` entry is closed, so none is deleted.
+
 ## [0.133.60.2] - 2026-11-20 — delete the stale NAME_SET_RATCHET row for auth_user_has_password
 
 ### Fixed

@@ -281,7 +281,7 @@ Plans:
 | 216. CSVSTATUS | 1/1 | Complete | 2026-11-18 |
 | 217. SERVERRULE | 2/2 | Complete | 2026-11-18 |
 | 218. SELFHEAL | 4/4 | Complete    | 2026-11-20 |
-| 219. ACCOUNTEMAIL | 0/0 | Not started | - |
+| 219. ACCOUNTEMAIL | 9/9 | In Progress (shipped v0.133.53.0 and v0.133.60.0; post-deploy UAT pending) | - |
 | 220. EXTRACTOR | 0/0 | Not started | - |
 
 ### Requirement Coverage (v1.18)
@@ -620,10 +620,27 @@ Plans:
 **Goal:** A signed-in user can see which email their account uses and change it. The account or settings page shows the signed-in email, and a change goes through Supabase Auth's own confirm-by-email flow, never a direct write. Trigger: the founder's session 2026-11-19, where the founder could not tell which email to sign in with in a private window, because Quantalyze shows the account email nowhere and offers no way to change it. Founder decision 2026-11-19 ("Book a phase (Recommended)").
 **Requirements**: TBD
 **Depends on:** none (independent of the MT5 parity phases)
-**Plans:** 0 plans
+**Plans:** 9/9 plans executed
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 219-01-PLAN.md — `profiles.email` follows the Auth sign-in email: AFTER UPDATE OF email trigger (SECURITY DEFINER, sanitize skip), column REVOKE, rollback and an annotated SQL gate
+- [x] 219-02-PLAN.md — Account tab shows the signed-in email from `getUser()` and changes it through Supabase Auth's confirm-by-email flow, landing on `/auth/callback`
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 219-03-PLAN.md — census moves for plan 01's migration, function and gate (mutation floors, schema snapshot, vitest pins)
+
+**Gap closure, Wave 1** *(from the founder's live PROD test 2026-11-20)*
+- [x] 219-04-PLAN.md — service_role-only `auth_user_has_password(uuid)` SECURITY DEFINER function, rollback and annotated gate (GD-05a)
+- [x] 219-05-PLAN.md — the final confirmation link lands on the Account tab even when the PKCE flow state has expired (GD-03)
+- [x] 219-06-PLAN.md — `/api/account/email` route: per-user limiter, current-password check on a throwaway client, then `updateUser` with the email-change marker (GD-01, GD-02, GD-05a)
+
+**Gap closure, Wave 2** *(blocked on Gap closure Wave 1 completion)*
+- [x] 219-07-PLAN.md — Account tab form rebuilt around the password gate: password field, password-less message, single-link pending panel, done note from Auth only
+- [x] 219-08-PLAN.md — census moves for plan 04's function and gate
+
+**Gap closure, Wave 3** *(blocked on Gap closure Wave 2 completion)*
+- [x] 219-09-PLAN.md — `/reset-password` handles `reauthentication_needed` with an emailed code once Secure password change is ON (GD-07)
 
 ### Phase 220: EXTRACTOR — the baseline re-dump carrying the 219 migration can land and main goes green
 
