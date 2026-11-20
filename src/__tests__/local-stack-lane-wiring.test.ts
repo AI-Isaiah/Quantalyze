@@ -712,7 +712,7 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     const TRIGGER_SQL =
       "CREATE TRIGGER on_signup\n  AFTER INSERT ON auth.users\n  FOR EACH ROW EXECUTE FUNCTION handle_signup();\n";
     const META = NONPUBLIC_META;
-    const TRIGGER_ROW = "trigger|users|on_signup|5|O|public.handle_signup()";
+    const TRIGGER_ROW = "trigger|users|on_signup|5|O|public.handle_signup()|";
     const A = "20260101000000_a.sql";
     const B = "20260102000000_b.sql";
 
@@ -726,6 +726,18 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       );
     });
 
+    it("OK on an exact UPDATE OF column match, and --emit writes the UPDATE OF statement's own bytes", () => {
+      const sql =
+        "CREATE TRIGGER on_email_change\n  AFTER UPDATE OF email ON auth.users\n  FOR EACH ROW EXECUTE FUNCTION sync_email();\n";
+      const r = gate({ [A]: sql }, [A], [...META, "trigger|users|on_email_change|17|O|public.sync_email()|email"]);
+      expect(r.status, `an exact UPDATE OF trigger was refused or drifted:\n${r.out}`).toBe(0);
+      expect(r.out).toMatch(/^nonpublic-fidelity: auth-users-triggers=1\/1 cron-jobs=0\/0 drift=0 verdict OK$/m);
+      expect(r.emitted.out).toContain(`auth-triggers=1 (on_email_change<-${A})`);
+      expect(r.emittedSql, "the emitted SQL is not the UPDATE OF statement's own bytes").toBe(
+        `SET search_path TO public;\n${sql.trimEnd()}\n`,
+      );
+    });
+
     it("DRIFT naming MISSING when the lane lacks a declared trigger", () => {
       const r = gate({ [A]: TRIGGER_SQL }, [A], META);
       expect(r.status, `the gate passed a lane with NO auth.users trigger:\n${r.out}`).toBe(1);
@@ -733,7 +745,7 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
     });
 
     it("DRIFT naming EXTRA for a trigger no carried migration declares", () => {
-      const r = gate({ [A]: TRIGGER_SQL }, [A], [...META, TRIGGER_ROW, "trigger|users|undeclared|5|O|public.x()"]);
+      const r = gate({ [A]: TRIGGER_SQL }, [A], [...META, TRIGGER_ROW, "trigger|users|undeclared|5|O|public.x()|"]);
       expect(r.status, `an undeclared auth.users trigger passed the gate:\n${r.out}`).toBe(1);
       expect(r.out).toContain("EXTRA    auth.users trigger undeclared");
     });

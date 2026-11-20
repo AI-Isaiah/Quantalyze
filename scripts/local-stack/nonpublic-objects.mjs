@@ -156,9 +156,14 @@ const TRIGGER_HEAD = /\b(CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER|
 const AUTH_TRIGGER_DDL =
   /\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER|DROP\s+TRIGGER)\b[^;]*?\bON\s+(?:ONLY\s+)?"?auth"?\s*\.|\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?"?auth"?\s*\.[^;]*?\bTRIGGER\b/gi;
 const IDENT = String.raw`(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)`;
-const EVENT = String.raw`(?:INSERT|DELETE|UPDATE|TRUNCATE)`;
-// The ONE accepted CREATE shape. ⛔ No WHEN, no `UPDATE OF`, no REFERENCING, no
-// CONSTRAINT: anything the regex does not describe is MEASURE_FAIL, never folded.
+// One event item: a bare keyword, or `UPDATE OF <column list>` (IDENTs joined by commas).
+const EVENT = String.raw`(?:INSERT|DELETE|TRUNCATE|UPDATE(?:\s+OF\s+${IDENT}(?:\s*,\s*${IDENT})*)?)`;
+// Walks an event list CREATE_SHAPE already validated: group 1 the keyword, group 2 the UPDATE OF list.
+const EVENT_ITEM = new RegExp(String.raw`(INSERT|DELETE|TRUNCATE|UPDATE)(?:\s+OF\s+(${IDENT}(?:\s*,\s*${IDENT})*))?`, "gi");
+const IDENT_GLOBAL = new RegExp(IDENT, "g");
+// The ONE accepted CREATE shape. ⛔ No WHEN, no REFERENCING, no CONSTRAINT: anything
+// the regex does not describe is MEASURE_FAIL, never folded. `UPDATE OF` is accepted
+// only because its columns are folded and compared (the `columns` field).
 const CREATE_SHAPE = new RegExp(
   String.raw`^CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\s+(${IDENT})\s+(BEFORE|AFTER)\s+(${EVENT}(?:\s+OR\s+${EVENT})*)\s+ON\s+(?:"auth"|auth)\s*\.\s*(?:"users"|users)\s+FOR\s+EACH\s+(ROW|STATEMENT)\s+EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+(${IDENT}(?:\s*\.\s*${IDENT})?)\s*\(\s*\)\s*$`,
   "i",
@@ -185,7 +190,7 @@ function tgtypeOf(timing, events, level) {
 
 /**
  * Fold every auth.users trigger over the carried files.
- * @returns {Map<string, {name, tgtype, fn, base, sql}>}
+ * @returns {Map<string, {name, tgtype, columns, fn, base, sql}>}
  */
 function foldAuthTriggers(files, lexed) {
   const fold = new Map();
@@ -225,14 +230,29 @@ function foldAuthTriggers(files, lexed) {
         continue;
       }
       const c = CREATE_SHAPE.exec(stmt);
-      if (!c) measureFail(`${at}: a CREATE TRIGGER shape this module does not parse (WHEN, UPDATE OF, REFERENCING and CONSTRAINT are refused)`);
+      if (!c) measureFail(`${at}: a CREATE TRIGGER shape this module does not parse (WHEN, REFERENCING and CONSTRAINT are refused)`);
       const name = ident(c[2]);
       if (fold.has(name) && !c[1]) measureFail(`${at}: CREATE TRIGGER ${name} of a name an earlier carried migration already created`);
-      const events = c[4].toUpperCase().split(/\s+OR\s+/);
+      // Scan the event list token by token from the ORIGINAL-case capture: a quoted column
+      // keeps its case, and a comma or the word OR can sit inside a quoted name, so the
+      // list is never split on either.
+      const events = [];
+      const cols = [];
+      EVENT_ITEM.lastIndex = 0;
+      for (let e; (e = EVENT_ITEM.exec(c[4])) !== null; ) {
+        events.push(e[1].toUpperCase());
+        if (e[2] !== undefined) for (const col of e[2].match(IDENT_GLOBAL)) cols.push(ident(col));
+      }
+      for (const col of cols) {
+        if (/[,|]/.test(col)) {
+          measureFail(`${at}: UPDATE OF column ${JSON.stringify(col)} contains a comma or pipe, which the catalogue's comma-joined column field cannot represent unambiguously`);
+        }
+      }
       const fnParts = c[6].split(/\s*\.\s*/).map(ident);
       fold.set(name, {
         name,
         tgtype: tgtypeOf(c[3].toUpperCase(), events, c[5].toUpperCase()),
+        columns: [...cols].sort().join(","),
         fn: `${fnParts.length === 2 ? fnParts.join(".") : `public.${fnParts[0]}`}()`,
         base,
         sql: src.slice(m.index, end),
@@ -464,9 +484,12 @@ function parseCatalogue(text) {
     if (f[0] === "meta" && f.length === 3) {
       if (meta.has(f[1])) measureFail(`the catalogue carries meta|${f[1]} twice`);
       meta.set(f[1], f[2]);
-    } else if (f[0] === "trigger" && f.length === 6 && f[1] === "users" && /^\d+$/.test(f[3])) {
+    } else if (f[0] === "trigger" && f.length === 7 && f[1] === "users" && /^\d+$/.test(f[3]) && (f[6] === "" || f[6].split(",").every((n) => n !== ""))) {
       if (triggers.has(f[2])) measureFail(`the catalogue lists auth.users trigger ${f[2]} twice`);
-      triggers.set(f[2], { name: f[2], tgtype: Number(f[3]), enabled: f[4], fn: f[5] });
+      // Field 7 is the UPDATE OF column list ("" = none). Re-sorted here so the SQL
+      // collation's order can never read as a mismatch, or as a match.
+      const columns = f[6] === "" ? "" : f[6].split(",").sort().join(",");
+      triggers.set(f[2], { name: f[2], tgtype: Number(f[3]), enabled: f[4], fn: f[5], columns });
     } else if (f[0] === "cron" && f.length === 7 && [f[1], f[2], f[6]].every(isHex) && /^[tf]$/.test(f[3])) {
       // Free-text fields are hex-encoded by the catalogue SQL: commands carry newlines and `|`.
       cron.push({ name: unhex(f[1]), schedule: unhex(f[2]), active: f[3], username: f[4], database: f[5], command: unhex(f[6]) });
@@ -515,6 +538,10 @@ function check() {
     if (got.tgtype !== d.tgtype) findings.push(`DIFFERS  auth.users trigger ${d.name}: tgtype lane=${got.tgtype} declared=${d.tgtype}`);
     if (got.enabled !== "O") findings.push(`DIFFERS  auth.users trigger ${d.name}: tgenabled lane=${got.enabled} declared=O`);
     if (got.fn !== d.fn) findings.push(`DIFFERS  auth.users trigger ${d.name}: function lane=${got.fn} declared=${d.fn}`);
+    // tgtype is 17 for a plain AFTER UPDATE and for AFTER UPDATE OF email alike: the column set is the only thing that tells them apart.
+    if (got.columns !== d.columns) {
+      findings.push(`DIFFERS  auth.users trigger ${d.name}: update-of columns lane=${got.columns || "(none)"} declared=${d.columns || "(none)"}`);
+    }
   }
   for (const got of cat.triggers.values()) {
     if (!declared.has(got.name)) findings.push(`EXTRA    auth.users trigger ${got.name} (on the lane, declared by no carried migration)`);
