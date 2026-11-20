@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155, 155.1 and 207-217 complete; 155.2, 157, 218, 219 and 220 open)
+current_phase_name: parallel phases (155, 155.1, 207-217 and 218 complete; 155.2, 157, 219 and 220 open)
 status: executing
-stopped_at: Phase 155.1 complete after the founder session; 218 and 219 booked
-last_updated: "2026-11-19T13:51:38.533Z"
-last_activity: 2026-11-19
-last_activity_desc: Founder session; Phase 155.1 complete; 218 SELFHEAL and 219 ACCOUNTEMAIL booked
-state_head: efb535683b1baf1b39a103439fd32691d7a9ff0c
+stopped_at: Phase 218 complete (shipped as #1293)
+last_updated: "2026-11-20T16:43:37.779Z"
+last_activity: 2026-11-20
+last_activity_desc: Phase 218 SELFHEAL complete (#1293 merged as 294ab9848)
+state_head: 294ab98481905c31253436e735ae08f2e7324395
 progress:
-  total_phases: 17
-  completed_phases: 13
-  total_plans: 79
-  completed_plans: 79
-  percent: 76
+  total_phases: 18
+  completed_phases: 14
+  total_plans: 83
+  completed_plans: 83
+  percent: 78
 ---
 
 ## ⭐ STATE lineage
@@ -175,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 155 PARITYHARNESS, 155.1 SERVERCLOCK and 207 RETRYPROP through 217 SERVERRULE complete
+Phase: parallel — 155 PARITYHARNESS, 155.1 SERVERCLOCK, 207 RETRYPROP through 217 SERVERRULE and 218 SELFHEAL complete
 Plan: per phase (see each phase directory)
-Status: the founder's trading-day session ran 2026-11-19: 155.1 UAT items 5 and 6 passed and 155.1 closed (MT5-06 complete); 155.2 LIVEPARITY terminal readings and classic All-History Reports for MM2, MM3 and FX-AI_V are captured in the gitignored capture directory, still owing the weekend reading and broker statements; 157 FOUNDER-CONFIRM FCONF-01 observed (silent same-browser resume accepted by the founder, banner shown in a fresh browser), FCONF-02/03 and the FCONF-04 rotation still open; 218 SELFHEAL and 219 ACCOUNTEMAIL booked from the session
-Last activity: 2026-11-19 — founder session; Phase 155.1 closed; 218 SELFHEAL and 219 ACCOUNTEMAIL booked
-Progress: [████████░░] 76%
+Status: the founder's trading-day session ran 2026-11-19: 155.1 UAT items 5 and 6 passed and 155.1 closed (MT5-06 complete); 155.2 LIVEPARITY terminal readings and classic All-History Reports for MM2, MM3 and FX-AI_V are captured in the gitignored capture directory, still owing the weekend reading and broker statements; 157 FOUNDER-CONFIRM FCONF-01 observed (silent same-browser resume accepted by the founder, banner shown in a fresh browser), FCONF-02/03 and the FCONF-04 rotation still open; 218 SELFHEAL and 219 ACCOUNTEMAIL booked from the session; 218 SELFHEAL shipped as #1293 (v0.133.58.0) and closed 2026-11-20
+Last activity: 2026-11-20 — Phase 218 SELFHEAL complete (#1293 merged as 294ab9848)
+Progress: [████████░░] 78%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1812,7 +1812,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-14T07:30:26.000Z
-**Stopped At:** Founder session 2026-11-19; Phase 155.1 complete; 218 and 219 booked
+**Stopped At:** Phase 218 SELFHEAL complete (#1293 merged as 294ab9848)
 **Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z
