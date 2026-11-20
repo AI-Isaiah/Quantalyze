@@ -1689,6 +1689,25 @@ COMMENT ON FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid",
 
 
 
+CREATE OR REPLACE FUNCTION "public"."auth_user_has_password"("p_user_id" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+  SELECT EXISTS (
+    SELECT 1
+      FROM auth.users u
+     WHERE u.id = p_user_id AND u.encrypted_password IS NOT NULL AND u.encrypted_password <> ''
+  );
+$$;
+
+
+ALTER FUNCTION "public"."auth_user_has_password"("p_user_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."auth_user_has_password"("p_user_id" "uuid") IS 'Phase 219 ACCOUNTEMAIL (GD-05a). One boolean about one auth user id: true when a password is set, false when it is empty, unset or the id is unknown. Never NULL, never exposes the hash. Runs with its owner''s rights and a pinned search_path; EXECUTE is held by service_role only.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."backfill_api_keys_history_reconstructed_at"() RETURNS integer
     LANGUAGE "sql"
     SET "search_path" TO 'public', 'pg_catalog'
@@ -17989,6 +18008,11 @@ GRANT ALL ON FUNCTION "public"."api_key_cooldown_remaining"("p_api_key_id" "uuid
 
 REVOKE ALL ON FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."auth_user_has_password"("p_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."auth_user_has_password"("p_user_id" "uuid") TO "service_role";
 
 
 
