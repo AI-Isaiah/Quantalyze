@@ -6018,11 +6018,16 @@ class TestAllocatorBookIsScoredOnDailyReturnsFromTheStoredCurve:
         seen, closes_mock = await _score_with_spies(ctx, universe, None)
         port = seen["score"]["portfolio_returns"]
 
-        days = ["2026-02-02", "2026-02-03", "2026-02-04"]
-        for sid, want in (("S1", [0.01, -0.02, 0.03]), ("S2", [0.02, 0.0, -0.01])):
+        # G3-1 (a): day 0 is the first level against the implicit 1.0 base. These fixtures
+        # store 1 + 0.0 there, so day 0 = 1.0 / 1 - 1 = 0.0 on 2026-02-01.
+        days = ["2026-02-01", "2026-02-02", "2026-02-03", "2026-02-04"]
+        for sid, want in (
+            ("S1", [0.0, 0.01, -0.02, 0.03]),
+            ("S2", [0.0, 0.02, 0.0, -0.01]),
+        ):
             got = port[sid]
             assert [d.strftime("%Y-%m-%d") for d in got.index] == days, (
-                "day 0 has no stored predecessor and must not appear"
+                "the stored curve's day 0 (w0 - 1) must appear (G3-1 (a))"
             )
             assert list(got.values) == pytest.approx(want, abs=1e-12), (
                 f"{sid}: the engine must be handed daily returns, not curve levels near 1.0"
@@ -6095,9 +6100,10 @@ class TestCandidateUniverseIsScoredOnDailyReturnsFromTheStoredCurve:
         }
         seen, _ = await _score_with_spies(ctx, universe, None)
         cand = seen["score"]["candidate_returns"]
-        assert list(cand["c-curve"].values) == pytest.approx([0.01, -0.02, 0.03], abs=1e-12)
+        # G3-1 (a): day 0 = 1.0 / 1 - 1 = 0.0 on 2026-02-01, then 0.01, -0.02, 0.03.
+        assert list(cand["c-curve"].values) == pytest.approx([0.0, 0.01, -0.02, 0.03], abs=1e-12)
         assert [d.strftime("%Y-%m-%d") for d in cand["c-curve"].index] == [
-            "2026-02-02", "2026-02-03", "2026-02-04",
+            "2026-02-01", "2026-02-02", "2026-02-03", "2026-02-04",
         ]
         assert list(cand["c-direct"].values) == [0.5, -0.25]
 

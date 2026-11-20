@@ -44,9 +44,10 @@ import { NextRequest } from "next/server";
  * added from the composer's Browse drawer got `[]` and was warm-up-gated out of
  * the blend. R12-R18 pin the fix and the additive `series_state` discriminator:
  *   R12 — SC1: a returns_series-ONLY analytics row yields the real DIFFERENCED
- *         series (N−1 points, hand-computed literals) + series_state 'available'
+ *         series (N points since G3-1 (a), hand-computed literals, the first being
+ *         w0 - 1) + series_state 'available'
  *   R13 — SC3: a wealth index starting at exactly 1.0 is NEVER forwarded raw —
- *         day one is not ≈ +100%, and the length is N−1, not N
+ *         day one is not ≈ +100%, and every emitted value is a hand-computed return
  *   R14 — the analytics select is widened to carry returns_series +
  *         computation_status (the SC-1(route) mutation target)
  *   R15 — empty series + computation_status pending/computing → 'computing'
@@ -758,6 +759,7 @@ describe("GET /api/strategies/[id]/returns", () => {
   //
   // Oracle independence: the expected returns are hand-computed literals typed
   // here, NEVER re-derived by calling equityCurveToDailyReturns in the test.
+  //   1.0    / 1     − 1 =  0.00   (day 0 against the implicit 1.0 base, G3-1 (a))
   //   1.05   / 1.0   − 1 = +0.05
   //   0.945  / 1.05  − 1 = −0.10
   //   1.0395 / 0.945 − 1 = +0.10
@@ -768,7 +770,7 @@ describe("GET /api/strategies/[id]/returns", () => {
     { date: "2026-01-04", value: 1.0395 },
   ];
 
-  it("R12 — SC1: returns_series-ONLY analytics row → the real DIFFERENCED series (N−1) + series_state 'available'", async () => {
+  it("R12 — SC1: returns_series-ONLY analytics row → the real DIFFERENCED series (N, day 0 included) + series_state 'available'", async () => {
     STATE.analyticsRow = {
       daily_returns: null,
       returns_series: WEALTH_INDEX,
@@ -778,14 +780,18 @@ describe("GET /api/strategies/[id]/returns", () => {
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
     expect(res.status).toBe(200);
     const body = await res.json();
-    // Differencing consumes the first point: N wealth values → N−1 returns.
-    // Asserted as N−1 of the fixture length, never a hard-coded day count.
-    expect(body.daily_returns).toHaveLength(WEALTH_INDEX.length - 1);
-    expect(body.daily_returns[0].value).toBeCloseTo(0.05, 10);
-    expect(body.daily_returns[1].value).toBeCloseTo(-0.1, 10);
-    expect(body.daily_returns[2].value).toBeCloseTo(0.1, 10);
-    // The date axis is the LATER date of each ratio (day one drops out).
+    // G3-1 (a): the stored curve is anchored at an implicit 1.0, so day 0 is read as
+    // w0 − 1 and N wealth values give N returns, the n observations the persisted
+    // factsheet Sharpe runs on. Asserted as N of the fixture length.
+    expect(body.daily_returns).toHaveLength(WEALTH_INDEX.length);
+    // 1.0 / 1 − 1 = 0.0 on 2026-01-01, then the three hand literals above.
+    expect(body.daily_returns[0].value).toBeCloseTo(0.0, 10);
+    expect(body.daily_returns[1].value).toBeCloseTo(0.05, 10);
+    expect(body.daily_returns[2].value).toBeCloseTo(-0.1, 10);
+    expect(body.daily_returns[3].value).toBeCloseTo(0.1, 10);
+    // The date axis is each level's own date: day 0 keeps the first stored date.
     expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-01-01",
       "2026-01-02",
       "2026-01-03",
       "2026-01-04",
@@ -794,15 +800,16 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(body.series_state).toBe("available");
   });
 
-  it("R12b — PRODUCTION shape (no 1.0 base row): N stored points → N−1 returns, day-one's return is UNRECOVERABLE", async () => {
+  it("R12b — PRODUCTION shape (no 1.0 base row): N stored points → N returns, day-one's return IS recovered", async () => {
     // The writer's first element is (1 + r_0) over the returns' own date index —
-    // it never prepends a 1.0 base row (metrics.py:654 cumprod; :1250-1257
-    // documents the day-0-exclusion semantics). WEALTH_INDEX above carries a
-    // test-convenience 1.0 anchor that makes ALL its returns recoverable; this
-    // companion drops it so the oracle pins what production data delivers:
-    // differencing recovers only N−1 returns, the return baked into element 0
-    // (+5% here) is permanently absent, and the derived series starts one day
-    // LATER than the stored curve.
+    // it never prepends a 1.0 base row (metrics.py cumprod). WEALTH_INDEX above
+    // carries a test-convenience 1.0 anchor; this companion drops it so the oracle
+    // pins what production data delivers. Before G3-1 (a) differencing recovered
+    // only N−1 returns and the +5% baked into element 0 was permanently absent;
+    // reading the first level against the implicit 1.0 base recovers it:
+    //   1.05   / 1     − 1 = +0.05   (day 0)
+    //   0.945  / 1.05  − 1 = −0.10
+    //   1.0395 / 0.945 − 1 = +0.10
     const PROD_WEALTH_INDEX = WEALTH_INDEX.slice(1); // head 1.05 = (1 + 0.05)
     STATE.analyticsRow = {
       daily_returns: null,
@@ -813,15 +820,13 @@ describe("GET /api/strategies/[id]/returns", () => {
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.daily_returns).toHaveLength(PROD_WEALTH_INDEX.length - 1);
-    expect(body.daily_returns[0].value).toBeCloseTo(-0.1, 10);
-    expect(body.daily_returns[1].value).toBeCloseTo(0.1, 10);
-    // Day one's +5% never surfaces as an emitted return.
-    for (const p of body.daily_returns as Array<{ value: number }>) {
-      expect(p.value).not.toBeCloseTo(0.05, 10);
-    }
-    // The date axis starts at the SECOND stored day (day one drops).
+    expect(body.daily_returns).toHaveLength(PROD_WEALTH_INDEX.length);
+    expect(body.daily_returns[0].value).toBeCloseTo(0.05, 10);
+    expect(body.daily_returns[1].value).toBeCloseTo(-0.1, 10);
+    expect(body.daily_returns[2].value).toBeCloseTo(0.1, 10);
+    // The date axis starts at the FIRST stored day: the record start is not shifted.
     expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-01-02",
       "2026-01-03",
       "2026-01-04",
     ]);
@@ -833,7 +838,7 @@ describe("GET /api/strategies/[id]/returns", () => {
     //   1.05 - 1.00 = +0.05 ; 0.95 - 1.05 = -0.10 ; 1.05 - 0.95 = +0.10
     // Read by ratio (the geometric default) the middle day would be
     // 0.95 / 1.05 - 1 = -0.0952..., a different number, so the two readings
-    // cannot be confused.
+    // cannot be confused. Day 0 (G3-1 (a)) = 1.00 - 1 = 0.0.
     STATE.analyticsRow = {
       daily_returns: null,
       returns_series: [
@@ -850,13 +855,15 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-01-01",
       "2026-01-02",
       "2026-01-03",
       "2026-01-04",
     ]);
-    expect(body.daily_returns[0].value).toBeCloseTo(0.05, 10);
-    expect(body.daily_returns[1].value).toBeCloseTo(-0.1, 10);
-    expect(body.daily_returns[2].value).toBeCloseTo(0.1, 10);
+    expect(body.daily_returns[0].value).toBeCloseTo(0.0, 10);
+    expect(body.daily_returns[1].value).toBeCloseTo(0.05, 10);
+    expect(body.daily_returns[2].value).toBeCloseTo(-0.1, 10);
+    expect(body.daily_returns[3].value).toBeCloseTo(0.1, 10);
     // The raw flags blob never ships.
     expect(JSON.stringify(body)).not.toContain("cumulative_method");
   });
@@ -878,8 +885,12 @@ describe("GET /api/strategies/[id]/returns", () => {
     // Day one is a return, not a wealth level: nowhere near +100%.
     expect(body.daily_returns[0].value).not.toBeCloseTo(1.0, 2);
     expect(Math.abs(body.daily_returns[0].value)).toBeLessThan(0.5);
-    // Raw forwarding would keep all N points; differencing yields N−1.
-    expect(body.daily_returns).not.toHaveLength(WEALTH_INDEX.length);
+    // Raw forwarding would emit the levels 1.0, 1.05, 0.945, 1.0395; the served values
+    // are the hand-computed returns 0.0, +0.05, −0.10, +0.10 instead (1.0 / 1 − 1,
+    // 1.05 / 1.0 − 1, 0.945 / 1.05 − 1, 1.0395 / 0.945 − 1). The length is N since
+    // G3-1 (a), so the length no longer tells a return from a level; the values do.
+    const served = (body.daily_returns as Array<{ value: number }>).map((p) => p.value);
+    [0.0, 0.05, -0.1, 0.1].forEach((want, i) => expect(served[i]).toBeCloseTo(want, 10));
     // And no emitted point is a wealth LEVEL (every |r| stays sub-100%).
     for (const p of body.daily_returns as Array<{ value: number }>) {
       expect(Math.abs(p.value)).toBeLessThan(1.0);
@@ -1362,11 +1373,17 @@ describe("GET /api/strategies/[id]/returns — 164.6.6.2 native-unit legs", () =
       data_quality_flags: { native_unit: "BTC" },
     };
     const body = await call();
-    expect(body.daily_returns_usd).toHaveLength(1);
-    expect(body.daily_returns_usd[0].date).toBe("2026-03-06");
+    // G3-1 (a): day 0 (03-02, 1.0 / 1 - 1 = 0.0) is the converter's interval anchor and
+    // is not priced, so 03-03 now is, over [03-02, 03-03] on closes 100 -> 100:
+    // (1 + 0.1) * (100 / 100) - 1 = 0.1.
+    expect(body.daily_returns_usd).toHaveLength(2);
+    expect(body.daily_returns_usd[0].date).toBe("2026-03-03");
     expect(body.daily_returns_usd[0].value).toBeCloseTo(0.1, 12);
+    expect(body.daily_returns_usd[1].date).toBe("2026-03-06");
+    expect(body.daily_returns_usd[1].value).toBeCloseTo(0.1, 12);
     // The shipped native series carries no placeholder: absent days are deleted.
     expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-03-02",
       "2026-03-03",
       "2026-03-06",
     ]);

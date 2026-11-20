@@ -1900,11 +1900,14 @@ def _btc_native_records() -> list[dict]:
 
 
 # Hand-computed with the shared oracle's arithmetic, usd_k = (1 + r_k) * 1.1 - 1.
-# The stored curve loses day 0 at the boundary and the BTC conversion loses the
-# next day (no prior priced day), so the first converted BTC day is day 2:
+# G3-1 (a): the stored curve now reads day 0 (w0 - 1 against the implicit 1.0), the BTC
+# conversion drops it as the interval anchor (no prior priced day), so the first
+# converted BTC day is day 1:
 #   BTC account day 2: r = 0.11 -> 1.11 * 1.1 - 1 = 1.221 - 1 = 0.221
 #   BTC account day 3: r = 0.12 -> 1.12 * 1.1 - 1 = 1.232 - 1 = 0.232
-_C2, _C3 = 0.221, 0.232
+#   BTC account day 1 (G3-1 (a): day 0 is read, so day 1 is priced over [day 0, day 1]):
+#     r = 0.10 -> 1.10 * 1.1 - 1 = 1.21 - 1 = 0.21
+_C1, _C2, _C3 = 0.21, 0.221, 0.232
 
 
 async def _simulate(sa_portfolio, sa_candidate, ps_data, closes):
@@ -1948,16 +1951,20 @@ class TestBtcSeriesAreConvertedBeforeTheAddBlend:
             closes=_btc_closes_series(),
         )
         proposed = result["equity_curve_proposed"]
-        # The window starts at day 2 (USD returns: day 2 = 0.01, day 3 = 0.02).
-        # Route add weight 0.10: day 2 = 0.9 * 0.01 + 0.1 * 0.221 = 0.009 + 0.0221
-        # = 0.0311. The raw BTC return would give 0.9 * 0.01 + 0.1 * 0.11 = 0.020.
+        # The window starts at day 1 (USD returns: day 1 = 0.02, day 2 = 0.01, day 3 = 0.02).
+        # Route add weight 0.10: day 1 = 0.9 * 0.02 + 0.1 * 0.21 = 0.018 + 0.021 = 0.039.
+        # Day 2 = 0.9 * 0.01 + 0.1 * 0.221 = 0.009 + 0.0221 = 0.0311. The raw BTC return
+        # would give 0.9 * 0.01 + 0.1 * 0.11 = 0.020.
         # Day 3 = 0.9 * 0.02 + 0.1 * 0.232 = 0.018 + 0.0232 = 0.0412.
+        d1 = 0.9 * 0.02 + 0.1 * _C1
         d2 = 0.9 * 0.01 + 0.1 * _C2
         d3 = 0.9 * 0.02 + 0.1 * _C3
+        assert d1 == pytest.approx(0.039, abs=1e-12)
         assert d2 == pytest.approx(0.0311, abs=1e-12)
         assert d3 == pytest.approx(0.0412, abs=1e-12)
-        assert proposed[0]["value"] == pytest.approx(1 + d2, abs=1e-12)
-        assert proposed[1]["value"] == pytest.approx((1 + d2) * (1 + d3), abs=1e-12)
+        assert proposed[0]["value"] == pytest.approx(1 + d1, abs=1e-12)
+        assert proposed[1]["value"] == pytest.approx((1 + d1) * (1 + d2), abs=1e-12)
+        assert proposed[2]["value"] == pytest.approx((1 + d1) * (1 + d2) * (1 + d3), abs=1e-12)
         assert closes.await_count == 1
 
     @pytest.mark.asyncio
@@ -1977,10 +1984,10 @@ class TestBtcSeriesAreConvertedBeforeTheAddBlend:
             closes=_btc_closes_series(),
         )
         current = result["equity_curve_current"]
-        # current portfolio, 50/50, window starts at day 2 (the BTC leg's first
-        # converted day): 0.5 * 0.01 + 0.5 * 0.221 = 0.005 + 0.1105 = 0.1155
-        # (raw BTC would be 0.5 * 0.01 + 0.5 * 0.11 = 0.06).
-        assert current[0]["value"] == pytest.approx(1 + 0.1155, abs=1e-12)
+        # current portfolio, 50/50, window starts at day 1 (the BTC leg's first
+        # converted day, G3-1 (a)): 0.5 * 0.02 + 0.5 * 0.21 = 0.01 + 0.105 = 0.115
+        # (raw BTC would be 0.5 * 0.02 + 0.5 * 0.10 = 0.06).
+        assert current[0]["value"] == pytest.approx(1 + 0.115, abs=1e-12)
         assert closes.await_count == 1
 
     @pytest.mark.asyncio
@@ -1994,12 +2001,14 @@ class TestBtcSeriesAreConvertedBeforeTheAddBlend:
             closes=_btc_closes_series(),
         )
         closes.assert_not_awaited()
-        # Nothing converted, so the window starts at the boundary's day 1 (a BTC
-        # conversion would start a day later): day 1 = 0.9 * 0.02 + 0.1 * 0.02 =
-        # 0.02 -> 1.02; day 2 = 0.9 * 0.01 + 0.1 * 0.01 = 0.01 -> 1.02 * 1.01.
+        # Nothing converted, so the window starts at the boundary's day 0 (G3-1 (a): a
+        # BTC conversion would start a day later): day 0 = 0.9 * 0.0 + 0.1 * 0.0 = 0 ->
+        # 1.0; day 1 = 0.9 * 0.02 + 0.1 * 0.02 = 0.02 -> 1.02; day 2 = 0.9 * 0.01 +
+        # 0.1 * 0.01 = 0.01 -> 1.02 * 1.01 = 1.0302.
         proposed = result["equity_curve_proposed"]
-        assert proposed[0]["value"] == pytest.approx(1.02, abs=1e-12)
-        assert proposed[1]["value"] == pytest.approx(1.0302, abs=1e-12)
+        assert proposed[0]["value"] == pytest.approx(1.0, abs=1e-12)
+        assert proposed[1]["value"] == pytest.approx(1.02, abs=1e-12)
+        assert proposed[2]["value"] == pytest.approx(1.0302, abs=1e-12)
 
     @pytest.mark.asyncio
     async def test_a_btc_candidate_with_no_price_source_has_no_returns_history(self):
@@ -2068,10 +2077,11 @@ class TestSimulatorBlendsReturnsDerivedFromTheStoredCurve:
         spy.assert_called_once()
         kwargs = spy.call_args.kwargs
         # Hand-written: the curve is 1.0, 1.02, 1.0098, 1.040094 (day 0 return 0.0
-        # applied); the stored-adjacent ratios are days 1..3 = 0.02, -0.01, 0.03.
-        want = [0.02, -0.01, 0.03]
+        # applied). G3-1 (a): day 0 = 1.0 / 1 - 1 = 0.0 is read, and the stored-adjacent
+        # ratios are days 1..3 = 0.02, -0.01, 0.03.
+        want = [0.0, 0.02, -0.01, 0.03]
         for got in (kwargs["portfolio_returns"]["s-1"], kwargs["candidate_returns"]):
-            assert [d.strftime("%Y-%m-%d") for d in got.index] == self._DATES[1:]
+            assert [d.strftime("%Y-%m-%d") for d in got.index] == self._DATES
             assert list(got.to_numpy()) == pytest.approx(want, abs=1e-12)
             # A level (about 1.0) weighted as a return is the CR-01 defect.
             assert max(abs(v) for v in got) < 0.5

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
 import { convertNativeReturnsToUsd, isNativeLegUnpriced } from "./native-to-usd";
+import { resolveDailyReturnSeries } from "./resolve-series";
 
 /**
  * Phase 164.6.6.2 (D-18, D-22, D-23): the BTC-native -> USD return conversion.
@@ -222,5 +223,35 @@ describe("isNativeLegUnpriced: a native leg with a series that priced to nothing
   it("a native leg with no series, or one point (nothing to convert), is not 'unpriced'", () => {
     expect(isNativeLegUnpriced([], "BTC", [])).toBe(false);
     expect(isNativeLegUnpriced(series.slice(0, 1), "BTC", [])).toBe(false);
+  });
+});
+
+describe("G3-1 (a): a stored native curve's day 1 is now priced over [day 0, day 1]", () => {
+  it("NAV 1.05 -> 1.155 in BTC on closes 60000 -> 66000: day 1 is 0.21 in USD; day 0 is the interval anchor and is not priced", () => {
+    // Native returns through the row reader (keepAbsent, as every converting caller passes
+    // it): day 0 = 1.05 / 1 - 1 = 0.05 on 2026-01-01 (the curve is anchored at an implicit
+    // 1.0), day 1 = 1.155 / 1.05 - 1 = 0.10 on 2026-01-02. Before G3-1 (a) the curve read as
+    // ONE return (day 1) and the converter dropped it as its own first day, so this leg
+    // priced to nothing.
+    // USD: (1 + 0.10) * (66000 / 60000) - 1 = 1.1 * 1.1 - 1 = 0.21. Day 0 has no interval.
+    const native = resolveDailyReturnSeries(
+      null,
+      [
+        { date: "2026-01-01", value: 1.05 },
+        { date: "2026-01-02", value: 1.155 },
+      ],
+      "geometric",
+      true,
+    );
+    expect(native.map((p) => p.date)).toEqual(["2026-01-01", "2026-01-02"]);
+    const out = convertNativeReturnsToUsd(native, "BTC", {
+      prices: [
+        { date: "2026-01-01", close: 60000 },
+        { date: "2026-01-02", close: 66000 },
+      ],
+      dropped: [],
+    });
+    expect(out.map((p) => p.date)).toEqual(["2026-01-02"]);
+    expect(out[0].value).toBeCloseTo(0.21, 12);
   });
 });

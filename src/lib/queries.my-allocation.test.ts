@@ -3108,11 +3108,16 @@ describe("getMyAllocationDashboard — Phase 147 SCEN-01 series resolution", () 
         daily_returns: Array<{ date: string; value: number }>;
       }
     ).daily_returns;
-    expect(series).toHaveLength(3);
-    expect(series[0].value).toBeCloseTo(0.05, 10);
-    expect(series[1].value).toBeCloseTo(-0.1, 10);
-    expect(series[2].value).toBeCloseTo(0.1, 10);
+    // G3-1 (a): the stored curve is anchored at an implicit 1.0, so the 4 levels read as 4
+    // returns. By hand: 1.0 / 1 - 1 = 0.0, 1.05 / 1.0 - 1 = +0.05, 0.945 / 1.05 - 1 = -0.10,
+    // 1.0395 / 0.945 - 1 = +0.10.
+    expect(series).toHaveLength(4);
+    expect(series[0].value).toBeCloseTo(0.0, 10);
+    expect(series[1].value).toBeCloseTo(0.05, 10);
+    expect(series[2].value).toBeCloseTo(-0.1, 10);
+    expect(series[3].value).toBeCloseTo(0.1, 10);
     expect(series.map((p) => p.date)).toEqual([
+      "2026-01-01",
       "2026-01-02",
       "2026-01-03",
       "2026-01-04",
@@ -3164,9 +3169,11 @@ describe("getMyAllocationDashboard — Phase 147 SCEN-01 series resolution", () 
         daily_returns: Array<{ date: string; value: number }>;
       }
     ).daily_returns;
-    // A raw forward would be length 4 and open at the 1.0 wealth base.
-    expect(series).not.toHaveLength(4);
+    // A raw forward would open at the 1.0 wealth base and carry the levels 1.05, 0.945,
+    // 1.0395. The length is 4 either way since G3-1 (a), so the values tell them apart:
+    // the served series is the hand-computed 0.0, +0.05, -0.10, +0.10.
     expect(series[0].value).not.toBeCloseTo(1.0, 10);
+    [0.0, 0.05, -0.1, 0.1].forEach((want, i) => expect(series[i].value).toBeCloseTo(want, 10));
   });
 
   // -------------------------------------------------------------------------
@@ -5482,7 +5489,9 @@ describe("getMyAllocationDashboard — 164.6.6.2 BTC-native book rows convert to
     // Curve 1.0, 1.1, null, 1.2, 1.32 on 03-02..03-06; BTC closes 100, 100, 200,
     // 400, 400. 03-06's native return is 1.32 / 1.2 - 1 = 0.1 and BTC was flat that
     // day, so USD is (1 + 0.1) * (400 / 400) - 1 = 0.1. Priced across the gap
-    // (against 03-03, close 100) it was 1.1 * 4 - 1 = 3.4.
+    // (against 03-03, close 100) it was 1.1 * 4 - 1 = 3.4. G3-1 (a): day 0 (03-02) is the
+    // converter's interval anchor, so 03-03 is priced too, over [03-02, 03-03] on closes
+    // 100 -> 100: 1.1 * 1 - 1 = 0.1.
     btcCloses.read.mockResolvedValue({
       prices: [
         { date: "2026-03-02", close: 100 },
@@ -5508,7 +5517,10 @@ describe("getMyAllocationDashboard — 164.6.6.2 BTC-native book rows convert to
       },
     ]);
     const row = result.strategies.find((s) => s.strategy_id === "sc")!;
-    expect(seriesOf(row)).toEqual([{ date: "2026-03-06", value: expect.closeTo(0.1, 12) }]);
+    expect(seriesOf(row)).toEqual([
+      { date: "2026-03-03", value: expect.closeTo(0.1, 12) },
+      { date: "2026-03-06", value: expect.closeTo(0.1, 12) },
+    ]);
     expect((row.strategy as unknown as { series_state: unknown }).series_state).toBe("available");
   });
 

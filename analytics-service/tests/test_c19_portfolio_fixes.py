@@ -292,10 +292,12 @@ class TestAumCollectionC19:
             "total_aum collapsed to None because the $0 allocation was treated "
             "as NULL — AUM collection must use `is not None` (NEW-C19-06)"
         )
-        # Both legs return [0.02, 0.01]: the persisted curve is their blend, which
-        # shows this run really computed from the stored curve shape end to end.
+        # Both legs read as [d0 0.0, d1 0.02, d2 0.01] (G3-1 (a): the stored curve's day 0
+        # is its first level against the implicit 1.0 base, 1.0 / 1 - 1 = 0.0): the
+        # persisted curve is their blend, which shows this run really computed from the
+        # stored curve shape end to end. By hand: 1.0, 1.0 * 1.02 = 1.02, 1.02 * 1.01 = 1.0302.
         values = [pt["value"] for pt in update["portfolio_equity_curve"]]
-        assert values == pytest.approx([1.02, 1.02 * 1.01], abs=1e-12)
+        assert values == pytest.approx([1.0, 1.02, 1.0302], abs=1e-12)
 
     @pytest.mark.asyncio
     async def test_null_aum_is_still_excluded(self):

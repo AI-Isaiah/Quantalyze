@@ -273,12 +273,15 @@ describe("GET /api/og/factsheet/[id]", () => {
 
     expect(headlineCalls).toHaveLength(1);
     const { rows } = headlineCalls[0];
-    // Differencing consumes the first point: N wealth values → N−1 returns.
-    // Pre-147 this was [] (the gate never fired) — never a hard-coded count.
-    expect(rows).toHaveLength(WEALTH_INDEX.length - 1);
-    expect(rows[0].value).toBeCloseTo(0.05, 10);
-    expect(rows[1].value).toBeCloseTo(-0.1, 10);
-    expect(rows[2].value).toBeCloseTo(0.1, 10);
+    // G3-1 (a): the stored curve is anchored at an implicit 1.0, so N wealth values give
+    // N returns, day 0 included. Pre-147 this was [] (the gate never fired) — never a
+    // hard-coded count. By hand: 1.0 / 1 − 1 = 0.0, 1.05 / 1.0 − 1 = +0.05,
+    // 0.945 / 1.05 − 1 = −0.10, 1.0395 / 0.945 − 1 = +0.10.
+    expect(rows).toHaveLength(WEALTH_INDEX.length);
+    expect(rows[0].value).toBeCloseTo(0.0, 10);
+    expect(rows[1].value).toBeCloseTo(0.05, 10);
+    expect(rows[2].value).toBeCloseTo(-0.1, 10);
+    expect(rows[3].value).toBeCloseTo(0.1, 10);
     // The wealth LEVELS are never forwarded as if they were returns (a 1.0
     // level would read as a +100% day and inflate every headline metric).
     for (const r of rows) expect(Math.abs(r.value)).toBeLessThan(1.0);
@@ -286,12 +289,13 @@ describe("GET /api/og/factsheet/[id]", () => {
     expect(headlineCalls[0].assetClass).toBe("crypto");
   });
 
-  it("O1c — PRODUCTION shape (no 1.0 base row): differencing yields N−1 returns; day-one's return is UNRECOVERABLE", async () => {
+  it("O1c — PRODUCTION shape (no 1.0 base row): N stored points yield N returns; day-one's return IS recovered", async () => {
     // The analytics-service writer's first element is (1 + r_0) — it never
     // persists a 1.0 base row (metrics.py cumprod over the returns' own date
     // index; day-0-exclusion semantics). WEALTH_INDEX above is the anchored
     // test-convenience variant; this companion pins what production data
-    // actually delivers: N stored points → N−1 returns, day one absent.
+    // actually delivers: N stored points → N returns (G3-1 (a)), day one recovered
+    // as 1.05 / 1 − 1 = +0.05.
     const PROD_WEALTH_INDEX = WEALTH_INDEX.slice(1); // head 1.05 = (1 + 0.05)
     STATE.strategyRow!.strategy_analytics = [
       { daily_returns: null, returns_series: PROD_WEALTH_INDEX , computation_status: "complete" },
@@ -301,11 +305,10 @@ describe("GET /api/og/factsheet/[id]", () => {
 
     expect(headlineCalls).toHaveLength(1);
     const { rows } = headlineCalls[0];
-    expect(rows).toHaveLength(PROD_WEALTH_INDEX.length - 1);
-    expect(rows[0].value).toBeCloseTo(-0.1, 10);
-    expect(rows[1].value).toBeCloseTo(0.1, 10);
-    // The +5% baked into the first stored element never surfaces as a return.
-    for (const r of rows) expect(r.value).not.toBeCloseTo(0.05, 10);
+    expect(rows).toHaveLength(PROD_WEALTH_INDEX.length);
+    expect(rows[0].value).toBeCloseTo(0.05, 10);
+    expect(rows[1].value).toBeCloseTo(-0.1, 10);
+    expect(rows[2].value).toBeCloseTo(0.1, 10);
   });
 
   it("O1b — SC1-OG outcome: a real-length returns_series-ONLY track renders FINITE headline metrics, not the blank card", async () => {

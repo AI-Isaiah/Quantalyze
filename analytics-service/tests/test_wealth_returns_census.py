@@ -6,8 +6,9 @@ with it. Two guards, both able to fail:
 
 1. END TO END (D-05 + D-01): the flags and ``returns_series`` the REAL runner
    upserts, handed to ``daily_returns_from_row``, give back the daily returns the
-   run was given for days 1..n (day 0 has no stored predecessor). Simple curve by
-   difference, geometric curve by ratio. The runner runs unmocked past its
+   run was given for ALL n days (G3-1 (a), Phase 155.2 plan 15: the writer stores no
+   base point, so the curve is anchored at an implicit 1.0 and day 0 reads as
+   ``w0 - 1``). Simple curve by difference, geometric curve by ratio. The runner runs unmocked past its
    Supabase client and the benchmark fetch: real ``derive_basis_series``, real
    ``compute_all_metrics``; a spy on ``compute_all_metrics`` captures the exact
    Series the run computed on, so the comparison is against what the run used,
@@ -105,16 +106,26 @@ def _assert_read_back_is_the_runs_input(payload: dict[str, Any], fed: pd.Series)
     }
     got = daily_returns_from_row(row, name="s")
     assert got is not None, "the boundary read nothing from the runner's own row"
-    expected = fed.dropna().iloc[1:]
-    assert len(expected) == len(_RUN_RETURNS) - 1, (
+    expected = fed.dropna()
+    assert len(expected) == len(_RUN_RETURNS), (
         "precondition: the run computed on every input day"
     )
     assert list(got.index) == list(expected.index), (
-        "the boundary must return days 1..n (day 0 has no stored predecessor)"
+        "the boundary must return all n days: the writer stores no base point, so day 0 "
+        "is the first level read against the implicit 1.0"
     )
     assert got.to_numpy() == pytest.approx(expected.to_numpy(), abs=1e-12), (
         "the boundary did not invert the runner's curve: a stored curve read with "
         "the wrong method silently scales every blend downstream (CR-01)"
+    )
+    # Day 0 by itself, so a regression is named. The first stored level is
+    # 1 + r0 on BOTH curves (cumprod of 1 + r, and 1 + cumsum of r), so w0 - 1 is the
+    # run's first input return. If the writer ever stored a 1.0 base point, day 0
+    # would read 0.0 here and this assertion would go RED: it is the executable
+    # proof of the no-base-point premise the reader rests on.
+    assert float(got.iloc[0]) == pytest.approx(_RUN_RETURNS[0], abs=1e-12), (
+        "day 0 must equal the run's first input return (0.010): the stored curve has "
+        "no base point"
     )
 
 
@@ -145,7 +156,7 @@ async def test_the_two_methods_are_distinguishable_on_this_input() -> None:
         {"returns_series": payload["returns_series"], "data_quality_flags": wrong_flags},
         name="s",
     )
-    expected = fed.dropna().iloc[1:]
+    expected = fed.dropna()
     assert wrong is not None
     assert not (
         len(wrong) == len(expected)

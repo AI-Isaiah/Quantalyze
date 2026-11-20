@@ -59,6 +59,7 @@ import {
   readCashConventions,
 } from "./composite-read-path";
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
+import { STORED_CURVE_MAX_POINTS } from "./resolve-series";
 import { curveMethodFromFlags, curveRecordStart } from "./resolve-series";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload, FactsheetUsdView, IngestSource } from "./types";
@@ -164,8 +165,10 @@ function notBuildable(reason: NotBuildableReason, detail: NotBuildableDetail = {
  * from, and how many dated returns that column holds. The rule is
  * `resolveDailyReturnSeries`'s own, asked through the same
  * `normalizeDailyReturns`: `daily_returns` whenever it normalizes to at least
- * one entry, and only otherwise the `returns_series` wealth curve (N points
- * make N-1 returns). A long `returns_series` beside a short but valid
+ * one entry, and only otherwise the `returns_series` wealth curve (G3-1 (a):
+ * N stored points make N returns, the first read against the implicit 1.0 base,
+ * except at or above `STORED_CURVE_MAX_POINTS`, where day 0 is not read and N
+ * points make one return fewer). A long `returns_series` beside a short but valid
  * `daily_returns` is therefore never counted: the builder never reads it.
  * When neither column normalizes, the count is the larger of the two columns'
  * stored entries, and `source` names the column that held them.
@@ -178,7 +181,9 @@ function countedSeriesColumn(
   if (normalizeDailyReturns(dailyRaw).length > 0) {
     return { source: "daily_returns", storedReturns: dailyStored };
   }
-  const wealthStored = storedEntryCount(returnsSeriesRaw) - 1;
+  const wealthEntries = storedEntryCount(returnsSeriesRaw);
+  const wealthStored =
+    wealthEntries >= STORED_CURVE_MAX_POINTS ? wealthEntries - 1 : wealthEntries;
   return dailyStored >= wealthStored
     ? { source: "daily_returns", storedReturns: dailyStored }
     : { source: "returns_series", storedReturns: wealthStored };
@@ -743,7 +748,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v25", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v26", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
  * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
  * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on

@@ -498,16 +498,17 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // analytics-service-only case) must project IDENTICALLY to the same track
     // arriving via daily_returns. Pre-147 the analytics-only leg resolved EMPTY
     // and the recipient saw a silently zeroed blend. The wealth index below is
-    // the ANCHORED cumprod of makeSeries() (1.0 base row prepended — a fixture
-    // convenience the production writer never persists), so the two paths carry
-    // the same economics BY CONSTRUCTION and the rendered markup must match
-    // byte-for-byte. On PRODUCTION data day one drops (N−1 semantics) and exact
-    // parity is NOT expected — the companion test below pins that shape.
+    // the PRODUCTION-shaped cumprod of makeSeries() (first element 1 + r_0, no
+    // base row, as the writer persists it). Since G3-1 (a) the stored curve is
+    // read against its implicit 1.0, so day 0 = w0 - 1 = r_0 and the two paths
+    // carry the same N returns: the rendered markup must match byte-for-byte.
+    // The companion test below pins the anchored (1.0 base row) fixture, which
+    // now carries one extra 0.0 day.
     rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
     const csvHtml = await renderPage("csv-leg");
 
     analyticsReadMock.mockResolvedValueOnce({
-      data: [{ strategy_id: STRAT_A, returns_series: makeWealthIndex() }],
+      data: [{ strategy_id: STRAT_A, returns_series: makeProductionWealthIndex() }],
       error: null,
     });
     rpcMock.mockResolvedValueOnce({ data: [analyticsOnlyRow()], error: null });
@@ -532,20 +533,19 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     expect(analyticsHtml).not.toContain("returns_series");
   });
 
-  it("SCEN-01 — a PRODUCTION-shaped wealth index (no 1.0 base row) renders a real projection, but byte parity with the CSV twin is an anchored-fixture property only", async () => {
-    // The writer's `returns_series` is `(1+r).cumprod()` over the returns' own
-    // date index — first element (1 + r_0), no base row. Differencing recovers
-    // N−1 returns: day one's return is unrecoverable and the derived start date
-    // shifts one day later. So an analytics-only leg on REAL data must still
-    // render a live projection (never the em-dash shell), while the CSV twin's
-    // exact markup is NOT reproducible — the previous test's byte-for-byte
-    // parity holds only for the anchored fixture.
+  it("SCEN-01 — an ANCHORED wealth index (a 1.0 base row, which the writer never persists) renders a real projection, but is not byte-identical to the CSV twin", async () => {
+    // G3-1 (a): the stored curve is read against an implicit 1.0, so a fixture that
+    // also carries an explicit 1.0 base row reads it as an extra day 0 = 1.0 / 1 - 1 =
+    // 0.0 (41 overlapping days against the CSV twin's 40). It must still render a live
+    // projection (never the em-dash shell), while the CSV twin's exact markup is not
+    // reproduced; the previous test's byte-for-byte parity holds for the production
+    // shape.
     rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
     const csvHtml = await renderPage("csv-leg-prod");
 
     analyticsReadMock.mockResolvedValueOnce({
       data: [
-        { strategy_id: STRAT_A, returns_series: makeProductionWealthIndex() },
+        { strategy_id: STRAT_A, returns_series: makeWealthIndex() },
       ],
       error: null,
     });
@@ -556,7 +556,7 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     expect(analyticsHtml).toContain("My Q3 Blend");
     expect(analyticsHtml).toMatch(/\d%/);
     expect(analyticsHtml).not.toContain("returns_series");
-    // …but not the CSV twin's markup: one fewer daily return, a later start.
+    // …but not the CSV twin's markup: one extra (0.0) day.
     expect(analyticsHtml).not.toBe(csvHtml);
   });
 

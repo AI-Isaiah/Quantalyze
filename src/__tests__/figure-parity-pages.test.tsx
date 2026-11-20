@@ -1050,13 +1050,14 @@ describe("194.2 D-02 parity: a curve-derived strategy reads one record length on
     expect(spanOfSeries(CURVE)).toBe(194);
   });
 
-  it("factsheet (production fetch path): the record is 194 days, and the equity series still starts at the second curve date", async () => {
+  it("factsheet (production fetch path): the record is 194 days, and the equity series starts at the first curve date (G3-1 (a))", async () => {
     const payload = await factsheetPayload("crypto", curveAnalytics());
     expect(payload.figureRecord?.spanDays).toBe(194);
     expect(payload.figureRecord?.unreadable).toBeFalsy();
-    // The series itself is untouched: the day-0 return is unrecoverable from a curve.
-    expect(payload.dates[0]).toBe("2026-05-01");
-    expect(payload.dates).toHaveLength(193);
+    // G3-1 (a): the stored curve is anchored at an implicit 1.0, so its day 0 (w0 - 1) is read
+    // and the series starts on the curve's first date, one return per stored point.
+    expect(payload.dates[0]).toBe("2026-04-30");
+    expect(payload.dates).toHaveLength(194);
     expect(shortTrackNote("record", payload.figureRecord!.spanDays!)).toBe(PRINTED_NOTE);
   });
 
@@ -1225,14 +1226,15 @@ describe("194.2 D-02 parity: a curve-derived strategy reads one record length on
     const payload = await factsheetPayload("crypto", curveAnalytics({ returns_series: curve }));
     expect(payload.figureRecord?.unreadable).toBe(true);
     expect(gateAnnualized(payload.figureRecord!)).toBe("withheld");
-    // The inversion drops that date from the series, so the report must name it from the record's
-    // own first date (the `record_start` axis), not leave the cause blank.
+    // G3-1 (a): day 0 is read at that date, so the malformed date is now IN the series itself and
+    // the report names it on the `cash` axis (before, the inversion dropped it from the series and
+    // the report fell to the record's own first date, the `record_start` axis).
     const reports = vi.mocked(captureToSentry).mock.calls.filter(
       ([, ctx]) => (ctx as { tags?: { op?: string } } | undefined)?.tags?.op === "buildFactsheetPayload",
     );
     expect(reports.length).toBeGreaterThan(0);
     expect((reports[0][1] as { extra: Record<string, unknown> }).extra).toMatchObject({
-      firstBadAxis: "record_start",
+      firstBadAxis: "cash",
       firstBadDate: "2026-04-30x",
       seriesStart: "2026-04-30x",
     });
@@ -1303,7 +1305,9 @@ describe("205 D-01 parity: a bad date on an absent day does not flip the USD vie
   it.each([
     ["an interior bad date", 60, "2026-06-31", "cash", "2026-06-31"],
     // "2026-04-3" sorts before the real first day "2026-04-30", so it stays the curve's first point.
-    ["a bad first curve point", 0, "2026-04-3", "record_start", "2026-04-3"],
+    // G3-1 (a): day 0 is read at that date, so the bad date is in the series itself (the `cash`
+    // axis); it used to be dropped from the series and named from the record start.
+    ["a bad first curve point", 0, "2026-04-3", "cash", "2026-04-3"],
   ])("%s is reported to Sentry exactly once, by the native build; the USD view stays unreadable", async (_label, at, bad, axis, badDate) => {
     const days = 194;
     const startMs = Date.parse("2026-04-30T00:00:00Z");

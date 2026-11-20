@@ -2,12 +2,15 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { sharpe as returnStatsSharpe } from "@/lib/return-stats";
+
 import { convertNativeReturnsToUsd } from "./native-to-usd";
 import {
   curveMethodFromFlags,
   curveRecordStart,
   equityCurveToDailyReturns,
   resolveDailyReturnSeries,
+  STORED_CURVE_MAX_POINTS,
 } from "./resolve-series";
 
 /**
@@ -27,7 +30,7 @@ interface OracleCase {
   name: string;
   data_quality_flags: Record<string, unknown> | null;
   daily_returns: unknown;
-  curve: Array<{ date: string; value: number | null }>;
+  curve: Array<{ date?: string; value: number | null }>;
   expected: Array<{ date: string; value: number }>;
   arithmetic: string;
   native_unit?: string;
@@ -36,6 +39,7 @@ interface OracleCase {
 
 interface Oracle {
   tolerance: number;
+  stored_curve_max_points: number;
   cases: OracleCase[];
 }
 
@@ -50,7 +54,8 @@ const ORACLE: Oracle = JSON.parse(
 
 /** JSON has no NaN: a null level in the fixture stands for a non-finite number. */
 function toCurve(raw: OracleCase["curve"]): Array<{ date: string; value: number }> {
-  return raw.map((p) => ({ date: p.date, value: p.value === null ? Number.NaN : p.value }));
+  // A fixture head with no `date` (WR-01) is passed through undated, as the DB would hold it.
+  return raw.map((p) => ({ date: p.date as string, value: p.value === null ? Number.NaN : p.value }));
 }
 
 afterEach(() => {
@@ -76,8 +81,14 @@ describe("resolveDailyReturnSeries: the shared hand-computed oracle (D-01, D-02)
       "daily_returns_first_wins",
       "daily_returns_empty_list_falls_to_curve",
       "unknown_method_string_reads_geometric",
-      "native_leg_loses_first_two_days",
+      "native_leg_loses_only_day_zero",
       "native_absent_day_is_priced_over_its_own_day",
+      "four_day_stored_curve_reads_n_returns_geometric",
+      "four_day_stored_curve_reads_n_returns_simple",
+      "geometric_nonpositive_first_level_day_zero_is_absent",
+      "simple_negative_first_level_is_a_legal_day_zero",
+      "one_point_series_is_its_day_zero",
+      "dropped_head_reads_with_the_old_pairing",
     ]) {
       expect(names, `fixture lacks ${required}`).toContain(required);
     }
@@ -153,6 +164,106 @@ describe("equityCurveToDailyReturns: stored adjacency, never bridged", () => {
   });
 });
 
+describe("G3-1 (a): a stored curve is anchored at an implicit 1.0, so n stored points read as n returns", () => {
+  // The writer stores no base point: levels are (1 + r).cumprod(). Built by hand from
+  // daily returns 0.02, -0.01, 0.03, 0.01:
+  //   1.02 = 1 * 1.02 ; 1.0098 = 1.02 * 0.99 ; 1.040094 = 1.0098 * 1.03 ; 1.05049494 = 1.040094 * 1.01
+  const FOUR_DAY_CURVE = [
+    { date: "2026-03-02", value: 1.02 },
+    { date: "2026-03-03", value: 1.0098 },
+    { date: "2026-03-04", value: 1.040094 },
+    { date: "2026-03-05", value: 1.05049494 },
+  ];
+
+  it("the row reader returns all four returns, the first being w0 - 1 = 0.02", () => {
+    const out = resolveDailyReturnSeries(null, FOUR_DAY_CURVE, "geometric");
+    expect(out.map((p) => p.date)).toEqual(["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05"]);
+    const want = [0.02, -0.01, 0.03, 0.01];
+    want.forEach((w, i) => expect(Math.abs(out[i].value - w)).toBeLessThanOrEqual(ORACLE.tolerance));
+  });
+
+  it("a Sharpe on that series is the n = 4 literal (11.619), not the n - 1 = 3 literal (7.937)", () => {
+    // Hand arithmetic, sample sd (ddof 1), a 252 clock, rf = 0 (the composer's convention:
+    // `returnStatsSharpe(portDaily, { periodsPerYear, ddof: 1 })` in src/lib/scenario.ts).
+    //   n = 4: mean = (0.02 - 0.01 + 0.03 + 0.01) / 4 = 0.0125
+    //     deviations 0.0075, -0.0225, 0.0175, -0.0025 ; squares 5.625e-5, 5.0625e-4, 3.0625e-4, 6.25e-6
+    //     sum = 8.75e-4 ; sample var = 8.75e-4 / 3 = 2.916667e-4 ; sd = 0.0170783
+    //     Sharpe = 0.0125 * 252 / (0.0170783 * sqrt(252)) = 3.15 / 0.271109 = 11.61895
+    //   n - 1 = 3 (day 0 dropped): returns -0.01, 0.03, 0.01 ; mean = 0.01
+    //     deviations -0.02, 0.02, 0 ; sum of squares 8e-4 ; sample var = 4e-4 ; sd = 0.02
+    //     Sharpe = 0.01 * 252 / (0.02 * sqrt(252)) = 2.52 / 0.3174902 = 7.937254
+    const read = resolveDailyReturnSeries(null, FOUR_DAY_CURVE, "geometric").map((p) => p.value);
+    const withDayZero = returnStatsSharpe(read, { periodsPerYear: 252, ddof: 1 });
+    expect(withDayZero).not.toBeNull();
+    expect(withDayZero as number).toBeCloseTo(11.61895, 4);
+    expect(withDayZero as number).not.toBeCloseTo(7.937254, 1);
+    // The old reading, written by literal (day 0 dropped), is the n - 1 number.
+    const old = returnStatsSharpe([-0.01, 0.03, 0.01], { periodsPerYear: 252, ddof: 1 });
+    expect(old as number).toBeCloseTo(7.937254, 4);
+  });
+
+  it("the raw function stays on the old pairing by default; fromBase = true adds day 0", () => {
+    const old = equityCurveToDailyReturns(FOUR_DAY_CURVE, "geometric");
+    expect(old.map((p) => p.date)).toEqual(["2026-03-03", "2026-03-04", "2026-03-05"]);
+    const based = equityCurveToDailyReturns(FOUR_DAY_CURVE, "geometric", false, true);
+    expect(based).toHaveLength(4);
+    expect(based[0].date).toBe("2026-03-02");
+    expect(based[0].value).toBeCloseTo(0.02, 12);
+  });
+
+  it("resolveDailyReturnSeries(..., fromBase = false) reads a cut curve with the old pairing", () => {
+    const out = resolveDailyReturnSeries(null, FOUR_DAY_CURVE, "geometric", false, false);
+    expect(out.map((p) => p.date)).toEqual(["2026-03-03", "2026-03-04", "2026-03-05"]);
+  });
+
+  it("a one-point curve is its day 0: 1.07 / 1 - 1 = 0.07 (it yielded none before)", () => {
+    const out = resolveDailyReturnSeries(null, [{ date: "2026-03-02", value: 1.07 }], "geometric");
+    expect(out).toHaveLength(1);
+    expect(out[0].value).toBeCloseTo(0.07, 12);
+    expect(equityCurveToDailyReturns([], "geometric", false, true)).toEqual([]);
+  });
+
+  it("day 0 is absent for w0 <= 0 or non-finite on the geometric curve, and a NaN placeholder with keepAbsent", () => {
+    const curve = [
+      { date: "2026-03-02", value: 0 },
+      { date: "2026-03-03", value: 1.0 },
+      { date: "2026-03-04", value: 1.1 },
+    ];
+    const dropped = equityCurveToDailyReturns(curve, "geometric", false, true);
+    expect(dropped.map((p) => p.date)).toEqual(["2026-03-04"]);
+    const kept = equityCurveToDailyReturns(curve, "geometric", true, true);
+    expect(kept.map((p) => p.date)).toEqual(["2026-03-02", "2026-03-03", "2026-03-04"]);
+    expect(kept.map((p) => Number.isFinite(p.value))).toEqual([false, false, true]);
+    // simple: only non-finite is unusable, so a zero w0 is a legal -1.0 day 0
+    const simple = equityCurveToDailyReturns(curve, "simple", false, true);
+    expect(simple[0].date).toBe("2026-03-02");
+    expect(simple[0].value).toBeCloseTo(-1.0, 12);
+  });
+
+  it("the cap constant equals the oracle's and the writer's cap_data_points default", () => {
+    expect(STORED_CURVE_MAX_POINTS).toBe(ORACLE.stored_curve_max_points);
+    expect(ORACLE.stored_curve_max_points).toBe(5000);
+  });
+
+  it("a curve below the writer cap emits day 0; one at or above it does not", () => {
+    // simple curve, +0.001 a day: level k (0-based) = 1 + 0.001 * (k + 1), so day 0 = 0.001
+    const curve = (n: number) =>
+      Array.from({ length: n }, (_, k) => ({
+        date: new Date(Date.UTC(2000, 0, 1 + k)).toISOString().slice(0, 10),
+        value: 1 + 0.001 * (k + 1),
+      }));
+    const below = resolveDailyReturnSeries(null, curve(STORED_CURVE_MAX_POINTS - 1), "simple");
+    expect(below).toHaveLength(STORED_CURVE_MAX_POINTS - 1);
+    expect(below[0].date).toBe("2000-01-01");
+    expect(below[0].value).toBeCloseTo(0.001, 12);
+    for (const n of [STORED_CURVE_MAX_POINTS, STORED_CURVE_MAX_POINTS + 1]) {
+      const atCap = resolveDailyReturnSeries(null, curve(n), "simple");
+      expect(atCap, `n = ${n}`).toHaveLength(n - 1);
+      expect(atCap[0].date, `n = ${n}`).toBe("2000-01-02");
+    }
+  });
+});
+
 describe("resolveDailyReturnSeries: the curve normalizer keeps a bad level's position", () => {
   it("a null level in an array curve is kept as NaN, so its dependent days are absent (never bridged)", () => {
     const out = resolveDailyReturnSeries(
@@ -166,8 +277,9 @@ describe("resolveDailyReturnSeries: the curve normalizer keeps a bad level's pos
       ],
       "geometric",
     );
-    // 1.3 / 1.1 - 1 would be a bridged 0.1818...; it must not appear.
-    expect(out.map((p) => p.date)).toEqual(["2026-03-03", "2026-03-06"]);
+    // 1.3 / 1.1 - 1 would be a bridged 0.1818...; it must not appear. Day 0
+    // (2026-03-02) is 1.0 / 1 - 1 = 0.0.
+    expect(out.map((p) => p.date)).toEqual(["2026-03-02", "2026-03-03", "2026-03-06"]);
   });
 
   it("a string level is non-numeric, kept as a bad level, never coerced", () => {
@@ -180,7 +292,9 @@ describe("resolveDailyReturnSeries: the curve normalizer keeps a bad level's pos
       ],
       "geometric",
     );
-    expect(out).toEqual([]);
+    // Day 0 is 1.0 / 1 - 1 = 0.0 and stands; day 1 has the NaN level "1.1" and day 2
+    // pairs with it, so both are absent. The string level is never coerced.
+    expect(out).toEqual([{ date: "2026-03-02", value: 0 }]);
   });
 
   it("daily_returns stays first: a non-empty direct series wins over the curve (D-02)", () => {
@@ -246,8 +360,11 @@ describe("WR-02: an absent day must not widen the next day's price interval", ()
     // 03-03 (close 100) gave 1.1 * (400 / 100) - 1 = 3.4.
     const native = resolveDailyReturnSeries(null, GAP_CURVE, "geometric", true);
     const out = convertNativeReturnsToUsd(native, "BTC", GAP_CLOSES);
-    expect(out.map((p) => p.date)).toEqual(["2026-03-06"]);
+    // Day 0 (03-02) is the converter's interval anchor and is not priced. 03-03 is
+    // priced over [03-02, 03-03], closes 100 -> 100: 1.1 * 1 - 1 = 0.1.
+    expect(out.map((p) => p.date)).toEqual(["2026-03-03", "2026-03-06"]);
     expect(out[0].value).toBeCloseTo(0.1, 12);
+    expect(out[1].value).toBeCloseTo(0.1, 12);
     expect(out.every((p) => Number.isFinite(p.value))).toBe(true);
   });
 

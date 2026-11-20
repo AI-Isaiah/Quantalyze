@@ -276,8 +276,10 @@ class TestCurveShapedBlend:
 
     @pytest.mark.asyncio
     async def test_curve_rows_blend_to_the_hand_computed_daily_returns(self):
-        # A: daily returns [d1 0.02, d2 0.01]; B: [d1 -0.01, d2 0.03] (day 0 has no
-        # stored predecessor). Weights 0.5/0.5:
+        # A: daily returns [d0 0.0, d1 0.02, d2 0.01]; B: [d0 0.0, d1 -0.01, d2 0.03]
+        # (G3-1 (a): the stored curve's day 0 is its first level against the implicit 1.0
+        # base, 1.0 / 1 - 1 = 0.0 here). Weights 0.5/0.5:
+        #   d0 = 0.5 * 0.0  + 0.5 *  0.0  = 0.000
         #   d1 = 0.5 * 0.02 + 0.5 * -0.01 = 0.005
         #   d2 = 0.5 * 0.01 + 0.5 *  0.03 = 0.020
         ps = [
@@ -297,12 +299,14 @@ class TestCurveShapedBlend:
         update = tables["portfolio_analytics"].update.call_args[0][0]
         assert update["computation_status"] == "complete"
         # The persisted equity curve is (1 + blended daily returns).cumprod():
-        # 1.005, then 1.005 * 1.02 = 1.0251. Read back, those are 0.005 and 0.02.
+        # 1.0, then 1.0 * 1.005 = 1.005, then 1.005 * 1.02 = 1.0251. Read back, those are
+        # 0.0, 0.005 and 0.02.
         values = [pt["value"] for pt in update["portfolio_equity_curve"]]
-        assert len(values) == 2
-        assert values[0] == pytest.approx(1.005, abs=1e-12)
-        assert values[1] == pytest.approx(1.0251, abs=1e-12)
-        assert values[1] / values[0] - 1.0 == pytest.approx(0.02, abs=1e-12)
+        assert len(values) == 3
+        assert values[0] == pytest.approx(1.0, abs=1e-12)
+        assert values[1] == pytest.approx(1.005, abs=1e-12)
+        assert values[2] == pytest.approx(1.0251, abs=1e-12)
+        assert values[2] / values[1] - 1.0 == pytest.approx(0.02, abs=1e-12)
 
 
 class TestBlendRiskIsAnnualizedOnTheBlendClock:
@@ -332,10 +336,12 @@ class TestBlendRiskIsAnnualizedOnTheBlendClock:
             {"strategy_id": "s1", "returns_series": curve_from_returns(r1, self._DATES)},
             {"strategy_id": "s2", "returns_series": curve_from_returns(r2, self._DATES)},
         ]
-        # Reading a curve back yields returns[1:] (day 0 has no stored predecessor).
+        # Reading a curve back yields ALL the returns it was built from (G3-1 (a): day 0 is
+        # the first level against the implicit 1.0 base). The oracle is computed from the
+        # raw returns here, never by calling the reader.
         import numpy as np
 
-        blend = 0.5 * np.array(r1[1:]) + 0.5 * np.array(r2[1:])
+        blend = 0.5 * np.array(r1) + 0.5 * np.array(r2)
         return ps, sa, blend
 
     @staticmethod
@@ -388,7 +394,7 @@ class TestBlendRiskIsAnnualizedOnTheBlendClock:
         assert "s2" in update["data_quality"]["missing_analytics_sids"]
         import numpy as np
 
-        vol, sharpe = self._oracle(np.array(r1[1:]), 252)
+        vol, sharpe = self._oracle(np.array(r1), 252)
         assert update["portfolio_volatility"] == pytest.approx(vol, rel=1e-9)
         assert update["portfolio_sharpe"] == pytest.approx(sharpe, rel=1e-9)
 

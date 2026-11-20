@@ -137,13 +137,16 @@ export type BuildFactsheetOpts = {
   recordObservations?: number | null;
   /**
    * 194.2 (D-02) - the record's FIRST return date when the series is derived from the stored
-   * `returns_series` curve. The curve inversion (`equityCurveToDailyReturns`) never emits day 0,
-   * so `dates[0]` is the SECOND curve date and the record would read one day short of every
-   * reader that takes `returns_series->0->>date` (lists, percentiles, SQL). Set by the server
-   * builder to the stored first point's date, verbatim; absent for a CSV-derived series, whose
-   * first return IS `dates[0]`. It moves only the record (`payload.figureRecord`), never the
-   * equity or metric series, and is a fact about the record like `recordObservations`, so the
-   * USD view carries it too.
+   * `returns_series` curve: the stored first point's date, verbatim, the date every list,
+   * percentile and SQL reader takes as `returns_series->0->>date`. Before G3-1 (a) (Phase 155.2
+   * plan 15) the curve inversion never emitted day 0, so `dates[0]` was the SECOND curve date and
+   * this option corrected it. The row reader now emits day 0, so for a stored curve below
+   * `STORED_CURVE_MAX_POINTS` `dates[0]` IS this date and the option agrees with it; it stays
+   * because it is still the one reading shared with those readers (and differs from `dates[0]` for
+   * a curve at the writer cap, whose day 0 is not read). Set by the server builder; absent for a
+   * CSV-derived series, whose first return IS `dates[0]`. It moves only the record
+   * (`payload.figureRecord`), never the equity or metric series, and is a fact about the record
+   * like `recordObservations`, so the USD view carries it too.
    */
   recordSeriesStart?: string | null;
   /**

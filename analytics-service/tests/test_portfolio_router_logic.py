@@ -587,27 +587,32 @@ class TestPortfolioAnalyticsBlendsBtcInUsd:
         tables, _ = await _run_compute(ps, sa, _BTC_COMPUTE_CLOSES)
         update = tables["portfolio_analytics"].update.call_args[0][0]
         curve = {p["date"][:10]: p["value"] for p in update["portfolio_equity_curve"]}
-        # d1 = 0.5*0.02 + 0.5*0 = 0.01 (B has no USD return that day) -> 1.01.
-        assert curve["2026-02-03"] == pytest.approx(1.01, abs=1e-12)
-        # d2 = 0.5*0.01 + 0.5*0.21 = 0.110 -> 1.01 * 1.11. The raw-BTC blend would
-        # give 0.5*0.01 + 0.5*0.10 = 0.055 -> 1.01 * 1.055.
-        assert curve["2026-02-04"] == pytest.approx(1.01 * 1.11, abs=1e-12)
-        assert curve["2026-02-04"] != pytest.approx(1.01 * 1.055, abs=1e-3)
+        # G3-1 (a): the stored curves read day 0 too. d0 = 0.5*0.0 + 0.5*0 = 0 (B has no USD
+        # return that day: it is the converter's interval anchor) -> 1.0.
+        assert curve["2026-02-02"] == pytest.approx(1.0, abs=1e-12)
+        # d1 = 0.5*0.02 + 0.5*0.21 = 0.115 -> 1.115. B's d1 is now priced over [d0, d1]:
+        # 1.10 * 1.10 - 1 = 0.21 (it was lost to the converter before day 0 was read).
+        assert curve["2026-02-03"] == pytest.approx(1.115, abs=1e-12)
+        # d2 = 0.5*0.01 + 0.5*0.21 = 0.110 -> 1.115 * 1.11. The raw-BTC blend would
+        # give 0.5*0.01 + 0.5*0.10 = 0.055 -> 1.115 * 1.055.
+        assert curve["2026-02-04"] == pytest.approx(1.115 * 1.11, abs=1e-12)
+        assert curve["2026-02-04"] != pytest.approx(1.115 * 1.055, abs=1e-3)
         # d3 = 0.5*0.03 + 0.5*0.144 = 0.087
-        assert curve["2026-02-05"] == pytest.approx(1.01 * 1.11 * 1.087, abs=1e-12)
+        assert curve["2026-02-05"] == pytest.approx(1.115 * 1.11 * 1.087, abs=1e-12)
 
     @pytest.mark.asyncio
     async def test_attribution_uses_the_usd_twr_of_the_btc_strategy(self):
         """compute_attribution's contribution is weight * strategy TWR. The BTC
         strategy's curve is in BTC, so its TWR is taken from the CONVERTED returns:
-        prod(1 + c_k) - 1 with c2 = 1.1 * 1.1 - 1 = 0.21 and c3 = 1.04 * 1.1 - 1 =
-        0.144 -> 1.21 * 1.144 - 1 = 0.38424. The native returns' product would be
+        prod(1 + c_k) - 1 with c1 = 1.1 * 1.1 - 1 = 0.21, c2 = 1.1 * 1.1 - 1 = 0.21 and
+        c3 = 1.04 * 1.1 - 1 = 0.144 -> 1.21 * 1.21 * 1.144 - 1 = 0.6749304 (G3-1 (a): c1 is
+        priced now that day 0 is read). The native returns' product would be
         1.10 * 1.10 * 1.04 - 1 = 0.25840."""
         ps, sa = _mixed_portfolio_rows()
         tables, _ = await _run_compute(ps, sa, _BTC_COMPUTE_CLOSES)
         update = tables["portfolio_analytics"].update.call_args[0][0]
         by_id = {a["strategy_id"]: a for a in update["attribution_breakdown"]}
-        assert by_id["btc-b"]["contribution"] == pytest.approx(0.5 * 0.38424, abs=1e-9)
+        assert by_id["btc-b"]["contribution"] == pytest.approx(0.5 * 0.6749304, abs=1e-9)
         # The USD strategy is untouched: 1.02 * 1.01 * 1.03 - 1 = 0.061106.
         assert by_id["usd-a"]["contribution"] == pytest.approx(0.5 * 0.061106, abs=1e-9)
 
@@ -849,10 +854,10 @@ class TestOptimizerAndBridgeReadDailyReturnsNotCurveLevels:
              patch.object(portfolio_mod, "log_audit_event"):
             await portfolio_mod.portfolio_optimizer.__wrapped__(MagicMock(), req)
 
-        # Day 0 has no stored predecessor, so the first return is the day-1 ratio:
-        # portfolio 1.02/1.0 - 1, 1.0302/1.02 - 1, 1.061106/1.0302 - 1.
-        assert _daily(seen["p"]["usd-a"]) == pytest.approx([0.02, 0.01, 0.03], abs=1e-12)
-        assert _daily(seen["c"]["usd-cand"]) == pytest.approx([-0.01, 0.04, 0.02], abs=1e-12)
+        # G3-1 (a): day 0 is the first level against the implicit 1.0 base: 1.0/1 - 1 = 0.0.
+        # Then portfolio 1.02/1.0 - 1, 1.0302/1.02 - 1, 1.061106/1.0302 - 1.
+        assert _daily(seen["p"]["usd-a"]) == pytest.approx([0.0, 0.02, 0.01, 0.03], abs=1e-12)
+        assert _daily(seen["c"]["usd-cand"]) == pytest.approx([0.0, -0.01, 0.04, 0.02], abs=1e-12)
 
     @pytest.mark.asyncio
     async def test_bridge_hands_the_scorer_the_curves_daily_returns(self):
@@ -871,8 +876,8 @@ class TestOptimizerAndBridgeReadDailyReturnsNotCurveLevels:
              patch.object(portfolio_mod, "log_audit_event"):
             await portfolio_mod.portfolio_bridge.__wrapped__(MagicMock(), req)
 
-        assert _daily(seen["p"]["usd-a"]) == pytest.approx([0.02, 0.01, 0.03], abs=1e-12)
-        assert _daily(seen["c"]["usd-cand"]) == pytest.approx([-0.01, 0.04, 0.02], abs=1e-12)
+        assert _daily(seen["p"]["usd-a"]) == pytest.approx([0.0, 0.02, 0.01, 0.03], abs=1e-12)
+        assert _daily(seen["c"]["usd-cand"]) == pytest.approx([0.0, -0.01, 0.04, 0.02], abs=1e-12)
 
     @pytest.mark.asyncio
     async def test_a_stored_daily_returns_column_wins_over_the_curve_on_both_endpoints(self):

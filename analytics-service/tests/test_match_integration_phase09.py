@@ -180,16 +180,21 @@ def test_mixed_portfolio_weights_sum_to_one(monkeypatch):
     # The strategy legs of the blend are DAILY RETURNS derived from the stored curves,
     # not the curve levels (about 1.0) weighted as returns (CR-01).
     rets = result["portfolio_returns"]
-    assert list(rets["uuid-strat-1"].values) == pytest.approx([0.01, 0.02], abs=1e-12)
-    assert list(rets["uuid-strat-2"].values) == pytest.approx([0.02, -0.01], abs=1e-12)
-    assert [d.strftime("%Y-%m-%d") for d in rets["uuid-strat-1"].index] == _STRAT_DATES[1:]
+    # G3-1 (a): the stored curves have no base point (first level 1 + r0, with r0 = 0.0 in
+    # these fixtures) and read as ALL three days, day 0 = 1.0 / 1 - 1 = 0.0. Then d1 = 0.01 and d2 = 0.02 for
+    # strat-1, d1 = 0.02 and d2 = -0.01 for strat-2 (levels 1.0, 1.01, 1.0302 and 1.0, 1.02, 1.0098).
+    assert list(rets["uuid-strat-1"].values) == pytest.approx([0.0, 0.01, 0.02], abs=1e-12)
+    assert list(rets["uuid-strat-2"].values) == pytest.approx([0.0, 0.02, -0.01], abs=1e-12)
+    assert [d.strftime("%Y-%m-%d") for d in rets["uuid-strat-1"].index] == _STRAT_DATES
 
 
 def test_one_point_curve_contributes_no_series_not_a_zero_return(monkeypatch):
-    """A strategy whose stored curve has one point has no stored predecessor, so no
-    daily return can be formed: it is absent from ``portfolio_returns`` (accounted like
-    a strategy with no returns), never present as a 0 return. It stays in the book and
-    keeps its weight; only its series is missing."""
+    """A strategy whose stored curve has one UNUSABLE point has no formable daily
+    return: it is absent from ``portfolio_returns`` (accounted like a strategy with no
+    returns), never present as a 0 return. It stays in the book and keeps its weight;
+    only its series is missing. G3-1 (a): a one-point curve with a usable level now reads
+    as its day 0 (w0 - 1), so the unusable point here is a zero level on a geometric curve
+    (0.0 is not > 0)."""
     ps_rows = [
         {"strategy_id": "uuid-one-point", "current_weight": 0.5, "portfolio_id": "port-1",
          "allocated_amount": 20000.0},
@@ -197,7 +202,7 @@ def test_one_point_curve_contributes_no_series_not_a_zero_return(monkeypatch):
          "allocated_amount": 30000.0},
     ]
     sa_rows = [
-        {"strategy_id": "uuid-one-point", "returns_series": [{"date": "2026-01-01", "value": 1.01}]},
+        {"strategy_id": "uuid-one-point", "returns_series": [{"date": "2026-01-01", "value": 0.0}]},
         {"strategy_id": "uuid-full",
          "returns_series": curve_from_returns([0.0, 0.03, 0.01], _STRAT_DATES)},
     ]
@@ -214,9 +219,9 @@ def test_one_point_curve_contributes_no_series_not_a_zero_return(monkeypatch):
     }
     assert result["portfolio_weights"]["uuid-one-point"] == pytest.approx(0.4)  # 20000 / 50000
     assert "uuid-one-point" not in result["portfolio_returns"]
-    # uuid-full: levels 1.0, 1.03, 1.0403 -> days 1..2 = 0.03, 0.01
+    # uuid-full: levels 1.0, 1.03, 1.0403 -> day 0 = 1.0 / 1 - 1 = 0.0, then 0.03 and 0.01
     assert list(result["portfolio_returns"]["uuid-full"].values) == pytest.approx(
-        [0.03, 0.01], abs=1e-12
+        [0.0, 0.03, 0.01], abs=1e-12
     )
 
 
