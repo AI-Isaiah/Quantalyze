@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.133.58.1] - 2026-11-20 — records: close 218 SELFHEAL
+
+Records PR for Phase 218, whose code is already on `main` as #1293 (v0.133.58.0, squash 294ab9848). It carries the phase artifacts and closes the phase. No source, test or migration change.
+
+### Added
+- **Phase artifacts for 218** under `.planning/phases/`, from the phase branch: context, discussion log, research, patterns, validation, coverage declaration, four plans and their summaries, review (three rounds; no Critical or Warning left), security and verification. The VERIFICATION is `passed` with `verified_at_sha` and `drift_subjects`, and has no `covered_*` keys.
+- **SECURITY note 5:** the commit security review's MEDIUM on `mt5_terminal_scrub.py` (an abandoned inline scrub thread outliving the caller's wait) is recorded as closed by commit 7c968e37e, shipped in #1293. `threats_open` stays 0.
+
+### Changed
+- `phase complete 218` ran: the overview bullet is ticked `(completed 2026-11-20)`, the Progress row reads `4/4 | Complete | 2026-11-20`, and the TBD stub is replaced by the four plan rows in their two waves.
+- **STATE and `state.json`:** progress is 14 of 18 phases, 83 of 83 plans, 78%. `phase complete` moved the position to 155.2; it is restored by hand to the parallel-phase form, with 155.2, 157, 219 and 220 open.
+- VERSION and package.json 0.133.58.0 → 0.133.58.1.
+
+### Notes
+- Post-deploy observation still open: the first wizard MT5 check after the analytics deploy should pass without Retry, with an `owed_scrub` `scrub_healed` event in the Railway logs.
+- No `TODOS.md` entry is closed, so none is deleted.
+
 ## [0.133.58.0] - 2026-11-20 — Phase 218 SELFHEAL: the wizard's MT5 key check heals an owed terminal scrub itself
 
 On 2026-11-19 13:14 UTC the founder's first wizard MT5 key check after the Phase 217 deploy answered `KEY_MT5_TERMINAL_BUSY` ("Our MetaTrader terminal is briefly busy"). The validation terminal owed its post-deploy scrub, the owed gate refused, the scheduled scrub finished in about 6 s, and a manual Retry passed. The founder asked why it did not just scrub itself and retry. It does now. This reverses the accepted cost of Phase 164.6.6.1 D-08 ("the first validation after each analytics deploy is refused") and its Decision 6.

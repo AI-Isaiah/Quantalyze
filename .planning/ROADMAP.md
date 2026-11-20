@@ -147,7 +147,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 215: TESTREACH — every test that guards money math or error contracts actually runs, and test apps match production** - CI-only test reach; independent of the MT5 phases (completed 2026-11-16)
 - [x] **Phase 216: CSVSTATUS — a malformed CSV upload answers 422 and the wizard stops offering Retry** - CSV upload status split, founder decision 2026-11-15; independent of the MT5 phases (completed 2026-11-18)
 - [x] **Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server** - A UTC-keeping broker server passes the 155.1 clock guard; founder decision 2026-11-18; follows 155.1 (completed 2026-11-18)
-- [ ] **Phase 218: SELFHEAL — the wizard's MT5 key check heals an owed terminal scrub itself** - Wizard self-heal of the post-deploy scrub plus two resume-banner fixes, founder decisions 2026-11-19; independent of the MT5 parity phases
+- [x] **Phase 218: SELFHEAL — the wizard's MT5 key check heals an owed terminal scrub itself** - Wizard self-heal of the post-deploy scrub plus two resume-banner fixes, founder decisions 2026-11-19; independent of the MT5 parity phases (completed 2026-11-20)
 - [ ] **Phase 219: ACCOUNTEMAIL — the signed-in account shows its email and can change it** - Account email display and change, founder decision 2026-11-19; independent of the MT5 parity phases
 - [ ] **Phase 220: EXTRACTOR — the baseline re-dump carrying the 219 migration can land and main goes green** - CI-only: the local-stack extractor accepts `UPDATE OF` auth.users triggers, then the bot re-dump lands; independent of the MT5 parity phases
 
@@ -280,7 +280,7 @@ Plans:
 | 215. TESTREACH | 8/8 | Complete | 2026-11-16 |
 | 216. CSVSTATUS | 1/1 | Complete | 2026-11-18 |
 | 217. SERVERRULE | 2/2 | Complete | 2026-11-18 |
-| 218. SELFHEAL | 0/0 | Not started | - |
+| 218. SELFHEAL | 4/4 | Complete    | 2026-11-20 |
 | 219. ACCOUNTEMAIL | 0/0 | Not started | - |
 | 220. EXTRACTOR | 0/0 | Not started | - |
 
@@ -604,10 +604,16 @@ Plans:
 **Widened 2026-11-19 (founder, "Fix in Phase 218 (Recommended)"), two wizard-resume findings from the same session (157 FCONF-01):** (1) in a browser without the local draft pointer, the "We saved your progress" banner renders while the draft's step is already mounted underneath it, so the Resume / Start fresh choice is pre-made; the wizard must hold the step until the founder chooses (`WizardClient.tsx` step initializer vs `deriveWizardResumeOverrides` in `src/lib/wizard/localStorage.ts`). (2) The banner copy says "paste your API secret again" for every API draft; it must match the key type (an MT5 key re-enters an investor password) and say nothing about re-entry when the resumed step needs none. Same-browser silent resume (matching pointer) stays: founder ruling 2026-11-19 "(a) the silent return is fine".
 **Requirements**: TBD
 **Depends on:** none (independent of the MT5 parity phases)
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 218-01-PLAN.md — owed gate pays the scrub inline under the held lease and probes in the same request; a non-scrubbed kind answers MT5_TERMINAL_NOT_READY (or MT5_VALIDATION_UNCONFIGURED) with no probe; owed_scrub stage event; wire-parity and never-raises guards
+- [x] 218-04-PLAN.md — resume banner holds the step until Resume or Start fresh (no step mounted under it); banner copy by key type and resumed step
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 218-02-PLAN.md — probe floor, scrub-bound clamp, quiet park skip after a heal, extended budget ordering test; STATUS_CONTRACT S-31, runbook knobs, dated corrections
+- [x] 218-03-PLAN.md — wizard key KEY_MT5_TERMINAL_NOT_READY (copy, verdict row, dialog roster), TS censuses moved, twin tests on every BUSY surface
 
 ### Phase 219: ACCOUNTEMAIL — the signed-in account shows its email and can change it
 

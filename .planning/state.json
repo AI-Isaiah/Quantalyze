@@ -77,12 +77,27 @@
       "number": "217",
       "name": "SERVERRULE",
       "status": "complete"
+    },
+    {
+      "number": "218",
+      "name": "SELFHEAL",
+      "status": "complete"
+    },
+    {
+      "number": "219",
+      "name": "ACCOUNTEMAIL",
+      "status": "pending"
+    },
+    {
+      "number": "220",
+      "name": "EXTRACTOR",
+      "status": "pending"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step (plan phase 155.2)",
-    "reason": "Phase 3 of 17 — needs a plan"
+    "reason": "Phase 3 of 18 — needs a plan"
   },
-  "updated_at": "2026-11-19T13:51:38.593Z"
+  "updated_at": "2026-11-20T16:43:37.849Z"
 }
