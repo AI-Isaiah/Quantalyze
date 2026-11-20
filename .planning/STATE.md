@@ -2,7 +2,7 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155, 155.1 and 207-217 complete; 155.2, 157, 218 and 219 open)
+current_phase_name: parallel phases (155, 155.1 and 207-217 complete; 155.2, 157, 218, 219 and 220 open)
 status: executing
 stopped_at: Phase 155.1 complete after the founder session; 218 and 219 booked
 last_updated: "2026-11-19T13:51:38.533Z"
@@ -714,6 +714,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 217 added (2026-11-18, /gsd-phase add, founder "Book per-server rule"): SERVERRULE, the MT5 server time rule is chosen per broker server, so a UTC-keeping server passes the 155.1 clock guard; trigger: the 2026-11-18 PROD readings (one key on a UTC server measured +0h against +2h, derive failed_final)
 - Phase 218 added (2026-11-19, /gsd-phase add, founder "Book a fix: wizard waits (Recommended)"): SELFHEAL, the wizard's MT5 key check pays an owed terminal scrub inline and runs the check in the same request instead of answering KEY_MT5_TERMINAL_BUSY; widened the same day (founder "Fix in Phase 218 (Recommended)") with two resume-banner fixes; trigger: the founder session's first wizard validation after the 217 deploy
 - Phase 219 added (2026-11-19, /gsd-phase add, founder "Book a phase (Recommended)"): ACCOUNTEMAIL, the signed-in account shows its email and can change it through Supabase Auth's confirm-by-email flow; trigger: the founder could not tell which email to sign in with
+- Phase 220 added (2026-11-20, /gsd-phase add, orchestrator under the standing milestone goal): EXTRACTOR, CI-only; the local-stack extractor accepts `UPDATE OF` auth.users triggers so the baseline re-dump carrying 219's migration can land and main's sql-gate-lint goes green; owns [219-EXTRACTOR-UPDATE-OF]
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 - Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
 

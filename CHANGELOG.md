@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.133.53.2] - 2026-11-20 — records: book 220 EXTRACTOR
+
+Planning-only release: books Phase 220 EXTRACTOR. No code changes.
+
+### Added
+- **Phase 220 EXTRACTOR booked** (ROADMAP overview bullet, phase section and Progress row; STATE roadmap evolution and current phase name). It is CI-only. It teaches the local-stack non-public extractor (`scripts/local-stack/nonpublic-objects.mjs`) to accept an `AFTER UPDATE OF <columns>` trigger on `auth.users` and to compare its columns against the catalogue, so that the baseline re-dump carrying the 219 migration `20261119120000` can land without making every lane boot FATAL. It owns `TODOS.md` `[219-EXTRACTOR-UPDATE-OF]`.
+
+### Notes
+- Main's `sql-gate-lint` has been red since merge `d4f93d474` with exactly one finding, `SNAPSHOT_MISSING sync_profile_email_from_auth/0`, and `frontend` is red only because it aggregates that job. That holds back the Railway analytics deploy. The bot re-dump PR #1294 clears the finding, but it must merge only after Phase 220 lands.
+- Version 0.133.53.1 is left to the bot re-dump PR #1294, which already carries it.
+
 ## [0.133.53.0] - 2026-11-19 — Phase 219 ACCOUNTEMAIL: the signed-in account shows its email and can change it
 
 The profile page's Account tab now shows the email the account signs in with, and lets the user change it. The change goes through Supabase Auth's own confirm-by-email flow (`auth.updateUser`); the app never writes `auth.users` itself. Once Auth applies a confirmed change, a database trigger copies the new address into the derived `public.profiles.email`. Phase branch: 28 commits (25 non-merge, 3 plan merges), squashed here into one release commit with no `.planning/` paths.
