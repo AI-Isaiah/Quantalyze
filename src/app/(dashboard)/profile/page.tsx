@@ -118,6 +118,8 @@ export default async function ProfilePage() {
         initialPreferences={initialPreferences}
         isAllocator={isAllocator}
         exchanges={exchanges}
+        accountEmail={user.email ?? null}
+        pendingEmail={user.new_email ?? null}
       />
     </>
   );

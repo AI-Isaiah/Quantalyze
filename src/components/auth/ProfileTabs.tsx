@@ -6,6 +6,7 @@ import { Tooltip } from "@/components/ui/Tooltip";
 import { termDefinition, type TermKey } from "@/lib/glossary";
 import { ProfileForm } from "./ProfileForm";
 import { DeleteAccountButton } from "./DeleteAccountButton";
+import { AccountEmailSection } from "./AccountEmailSection";
 import { OrganizationTab } from "@/components/org/OrganizationTab";
 import { MandateForm } from "@/components/mandate/MandateForm";
 import {
@@ -52,6 +53,10 @@ interface Props {
   initialPreferences?: AllocatorOwnPreferences | null;
   isAllocator?: boolean;
   exchanges?: ExchangesTabContentProps | null;
+  /** Phase 219 D-02: the server-read `auth.getUser().email`, never `profile.email`. */
+  accountEmail?: string | null;
+  /** Phase 219 D-05: the server-read `auth.getUser().new_email`, set while a change awaits confirmation. */
+  pendingEmail?: string | null;
 }
 
 export function ProfileTabs({
@@ -59,6 +64,8 @@ export function ProfileTabs({
   initialPreferences = null,
   isAllocator = false,
   exchanges = null,
+  accountEmail = null,
+  pendingEmail = null,
 }: Props) {
   const router = useRouter();
   const pathname = usePathname();
@@ -176,8 +183,15 @@ export function ProfileTabs({
         <OrganizationTab />
       </TabsContent>
       <TabsContent value="account">
-        <div className="max-w-xl">
-          <DeleteAccountButton />
+        <div className="max-w-xl space-y-8">
+          <AccountEmailSection
+            email={accountEmail}
+            pendingEmail={pendingEmail}
+            firstLinkAccepted={searchParams.get("email_change") === "partial"}
+          />
+          <div className="border-t border-border pt-8">
+            <DeleteAccountButton />
+          </div>
         </div>
       </TabsContent>
     </Tabs>

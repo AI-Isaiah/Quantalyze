@@ -392,6 +392,20 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
+  // ⭐ 2026-11-19: Phase 219 ACCOUNTEMAIL plan 03 adds one `snapshot-only` row, for the
+  // trigger function that copies a confirmed auth.users.email change into profiles.email
+  // (D-06). Its clearing condition is the re-dump taken after the migration has applied
+  // to PROD; that act turns the row into `ratchet-stale` and it is DELETED, as the
+  // Phase 155.1 row below was.
+  {
+    name: "sync_profile_email_from_auth",
+    side: "snapshot-only",
+    capturedAt: "2026-11-19",
+    clearedBy:
+      "a re-dump of supabase/schema/baseline.sql taken after 20261119120000_sync_profile_email_from_auth.sql applies to PROD",
+    reason:
+      "Phase 219 D-06 defines the email-sync trigger function in a forward migration that is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
+  },
   // ⭐ 2026-11-17: the Phase 155.1 SERVERCLOCK plan 05 row
   // (`enforce_mt5_server_clock_readings_write_once`, `snapshot-only`, captured
   // 2026-11-17) is DELETED: its clearing condition, a re-dump taken after

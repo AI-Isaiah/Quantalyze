@@ -105,5 +105,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.redirect(new URL(safeNext, req.url));
   }
 
+  // "Secure email change": the FIRST of the two confirmation links is a partial
+  // confirmation. GoTrue's /verify answers it with a `message` and neither a
+  // `code` nor a `token_hash` (Phase 219 MD-01). Nothing was verified here, so
+  // nobody is signed in; send the user back to `next` with a marker the Account
+  // tab turns into a note, instead of an error page for a click that worked.
+  if (url.searchParams.get("message")) {
+    const dest = new URL(safeNext, req.url);
+    dest.searchParams.set("email_change", "partial");
+    return NextResponse.redirect(dest);
+  }
+
   return loginRedirect(req, "Missing verification parameters");
 }

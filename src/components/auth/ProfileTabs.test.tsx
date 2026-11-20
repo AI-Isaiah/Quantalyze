@@ -32,12 +32,20 @@ import { termDefinition } from "@/lib/glossary";
 // routerReplace is a STABLE hoisted spy (a fresh vi.fn() per useRouter() call
 // would be unassertable) so the manual-activation test can assert nav timing.
 const { routerReplace } = vi.hoisted(() => ({ routerReplace: vi.fn() }));
-const searchParamsState = { tab: null as string | null };
+const searchParamsState = {
+  tab: null as string | null,
+  emailChange: null as string | null,
+};
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: routerReplace, push: vi.fn(), refresh: vi.fn() }),
   usePathname: () => "/profile",
   useSearchParams: () => ({
-    get: (k: string) => (k === "tab" ? searchParamsState.tab : null),
+    get: (k: string) =>
+      k === "tab"
+        ? searchParamsState.tab
+        : k === "email_change"
+          ? searchParamsState.emailChange
+          : null,
     toString: () =>
       searchParamsState.tab ? `tab=${searchParamsState.tab}` : "",
   }),
@@ -59,6 +67,7 @@ beforeEach(() => {
   // mock to every later file in the worker.
   vi.stubGlobal("fetch", mockFetch as unknown as typeof globalThis.fetch);
   searchParamsState.tab = null;
+  searchParamsState.emailChange = null;
 });
 afterEach(() => {
   vi.clearAllMocks();
@@ -344,5 +353,80 @@ describe("ProfileTabs: the Mandate tab explains mandate (Form B)", () => {
       });
       expect(screen.queryByRole("tooltip")).toBeNull();
     }
+  });
+});
+
+// Phase 219 (D-01, D-02, D-05): the Account tab leads with the sign-in email
+// from Supabase Auth, ahead of the deletion request.
+describe("ProfileTabs: the Account tab sign-in email (Phase 219)", () => {
+  it("D-02: shows the auth email and never the derived profiles.email", () => {
+    searchParamsState.tab = "account";
+    render(
+      <ProfileTabs
+        profile={PROFILE_FIXTURE}
+        accountEmail="auth@quantalyze.test"
+        pendingEmail={null}
+      />,
+    );
+
+    const panel = screen.getByRole("tabpanel");
+    expect(screen.getByTestId("account-email")).toHaveTextContent(
+      "auth@quantalyze.test",
+    );
+    // PROFILE_FIXTURE.email is test@example.test: it must not reach the panel.
+    expect(panel.textContent).not.toContain(PROFILE_FIXTURE.email);
+  });
+
+  it("D-01: the Sign-in email section precedes the account deletion request", () => {
+    searchParamsState.tab = "account";
+    render(<ProfileTabs profile={PROFILE_FIXTURE} accountEmail="auth@quantalyze.test" />);
+
+    const heading = screen.getByRole("heading", { name: "Sign-in email" });
+    const deletion = screen.getByRole("button", { name: "Request account deletion" });
+    expect(
+      heading.compareDocumentPosition(deletion) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("D-05: a pending address renders the pending panel on load", () => {
+    searchParamsState.tab = "account";
+    render(
+      <ProfileTabs
+        profile={PROFILE_FIXTURE}
+        accountEmail="auth@quantalyze.test"
+        pendingEmail="next@quantalyze.test"
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("next@quantalyze.test");
+  });
+
+  // MD-01: /auth/callback sends the first email-change link back with
+  // ?email_change=partial; the tab turns the marker into the pending-panel note.
+  it("MD-01: ?email_change=partial shows the first-link note beside the pending panel", () => {
+    searchParamsState.tab = "account";
+    searchParamsState.emailChange = "partial";
+    render(
+      <ProfileTabs
+        profile={PROFILE_FIXTURE}
+        accountEmail="auth@quantalyze.test"
+        pendingEmail="next@quantalyze.test"
+      />,
+    );
+
+    expect(screen.getByTestId("account-email-first-link")).toBeInTheDocument();
+  });
+
+  it("MD-01: without the marker the note is absent", () => {
+    searchParamsState.tab = "account";
+    render(
+      <ProfileTabs
+        profile={PROFILE_FIXTURE}
+        accountEmail="auth@quantalyze.test"
+        pendingEmail="next@quantalyze.test"
+      />,
+    );
+
+    expect(screen.queryByTestId("account-email-first-link")).toBeNull();
   });
 });

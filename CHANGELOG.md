@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.133.53.0] - 2026-11-19 — Phase 219 ACCOUNTEMAIL: the signed-in account shows its email and can change it
+
+The profile page's Account tab now shows the email the account signs in with, and lets the user change it. The change goes through Supabase Auth's own confirm-by-email flow (`auth.updateUser`); the app never writes `auth.users` itself. Once Auth applies a confirmed change, a database trigger copies the new address into the derived `public.profiles.email`. Phase branch: 28 commits (25 non-merge, 3 plan merges), squashed here into one release commit with no `.planning/` paths.
+
+### Added
+- **Sign-in email on the Account tab** (`src/components/auth/AccountEmailSection.tsx`, wired in `ProfileTabs.tsx` and `src/app/(dashboard)/profile/page.tsx`).
+  - The address comes from the server-read `auth.getUser().email`, never `profile.email` (D-01, D-02). A pending change comes from `user.new_email` (D-05), so a reload while a change awaits confirmation lands straight in the pending panel.
+  - "Change email" opens a form. Empty input, the current address and a failed send each get their own message. An empty Supabase error message falls back to fixed copy, and a thrown request says "Network error".
+  - A successful send calls `updateUser` once with the trimmed address and `emailRedirectTo` set to `/auth/callback?next=%2Fprofile%3Ftab%3Daccount`, then `router.refresh()` (D-04).
+  - Focus moves to the input on open, back to "Change email" on cancel, and to "Use a different email" when the pending panel is reopened. Long addresses wrap (`break-all` inside `max-w-xl`).
+  - The section sits above the delete-account block, which now has a top border.
+- **`/auth/callback` keeps `next=/profile?tab=account`** on both the PKCE `code` branch and the `token_hash` + `email_change` branch, pinned by two route tests.
+- **Migration `20261119120000_sync_profile_email_from_auth.sql`** (D-06, D-07):
+  - `public.sync_profile_email_from_auth()`: `SECURITY DEFINER`, pinned `search_path`, `EXECUTE` revoked from `PUBLIC`, `anon` and `authenticated`. It copies `NEW.email` into `profiles.email` only when the address changed, and does nothing while `quantalyze.sanitize_in_progress` is `on`, so account erasure is never fought.
+  - Trigger `on_auth_user_email_updated`: `AFTER UPDATE OF email ON auth.users`.
+  - `REVOKE UPDATE (email) ON public.profiles FROM authenticated`, so a signed-in user can no longer write their own `profiles.email` (they can still update `display_name`).
+  - A catalogue-only verify block. No backfill, no data-reading `DO` guard, no `BEGIN`/`COMMIT`. Rollback in `supabase/migrations/down/20261119120000-rollback.sql`.
+- **SQL gate `supabase/tests/test_profiles_email_sync.sql`:** ten arms, each with a prose `RED-UNDER` and a machine `RED-UNDER-M` twin. It covers the copy, the trigger firing for a role with no `EXECUTE` (a temp-table twin as `authenticated`), the unchanged-address skip, the sanitize skip and that it applies only when the setting is `on`, the column revoke and `display_name` staying writable, the trigger's `UPDATE OF email` column list, and the function's `search_path` and `REVOKE`. The diagnostic mutation run over this file reported `biting: 10`, `lane-invocations: 10`, every arm `RED (identity ok)`.
+- **Function snapshot** `supabase/schema/functions/sync_profile_email_from_auth.sql`, with a dated `snapshot-only` row in `NAME_SET_RATCHET` (`scripts/dump-sql-functions.ts`). The re-dump taken after the PROD apply clears it, and the row is then deleted.
+
+### Fixed
+- **MD-01 (review round 1, user-facing):** under "Secure email change", the first confirmation link reaches `/auth/callback` with only a `message` and no `code` or `token_hash`. It used to land a signed-in user on `/login?error=Missing verification parameters`. It now redirects to the safe `next` path with `email_change=partial`, still through `safeNextPath` (an off-site `next` falls back to `/onboarding`), and the Account tab shows "Your confirmation was accepted. To finish the change, confirm the link sent to your other address."
+- **SF-01 (review round 1, user-facing):** the "We sent a confirmation link" panel is now driven by `data.user.new_email` from the `updateUser` response, not by the typed address. No panel appears when Auth applied the change at once, and any change in the server-read `email` or `pendingEmail` clears the local stand-in. This also closes LW-02.
+
+### Tests
+- `AccountEmailSection.test.tsx` (every email state, error fallbacks, focus rules, the first-link note), new cases in `ProfileTabs.test.tsx`, and four new `/auth/callback` route tests (both `next` branches, the message-only branch, and the open-redirect guard on it).
+- **Census pins moved for the new gate:** `FILES_FLOOR` 83 → 84 and `ARMS_FLOOR` 891 → 901 in `scripts/mutation-floors.mjs`, measured with `--parse-only` (`coverage: files 84/111`, `arms: 0/901/0`). The pinned censuses in `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`, `gate-family-meta.test.ts` and `lint-sql-gates.test.ts` moved to match. `WAIVED_CEILING` stays 0.
+- `COMPARED_FLOOR` 136 → 137 in `scripts/baseline-content-drift-check.mjs`: one function joined the chain. No allowlist row was added.
+
+### Changed
+- VERSION and package.json 0.133.52.2 → 0.133.53.0.
+
+### Notes
+- **Booked: `[219-EXTRACTOR-UPDATE-OF]`** (`TODOS.md`, FIX MID-TERM). The local-stack non-public extractor refuses `AFTER UPDATE OF email ON auth.users`. Today the migration is newer than the dump and is replayed, so nothing is red. The first baseline re-dump that carries it would make every local-stack lane boot FATAL. That fix must land before that re-dump.
+- **Expected drift until the post-apply re-dump:** `baseline-content-drift` reports `SNAPSHOT_MISSING sync_profile_email_from_auth/0`, because the migration is not on PROD yet. This is the expected stale-baseline red, not a regression.
+- **Recorded dependency, not checked:** the PROD Supabase Auth dashboard settings ("Confirm email", "Secure email change", the Redirect URL allow-list and the "Change email address" template). This phase neither read nor changed them (D-12). The redirect only works if the allow-list admits `/auth/callback?next=...`.
+- **Verification is `human_needed`** (20/20 must-haves verified in code). Still owed:
+  - the dashboard settings read above;
+  - a real email change on TEST, recording where the first link lands and the signed-out and other-device cases;
+  - `profiles.email` equal to the new address on TEST after the second link, which proves the trigger fires under GoTrue's own role;
+  - a 375px check with a 254-character address;
+  - the CI proofs on this PR's head SHA (local-stack replay names `20261119120000`, FULL `sql-mutation` green at the new floors);
+  - a rollback dry-run on TEST, or confirmation of which role owns `auth.users` on hosted Supabase (LW-04).
+- **Review:** converged after two rounds with 0 open MEDIUM+. migration-reviewer and rls-policy-auditor were clean in round 1, and the migration was not touched afterwards. LOW and INFO findings are recorded in the phase REVIEW only.
+- No `TODOS.md` entry is closed, so none is deleted. Planning artifacts (context, research, UI-SPEC, patterns, validation, three plans and their summaries, review and verification) stay on the phase branch and go to `main` in the follow-up records PR.
+
 ## [0.133.52.2] - 2026-11-19 — records: close 155.1 SERVERCLOCK; book 218 SELFHEAL and 219 ACCOUNTEMAIL
 
 Records PR from the founder's trading-day session on 2026-11-19. It closes Phase 155.1 and books two phases the session surfaced. No source, test or migration change.

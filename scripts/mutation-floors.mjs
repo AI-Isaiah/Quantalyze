@@ -1360,7 +1360,13 @@
 // `lane-invocations: 24` (the two independent tallies AGREE), every arm `RED (identity ok)`. Per-file line: `test_mt5_server_clock_readings.sql: sections 9 / judged 0 / annotated 24 / waived 0 /
 // biting 0` in the parse-only table (that mode executes nothing). The FULL local run was NOT run on this host; CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the authoritative
 // full run. WAIVED_CEILING stays 0 - no waiver was added.
-export const FILES_FLOOR = 83;
+// RAISED 83 -> 84 2026-11-19 (Phase 219 ACCOUNTEMAIL plan 03): +1 file, test_profiles_email_sync.sql (migration 20261119120000, the profiles.email sync gate: ten identities, each carrying a
+// prose RED-UNDER and a machine RED-UNDER-M twin), so 84 of 111 files. MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`, exit 0: `coverage: files 84/111`,
+// `arms: 0/901/0   (executed/annotated/waived)`, `No static defects`, and by plan 01's exit-0-by-design DIAGNOSTIC run `--file supabase/tests/test_profiles_email_sync.sql`: `arms: 10/10/0`,
+// `biting: 10`, `lane-invocations: 10` (the two independent tallies AGREE), every arm `RED (identity ok)`. Per-file line in the parse-only table: `test_profiles_email_sync.sql: sections 8 /
+// judged 0 / annotated 10 / waived 0 / biting 0` (that mode executes nothing). The FULL local run was NOT run on this host (the data volume is nearly full); CI `sql-mutation` FULL on the PR
+// (a floors edit forces FULL) is the authoritative full run. WAIVED_CEILING stays 0 - no waiver was added.
+export const FILES_FLOOR = 84;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3477,7 +3483,12 @@ export const FILES_FLOOR = 83;
 // (867 at HEAD plus the 24 the new gate declares), and by plan 04's DIAGNOSTIC run over that one gate: `arms: 24/24/0`, `biting: 24`, `lane-invocations: 24`, every arm `RED (identity ok)`.
 // NOT MEASURED by a FULL local run, so 891 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA is the run that compares it with a real
 // biting count. WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 891;
+// RAISED 891 -> 901 2026-11-19 (Phase 219 ACCOUNTEMAIL plan 03): +10 arms, each twinned, in the one NEW gate test_profiles_email_sync.sql (FILES_FLOOR 83 -> 84, see its block above).
+// MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`, exit 0: `coverage: files 84/111`, `arms: 0/901/0   (executed/annotated/waived)`, `No static defects`
+// (891 at HEAD plus the 10 the new gate declares), and by plan 01's DIAGNOSTIC run over that one gate: `arms: 10/10/0`, `biting: 10`, `lane-invocations: 10`, every arm `RED (identity ok)`.
+// NOT MEASURED by a FULL local run, so 901 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA is the run that compares it with a real
+// biting count. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 901;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
