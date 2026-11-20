@@ -17,6 +17,11 @@ can log in to the terminal while it scrubs. Only a scrub that DELETED
 whose house relaunch VERIFIED clears the mark, so a missed scrub is visible to the next validation, which
 refuses (wizard) or pays the scrub inline (worker,
 ``run_owed_validation_scrub_in_lease``). Plan 06 wires those call sites.
+⛔ CORRECTED 2026-11-19 (Phase 218): the wizard no longer refuses an owed
+terminal. It pays the scrub inline under the lease it already holds
+(``pay_owed_validation_scrub_in_lease``) and runs the check in the same request,
+and refuses only when that scrub does not end ``scrubbed``. The sentence above
+is kept as lineage.
 
 THE BUDGET. The scrub builds its own ``Mt5Client`` on the WORKER chain
 (``MT5_REQUEST_TIMEOUT_S`` 30 s rpyc, ``MT5_INITIALIZE_TIMEOUT_MS`` 20000), the
@@ -118,6 +123,7 @@ __all__ = [
     "SCRUB_KIND_SKIPPED_NO_HOUSE_CREDENTIALS",
     "SCRUB_KIND_SKIPPED_PROBE_IN_FLIGHT",
     "mark_validation_terminal_owed_at_boot",
+    "pay_owed_validation_scrub_in_lease",
     "record_mt5_terminal_scrub",
     "report_scrub_owed_refusal",
     "run_owed_validation_scrub_in_lease",
@@ -168,6 +174,13 @@ _SCRUB_PROBE_WAIT_S: Final[float] = MT5_VALIDATE_REQUEST_TIMEOUT_S + 5.0
 
 #: The bound on the one row insert (`mt5_handover._HANDOVER_RECORD_TIMEOUT_S`).
 _SCRUB_RECORD_TIMEOUT_S: Final[float] = 5.0
+
+#: Phase 218 review round 1 (WR-02): the least event-loop wait the wizard's inline
+#: scrub is worth STARTING with. The scrub measured about 6 s; with less than this
+#: left of the wizard budget the thread would start and be abandoned at once
+#: (churn on the shared terminal, an unobserved outcome, a needless ERROR page), so
+#: `_scrub_decide` returns `abandoned` without starting it. `budget_s=None` is exempt.
+_MIN_INLINE_SCRUB_WAIT_S: Final[float] = 10.0
 
 #: At most one Sentry capture per cause per window; ERROR on every occurrence
 #: (`mt5_probe._PARK_ALERT_WINDOW_S`'s shape).
@@ -348,6 +361,11 @@ def report_scrub_owed_refusal(*, site: str, key: str) -> None:
     (CONTEXT, "The queue-instead-of-fail rule from 164.6.6's D-29 is partly
     reversed"). When nothing is pending, the scrub was genuinely missed: ERROR and
     the windowed capture. ``key`` is only looked up, never logged.
+
+    ⛔ Phase 218 review round 1 (IN-01): the wizard's owed gate NO LONGER calls this.
+    The inline scrub has already paged with its real per-cause label, and the inline
+    path never enters ``_PENDING_SCRUB_KEYS``, so a call there paged a second time
+    under ``owed_validation_refused``. No production caller remains.
     """
     try:
         if key in _PENDING_SCRUB_KEYS:
@@ -450,12 +468,17 @@ def _classify(result: ScrubRelaunchResult) -> str:
     return SCRUB_KIND_SCRUBBED
 
 
-async def _wait_for_unfinished_probes(key: str) -> bool:
+async def _wait_for_unfinished_probes(key: str, *, wait_s: float | None = None) -> bool:
     """W-1: wait, bounded by ``_SCRUB_PROBE_WAIT_S`` in total, for every
     registered probe event on ``key``. True when none is left in flight.
     The registry is re-read after every wait, so a probe registered while the
-    scrub waited is waited for too."""
-    deadline = time.monotonic() + _SCRUB_PROBE_WAIT_S
+    scrub waited is waited for too.
+
+    Phase 218: ``wait_s`` overrides the bound for the wizard's inline scrub.
+    ``None`` resolves to the module global HERE, at call time, so a test that
+    monkeypatches ``_SCRUB_PROBE_WAIT_S`` still takes effect."""
+    bound = _SCRUB_PROBE_WAIT_S if wait_s is None else wait_s
+    deadline = time.monotonic() + bound
     while True:
         unfinished = _unfinished_probes(key)
         if not unfinished:
@@ -466,13 +489,31 @@ async def _wait_for_unfinished_probes(key: str) -> bool:
         await asyncio.to_thread(unfinished[0].wait, remaining)
 
 
-async def _scrub_decide(host: str, port: int) -> tuple[str, ScrubRelaunchResult | None]:
+async def _scrub_decide(
+    host: str, port: int, *, budget_s: float | None = None
+) -> tuple[str, ScrubRelaunchResult | None]:
+    """Decide the scrub's kind. ``budget_s`` (Phase 218, the wizard's inline
+    scrub) bounds the EVENT-LOOP wait only: the W-1 wait gets
+    ``min(_SCRUB_PROBE_WAIT_S, budget_s)`` and the ``wait_for`` gets what is left
+    of ``budget_s``. ⛔ The thread deadline stays ``heal_deadline(_VALIDATION_SCRUB_BUDGET_S)``
+    in both cases: ``_affordable(deadline, _CREDENTIALED_RELAUNCH_READING_CROSSINGS)``
+    in ``mt5_relogin`` needs about 60 s of thread deadline after the verb, or every
+    heal would end ``relaunch_unverified``. ``None`` is today's behaviour."""
+    started = time.monotonic()
     key = mt5_terminal_key(host, port)
-    if not await _wait_for_unfinished_probes(key):
+    wait_s = None if budget_s is None else min(_SCRUB_PROBE_WAIT_S, budget_s)
+    if not await _wait_for_unfinished_probes(key, wait_s=wait_s):
         return SCRUB_KIND_SKIPPED_PROBE_IN_FLIGHT, None
     house = read_env_mt5_credentials()
     if house is None:
         return SCRUB_KIND_SKIPPED_NO_HOUSE_CREDENTIALS, None
+    wait_timeout = (
+        _VALIDATION_SCRUB_BUDGET_S
+        if budget_s is None
+        else max(0.0, budget_s - (time.monotonic() - started))
+    )
+    if budget_s is not None and wait_timeout < _MIN_INLINE_SCRUB_WAIT_S:
+        return SCRUB_KIND_ABANDONED, None
     try:
         result = await asyncio.wait_for(
             asyncio.to_thread(
@@ -482,7 +523,7 @@ async def _scrub_decide(host: str, port: int) -> tuple[str, ScrubRelaunchResult 
                 house,
                 heal_deadline(_VALIDATION_SCRUB_BUDGET_S),
             ),
-            timeout=_VALIDATION_SCRUB_BUDGET_S,
+            timeout=wait_timeout,
         )
     except TimeoutError:
         return SCRUB_KIND_ABANDONED, None
@@ -492,7 +533,9 @@ async def _scrub_decide(host: str, port: int) -> tuple[str, ScrubRelaunchResult 
     return kind, result
 
 
-async def _scrub_under_lease(host: str, port: int, *, site: str) -> str:
+async def _scrub_under_lease(
+    host: str, port: int, *, site: str, budget_s: float | None = None
+) -> str:
     """The scrub, with the validation terminal's lease ALREADY HELD. Returns the
     kind. Writes exactly one row and alerts on every non-scrubbed kind.
 
@@ -505,7 +548,7 @@ async def _scrub_under_lease(host: str, port: int, *, site: str) -> str:
     """
     result: ScrubRelaunchResult | None = None
     try:
-        kind, result = await _scrub_decide(host, port)
+        kind, result = await _scrub_decide(host, port, budget_s=budget_s)
     except Exception as exc:  # noqa: BLE001 — every exit is a recorded kind
         logger.error(
             "mt5 validation terminal scrub: the scrub raised (exc_class=%s)",
@@ -641,6 +684,9 @@ def mark_validation_terminal_owed_at_boot() -> None:
     enough: the first validation after a restart pays the owed scrub (the wizard
     refuses and schedules it, the worker runs it inline) and the terminal is
     house-relaunched before any probe.
+    ⛔ CORRECTED 2026-11-19 (Phase 218): the wizard now pays that scrub inline
+    too (``pay_owed_validation_scrub_in_lease``) and refuses only when the scrub
+    does not end ``scrubbed``. The sentence above is kept as lineage.
 
     ⛔ WHY IT MARKS AND NEVER SCHEDULES. During a Railway deploy overlap the OLD
     process may still be validating on this terminal, and the lease and the
@@ -652,6 +698,9 @@ def mark_validation_terminal_owed_at_boot() -> None:
     deploy is refused"): the first wizard validation after each deploy is refused
     with the recoverable 424 while the scrub runs, and because nothing was
     pending it pages once (ERROR plus a windowed capture).
+    ⛔ CORRECTED 2026-11-19 (Phase 218): that cost is gone. The first wizard
+    validation pays the scrub inline and passes; a refusal and its page happen
+    only when the inline scrub does not end ``scrubbed``. Kept as lineage.
 
     It reads the validation endpoint only to MARK that terminal; it cannot route
     a job onto it (the routing pin in ``tests/test_mt5_concurrency.py`` names it
@@ -701,6 +750,35 @@ async def run_owed_validation_scrub_in_lease(host: str, port: int, *, site: str)
             return False
         except BaseException:  # noqa: BLE001 — see the docstring; this is the control
             return False
+
+
+async def pay_owed_validation_scrub_in_lease(
+    host: str, port: int, *, site: str, budget_s: float
+) -> str:
+    """The wizard's inline path (Phase 218): the request already holds the
+    validation terminal's lease and pays an owed scrub before its probe, bounded
+    on the event loop by ``budget_s``. Returns the scrub KIND so the caller can
+    name the real cause when it is not ``scrubbed``. NEVER RAISES ``Exception``.
+
+    Takes NO lease of its own: it runs under the caller's held lease
+    (``asyncio.Lock`` is not re-entrant, and ``_PRODUCTION_LEASE_SITES`` in
+    ``tests/test_mt5_concurrency.py`` forbids a third lease site)."""
+    try:
+        return await _scrub_under_lease(host, port, site=site, budget_s=budget_s)
+    except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
+        try:
+            logger.error(
+                "mt5 validation terminal scrub: the inline scrub failed "
+                "(exc_class=%s)",
+                type(exc).__name__,
+            )
+            # A raise escaping `_scrub_under_lease` is the one refusal nothing
+            # alerted for (the caller no longer reports one): page it here, with its
+            # real cause. `_alert_scrub_failed` never raises.
+            _alert_scrub_failed(SCRUB_KIND_FAILED, site=site)
+            return SCRUB_KIND_FAILED
+        except BaseException:  # noqa: BLE001 — see the docstring; this is the control
+            return SCRUB_KIND_FAILED
 
 
 def _count_or_none(verdict: dict[str, object], key: str) -> int | None:

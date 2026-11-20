@@ -1643,6 +1643,11 @@ _GUARDED_SYMBOLS = (
     mt5_terminal_scrub.scrub_validation_terminal,
     mt5_terminal_scrub.record_mt5_terminal_scrub,
     mt5_terminal_scrub.run_owed_validation_scrub_in_lease,
+    # ⭐ Phase 218 (SELFHEAL) — the wizard's inline sibling of the line above. It runs
+    # inside the wizard's HELD validation lease and its caller turns the returned kind
+    # into the user's answer, so a raise there would replace the request's own
+    # outcome. Same predicate, never a copy of it.
+    mt5_terminal_scrub.pay_owed_validation_scrub_in_lease,
     # ⭐ Phase 164.6.6.1 plan 06 — called SYNCHRONOUSLY from `main.lifespan`,
     # before the worker loops start and outside any `try`: a raise would abort
     # uvicorn startup and take `/health` and every loop down for an MT5 mark.

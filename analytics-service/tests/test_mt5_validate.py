@@ -1975,6 +1975,70 @@ def test_mt5_validate_worst_case_stays_inside_the_client_budget(exchange_router)
     assert mt5_concurrency._MT5_LEASE_WAIT_S == router._MT5_LEASE_WAIT_S
 
 
+def test_mt5_validate_inline_scrub_budget_fits_inside_the_envelope(exchange_router):
+    """218-SC-4 (Phase 218). The wizard's inline owed scrub runs INSIDE the 75 s
+    end-to-end envelope (anchored at lease acquisition), not beside it, so the 105 s
+    server worst case above does not move. The three knobs are HAND-TYPED so a
+    drift in the source cannot move the pin with it.
+
+    scrub wait 30 + cron-row write 5 + probe floor 40 = 75: the floor holds by
+    construction with ZERO slack, so `<=` is the form that can still fail."""
+    from services import mt5_terminal_scrub
+
+    router = exchange_router
+    assert router._MT5_INLINE_SCRUB_BUDGET_S == 30.0
+    assert router._MT5_VALIDATE_PROBE_FLOOR_S == 40.0
+    assert router._MT5_INLINE_SCRUB_RECORD_S == 5.0
+    # `_scrub_under_lease` awaits the cron row (up to this long) before returning,
+    # so the router's copy must equal the scrub module's, like `_MT5_LEASE_WAIT_S`.
+    assert router._MT5_INLINE_SCRUB_RECORD_S == mt5_terminal_scrub._SCRUB_RECORD_TIMEOUT_S
+    assert 30.0 + 5.0 + 40.0 <= router._MT5_VALIDATE_DEADLINE_S
+    # DELIBERATE, ACCEPTED INVERSION (CONTEXT "Amended after research" Budget,
+    # research option B): the probe floor sits BELOW the per-stage ceiling, so a
+    # scrub-then-probe request whose scrub AND probe are both slow can be cut off by
+    # the deadline before a stage fires. Accepted only for that doubly-slow case;
+    # a floor above the stage ceiling would leave no room for the scrub.
+    assert router._MT5_VALIDATE_PROBE_FLOOR_S < router._MT5_VALIDATE_STAGE_TIMEOUT_S, (
+        "the probe floor is DELIBERATELY below the stage ceiling, accepted only when "
+        "the scrub and the probe are both slow (218-CONTEXT Amended-after-research "
+        "Budget, research option B); moving it above the ceiling needs a new decision"
+    )
+
+
+@pytest.mark.parametrize(
+    ("knob", "value"),
+    [
+        ("_MT5_VALIDATE_PROBE_FLOOR_S", 60.0),  # 75 - 5 - 60 = 10, the boundary
+        ("_MT5_VALIDATE_DEADLINE_S", 55.0),  # 55 - 5 - 40 = 10, the boundary
+        ("_MT5_INLINE_SCRUB_BUDGET_S", 4.0),
+    ],
+)
+def test_mt5_validate_inline_scrub_budget_misconfig_is_named_at_startup(
+    exchange_router, monkeypatch, caplog, knob, value
+):
+    """Phase 218 review round 2 (WR-01). An env override that clamps the inline scrub
+    budget to the scrub's minimum or below makes EVERY owed validation refuse as
+    `abandoned` without scrubbing, and the alert would read as a timing fault. The
+    startup check must instead log one ERROR naming the three env knobs; the defaults
+    must stay silent."""
+    router = exchange_router
+    with caplog.at_level(logging.ERROR, logger="quantalyze.analytics"):
+        router._check_inline_scrub_budget()
+    assert not caplog.records, "the defaults must not log a misconfiguration"
+
+    monkeypatch.setattr(router, knob, value)
+    with caplog.at_level(logging.ERROR, logger="quantalyze.analytics"):
+        router._check_inline_scrub_budget()
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    for env_name in (
+        "MT5_VALIDATE_SCRUB_BUDGET_S",
+        "MT5_VALIDATE_DEADLINE_S",
+        "MT5_VALIDATE_PROBE_FLOOR_S",
+    ):
+        assert env_name in message
+
+
 def test_worker_request_timeout_is_unmoved_by_the_validate_chain():
     """⛔ D-25: MT5_REQUEST_TIMEOUT_S is the SEQUENTIAL worker's contract and must
     stay at 30s. The validate path got its headroom per-instance precisely so this

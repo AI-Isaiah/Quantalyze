@@ -165,6 +165,14 @@ EXPECTED_MT5_TERMINAL_BUSY_DETAIL = (
     "Try again in a minute."
 )
 
+# Phase 218 (SELFHEAL) - the wire body of C9 now. The owed-scrub gate pays the scrub inline
+# and refuses only when it does not end `scrubbed`; that refusal names its own code. Typed
+# here independently of `services/closed_sets.py`; the hoisted-copy pin below COMPARES them.
+EXPECTED_MT5_TERMINAL_NOT_READY_DETAIL = (
+    "Our MetaTrader connection could not be made ready for this check, so it did not run. "
+    "Try again in a minute."
+)
+
 # The synthetic unknown-code control. Deliberately NOT a member of any real
 # vocabulary — if a future phase mints this string as a real code, this control
 # stops testing what it claims to and must be re-synthesised.
@@ -851,16 +859,24 @@ def test_c8_mt5_unlisted_server_is_refused_before_login(
     factory.assert_not_called()
 
 
-def test_c9_mt5_owed_scrub_answers_terminal_busy(app_client, monkeypatch) -> None:
-    """C9 - a terminal that owes a scrub (or a relaunch) refuses the wizard validation
-    BEFORE any connect, login or probe, through the real route and the real
-    exception-handler stack, and the code names the cause: MT5_TERMINAL_BUSY.
+def test_c9_mt5_owed_scrub_unhealed_answers_terminal_not_ready(
+    app_client, monkeypatch
+) -> None:
+    """C9 - a terminal that owes a scrub (or a relaunch) whose INLINE scrub does not end
+    `scrubbed` refuses the wizard validation BEFORE any connect, login or probe, through
+    the real route and the real exception-handler stack, and the code names the cause:
+    MT5_TERMINAL_NOT_READY.
+
+    Phase 218: before it, this site answered MT5_TERMINAL_BUSY (Phase 164.6.6.3.2 D-02)
+    on EVERY owed terminal. The gate now heals an owed terminal itself and reaches this
+    refusal only on a non-`scrubbed` kind (stubbed here as `abandoned`). C10 keeps
+    MT5_TERMINAL_BUSY: it is the only remaining emitter of that code.
 
     Phase 164.6.6.3.2 D-02. This arm used to answer NETWORK_UNAVAILABLE, so a user whose
     check was refused by OUR terminal read "the validation request did not complete in
     time ... a network blip". The mark is the REAL one (`note_mt5_scrub_owed`, not a
     patched predicate), so a regression that stopped reading it cannot pass. The
-    scheduler and the reporter are stubbed: this file asserts the WIRE body, and the
+    scheduler is stubbed: this file asserts the WIRE body, and the
     scrub and its alert have their own tests in test_mt5_validation_park.py.
 
     The client double is armed to FAIL if it is ever built: nothing may reach the
@@ -868,12 +884,18 @@ def test_c9_mt5_owed_scrub_answers_terminal_busy(app_client, monkeypatch) -> Non
     from unittest.mock import MagicMock
 
     from services import mt5_client
+    from services.mt5_terminal_scrub import SCRUB_KIND_ABANDONED
 
     g = _handler_globals("/api/validate-key")
     factory = MagicMock(side_effect=AssertionError("a client was built"))
     monkeypatch.setitem(g, "Mt5Client", factory)
-    monkeypatch.setitem(g, "schedule_validation_terminal_scrub", MagicMock())
-    monkeypatch.setitem(g, "report_scrub_owed_refusal", MagicMock())
+    schedule =MagicMock(side_effect=AssertionError("the owed gate must not schedule"))
+    monkeypatch.setitem(g, "schedule_validation_terminal_scrub", schedule)
+
+    async def _unhealed(*args: Any, **kwargs: Any) -> str:
+        return SCRUB_KIND_ABANDONED
+
+    monkeypatch.setitem(g, "pay_owed_validation_scrub_in_lease", _unhealed)
     key = mt5_client.mt5_terminal_key("mt5-validate-gw.internal", 18813)
     mt5_client.note_mt5_scrub_owed(key)
     try:
@@ -884,19 +906,21 @@ def test_c9_mt5_owed_scrub_answers_terminal_busy(app_client, monkeypatch) -> Non
     _assert_flat_venue_body(
         r,
         trigger="mt5_scrub_owed",
-        detail=EXPECTED_MT5_TERMINAL_BUSY_DETAIL,
-        code="MT5_TERMINAL_BUSY",
+        detail=EXPECTED_MT5_TERMINAL_NOT_READY_DETAIL,
+        code="MT5_TERMINAL_NOT_READY",
         recoverable=True,
     )
     factory.assert_not_called()
+    schedule.assert_not_called()
 
 
 def test_c10_mt5_held_lease_answers_terminal_busy(app_client, monkeypatch) -> None:
     """C10 - a terminal still held when the interactive lease bound expires refuses the
     wizard validation, through the real route and the real exception-handler stack,
-    with the SAME code and detail as C9 (an owed scrub): the user's remedy is the same
-    and the detail is true at both. Phase 164.6.6.3.2 D-02; this arm used to answer
-    NETWORK_UNAVAILABLE.
+    with MT5_TERMINAL_BUSY. Phase 164.6.6.3.2 D-02; this arm used to answer
+    NETWORK_UNAVAILABLE. (⛔ CORRECTED 2026-11-19, Phase 218: it used to share its code and
+    detail with C9, the owed-scrub gate. C9 now answers MT5_TERMINAL_NOT_READY, so this is
+    the only emitter of MT5_TERMINAL_BUSY.)
 
     The lease is replaced by one that raises `Mt5TerminalBusyError` on entry, which is
     exactly what the real lease does at its bound; the real-lock path has its own test
@@ -1647,6 +1671,10 @@ def test_hoisted_copy_constants_match_the_literals_pinned_here() -> None:
     from services.closed_sets import MT5_TERMINAL_BUSY_DETAIL
 
     assert MT5_TERMINAL_BUSY_DETAIL == EXPECTED_MT5_TERMINAL_BUSY_DETAIL
+    # Phase 218 - C9's detail, hoisted in the same module.
+    from services.closed_sets import MT5_TERMINAL_NOT_READY_DETAIL
+
+    assert MT5_TERMINAL_NOT_READY_DETAIL == EXPECTED_MT5_TERMINAL_NOT_READY_DETAIL
 
     # The substring the cascade actually keys on, asserted separately: equality
     # to a literal proves the string did not move, this proves WHY it matters.
@@ -1659,7 +1687,12 @@ def test_terminal_busy_detail_claims_nothing_false_at_scrub_owed() -> None:
     terminal owes a scrub from an EARLIER check and nothing else is running, so any
     sentence saying another check, or another user, is using the connection is false
     there. Every sentence must be true at both sites: "was busy and could not take this
-    check yet" is true of an owed scrub and of a held lease alike."""
+    check yet" is true of an owed scrub and of a held lease alike.
+
+    ⛔ CORRECTED 2026-11-19 (Phase 218): since Phase 218 the BUSY detail is emitted ONLY at
+    the held lease (C10); the owed-scrub gate (C9) answers MT5_TERMINAL_NOT_READY_DETAIL.
+    The assertion is kept, since the copy is unchanged and still must claim nothing false
+    wherever it is ever shown."""
     from services.closed_sets import MT5_TERMINAL_BUSY_DETAIL
 
     lowered = MT5_TERMINAL_BUSY_DETAIL.lower()

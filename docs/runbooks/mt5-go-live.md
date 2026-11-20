@@ -904,6 +904,13 @@ The interactive `/validate-key` chain, as shipped by Phase 153.3:
 | end-to-end deadline | **75** s | `MT5_VALIDATE_DEADLINE_S` |
 | lease (queue) wait — OUTSIDE the deadline | **20** s | `MT5_LEASE_WAIT_S` |
 | release — OUTSIDE the deadline | **10** s | `MT5_RELEASE_TIMEOUT_S` |
+| inline owed-scrub wait — INSIDE the deadline (Phase 218) | **30** s | `MT5_VALIDATE_SCRUB_BUDGET_S` |
+| probe floor after an inline scrub (Phase 218) | **40** s | `MT5_VALIDATE_PROBE_FLOOR_S` |
+
+The last two rows are PROVISIONAL like the rest, derived from the measured about-6 s
+boot-mark scrub (5 x that for the wait; the floor is what remains of the 75 s envelope
+after the wait and the 5 s cron-row write). Their real distribution comes from the
+`owed_scrub` `mt5.stage` event's `duration_ms`.
 
 **⛔ Every one of those six numbers is PROVISIONAL. They are derived from vendor
 defaults and from the D-26 client ceiling — NOT from measurement.** State it plainly:

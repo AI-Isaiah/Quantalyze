@@ -171,6 +171,14 @@ const EXPECTED: Readonly<
     wireRecoverable: true,
     envelopeRecoverable: true,
   },
+  // Phase 218 (SELFHEAL) - case C9, the owed gate after an unhealed inline scrub, was
+  // re-pointed from `MT5_TERMINAL_BUSY` to this code at 424. Both `recoverable` columns
+  // AGREE (`clear_and_retry` is in `RECOVERABLE_ACTIONS`). C10 (held lease) stays BUSY.
+  MT5_TERMINAL_NOT_READY: {
+    wizardCode: "KEY_MT5_TERMINAL_NOT_READY",
+    wireRecoverable: true,
+    envelopeRecoverable: true,
+  },
   // Correct BY CONSTRUCTION: the contract's own control for a code the table
   // has never seen. It must reach UNKNOWN through the surviving cascade, not
   // through a short-circuit above it.
@@ -231,9 +239,15 @@ const DIVERGENT_WIRE_CODE = "AUTH_FAILED";
  * with the SAME code `MT5_TERMINAL_BUSY` as C9: `TOTAL_CASES` 17 → 18 ("expected 18 to
  * be 17"). `DISTINCT_WIRE_CODES` did not move (still 10): it is one code. Both
  * non-recoverable counts did not move either.
+ *
+ * ⚠️ Phase 218 (SELFHEAL) RE-POINTED case C9 (`mt5_scrub_owed`) from `MT5_TERMINAL_BUSY` to
+ * the NEW recoverable code `MT5_TERMINAL_NOT_READY`; C10 stays `MT5_TERMINAL_BUSY`.
+ * `DISTINCT_WIRE_CODES` 10 → 11 ("expected 11 to be 10", read off that guard's own failure
+ * message). `TOTAL_CASES` did NOT move (still 18): C9 was re-pointed, not added. Both
+ * non-recoverable counts did not move either.
  */
 const TOTAL_CASES = 18;
-const DISTINCT_WIRE_CODES = 10;
+const DISTINCT_WIRE_CODES = 11;
 const NON_RECOVERABLE_WIRE_CASES = 3;
 const NON_RECOVERABLE_WIRE_CODES = 2;
 

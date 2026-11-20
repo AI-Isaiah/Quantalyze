@@ -1118,3 +1118,201 @@ def test_TERMINAL_SCRUB_BOOT_lifespan_calls_the_boot_mark_once_synchronously_nev
     assert calls[0].lineno < task_lists[0].lineno, (
         "the boot mark must run before the worker tasks are created"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 218 (SELFHEAL) - the wizard's inline scrub and its `budget_s` plumbing.
+#
+# `pay_owed_validation_scrub_in_lease` is `run_owed_validation_scrub_in_lease`'s
+# sibling for the wizard, which wants the KIND back and a bound on the event-loop
+# wait. `budget_s` is plumbing only: `None` is today's behaviour for the worker
+# and the scheduled scrub, which these tests pin so the new knob cannot move them.
+# ---------------------------------------------------------------------------
+
+
+async def test_TERMINAL_SCRUB_budget_none_keeps_todays_probe_wait_and_scrub_bound(
+    monkeypatch: pytest.MonkeyPatch, sink: _FakeCronRuns, captures: list[str]
+) -> None:
+    """`budget_s=None` is the worker's and the scheduled task's path. The W-1 wait
+    must stay `_SCRUB_PROBE_WAIT_S` and the scrub's `wait_for` must stay
+    `_VALIDATION_SCRUB_BUDGET_S`, or the knob silently re-bounds every caller."""
+    _install_scrub_client(monkeypatch, dict(_VERIFIED))
+    waits: list[float | None] = []
+    timeouts: list[float | None] = []
+    real_wait = mt5_terminal_scrub._wait_for_unfinished_probes
+    real_wait_for = asyncio.wait_for
+
+    async def _spy_wait(key: str, *, wait_s: float | None = None) -> bool:
+        waits.append(wait_s)
+        return await real_wait(key, wait_s=wait_s)
+
+    async def _spy_wait_for(aw: Any, timeout: float | None = None) -> Any:
+        timeouts.append(timeout)
+        return await real_wait_for(aw, timeout=timeout)
+
+    monkeypatch.setattr(mt5_terminal_scrub, "_wait_for_unfinished_probes", _spy_wait)
+    monkeypatch.setattr(asyncio, "wait_for", _spy_wait_for)
+
+    kind = await mt5_terminal_scrub._scrub_under_lease(
+        _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WORKER
+    )
+
+    assert kind == mt5_terminal_scrub.SCRUB_KIND_SCRUBBED
+    assert waits == [None], "None must reach the wait unchanged (resolved at call time)"
+    # The scrub's own bound comes first; the row's insert is bounded after it.
+    assert timeouts == [
+        mt5_terminal_scrub._VALIDATION_SCRUB_BUDGET_S,
+        mt5_terminal_scrub._SCRUB_RECORD_TIMEOUT_S,
+    ], timeouts
+
+
+async def test_TERMINAL_SCRUB_a_budget_smaller_than_the_probe_wait_caps_the_W1_wait(
+    monkeypatch: pytest.MonkeyPatch, sink: _FakeCronRuns, captures: list[str]
+) -> None:
+    """The wizard's bound covers the W-1 wait too: with 5 s of probe wait and a
+    0.2 s budget, an unfinished probe yields `skipped_probe_in_flight` in about
+    the budget, not after the full 5 s the user could not wait out."""
+    fake, constructions = _install_scrub_client(monkeypatch, dict(_VERIFIED))
+    monkeypatch.setattr(mt5_terminal_scrub, "_SCRUB_PROBE_WAIT_S", 5.0)
+    blocker = threading.Event()
+    mt5_terminal_scrub._register_probe(_VAL_KEY, blocker)
+    started = asyncio.get_running_loop().time()
+    try:
+        kind = await mt5_terminal_scrub.pay_owed_validation_scrub_in_lease(
+            _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WIZARD, budget_s=0.2
+        )
+        elapsed = asyncio.get_running_loop().time() - started
+    finally:
+        blocker.set()
+    assert kind == mt5_terminal_scrub.SCRUB_KIND_SKIPPED_PROBE_IN_FLIGHT
+    assert elapsed < 2.5, f"the W-1 wait ran {elapsed:.2f}s against a 0.2 s budget"
+    assert constructions == [] and not _scrub_crossed(fake)
+    assert _the_one_scrub_row(sink)["kind"] == "skipped_probe_in_flight"
+
+
+async def test_TERMINAL_SCRUB_a_budget_shorter_than_the_scrub_ends_abandoned_with_one_row(
+    monkeypatch: pytest.MonkeyPatch,
+    sink: _FakeCronRuns,
+    captures: list[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The scrub crossing wedges past the wizard's budget: the sibling returns
+    `abandoned` (the wizard then refuses), and the one cron row and the per-cause
+    alert are written exactly as for any other abandoned scrub."""
+    finished = threading.Event()
+    release = threading.Event()
+
+    def _wedge() -> None:
+        release.wait(5.0)  # parked on an Event the test releases; 5 s is a deadman
+        finished.set()
+
+    _install_scrub_client(monkeypatch, {**_VERIFIED, "after_recycle_crossed": _wedge})
+    # The 0.2 s budget is under the minimum a scrub is worth starting with; lower the
+    # minimum so this test still drives a REAL thread past the bound (the no-start
+    # guard has its own test below).
+    monkeypatch.setattr(mt5_terminal_scrub, "_MIN_INLINE_SCRUB_WAIT_S", 0.0)
+    # The budget here is `budget_s`, not the module constant, so the rendezvous
+    # helper (which stands in for the module's `asyncio` name) is not used: the
+    # 0.2 s bound is a real one, and the wedge parks well past it.
+    try:
+        with caplog.at_level(logging.INFO):
+            kind = await mt5_terminal_scrub.pay_owed_validation_scrub_in_lease(
+                _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WIZARD, budget_s=0.2
+            )
+        assert kind == mt5_terminal_scrub.SCRUB_KIND_ABANDONED
+        assert _the_one_scrub_row(sink)["kind"] == "abandoned"
+        _assert_one_alert(caplog, captures, "abandoned")
+    finally:
+        release.set()
+    assert await asyncio.to_thread(finished.wait, 5.0)
+    await asyncio.sleep(0.05)
+
+
+@pytest.mark.parametrize("budget_s", [0.0, 0.5])
+async def test_TERMINAL_SCRUB_a_budget_too_small_to_scrub_never_starts_the_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    sink: _FakeCronRuns,
+    captures: list[str],
+    caplog: pytest.LogCaptureFixture,
+    budget_s: float,
+) -> None:
+    """Review round 1 (WR-02). With ~nothing left of the wizard budget (the W-1 wait
+    used it, or the env clamp reached 0) the scrub thread would start and be
+    abandoned at once. It must not start: no client is built and nothing crosses
+    the terminal, the kind is `abandoned`, and the row and the per-cause alert are
+    written exactly as for any abandoned scrub."""
+    fake, constructions = _install_scrub_client(monkeypatch, dict(_VERIFIED))
+    with caplog.at_level(logging.INFO):
+        kind = await mt5_terminal_scrub.pay_owed_validation_scrub_in_lease(
+            _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WIZARD, budget_s=budget_s
+        )
+    assert kind == mt5_terminal_scrub.SCRUB_KIND_ABANDONED
+    assert constructions == [] and not _scrub_crossed(fake), (
+        "the scrub thread was started with no budget to finish in"
+    )
+    assert _the_one_scrub_row(sink)["kind"] == "abandoned"
+    _assert_one_alert(caplog, captures, "abandoned")
+
+
+async def test_TERMINAL_SCRUB_the_inline_sibling_returns_failed_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    captures: list[str],
+) -> None:
+    """The wizard turns the returned kind into the user's answer, so a raise would
+    replace it with a raw 500. `_scrub_under_lease` raising becomes `failed`.
+
+    Phase 218 review round 1 (IN-01): the wizard no longer pages on a refusal, so a
+    raise escaping `_scrub_under_lease` (which alerted nothing) is paged HERE, once,
+    with the real cause `failed`."""
+    monkeypatch.setattr(mt5_terminal_scrub, "_scrub_under_lease", _raising_coro)
+    with caplog.at_level(logging.INFO):
+        kind = await mt5_terminal_scrub.pay_owed_validation_scrub_in_lease(
+            _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WIZARD, budget_s=30.0
+        )
+    assert kind == mt5_terminal_scrub.SCRUB_KIND_FAILED
+    assert any(
+        r.levelno == logging.ERROR and r.name == _LOGGER_NAME for r in caplog.records
+    ), "a failure was swallowed with no ERROR line"
+    _assert_one_alert(caplog, captures, "failed")
+
+
+async def test_TERMINAL_SCRUB_the_wizard_bound_never_becomes_the_scrub_threads_deadline(
+    monkeypatch: pytest.MonkeyPatch, sink: _FakeCronRuns, captures: list[str]
+) -> None:
+    """T-218-03. `budget_s` bounds the event-loop WAIT. The thread that runs the
+    scrub and the credentialed relaunch keeps `heal_deadline(_VALIDATION_SCRUB_BUDGET_S)`,
+    because the relaunch is only attempted when `_affordable(deadline,
+    _CREDENTIALED_RELAUNCH_READING_CROSSINGS)` still holds after the delete verb.
+    With the wizard's 30 s as the thread deadline every heal would end
+    `relaunch_unverified` and the first validation after a deploy would never heal."""
+    _install_scrub_client(monkeypatch, dict(_VERIFIED))
+    deadlines: list[float] = []
+    real_blocking = mt5_terminal_scrub._scrub_validation_terminal_blocking
+
+    def _spy(host: str, port: int, house: Any, deadline: float) -> Any:
+        deadlines.append(deadline)
+        return real_blocking(host, port, house, deadline)
+
+    monkeypatch.setattr(mt5_terminal_scrub, "_scrub_validation_terminal_blocking", _spy)
+
+    kind = await mt5_terminal_scrub.pay_owed_validation_scrub_in_lease(
+        _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WIZARD, budget_s=30.0
+    )
+
+    assert kind == mt5_terminal_scrub.SCRUB_KIND_SCRUBBED
+    (deadline,) = deadlines
+    remaining = deadline - mt5_relogin._clock()
+    needed = (
+        mt5_relogin._CREDENTIALED_RELAUNCH_READING_CROSSINGS
+        * mt5_relogin._MT5_REQUEST_TIMEOUT_S
+    )
+    assert remaining > 30.0, (
+        f"the scrub thread's deadline is {remaining:.1f}s out: it was bound to the "
+        "wizard's budget, which starves the credentialed relaunch "
+        "(`_affordable` in mt5_relogin)"
+    )
+    assert remaining >= needed, (
+        f"the thread deadline leaves {remaining:.1f}s but `_affordable` needs {needed:.1f}s "
+        "for the credentialed relaunch's readings"
+    )

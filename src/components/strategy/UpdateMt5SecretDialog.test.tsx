@@ -339,6 +339,20 @@ describe("UpdateMt5SecretDialog", () => {
     expect(envelope.textContent).toContain("Try again in a minute.");
   });
 
+  it("[218] KEY_MT5_TERMINAL_NOT_READY is recognised, not UNKNOWN, and hides the draft line", async () => {
+    const envelope = await submitAndFailWith("KEY_MT5_TERMINAL_NOT_READY");
+    expect(envelope).not.toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(envelope.textContent).toContain(
+      "Our MetaTrader terminal could not be made ready for this check.",
+    );
+    expect(envelope.textContent?.toLowerCase()).not.toContain("busy");
+    expect(envelope.textContent).not.toContain("been alerted");
+    expect(envelope.textContent).not.toContain("Try the last action again.");
+    expect(envelope.textContent).not.toContain("Your draft is saved.");
+    // Non-vacuity: the surface-free bullet still renders beside the absence above.
+    expect(envelope.textContent).toContain("Try again in a minute.");
+  });
+
   it("the submit button is disabled while the field is empty", () => {
     render(
       <UpdateMt5SecretDialog

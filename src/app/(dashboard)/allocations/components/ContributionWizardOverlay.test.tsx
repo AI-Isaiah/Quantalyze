@@ -391,7 +391,7 @@ describe("[154-05] ContributionWizardOverlay — resume, through the real Wizard
     });
   });
 
-  it("an existing API draft renders the real resume banner and lands on the draft", async () => {
+  it("an existing API draft renders the real resume banner alone, and Resume lands on the draft", async () => {
     render(<ContributionWizardOverlay isOpen onClose={vi.fn()} />);
 
     // The founder gets the explicit choice — the whole point of WIZCONT-01.
@@ -401,18 +401,20 @@ describe("[154-05] ContributionWizardOverlay — resume, through the real Wizard
       screen.getByText(/A draft from an earlier session is ready/i),
     ).toBeInTheDocument();
 
-    // And the wizard is genuinely holding THIS draft, not merely holding a prop.
-    expect(await screen.findByTestId("sync-strategy-id")).toHaveTextContent(
-      API_DRAFT.id,
-    );
+    // 218-SC-6: banner-only. The draft's step is NOT mounted under the choice.
+    expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
+    expect(screen.queryByTestId("sync-strategy-id")).toBeNull();
 
     fireEvent.click(screen.getByTestId("wizard-resume"));
 
     await waitFor(() =>
       expect(screen.queryByTestId("wizard-resume")).toBeNull(),
     );
+    // And the wizard is genuinely holding THIS draft, not merely holding a prop.
+    expect(await screen.findByTestId("sync-strategy-id")).toHaveTextContent(
+      API_DRAFT.id,
+    );
     expect(screen.getByTestId("mock-sync-preview")).toBeInTheDocument();
-    expect(screen.getByTestId("sync-strategy-id")).toHaveTextContent(API_DRAFT.id);
   });
 
   it("Start fresh only OPENS the confirm dialog — it never deletes (TRAP-4)", async () => {

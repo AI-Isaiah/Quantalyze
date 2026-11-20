@@ -423,12 +423,49 @@ describe("[H-0182] WizardClient — session expiry", () => {
 });
 
 describe("[H-0182] WizardClient — resume banner on LS pointer mismatch", () => {
-  it("shows the Resume banner (not the loaded step) when override flags it", async () => {
+  it("shows the Resume banner ALONE (no step mounted under it) when override flags it", async () => {
     resumeOverrides = { showResumeBanner: true };
     render(<WizardClient initialDraft={DRAFT} />);
 
     expect(await screen.findByTestId("wizard-resume")).toBeInTheDocument();
     expect(screen.getByTestId("wizard-start-fresh")).toBeInTheDocument();
+    // 218-SC-6: the choice must not be pre-made by a mounted step.
+    expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
+    expect(screen.queryByTestId("wizard-csv-dropzone")).toBeNull();
+    expect(screen.queryByTestId("mock-connect-step")).toBeNull();
+  });
+
+  it("an MT5 draft's banner makes no secret claim: Resume lands on a step with no secret input (218-SC-7)", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    render(
+      <WizardClient
+        initialDraft={{ ...DRAFT, supported_exchanges: ["mt5"] }}
+      />,
+    );
+
+    const banner = (await screen.findByTestId("wizard-resume")).closest("div")
+      ?.parentElement as HTMLElement;
+    expect(
+      within(banner).getByText("A draft from an earlier session is ready."),
+    ).toBeInTheDocument();
+    expect(banner.textContent).not.toMatch(/API secret|investor password/i);
+  });
+
+  it("a CSV draft's banner keeps the re-select copy (218-SC-7)", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    searchParamsString = "source=csv";
+    render(
+      <WizardClient
+        initialDraft={{ ...DRAFT, api_key_id: null }}
+        initialDraftKind="csv"
+      />,
+    );
+
+    expect(
+      await screen.findByText(
+        "A CSV upload draft from an earlier session is ready. Re-select the file and continue.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("Resume fires wizard_resume and hides the banner", async () => {
@@ -516,7 +553,7 @@ describe("[154-05 / TWIN-6] WizardClient — the draft decides the step, not the
     api_key_id: null,
   };
 
-  it("a CSV draft resumes ON the CSV branch: banner + csv_upload + the draft bound", async () => {
+  it("a CSV draft shows the banner ALONE, then Resume mounts csv_upload with the draft bound", async () => {
     resumeOverrides = { showResumeBanner: true };
     searchParamsString = "source=csv";
     render(<WizardClient initialDraft={CSV_DRAFT} initialDraftKind="csv" />);
@@ -524,15 +561,22 @@ describe("[154-05 / TWIN-6] WizardClient — the draft decides the step, not the
     // The founder gets the explicit choice (never a silent jump).
     expect(await screen.findByTestId("wizard-resume")).toBeInTheDocument();
     expect(screen.getByTestId("wizard-start-fresh")).toBeInTheDocument();
+    // Banner-only: no step is mounted under the choice (218-SC-6).
+    expect(screen.queryByTestId("wizard-csv-dropzone")).toBeNull();
+    // The banner body is the CSV copy (UI-SPEC state contract 1).
+    expect(
+      screen.getByText(/A CSV upload draft from an earlier session is ready/i),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("wizard-resume"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("wizard-resume")).toBeNull(),
+    );
     // The step is csv_upload — the CSV draft's own step.
     expect(screen.getByTestId("wizard-csv-dropzone")).toBeInTheDocument();
     // …and the SERVER draft is bound behind it: `strategyId` seeds `canDelete`,
     // so the chrome's delete-draft control only exists when a draft is loaded.
     expect(screen.getByTestId("wizard-delete-draft")).toBeInTheDocument();
-    // The banner body is the CSV copy (UI-SPEC state contract 1).
-    expect(
-      screen.getByText(/A CSV upload draft from an earlier session is ready/i),
-    ).toBeInTheDocument();
   });
 
   it("Resume on a CSV draft stays on csv_upload — it never lands on sync_preview", async () => {
@@ -551,7 +595,7 @@ describe("[154-05 / TWIN-6] WizardClient — the draft decides the step, not the
     expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
   });
 
-  it("a COMPOSITE draft resumes on sync_preview, never on csv_upload (A4)", async () => {
+  it("a COMPOSITE draft shows the banner alone, then Resume lands on sync_preview, never csv_upload (A4)", async () => {
     resumeOverrides = { showResumeBanner: true };
     render(
       <WizardClient
@@ -562,6 +606,11 @@ describe("[154-05 / TWIN-6] WizardClient — the draft decides the step, not the
 
     // api_key_id is null here too — a kind-blind `api_key_id === null ? csv`
     // rule would have routed this member-bearing draft to the upload step.
+    expect(await screen.findByTestId("wizard-resume")).toBeInTheDocument();
+    expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
+    expect(screen.queryByTestId("wizard-csv-dropzone")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("wizard-resume"));
     expect(await screen.findByTestId("mock-sync-preview")).toBeInTheDocument();
     expect(screen.queryByTestId("wizard-csv-dropzone")).toBeNull();
   });
@@ -1384,6 +1433,9 @@ describe("[140.3-10 / TRAP-4] Start fresh is confirmed before it destroys anythi
 
     render(<WizardClient initialDraft={DRAFT} />);
 
+    // 218: the step is held under the banner, so answer the banner first.
+    fireEvent.click(await screen.findByTestId("wizard-resume"));
+
     // (1) The remedy formerly known as destructive: no delete, and no dialog
     // either — there is nothing to confirm.
     fireEvent.click(await screen.findByTestId("sync-try-another"));
@@ -1396,9 +1448,11 @@ describe("[140.3-10 / TRAP-4] Start fresh is confirmed before it destroys anythi
     ).toHaveLength(0);
     expect(confirmDialogIsOpen()).toBe(false);
 
-    // (2) The SAME mount can still delete, through the one confirmed path. If a
-    // class fix had merely broken deletion, (1) would pass and this would not.
-    fireEvent.click(screen.getByTestId("wizard-start-fresh"));
+    // (2) The SAME mount can still delete, through the one confirmed path
+    // (the chrome's Delete-draft control shares the dialog with Start fresh,
+    // whose banner the Resume click above removed). If a class fix had merely
+    // broken deletion, (1) would pass and this would not.
+    fireEvent.click(screen.getByTestId("wizard-delete-draft"));
     await waitFor(() => expect(confirmDialogIsOpen()).toBe(true));
     const dialog = screen
       .getByText(/Delete this draft\?/i)

@@ -415,6 +415,21 @@ describe("[164.6.6.3.2 D-01/D-02] MultiKeyConnectStep — the two new MT5 key co
     // A busy terminal frees in seconds, so Retry is real advice here.
     expect(within(envelope).getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
+
+  it("[218] renders KEY_MT5_TERMINAL_NOT_READY, not UNKNOWN, WITH a Retry, and never says busy", async () => {
+    const envelope = await failSecondKeyWith("KEY_MT5_TERMINAL_NOT_READY", 424);
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_MT5_TERMINAL_NOT_READY");
+    expect(envelope).not.toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(envelope.textContent).toContain(
+      "Our MetaTrader terminal could not be made ready for this check.",
+    );
+    // The owed gate holds nothing else, so "busy" would be false; and the Python scrub pages
+    // per cause with no Next-side capture, so no alert claim is substantiated.
+    expect(envelope.textContent?.toLowerCase()).not.toContain("busy");
+    expect(envelope.textContent).not.toContain("been alerted");
+    // A scrub retries on the next check, so Retry is real advice here.
+    expect(within(envelope).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
 });
 
 describe("[ONB-01] MultiKeyConnectStep — reorder (Move ↑/↓, position-derived seq)", () => {

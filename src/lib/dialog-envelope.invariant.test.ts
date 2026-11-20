@@ -881,7 +881,14 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     // through the same `seamCode`. 17 -> 18 on that one roster, 36 -> 37 overall.
     // MEASURED: this assertion read `expected 37 to be 36` with the row added and the
     // pin unmoved, before the pin was touched.
-    expect(checked).toBe(37);
+    //
+    // 37 -> 38 at Phase 218 plan 03: the rotate-secret roster gained
+    // KEY_MT5_TERMINAL_NOT_READY - wire MT5_TERMINAL_NOT_READY (424), the owed-gate refusal
+    // of the same `_validate_mt5_key_probe` `rotate_key_secret` runs, reached through the
+    // same `seamCode`. 18 -> 19 on that one roster, 37 -> 38 overall. MEASURED: this
+    // assertion read `expected 38 to be 37` with the row added and the pin unmoved, before
+    // the pin was touched.
+    expect(checked).toBe(38);
   });
 
   it("B. no rostered code is the generic terminal — that would defeat the roster", () => {

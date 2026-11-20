@@ -300,7 +300,7 @@ describe("[162-06 / D-162-3] Continue with this key — the two live populations
     ).toBeNull();
   });
 
-  it("O-4 (population a, key with a live draft): shows the summary first, then resumes THAT draft", async () => {
+  it("O-4 (population a, key with a live draft): the resume banner is answered first, then Resume lands on THAT draft", async () => {
     // The stale-page case: another tab started a draft on this very key while
     // this page's placeholder row was already rendered.
     draftResponder = async () =>
@@ -320,13 +320,16 @@ describe("[162-06 / D-162-3] Continue with this key — the two live populations
       <ContributionWizardOverlay isOpen onClose={vi.fn()} preselectKey={KEY_A} />,
     );
 
-    // ⭐ THE SUMMARY WINS OVER THE DRAFT'S RESUME STEP. A draft normally resumes
-    // straight onto sync_preview; doing that here would skip the one screen that
-    // says WHICH key this is about and offers to change it.
-    await findSummary();
+    // 218-SC-6: a draft with no local pointer holds EVERY step, the preselect
+    // summary included, until the owner answers the banner. Before 218 the
+    // summary sat under the banner and "Continue with this key" pre-made the
+    // choice. Resume already replaced the summary with the draft's step
+    // (`handleResume` -> `draftResumeStep`), so nothing reachable is lost.
+    expect(await screen.findByTestId("wizard-resume")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-preselect-summary")).toBeNull();
     expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
 
-    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+    fireEvent.click(screen.getByTestId("wizard-resume"));
 
     expect(await screen.findByTestId("mock-sync-preview")).toBeInTheDocument();
     expect(screen.getByTestId("sync-strategy-id")).toHaveTextContent(
