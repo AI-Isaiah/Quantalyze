@@ -671,7 +671,12 @@ export async function seedStrategyWithHistory(opts: {
       dailyGrowth === undefined
         ? 1 + Math.sin(i / 30) * 0.05 * (i / Math.max(1, opts.days))
         : (level *= 1 + growthReturn(dailyGrowth, i)),
-  }));
+  })).slice(dailyGrowth === undefined ? 1 : 0);
+  // Phase 155.2-15: the analytics writer stores a curve with no 1.0 base point, and the
+  // stored-curve readers now read the first stored point against an implicit 1.0. The
+  // default branch's i=0 point is exactly 1.0, a base point the writer never writes, so it
+  // is dropped: every remaining date keeps its value and its return, and no 0.0 day is
+  // invented. The dailyGrowth branch already starts at 1 * (1 + r0), so it is unchanged.
 
   // 3. Build a minimal monthly_returns grid (used by Panel 4 + Yearly view)
   //    only when we have enough data.
@@ -1628,7 +1633,7 @@ export async function seedSfoxVerifiedStrategy(opts?: {
   const series = Array.from({ length: days }, (_, i) => ({
     date: new Date(anchorMs - (days - i) * 86_400_000).toISOString().slice(0, 10),
     value: 1 + Math.sin(i / 30) * 0.05 * (i / days),
-  }));
+  })).slice(1); // 155.2-15: drop the 1.0 base point the writer never stores (see the first seeder)
   const { error: aErr } = await admin.from("strategy_analytics").insert({
     strategy_id: strategyId,
     computation_status: "complete",
@@ -1825,7 +1830,7 @@ export async function seedMt5VerifiedStrategy(opts?: {
   const series = Array.from({ length: days }, (_, i) => ({
     date: new Date(anchorMs - (days - i) * 86_400_000).toISOString().slice(0, 10),
     value: 1 + Math.sin(i / 30) * 0.05 * (i / days),
-  }));
+  })).slice(1); // 155.2-15: drop the 1.0 base point the writer never stores (see the first seeder)
   const { error: aErr } = await admin.from("strategy_analytics").insert({
     strategy_id: strategyId,
     computation_status: "complete",
