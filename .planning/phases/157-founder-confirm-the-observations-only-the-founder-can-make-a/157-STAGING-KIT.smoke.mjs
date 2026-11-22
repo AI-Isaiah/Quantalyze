@@ -379,3 +379,13 @@ test("scrub keeps METHOD and path, replaces ids, and keeps only the select param
   );
   assert.equal(scrub("GET", `${REST}/trades?select=eq.${ID}&strategy_id=eq.${ID}`), "GET /rest/v1/trades?select=eq.:id");
 });
+
+test("a request the router cannot classify is refused with 599 and never sent (catch arm fails closed)", async () => {
+  const env = makeEnv();
+  env.fconf().arm("submit", "DRAFT_LOOKUP_FAILED");
+  const unclassifiable = { toString() { throw new Error("cannot stringify"); } };
+  const res = await env.call(unclassifiable, { method: "POST" });
+  assert.equal(res.status, 599);
+  assert.equal(env.spyCalls.length, 0);
+  assert.ok(env.fconf().refused.some((line) => line.startsWith("UNCLASSIFIED")));
+});

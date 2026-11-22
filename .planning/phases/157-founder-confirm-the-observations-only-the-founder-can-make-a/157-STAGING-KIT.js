@@ -362,8 +362,14 @@
       method = methodOf(input, init);
       verdict = decide(method, href, state.mode, state.envelope);
     } catch (err) {
-      // an unparsable url cannot reach the network; let the native fetch reject it itself
-      return orig(input, init);
+      // fail closed: a request the router could not classify never reaches the network
+      refused.push("UNCLASSIFIED (router threw)");
+      return Promise.resolve(
+        new Response('{"code":"FCONF_REFUSED"}', {
+          status: 599,
+          headers: { "Content-Type": JSON_CT },
+        }),
+      );
     }
     if (verdict.kind === "outside") return orig(input, init);
     if (verdict.kind === "stub") {

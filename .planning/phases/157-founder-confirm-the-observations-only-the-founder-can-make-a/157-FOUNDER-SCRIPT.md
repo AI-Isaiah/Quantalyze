@@ -13,6 +13,7 @@ SC-1 names the entry `+ Strategy`; at HEAD the control is called "Add a strategy
 - Injection order is always the same: you open the page, I inject the kit and arm the mode, you confirm the marker, and only then you click the entry. Arming comes BEFORE Resume, every time.
 - Fallback injection if I cannot reach your tab: paste the kit file into the DevTools console. Chrome asks you to type "allow pasting" the first time.
 - Refused reads from page chrome outside the wizard (sidebar counts, notification reads and similar) are expected noise from the fail-closed rule. They show in my read-back as `GET` lines and are not findings. A refused write (any other method) is always reported.
+- Analytics will record the staged legs. The kit stops staged requests from reaching our database, but the wizard's own client telemetry goes to PostHog (`wizard_error` and similar events), and so does any browser error report, and both still leave the browser. The staged faults will therefore show up there as events from your account during the sitting. I record the sitting's time window so those events can be told apart. They are noise, not real faults.
 - Fake text only. Where a field needs text, type obvious words such as "not a real key". Never type anything key-shaped and never a real credential.
 
 ## 1. Entry check (one step)

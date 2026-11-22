@@ -49,6 +49,7 @@ The agent prepares everything: a staging kit, a founder script, and the gate-1 r
 ### Plan shape and completion
 - Plan 01 (autonomous) builds the staging kit and the founder script. Plan 02 (founder checkpoint) covers the FCONF-01..03 observations. Plan 03 (founder checkpoint, gated on 155.2's last live read) covers the FCONF-04 rotation and the gate-1 re-read. The agent executes only Plan 01. No SUMMARY is written for a plan whose founder step has not happened.
 - Verification ends `human_needed` and is recorded as deferred. It is not passed.
+- ⛔ CORRECTED 2026-11-23 (after Plan 01 executed; the bullet above is kept as lineage): with Plans 02 and 03 unrun, there is NO verification yet. No VERIFICATION.md and no `## Deferred Verification` STATE row is written, because that row would drop 157 from the autonomous queue. The honest state is "stopped at Plan 02's founder checkpoint, 1/3 plans". Verification runs after Plans 02 and 03.
 
 ### Decided autonomously
 - [Kit location] Q: "Where does the staging kit live?" → Selected: "In the phase directory (`157-STAGING-KIT.js` plus `157-FOUNDER-SCRIPT.md`), not under `src/` or `scripts/`" — it is a one-shot observation aid, no product code changes, and it is moved or deleted with one commit.
