@@ -22,7 +22,9 @@ Open `/strategies`. Which "Add a strategy" do you see?
 - (a) In the left sidebar or the mobile nav: an action that opens a panel over the page.
 - (b) Only the button in the strategies list header: a link to the full wizard page.
 
-Tell me (a), (b) or both. It picks the connect route in section 4.
+- (c) The `+ Strategy` control you used on 2026-11-19, if it is somewhere else, for example on `/allocations`. There, the browse drawer's `Add your own track record` or `Can't find it? Add your own` also opens the overlay panel, so (c) counts as (a). Tell me exactly where you clicked.
+
+Tell me (a), (b), (c) or a combination. It picks the connect route in section 4.
 
 ## 2. FCONF-01: resume banner and Resume (mode `resume`)
 
@@ -79,7 +81,10 @@ I arm `submit` with `DRAFT_LOOKUP_FAILED`. Confirm the marker reads `STAGED RESP
 
 Run this section only after 155.2's last live read with that password, and after any further 155.1 spike run. Nothing here can happen earlier.
 
-1. I report two read-only pre-reads: the count and labels of the PROD keys on that MT5 account (MM2's), and any Railway variable names beginning `MT5_SPIKE_`. Names only, never values. If a Railway-held copy exists, you decide whether to rotate or delete it.
+1. Two read-only pre-reads:
+   - I report the count and labels of the PROD keys on that MT5 account (MM2's).
+   - You open the Railway dashboard and tell me any variable NAMES that begin `MT5_SPIKE_`, never their values. I do not list Railway variables myself, because the listing returns values.
+   - If a Railway-held copy exists, you decide whether to rotate it or delete it.
 2. Change the investor password at the broker FIRST. The product validates the new password live against the broker, so the broker change must come before the next step.
 3. Then, on `/profile`, for EVERY key the pre-read listed: click "Update password", type the new password in the field labelled `New password`, and save. Each key is checked live on its own.
 4. Do this outside 00:30-07:30 UTC, and not while an MT5 compute job is running, because the shared terminal switches account.
