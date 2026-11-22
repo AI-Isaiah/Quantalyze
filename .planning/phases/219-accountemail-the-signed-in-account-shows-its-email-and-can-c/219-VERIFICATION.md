@@ -1,7 +1,7 @@
 ---
 phase: 219-accountemail-the-signed-in-account-shows-its-email-and-can-c
 verified: 2026-11-20T17:00:00Z
-status: human_needed
+status: passed
 score: 24/24 must-haves verified in code (20 original + 4 gap truths); live-service behavior is the human list
 verified_at_sha: 2b45098080979e97337d76a2921fec6a8e2ef293
 drift_subjects:
@@ -27,6 +27,7 @@ drift_subjects:
   - scripts/dump-sql-functions.ts
   - scripts/baseline-content-drift-check.mjs
 behavior_unverified: 0
+human_verified: "2026-11-23 — 219-UAT.md complete on PROD: tests 1-5, 7, 10, 11, 12 pass; 6, 8, 9 accepted untested live by founder ruling (\"I do 10, accept 6/8/9\")"
 overrides_applied: 0
 re_verification:
   previous_status: gaps_found

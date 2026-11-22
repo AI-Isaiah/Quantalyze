@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: parallel phases (155, 155.1, 207-218 and 220 complete; 219 shipped, awaiting the founder's live re-test; 155.2 and 157 open)
+current_phase_name: "parallel: 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM open; everything else complete"
 status: executing
-stopped_at: Phase 220 complete (shipped as #1296)
-last_updated: "2026-11-20T18:58:29.550Z"
-last_activity: 2026-11-20
-last_activity_desc: Phase 220 EXTRACTOR complete (#1296 merged as d188fef84)
-state_head: d188fef84aec725f5d31ca1b6bfd2924c9c57be7
+stopped_at: Phase 219 complete pending its security audit; 155.2 weekend readings captured
+last_updated: "2026-11-22T22:23:40.787Z"
+last_activity: 2026-11-23
+last_activity_desc: Phase 219 complete, transitioned to Phase 155.2
+state_head: 0fd87657e40214eb7e77ccebaa284fb8d3bea285
 progress:
   total_phases: 18
-  completed_phases: 15
+  completed_phases: 16
   total_plans: 93
   completed_plans: 93
-  percent: 83
+  percent: 89
 ---
 
 ## ⭐ STATE lineage
@@ -175,11 +175,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 155 PARITYHARNESS, 155.1 SERVERCLOCK, 207 RETRYPROP through 218 SELFHEAL and 220 EXTRACTOR complete
+Phase: parallel — 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM open; 155, 155.1, 207-220 complete
 Plan: per phase (see each phase directory)
-Status: the founder's trading-day session ran 2026-11-19: 155.1 UAT items 5 and 6 passed and 155.1 closed (MT5-06 complete); 155.2 LIVEPARITY terminal readings and classic All-History Reports for MM2, MM3 and FX-AI_V are captured in the gitignored capture directory, still owing the weekend reading and broker statements; 157 FOUNDER-CONFIRM FCONF-01 observed (silent same-browser resume accepted by the founder, banner shown in a fresh browser), FCONF-02/03 and the FCONF-04 rotation still open; 218 SELFHEAL and 219 ACCOUNTEMAIL booked from the session; 218 SELFHEAL shipped as #1293 (v0.133.58.0) and closed 2026-11-20; 219 ACCOUNTEMAIL shipped as #1291 (v0.133.53.0) and its gap closure as #1299 (v0.133.60.0, migration applied to TEST and PROD), 9/9 plans, VERIFICATION human_needed; the after-deploy Auth flip ran 2026-11-20 (Secure email change OFF, Secure password change ON, Confirm email still on, read back), and 219 closes after the founder's live re-test of the one-link, password-gated email change; 220 EXTRACTOR shipped as #1296 (v0.133.56.0), after which the bot re-dump #1294 and the ratchet-row delete #1298 landed, and closed 2026-11-20
-Last activity: 2026-11-20 — Phase 220 EXTRACTOR complete (#1296 merged as d188fef84)
-Progress: [████████░░] 83%
+Status: 219 ACCOUNTEMAIL closed 2026-11-23 after the founder's live PROD re-test (219-UAT.md: 8 pass, tests 6/8/9 accepted untested live by founder ruling). 155.2 LIVEPARITY: weekend readings (Fri 2026-11-20 frozen close) captured 2026-11-22 for MM2, MM3 and FX-AI_V in the gitignored capture directory, D-E amended by founder ruling to that edge; still owes the broker statements, then plan/execute. 157 FOUNDER-CONFIRM: FCONF-01 observed 2026-11-19; FCONF-02/03 need staged wizard states; FCONF-04 rotation after 155.2's last live read
+Last activity: 2026-11-23 — Phase 219 live re-test complete; 155.2 weekend readings captured
+Progress: [█████████░] 89%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1812,7 +1812,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-14T07:30:26.000Z
-**Stopped At:** Phase 220 EXTRACTOR complete (#1296 merged as d188fef84)
+**Stopped At:** Phase 219 complete, ready to plan Phase 155.2
 **Resume File:** None
 
 **Last Date:** 2026-11-13T13:51:21.051Z
