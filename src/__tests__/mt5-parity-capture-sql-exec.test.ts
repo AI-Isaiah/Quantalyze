@@ -207,13 +207,16 @@ const BTC_DAYS = dayRange("2026-10-20", "2026-11-15");
 
 function seedSql(): string {
   const out: string[] = [];
-  const key = (k: { key: string; owner: string; created: string }, exchange: string, label: string, login: string | null) =>
-    `INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted, created_at, venue_account_id, account_currency)
-     VALUES (${q(k.key)}, ${q(k.owner)}, ${q(exchange)}, ${q(label)}, 'fixture-not-a-credential', ${q(k.created)}, ${login === null ? "NULL" : q(login)}, 'USD');`;
+  const key = (k: { key: string; owner: string; created: string }, exchange: string, label: string, login: string | null, sharedWith: string | null = null) =>
+    `INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted, created_at, venue_account_id, account_currency, account_share_kind, account_shared_with_api_key_id)
+     VALUES (${q(k.key)}, ${q(k.owner)}, ${q(exchange)}, ${q(label)}, 'fixture-not-a-credential', ${q(k.created)}, ${login === null ? "NULL" : q(login)}, 'USD', ${sharedWith === null ? "NULL" : "'duplicate'"}, ${sharedWith === null ? "NULL" : q(sharedWith)});`;
   // Created in this order on purpose: the okx key sits BETWEEN k1 and k2 and must not shift ordinals.
   out.push(key(K1, "mt5", "FIX-1", "L1"));
   out.push(key(OKX, "okx", "FIX-OKX", null));
-  out.push(key(K2, "mt5", "FIX-2", "L1"));
+  // K2 is a second key on K1's account the way the identity stamper records one: a NULL
+  // login (the unique index refused the duplicate stamp) and the share link to K1. Only
+  // the link can make keys_sharing_login see it (155.2 RECHECK 2026-11-23).
+  out.push(key(K2, "mt5", "FIX-2", null, K1.key));
   out.push(key(K3, "mt5", "FIX-3", null));
 
   const strat = (id: string, owner: string, keyId: string, created: string) =>

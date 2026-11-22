@@ -6,7 +6,9 @@ WITH k AS (
             FROM public.api_keys o
            WHERE o.exchange = 'mt5'
              AND o.id <> ak.id
-             AND o.venue_account_id = ak.venue_account_id) AS keys_sharing_login
+             AND true IN (o.venue_account_id = ak.venue_account_id,
+                          o.account_shared_with_api_key_id = ak.id,
+                          ak.account_shared_with_api_key_id = o.id)) AS keys_sharing_login
     FROM public.api_keys ak
    WHERE ak.exchange = 'mt5'
 ),

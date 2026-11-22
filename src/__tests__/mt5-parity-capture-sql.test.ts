@@ -375,6 +375,15 @@ describe("census-accounts.sql carries the PARITY-04 fields", () => {
     }
   });
 
+  it("counts the account_shared_with_api_key_id link in keys_sharing_login, both directions", () => {
+    // A duplicate key has a NULL venue_account_id, so login equality alone read 0 for the
+    // key that carried MM3's name on MM2's account (155.2 RECHECK 2026-11-23).
+    expect(text).toMatch(/o\.account_shared_with_api_key_id\s*=\s*ak\.id/);
+    expect(text).toMatch(/ak\.account_shared_with_api_key_id\s*=\s*o\.id/);
+    // One row per other key, so a key equal by login AND linked still counts once.
+    expect(text).toMatch(/true IN \(o\.venue_account_id = ak\.venue_account_id,/);
+  });
+
   it("prints a summary row for an empty census", () => {
     expect(text).toMatch(/UNION ALL[\s\S]*'all'/i);
     expect(read("census-edges.sql")).toMatch(/UNION ALL[\s\S]*'all'[\s\S]*rows_examined|rows_examined[\s\S]*UNION ALL[\s\S]*'all'/i);
