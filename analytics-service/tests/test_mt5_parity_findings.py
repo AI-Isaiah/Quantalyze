@@ -738,3 +738,44 @@ def test_a_decimals_fraction_digits_are_not_a_digit_run() -> None:
     # but a long fraction is still too precise
     assert scan_tracked_text("ratio 0.12345678 end") == ("sig_figs_gt_3",)
     assert scan_tracked_text("ratio 12345.6 end") == ("digit_run_5", "sig_figs_gt_3")
+
+
+def _sharpe_findings(anchor: float, other: float) -> list[Finding]:
+    """SYN-B with every displayed Sharpe set to ``anchor`` and the last one to ``other``:
+    the Sharpe findings that leaves."""
+    matrix = _matrix()
+    carriers = [
+        c for c in matrix["accounts"][1]["cells"]
+        if isinstance(c["figures"].get("sharpe"), (int, float))
+        and c["figure_states"].get("sharpe") != "withheld"
+    ]
+    assert len(carriers) >= 2  # anti-vacuity: an anchor and a compared cell
+    for cell in carriers:
+        cell["figures"]["sharpe"] = anchor
+    carriers[-1]["figures"]["sharpe"] = other
+    findings, _ = classify_matrix(matrix)
+    return [f for f in findings if f.account_label == "SYN-B" and f.subject.endswith(".sharpe")]
+
+
+def test_sharpe_equal_at_the_stored_three_decimals_is_no_finding_though_3sf_differs() -> None:
+    """Founder ruling (e): the product stores Number(sharpe.toFixed(3)). Two surfaces
+    showing 0.01234 and 0.01236 store the same 0.012, so no reader can see a gap; at three
+    significant figures (0.0123 against 0.0124) the old comparison raised one."""
+    assert _sharpe_findings(0.01234, 0.01236) == []
+
+
+def test_sharpe_different_at_the_stored_three_decimals_is_a_finding_though_3sf_agrees() -> None:
+    """1.2341 and 1.2349 agree at three significant figures (1.23) but are stored as
+    1.234 and 1.235: a reader sees two different Sharpes, so it is a finding."""
+    found = _sharpe_findings(1.2341, 1.2349)
+    assert [f.bucket for f in found] == ["unexplained"]
+    assert "stored precision (3 decimals)" in found[0].lead
+
+
+def test_sharpe_tie_rounds_like_js_tofixed_and_negative_zero_equals_zero() -> None:
+    """JS toFixed rounds the exact binary value half away from zero. 0.0625 is exact in
+    binary, so toFixed(3) gives 0.063 for both 0.0625 and 0.063 (Python round() would give
+    0.062 and raise a false finding). -0.0004 and 0.0004 both store as 0 (-0.000 vs 0.000
+    as text, equal as numbers)."""
+    assert _sharpe_findings(0.0625, 0.063) == []
+    assert _sharpe_findings(-0.0004, 0.0004) == []
