@@ -41,10 +41,12 @@ from typing import Final, Literal
 
 from services import mt5_parity_proofs as proofs
 from services.mt5_parity import (
+    ORACLE_ACCOUNT_MISMATCH,
     OracleBindingRefused,
     Verdict,
     Window,
     evaluate_windows,
+    oracle_account_check,
     propose_windows,
     render_verdict_markdown,
     verdict_to_json,
@@ -104,6 +106,8 @@ class _Inputs:
     run_day: date
     windows: tuple[Window, ...]
     synthetic_pair: bool
+    # 155.2 G5-1: oracle_account_check's reason, or None when the key is the Report's account.
+    account_mismatch: str | None
 
 
 def _refuse(error: BaseException) -> int:
@@ -229,6 +233,7 @@ def _prepare(args: argparse.Namespace) -> _Inputs:
     report_bytes = Path(args.report).read_bytes()
     bind_report(worksheet, oracle_label, report_bytes)
     parsed = parse_report(report_bytes)
+    account_mismatch = oracle_account_check(capture, ordinal, report_bytes)
     deals_bytes = oracle_deals_bytes(parsed)
     rule: str = args.clock_rule
     clock = _clock_from_rule(rule)
@@ -261,6 +266,7 @@ def _prepare(args: argparse.Namespace) -> _Inputs:
         run_day=run_day,
         windows=tuple(windows),
         synthetic_pair=synthetic_pair,
+        account_mismatch=account_mismatch,
     )
 
 
@@ -275,6 +281,7 @@ def _judge(inputs: _Inputs, deals_bytes: bytes) -> Verdict:
         run_day=inputs.run_day,
         oracle_label=inputs.oracle_label,
         capture_synthetic=inputs.synthetic_pair,
+        account_mismatch=inputs.account_mismatch,
     )
 
 
@@ -294,6 +301,14 @@ def _cmd_verdict(args: argparse.Namespace) -> int:
         f"final_green={'yes' if verdict.final_green else 'no'}"
     )
     if not any(a.legs for a in verdict.accounts):
+        mismatch = sorted({a.reason or "" for a in verdict.accounts if a.bucket == ORACLE_ACCOUNT_MISMATCH})
+        if mismatch:
+            print(
+                "the verdict judged no window: the label's key is not the Report's account "
+                f"({', '.join(mismatch)})",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
         print("the verdict judged no window: every gate was refused", file=sys.stderr)
         return EXIT_REFUSED
     return EXIT_OK

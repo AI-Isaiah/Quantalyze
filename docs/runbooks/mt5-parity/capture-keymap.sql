@@ -4,7 +4,9 @@ WITH k AS (
          ak.user_id,
          ak.account_currency,
          ak.label,
-         ak.created_at
+         ak.created_at,
+         ak.account_shared_with_api_key_id IS NOT NULL AS account_shared,
+         encode(sha256(convert_to(ak.venue_account_id, 'UTF8')), 'hex') AS venue_account_sha256
     FROM public.api_keys ak
    WHERE ak.exchange = 'mt5'
 )
@@ -19,7 +21,9 @@ SELECT k.key_ordinal,
              'strategy_id', s.id,
              'strategy_status', s.status,
              'asset_class', s.asset_class,
-             'key_created_at', k.created_at
+             'key_created_at', k.created_at,
+             'account_shared', k.account_shared,
+             'venue_account_sha256', k.venue_account_sha256
            )
            ORDER BY s.created_at, s.id
          ) FILTER (WHERE k.id IS NOT NULL),

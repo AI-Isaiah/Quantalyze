@@ -32,6 +32,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -742,6 +743,15 @@ describe("mt5-parity census, bind and capture SQL, EXECUTED on a throwaway clust
         }
       }
       expect(JSON.stringify(got)).not.toContain("fixture-not-a-credential");
+      // 155.2 G5-1: the harness refuses a label whose key is not the Report's account. It
+      // needs the share link and the login's sha256 (never the login itself).
+      const k1el = (b.k1.slice_rows as Row[])[0];
+      const k2el = (b.k2.slice_rows as Row[])[0];
+      expect(k1el.account_shared).toBe(false);
+      expect(k1el.venue_account_sha256).toBe(createHash("sha256").update("L1", "utf8").digest("hex"));
+      expect(k2el.account_shared).toBe(true);
+      expect(k2el.venue_account_sha256).toBeNull();
+      expect(JSON.stringify(got)).not.toContain('"L1"');
     });
 
     it("capture-returns: k1 reads its two per-key rows and its one strategy row", () => {
