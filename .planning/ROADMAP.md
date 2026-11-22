@@ -272,7 +272,7 @@ Plans:
 **Goal:** The observations only the founder can make about shipped wizard behaviour are made in the same sitting as the 155.2 session, and the spike investor password is rotated once no live read needs it, with gate 1 shown intact afterwards.
 **Requirements**: FCONF-01, FCONF-02, FCONF-03, FCONF-04
 **Depends on:** the 155.2 founder session (the same sitting, not 155.2's completion); FCONF-04's rotation comes after that session's last live read
-**Plans:** TBD
+**Plans:** 3 plans
 **UI hint**: no (it observes shipped UI; a failed observation is a finding, not a new design)
 
 **Success Criteria** (what must be TRUE):
@@ -282,7 +282,9 @@ Plans:
 4. `MT5_SPIKE_INVESTOR_PASSWORD` is rotated after the last live read that needs it, and gate 1 is re-checked afterwards: all three keys sync `complete` on a sync that ran after the rotation. (FCONF-04)
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [ ] 157-01-PLAN.md — the staging kit (fail-closed fetch router with a visible marker), its smoke test and the founder script
+- [ ] 157-02-PLAN.md — the founder makes the FCONF-01..03 observations under staged responses (founder checkpoint)
+- [ ] 157-03-PLAN.md — the MM2 investor password rotation after 155.2's last live read, then the gate-1 re-read on the next scheduled derive (founder checkpoint)
 
 ### Progress (v1.18)
 
