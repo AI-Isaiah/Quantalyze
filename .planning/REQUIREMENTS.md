@@ -11,6 +11,7 @@
 - D-C **Statements: the founder gets broker statements** for these accounts and provides them in the session. They are the historical-equity oracle (month-end and/or daily).
 - D-D **Clock read: "Allow narrow read".** One named, tick-time-only `Mt5Client` method is admitted; the forbidden list in the contract test stays, and the exception is pinned by a test (precedent `terminal_info`, 153.3/D-31).
 - D-E **Weekend reading: "Yes, this weekend".** The founder reads frozen terminal Balance/Equity for each account on Sat 2026-11-14 or Sun 2026-11-15 (the Friday 2026-11-13 close), as one Gate B edge.
+  - ⛔ **AMENDED 2026-11-22 (founder ruling, "Accept 11-20 as the edge"):** the D-E edge is the Fri 2026-11-20 frozen close, read from the terminal on Sun 2026-11-22 for MM2, MM3 and FX-AI_V. For this edge only, the Gate B window runs to 2026-11-20, past the 2026-11-19 run day. The 11-13 close is read from the daily statement instead. The text above is kept as lineage.
 - Settled 2026-08-14 and unchanged: the measurement window ends before the run day.
 
 ## v1.18 Requirements

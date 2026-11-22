@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.133.60.5] - 2026-11-23 — records: close 219 ACCOUNTEMAIL, amend D-E
+
+Records PR. Phase 219's code has been on `main` since #1291 (v0.133.53.0) and #1299 (v0.133.60.0). This PR records the founder's live PROD re-test and the phase's security audit, and closes the phase. It also records the founder's D-E ruling for Phase 155.2. No source, test or migration change.
+
+### Added
+- **`219-UAT.md`, status complete.** The founder ran the one-link, password-gated email change on PROD on 2026-11-22. 8 of 12 tests pass: 1 to 5, 7, 11 and 12. A wrong password sends nothing. Exactly one `email_change` mail goes out, to the new address, and Auth carries only the new-address token. The session survives. The Auth logs show `GET /verify` 303 then `POST /token` with the PKCE grant returning 200. `profiles.email` follows the new address. A used link lands on the Account tab with `otp_expired` and no success line. Test 10 (narrow layout, 254-character address) was checked in the founder's signed-in browser. Tests 6, 8 and 9 are accepted untested live by founder ruling ("I do 10, accept 6/8/9").
+- **`219-SECURITY.md`:** `SECURED`, 37 of 37 threats closed at ASVS 1. T-219-11, T-219-27 and T-219-SC are accepted; T-219-09 and T-219-36 are transferred to Supabase Auth.
+
+### Changed
+- **219 VERIFICATION** `human_needed` → `passed`, with a `human_verified` line pointing at the UAT. `verified_at_sha` and `drift_subjects` are unchanged.
+- **`phase complete 219` ran.** The overview bullet is ticked `(completed 2026-11-23)`, the Progress row reads `9/9 | Complete | 2026-11-23`, and `**Plans:** 9/9 plans complete`. STATE is 16 of 18 phases, 93 of 93 plans, 89%. The handler moved the position to 155.2 with `status: planning`; both are restored by hand to the parallel form, with 155.2 and 157 open.
+- **D-E amended (founder ruling 2026-11-22, "Accept 11-20 as the edge").** The 155.2 weekend edge is now the Fri 2026-11-20 frozen close, read from the terminal on 2026-11-22 for MM2, MM3 and FX-AI_V. For that edge only, the Gate B window runs past the 2026-11-19 run day. The original text is kept as lineage in `REQUIREMENTS.md`, and a pointer was added under the 155.2 ROADMAP entry. The raw readings stay in the gitignored capture directory.
+- VERSION and package.json 0.133.60.4 → 0.133.60.5.
+
+### Notes
+- Recorded rather than fixed, from the security audit's non-blocking notes: the per-user 5-per-60-second limiter is the only brute-force bound on the password gate, and `checkLimit` fails open on a store timeout. `?password_set=1` shows "Your password is set." from the URL alone, which states no identity and changes no state. `src/lib/csrf.ts` compares the Origin/Referer host but not its scheme; this predates the phase.
+- At 202px, below any phone width, the "Keep current email" button clips by about 20px. At 375px both buttons fit. The pending panel was not rendered live, because it needs a real submit.
+- No `TODOS.md` entry is closed by this PR.
+
 ## [0.133.60.4] - 2026-11-20 — records: close 220 EXTRACTOR
 
 Records PR for Phase 220, whose code is on `main` as #1296 (v0.133.56.0, squash d188fef84). After it landed, the bot re-dump #1294 and the stale ratchet-row delete #1298 followed. This PR carries the phase artifacts and closes the phase. No source, test or migration change.

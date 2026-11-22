@@ -148,7 +148,7 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 216: CSVSTATUS — a malformed CSV upload answers 422 and the wizard stops offering Retry** - CSV upload status split, founder decision 2026-11-15; independent of the MT5 phases (completed 2026-11-18)
 - [x] **Phase 217: SERVERRULE — the MT5 server time rule is chosen per broker server** - A UTC-keeping broker server passes the 155.1 clock guard; founder decision 2026-11-18; follows 155.1 (completed 2026-11-18)
 - [x] **Phase 218: SELFHEAL — the wizard's MT5 key check heals an owed terminal scrub itself** - Wizard self-heal of the post-deploy scrub plus two resume-banner fixes, founder decisions 2026-11-19; independent of the MT5 parity phases (completed 2026-11-20)
-- [ ] **Phase 219: ACCOUNTEMAIL — the signed-in account shows its email and can change it** - Account email display and change, founder decision 2026-11-19; independent of the MT5 parity phases
+- [x] **Phase 219: ACCOUNTEMAIL — the signed-in account shows its email and can change it** - Account email display and change, founder decision 2026-11-19; independent of the MT5 parity phases (completed 2026-11-23)
 - [x] **Phase 220: EXTRACTOR — the baseline re-dump carrying the 219 migration can land and main goes green** - CI-only: the local-stack extractor accepts `UPDATE OF` auth.users triggers, then the bot re-dump lands; independent of the MT5 parity phases (completed 2026-11-20)
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
@@ -232,6 +232,8 @@ Plans:
 **Plans:** TBD
 **UI hint**: no
 
+D-E amended 2026-11-22 (founder): the weekend edge is the Fri 2026-11-20 frozen close, read 2026-11-22 for all three accounts; for that edge only, the Gate B window runs past the 11-19 run day (see `REQUIREMENTS.md` D-E).
+
 Carried context, not requirements: timeout findings #8 and #10 are tuned only from percentile data across several nightlies, with fresh and cached logins split, and are booked separately if the data is not in by the milestone close (`REQUIREMENTS.md` Future). The product call on MT5 as a composite member stays out of scope.
 
 **Success Criteria** (what must be TRUE):
@@ -281,7 +283,7 @@ Plans:
 | 216. CSVSTATUS | 1/1 | Complete | 2026-11-18 |
 | 217. SERVERRULE | 2/2 | Complete | 2026-11-18 |
 | 218. SELFHEAL | 4/4 | Complete    | 2026-11-20 |
-| 219. ACCOUNTEMAIL | 9/9 | In Progress (shipped v0.133.53.0 and v0.133.60.0; post-deploy UAT pending) | - |
+| 219. ACCOUNTEMAIL | 9/9 | Complete    | 2026-11-23 |
 | 220. EXTRACTOR | 1/1 | Complete    | 2026-11-20 |
 
 ### Requirement Coverage (v1.18)
@@ -620,7 +622,7 @@ Plans:
 **Goal:** A signed-in user can see which email their account uses and change it. The account or settings page shows the signed-in email, and a change goes through Supabase Auth's own confirm-by-email flow, never a direct write. Trigger: the founder's session 2026-11-19, where the founder could not tell which email to sign in with in a private window, because Quantalyze shows the account email nowhere and offers no way to change it. Founder decision 2026-11-19 ("Book a phase (Recommended)").
 **Requirements**: TBD
 **Depends on:** none (independent of the MT5 parity phases)
-**Plans:** 9/9 plans executed
+**Plans:** 9/9 plans complete
 
 Plans:
 **Wave 1**
