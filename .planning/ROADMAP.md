@@ -229,7 +229,7 @@ Plans:
 **Goal:** On one trading day, with the founder at the terminal, the numbers Quantalyze renders for MM2, MM3 and FX-AI_V are compared with the terminal's and the broker's own figures, and every difference is fixed at its root or ruled on by the founder, until the parity verdict passes on every surface. This is the only phase gate 2 blocks, and the phase whose pass lifts the advertising ban. Research Phase C.
 **Requirements**: MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01
 **Depends on:** Phase 155 (dress rehearsal green). The founder session inside this phase also waits on 155.1's reading deployed with a weekday PROD reading row per key; that is a deploy condition, not a completion dependency (see 155.1)
-**Plans:** TBD
+**Plans:** 13/17 plans complete
 **UI hint**: no
 
 D-E amended 2026-11-22 (founder): the weekend edge is the Fri 2026-11-20 frozen close, read 2026-11-22 for all three accounts; for that edge only, the Gate B window runs past the 11-19 run day (see `REQUIREMENTS.md` D-E).
@@ -244,7 +244,23 @@ Carried context, not requirements: timeout findings #8 and #10 are tuned only fr
 5. The founder confirms live that an MT5 strategy he uploaded ingests, projects in a scenario and has a viewable factsheet. (MT5-GOAL-01)
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 155.2-01-PLAN.md — The Report parser reads the real MT5 build 5830 All-History Report (`td` headers, hidden `Cost` column)
+- [x] 155.2-02-PLAN.md — `_native_unit_present` no longer makes every real USD account's Gate A unmeasurable
+- [x] 155.2-03-PLAN.md — Gate A judged on the three real accounts from a sealed PROD capture
+- [x] 155.2-04-PLAN.md — Root-cause the cross_store findings F-155-01..03 (group G1)
+- [x] 155.2-05-PLAN.md — Group G2 fixed at its root in shared money-math: the per-key builder stamps each key's asset class
+- [x] 155.2-06-PLAN.md — G2 wired into the scenario composer and the scenario compare panel
+- [x] 155.2-07-PLAN.md — G2 finished in the server live baseline (`liveBaselineMetricsFromPerKeyDailies`)
+- [x] 155.2-08-PLAN.md — Root-cause the G3 convention gaps and the G4 freshness window; founder ruling questions
+- [x] 155.2-09-PLAN.md — `csv_source` classified from the code that writes it (MT5-15 machine side)
+- [x] 155.2-10-PLAN.md — Full-verdict preparation: run day and instant-T settled by the founder
+- [ ] 155.2-11-PLAN.md — Founder-only Gate B readings: weekend reading and broker statements (waits on the statements)
+- [ ] 155.2-12-PLAN.md — Re-run after the fixes are live and produce the full parity verdict
+- [ ] 155.2-13-PLAN.md — Criterion 3: every surface in the founder's signed-in browser
+- [ ] 155.2-14-PLAN.md — Founder-only exits: written rulings and the live MT5-GOAL-01 confirmation
+- [x] 155.2-15-PLAN.md — Gap closure G3-1 (a): the stored-curve reader includes the first-day return (TS and Python twin)
+- [x] 155.2-16-PLAN.md — Gap closure G4-1 (b): a key-mode derive enqueues the analytics recompute of its linked strategy
+- [x] 155.2-17-PLAN.md — Gap closure G5-1..G5-3: `oracle_account_mismatch`, the census counts the share link, Sharpe at the stored precision
 
 ### Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made
 
@@ -269,7 +285,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 155. PARITYHARNESS | 11/11 | Complete | 2026-11-14 |
 | 155.1. SERVERCLOCK | 6/6 | Complete | 2026-11-19 |
-| 155.2. LIVEPARITY | 0/? | Not started | - |
+| 155.2. LIVEPARITY | 13/17 | In Progress | - |
 | 157. FOUNDER-CONFIRM | 0/? | Not started | - |
 | 207. RETRYPROP | 1/1 | Complete | 2026-11-14 |
 | 208. UIQUICK | 5/5 | Complete | 2026-11-14 |

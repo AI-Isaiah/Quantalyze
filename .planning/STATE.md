@@ -12,8 +12,8 @@ state_head: 0fd87657e40214eb7e77ccebaa284fb8d3bea285
 progress:
   total_phases: 18
   completed_phases: 16
-  total_plans: 93
-  completed_plans: 93
+  total_plans: 110
+  completed_plans: 106
   percent: 89
 ---
 
@@ -177,8 +177,8 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: parallel — 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM open; 155, 155.1, 207-220 complete
 Plan: per phase (see each phase directory)
-Status: 219 ACCOUNTEMAIL closed 2026-11-23 after the founder's live PROD re-test (219-UAT.md: 8 pass, tests 6/8/9 accepted untested live by founder ruling). 155.2 LIVEPARITY: weekend readings (Fri 2026-11-20 frozen close) captured 2026-11-22 for MM2, MM3 and FX-AI_V in the gitignored capture directory, D-E amended by founder ruling to that edge; still owes the broker statements, then plan/execute. 157 FOUNDER-CONFIRM: FCONF-01 observed 2026-11-19; FCONF-02/03 need staged wizard states; FCONF-04 rotation after 155.2's last live read
-Last activity: 2026-11-23 — Phase 219 live re-test complete; 155.2 weekend readings captured
+Status: 219 ACCOUNTEMAIL closed 2026-11-23 after the founder's live PROD re-test (219-UAT.md: 8 pass, tests 6/8/9 accepted untested live by founder ruling). 155.2 LIVEPARITY: 13 of 17 plans complete. Gap plan 17 (oracle_account_mismatch, census share link, Sharpe at the stored precision) executed 2026-11-23 after the founder ruled k10 is MM3; the post-plan-17 recapture passes Gate A on all three labels and clears 31 of 31 findings rows (155.2-RECHECK-2026-11-23b.md). Plans 11-14 still owe the broker statements and founder steps; the CLI verdict is also refused on a weekend-reading provenance rule. 157 FOUNDER-CONFIRM: FCONF-01 observed 2026-11-19; FCONF-02/03 need staged wizard states; FCONF-04 rotation after 155.2's last live read
+Last activity: 2026-11-23 — 155.2 gap plan 17 executed; post-fix recapture with MM3 on k10, Gate A passes on all three labels
 Progress: [█████████░] 89%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
