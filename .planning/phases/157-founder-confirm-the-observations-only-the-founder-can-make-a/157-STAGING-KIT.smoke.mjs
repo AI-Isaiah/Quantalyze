@@ -9,6 +9,29 @@ import vm from "node:vm";
 const KIT_PATH = new URL("./157-STAGING-KIT.js", import.meta.url);
 const KIT_SRC = readFileSync(KIT_PATH, "utf8");
 
+// The route sources the staged literals were copied from, read at test time so a drifted route fails
+// here. Resolved from the repo root: this file sits three directories below it.
+const srcOf = (rel) => readFileSync(new URL(`../../../${rel}`, import.meta.url), "utf8");
+const FINALIZE_SRC = srcOf("src/app/api/strategies/finalize-wizard/route.ts");
+const CREATE_WITH_KEY_SRC = srcOf("src/app/api/strategies/create-with-key/route.ts");
+const WIZARD_ERRORS_SRC = srcOf("src/lib/wizardErrors.ts");
+const HEADERS_SRC = srcOf("src/lib/api/headers.ts");
+const SEAM_RETRY_SRC = srcOf("src/lib/api/seam-retry-after.ts");
+const COMPOSITE_MEMBERS_SRC = srcOf("src/app/api/strategies/composite/members/route.ts");
+const MULTI_KEY_STEP_SRC = srcOf("src/app/(dashboard)/strategies/new/wizard/steps/MultiKeyConnectStep.tsx");
+
+// `{ code: "<code>", error: "<msg>" }, { status: N, headers: NO_STORE_HEADERS }` as the finalize route
+// writes it (formatting tolerant). Exactly one site per code, or the extraction is ambiguous.
+function finalizeLiteral(code) {
+  const re = new RegExp(
+    `code:\\s*"${code}",\\s*error:\\s*"([^"]*)",?\\s*\\},\\s*\\{\\s*status:\\s*(\\d+),\\s*headers:\\s*NO_STORE_HEADERS\\s*\\}`,
+    "g",
+  );
+  const hits = [...FINALIZE_SRC.matchAll(re)];
+  assert.equal(hits.length, 1, `${code}: expected exactly one literal in finalize-wizard/route.ts`);
+  return { error: hits[0][1], status: Number(hits[0][2]) };
+}
+
 const ORIGIN = "https://app.example.test";
 const APP = (p) => `${ORIGIN}${p}`;
 // A uuid-shaped id built at runtime from a repeated character, so no id literal sits in this file.
@@ -238,29 +261,59 @@ const head = (table, col) =>
 // postgrest-js's count rule for a head request: the number after the slash of Content-Range.
 const countOf = (res) => parseInt(res.headers.get("content-range").split("/")[1], 10);
 
-const ENVELOPE_CASES = [
-  ["DRAFT_LOOKUP_FAILED", 500, { code: "DRAFT_LOOKUP_FAILED", error: "Could not load draft" }],
-  ["DRAFT_FINALIZE_FAILED", 500, { code: "DRAFT_FINALIZE_FAILED", error: "Could not finalize wizard draft" }],
-  [
-    "SEAM_RESPONSE_UNREADABLE",
-    502,
-    { code: "SEAM_RESPONSE_UNREADABLE", error: "Upstream service returned unexpected response" },
-  ],
-];
+const ENVELOPE_CODES = ["DRAFT_LOOKUP_FAILED", "DRAFT_FINALIZE_FAILED", "SEAM_RESPONSE_UNREADABLE"];
+const NO_STORE_FROM_SOURCE = /"Cache-Control":\s*"([^"]+)"/.exec(HEADERS_SRC)?.[1];
 
-for (const [code, status, body] of ENVELOPE_CASES) {
-  test(`submit: ${code} envelope is ${status} and byte-equal to the route literal`, async () => {
+for (const code of ENVELOPE_CODES) {
+  test(`submit: ${code} envelope is byte-equal to the route literal read from finalize-wizard/route.ts`, async () => {
+    const { error, status } = finalizeLiteral(code);
+    assert.equal(NO_STORE_FROM_SOURCE, "private, no-store");
     const env = makeEnv();
     env.fconf().arm("submit", code);
     const res = await env.call(post("/api/strategies/finalize-wizard"));
     assert.equal(res.status, status);
-    assert.deepEqual(await res.json(), body);
-    assert.equal(res.headers.get("cache-control"), "private, no-store");
+    assert.equal(await res.text(), JSON.stringify({ code, error }));
+    assert.equal(res.headers.get("cache-control"), NO_STORE_FROM_SOURCE);
     assert.equal(res.headers.get("content-type"), "application/json");
     assert.equal(res.headers.get("retry-after"), null);
     assert.equal(env.spyCalls.length, 0);
   });
 }
+
+test("connect: the create-with-key stub matches the route's catch tail and the SEAM_INTERNAL_FAULT classifier rows read from source", async () => {
+  // the route's catch tail answers a uniform { code } body with the resolved status and headers
+  assert.match(CREATE_WITH_KEY_SRC, /NextResponse\.json\(\{ code \},\s*\{ status, headers \}\)/);
+  // every classifier row that resolves to SEAM_INTERNAL_FAULT carries one status
+  const statuses = [...WIZARD_ERRORS_SRC.matchAll(/code:\s*"SEAM_INTERNAL_FAULT",\s*status:\s*(\d+)/g)].map((m) => Number(m[1]));
+  assert.ok(statuses.length >= 1, "no SEAM_INTERNAL_FAULT classifier row found");
+  assert.deepEqual([...new Set(statuses)], [500]);
+  // a non-breaker error gets NO_STORE_HEADERS only, so the stub carries no Retry-After
+  assert.match(SEAM_RETRY_SRC, /export function keyRouteFailureHeaders[\s\S]*?:\s*NO_STORE_HEADERS/);
+  const env = makeEnv();
+  env.fconf().arm("connect");
+  const res = await env.call(post("/api/strategies/create-with-key"));
+  assert.equal(res.status, statuses[0]);
+  assert.equal(await res.text(), JSON.stringify({ code: "SEAM_INTERNAL_FAULT" }));
+  assert.equal(res.headers.get("cache-control"), NO_STORE_FROM_SOURCE);
+  assert.equal(res.headers.get("retry-after"), null);
+  assert.equal(env.spyCalls.length, 0);
+});
+
+test("connect: the composite/members read is answered {\"members\":[]}, never sent, and only in connect mode", async () => {
+  // the route answers { ok: true, members }; the connect step reads data.members as an array
+  assert.match(COMPOSITE_MEMBERS_SRC, /\{\s*ok:\s*true,\s*members\s*\}/);
+  assert.match(MULTI_KEY_STEP_SRC, /members\?:\s*Array</);
+  const env = makeEnv();
+  env.fconf().arm("connect");
+  const res = await env.call(APP(`/api/strategies/composite/members?strategy_id=${ID}`));
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), '{"members":[]}');
+  assert.equal(env.spyCalls.length, 0);
+  const resume = makeEnv();
+  resume.fconf().arm("resume");
+  await resume.call(APP(`/api/strategies/composite/members?strategy_id=${ID}`));
+  assert.equal(resume.spyCalls.length, 1);
+});
 
 test("submit: the armed envelope is one-shot, a second finalize is refused and never sent", async () => {
   const env = makeEnv();
