@@ -1372,7 +1372,13 @@
 // `biting: 9`, `lane-invocations: 9` (the two independent tallies AGREE), every arm `RED (identity ok)`. Per-file line in the parse-only table: `test_auth_user_has_password.sql: sections 7 /
 // judged 0 / annotated 9 / waived 0 / biting 0` (that mode executes nothing). The FULL local run was NOT run on this host; CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the
 // authoritative full run. WAIVED_CEILING stays 0 - no waiver was added.
-export const FILES_FLOOR = 85;
+// RAISED 85 -> 86 2026-11-23 (Phase 225 ONEACCOUNTONCE plan 04, MT5D-08): +1 file, test_swap_account_slot.sql (migration 20261123180100, the public.swap_account_slot(uuid, uuid, text, text) gate:
+// thirteen arms, each carrying a prose RED-UNDER and a machine RED-UNDER-M twin), so 86 of 113 files. MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`, exit 0:
+// `coverage: files 86/113`, `arms: 0/927/0   (executed/annotated/waived)`, `No static defects`, per-file line `test_swap_account_slot.sql: 13 prose / 13 twin(s) / 0 waiver(s)`, and by the
+// exit-2-by-design DIAGNOSTIC run `--file supabase/tests/test_swap_account_slot.sql`: `arms: 13/13/0`, `biting: 13`, `lane-invocations: 13` (the two independent tallies AGREE), every arm
+// `RED (identity ok)`. Per-file line in the parse-only table: `test_swap_account_slot.sql: sections 13 / judged 0 / annotated 13 / waived 0 / biting 0` (that mode executes nothing). The FULL local
+// run was NOT run on this host; CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the authoritative full run. WAIVED_CEILING stays 0 - no waiver was added.
+export const FILES_FLOOR = 86;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3507,7 +3513,12 @@ export const FILES_FLOOR = 85;
 // (the two independent tallies AGREE), `No defects in the narrowed scope`, and each of 6v-writes, 6v-check-blank, 6v-omitted and 6v-no-grant `RED (identity ok)`.
 // NOT MEASURED by a FULL local run, so 914 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA is the run that compares it with a
 // real biting count. WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 914;
+// RAISED 914 -> 927 2026-11-23 (Phase 225 ONEACCOUNTONCE plan 04, MT5D-08): +13 arms, each twinned, in the one NEW gate test_swap_account_slot.sql (FILES_FLOOR 85 -> 86, see its block above).
+// MEASURED on this host by `node scripts/mutation-runner/run.mjs --parse-only`, exit 0: `coverage: files 86/113`, `arms: 0/927/0   (executed/annotated/waived)`, `No static defects`
+// (914 at HEAD plus the 13 the new gate declares), and by the DIAGNOSTIC run over that one gate: `arms: 13/13/0`, `biting: 13`, `lane-invocations: 13`, every arm `RED (identity ok)`.
+// NOT MEASURED by a FULL local run, so 927 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA is the run that compares it with a
+// real biting count. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 927;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
