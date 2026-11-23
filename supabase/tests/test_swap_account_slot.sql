@@ -93,6 +93,7 @@ DECLARE
   uid_b     uuid := gen_random_uuid();   -- a different tenant
   k_h       uuid;                        -- the old holder
   k_n       uuid;                        -- the new key
+  k_d       uuid;                        -- a dependent of the old holder
   v_res     text;
   v_login   text;
   v_server  text;
@@ -159,9 +160,185 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SWAP-acl): swap_account_slot is not SECURITY DEFINER';
   END IF;
 
+  -- ===== Ordering and refusal arms. Each seeds its own keys. ======================
+  -- Every refusal arm asserts the raised MESSAGE equals the token AND that neither row
+  -- changed (pg_temp.sw_try appends ' [ROWS CHANGED]' to the message otherwise).
+  -- Where an arm's twin removes a check, the call falls through to a LATER step and
+  -- succeeds or is refused by the real trigger under a different message, so the arm
+  -- reddens by name. Servers stay equal-or-both-NULL in every arm but SWAP-server-*, so
+  -- the wildcard twin below cannot trip an earlier arm.
+
+  -- ----- SWAP-repoint. duplicate dependents of the old holder follow the slot ---------
+  -- D is marked duplicate against H. If D still pointed at H after H is marked against N,
+  -- H would be a holder AND marked: the marker trigger's no-chain rule refuses it.
+  -- RED-UNDER: neuter the dependents re-point UPDATE in the migration (its WHERE gains
+  --            AND false), so the real marker trigger raises ACCOUNT_SHARE_KEY_IS_A_HOLDER
+  --            on the old holder's own marking and the swap fails.
+  -- RED-UNDER-M: {"arm":"SWAP-repoint","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"     AND id <> p_new_key;","replace":"     AND false;","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-repoint', 'syn-srv-repoint', 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  k_d := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  UPDATE api_keys SET account_shared_with_api_key_id = k_h, account_share_kind = 'duplicate' WHERE id = k_d;
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-repoint', 'syn-srv-repoint');
+  IF v_res IS DISTINCT FROM 'SUCCEEDED' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-repoint): a swap with a duplicate dependent on the old holder did not succeed (%)', v_res;
+  END IF;
+  SELECT account_shared_with_api_key_id INTO v_holder FROM api_keys WHERE id = k_d;
+  IF v_holder IS DISTINCT FROM k_n THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-repoint): the dependent now points at % — expected the new key %. It is left on the old holder.', v_holder, k_n;
+  END IF;
+
+  -- ----- SWAP-marked-new. a new key already marked against the old holder (heal case) --
+  -- The stamper marks a working sibling against the failing holder. The swap must unmark
+  -- it in the same call, or the trigger refuses to name a MARKED key as the holder.
+  -- RED-UNDER: neuter the marker-clear UPDATE of the new key in the migration (its guard
+  --            becomes IF false), so the real marker trigger raises
+  --            ACCOUNT_SHARE_HOLDER_IS_MARKED when the old holder is pointed at it.
+  -- RED-UNDER-M: {"arm":"SWAP-marked-new","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"  IF v_new_holder IS NOT NULL THEN","replace":"  IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-marked-new', NULL, 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  UPDATE api_keys SET account_shared_with_api_key_id = k_h, account_share_kind = 'duplicate' WHERE id = k_n;
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-marked-new', NULL);
+  IF v_res IS DISTINCT FROM 'SUCCEEDED' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-marked-new): the heal case (new key already marked against the old holder) did not succeed (%)', v_res;
+  END IF;
+  SELECT venue_account_id, account_shared_with_api_key_id, account_share_kind
+    INTO v_login, v_holder, v_kind FROM api_keys WHERE id = k_n;
+  IF v_login IS DISTINCT FROM 'swap225-marked-new' OR v_holder IS NOT NULL OR v_kind IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-marked-new): the new key has login %, holder %, kind % — expected it stamped and unmarked', v_login, v_holder, v_kind;
+  END IF;
+  SELECT account_shared_with_api_key_id INTO v_holder FROM api_keys WHERE id = k_h;
+  IF v_holder IS DISTINCT FROM k_n THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-marked-new): the old holder points at %, expected the new key %', v_holder, k_n;
+  END IF;
+
+  -- ----- SWAP-owner. another tenant's key is never swapped --------------------------
+  -- RED-UNDER: remove the same-owner check from the migration (IF false). The old holder
+  --            of another tenant is then reached and the marker trigger's own refusal
+  --            surfaces under a different token, so cross-tenant takeover rests on the
+  --            trigger alone.
+  -- RED-UNDER-M: {"arm":"SWAP-owner","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_new_owner IS DISTINCT FROM v_old_owner THEN","replace":"IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_b, 'swap225-owner', 'syn-srv-owner', 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-owner', 'syn-srv-owner');
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_NOT_SAME_OWNER' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-owner): a swap across two owners answered % — expected ACCOUNT_SLOT_NOT_SAME_OWNER with both rows unchanged', v_res;
+  END IF;
+
+  -- ----- SWAP-holder-working. a working holder keeps the account --------------------
+  -- RED-UNDER: remove the working-holder refusal from the migration (IF false): the swap
+  --            then takes the account from a key that works.
+  -- RED-UNDER-M: {"arm":"SWAP-holder-working","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_old_working THEN","replace":"IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-holder-working', 'syn-srv-hw', NULL);
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-holder-working', 'syn-srv-hw');
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_HOLDER_WORKING' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-holder-working): a swap against a WORKING holder answered % — expected ACCOUNT_SLOT_HOLDER_WORKING with both rows unchanged', v_res;
+  END IF;
+
+  -- ----- SWAP-inactive-holder. an inactive holder is NOT working (the is_active leg) ---
+  -- D-18: a key is working only while it is ACTIVE. sync_status NULL alone would pass.
+  -- RED-UNDER: drop the `v_is_active AND` leg of the D-18 expression in the migration, so
+  --            an inactive key with a NULL status is read as working and the swap is
+  --            refused ACCOUNT_SLOT_HOLDER_WORKING.
+  -- RED-UNDER-M: {"arm":"SWAP-inactive-holder","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_is_active AND v_disconnected IS NULL AND (","replace":"IF v_disconnected IS NULL AND (","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-inactive-holder', 'syn-srv-ih', NULL, false);
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-inactive-holder', 'syn-srv-ih');
+  IF v_res IS DISTINCT FROM 'SUCCEEDED' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-inactive-holder): an INACTIVE holder with a NULL sync status was treated as working (%) — the is_active leg of D-18 is missing', v_res;
+  END IF;
+  SELECT venue_account_id INTO v_login FROM api_keys WHERE id = k_n;
+  IF v_login IS DISTINCT FROM 'swap225-inactive-holder' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-inactive-holder): the new key holds login % after the swap', v_login;
+  END IF;
+
+  -- ----- SWAP-new-failing. a failing new key cannot take the account -----------------
+  -- RED-UNDER: remove the new-key-not-working refusal from the migration (IF false): a key
+  --            that itself fails would take the slot from another failing key.
+  -- RED-UNDER-M: {"arm":"SWAP-new-failing","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF NOT v_new_working THEN","replace":"IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-new-failing', 'syn-srv-nf', 'sign_in_failed');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, 'error');
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-new-failing', 'syn-srv-nf');
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_NEW_KEY_NOT_WORKING' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-new-failing): a swap by a failing new key answered % — expected ACCOUNT_SLOT_NEW_KEY_NOT_WORKING with both rows unchanged', v_res;
+  END IF;
+
+  -- ----- SWAP-not-live. a departed key on either side is refused ----------------------
+  -- RED-UNDER: remove the liveness refusal from the migration (IF false): a disconnected
+  --            old holder is read as not working and its slot is moved anyway.
+  -- RED-UNDER-M: {"arm":"SWAP-not-live","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_new_disc IS NOT NULL OR v_old_disc IS NOT NULL THEN","replace":"IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-not-live', 'syn-srv-nl', 'error', true, now());
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-not-live', 'syn-srv-nl');
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_NOT_LIVE' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-not-live): a swap with a DISCONNECTED old holder answered % — expected ACCOUNT_SLOT_NOT_LIVE with both rows unchanged', v_res;
+  END IF;
+  k_h := pg_temp.sw_key(uid_a, 'swap225-not-live-2', 'syn-srv-nl2', 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL, true, now());
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-not-live-2', 'syn-srv-nl2');
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_NOT_LIVE' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-not-live): a swap with a DISCONNECTED new key answered % — expected ACCOUNT_SLOT_NOT_LIVE with both rows unchanged', v_res;
+  END IF;
+
+  -- ----- SWAP-login. the caller must name the login the old holder holds --------------
+  -- RED-UNDER: remove the login comparison from the migration (IF false): the call would
+  --            stamp the new key with a login the old holder never held.
+  -- RED-UNDER-M: {"arm":"SWAP-login","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_old_login IS DISTINCT FROM v_login THEN","replace":"IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-login-held', 'syn-srv-login', 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-login-other', 'syn-srv-login');
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-login): a swap naming a login the old holder does not hold answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH with both rows unchanged', v_res;
+  END IF;
+
+  -- ----- SWAP-server-conflict. two different broker servers are two accounts ----------
+  -- RED-UNDER: remove the server comparison from the migration (IF false): login 1001 on
+  --            one broker would be swapped for login 1001 on another.
+  -- RED-UNDER-M: {"arm":"SWAP-server-conflict","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_old_server IS NOT NULL AND v_server IS NOT NULL AND v_old_server <> v_server THEN","replace":"IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-server-conflict', 'syn-srv-a', 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-server-conflict', 'syn-srv-b');
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-server-conflict): a swap across two different broker servers answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH with both rows unchanged', v_res;
+  END IF;
+
+  -- ----- SWAP-composite. a composite_member dependent keeps the slot where it is -------
+  -- RED-UNDER: drop the composite_member filter from the dependents check in the migration
+  --            (AND false): the check no longer sees the dependent, the swap proceeds, and
+  --            the real marker trigger raises ACCOUNT_SHARE_KEY_IS_A_HOLDER on the old
+  --            holder, a different token.
+  -- RED-UNDER-M: {"arm":"SWAP-composite","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"AND d.account_share_kind = 'composite_member'","replace":"AND false","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-composite', 'syn-srv-comp', 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  k_d := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  UPDATE api_keys SET account_shared_with_api_key_id = k_h, account_share_kind = 'composite_member' WHERE id = k_d;
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-composite', 'syn-srv-comp');
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_COMPOSITE_DEPENDENT' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-composite): a swap with a composite_member dependent on the old holder answered % — expected ACCOUNT_SLOT_COMPOSITE_DEPENDENT with both rows unchanged', v_res;
+  END IF;
+
+  -- ----- SWAP-server-wildcard. a server not captured yet matches any ------------------
+  -- NULL on the old holder's side is the wildcard (Q2 / F-3): the swap succeeds and the new
+  -- key stores the passed server, trimmed and lower-cased.
+  -- RED-UNDER: make a NULL server on the old holder an ordinary value in the migration's
+  --            server comparison (IS DISTINCT FROM), so NULL against a named server is a
+  --            conflict and the swap is refused ACCOUNT_SLOT_IDENTITY_MISMATCH.
+  -- RED-UNDER-M: {"arm":"SWAP-server-wildcard","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_old_server IS NOT NULL AND v_server IS NOT NULL AND v_old_server <> v_server THEN","replace":"IF v_old_server IS DISTINCT FROM v_server THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-wildcard', NULL, 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-wildcard', '  Syn-Srv-Wild  ');
+  IF v_res IS DISTINCT FROM 'SUCCEEDED' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-server-wildcard): a swap whose old holder has no server captured yet was refused or errored (%) — NULL must be the wildcard', v_res;
+  END IF;
+  SELECT venue_server INTO v_server FROM api_keys WHERE id = k_n;
+  IF v_server IS DISTINCT FROM 'syn-srv-wild' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-server-wildcard): the new key stored server % — expected the passed server, trimmed and lower-case', v_server;
+  END IF;
+
   -- Explicit, in FK order, rather than relying on the profiles -> api_keys cascade.
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);
 
-  RAISE NOTICE 'PASS (swap_account_slot): a failing holder gives its slot to a working key and is marked duplicate against it; the function is service-role only and SECURITY DEFINER.';
+  RAISE NOTICE 'PASS (swap_account_slot): a failing or inactive holder gives its slot to a working key and is marked duplicate against it, dependents follow, a marked new key is healed, the server wildcard holds; every refusal (owner, working holder, failing new key, departed key, login, server, composite dependent) leaves both rows unchanged; the function is service-role only and SECURITY DEFINER.';
 END $swap$;

@@ -172,6 +172,11 @@ describe("D-18 parity: the TypeScript not-working statuses equal the SQL tuple",
   it.each([
     "supabase/migrations/20260927180000_working_holder_rule_d18.sql",
     "supabase/schema/functions/set_departed_key_history_inclusion.sql",
+    // Phase 225 plan 04 (MT5D-08): the fourth twin. swap_account_slot evaluates the same
+    // working-ness rule inside the database, on the rows it locks, and carries its one tuple
+    // in its own body. A fifth copy is never added: extend this list instead.
+    "supabase/migrations/20261123180100_swap_account_slot.sql",
+    "supabase/schema/functions/swap_account_slot.sql",
   ])("%s", (relPath) => {
     const tuple = sqlTuple(relPath);
     expect(tuple.length).toBeGreaterThan(0);
