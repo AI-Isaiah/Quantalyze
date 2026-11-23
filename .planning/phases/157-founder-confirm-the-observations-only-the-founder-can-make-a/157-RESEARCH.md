@@ -466,7 +466,7 @@ The kit must be structured so the test can import its router: the file is an IIF
 | Stub miss lets a destructive request reach PROD | Tampering | Method-aware fail-closed router; stubs for finalize/kickoff; refuse `DELETE /api/strategies/draft/*` and every `/rest/v1` write |
 | Credential or id leaks into tracked text/logs | Information disclosure | Match by path pattern only, ids from runtime URL; `__fconf.refused` records `METHOD path` with ids replaced by `:id`; grep gate on tracked files |
 | Kit left active and mistaken for real state | Repudiation / spoofing | Fixed visible marker; reload clears; script: "no marker, do not click" |
-| Stubbed security verdict presented as real | Spoofing | Do not stub `GET /api/keys/<id>/permissions`; pass it through |
+| Stubbed security verdict presented as real | Spoofing | Do not stub `GET /api/keys/<id>/permissions`. ⛔ CORRECTED 2026-11-23 (review CR-01): do not pass it through either, because it writes an audit row and runs a live decrypt and probe. It is refused (599) while the kit is armed. |
 | Gitleaks trip on credential-shaped literals | Information disclosure | Do not write credential-shaped placeholder strings in the script (type obviously fake words, no key-like patterns); CLAUDE.md gitleaks rule |
 | Spike password stored in Railway | Information disclosure | Plan 03 pre-rotation Railway name check; rotate or delete per founder |
 
