@@ -330,7 +330,7 @@ Plans:
 4. A job reclaimed after a crash keeps its curated error sentence, and its strategy's analytics status follows the reclaim. The lane arm that re-stamps a different sentence under the same job id shows the reclaimed one surviving. (HEAL-04)
 5. The daily positions poll enqueues private strategies too, so they get position snapshots, and the `poll_positions` enqueue stays live. (HEAL-05)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. New SQL arms carry `RED-UNDER` twins and list their migration in `RED-UNDER-SETUP`. Raising retries or a watchdog threshold is not a close. Each migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding before merge, and runs in the one serial migration lane (they auto-apply to PROD).
-**Plans:** 9/11 plans executed
+**Plans:** 10/11 plans executed
 
 Plans:
 **Wave 1**
@@ -349,7 +349,7 @@ Plans:
 - [x] 227-09-PLAN.md — Worker: the readmit-ceiling page through ops_alert, stamped on delivery (HEAL-03, page half)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 227-10-PLAN.md — Every phase migration applies on the local-stack lane, the corpus passes, and the censuses are measured (SC-6)
+- [x] 227-10-PLAN.md — Every phase migration applies on the local-stack lane, the corpus passes, and the censuses are measured (SC-6)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 227-11-PLAN.md — The migrations-schedule-nothing census, the operator runbook, the validation map and the ship records
@@ -649,7 +649,7 @@ Plans:
 | 223. FLOWKINDS | 0/? | Not started | - |
 | 225. ONEACCOUNTONCE | 0/? | Not started | - |
 | 226. MT5SOAK | 0/? | Not started | - |
-| 227. JOBLEDGER | 9/11 | In Progress | - |
+| 227. JOBLEDGER | 10/11 | In Progress | - |
 | 228. KEYANSWERS | 0/? | Not started | - |
 | 229. MT5DERIVE2 | 0/? | Not started | - |
 | 230. MT5NIGHTLY | 0/? | Not started | - |
