@@ -42,6 +42,17 @@
 --        the order an independent computation gives, for rows that share one recorded_at.
 --   E8   (ACL and RLS, behavioural) anon and authenticated cannot SELECT the table or
 --        EXECUTE the worker-lost RPC; service_role can SELECT and cannot INSERT.
+--   Plan 02 (migration 20261124120100) appends W1 to W5, after E8, so no E arm or twin moved:
+--   W1   a watchdog reset (default pass) is one `watchdog_reset` record with the pre-reset
+--        claim token and attempt, error_text worker_stalled, no error_kind.
+--   W2   a reclaim is one `stall_reclaim` record with the PRE-decrement attempt, while the job
+--        row reads the decremented count and keeps its token.
+--   W3   a job reset by the per-kind pass and then failed for real on its next claim holds two
+--        records under two tokens, watchdog_reset then error, in (attempt, recorded_at, id) order.
+--   W4   the reset's return value is the count of reset rows, per-kind pass plus default pass,
+--        unchanged by the ledger write.
+--   W5   (negative control) a row younger than its kind's override is not reset and writes no
+--        record.
 --
 -- ONE `BEGIN; DO; ROLLBACK;` BLOCK PER ARM. Each block rolls back, so the file leaves no row
 -- behind and runs on BOTH lanes: the pg-lane under sql-mutation and the local Supabase stack
@@ -66,13 +77,20 @@
 -- beside the claim pair's 5-argument one, which makes the 3-positional-argument call this gate
 -- (and the claim pair's own gate) makes ambiguous (SQLSTATE 42725). Fixture 36 supplies the
 -- claim_token column instead, as the claim pair's gate does.
+-- Plan 02 appended the migration it adds (20261124120100) LAST, and inserted what W1 to W5 need
+-- in timestamp order: fixture 44 (compute_jobs.reclaim_count, a stand-in for 20260510180226,
+-- which cannot be applied whole) after fixture 36, and the two bridge migrations
+-- 20261023120000 and 20261105120000 before 20261024120000, so the bridge the reset calls is the
+-- latest one. 20260516104201 (the previous reset and reclaim bodies) is NOT in the list: it
+-- aborts on its own verify block on any list that omits 20260515114555, and the migration under
+-- test creates both functions itself.
 --
 -- LANE SUBSTITUTION (recorded, not hidden). The pg-lane has no Supabase auth schema beyond
 -- the stand-ins and no PostgREST, so E8 proves the privilege model with SET ROLE, not with a
 -- JWT. Plan 10 owns the proof on the local-stack lane.
 -- ==========================================================================
 
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/23-fixture-contact-requests.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","scripts/pg-lane/fixtures/37-fixture-side-compute-job-kinds.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","supabase/migrations/20260416125430_contact_request_metadata.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515210300_scoring_weight_overrides_high_hardening.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260525074649_compute_jobs_kind_check_extend_csv.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260716090000_retire_compute_analytics_kind_rpc_guard.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260826150000_destrict_enqueue_internal_10param.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20260924230827_fanin_initial_status_10param.sql","scripts/pg-lane/fixtures/29-fixture-compute-jobs-priority.sql","supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql","supabase/migrations/20261009120000_sync_status_analytics_scope.sql","scripts/pg-lane/fixtures/40-fixture-match-decisions-bridge-outcomes.sql","supabase/migrations/20261024120000_fan_in_graph_and_decision_cascade.sql","supabase/migrations/20261124120000_jobledger_attempt_failures.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/23-fixture-contact-requests.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","scripts/pg-lane/fixtures/37-fixture-side-compute-job-kinds.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/44-fixture-compute-jobs-reclaim-count.sql","supabase/migrations/20260416125430_contact_request_metadata.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515210300_scoring_weight_overrides_high_hardening.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260525074649_compute_jobs_kind_check_extend_csv.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260716090000_retire_compute_analytics_kind_rpc_guard.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260826150000_destrict_enqueue_internal_10param.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20260924230827_fanin_initial_status_10param.sql","scripts/pg-lane/fixtures/29-fixture-compute-jobs-priority.sql","supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql","supabase/migrations/20261009120000_sync_status_analytics_scope.sql","scripts/pg-lane/fixtures/40-fixture-match-decisions-bridge-outcomes.sql","supabase/migrations/20261023120000_sync_status_runner_stamps_computed_at.sql","supabase/migrations/20261105120000_sync_status_protect_refused_derive.sql","supabase/migrations/20261024120000_fan_in_graph_and_decision_cascade.sql","supabase/migrations/20261124120000_jobledger_attempt_failures.sql","supabase/migrations/20261124120100_jobledger_reset_ledger_and_bridge.sql"]}
 
 -- >>> ARM E1
 BEGIN;
@@ -644,4 +662,320 @@ END $$;
 ROLLBACK;
 -- <<< ARM E8
 
-DO $$ BEGIN RAISE NOTICE 'ALL 9 ARMS EXECUTED (E1, E2, E4, E3, E3b, E5, E6, E7, E8) and passed - E1 attempt 1''s cause survives attempt 2''s re-claim and success; E2 a worker-lost error on a running job is recorded once; E4 a forged token or unknown job records nothing; E3 and E3b a late error is recorded beside its reset under the attempt that raised it; E5 a NULL error stays NULL; E6 a cascaded child records nothing; E7 the records outlive the job row and read in a stable order; E8 only service_role can SELECT and nobody can INSERT directly.'; END $$;
+-- >>> ARM W1
+BEGIN;
+
+DO $$
+DECLARE
+  uid      UUID := gen_random_uuid();
+  k        UUID;
+  s        UUID;
+  j        UUID;
+  tok      UUID := gen_random_uuid();
+  v_state  TEXT;
+  v_msg    TEXT;
+  v_jstat  TEXT;
+  v_jtok   UUID;
+  n        INTEGER;
+  v_row    JSONB;
+  v_ok     BOOLEAN;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000', 'jl-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'jl', 'jl-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'jl w1', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'jl w1') RETURNING id INTO s;
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, claim_token, claimed_by, claimed_at)
+  VALUES (s, 'sync_trades', 'running', 2, 3, tok, 'w1-worker', now() - interval '30 minutes') RETURNING id INTO j;
+
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    PERFORM reset_stalled_compute_jobs(interval '10 minutes');
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE; v_msg := SQLERRM;
+  END;
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W1-SETUP): reset_stalled_compute_jobs raised SQLSTATE % (message: %) on a job running for 30 minutes, so no reset happened for this arm to observe.', v_state, v_msg;
+  END IF;
+  SELECT cj.status, cj.claim_token INTO v_jstat, v_jtok FROM compute_jobs cj WHERE cj.id = j;
+  SELECT count(*) INTO n FROM compute_job_attempt_failures f WHERE f.job_id = j;
+  SELECT to_jsonb(f) INTO v_row FROM compute_job_attempt_failures f WHERE f.job_id = j ORDER BY f.attempt, f.recorded_at, f.id LIMIT 1;
+
+  -- ===== ARM W1 — a watchdog reset reads as a reset in the ledger, with the pre-reset token and attempt =====
+  v_ok := COALESCE(
+        v_jstat = 'pending' AND v_jtok IS NULL
+    AND n = 1
+    AND v_row->>'cause_class' = 'watchdog_reset'
+    AND v_row->>'error_text' = 'worker_stalled'
+    AND v_row->>'error_kind' IS NULL
+    AND (v_row->>'attempt')::int = 2
+    AND (v_row->>'claim_token')::uuid = tok
+    AND v_row->>'worker_id' = 'w1-worker', FALSE);
+  -- RED-UNDER: write the default-pass ledger row with cause_class 'error' instead of 'watchdog_reset', so a stall reads like a real error (with the STEP 1 self-verify's cause literal check stood down).
+  -- RED-UNDER-M: {"arm":"W1","apply":[{"kind":"edit","file":"supabase/migrations/20261124120100_jobledger_reset_ledger_and_bridge.sql","find":"\n    SELECT u.id, u.kind, u.strategy_id, u.api_key_id, u.exchange, u.created_at,\n           u.old_attempts, u.old_claim_token, 'watchdog_reset', NULL, 'worker_stalled', u.old_claimed_by","replace":"\n    SELECT u.id, u.kind, u.strategy_id, u.api_key_id, u.exchange, u.created_at,\n           u.old_attempts, u.old_claim_token, 'error', NULL, 'worker_stalled', u.old_claimed_by","occurrences":1}]}
+  IF NOT v_ok THEN
+    RAISE EXCEPTION 'TEST FAILED (W1): after the watchdog reset a job that had run 30 minutes as attempt 2 under a claim token, the job reads status % and claim token % (expected pending and NULL) and the ledger holds % row(s) for it, the first reading % (expected exactly one: cause_class watchdog_reset, error_text worker_stalled, no error_kind, attempt 2, the PRE-reset claim token, worker w1-worker). A stall that is not recorded as a reset, or is recorded under the wrong token or attempt, cannot be told from a real error when Phase 230 reads the nights.', COALESCE(v_jstat, 'NULL'), COALESCE(v_jtok::text, 'NULL'), n, COALESCE(v_row::text, 'NULL');
+  END IF;
+END $$;
+
+ROLLBACK;
+-- <<< ARM W1
+
+-- >>> ARM W2
+BEGIN;
+
+DO $$
+DECLARE
+  uid      UUID := gen_random_uuid();
+  k        UUID;
+  s        UUID;
+  j        UUID;
+  tok      UUID := gen_random_uuid();
+  v_state  TEXT;
+  v_msg    TEXT;
+  v_jstat  TEXT;
+  v_jtok   UUID;
+  v_jatt   INTEGER;
+  v_jrc    INTEGER;
+  n        INTEGER;
+  v_row    JSONB;
+  v_ok     BOOLEAN;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000', 'jl-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'jl', 'jl-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'jl w2', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'jl w2') RETURNING id INTO s;
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, claim_token, claimed_by, claimed_at)
+  VALUES (s, 'sync_trades', 'running', 2, 3, tok, 'w2-worker', now() - interval '30 minutes') RETURNING id INTO j;
+
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    PERFORM reclaim_stuck_compute_jobs(interval '10 minutes');
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE; v_msg := SQLERRM;
+  END;
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W2-SETUP): reclaim_stuck_compute_jobs raised SQLSTATE % (message: %) on a job running for 30 minutes, so no reclaim happened for this arm to observe.', v_state, v_msg;
+  END IF;
+  SELECT cj.status, cj.claim_token, cj.attempts, cj.reclaim_count INTO v_jstat, v_jtok, v_jatt, v_jrc FROM compute_jobs cj WHERE cj.id = j;
+  SELECT count(*) INTO n FROM compute_job_attempt_failures f WHERE f.job_id = j;
+  SELECT to_jsonb(f) INTO v_row FROM compute_job_attempt_failures f WHERE f.job_id = j ORDER BY f.attempt, f.recorded_at, f.id LIMIT 1;
+
+  -- ===== ARM W2 — a reclaim leaves a stall_reclaim record with the PRE-decrement attempt =====
+  v_ok := COALESCE(
+        v_jstat = 'pending' AND v_jatt = 1 AND v_jrc = 1 AND v_jtok = tok
+    AND n = 1
+    AND v_row->>'cause_class' = 'stall_reclaim'
+    AND v_row->>'error_text' IS NULL
+    AND v_row->>'error_kind' IS NULL
+    AND (v_row->>'attempt')::int = 2
+    AND (v_row->>'claim_token')::uuid = tok
+    AND v_row->>'worker_id' = 'w2-worker', FALSE);
+  -- RED-UNDER: record the POST-decrement attempt count in the stall_reclaim row (attempt 1 for a job that held attempt 2), so the record names an attempt that never stalled (with the STEP 2 self-verify clause for it stood down).
+  -- RED-UNDER-M: {"arm":"W2","apply":[{"kind":"edit","file":"supabase/migrations/20261124120100_jobledger_reset_ledger_and_bridge.sql","find":"           u.old_attempts, u.old_claim_token, 'stall_reclaim'","replace":"           GREATEST(u.old_attempts - 1, 0), u.old_claim_token, 'stall_reclaim'","occurrences":1}]}
+  IF NOT v_ok THEN
+    RAISE EXCEPTION 'TEST FAILED (W2): after reclaim_stuck_compute_jobs took a job that held attempt 2, the job reads status %, attempts %, reclaim_count %, claim token % (expected pending, 1, 1 and the unchanged token, because reclaim decrements attempts and does not NULL the token) and the ledger holds % row(s) for it, the first reading % (expected exactly one: cause_class stall_reclaim, no error text, attempt 2 = the PRE-decrement count, the held claim token, worker w2-worker). A record carrying the post-decrement count names an attempt that never stalled.', COALESCE(v_jstat, 'NULL'), COALESCE(v_jatt::text, 'NULL'), COALESCE(v_jrc::text, 'NULL'), COALESCE(v_jtok::text, 'NULL'), n, COALESCE(v_row::text, 'NULL');
+  END IF;
+END $$;
+
+ROLLBACK;
+-- <<< ARM W2
+
+-- >>> ARM W3
+BEGIN;
+
+DO $$
+DECLARE
+  uid      UUID := gen_random_uuid();
+  k        UUID;
+  s        UUID;
+  j        UUID;
+  t1       UUID := gen_random_uuid();
+  t2       UUID;
+  v_state  TEXT;
+  v_msg    TEXT;
+  n        INTEGER;
+  v_causes TEXT;
+  v_toks   TEXT;
+  v_texts  TEXT;
+  v_ok     BOOLEAN;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000', 'jl-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'jl', 'jl-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'jl w3', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'jl w3') RETURNING id INTO s;
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, claim_token, claimed_by, claimed_at)
+  VALUES (s, 'sync_trades', 'running', 1, 3, t1, 'w3-worker-1', now() - interval '30 minutes') RETURNING id INTO j;
+
+  -- Reset through the PER-KIND pass (an override for the job's own kind), then the next claim
+  -- is the REAL claim RPC, then that attempt fails for real.
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    PERFORM reset_stalled_compute_jobs(interval '10 minutes', '{"sync_trades": "10 minutes"}'::jsonb);
+    SELECT c.claim_token INTO t2
+      FROM public.claim_compute_jobs_with_priority(1000, 'w3-worker-2', NULL) c WHERE c.id = j;
+    PERFORM mark_compute_job_failed(j, 'W3 real error on attempt two', 'permanent', t2);
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE; v_msg := SQLERRM;
+  END;
+  IF v_state IS NOT NULL OR t2 IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W3-SETUP): resetting, re-claiming and failing the job raised SQLSTATE % (message: %) with the second claim token %, so the two-attempt history this arm reads never existed.', COALESCE(v_state, 'none'), COALESCE(v_msg, 'none'), COALESCE(t2::text, 'NULL');
+  END IF;
+  SELECT count(*),
+         string_agg(f.cause_class, ',' ORDER BY f.attempt, f.recorded_at, f.id),
+         string_agg(COALESCE(f.claim_token::text, 'NULL'), ',' ORDER BY f.attempt, f.recorded_at, f.id),
+         string_agg(COALESCE(f.error_text, 'NULL'), ' | ' ORDER BY f.attempt, f.recorded_at, f.id)
+    INTO n, v_causes, v_toks, v_texts
+    FROM compute_job_attempt_failures f WHERE f.job_id = j;
+
+  -- ===== ARM W3 — a reset attempt and the next attempt's real error are two records, in order =====
+  v_ok := COALESCE(
+        n = 2
+    AND v_causes = 'watchdog_reset,error'
+    AND v_toks = t1::text || ',' || t2::text
+    AND t1 <> t2
+    AND v_texts = 'worker_stalled | W3 real error on attempt two', FALSE);
+  -- RED-UNDER: write the per-kind pass's ledger row with cause_class 'error' instead of 'watchdog_reset' (the default pass stays right, so W1 still passes), so the reset and the next attempt's real error collapse into one cause.
+  -- RED-UNDER-M: {"arm":"W3","apply":[{"kind":"edit","file":"supabase/migrations/20261124120100_jobledger_reset_ledger_and_bridge.sql","find":"\n        SELECT u.id, u.kind, u.strategy_id, u.api_key_id, u.exchange, u.created_at,\n               u.old_attempts, u.old_claim_token, 'watchdog_reset', NULL, 'worker_stalled', u.old_claimed_by","replace":"\n        SELECT u.id, u.kind, u.strategy_id, u.api_key_id, u.exchange, u.created_at,\n               u.old_attempts, u.old_claim_token, 'error', NULL, 'worker_stalled', u.old_claimed_by","occurrences":1}]}
+  IF NOT v_ok THEN
+    RAISE EXCEPTION 'TEST FAILED (W3): a job reset by the per-kind watchdog pass and then failed for real on its next claim holds % ledger row(s) with causes % under claim tokens % and error texts % (expected two rows read in (attempt, recorded_at, id) order: watchdog_reset under the first token with worker_stalled, then error under the second token with the real error text). A reset that reads like a real error, or an error that overwrites the reset, hides which attempt stalled and which one failed.', n, COALESCE(v_causes, 'NULL'), COALESCE(v_toks, 'NULL'), COALESCE(v_texts, 'NULL');
+  END IF;
+END $$;
+
+ROLLBACK;
+-- <<< ARM W3
+
+-- >>> ARM W4
+BEGIN;
+
+DO $$
+DECLARE
+  uid      UUID := gen_random_uuid();
+  k        UUID;
+  s_a      UUID;
+  s_b      UUID;
+  j_a      UUID;
+  j_b      UUID;
+  v_state  TEXT;
+  v_msg    TEXT;
+  n_expect INTEGER;
+  n_ret    INTEGER;
+  v_a_st   TEXT;
+  v_b_st   TEXT;
+  n_led    INTEGER;
+  v_ok     BOOLEAN;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000', 'jl-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'jl', 'jl-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'jl w4', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'jl w4 a') RETURNING id INTO s_a;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'jl w4 b') RETURNING id INTO s_b;
+  -- Kind A has an override of 1 hour and is 2 hours old: the per-kind pass takes it.
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, claim_token, claimed_by, claimed_at)
+  VALUES (s_a, 'sync_trades', 'running', 1, 3, gen_random_uuid(), 'w4-worker', now() - interval '2 hours') RETURNING id INTO j_a;
+  -- Kind B has no override and is 30 minutes old against the 10 minute default: the default pass takes it.
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, claim_token, claimed_by, claimed_at)
+  VALUES (s_b, 'derive_broker_dailies', 'running', 1, 3, gen_random_uuid(), 'w4-worker', now() - interval '30 minutes') RETURNING id INTO j_b;
+
+  -- The expected count is computed from the rows BEFORE the call, by the two thresholds
+  -- themselves, never from the ledger or from the function's own output.
+  SELECT count(*) INTO n_expect
+    FROM compute_jobs cj
+   WHERE cj.status = 'running' AND cj.claimed_at IS NOT NULL
+     AND ((cj.kind = 'sync_trades' AND cj.claimed_at < now() - interval '1 hour')
+       OR (cj.kind <> 'sync_trades' AND cj.claimed_at < now() - interval '10 minutes'));
+
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    n_ret := reset_stalled_compute_jobs(interval '10 minutes', '{"sync_trades": "1 hour"}'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE; v_msg := SQLERRM;
+  END;
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W4-SETUP): reset_stalled_compute_jobs raised SQLSTATE % (message: %) with a per-kind override, so no reset happened for this arm to observe.', v_state, v_msg;
+  END IF;
+  SELECT cj.status INTO v_a_st FROM compute_jobs cj WHERE cj.id = j_a;
+  SELECT cj.status INTO v_b_st FROM compute_jobs cj WHERE cj.id = j_b;
+  SELECT count(*) INTO n_led FROM compute_job_attempt_failures f WHERE f.job_id IN (j_a, j_b);
+
+  -- ===== ARM W4 — the return value is the count of reset rows, per-kind pass plus default pass =====
+  v_ok := COALESCE(
+        v_a_st = 'pending' AND v_b_st = 'pending' AND n_led = 2
+    AND n_expect >= 2 AND n_ret = n_expect, FALSE);
+  -- RED-UNDER: stop adding the default pass's count to the total (`v_reset := v_reset;`), so the return value forgets every row the default pass reset.
+  -- RED-UNDER-M: {"arm":"W4","apply":[{"kind":"edit","file":"supabase/migrations/20261124120100_jobledger_reset_ledger_and_bridge.sql","find":"\n  v_reset := v_reset + v_partial;\n  v_ids   := v_ids || v_pass_ids;","replace":"\n  v_reset := v_reset;\n  v_ids   := v_ids || v_pass_ids;","occurrences":1}]}
+  IF NOT v_ok THEN
+    RAISE EXCEPTION 'TEST FAILED (W4): reset_stalled_compute_jobs with a per-kind override returned % (expected % = every row eligible under its own threshold), left the jobs % and % (expected pending and pending) and wrote % ledger row(s) for them (expected 2). The worker logs this count and alerts on it; a ledger write must not change it.', COALESCE(n_ret::text, 'NULL'), n_expect, COALESCE(v_a_st, 'NULL'), COALESCE(v_b_st, 'NULL'), n_led;
+  END IF;
+END $$;
+
+ROLLBACK;
+-- <<< ARM W4
+
+-- >>> ARM W5
+BEGIN;
+
+DO $$
+DECLARE
+  uid      UUID := gen_random_uuid();
+  k        UUID;
+  s        UUID;
+  j        UUID;
+  v_state  TEXT;
+  v_msg    TEXT;
+  v_jstat  TEXT;
+  n_led    INTEGER;
+  v_ok     BOOLEAN;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000', 'jl-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'jl', 'jl-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'jl w5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'jl w5') RETURNING id INTO s;
+  -- 30 minutes old: past the 10 minute default, but younger than its kind's 1 hour override.
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, claim_token, claimed_by, claimed_at)
+  VALUES (s, 'sync_trades', 'running', 1, 3, gen_random_uuid(), 'w5-worker', now() - interval '30 minutes') RETURNING id INTO j;
+
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    PERFORM reset_stalled_compute_jobs(interval '10 minutes', '{"sync_trades": "1 hour"}'::jsonb);
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE; v_msg := SQLERRM;
+  END;
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W5-SETUP): reset_stalled_compute_jobs raised SQLSTATE % (message: %) with a per-kind override, so the call this arm judges never completed.', v_state, v_msg;
+  END IF;
+  SELECT cj.status INTO v_jstat FROM compute_jobs cj WHERE cj.id = j;
+  SELECT count(*) INTO n_led FROM compute_job_attempt_failures f WHERE f.job_id = j;
+
+  -- ===== ARM W5 — (negative control) a row younger than its kind's override is not reset and writes no record =====
+  v_ok := COALESCE(v_jstat = 'running' AND n_led = 0, FALSE);
+  -- RED-UNDER: let the default pass take overridden kinds too (`OR TRUE` in place of the `NOT (p_per_kind_overrides ? kind)` exclusion), so the 30 minute old row is reset under the 10 minute default although its kind's override is 1 hour.
+  -- RED-UNDER-M: {"arm":"W5","apply":[{"kind":"edit","file":"supabase/migrations/20261124120100_jobledger_reset_ledger_and_bridge.sql","find":"         OR NOT (p_per_kind_overrides ? kind)","replace":"         OR TRUE","occurrences":1}]}
+  IF NOT v_ok THEN
+    RAISE EXCEPTION 'TEST FAILED (W5): a job of a kind whose per-kind override is 1 hour, claimed 30 minutes ago, reads status % (expected running) and has % ledger row(s) (expected 0) after a reset call with a 10 minute default. A job still inside its own kind''s window must be left alone, and no reset record may be written for it.', COALESCE(v_jstat, 'NULL'), n_led;
+  END IF;
+END $$;
+
+ROLLBACK;
+-- <<< ARM W5
+
+DO $$ BEGIN RAISE NOTICE 'ALL 14 ARMS EXECUTED (E1, E2, E4, E3, E3b, E5, E6, E7, E8, W1, W2, W3, W4, W5) and passed - E1 attempt 1''s cause survives attempt 2''s re-claim and success; E2 a worker-lost error on a running job is recorded once; E4 a forged token or unknown job records nothing; E3 and E3b a late error is recorded beside its reset under the attempt that raised it; E5 a NULL error stays NULL; E6 a cascaded child records nothing; E7 the records outlive the job row and read in a stable order; E8 only service_role can SELECT and nobody can INSERT directly; W1 a watchdog reset is a watchdog_reset record with the pre-reset token and attempt; W2 a reclaim is a stall_reclaim record with the pre-decrement attempt; W3 a reset and the next attempt''s real error are two ordered records; W4 the reset count is unchanged by the ledger write; W5 a row inside its own kind''s window writes nothing.'; END $$;

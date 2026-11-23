@@ -251,3 +251,85 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION reset_stalled_compute_jobs(interval, jsonb) FROM PUBLIC, anon, authenticated;
+
+-- ==========================================================================
+-- STEP 2: reclaim_stuck_compute_jobs, re-based on 20260516104201
+-- ==========================================================================
+-- Same shape as STEP 1 (DEC-02-A: no caller on PROD today, fixed so it cannot become a
+-- second silent path). The ledger row is cause_class stall_reclaim, error_text NULL, the
+-- PRE-decrement attempt count and the claim token the row holds (DEC-02-E: reclaim does not
+-- NULL it). The attempts decrement (mig 109 P2) and the reclaim_count bump stay.
+CREATE OR REPLACE FUNCTION reclaim_stuck_compute_jobs(
+  p_older_than INTERVAL DEFAULT interval '10 minutes'
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_reclaimed INTEGER;
+  -- HEAL-04 / MT5D-01 (phase 227): the ids this call reclaimed, for the bridge loop below.
+  v_ids       UUID[];
+  r_b         RECORD;
+BEGIN
+  -- HEAL-04 / MT5D-01 (phase 227): the same bounded UPDATE, in one statement with its
+  -- ledger rows. `old` takes the row locks (SKIP LOCKED) and remembers the token, attempts
+  -- and worker the row held BEFORE the reclaim; `ins` writes one stall_reclaim record per
+  -- reclaimed row with that PRE-decrement attempt count.
+  WITH old AS (
+    SELECT id,
+           claim_token AS old_claim_token,
+           attempts    AS old_attempts,
+           claimed_by  AS old_claimed_by
+      FROM compute_jobs
+     WHERE status = 'running'
+       AND claimed_at IS NOT NULL
+       AND claimed_at < (now() - p_older_than)
+     ORDER BY claimed_at
+     LIMIT 500
+     FOR UPDATE SKIP LOCKED
+  ), upd AS (
+    UPDATE compute_jobs cj
+       SET status          = 'pending',
+           claimed_at      = NULL,
+           claimed_by      = NULL,
+           next_attempt_at = now(),
+           attempts        = GREATEST(cj.attempts - 1, 0),
+           reclaim_count   = cj.reclaim_count + 1
+      FROM old
+     WHERE cj.id = old.id
+    RETURNING cj.id, cj.kind, cj.strategy_id, cj.api_key_id, cj.exchange, cj.created_at,
+              old.old_claim_token, old.old_attempts, old.old_claimed_by
+  ), ins AS (
+    INSERT INTO public.compute_job_attempt_failures
+           (job_id, kind, strategy_id, api_key_id, exchange, job_created_at,
+            attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+    SELECT u.id, u.kind, u.strategy_id, u.api_key_id, u.exchange, u.created_at,
+           u.old_attempts, u.old_claim_token, 'stall_reclaim', NULL, NULL, u.old_claimed_by
+      FROM upd u
+    ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING
+  )
+  SELECT count(*), COALESCE(array_agg(upd.id), '{}'::uuid[])
+    INTO v_reclaimed, v_ids
+    FROM upd;
+
+  -- HEAL-04 / MT5D-01 (phase 227): the same sorted bridge loop as reset_stalled_compute_jobs
+  -- (DEC-02-B, DEC-02-C). The bridge decides whether a side-kind job bounces the status.
+  FOR r_b IN
+    SELECT cj.strategy_id, cj.kind, min(cj.id::text)::uuid AS job_id
+      FROM compute_jobs cj
+     WHERE cj.id = ANY (v_ids)
+       AND cj.strategy_id IS NOT NULL
+     GROUP BY cj.strategy_id, cj.kind
+     ORDER BY hashtext(cj.strategy_id::text), cj.strategy_id, cj.kind
+  LOOP
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(r_b.strategy_id::text));
+    PERFORM sync_strategy_analytics_status(r_b.strategy_id, r_b.job_id);
+  END LOOP;
+
+  RETURN v_reclaimed;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION reclaim_stuck_compute_jobs(interval) FROM PUBLIC, anon, authenticated;
