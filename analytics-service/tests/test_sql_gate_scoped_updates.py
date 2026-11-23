@@ -169,6 +169,11 @@ _SCOPED_RE = re.compile(
 #     row(s) out of the cohort: arm 12 (`WHERE strategy_id = ANY (v_seeded)`, the three rows it seeded)
 #     and arms 15, 16, 17 and 18 (`WHERE strategy_id = v_id`)  -> 7 -> 12
 #
+#   * Phase 227 (JOBLEDGER, plan 10) counted the NEW gate test_reset_stalled_bridge_provenance.sql, added by
+#     plan 02: two scoped UPDATEs (arms B1 and B4, each `WHERE strategy_id = s`, the second attempt's own
+#     curated-sentence re-stamp on the one strategy that arm seeded)  -> new key, 2. MEASURED: this test read
+#     `Left contains 1 more item: {'test_reset_stalled_bridge_provenance.sql': 2}` on the phase branch.
+#
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches
 # never appears in it and an explicit `: 0` here would fail the comparison. The
@@ -180,6 +185,7 @@ _EXPECTED_MATCH_COUNTS: dict[str, int] = {
     "test_ledger_refresh_staleness.sql": 2,
     "test_metrics_by_basis_write.sql": 4,
     "test_okx_archive_rebuild.sql": 1,
+    "test_reset_stalled_bridge_provenance.sql": 2,
     "test_strategy_analytics_stuck_computing_reaper.sql": 3,
     "test_strategy_analytics_trade_fetch_provenance.sql": 6,
     "test_sync_status_bridge_residues.sql": 5,
