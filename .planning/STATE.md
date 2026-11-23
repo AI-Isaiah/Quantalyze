@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase: "155.2"
-current_phase_name: 155.2 LIVEPARITY open, waiting on broker statements; 157 and 221-225 deferred to the next milestone
-status: executing
-stopped_at: 155.2 waits on the broker statements; 157 and 221-225 moved to the next milestone 2026-11-23
-last_updated: "2026-11-23T08:46:30.225Z"
+current_phase_name: v1.18 all phases complete; ready for /gsd-audit-milestone. 155.2, 157 and 221-225 deferred to the next milestone
+status: All phases complete
+stopped_at: v1.18 has no open phase; next is /gsd-audit-milestone then /gsd-complete-milestone
+last_updated: "2026-11-23T08:53:06.544Z"
 last_activity: 2026-11-23
-last_activity_desc: 157 and 221-225 moved out of v1.18 by founder decision; 155.2 gap plan 17 recorded
-state_head: 621049ac9e24a866911518dd8cd47cf9ade136e6
+last_activity_desc: 155.2 remaining work, 157 and 221-225 moved out of v1.18 by founder decision
+state_head: 9508eee3476a95812ced3f6d26d2502d64ab1987
 progress:
-  total_phases: 17
+  total_phases: 16
   completed_phases: 16
-  total_plans: 110
-  completed_plans: 106
-  percent: 94
+  total_plans: 93
+  completed_plans: 93
+  percent: 100
+current_phase: null
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 155.2 LIVEPARITY open (waiting on the broker statements); 155, 155.1, 207-220 complete; 157 and 221-225 deferred to the next milestone
-Plan: per phase (see each phase directory)
-Status: v1.18 holds 155, 155.1, 155.2 and 207-220; 155.2 is its only open phase. 155.2 LIVEPARITY: 13 of 17 plans complete. Gap plan 17 (oracle_account_mismatch, census share link, Sharpe at the stored precision) shipped 2026-11-23 (#1306) after the founder ruled k10 is MM3; the post-plan-17 recapture passes Gate A on all three labels and clears 31 of 31 findings rows (155.2-RECHECK-2026-11-23b.md). Plans 11-14 still owe the broker statements and founder steps; the CLI verdict is also refused on a weekend-reading provenance rule. 157 FOUNDER-CONFIRM (plan 01 done, 1/3) and 221-225 (booked 2026-11-23, unplanned) moved to the next milestone on 2026-11-23 by founder decision ("delay 157 into next milestone. Cannot do that now"; "Move them too (Recommended)")
-Last activity: 2026-11-23 — 157 and 221-225 moved to the next milestone; 155.2 gap plan 17 shipped and recaptured
-Progress: [█████████░] 94%
+Phase: none open in v1.18 — 155, 155.1 and 207-220 complete; 155.2 (remaining work), 157 and 221-225 deferred to the next milestone
+Plan: none (v1.18 ready for /gsd-audit-milestone, then /gsd-complete-milestone)
+Status: v1.18 holds 155, 155.1 and 207-220, all complete, and has no open phase: ready for /gsd-audit-milestone and then /gsd-complete-milestone. On 2026-11-23 the founder moved three things to the next milestone: 157 FOUNDER-CONFIRM (plan 01 done, 1/3; "delay 157 into next milestone. Cannot do that now"), 221-225 (booked that day, unplanned; "Move them too (Recommended)"), and 155.2 LIVEPARITY's remaining work, meaning the broker statements, plans 11-14, the Gate B run, verification and phase complete ("Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."). 155.2's shipped work stays recorded: 13 of 17 plans, with code in #1292, #1297 and #1306; the post-plan-17 recapture passes Gate A on all three labels and clears 31 of 31 findings rows (155.2-RECHECK-2026-11-23b.md). MT5 stays unadvertised until 155.2 passes
+Last activity: 2026-11-23 — 155.2 remaining work, 157 and 221-225 moved to the next milestone; v1.18 ready for audit
+Progress: [██████████] 100%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -722,6 +722,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 224 added (2026-11-23, /gsd-phase add, founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS"): DEADLEFTOVERS, dead SQL, retired job kinds still enqueued and inert plumbing are retired
 - Phase 225 added (2026-11-23, /gsd-phase add, founder decision 2026-11-23, "several accounts can use one key. one account should not use the same key several times"): ONEACCOUNTONCE, a user cannot connect the same exchange account more than once, and one account shared across users stays allowed
 - Phases 157 and 221-225 moved out of v1.18 into the next milestone (2026-11-23, hand-edit because `/gsd-phase --edit` preserves a phase's milestone; founder decisions "delay 157 into next milestone. Cannot do that now" and, for 221-225, "Move them too (Recommended)"): v1.18 keeps 155, 155.1, 155.2 and 207-220, with 155.2 the only open phase
+- Phase 155.2 LIVEPARITY's remaining work moved out of v1.18 into the next milestone (2026-11-23, hand-edit, founder "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."): the broker statements, plans 11-14, the Gate B run, verification and phase complete move; its 13 shipped plans stay recorded as shipped. v1.18 keeps 155, 155.1 and 207-220, all complete
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 - Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
 

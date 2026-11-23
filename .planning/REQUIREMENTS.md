@@ -25,6 +25,8 @@
 
 ### MT5 verification (carried requirements)
 
+⭐ 2026-11-23 (founder, "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."): MT5-07..10, MT5-15 and MT5-GOAL-01 move with Phase 155.2's remaining work to the next milestone. They stay listed here, unchanged, until that milestone's requirements are defined. MT5-06 stays in v1.18, complete.
+
 - [x] **MT5-06**: The MT5 server-UTC offset is measured live inside the worker's leased derive (D-D), asserted against the configured `Mt5ServerClock` rule (Phase 175's `MT5_SERVER_TIME_RULE` is the carrier; the reading asserts it and is never written back as config), and persisted write-once; a near-midnight real deal from a DST divergence week lands on the UTC day of (terminal-displayed server time − the offset in force). ⚠️ Restated 2026-11-13: the August text named `MT5_SOAK_SERVER_OFFSET_MIN` (superseded by Phase 175) and "the day the terminal shows" (the terminal shows server days; our series buckets by UTC day).
 - [ ] **MT5-07**: Rendered performance matches an external oracle within `MT5_PARITY_TOLERANCE` as defined in D-B: Gate A (pre-`S`, closed-trade balance basis) against the terminal's All-History export, and Gate B (from `S`, open P&L included) against broker statements and the weekend reading (D-C, D-E), over windows that end before the run day.
 - [ ] **MT5-08**: The verification runs against the live funded accounts MM2, MM3 and FX-AI_V, with the founder at the terminal on a trading day; a demo, the v1.15 soak account or a weekend-only run does not satisfy it (the weekend reading is an edge input, not the run).
@@ -83,6 +85,7 @@ Status cells stay a bare `Pending`, because `phase complete` flips only an exact
 
 **Coverage:**
 - ⭐ 2026-11-23: FCONF-01..04 moved to the next milestone with 157 (founder, "delay 157 into next milestone. Cannot do that now"), so v1.18 now carries 11 requirements, all mapped. The three lines below are kept as lineage.
+- ⭐ 2026-11-23, later the same day: MT5-07..10, MT5-15 and MT5-GOAL-01 moved with 155.2 (founder, "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."), so v1.18 now carries 5 requirements (PARITY-01..04, MT5-06), all mapped and complete.
 - v1.18 requirements: 15 total
 - Mapped to phases: 15 (each to exactly one phase)
 - Unmapped: 0
