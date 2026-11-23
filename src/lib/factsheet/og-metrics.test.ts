@@ -347,4 +347,58 @@ describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)",
       expect(Number.isNaN(got.cagr)).toBe(true);
     });
   });
+  /**
+   * Phase 237 FACT-02 (plan 05): the fourth argument is the held-re-run flag. Default false is
+   * today's behaviour (a computing row's stored result is never read), true reads the stored
+   * figures through the SAME three inner gates, so the hold changes WHETHER the stored result is
+   * read, never which figures a gate shows (G1).
+   */
+  describe("recomputeOverStoredResult: the held-re-run flag (FACT-02)", () => {
+    const COMPUTING = { ...SEVEN_STORED, sharpe: 1.5, cagr: 0.6, max_drawdown: -0.1, computation_status: "computing" } as const;
+
+    it("default (flag absent): a computing row's stored figures are not read, the computed ones print", () => {
+      const rows = alternating(400);
+      const computed = computeOgHeadline(rows, "crypto");
+      const got = computeOgHeadline(rows, "crypto", COMPUTING);
+      expect(got.sharpe).toBe(computed.sharpe);
+      expect(got.sharpe).not.toBe(1.5);
+      expect(got.maxDd).toBe(computed.maxDd);
+    });
+
+    it("true: a computing row's STORED Sharpe, CAGR and Max DD print", () => {
+      const got = computeOgHeadline(alternating(400), "crypto", COMPUTING, true);
+      expect(got.sharpe).toBe(1.5);
+      expect(got.cagr).toBe(0.6);
+      expect(got.maxDd).toBe(-0.1);
+    });
+
+    it("true never un-withholds: a legacy chain-broken computing row is still three NaN", () => {
+      const got = computeOgHeadline(
+        alternating(400),
+        "crypto",
+        { ...COMPUTING, data_quality_flags: { twr_chain_broken: true } },
+        true,
+      );
+      expect([got.sharpe, got.cagr, got.maxDd].every(Number.isNaN)).toBe(true);
+    });
+
+    it("true over a Dated computing row: stored Sharpe and Max DD print, CAGR is withheld (E2)", () => {
+      const got = computeOgHeadline(
+        alternating(400),
+        "crypto",
+        { ...COMPUTING, data_quality_flags: { twr_chain_broken: true, headline_since: "2023-02-01" } },
+        true,
+      );
+      expect(got.sharpe).toBe(1.5);
+      expect(got.maxDd).toBe(-0.1);
+      expect(Number.isNaN(got.cagr)).toBe(true);
+    });
+
+    it("true never reads a FAILED row", () => {
+      const rows = alternating(400);
+      const computed = computeOgHeadline(rows, "crypto");
+      const got = computeOgHeadline(rows, "crypto", { ...COMPUTING, computation_status: "failed" }, true);
+      expect(got.sharpe).toBe(computed.sharpe);
+    });
+  });
 });

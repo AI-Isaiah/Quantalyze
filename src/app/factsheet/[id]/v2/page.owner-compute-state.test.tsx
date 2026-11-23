@@ -208,11 +208,18 @@ function mockRequestClient() {
           sawOr = true;
           return chain;
         },
+        // Phase 237 (FACT-04): the owner lane reads the latest
+        // `strategy_verifications` row (select/eq/order/limit/maybeSingle). These
+        // pending drafts have none, so it answers no row and no error.
+        order: () => chain,
+        limit: () => chain,
         maybeSingle: () =>
           Promise.resolve(
-            sawOr
-              ? { data: STATE.ownerRow, error: null }
-              : { data: STATE.publishedRow, error: null },
+            table === "strategy_verifications"
+              ? { data: null, error: null }
+              : sawOr
+                ? { data: STATE.ownerRow, error: null }
+                : { data: STATE.publishedRow, error: null },
           ),
       };
       return chain;

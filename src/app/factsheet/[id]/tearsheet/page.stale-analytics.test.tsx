@@ -56,10 +56,15 @@ vi.mock("@/components/ui/PrintButton", () => ({
 }));
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
-const mounted = vi.hoisted(() => ({ views: 0 }));
+const mounted = vi.hoisted(() => ({
+  views: 0,
+  // Phase 237 T5b: the props the last mount received, so a held render's payload is inspectable.
+  lastProps: null as { payload?: { analyticsUpdating?: boolean } } | null,
+}));
 vi.mock("../v2/FactsheetView", () => ({
-  FactsheetView: () => {
+  FactsheetView: (props: { payload?: { analyticsUpdating?: boolean } }) => {
     mounted.views += 1;
+    mounted.lastProps = props;
     return React.createElement("div", { "data-testid": "factsheet-view" });
   },
 }));
@@ -188,9 +193,30 @@ async function renderPage() {
   render(ui as React.ReactElement);
 }
 
+/**
+ * Phase 237 T5b: a `computing` re-run over a STORED success result. Beside the scalars every
+ * fixture carries, it stores what `hasStoredAnalyticsResult` reads (a series, a finite headline,
+ * success-written flags carrying `cumulative_method`) and no derive prestamp. The series is a
+ * 30-day {date,value} array, the same shape the builder's own tests use.
+ */
+function seedHeldStrategy(status: "computing" | "pending") {
+  seedStrategy(status);
+  const row = seeded.strategyRow as { strategy_analytics: Record<string, unknown> };
+  const start = Date.parse("2024-01-02T00:00:00Z");
+  row.strategy_analytics = {
+    ...row.strategy_analytics,
+    daily_returns: Array.from({ length: 30 }, (_, i) => ({
+      date: new Date(start + i * 86_400_000).toISOString().slice(0, 10),
+      value: ((i % 7) - 3) / 1000,
+    })),
+    data_quality_flags: { cumulative_method: "geometric" },
+  };
+}
+
 beforeEach(() => {
   seeded.strategyRow = null;
   mounted.views = 0;
+  mounted.lastProps = null;
 });
 
 describe("STALE-01 · /factsheet/[id]/tearsheet — the PDF wrapper's side door", () => {
@@ -216,6 +242,23 @@ describe("STALE-01 · /factsheet/[id]/tearsheet — the PDF wrapper's side door"
     expect(screen.queryByText(STALE_TEXT.sharpe)).toBeNull();
     expect(screen.queryByText(STALE_TEXT.cagr)).toBeNull();
   });
+
+  // Phase 237 FACT-02 (S2): the tear sheet is the page `tearsheet.pdf` prints, and a held re-run
+  // stays published on it. The REAL builder produces the payload (no `mockResolvedValueOnce`, so
+  // neutering the builder's `analyticsUpdating` reddens this case), the REAL `getFactsheetDetail`
+  // admits the row (it only null-checks `analytics`, so its select is not widened), and the page
+  // threads the flag to FactsheetView, whose own test pins that `analyticsUpdating: true` renders
+  // the one Updating line (FactsheetView.updating-line.test.tsx case 1).
+  it.each(["computing", "pending"] as const)(
+    "T5b: a `%s` re-run over a stored success mounts the opening view with analyticsUpdating true and does not withhold",
+    async (status) => {
+      seedHeldStrategy(status);
+      await renderPage();
+      expect(screen.queryByTestId("tearsheet-pending")).toBeNull();
+      expect(mounted.views).toBe(1);
+      expect(mounted.lastProps?.payload?.analyticsUpdating).toBe(true);
+    },
+  );
 
   it("T6: CONTROL — the same strategy as `complete`, with a payload from the builder, mounts the opening view and does not 404", async () => {
     seedStrategy("complete");

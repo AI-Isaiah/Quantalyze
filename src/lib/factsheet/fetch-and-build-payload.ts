@@ -748,7 +748,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v26", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v27", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
  * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
  * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on
@@ -1145,6 +1145,15 @@ async function buildUsdView(args: {
       id,
       code: typeof err?.code === "string" ? err.code : "none",
       message: typeof err?.message === "string" ? err.message : String(read.error),
+    });
+    // 237 review round 1 SFH-M2: nothing caches this failure, so a sustained BTC price
+    // outage hits every view; the console line alone never reaches Sentry.
+    captureToSentry(new Error("factsheet usd view: BTC price read failed"), {
+      tags: { stage: "usd-view-price-read", strategy_id: id },
+      extra: {
+        code: typeof err?.code === "string" ? err.code : "none",
+        message: typeof err?.message === "string" ? err.message : String(read.error),
+      },
     });
     return { usdViewUnavailable: "price_read_failed" };
   }

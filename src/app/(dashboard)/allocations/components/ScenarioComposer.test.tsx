@@ -56,6 +56,7 @@ import type {
   MyAllocationDashboardPayload,
 } from "@/lib/queries";
 import { isoDayFromDate } from "@/lib/dateday";
+import { ANALYTICS_UPDATING_LINE } from "@/lib/status-surface-copy";
 
 // --- next/navigation mock -------------------------------------------------
 
@@ -20020,5 +20021,404 @@ describe("ScenarioComposer — 194 D-15 blend figure gate", () => {
     const handed = renderBlend(500);
     expect(Number.isFinite(handed.sharpe)).toBe(true);
     expect(screen.queryByTestId("scenario-figure-gate-note")).toBeNull();
+  });
+});
+
+// ===========================================================================
+// Phase 237 / FACT-02 (plan 08) — the composer's drawer-added row says "Updating"
+// during a re-run (UI-SPEC S8).
+//
+// The returns API (plan 01) holds a pending or computing row over its stored
+// success and says so with `analytics_updating: true`. The composer reads that
+// boolean STRICTLY (=== true) off the lazily fetched body, merges it with the
+// same precedence as series_state (book wins, then the lazy value, then false),
+// purges it on removal, and prints ANALYTICS_UPDATING_LINE in the row's detail
+// note slot. It never coexists with the metrics-absent or metrics-unavailable
+// notes, because a held row carries figures.
+// ===========================================================================
+describe("ScenarioComposer — Phase 237 FACT-02 S8 the Updating line on a drawer-added row", () => {
+  const UPD_ID = "dddddddd-1111-2222-3333-444444444444";
+  const UPD_NAME = "Rerun Strat";
+  const UPD_DATES = Array.from({ length: 12 }, (_, i) =>
+    `2026-01-${String(i + 1).padStart(2, "0")}`,
+  );
+  const UPD_SERIES = UPD_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+  /** A held row's body: stored series AND stored scalars, the updating flag on top. */
+  const heldBody = (extra: Record<string, unknown> = {}) => ({
+    daily_returns: UPD_SERIES,
+    series_state: "available",
+    cagr: 0.234,
+    sharpe: 1.87,
+    ...extra,
+  });
+  const lineId = `scenario-detail-analytics-updating-${UPD_ID}`;
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  /** A fetch stub whose /returns responses come off a queue: each call parks
+   *  until released, then answers the next queued body. */
+  function stubQueuedReturns(bodies: Record<string, unknown>[]) {
+    const releases: Array<() => void> = [];
+    let call = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
+      }
+      if (String(url).includes(`/api/strategies/${UPD_ID}/returns`)) {
+        const body = bodies[Math.min(call, bodies.length - 1)];
+        call += 1;
+        return new Promise((resolve) => {
+          releases.push(() =>
+            resolve({ ok: true, status: 200, json: async () => body }),
+          );
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return {
+      fetchMock,
+      /** Resolve the oldest parked /returns call. */
+      release: async () => {
+        await act(async () => {
+          releases.shift()?.();
+          await Promise.resolve();
+        });
+      },
+    };
+  }
+
+  function addRow() {
+    addStrategy({
+      id: UPD_ID,
+      name: UPD_NAME,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  function row(): HTMLElement {
+    const el = document.querySelector(`[data-scope-ref="${UPD_ID}"]`);
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  function openPanel(): HTMLElement {
+    fireEvent.click(within(row()).getByRole("button", { name: UPD_NAME }));
+    return screen.getByTestId(`scenario-detail-${UPD_ID}`);
+  }
+
+  /** Drive a drawer-added strategy through the lazy route with `body`, open its
+   *  detail panel, and return the panel once the response has settled. */
+  async function settledPanel(
+    body: Record<string, unknown>,
+    payload = makePayload(),
+  ): Promise<HTMLElement> {
+    const { release } = stubQueuedReturns([body]);
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={`${ALLOCATOR_A}-p237-s8`}
+        allocatorMandate={null}
+      />,
+    );
+    addRow();
+    await release();
+    return openPanel();
+  }
+
+  it("S8-1 a returns body that says analytics_updating true prints the verbatim line in the row's detail, with its degrade id, and the chip reads In blend", async () => {
+    const p = await settledPanel(heldBody({ analytics_updating: true }));
+
+    // Non-vacuity: the stored figures are on the row, so this is a held row and not an absent one.
+    await waitFor(() => {
+      expect(within(p).getByTestId(`scenario-detail-cagr-${UPD_ID}`).textContent).toBe("+23.4%");
+    });
+    const line = within(p).getByTestId(lineId);
+    expect(line.textContent).toBe(ANALYTICS_UPDATING_LINE);
+    expect(line.getAttribute("data-degrade-id")).toBe("scenario.analytics-updating");
+    expect(line.tagName).toBe("P");
+    expect(line.className).toContain("text-xs");
+    expect(line.className).toContain("text-text-muted");
+    // The chip is the S8 detail: a held series is `available`, so In blend and not Syncing.
+    expect(row()).toHaveAttribute("data-series-state", "available");
+    expect(within(row()).getByText("In blend")).toBeInTheDocument();
+    expect(within(row()).queryByText("Syncing")).toBeNull();
+  });
+
+  it.each([
+    ["false", { analytics_updating: false }],
+    ["absent", {}],
+    ["the string 'true'", { analytics_updating: "true" }],
+    ["the number 1", { analytics_updating: 1 }],
+    ["null", { analytics_updating: null }],
+  ])("S8-2 analytics_updating %s is not a claim: no line (strict === true, T-237-14)", async (_label, extra) => {
+    const p = await settledPanel(heldBody(extra));
+
+    // Non-vacuity: the figures settled, so the panel is past its pending state.
+    await waitFor(() => {
+      expect(within(p).getByTestId(`scenario-detail-cagr-${UPD_ID}`).textContent).toBe("+23.4%");
+    });
+    expect(within(p).queryByTestId(lineId)).toBeNull();
+    expect(p.textContent).not.toContain(ANALYTICS_UPDATING_LINE);
+  });
+
+  it("S8-3 with the unpriced note also rendered, the Updating line FOLLOWS it", async () => {
+    const p = await settledPanel(
+      heldBody({ analytics_updating: true, returns_unit: "BTC", native_unpriced: true }),
+    );
+
+    const unpriced = await within(p).findByTestId(`scenario-detail-usd-unpriced-${UPD_ID}`);
+    const line = within(p).getByTestId(lineId);
+    expect(
+      unpriced.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("S8-4 never coexists with the metrics-absent note: a body with the flag but no figures shows the absence note and no line", async () => {
+    const p = await settledPanel({
+      daily_returns: UPD_SERIES,
+      series_state: "available",
+      analytics_updating: true,
+    });
+
+    await waitFor(() => {
+      expect(
+        within(p).getByText("No computed metrics for this strategy — open the factsheet for detail."),
+      ).toBeInTheDocument();
+    });
+    expect(within(p).queryByTestId(lineId)).toBeNull();
+  });
+
+  it("S8-5 never coexists with the metrics-unavailable note: a failed fetch says it could not load, and no line", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (String(url).startsWith("/api/benchmark/btc/prices")) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => EMPTY_BTC_CLOSES });
+        }
+        if (String(url).includes(`/api/strategies/${UPD_ID}/returns`)) {
+          return Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
+        }
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+      }),
+    );
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={`${ALLOCATOR_A}-p237-s8`}
+        allocatorMandate={null}
+      />,
+    );
+    addRow();
+    const p = openPanel();
+
+    await waitFor(() => {
+      expect(
+        within(p).getByText("We could not load metrics for this strategy right now."),
+      ).toBeInTheDocument();
+    });
+    expect(within(p).queryByTestId(lineId)).toBeNull();
+  });
+
+  it("S8-6 remove then re-add purges the fetched flag: the re-added row shows no line while its retry is in flight, and none after a body that says false", async () => {
+    const { release } = stubQueuedReturns([
+      heldBody({ analytics_updating: true }),
+      heldBody({ analytics_updating: false }),
+    ]);
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={`${ALLOCATOR_A}-p237-s8`}
+        allocatorMandate={null}
+      />,
+    );
+    addRow();
+    await release();
+    let p = openPanel();
+    expect(within(p).getByTestId(lineId)).toBeInTheDocument();
+
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /Remove from scenario/i }));
+    });
+    expect(document.querySelector(`[data-scope-ref="${UPD_ID}"]`)).toBeNull();
+
+    // Re-add: the retry is parked, so nothing has told us anything yet. A surviving
+    // map entry would print a stale line here.
+    addRow();
+    p = openPanel();
+    expect(within(p).queryByTestId(lineId)).toBeNull();
+
+    await release();
+    await waitFor(() => {
+      expect(within(p).getByTestId(`scenario-detail-cagr-${UPD_ID}`).textContent).toBe("+23.4%");
+    });
+    expect(within(p).queryByTestId(lineId)).toBeNull();
+  });
+
+  // Phase 237 plan 13 (S8b) — the book-strategy rows. The book value is the My-allocation
+  // payload's `analytics_updating` (decided server-side by `analyticsHold`); a book row with
+  // stored figures needs them on the payload, because a book row never fetches lazily.
+  const bookStrategy = (updating: boolean | undefined) => {
+    const row = catalogStrategy(UPD_ID, UPD_NAME, UPD_SERIES);
+    row.strategy.strategy_analytics.cagr = 0.234;
+    row.strategy.strategy_analytics.sharpe = 1.87;
+    row.strategy.series_state = "available";
+    if (updating !== undefined) row.strategy.analytics_updating = updating;
+    return row;
+  };
+  const bookPayload = (updating: boolean | undefined) =>
+    makePayload({ strategies: [bookStrategy(updating)] });
+
+  /** A fetch stub for a book row: nothing but the BTC closes is ever asked for. */
+  function stubNoLazyFetch() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () =>
+            String(url).startsWith("/api/benchmark/btc/prices") ? EMPTY_BTC_CLOSES : {},
+        }),
+      ),
+    );
+  }
+
+  it("S8-7 a strategy that is in the book takes the book value, not the lazily fetched one: book false hides a lazy true", async () => {
+    // Added while NOT in the book, the lazy body says true and the line shows.
+    const { release } = stubQueuedReturns([heldBody({ analytics_updating: true })]);
+    const { rerender } = render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={`${ALLOCATOR_A}-p237-s8`}
+        allocatorMandate={null}
+      />,
+    );
+    addRow();
+    await release();
+    const p = openPanel();
+    expect(within(p).getByTestId(lineId)).toBeInTheDocument();
+
+    // The same id now arrives in the book payload saying false: the book branch wins,
+    // whatever the lazy map still holds for it.
+    rerender(
+      <ScenarioComposer
+        payload={bookPayload(false)}
+        allocatorId={`${ALLOCATOR_A}-p237-s8`}
+        allocatorMandate={null}
+      />,
+    );
+    expect(document.querySelector(`[data-scope-ref="${UPD_ID}"]`)).not.toBeNull();
+    // Non-vacuity: the book row is on screen with its figures, so the absence is the rule's.
+    expect(screen.getByTestId(`scenario-detail-cagr-${UPD_ID}`).textContent).toBe("+23.4%");
+    expect(screen.queryByTestId(lineId)).toBeNull();
+  });
+
+  it("S8-8 a strategy that is in the book takes the book value: book true shows the line over a lazy false", async () => {
+    const { release } = stubQueuedReturns([heldBody({ analytics_updating: false })]);
+    const { rerender } = render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={`${ALLOCATOR_A}-p237-s8`}
+        allocatorMandate={null}
+      />,
+    );
+    addRow();
+    await release();
+    const p = openPanel();
+    expect(within(p).queryByTestId(lineId)).toBeNull();
+
+    rerender(
+      <ScenarioComposer
+        payload={bookPayload(true)}
+        allocatorId={`${ALLOCATOR_A}-p237-s8`}
+        allocatorMandate={null}
+      />,
+    );
+    const line = screen.getByTestId(lineId);
+    expect(line.textContent).toBe(ANALYTICS_UPDATING_LINE);
+  });
+
+  it("S8-9 a book-strategy row whose payload says analytics_updating true shows the same element as a drawer-added row, byte for byte", async () => {
+    // The book row's detail panel renders with no lazy fetch at all.
+    stubNoLazyFetch();
+    const { unmount } = render(
+      <ScenarioComposer
+        payload={bookPayload(true)}
+        allocatorId={`${ALLOCATOR_A}-p237-s8`}
+        allocatorMandate={null}
+      />,
+    );
+    addRow();
+    const p = openPanel();
+    expect(within(p).getByTestId(`scenario-detail-cagr-${UPD_ID}`).textContent).toBe("+23.4%");
+    const bookLine = within(p).getByTestId(lineId);
+    expect(bookLine.tagName).toBe("P");
+    expect(bookLine.getAttribute("data-degrade-id")).toBe("scenario.analytics-updating");
+    expect(bookLine.textContent).toBe(ANALYTICS_UPDATING_LINE);
+    const bookHtml = bookLine.outerHTML;
+    // No other surface of the composer (Holdings, the compare panel, the MTD column)
+    // printed the claim: the row's own line is the only one.
+    expect(
+      document.querySelectorAll('[data-degrade-id="scenario.analytics-updating"]'),
+    ).toHaveLength(1);
+    unmount();
+    cleanup();
+
+    // The drawer-added row for the same strategy renders the identical element.
+    lsStore.clear();
+    const { release } = stubQueuedReturns([heldBody({ analytics_updating: true })]);
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={`${ALLOCATOR_A}-p237-s8`}
+        allocatorMandate={null}
+      />,
+    );
+    addRow();
+    await release();
+    const p2 = openPanel();
+    expect(within(p2).getByTestId(lineId).outerHTML).toBe(bookHtml);
+  });
+
+  it.each([
+    ["false", false],
+    ["absent", undefined],
+  ])("S8-10 a book strategy whose payload says analytics_updating %s shows no line", async (_label, value) => {
+    stubNoLazyFetch();
+    render(
+      <ScenarioComposer
+        payload={bookPayload(value)}
+        allocatorId={`${ALLOCATOR_A}-p237-s8`}
+        allocatorMandate={null}
+      />,
+    );
+    addRow();
+    const p = openPanel();
+    expect(within(p).getByTestId(`scenario-detail-cagr-${UPD_ID}`).textContent).toBe("+23.4%");
+    expect(within(p).queryByTestId(lineId)).toBeNull();
+    expect(document.body.textContent).not.toContain(ANALYTICS_UPDATING_LINE);
   });
 });

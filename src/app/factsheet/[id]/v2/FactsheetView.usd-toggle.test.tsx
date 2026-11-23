@@ -376,7 +376,7 @@ describe("D-22 — a native strategy without a USD view says why", () => {
   it("price_read_failed: USD is aria-disabled, with the amber visible line and the same title", () => {
     const { container } = renderView(nativeWithoutUsd("price_read_failed"));
     const usd = unitButton(container, "USD");
-    const copy = "No USD view: the daily BTC closes could not be read. It is retried within the hour.";
+    const copy = "No USD view: the daily BTC closes could not be read. Reload this page to try again.";
     expect(usd.getAttribute("aria-disabled")).toBe("true");
     expect(usd.getAttribute("title")).toBe(copy);
     const line = within(toggle(container)!).getByText(copy);

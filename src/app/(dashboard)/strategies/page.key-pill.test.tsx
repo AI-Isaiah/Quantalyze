@@ -321,9 +321,20 @@ vi.mock("@/lib/supabase/admin", () => ({
             await new Promise((resolve) => setTimeout(resolve, state.adminReadDelayMs));
           }
           state.adminInFlight -= 1;
+          // 237-REVIEW WR-03: the page now probes a pending or computing row
+          // too. With no per-id entry, such a row answers as a FIRST compute
+          // (its embed status, and no stored headline), the state every
+          // pre-existing in-flight case meant. A held re-run over a stored
+          // success is set explicitly by `heldRerun` below.
+          const embed = state.strategies?.find((r) => r.id === id)?.strategy_analytics;
+          const embedStatus = (Array.isArray(embed) ? embed[0] : embed)?.computation_status;
+          const inFlight = embedStatus === "pending" || embedStatus === "computing";
           return (
             state.adminRows[id] ?? {
-              data: adminStrategy(id, { daily_returns: points(30) }),
+              data: adminStrategy(id, {
+                daily_returns: points(30),
+                ...(inFlight ? { computation_status: embedStatus } : {}),
+              }),
               error: null,
             }
           );
@@ -1283,6 +1294,77 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
         expect.objectContaining({ id: "c-1", reason: "not_computed" }),
       );
       expect(captureToSentryMock).not.toHaveBeenCalled();
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  // 237-REVIEW WR-03: a pending or computing row OVER a stored success is a
+  // held re-run. The factsheet keeps showing its figures (Phase 190), so the
+  // owner is told nothing false: no "not available yet" and no "being prepared".
+  // The row is stored-result shaped exactly as `hasStoredAnalyticsResult` reads
+  // it: a series, a finite headline, and success-written flags.
+  const heldRerun = (id: string, status: "pending" | "computing") => ({
+    data: adminStrategy(id, {
+      computation_status: status,
+      daily_returns: points(30),
+      cumulative_return: 0.12,
+      data_quality_flags: { cumulative_method: "compound" },
+    }),
+    error: null,
+  });
+
+  it("HELD-RERUN-PUBLISHED (237 WR-03): a published row re-running over a stored result shows no 'not available yet' note", async () => {
+    state.strategies = [
+      row("s-held", { status: "published", strategy_analytics: { computation_status: "computing" } }),
+      row("s-held-p", { status: "published", strategy_analytics: [{ computation_status: "pending" }] }),
+    ];
+    state.adminRows = {
+      "s-held": heldRerun("s-held", "computing"),
+      "s-held-p": heldRerun("s-held-p", "pending"),
+    };
+    state.jobs = { "s-held": [running], "s-held-p": [running] };
+
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const container = await renderPage();
+
+      // The builder's own resolve stage answered for both rows.
+      expect(state.adminStrategyReads).toEqual(["s-held", "s-held-p"]);
+      expect(noteOf(container, "Strategy s-held")).toBeNull();
+      expect(noteOf(container, "Strategy s-held-p")).toBeNull();
+      expect(container.textContent).not.toContain(PUBLIC);
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it("HELD-RERUN-PRIVATE (237 WR-03): a private row re-running over a stored result does not say 'being prepared'", async () => {
+    state.strategies = [row("s-held", { status: "draft", strategy_analytics: { computation_status: "computing" } })];
+    state.adminRows = { "s-held": heldRerun("s-held", "computing") };
+    state.jobs = { "s-held": [running] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-held")).toBeNull();
+  });
+
+  it("FIRST-COMPUTE-PUBLISHED (237 WR-03): a published first compute still takes the uncomputed note, and is not logged as a race", async () => {
+    state.strategies = [row("s-first", { status: "published", strategy_analytics: { computation_status: "computing" } })];
+    state.jobs = { "s-first": [running] };
+
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const container = await renderPage();
+
+      expect(state.adminStrategyReads).toEqual(["s-first"]);
+      expect(noteOf(container, "Strategy s-first")).toBe(PUBLIC);
+      // The embed said computing, so `not_computed` is the expected answer,
+      // not a disagreement between two reads.
+      expect(consoleWarn).not.toHaveBeenCalledWith(
+        "[strategies/page] factsheet probe found the analytics row not computed (the list embed said computed)",
+        expect.anything(),
+      );
     } finally {
       consoleWarn.mockRestore();
     }

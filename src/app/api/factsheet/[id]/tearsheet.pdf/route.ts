@@ -10,6 +10,7 @@ import {
 import { extractAnalytics } from "@/lib/queries";
 import { publicIpLimiter, checkLimit, getClientIp, rateLimitDenyJson } from "@/lib/ratelimit";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { analyticsHold, HELD_RERUN_CACHE_CONTROL } from "@/lib/analytics-hold";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
 import { isUuid } from "@/lib/utils";
 
@@ -184,7 +185,13 @@ export async function GET(
   const { data: strategy, error } = await withPublishedOnly(
     admin
       .from("strategies")
-      .select("id, name, status, strategy_analytics (computation_status)")
+      // Phase 237 FACT-02: the columns after `computation_status` are the hold's
+      // evidence (`analyticsHold` asks whether the row stores a successful result and
+      // whether its flags are a composite or an unbound derive prestamp). They are read
+      // on the server only; the response is a PDF, never this row.
+      .select(
+        "id, name, status, strategy_analytics (computation_status, computed_at, cumulative_return, daily_returns, returns_series, data_quality_flags)",
+      )
       .eq("id", id),
   )
     .single();
@@ -198,11 +205,16 @@ export async function GET(
   // unavailable benchmark still compute valid metrics under this terminal
   // status. Parity with the /strategy/[id] factsheet render gate; without it a
   // complete_with_warnings strategy renders metrics on the page but 400s here.
-  if (
-    !analytics ||
-    (analytics.computation_status !== "complete" &&
-      analytics.computation_status !== "complete_with_warnings")
-  ) {
+  //
+  // Phase 237 FACT-02 (S4): the door is `analyticsHold`, the verdict the tear sheet
+  // page itself applies, so the two cannot disagree. It admits a terminal success and
+  // a pending or computing re-run over a stored success result. It refuses a
+  // first-ever compute, a failed row, a composite during a re-run and a terminal
+  // success whose derive prestamp left no bound snapshot (D-04, matching the
+  // factsheet's queued state). Admitting every pending row would reach the page and
+  // answer the marker-absent 503 plus a Sentry error below for a first-ever compute.
+  const hold = analyticsHold(analytics);
+  if (!analytics || !hold.admitted) {
     return NextResponse.json(
       { error: "Analytics not computed" },
       { status: 400 },
@@ -288,7 +300,14 @@ export async function GET(
         // on auth-bearing headers prevents the CDN from serving a
         // cached anonymous render to a future authenticated request if
         // statelessness ever regresses.
-        "Cache-Control": "public, s-maxage=300, stale-while-revalidate=300",
+        //
+        // Phase 237 FACT-02: a render of a held re-run (pending or computing over
+        // a stored success) says Updating and takes HELD_RERUN_CACHE_CONTROL, a
+        // 60 s cache with no stale-while-revalidate, so it does not outlive the
+        // re-run by long. Vary is the same either way.
+        "Cache-Control": hold.updating
+          ? HELD_RERUN_CACHE_CONTROL
+          : "public, s-maxage=300, stale-while-revalidate=300",
         Vary: "Cookie, Authorization, Host",
       },
     });

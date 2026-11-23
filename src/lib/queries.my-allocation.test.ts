@@ -2713,6 +2713,10 @@ function psProvenance(overrides: {
   record_observations?: unknown;
   /** 194 D-15: the strategy's asset class (default `crypto`, as before). */
   asset_class?: string | null;
+  /** 237 FACT-02: the stored-result evidence columns. Emitted on the embed ONLY when
+   *  given, so every earlier fixture is byte-identical to before. */
+  cumulative_return?: number | null;
+  computed_at?: string | null;
   /** 201 D-17: the visibility facts and the identity fields the name rule reads.
    *  Each is emitted on the embed ONLY when given, so every earlier fixture is
    *  byte-identical to before. */
@@ -2769,6 +2773,10 @@ function psProvenance(overrides: {
             returns_series,
             computation_status,
             ...(record_observations === undefined ? {} : { record_observations }),
+            ...(overrides.cumulative_return === undefined
+              ? {}
+              : { cumulative_return: overrides.cumulative_return }),
+            ...(overrides.computed_at === undefined ? {} : { computed_at: overrides.computed_at }),
           }
         : null,
     },
@@ -6973,5 +6981,158 @@ describe("getMyAllocationDashboard - the live baseline sits a key out of its tin
     expect(result.liveBaselineMetrics).toEqual(
       liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, returns, { "key-a": ["2026-03-03"] }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 237 / FACT-02 (S8b) — `analytics_updating` on every book strategy.
+//
+// WHY THIS EXISTS: during a re-run the book row keeps showing its stored figures,
+// and the composer must say so ("Updating"). The verdict is `analyticsHold` (the
+// factsheet's own rule), decided server-side because the raw status and the
+// stored-result evidence must never reach the browser. A held row is a `pending`
+// or `computing` row over a stored, non-composite success result: a first-ever
+// compute (no stored result) and a failed row are not held, whatever they store.
+// ---------------------------------------------------------------------------
+describe("getMyAllocationDashboard — Phase 237 FACT-02 analytics_updating (S8b)", () => {
+  beforeEach(() => {
+    resetState();
+    state.portfolios = [PORTFOLIO_FIXTURE];
+  });
+
+  const STORED = {
+    daily_returns: [
+      { date: "2026-01-01", value: 0.01 },
+      { date: "2026-01-02", value: -0.02 },
+    ],
+    cumulative_return: 0.123,
+    data_quality_flags: { cumulative_method: "compound" },
+  };
+
+  async function heldRow(overrides: Parameters<typeof psProvenance>[0]) {
+    state.portfolioStrategies = [
+      psProvenance(overrides) as (typeof state.portfolioStrategies)[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    return result.strategies.find((s) => s.strategy_id === "sc")!;
+  }
+
+  it("is true for a computing or pending row over a stored success result", async () => {
+    for (const status of ["computing", "pending"]) {
+      const row = await heldRow({ ...STORED, computation_status: status });
+      expect(row.strategy.analytics_updating, status).toBe(true);
+    }
+  });
+
+  it("is false for a terminal success, a failed row and a first-ever compute", async () => {
+    for (const status of ["complete", "failed"]) {
+      const row = await heldRow({ ...STORED, computation_status: status });
+      expect(row.strategy.analytics_updating, status).toBe(false);
+    }
+    // computing, but nothing stored to hold: the first compute, not a re-run.
+    const first = await heldRow({
+      daily_returns: [],
+      returns_series: null,
+      computation_status: "computing",
+    });
+    expect(first.strategy.analytics_updating).toBe(false);
+    // computing with a series but no finite headline: not a stored result either.
+    const noHeadline = await heldRow({
+      ...STORED,
+      cumulative_return: null,
+      computation_status: "computing",
+    });
+    expect(noHeadline.strategy.analytics_updating).toBe(false);
+  });
+
+  it("is false for a composite computing over stored evidence (the factsheet withholds it)", async () => {
+    const row = await heldRow({
+      ...STORED,
+      data_quality_flags: { cumulative_method: "compound", composite: true },
+      computation_status: "computing",
+    });
+    expect(row.strategy.analytics_updating).toBe(false);
+  });
+
+  it("WR-01: a derive-in-flight row reads its series by the bound snapshot's method, not the prestamp's live flags", async () => {
+    // The derive hop replaced the live flags with a prestamp (no cumulative_method), carrying the
+    // last success's flags in a snapshot bound to the row's computed_at. The stored curve is
+    // `simple` (1 + cumsum). Read from the live flags the method falls back to geometric and the
+    // curve is differenced the wrong way.
+    const COMPUTED_AT = "2026-01-04T00:00:00.000Z";
+    const row = await heldRow({
+      daily_returns: null,
+      returns_series: [
+        { date: "2026-01-01", value: 1.05 },
+        { date: "2026-01-02", value: 1.1 },
+        { date: "2026-01-03", value: 1.0 },
+      ],
+      cumulative_return: 0,
+      computed_at: COMPUTED_AT,
+      computation_status: "computing",
+      data_quality_flags: {
+        last_success_snapshot: {
+          computed_at: COMPUTED_AT,
+          flags: { cumulative_method: "simple" },
+        },
+      },
+    });
+    expect(row.strategy.analytics_updating).toBe(true);
+    const series = (
+      row.strategy.strategy_analytics as unknown as {
+        daily_returns: Array<{ date: string; value: number }>;
+      }
+    ).daily_returns;
+    // Simple method, by hand: 1.05 - 1 = +0.05, 1.10 - 1.05 = +0.05, 1.00 - 1.10 = -0.10.
+    expect(series.map((p) => p.value)).toHaveLength(3);
+    expect(series[0].value).toBeCloseTo(0.05, 10);
+    expect(series[1].value).toBeCloseTo(0.05, 10);
+    expect(series[2].value).toBeCloseTo(-0.1, 10);
+  });
+
+  it("is present (false) on a strategy with no analytics row at all", async () => {
+    const row = await heldRow({ analyticsRow: false });
+    expect(row.strategy.analytics_updating).toBe(false);
+    expect("analytics_updating" in row.strategy).toBe(true);
+  });
+
+  it("the strategy_analytics embed selects the stored-result evidence analyticsHold reads", async () => {
+    // Without these two columns on the wire the verdict can never see a stored result,
+    // so a held row would read false in production while every fixture above passes.
+    await heldRow({ ...STORED, computation_status: "computing" });
+    const cols = chainAudit.entries
+      .filter((c) => c.table === "portfolio_strategies")
+      .map((c) => c.select ?? "")
+      .find((c) => c.includes("strategy:strategies!inner"));
+    expect(cols).toBeDefined();
+    const embed = cols!.slice(cols!.indexOf("strategy_analytics ("));
+    expect(embed).toMatch(/\bcumulative_return\b/);
+    expect(embed).toMatch(/\bcomputed_at\b/);
+  });
+
+  it("ships the boolean only: no cumulative_return, computed_at, computation_status or flags blob (T-237-13)", async () => {
+    const row = await heldRow({
+      ...STORED,
+      computed_at: "2026-01-02T00:00:00Z",
+      computation_status: "computing",
+    });
+    const analytics = row.strategy.strategy_analytics as unknown as Record<string, unknown>;
+    expect(Object.keys(analytics).sort()).toEqual(
+      ["cagr", "daily_returns", "max_drawdown", "sharpe", "volatility"].sort(),
+    );
+    for (const key of [
+      "cumulative_return",
+      "computed_at",
+      "computation_status",
+      "data_quality_flags",
+      "returns_series",
+    ]) {
+      expect(key in analytics, key).toBe(false);
+    }
+    const wire = JSON.stringify(row);
+    expect(wire).not.toContain("cumulative_return");
+    expect(wire).not.toContain("computed_at");
+    expect(wire).not.toContain("computation_status");
   });
 });

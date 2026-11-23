@@ -1,6 +1,7 @@
 import { metricsBasisSeries } from "@/lib/factsheet/compute";
 import type { ComparatorBlock, FactsheetPayload } from "@/lib/factsheet/types";
 import { withUnit } from "@/lib/factsheet/returns-unit";
+import type { HeadlineNote } from "./MetricsColumn";
 
 /**
  * Static configs that drive `<TimeSeriesChart>`. Each entry describes one
@@ -106,6 +107,16 @@ export type ChartConfig = {
    *  on the rolling vol/sharpe/sortino charts so the viewer can see at a glance
    *  whether the current value is above or below the strategy's average. */
   showStratAverage?: boolean;
+  /** Phase 237 FACT-01 (UI-SPEC 1.6 row 3): when present the chart renders its header title and
+   *  this note and nothing else (no subtitle, frame, bands, line, crosshair or caption). Set by
+   *  `PerformanceCharts` on the `worstDDs` entry only, on a Withheld full-history view, from the
+   *  verdict it computes where the chart mounts. Absent renders exactly as before. */
+  withheldNote?: HeadlineNote;
+  /** Phase 237 FACT-01 (UI-SPEC 1.6 row 4): when true the crosshair tooltip's strategy row prints
+   *  a dash at the series' LAST index, the figure the Rolling Metrics "Now" cells dash. Set by
+   *  `PerformanceCharts` on the rolling charts at full history on a Withheld view, the way
+   *  `showStratAverage` is switched off there. Absent or false renders exactly as before. */
+  lastPointWithheld?: boolean;
   /** Phase 169.1 (D-38 as narrowed by D-84): join the STRATEGY line across the
    *  days the payload's day basis excluded. Under `dayBasis: "active"` the rolling
    *  Sharpe is null on every excluded (zero-return) day, exactly as the engine's

@@ -1149,3 +1149,210 @@ describe("GET /api/factsheet/[id]/pdf — Advanced is opened server-side (Phase 
     expect(pdf).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Phase 237 (FACTSHEETHONEST) FACT-02 surface S3 — a pending or computing re-run over a
+ * stored success result keeps the factsheet PDF published. The door is `analyticsHold`, the
+ * same verdict the factsheet page applies, so the door and the page cannot disagree (a door
+ * that admitted every pending row would turn a first-ever compute into a 409 here).
+ *
+ * The PDF printed from a held row says Updating, so it must not share the terminal PDF's
+ * ETag or long cache (T-237-10): a run that finishes mid-cache would otherwise leave a reader
+ * on a PDF that says Updating about a finished computation, or on a terminal PDF while the
+ * factsheet says Updating.
+ */
+describe("GET /api/factsheet/[id]/pdf — a held re-run stays published (Phase 237 FACT-02, S3)", () => {
+  const COMPUTED_AT = "2026-05-17T00:00:00.000Z";
+  const TERMINAL_ETAG = `"${STRATEGY_ID}:${COMPUTED_AT}"`;
+  const HELD_CACHE = "public, max-age=60, s-maxage=60";
+  const TERMINAL_CACHE = "public, s-maxage=3600, stale-while-revalidate=86400";
+  let goto: ReturnType<typeof vi.fn>;
+  let selectSpy: ReturnType<typeof vi.fn>;
+
+  /** A row that stores a successful compute: series, finite headline, success-written flags. */
+  const evidence = {
+    computed_at: COMPUTED_AT,
+    cumulative_return: 0.12,
+    returns_series: [{ date: "2026-05-01", value: 0.01 }],
+    data_quality_flags: { cumulative_method: "compounded" },
+  };
+
+  function serveAnalytics(analytics: Record<string, unknown> | null) {
+    const single = vi.fn().mockResolvedValue({
+      data: {
+        id: STRATEGY_ID,
+        name: "Momentum Strategy",
+        status: "published",
+        strategy_analytics: analytics === null ? [] : [analytics],
+      },
+      error: null,
+    });
+    const eq2 = vi.fn().mockReturnValue({ single });
+    const eq1 = vi.fn().mockReturnValue({ eq: eq2 });
+    selectSpy = vi.fn().mockReturnValue({ eq: eq1 });
+    const from = vi.fn().mockReturnValue({ select: selectSpy });
+    vi.mocked(createAdminClient).mockReturnValue({ from } as never);
+  }
+
+  const req = (headers: Record<string, string> = {}) =>
+    new NextRequest(`https://quantalyze.xyz/api/factsheet/${STRATEGY_ID}/pdf`, {
+      method: "GET",
+      headers,
+    });
+
+  beforeEach(async () => {
+    vi.resetModules();
+    process.env.VERCEL_ENV = "production";
+    vi.mocked(checkLimit).mockReset();
+    vi.mocked(checkLimit).mockResolvedValue({ success: true, retryAfter: 0 } as never);
+    vi.mocked(createAdminClient).mockReset();
+    const puppeteer = await import("@/lib/puppeteer");
+    vi.mocked(puppeteer.acquirePdfSlot).mockReset();
+    vi.mocked(puppeteer.launchBrowser).mockReset();
+    vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
+    goto = vi.fn().mockResolvedValue(okResponse());
+    const newPage = vi.fn().mockResolvedValue({
+      goto,
+      setDefaultNavigationTimeout: vi.fn(),
+      setDefaultTimeout: vi.fn(),
+      setViewport: vi.fn().mockResolvedValue(undefined),
+      setUserAgent: vi.fn().mockResolvedValue(undefined),
+      evaluate: vi.fn().mockResolvedValue(undefined),
+      pdf: vi.fn().mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46])),
+    });
+    vi.mocked(puppeteer.launchBrowser).mockResolvedValue({
+      newPage,
+      close: vi.fn().mockResolvedValue(undefined),
+    } as never);
+  });
+
+  afterEach(() => {
+    process.env = { ...ENV_BACKUP };
+  });
+
+  async function expectRefused() {
+    const { GET } = await import("./route");
+    const res = await GET(req(), mkParams());
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("Analytics not computed");
+    const puppeteer = await import("@/lib/puppeteer");
+    expect(puppeteer.acquirePdfSlot).not.toHaveBeenCalled();
+    expect(puppeteer.launchBrowser).not.toHaveBeenCalled();
+  }
+
+  it.each(["pending", "computing"])(
+    "H1: a %s row over a stored success is admitted, renders, and carries the held cache and a held ETag suffix",
+    async (status) => {
+      serveAnalytics({ computation_status: status, ...evidence });
+      const { GET } = await import("./route");
+      const res = await GET(req(), mkParams());
+      expect(res.status).toBe(200);
+      expect(goto).toHaveBeenCalledTimes(1);
+      expect(res.headers.get("Cache-Control")).toBe(HELD_CACHE);
+      expect(res.headers.get("Vary")).toBe("Host");
+      const etag = res.headers.get("ETag") ?? "";
+      expect(etag.startsWith(`"${STRATEGY_ID}:${COMPUTED_AT}`)).toBe(true);
+      expect(etag.endsWith(':held"')).toBe(true);
+    },
+  );
+
+  it("H2: If-None-Match equal to the held ETag during the re-run answers 304 with the held cache and Vary Host", async () => {
+    serveAnalytics({ computation_status: "computing", ...evidence });
+    const { GET } = await import("./route");
+    const first = await GET(req(), mkParams());
+    const heldEtag = first.headers.get("ETag") as string;
+    goto.mockClear();
+    const res = await GET(req({ "If-None-Match": heldEtag }), mkParams());
+    expect(res.status).toBe(304);
+    expect(goto).not.toHaveBeenCalled();
+    expect(res.headers.get("ETag")).toBe(heldEtag);
+    expect(res.headers.get("Cache-Control")).toBe(HELD_CACHE);
+    expect(res.headers.get("Vary")).toBe("Host");
+  });
+
+  it("H3: the TERMINAL ETag of the same computed_at does not 304 while the row is re-running (it renders)", async () => {
+    serveAnalytics({ computation_status: "computing", ...evidence });
+    const { GET } = await import("./route");
+    const res = await GET(req({ "If-None-Match": TERMINAL_ETAG }), mkParams());
+    expect(res.status).toBe(200);
+    expect(goto).toHaveBeenCalledTimes(1);
+    expect(res.headers.get("ETag")).not.toBe(TERMINAL_ETAG);
+  });
+
+  it("H3b: the HELD ETag does not 304 once the run finished (the row is terminal again)", async () => {
+    serveAnalytics({ computation_status: "computing", ...evidence });
+    const { GET } = await import("./route");
+    const heldEtag = (await GET(req(), mkParams())).headers.get("ETag") as string;
+    goto.mockClear();
+    serveAnalytics({ computation_status: "complete", ...evidence });
+    const res = await GET(req({ "If-None-Match": heldEtag }), mkParams());
+    expect(res.status).toBe(200);
+    expect(goto).toHaveBeenCalledTimes(1);
+    expect(res.headers.get("ETag")).toBe(TERMINAL_ETAG);
+  });
+
+  it("H4: a terminal-success row keeps its ETag, its 304 and its long cache byte for byte", async () => {
+    serveAnalytics({ computation_status: "complete", ...evidence });
+    const { GET } = await import("./route");
+    const res = await GET(req(), mkParams());
+    expect(res.status).toBe(200);
+    expect(res.headers.get("ETag")).toBe(TERMINAL_ETAG);
+    expect(res.headers.get("Cache-Control")).toBe(TERMINAL_CACHE);
+    const notModified = await GET(req({ "If-None-Match": TERMINAL_ETAG }), mkParams());
+    expect(notModified.status).toBe(304);
+    expect(notModified.headers.get("Cache-Control")).toBe(TERMINAL_CACHE);
+  });
+
+  it.each(["running", "computing", "pending"])(
+    "H5: a %s row WITHOUT stored evidence is still refused (control, first-ever compute)",
+    async (status) => {
+      serveAnalytics({ computation_status: status, computed_at: COMPUTED_AT });
+      await expectRefused();
+    },
+  );
+
+  it("H6: a failed row is refused even with stored evidence", async () => {
+    serveAnalytics({ computation_status: "failed", ...evidence });
+    await expectRefused();
+  });
+
+  it("H7: a composite row during a re-run is refused, matching the factsheet's queued state", async () => {
+    serveAnalytics({
+      computation_status: "computing",
+      ...evidence,
+      data_quality_flags: { cumulative_method: "compounded", composite: true },
+    });
+    await expectRefused();
+  });
+
+  it("H8: a terminal-success row with an unbound derive prestamp is refused (D-04, a behaviour change)", async () => {
+    serveAnalytics({
+      computation_status: "complete",
+      ...evidence,
+      data_quality_flags: { last_success_snapshot: null },
+    });
+    await expectRefused();
+  });
+
+  it("H9: no analytics row at all is refused", async () => {
+    serveAnalytics(null);
+    await expectRefused();
+  });
+
+  it("H10: the select names every evidence column, or the hold is dead code", async () => {
+    serveAnalytics({ computation_status: "complete", ...evidence });
+    const { GET } = await import("./route");
+    await GET(req(), mkParams());
+    const selected = String(selectSpy.mock.calls[0][0]);
+    for (const col of [
+      "computation_status",
+      "computed_at",
+      "cumulative_return",
+      "daily_returns",
+      "returns_series",
+      "data_quality_flags",
+    ]) {
+      expect(selected).toContain(col);
+    }
+  });
+});

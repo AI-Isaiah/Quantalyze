@@ -23,6 +23,7 @@ import { formatIsoDate } from "../trade-fetch-lines";
 import { MONTH_ABBR, formatDay } from "@/lib/utils";
 import { isZoomWheel } from "./wheel-zoom";
 import { ChartHintContext } from "./chart-hint";
+import { PanelWithheldNote } from "./MetricsColumn";
 
 const VB_W = 880;
 // `left` is the minimum gutter: it grows from the widest y tick label (see `padLeft`).
@@ -851,6 +852,29 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   // available on the focused chart so AT users have parity with mouse users.
   const chartHelpId = `chart-help-${config.key}`;
 
+  // Phase 237 FACT-01 (UI-SPEC 1.6 row 3): a chart handed a withheld note draws its header title
+  // and that note and nothing else: no subtitle, no frame, no line, bands, depth labels, crosshair
+  // or export. Every hook above has already run, so this early return keeps the hook order.
+  if (config.withheldNote) {
+    return (
+      <figure className="flex flex-col gap-2">
+        <header>
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
+            {config.title}
+          </h3>
+        </header>
+        <PanelWithheldNote note={config.withheldNote} testId="chart-withheld-note" />
+      </figure>
+    );
+  }
+
+  // Phase 237 FACT-01 (UI-SPEC 1.6 row 4): on a rolling chart at full history on a Withheld view
+  // the strategy's value at the LAST index is the figure the Rolling Metrics "Now" cells dash, so
+  // the hover reading (the crosshair card and the legend chip) prints a dash there. The strategy
+  // is series 0 whenever it resolved; a comparator row, and every earlier index, is unchanged.
+  const strategyResolved = config.stratField !== null && view[config.stratField] != null;
+  const withheldHoverIdx = config.lastPointWithheld === true && strategyResolved ? n - 1 : -1;
+
   return (
     <figure className="flex flex-col gap-2" style={cvStyle}>
       {sharedHintId === null && (
@@ -919,7 +943,9 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             <span className="text-text-2">{s.name}</span>
             {deferredCrossIdx != null && (
               <span className="font-mono tabular-nums text-text-primary">
-                {formatValue(s.values[deferredCrossIdx], config.valueFormat)}
+                {i === 0 && deferredCrossIdx === withheldHoverIdx
+                  ? "—"
+                  : formatValue(s.values[deferredCrossIdx], config.valueFormat)}
               </span>
             )}
           </button>
@@ -1280,6 +1306,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
               series={series}
               muted={muted}
               valueFormat={config.valueFormat}
+              withheldRow={crossIdx === withheldHoverIdx ? 0 : null}
             />
           </g>
         )}
@@ -1461,6 +1488,7 @@ function CrosshairTooltipInner({
   muted,
   crossIdx,
   valueFormat,
+  withheldRow,
 }: {
   x: number;
   plotLeft: number;
@@ -1471,9 +1499,20 @@ function CrosshairTooltipInner({
   muted: Set<number>;
   crossIdx: number;
   valueFormat: ChartValueFormat;
+  /** Phase 237 FACT-01: the series row whose value prints a dash (the strategy at the last index of a withheld rolling chart), or null. */
+  withheldRow: number | null;
 }) {
   const visible = series
-    .map((s, idx) => ({ name: s.name, color: s.color, value: s.values[crossIdx], idx }))
+    .map((s, idx) => {
+      const withheld = idx === withheldRow;
+      return {
+        name: s.name,
+        color: s.color,
+        idx,
+        withheld,
+        text: withheld ? "—" : formatValue(s.values[crossIdx], valueFormat),
+      };
+    })
     .filter(s => !muted.has(s.idx));
   const rowH = 12;
   const headerH = 14;
@@ -1481,7 +1520,7 @@ function CrosshairTooltipInner({
   const padY = 6;
   // Width: rough estimate from longest series name + value (mono font ≈ 6px/char).
   const maxRowChars = visible.reduce((m, s) => {
-    const lbl = `${s.name}  ${formatValue(s.value, valueFormat)}`;
+    const lbl = `${s.name}  ${s.text}`;
     return Math.max(m, lbl.length);
   }, 10);
   // Card width must fit inside the plot — on narrow viewports the estimated
@@ -1541,8 +1580,9 @@ function CrosshairTooltipInner({
               textAnchor="end"
               fill="var(--color-text-primary)"
               fontWeight={600}
+              data-testid={s.withheld ? "crosshair-value-withheld" : undefined}
             >
-              {formatValue(s.value, valueFormat)}
+              {s.text}
             </text>
           </g>
         );

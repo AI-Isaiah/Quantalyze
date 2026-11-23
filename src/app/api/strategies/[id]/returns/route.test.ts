@@ -1198,8 +1198,10 @@ describe("GET /api/strategies/[id]/returns", () => {
     // data_quality_flags / computation_status passthrough would show up here).
     // 164.6.6.2 plan 09 added `returns_unit` and `daily_returns_usd` (null for a
     // USD strategy) to the list; SFH-1 added the boolean `native_unpriced`.
-    // 194.1 plan 09 added the three record scalars `figure_*`; R2 WR-01 added `figure_unreadable`. Nothing else.
+    // 194.1 plan 09 added the three record scalars `figure_*`; R2 WR-01 added `figure_unreadable`.
+    // 237 FACT-02 added the boolean `analytics_updating`. Nothing else.
     expect(Object.keys(body).sort()).toEqual([
+      "analytics_updating",
       "asset_class",
       "cagr",
       "daily_returns",
@@ -1709,5 +1711,186 @@ describe("GET /api/strategies/[id]/returns — 194.1 record scalars (B8)", () =>
     };
     await call();
     expect(captureSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 237 (FACTSHEETHONEST) FACT-02, surface S6 — a held re-run stays
+// published on the returns API.
+//
+// A `pending` / `computing` row over a stored success result carries the LAST
+// success's numbers while a re-run is in flight. The factsheet keeps them on
+// screen (Phase 190 plan 03); this route used to answer the empty series for the
+// same row, so a composer leg vanished for the duration of every re-run. The
+// verdict is `analyticsHold` (one function, never a status ladder of the
+// route's own), and the state travels as the `analytics_updating` field, never
+// as a line of text.
+// ---------------------------------------------------------------------------
+describe("GET /api/strategies/[id]/returns — 237 FACT-02 held re-run", () => {
+  const HELD_COMPUTED_AT = "2026-11-20T10:00:00.000Z";
+  const HELD_SERIES = [
+    { date: "2026-11-01", value: 0.01 },
+    { date: "2026-11-02", value: -0.004 },
+  ];
+
+  /** A row that stores a success result: a series, a finite headline and a success marker. */
+  function storedRow(over: Record<string, unknown> = {}) {
+    return {
+      daily_returns: HELD_SERIES,
+      cumulative_return: 0.0059,
+      computed_at: HELD_COMPUTED_AT,
+      data_quality_flags: { cumulative_method: "geometric" },
+      cagr: 0.18,
+      sharpe: 1.6,
+      series_start: "2026-11-01",
+      series_end: "2026-11-02",
+      record_observations: 2,
+      ...over,
+    };
+  }
+
+  async function call() {
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    return res.json();
+  }
+
+  it.each(["pending", "computing"])(
+    "H1 — a %s row over a stored success serves the stored series and scalars with analytics_updating true",
+    async (computation_status) => {
+      STATE.analyticsRow = storedRow({ computation_status });
+      const body = await call();
+      expect(body.analytics_updating).toBe(true);
+      expect(body.daily_returns).toEqual(HELD_SERIES);
+      expect(body.cagr).toBe(0.18);
+      expect(body.sharpe).toBe(1.6);
+      expect(body.series_state).toBe("available");
+      expect(body.figure_observations).toBe(2);
+    },
+  );
+
+  it("H2 — a terminal-success row answers analytics_updating false, and the field is a boolean on every 200 body", async () => {
+    for (const row of [
+      storedRow({ computation_status: "complete" }),
+      storedRow({ computation_status: "failed" }),
+      { daily_returns: [] },
+      null,
+    ]) {
+      STATE.analyticsRow = row as typeof STATE.analyticsRow;
+      const body = await call();
+      expect(typeof body.analytics_updating).toBe("boolean");
+      expect(body.analytics_updating).toBe(false);
+    }
+  });
+
+  it("H3 — a failed row, or a computing row WITHOUT stored evidence, still answers the empty series and updating false (control)", async () => {
+    // failed: never admitted, whatever it stores (the STALE-01 corpse).
+    STATE.analyticsRow = storedRow({ computation_status: "failed" });
+    let body = await call();
+    expect(body.daily_returns).toEqual([]);
+    expect(body.cagr).toBeNull();
+    expect(body.analytics_updating).toBe(false);
+
+    // computing with a series but no success marker and no headline: not evidence.
+    STATE.analyticsRow = {
+      daily_returns: HELD_SERIES,
+      computation_status: "computing",
+      cagr: 0.9,
+      sharpe: 3.1,
+    };
+    body = await call();
+    expect(body.daily_returns).toEqual([]);
+    expect(body.cagr).toBeNull();
+    expect(body.sharpe).toBeNull();
+    expect(body.series_state).toBe("computing");
+    expect(body.analytics_updating).toBe(false);
+  });
+
+  it("H4 — the select names cumulative_return and computed_at, or the hold is dead code", async () => {
+    await call();
+    expect(STATE.observedFilters.analyticsSelect).toContain("cumulative_return");
+    expect(STATE.observedFilters.analyticsSelect).toContain("computed_at");
+  });
+
+  it("H5 — the raw status and the flags blob never ship beside the new field", async () => {
+    STATE.analyticsRow = storedRow({ computation_status: "computing" });
+    const body = await call();
+    expect(JSON.stringify(body)).not.toContain("computation_status");
+    expect(JSON.stringify(body)).not.toContain("data_quality_flags");
+    expect(JSON.stringify(body)).not.toContain("cumulative_method");
+  });
+
+  // ── Task 2: the factsheet's own refusals and the EFFECTIVE flags ──────────
+
+  it("H6 — a held row inside the derive prestamp window serves the last success's unit, not the prestamp's (RESEARCH Pitfall 2)", async () => {
+    // The derive hop replaced the live flags with a prestamp (no cumulative_method,
+    // carrying last_success_snapshot). The snapshot is bound to the row's
+    // computed_at and its flags say the last success was recorded in BTC. Read
+    // from the live flags the unit would be null (USD) and the BTC series would be
+    // blended as if it were dollars.
+    btcClosesMock.mockResolvedValue({
+      prices: [
+        { date: "2026-11-01", close: 60000 },
+        { date: "2026-11-02", close: 66000 },
+      ],
+      dropped: [] as string[],
+      through: "2026-11-02",
+    });
+    STATE.analyticsRow = storedRow({
+      computation_status: "computing",
+      data_quality_flags: {
+        last_success_snapshot: {
+          computed_at: HELD_COMPUTED_AT,
+          flags: { cumulative_method: "geometric", native_unit: "BTC" },
+        },
+      },
+    });
+    const body = await call();
+    expect(body.analytics_updating).toBe(true);
+    expect(body.returns_unit).toBe("BTC");
+    expect(body.daily_returns).toEqual(HELD_SERIES);
+    // The prestamp's own keys never ship.
+    expect(JSON.stringify(body)).not.toContain("last_success_snapshot");
+  });
+
+  it("H7 — a computing COMPOSITE with stored evidence is withheld, as the factsheet withholds it", async () => {
+    STATE.analyticsRow = storedRow({
+      computation_status: "computing",
+      data_quality_flags: { cumulative_method: "geometric", composite: true },
+    });
+    const body = await call();
+    expect(body.daily_returns).toEqual([]);
+    expect(body.cagr).toBeNull();
+    expect(body.analytics_updating).toBe(false);
+    expect(body.is_composite).toBe(true);
+  });
+
+  it("H8 — D-04: a terminal-success row with an unbound derive prestamp is withheld on the returns API, matching the factsheet", async () => {
+    STATE.analyticsRow = storedRow({
+      computation_status: "complete",
+      data_quality_flags: { last_success_snapshot: null },
+    });
+    const body = await call();
+    expect(body.daily_returns).toEqual([]);
+    expect(body.cagr).toBeNull();
+    expect(body.sharpe).toBeNull();
+    expect(body.analytics_updating).toBe(false);
+    // WR-02: withheld for the D-04 window, so the label says computing, never "No data".
+    expect(body.series_state).toBe("computing");
+  });
+
+  it("H9 — a terminal-success row whose live flags carry cumulative_method keeps today's output, with analytics_updating false", async () => {
+    STATE.analyticsRow = storedRow({
+      computation_status: "complete",
+      data_quality_flags: { cumulative_method: "geometric", native_unit: "BTC", tiny_base_days: ["2026-11-02"] },
+    });
+    btcClosesMock.mockResolvedValue(null);
+    const body = await call();
+    expect(body.daily_returns).toEqual(HELD_SERIES);
+    expect(body.cagr).toBe(0.18);
+    expect(body.returns_unit).toBe("BTC");
+    expect(body.tiny_base_days).toEqual(["2026-11-02"]);
+    expect(body.analytics_updating).toBe(false);
   });
 });

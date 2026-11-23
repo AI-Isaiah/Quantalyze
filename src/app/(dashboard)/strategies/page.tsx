@@ -817,8 +817,15 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
         (strategies ?? []).map(async (s): Promise<readonly [string, string | null]> => {
           const mode = shareAffordanceMode(isPublishedStatus(s.status));
           // D-08: an uncomputed row is never probed; it keeps today's path.
+          // 237-REVIEW WR-03: a pending or computing row is the exception.
+          // It may be a held re-run over a stored success, which the factsheet
+          // keeps showing (Phase 190), so the builder's own resolve stage
+          // answers for it: buildable for a held re-run (no note), and
+          // `not_computed` for a first compute (the uncomputed note below,
+          // unchanged). No third status ladder here.
           const embedStatus = computationStatusOf(s.strategy_analytics);
-          if (!isComputedAnalytics(embedStatus)) {
+          const inFlight = embedStatus === "pending" || embedStatus === "computing";
+          if (!isComputedAnalytics(embedStatus) && !inFlight) {
             return [
               s.id,
               await uncomputedNote(s, mode, embedStatus === "failed"),
@@ -912,10 +919,14 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
           // measurable. Not captured: a status flip between two reads is
           // legitimate, and one event per occurrence would be noise.
           if (probe.reason === "not_computed") {
-            console.warn("[strategies/page] factsheet probe found the analytics row not computed (the list embed said computed)", {
-              id: s.id,
-              reason: probe.reason,
-            });
+            // WR-03: a race only when the embed said computed. An in-flight
+            // first compute answers `not_computed` by design, not by race.
+            if (isComputedAnalytics(embedStatus)) {
+              console.warn("[strategies/page] factsheet probe found the analytics row not computed (the list embed said computed)", {
+                id: s.id,
+                reason: probe.reason,
+              });
+            }
             // D-08: when the builder's read says the row FAILED, the same
             // analytics-failed note as the embed path (`kind` is that or null).
             return [s.id, await uncomputedNote(s, mode, kind === "analytics_failed")] as const;

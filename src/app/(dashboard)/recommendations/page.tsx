@@ -15,7 +15,8 @@ import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGate";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { drawdownTone } from "@/lib/factsheet/display-sign";
-import { isRankableAnalyticsRow } from "@/lib/closed-sets";
+import { analyticsHold } from "@/lib/analytics-hold";
+import { ANALYTICS_UPDATING_LINE } from "@/lib/status-surface-copy";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { deriveMandateIsSet } from "@/lib/queries";
 import { gateAnnualized, gatedValue, type FigureRecord, type FigureState } from "@/lib/figure-gate";
@@ -261,6 +262,9 @@ export default async function RecommendationsPage() {
   // lib/queries.ts). The array itself is never projected. Without it a
   // recommended record whose series ended months ago read as current.
   const computedById = new Map<string, boolean>();
+  // Phase 237 FACT-02 (S7): true for a pending or computing row over a stored
+  // success. The card keeps its figures and says so; same verdict as the factsheet.
+  const updatingById = new Map<string, boolean>();
   const seriesEndById = new Map<string, string | null>();
   // Phase 167.1.2.2.2 / SC-4, D-07 — the same read also answers "when did the
   // cron last fetch this strategy's trades", off the column the daily
@@ -288,7 +292,7 @@ export default async function RecommendationsPage() {
       supabase
         .from("strategy_analytics")
         .select(
-          `strategy_id, computation_status, trades_fetched_at, ${RECORD_SCALAR_ALIASES}`,
+          `strategy_id, computation_status, trades_fetched_at, cumulative_return, computed_at, data_quality_flags, ${RECORD_SCALAR_ALIASES}`,
         )
         .in("strategy_id", recIds),
       withPublishedOnly(
@@ -306,15 +310,23 @@ export default async function RecommendationsPage() {
     // The cast covers one postgrest-js TYPE-LEVEL limitation: its select
     // parser cannot read a negative JSONB index (the same cast, and the same
     // measured server behaviour, as `getStrategiesByCategory`).
+    // The flags blob is read server-side for the hold verdict only (Phase 237
+    // FACT-02, ruling 2): `analyticsHold` reduces it to booleans and it never
+    // reaches RecommendationCard.
     for (const r of (statusRows ?? []) as unknown as Array<
       RecordScalarRow & {
         strategy_id: string;
         computation_status: string | null;
         series_end: string | null;
         trades_fetched_at: string | null;
+        cumulative_return: number | null;
+        computed_at: string | null;
+        data_quality_flags: unknown;
       }
     >) {
-      computedById.set(r.strategy_id, isRankableAnalyticsRow(r));
+      const hold = analyticsHold(r);
+      computedById.set(r.strategy_id, hold.admitted);
+      updatingById.set(r.strategy_id, hold.updating);
       seriesEndById.set(r.strategy_id, r.series_end ?? null);
       tradesFetchedAtById.set(r.strategy_id, r.trades_fetched_at ?? null);
       scalarsById.set(r.strategy_id, r);
@@ -347,6 +359,8 @@ export default async function RecommendationsPage() {
     rank: number;
     score: number;
     reasons: string[];
+    // FACT-02 S7: a re-run is in flight over a stored success; the figures are the last success's.
+    analytics_updating: boolean;
     strategy: {
       id: string;
       name: string;
@@ -379,6 +393,7 @@ export default async function RecommendationsPage() {
       rank: row.rank,
       score: row.score,
       reasons: row.reasons ?? [],
+      analytics_updating: updatingById.get(row.strategy_id) ?? false,
       strategy: {
         id: row.strategy_id,
         name: row.strategy_name,
@@ -561,6 +576,7 @@ function RecommendationCard({
     rank: number;
     score: number;
     reasons: string[];
+    analytics_updating: boolean;
     strategy: {
       id: string;
       name: string;
@@ -577,7 +593,7 @@ function RecommendationCard({
     };
   };
 }) {
-  const { rank, reasons, strategy } = candidate;
+  const { rank, reasons, strategy, analytics_updating } = candidate;
   const primaryReason = reasons[0] ?? "Strong fit for your current mandate.";
   const categoryName = strategy.category_slug
     ? (DISCOVERY_CATEGORIES.find((c) => c.slug === strategy.category_slug)?.name ??
@@ -645,6 +661,14 @@ function RecommendationCard({
               negative={drawdownTone(strategy.max_drawdown, 2, 100) === "negative"}
             />
           </div>
+          {analytics_updating && (
+            <p
+              className="mt-2 text-xs text-text-muted"
+              data-testid="recommendation-analytics-updating"
+            >
+              {ANALYTICS_UPDATING_LINE}
+            </p>
+          )}
         </div>
         <div className="shrink-0">
           <Link
