@@ -147,9 +147,16 @@ SECURITY DEFINER
 SET search_path = public, pg_catalog
 AS $sweep$
 DECLARE
+  -- The named failed state's user-visible sentence (DEC-05-E). It is DECLAREd
+  -- ONCE, here, and every write below reads this constant. A fixed literal,
+  -- never data: nothing a caller or a row can supply reaches computation_error.
+  c_named_state_copy CONSTANT TEXT :=
+    'Analytics has not started for this strategy: its first sync was never queued, and the automatic retry did not complete. Retry the sync, or contact support if this persists.';
+
   v_cleared   INTEGER;
   v_observed  INTEGER;
   v_reenq     INTEGER;
+  v_named     INTEGER;
 BEGIN
   -- ONE statement, ONE candidate predicate. The `cand` CTE is written once and
   -- shared by the clear, the observe and the re-enqueue below, so the three can
@@ -236,11 +243,69 @@ BEGIN
          (SELECT count(*) FROM stamped)
     INTO v_cleared, v_observed, v_reenq;
 
+  -- (4) THE NAMED STATE, only when the retry ALSO ended without a result. A
+  -- re-enqueued strategy is ripe when it has at least one failed_final job and
+  -- NO job in any other status (so nothing is queued, running or retrying), and
+  -- its analytics row is absent or still 'pending'. A strategy with no job row
+  -- at all is NOT ripe: retention pruned the retry or someone removed it, and
+  -- "the retry did not complete" would be a claim nobody measured.
+  --
+  -- A retry that the bridge already turned into its own 'failed' row (its
+  -- curated, per-kind sentence) is KEPT, by two layers that are redundant on
+  -- purpose: the admission test below excludes any row not 'pending', and the
+  -- DO UPDATE's WHERE clause refuses to overwrite anything but 'pending' even
+  -- if a row appears between the two.
+  WITH ripe AS (
+    SELECT r.strategy_id
+      FROM public.first_hop_enqueue_retries r
+     WHERE r.reenqueued_at IS NOT NULL
+       AND r.named_state_at IS NULL
+       AND EXISTS (
+             SELECT 1
+               FROM public.compute_jobs cjf
+              WHERE cjf.strategy_id = r.strategy_id
+                AND cjf.status = 'failed_final'
+           )
+       AND NOT EXISTS (
+             SELECT 1
+               FROM public.compute_jobs cjn
+              WHERE cjn.strategy_id = r.strategy_id
+                AND cjn.status <> 'failed_final'
+           )
+       AND NOT EXISTS (
+             SELECT 1
+               FROM public.strategy_analytics san
+              WHERE san.strategy_id = r.strategy_id
+                AND san.computation_status <> 'pending'
+           )
+     ORDER BY r.reenqueued_at
+     LIMIT 25
+       FOR UPDATE OF r SKIP LOCKED
+  ),
+  named AS (
+    INSERT INTO public.strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+    SELECT p.strategy_id, 'failed', c_named_state_copy, NULL, NULL, NULL
+      FROM ripe p
+    ON CONFLICT (strategy_id) DO UPDATE
+       SET computation_status = EXCLUDED.computation_status,
+           computation_error = EXCLUDED.computation_error,
+           computing_started_at = EXCLUDED.computing_started_at,
+           computation_error_source = EXCLUDED.computation_error_source,
+           computation_error_job_id = EXCLUDED.computation_error_job_id
+     WHERE strategy_analytics.computation_status = 'pending'
+    RETURNING strategy_id
+  )
+  UPDATE public.first_hop_enqueue_retries r
+     SET named_state_at = now()
+    FROM named n
+   WHERE r.strategy_id = n.strategy_id;
+  GET DIAGNOSTICS v_named = ROW_COUNT;
+
   RETURN jsonb_build_object(
     'cleared', v_cleared,
     'observed', v_observed,
     'reenqueued', v_reenq,
-    'named_state', 0
+    'named_state', v_named
   );
 END
 $sweep$;
@@ -262,3 +327,210 @@ COMMENT ON FUNCTION public.first_hop_enqueue_sweep() IS
 -- EXECUTE to service_role on every new public function, and this function
 -- inserts compute jobs and writes a user-visible status as its DEFINER.
 REVOKE ALL ON FUNCTION public.first_hop_enqueue_sweep() FROM PUBLIC, anon, authenticated, service_role;
+
+-- --------------------------------------------------------------------------
+-- STEP 4: self-verifying DO block (catalogue only)
+-- --------------------------------------------------------------------------
+-- House style: RAISE EXCEPTION, never a silent NOTICE-skip, one literal per
+-- RAISE, each naming the CONSEQUENCE. Asserts SHAPE, never behaviour and never
+-- data; behaviour is covered by supabase/tests/test_first_hop_enqueue_sweep.sql.
+DO $verify$
+DECLARE
+  -- ⛔ Every variable is DECLAREd up front: plpgsql compiles a DO block WHOLE.
+  v_tbl        REGCLASS;
+  v_rls        BOOLEAN;
+  v_policies   INTEGER;
+  v_cnt        INTEGER;
+  v_def        TEXT;
+  v_tbl_acl    TEXT;
+  v_overloads  INTEGER;
+  v_nargs      SMALLINT;
+  v_secdef     BOOLEAN;
+  v_config     TEXT[];
+  v_srchpath   TEXT;
+  v_defowner   TEXT;
+  v_bypass     BOOLEAN;
+  v_super      BOOLEAN;
+  v_owner      TEXT;
+  v_grantees   TEXT;
+  v_body       TEXT;
+BEGIN
+  -- ===== THE TABLE ==========================================================
+  v_tbl := to_regclass('public.first_hop_enqueue_retries');
+  IF v_tbl IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261124120400: public.first_hop_enqueue_retries does not exist after CREATE TABLE, so the sweep has no grace anchor and no once-only guard and every call would abort';
+  END IF;
+
+  -- RLS on, zero policies: the only principal that may touch the ledger is the
+  -- owner (the sweep's DEFINER), which bypasses row security.
+  SELECT c.relrowsecurity INTO v_rls FROM pg_class c WHERE c.oid = v_tbl;
+  IF NOT COALESCE(v_rls, FALSE) THEN
+    RAISE EXCEPTION 'Migration 20261124120400: row level security is OFF on public.first_hop_enqueue_retries, so any role holding a table privilege can rewrite the once-only guard and re-arm the re-enqueue for a strategy';
+  END IF;
+  SELECT count(*) INTO v_policies FROM pg_policy p WHERE p.polrelid = v_tbl;
+  IF v_policies <> 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: public.first_hop_enqueue_retries carries % row security policy(ies), expected none; the ledger is written by the owner alone and a policy would open it to a role that must not write it', v_policies;
+  END IF;
+
+  -- The two CHECKs, by name AND by what they test.
+  SELECT pg_get_constraintdef(k.oid) INTO v_def
+    FROM pg_constraint k
+   WHERE k.conrelid = v_tbl AND k.contype = 'c'
+     AND k.conname = 'first_hop_enqueue_retries_named_implies_reenqueued_check';
+  IF v_def IS NULL OR v_def !~ 'named_state_at' OR v_def !~ 'reenqueued_at' THEN
+    RAISE EXCEPTION 'Migration 20261124120400: the named-state-implies-reenqueued CHECK is missing or does not test both columns (%), so a strategy could be shown the named failed state without the retry that justifies it ever having run', COALESCE(v_def, 'absent');
+  END IF;
+  v_def := NULL;
+  SELECT pg_get_constraintdef(k.oid) INTO v_def
+    FROM pg_constraint k
+   WHERE k.conrelid = v_tbl AND k.contype = 'c'
+     AND k.conname = 'first_hop_enqueue_retries_reenqueued_after_seen_check';
+  IF v_def IS NULL OR v_def !~ 'reenqueued_at' OR v_def !~ 'first_seen_at' THEN
+    RAISE EXCEPTION 'Migration 20261124120400: the reenqueued-not-before-seen CHECK is missing or does not test both columns (%), so the ledger could record a re-enqueue that precedes the observation that justified it', COALESCE(v_def, 'absent');
+  END IF;
+
+  -- The cascade: deleting a strategy must take its observation with it.
+  SELECT count(*) INTO v_cnt
+    FROM pg_constraint k
+   WHERE k.conrelid = v_tbl AND k.contype = 'f'
+     AND k.confrelid = 'public.strategies'::regclass
+     AND k.confdeltype = 'c';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: strategy_id on public.first_hop_enqueue_retries is not a cascading foreign key to public.strategies (% matching), so deleting a strategy would either be blocked by its observation or leave an orphan row behind', v_cnt;
+  END IF;
+
+  -- THE TABLE ACL for the four principals the REVOKE above names (PUBLIC, anon,
+  -- authenticated, service_role) is exactly service_role SELECT. aclexplode
+  -- enumerates grantees instead of interrogating a guessed list; a NULL relacl
+  -- means the default ACL, which is made explicit here. The owner and any
+  -- platform-internal role are deliberately not enumerated: they are not what
+  -- the REVOKE addresses, and naming them would make the apply depend on roles
+  -- this file does not own.
+  SELECT string_agg(
+           (CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END) || ':' || a.privilege_type,
+           ',' ORDER BY (CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END), a.privilege_type)
+    INTO v_tbl_acl
+    FROM pg_class c
+    CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a
+   WHERE c.oid = v_tbl
+     AND (a.grantee = 0
+          OR a.grantee IN (SELECT r.oid FROM pg_roles r
+                            WHERE r.rolname IN ('anon', 'authenticated', 'service_role')));
+  IF v_tbl_acl IS DISTINCT FROM 'service_role:SELECT' THEN
+    RAISE EXCEPTION 'Migration 20261124120400: the table ACL for PUBLIC, anon, authenticated and service_role is [%], expected exactly [service_role:SELECT]. Any write privilege held by a role other than the owner lets it re-arm or erase the once-only guard, and the sweep would then hammer one exchange key every hour', COALESCE(v_tbl_acl, 'none');
+  END IF;
+
+  -- ===== THE FUNCTION =======================================================
+  -- 0. The name resolves to EXACTLY ONE function: every check after it reads
+  --    (schema, name) and a SELECT INTO without STRICT takes the first of several
+  --    rows in silence, while an overload created without a REVOKE carries the
+  --    default ACL, which grants EXECUTE to PUBLIC.
+  SELECT count(*) INTO v_overloads
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'first_hop_enqueue_sweep';
+  IF v_overloads <> 1 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: public.first_hop_enqueue_sweep resolves to % functions, expected exactly 1; the checks below read (schema, name) with no signature, so an overload carrying the default ACL could sit in the catalogue with every check green', v_overloads;
+  END IF;
+
+  -- 1. Takes NO arguments: a caller-supplied value on a SECURITY DEFINER function
+  --    that inserts jobs and writes a user-visible status is the attack surface.
+  SELECT p.pronargs, p.prosecdef, p.proconfig
+    INTO v_nargs, v_secdef, v_config
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'first_hop_enqueue_sweep';
+  IF v_nargs <> 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: first_hop_enqueue_sweep takes % argument(s), expected 0; a caller-supplied value on a SECURITY DEFINER function that enqueues jobs and writes a user-visible status lets any caller who can EXECUTE it choose what is written', v_nargs;
+  END IF;
+
+  -- 2. SECURITY DEFINER with a pinned search_path, compared BY VALUE.
+  IF NOT v_secdef THEN
+    RAISE EXCEPTION 'Migration 20261124120400: first_hop_enqueue_sweep is not SECURITY DEFINER, so it reads and writes compute_jobs and strategy_analytics as the CALLER and fails for every role that is not the owner';
+  END IF;
+  SELECT c INTO v_srchpath
+    FROM unnest(COALESCE(v_config, ARRAY[]::TEXT[])) AS c
+   WHERE c LIKE 'search_path=%';
+  IF v_srchpath IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261124120400: first_hop_enqueue_sweep does not pin search_path at all (proconfig=%); on a SECURITY DEFINER function that is a privilege-escalation route', v_config;
+  END IF;
+  IF regexp_replace(v_srchpath, '\s', '', 'g') <> 'search_path=public,pg_catalog' THEN
+    RAISE EXCEPTION 'Migration 20261124120400: first_hop_enqueue_sweep pins search_path to "%", not to the "public, pg_catalog" its own declaration sets', v_srchpath;
+  END IF;
+
+  -- 2b. The definer role is exempt from row security: rolsuper OR rolbypassrls,
+  --     NEVER rolbypassrls alone. compute_jobs carries FORCE ROW LEVEL SECURITY,
+  --     under which owning the table is not an exemption, so a non-exempt owner
+  --     would insert nothing and the sweep would report success forever.
+  SELECT r.rolname, r.rolbypassrls, r.rolsuper
+    INTO v_defowner, v_bypass, v_super
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_roles r ON r.oid = p.proowner
+   WHERE n.nspname = 'public' AND p.proname = 'first_hop_enqueue_sweep';
+  IF v_defowner IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261124120400: could not resolve the owner of public.first_hop_enqueue_sweep, pg_proc.proowner has no matching pg_roles row';
+  END IF;
+  IF NOT (COALESCE(v_bypass, FALSE) OR COALESCE(v_super, FALSE)) THEN
+    RAISE EXCEPTION 'Migration 20261124120400: public.first_hop_enqueue_sweep is owned by role "%" (rolsuper=%, rolbypassrls=%), exempt from row security by neither route; compute_jobs carries FORCE ROW LEVEL SECURITY, so the re-enqueue would insert zero rows and the sweep would report healthy forever', v_defowner, v_super, v_bypass;
+  END IF;
+
+  -- 3. THE WHOLE EXECUTE GRANTEE SET IS EXACTLY THE OWNER. Compared to the
+  --    owner's NAME, never the literal 'postgres'.
+  SELECT g.owner_name, string_agg(g.grantee_name, ',' ORDER BY g.grantee_name)
+    INTO v_owner, v_grantees
+    FROM (
+      SELECT pg_get_userbyid(p.proowner) AS owner_name,
+             CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee_name
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+       WHERE n.nspname = 'public'
+         AND p.proname = 'first_hop_enqueue_sweep'
+         AND p.pronargs = 0
+         AND a.privilege_type = 'EXECUTE'
+    ) g
+   GROUP BY g.owner_name;
+  IF v_grantees IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261124120400: could not read the EXECUTE grantee set of public.first_hop_enqueue_sweep, the function is missing or carries no EXECUTE aclitem at all, and an empty answer is indistinguishable from a locked-down one unless it is refused';
+  END IF;
+  IF v_grantees IS DISTINCT FROM v_owner THEN
+    RAISE EXCEPTION 'Migration 20261124120400: EXECUTE on public.first_hop_enqueue_sweep is held by [%], expected exactly the owner [%]. The scheduler runs as the owner; a grantee beyond it can force job inserts and a user-visible failed status on demand', v_grantees, v_owner;
+  END IF;
+
+  -- 4. THE BODY, comment-stripped. cron-style bodies keep SQL comments verbatim,
+  --    so an anchor over the raw text would false-pass the exact neuter it exists
+  --    to catch: delete the clause from the CODE and leave its comment behind.
+  SELECT regexp_replace(p.prosrc, '--[^\n]*', '', 'g')
+    INTO v_body
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'first_hop_enqueue_sweep';
+  IF v_body IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261124120400: could not read the body of public.first_hop_enqueue_sweep, so none of the clause anchors below can be checked';
+  END IF;
+  IF position('first-hop-sweep' IN v_body) = 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: the sweep body does not carry the first-hop-sweep source marker, so its jobs cannot be told from the finalize route''s and an operator reading compute_jobs cannot see that the sweep acted';
+  END IF;
+  IF position('interval ''90 minutes''' IN v_body) = 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: the sweep body does not carry the 90-minute grace; without it a strategy still inside its finalize window is re-enqueued under the user, against the founder''s ruling of a grace longer than one hour';
+  END IF;
+  IF position('''private''' IN v_body) = 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: the sweep body does not admit the private status; the contribution finalize sets private and takes the only arm whose first hop is a sync_trades enqueue, so the sweep would watch nothing';
+  END IF;
+  IF position('''pending_review''' IN v_body) > 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: the sweep body names the pending_review status; a manager strategy is first-hopped by process_key_long, and re-enqueueing sync_trades for a ledger-backed key would fail and write a misleading failed state';
+  END IF;
+  IF position('disconnected_at IS NULL' IN v_body) = 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: the sweep body does not require disconnected_at IS NULL on the key; a disconnected key is the user withdrawing access, and enqueueing a sync against it acts on a revoked connection';
+  END IF;
+  IF position('is_active' IN v_body) = 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: the sweep body does not require an active key; a deactivated key is the user turning the connection off, and enqueueing a sync against it acts on a revoked connection';
+  END IF;
+  IF position('computation_status = ''pending''' IN v_body) = 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120400: the sweep body does not restrict its analytics overwrite to a pending row; the named state would overwrite the bridge''s curated failed sentence, or a complete row, with generic copy';
+  END IF;
+
+  RAISE NOTICE 'Migration 20261124120400: first_hop_enqueue_retries and first_hop_enqueue_sweep() verified, table RLS on with no policy and service_role SELECT only, SECURITY DEFINER, search_path pinned, owner exempt from row security, EXECUTE held by the owner alone, body clauses present';
+END
+$verify$;

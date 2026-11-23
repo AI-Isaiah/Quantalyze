@@ -13,9 +13,16 @@ SECURITY DEFINER
 SET search_path = public, pg_catalog
 AS $sweep$
 DECLARE
+  -- The named failed state's user-visible sentence (DEC-05-E). It is DECLAREd
+  -- ONCE, here, and every write below reads this constant. A fixed literal,
+  -- never data: nothing a caller or a row can supply reaches computation_error.
+  c_named_state_copy CONSTANT TEXT :=
+    'Analytics has not started for this strategy: its first sync was never queued, and the automatic retry did not complete. Retry the sync, or contact support if this persists.';
+
   v_cleared   INTEGER;
   v_observed  INTEGER;
   v_reenq     INTEGER;
+  v_named     INTEGER;
 BEGIN
   -- ONE statement, ONE candidate predicate. The `cand` CTE is written once and
   -- shared by the clear, the observe and the re-enqueue below, so the three can
@@ -102,11 +109,69 @@ BEGIN
          (SELECT count(*) FROM stamped)
     INTO v_cleared, v_observed, v_reenq;
 
+  -- (4) THE NAMED STATE, only when the retry ALSO ended without a result. A
+  -- re-enqueued strategy is ripe when it has at least one failed_final job and
+  -- NO job in any other status (so nothing is queued, running or retrying), and
+  -- its analytics row is absent or still 'pending'. A strategy with no job row
+  -- at all is NOT ripe: retention pruned the retry or someone removed it, and
+  -- "the retry did not complete" would be a claim nobody measured.
+  --
+  -- A retry that the bridge already turned into its own 'failed' row (its
+  -- curated, per-kind sentence) is KEPT, by two layers that are redundant on
+  -- purpose: the admission test below excludes any row not 'pending', and the
+  -- DO UPDATE's WHERE clause refuses to overwrite anything but 'pending' even
+  -- if a row appears between the two.
+  WITH ripe AS (
+    SELECT r.strategy_id
+      FROM public.first_hop_enqueue_retries r
+     WHERE r.reenqueued_at IS NOT NULL
+       AND r.named_state_at IS NULL
+       AND EXISTS (
+             SELECT 1
+               FROM public.compute_jobs cjf
+              WHERE cjf.strategy_id = r.strategy_id
+                AND cjf.status = 'failed_final'
+           )
+       AND NOT EXISTS (
+             SELECT 1
+               FROM public.compute_jobs cjn
+              WHERE cjn.strategy_id = r.strategy_id
+                AND cjn.status <> 'failed_final'
+           )
+       AND NOT EXISTS (
+             SELECT 1
+               FROM public.strategy_analytics san
+              WHERE san.strategy_id = r.strategy_id
+                AND san.computation_status <> 'pending'
+           )
+     ORDER BY r.reenqueued_at
+     LIMIT 25
+       FOR UPDATE OF r SKIP LOCKED
+  ),
+  named AS (
+    INSERT INTO public.strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+    SELECT p.strategy_id, 'failed', c_named_state_copy, NULL, NULL, NULL
+      FROM ripe p
+    ON CONFLICT (strategy_id) DO UPDATE
+       SET computation_status = EXCLUDED.computation_status,
+           computation_error = EXCLUDED.computation_error,
+           computing_started_at = EXCLUDED.computing_started_at,
+           computation_error_source = EXCLUDED.computation_error_source,
+           computation_error_job_id = EXCLUDED.computation_error_job_id
+     WHERE strategy_analytics.computation_status = 'pending'
+    RETURNING strategy_id
+  )
+  UPDATE public.first_hop_enqueue_retries r
+     SET named_state_at = now()
+    FROM named n
+   WHERE r.strategy_id = n.strategy_id;
+  GET DIAGNOSTICS v_named = ROW_COUNT;
+
   RETURN jsonb_build_object(
     'cleared', v_cleared,
     'observed', v_observed,
     'reenqueued', v_reenq,
-    'named_state', 0
+    'named_state', v_named
   );
 END
 $sweep$;
