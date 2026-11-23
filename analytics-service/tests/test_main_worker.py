@@ -515,6 +515,13 @@ class TestWatchdogTick:
         15-minute derive_broker_dailies batch-mates can still pass 20 minutes
         (SC-3 is partly met, TODOS ``[166.5.1-DERIVE-BATCH-RESET-RESIDUAL]``).
         It does not cover the mark RPCs' own SQL or the claim-token 55006 fence.
+
+        2026-11-23: Phase 227 HEAL-02 closed that residual with the claim renewal
+        (``renew_compute_job_claims``, called by dispatch_tick before each dispatch
+        and from its heartbeat); the renewal itself is covered by TestClaimFence and
+        TestHeartbeatClaimRenewal below and by the SQL gate arm R1 of
+        supabase/tests/test_compute_job_claim_renewal.sql. The text above stays as
+        lineage.
         """
         mock_supabase = MagicMock()
         chain = MagicMock()
@@ -2391,6 +2398,11 @@ class TestClaimedJobContract:
         def _rpc_side_effect(name: str, params: dict):
             if name == "claim_compute_jobs_with_priority":
                 return claim_chain
+            if name == "renew_compute_job_claims":
+                # Phase 227 claim fence: the realistic answer is "all still mine".
+                renew_chain = MagicMock()
+                renew_chain.execute.return_value = MagicMock(data=list(params["p_job_ids"]))
+                return renew_chain
             return mark_chain
 
         mock_supabase.rpc.side_effect = _rpc_side_effect
@@ -3119,7 +3131,8 @@ class _FakeSentry:
 def _mock_supabase_for(jobs: list[dict[str, Any]]) -> MagicMock:
     """The TestDispatchTick mocked-supabase harness (:39-110), reused verbatim.
 
-    The claim RPC returns `jobs`; every other RPC name (mark_compute_job_done /
+    The claim RPC returns `jobs`; the renew RPC echoes the ids it was asked to
+    renew (all still ours); every other RPC name (mark_compute_job_done /
     _failed) resolves to an inert chain.
     """
     mock_supabase = MagicMock()
@@ -3131,6 +3144,11 @@ def _mock_supabase_for(jobs: list[dict[str, Any]]) -> MagicMock:
     def _rpc_side_effect(name: str, params: dict) -> MagicMock:
         if name == "claim_compute_jobs_with_priority":
             return claim_chain
+        if name == "renew_compute_job_claims":
+            # Phase 227 claim fence: the realistic answer is "all still mine".
+            renew_chain = MagicMock()
+            renew_chain.execute.return_value = MagicMock(data=list(params["p_job_ids"]))
+            return renew_chain
         return mark_chain
 
     mock_supabase.rpc.side_effect = _rpc_side_effect
@@ -3896,3 +3914,645 @@ class TestReconcileSweepMarkerContract:
                 "inspecting a function that no longer carries the read, and "
                 "stays green while the alert is dead."
             )
+
+
+# ===========================================================================
+# Phase 227 JOBLEDGER plan 08: claim renewal fence, heartbeat renewal, lost-mark
+# attempt-error recording, first-hop heal capture.
+# ===========================================================================
+
+_WORKER_LOGGER = "quantalyze.analytics.worker"
+
+
+@pytest.fixture(autouse=True)
+def _renew_unavailable_log_is_test_scoped() -> Iterator[None]:
+    """The once-per-process 'renew RPC missing' log flag is process-wide, so a
+    test that trips it would silence the log for every later test. Reset it on
+    the way in and restore it on the way out, like the claim latch above."""
+    saved = main_worker._RENEW_UNAVAILABLE_LOGGED
+    main_worker._RENEW_UNAVAILABLE_LOGGED = False
+    try:
+        yield
+    finally:
+        main_worker._RENEW_UNAVAILABLE_LOGGED = saved
+
+
+def _ledger_supabase(
+    jobs: list[dict[str, Any]],
+    *,
+    renew: Any = None,
+    mark_failed: Any = None,
+    mark_done: Any = None,
+    record: Any = None,
+) -> MagicMock:
+    """Fake supabase answering every RPC the worker loop uses.
+
+    `renew` / `mark_failed` / `mark_done` / `record` are optional callables
+    taking the RPC params. They return the rpc `.data`, or raise to make the
+    `.execute()` fail the way PostgREST does. Default renew answers the
+    realistic "every row is still mine" (it echoes the requested ids)."""
+    mock_supabase = MagicMock()
+
+    def _rpc(name: str, params: dict[str, Any]) -> MagicMock:
+        chain = MagicMock()
+        if name == "claim_compute_jobs_with_priority":
+            chain.execute.return_value = MagicMock(data=jobs)
+            return chain
+        handler = {
+            "renew_compute_job_claims": renew,
+            "mark_compute_job_failed": mark_failed,
+            "mark_compute_job_done": mark_done,
+            "record_compute_job_attempt_error": record,
+        }.get(name)
+
+        def _execute() -> MagicMock:
+            if handler is not None:
+                return MagicMock(data=handler(params))
+            if name == "renew_compute_job_claims":
+                return MagicMock(data=list(params["p_job_ids"]))
+            return MagicMock(data=None)
+
+        chain.execute.side_effect = _execute
+        return chain
+
+    mock_supabase.rpc.side_effect = _rpc
+    return mock_supabase
+
+
+def _calls_to(mock_supabase: MagicMock, name: str) -> list[dict[str, Any]]:
+    return [c.args[1] for c in mock_supabase.rpc.call_args_list if c.args[0] == name]
+
+
+def _events(caplog: pytest.LogCaptureFixture, event_type: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if getattr(r, "event_type", None) == event_type]
+
+
+def _tokened_jobs(n: int, kind: str = "derive_allocator_equity") -> list[dict[str, Any]]:
+    return [
+        {
+            "id": f"job-{i}",
+            "kind": kind,
+            "strategy_id": f"s-{i}",
+            "claim_token": f"tok-{i}",
+        }
+        for i in range(1, n + 1)
+    ]
+
+
+_DONE = DispatchResult(outcome=DispatchOutcome.DONE)
+
+
+class TestClaimFence:
+    """HEAL-02 (worker half): never run a job the watchdog already took, and
+    never stall the queue because the renew RPC is not deployed yet."""
+
+    @pytest.mark.asyncio
+    async def test_claim_fence_skips_job_the_watchdog_took(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Business rule: a job whose claim the watchdog reclaimed is never run
+        a second time by the worker that lost it. The renew RPC answers only
+        the rows the caller still owns, so a job missing from that answer is
+        skipped before dispatch and the skip is logged for the operator."""
+        jobs = _tokened_jobs(2)
+        owned = {"job-1"}  # the watchdog took job-2 while job-1 was running
+        mock_supabase = _ledger_supabase(
+            jobs, renew=lambda p: [i for i in p["p_job_ids"] if i in owned]
+        )
+        dispatch = AsyncMock(return_value=_DONE)
+
+        with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-fence-skip")
+
+        dispatched = [c.args[0]["id"] for c in dispatch.await_args_list]
+        assert dispatched == ["job-1"], (
+            f"the watchdog-taken job must not be dispatched, got {dispatched}"
+        )
+        renews = _calls_to(mock_supabase, "renew_compute_job_claims")
+        # The fence renews the current job AND everything still waiting behind it.
+        assert renews[0]["p_job_ids"] == ["job-1", "job-2"]
+        assert renews[0]["p_claim_tokens"] == ["tok-1", "tok-2"]
+        assert renews[1]["p_job_ids"] == ["job-2"]
+        skips = _events(caplog, "claim_fence_skip")
+        assert len(skips) == 1
+        assert skips[0].job_id == "job-2"  # type: ignore[attr-defined]
+        assert skips[0].kind == "derive_allocator_equity"  # type: ignore[attr-defined]
+        assert skips[0].worker_id == "worker-fence-skip"  # type: ignore[attr-defined]
+        # The skipped job is not marked either: it is the watchdog's, not ours.
+        assert _calls_to(mock_supabase, "mark_compute_job_done") == [
+            {"p_job_id": "job-1", "p_claim_token": "tok-1"}
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", ["42883", "PGRST202"])
+    async def test_claim_fence_dispatches_when_renew_rpc_missing(
+        self, code: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Business rule: a worker deployed ahead of the migration (or after a
+        rollback) must not stall the queue. A missing renew RPC, spelled 42883
+        by Postgres or PGRST202 by PostgREST's schema cache, dispatches every
+        job exactly as before, and the degradation is logged once per process,
+        not once per job."""
+        jobs = _tokened_jobs(2)
+
+        def _missing(_params: dict[str, Any]) -> Any:
+            raise _make_worker_api_error(code)
+
+        mock_supabase = _ledger_supabase(jobs, renew=_missing)
+        dispatch = AsyncMock(return_value=_DONE)
+
+        with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-fence-missing")
+
+        assert [c.args[0]["id"] for c in dispatch.await_args_list] == ["job-1", "job-2"]
+        assert len(_events(caplog, "claim_renew_unavailable")) == 1
+        assert _events(caplog, "claim_fence_skip") == []
+        assert _events(caplog, "claim_fence_renew_error") == []
+
+    @pytest.mark.asyncio
+    async def test_claim_fence_skips_on_renew_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Business rule: ownership that cannot be confirmed is treated as not
+        owned (running a job twice is the defect), but only that one job is
+        lost: the watchdog returns it to the queue and the loop carries on."""
+        jobs = _tokened_jobs(2)
+        calls = {"n": 0}
+
+        def _renew(params: dict[str, Any]) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("connection reset")
+            return list(params["p_job_ids"])
+
+        mock_supabase = _ledger_supabase(jobs, renew=_renew)
+        dispatch = AsyncMock(return_value=_DONE)
+
+        with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-fence-error")
+
+        assert [c.args[0]["id"] for c in dispatch.await_args_list] == ["job-2"]
+        errors = _events(caplog, "claim_fence_renew_error")
+        assert len(errors) == 1
+        assert errors[0].levelno == logging.ERROR
+        assert errors[0].job_id == "job-1"  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_claim_fence_dispatches_tokenless_job(self) -> None:
+        """A row with no claim token (the legacy claim path) cannot be fenced,
+        so it dispatches as before and the renew RPC is never called."""
+        jobs = [{"id": "job-legacy", "kind": "sync_trades", "strategy_id": "s-1"}]
+        mock_supabase = _ledger_supabase(jobs)
+        dispatch = AsyncMock(return_value=_DONE)
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-fence-tokenless")
+
+        assert dispatch.await_count == 1
+        assert _calls_to(mock_supabase, "renew_compute_job_claims") == []
+
+
+
+
+class TestHeartbeatClaimRenewal:
+    """While one job runs, the claims of the jobs queued behind it stay fresh
+    (HEAL-02), and a hung running job still ages out under its own override."""
+
+    @staticmethod
+    async def _await_until(predicate: Any, what: str, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        while not predicate() and time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+        assert predicate(), f"timed out waiting for: {what}"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_renews_waiting_rows_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Business rule: a job queued behind a slow batch-mate must not age
+        out under the watchdog, and the RUNNING job must never be renewed, so
+        a genuinely hung run still resets under its own threshold."""
+        import main_worker_healthz
+
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.01)
+        monkeypatch.setattr(main_worker, "_CLAIM_RENEW_INTERVAL_S", 0.02)
+        jobs = _tokened_jobs(3)
+        running: dict[str, str | None] = {"id": None}
+        seen: list[tuple[str | None, list[str]]] = []
+
+        def _renew(params: dict[str, Any]) -> Any:
+            seen.append((running["id"], list(params["p_job_ids"])))
+            return list(params["p_job_ids"])
+
+        mock_supabase = _ledger_supabase(jobs, renew=_renew)
+
+        async def _dispatch(job: dict[str, Any]) -> DispatchResult:
+            running["id"] = job["id"]
+            try:
+                if job["id"] == "job-1":
+                    await self._await_until(
+                        lambda: any(r == "job-1" for r, _ in seen),
+                        "a heartbeat renewal during job-1's run",
+                    )
+                return _DONE
+            finally:
+                running["id"] = None
+
+        _saved = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_dispatch):
+                await dispatch_tick("worker-hb-renew")
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved
+
+        during_job_1 = [ids for r, ids in seen if r == "job-1"]
+        assert during_job_1, "the heartbeat never renewed the waiting rows"
+        for ids in during_job_1:
+            assert ids == ["job-2", "job-3"], (
+                f"the heartbeat renewed {ids}: only the jobs still waiting may "
+                "be renewed, never the running job-1"
+            )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_renew_is_throttled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The renewal rate is _CLAIM_RENEW_INTERVAL_S, not the 30 s healthz
+        tick: with the renew interval far above the heartbeat, many heartbeat
+        ticks pass during one run and none of them calls the renew RPC."""
+        import main_worker_healthz
+
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.01)
+        monkeypatch.setattr(main_worker, "_CLAIM_RENEW_INTERVAL_S", 60.0)
+        jobs = _tokened_jobs(2)
+        running: dict[str, str | None] = {"id": None}
+        seen: list[str | None] = []
+
+        def _renew(params: dict[str, Any]) -> Any:
+            seen.append(running["id"])
+            return list(params["p_job_ids"])
+
+        mock_supabase = _ledger_supabase(jobs, renew=_renew)
+        ticks: list[float] = []
+
+        async def _dispatch(job: dict[str, Any]) -> DispatchResult:
+            running["id"] = job["id"]
+            try:
+                if job["id"] == "job-1":
+                    # Anti-vacuity: prove the heartbeat really ticked several
+                    # times (LAST_TICK_AT keeps advancing) before asserting
+                    # that none of those ticks renewed anything.
+                    last = main_worker_healthz.LAST_TICK_AT
+                    deadline = time.monotonic() + 5.0
+                    while len(ticks) < 4 and time.monotonic() < deadline:
+                        await asyncio.sleep(0.005)
+                        if main_worker_healthz.LAST_TICK_AT != last:
+                            last = main_worker_healthz.LAST_TICK_AT
+                            ticks.append(last)
+                return _DONE
+            finally:
+                running["id"] = None
+
+        _saved = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_dispatch):
+                await dispatch_tick("worker-hb-throttle")
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved
+
+        assert len(ticks) >= 4, "the heartbeat never ticked, so this proves nothing"
+        assert seen, "the pre-dispatch fence should have renewed at least once"
+        assert "job-1" not in seen, (
+            "the heartbeat called the renew RPC during job-1's run despite the "
+            "renew interval being far above the heartbeat interval"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_renew_error_never_escapes(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failing renew inside the heartbeat is logged and swallowed: a
+        heartbeat that raised would end its task and freeze the healthz tick,
+        and the running job's own result must be untouched."""
+        import main_worker_healthz
+
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.01)
+        monkeypatch.setattr(main_worker, "_CLAIM_RENEW_INTERVAL_S", 0.02)
+        jobs = _tokened_jobs(2)
+        running: dict[str, str | None] = {"id": None}
+        failures: list[str] = []
+
+        def _renew(params: dict[str, Any]) -> Any:
+            if running["id"] == "job-1":
+                failures.append("x")
+                raise RuntimeError("renew transport down")
+            return list(params["p_job_ids"])
+
+        mock_supabase = _ledger_supabase(jobs, renew=_renew)
+
+        async def _dispatch(job: dict[str, Any]) -> DispatchResult:
+            running["id"] = job["id"]
+            try:
+                if job["id"] == "job-1":
+                    # Two failed renewals prove the heartbeat survived the
+                    # first failure and kept running.
+                    await self._await_until(
+                        lambda: len(failures) >= 2, "two failed heartbeat renewals"
+                    )
+                return _DONE
+            finally:
+                running["id"] = None
+
+        _saved = main_worker_healthz.LAST_TICK_AT
+        try:
+            with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+                 patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_dispatch):
+                await dispatch_tick("worker-hb-error")
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved
+
+        assert _calls_to(mock_supabase, "mark_compute_job_done")[0] == {
+            "p_job_id": "job-1",
+            "p_claim_token": "tok-1",
+        }, "the heartbeat renew failure must not change the running job's result"
+        events = _events(caplog, "claim_renew_heartbeat_failed")
+        assert len(events) >= 2
+        assert all(e.levelno == logging.WARNING for e in events)
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_renew_hang_does_not_freeze_healthz(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A renew call that hangs must not stop the healthz stamp: the
+        heartbeat bounds the call, so a slow database cannot restart a worker
+        mid-crawl (the FLIPRETRY-04 failure this heartbeat exists to prevent)."""
+        import threading
+
+        import main_worker_healthz
+
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.01)
+        monkeypatch.setattr(main_worker, "_CLAIM_RENEW_INTERVAL_S", 0.02)
+        monkeypatch.setattr(main_worker, "_CLAIM_RENEW_TIMEOUT_S", 0.05)
+        jobs = _tokened_jobs(2)
+        running: dict[str, str | None] = {"id": None}
+        release = threading.Event()
+        entered = threading.Event()
+
+        def _renew(params: dict[str, Any]) -> Any:
+            if running["id"] == "job-1":
+                entered.set()
+                release.wait(5.0)
+            return list(params["p_job_ids"])
+
+        mock_supabase = _ledger_supabase(jobs, renew=_renew)
+        advanced: list[float] = []
+
+        async def _dispatch(job: dict[str, Any]) -> DispatchResult:
+            running["id"] = job["id"]
+            try:
+                if job["id"] == "job-1":
+                    await self._await_until(entered.is_set, "the renew to start hanging")
+                    last = main_worker_healthz.LAST_TICK_AT
+                    deadline = time.monotonic() + 5.0
+                    while len(advanced) < 3 and time.monotonic() < deadline:
+                        await asyncio.sleep(0.005)
+                        if main_worker_healthz.LAST_TICK_AT != last:
+                            last = main_worker_healthz.LAST_TICK_AT
+                            advanced.append(last)
+                    release.set()
+                return _DONE
+            finally:
+                running["id"] = None
+
+        _saved = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_dispatch):
+                await dispatch_tick("worker-hb-hang")
+        finally:
+            release.set()
+            main_worker_healthz.LAST_TICK_AT = _saved
+
+        assert len(advanced) >= 3, (
+            "healthz stopped advancing while a heartbeat renew call hung"
+        )
+
+    def test_claim_renew_interval_bound(self) -> None:
+        """A misconfigured interval fails at import, not by letting waiting
+        rows reset: it must be above 0 and below the smallest watchdog
+        threshold in force (the 10-minute default or any per-kind override)."""
+        smallest = min(
+            [_watchdog_seconds("10 minutes")]
+            + [_watchdog_seconds(v) for v in WATCHDOG_PER_KIND_OVERRIDES.values()]
+        )
+        assert main_worker._SMALLEST_WATCHDOG_THRESHOLD_S == smallest
+        assert 0 < main_worker._CLAIM_RENEW_INTERVAL_S < smallest
+        for bad in (0.0, -1.0, smallest, smallest + 1.0):
+            with pytest.raises(ValueError):
+                main_worker._validate_claim_renew_interval(bad, smallest)
+        assert main_worker._validate_claim_renew_interval(smallest - 1.0, smallest) == (
+            smallest - 1.0
+        )
+
+
+
+
+class TestAttemptErrorRecording:
+    """MT5D-01 (worker half): when the failed mark cannot land, the real error
+    is still recorded so the attempt reads as an error, not only as a reset."""
+
+    @staticmethod
+    def _failed_result() -> DispatchResult:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="exchange said no",
+            error_kind="permanent",
+        )
+
+    @pytest.mark.asyncio
+    async def test_lock_bound_failure_records_attempt_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """55P03 rolled the mark back, so the job stays running for the
+        watchdog. The real failure is recorded once through the worker-lost
+        RPC (job id, token, original message and kind), and the existing
+        MARK_FAILED_LOCK_BOUND log still fires."""
+        jobs = _tokened_jobs(1, kind="sync_trades")
+
+        def _mark_failed(_params: dict[str, Any]) -> Any:
+            raise _make_worker_api_error("55P03")
+
+        mock_supabase = _ledger_supabase(jobs, mark_failed=_mark_failed)
+
+        with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock(return_value=self._failed_result())):
+            await dispatch_tick("worker-lock-bound")
+
+        assert _calls_to(mock_supabase, "record_compute_job_attempt_error") == [
+            {
+                "p_job_id": "job-1",
+                "p_claim_token": "tok-1",
+                "p_error": "exchange said no",
+                "p_error_kind": "permanent",
+            }
+        ]
+        assert len(_events(caplog, "mark_failed_lock_bound")) == 1
+        # No generic fallback re-mark of the job as 'unknown'.
+        assert len(_calls_to(mock_supabase, "mark_compute_job_failed")) == 1
+
+    @pytest.mark.asyncio
+    async def test_late_mark_failed_records_attempt_error(self) -> None:
+        """A 55006 on the mark_failed label (the watchdog took the row while it
+        ran) is swallowed as a late mark, and the real error is recorded. On
+        the mark_done label nothing is recorded: a finished job had no error,
+        and the watchdog reset is recorded by the database."""
+        def _preempted(_params: dict[str, Any]) -> Any:
+            raise _make_worker_api_error("55006")
+
+        failed_sb = _ledger_supabase(
+            _tokened_jobs(1, kind="sync_trades"), mark_failed=_preempted
+        )
+        with patch("main_worker.get_supabase", return_value=failed_sb), \
+             patch("main_worker.dispatch", new=AsyncMock(return_value=self._failed_result())):
+            await dispatch_tick("worker-late-failed")
+        assert _calls_to(failed_sb, "record_compute_job_attempt_error") == [
+            {
+                "p_job_id": "job-1",
+                "p_claim_token": "tok-1",
+                "p_error": "exchange said no",
+                "p_error_kind": "permanent",
+            }
+        ]
+
+        done_sb = _ledger_supabase(
+            _tokened_jobs(1, kind="sync_trades"), mark_done=_preempted
+        )
+        with patch("main_worker.get_supabase", return_value=done_sb), \
+             patch("main_worker.dispatch", new=AsyncMock(return_value=_DONE)):
+            await dispatch_tick("worker-late-done")
+        assert _calls_to(done_sb, "record_compute_job_attempt_error") == []
+
+    @pytest.mark.asyncio
+    async def test_late_fallback_mark_records_attempt_error(self) -> None:
+        """The outer-catch path (dispatch itself raised) marks the job failed as
+        'unknown'; if that mark is a swallowed 55006 the unknown error text is
+        recorded the same way."""
+        def _preempted(_params: dict[str, Any]) -> Any:
+            raise _make_worker_api_error("55006")
+
+        mock_supabase = _ledger_supabase(
+            _tokened_jobs(1, kind="sync_trades"), mark_failed=_preempted
+        )
+
+        async def _explode(_job: dict[str, Any]) -> DispatchResult:
+            raise RuntimeError("worker-level crash")
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=_explode):
+            await dispatch_tick("worker-late-fallback")
+
+        assert _calls_to(mock_supabase, "record_compute_job_attempt_error") == [
+            {
+                "p_job_id": "job-1",
+                "p_claim_token": "tok-1",
+                "p_error": "worker-level crash",
+                "p_error_kind": "unknown",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["missing-rpc", "runtime"])
+    async def test_record_attempt_error_never_raises(
+        self, failure: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Telemetry must never fail the work it observes: a record RPC that
+        raises (including because the migration is not applied yet) is logged
+        and swallowed, and the loop goes on to the next job."""
+        jobs = _tokened_jobs(2, kind="sync_trades")
+
+        def _mark_failed(_params: dict[str, Any]) -> Any:
+            raise _make_worker_api_error("55P03")
+
+        def _record(_params: dict[str, Any]) -> Any:
+            if failure == "missing-rpc":
+                raise _make_worker_api_error("42883")
+            raise RuntimeError("record transport down")
+
+        mock_supabase = _ledger_supabase(jobs, mark_failed=_mark_failed, record=_record)
+        dispatch = AsyncMock(return_value=self._failed_result())
+
+        with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-record-never-raises")
+
+        assert dispatch.await_count == 2, "the loop must continue past the record failure"
+        events = _events(caplog, "attempt_error_record_failed")
+        assert len(events) == 2
+        assert events[0].job_id == "job-1"  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_record_attempt_error_without_token_is_a_noop(self) -> None:
+        """No claim token means nothing to attest, so no RPC is attempted."""
+        mock_supabase = _ledger_supabase([])
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            await main_worker._record_attempt_error("job-x", None, "boom", "permanent")
+        assert _calls_to(mock_supabase, "record_compute_job_attempt_error") == []
+
+
+class TestFirstHopHealAlert:
+    """A first sync_trades enqueue healed by the first-hop sweep alerts once,
+    exactly as the reconcile-sweep heal does, so a healed first hop is never
+    silent."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_heal_dedupe(self) -> Any:
+        main_worker._RECONCILE_ALERTED.clear()
+        yield
+        main_worker._RECONCILE_ALERTED.clear()
+
+    @pytest.mark.asyncio
+    async def test_first_hop_heal_claim_emits_sentry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        strategy_id = "33333333-3333-4333-8333-333333333333"
+        job = {
+            "id": "job-first-hop",
+            "kind": "sync_trades",
+            "strategy_id": strategy_id,
+            "claim_token": "tok-fh",
+            "metadata": {"source": "first-hop-sweep", "detected_at": "2026-11-23T00:00:00Z"},
+        }
+        spy = _FakeSentry()
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+        dispatch = AsyncMock(return_value=_DONE)
+
+        with patch("main_worker.get_supabase", return_value=_ledger_supabase([job])), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-first-hop-1")
+        assert len(spy.captures) == 1, spy.serialised()
+        capture = spy.captures[0]
+        assert capture["message"] == "Dropped first sync_trades enqueue healed by first-hop sweep"
+        assert capture["level"] == "warning"
+        assert capture["tags"].get("surface") == "first-hop-sweep"
+        assert capture["tags"].get("job_kind") == "sync_trades"
+        assert capture["extras"].get("strategy_id") == strategy_id
+        assert capture["extras"].get("detected_at") == "2026-11-23T00:00:00Z"
+
+        # The SAME heal claimed again (watchdog reset, re-claim): no second alert.
+        with patch("main_worker.get_supabase", return_value=_ledger_supabase([job])), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-first-hop-2")
+        assert len(spy.captures) == 1, "a re-claim of the same heal must not re-alert"
+        assert dispatch.await_count == 2
