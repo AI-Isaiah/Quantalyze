@@ -71,6 +71,12 @@ Requirements: ONCE-01, ONCE-02, ONCE-03, ONCE-04, CONN-01, CONN-03, MT5D-08.
      - confirmation that no cross-owner key and no holder key is in the set, and that the 155.2 holder keys (MM2 on k1, MM3 on k10, FX-AI_V on k3) are untouched.
   2. The founder confirms the permanent deletion before it runs.
   3. It runs once, through existing product paths or RPCs where they exist (for example `delete_allocator_api_key`). It respects the deletion-cascade guards (`quantalyze.sanitize_in_progress` where applicable) and never runs inside a migration's data-reading `DO` block.
+- **Manifest confirmed (founder, 2026-11-23, AskUserQuestion "Yes, delete all (Recommended)"):**
+  - Scope: exactly 13 same-owner duplicate keys (7 deribit, 1 mt5, 5 okx; all disconnected; 5 owners; no holder, no live key, no cross-owner key, none of 155.2's k1, k10 or k3) and the 2 strategies on them (1 published okx, 1 private mt5 on 155.2's k2), with all dependent rows.
+  - Key dependents at census: allocator_holdings 2470, csv_daily_returns 1599, compute_jobs 99, api_key_nav_marks 28, mt5_server_clock_readings 11, key_permission_audit 9.
+  - Strategy dependents at census: strategy_analytics 2, strategy_analytics_series 24, csv_daily_returns 272, trades 125, positions 9, position_snapshots 15, funding_fees 285, match_candidates 119, compute_jobs 57, reconciliation_reports 132, strategy_verifications 2.
+  - The deletion step re-runs the census immediately before deleting. If the set differs in any way (more keys, a key now live or a holder, a 155.2 key appearing), it STOPS and reports instead of deleting. The SUMMARY records before and after counts verbatim.
+  - Path: `delete_allocator_api_key(p_api_key_id, p_cascade_holdings => true)` per key, in the owner's context. Then the product's strategy-delete path for the 2 strategies, because `strategies.api_key_id` is ON DELETE SET NULL. Respect any cascade guards.
 - Going forward: no strategy publishes another key's numbers under its own name, because the refusal (ONCE-01) stops new same-owner duplicates and the one-time deletion removes the stored ones.
 - **Reversibility:** one-way. Permanent deletion of PROD rows.
 
