@@ -449,12 +449,6 @@ other lines are DM Sans `text-caption` (12 to 13 px), while the pill (`text-xs`)
 move to `text-caption`, after checking every surface that mounts the component, and DESIGN.md's
 typography stays one tier per role.
 
-### 164.6.6.3.3-WITHHELD-RESIDUE — a Withheld factsheet still prints three whole-record readings outside the rail's single figures (booked 2026-10-15, Phase 164.6.6.3.3 plan 15 close; ten of thirteen closed 2026-10-15, three founder-deferred items and one hover note open) (owned by Phase 237 FACTSHEETHONEST, v1.22; REQUIREMENTS.md FACT-01; tagged 2026-11-23)
-
-**Why it is open.** D-15 and its two extensions (phase CONTEXT) make every whole-record rail figure read "—" on a Withheld row at full history with no what-if. Plan 15 left three items undashed as ambiguous, and the founder chose on 2026-10-15 to ship and book them ("Ship as is, book them"). The plan 15 review (`164.6.6.3.3-15-REVIEW.md`, no HIGH) and the silent-failure pass added four MEDIUMs, booked under the review rule. **The four MEDIUMs were fixed the same day, the round-2 review's four more in round 3, and the round-3 review's two in round 4,** under the founder rule of 2026-10-15 ("fix also the medium user facing and data integrity issues"); the three founder-deferred items below stay open. Fix reports: `164.6.6.3.3-15-REVIEW-FIX.md`, `-R3.md`, `-R4.md`.
-
-- **Founder-deferred, plan 15 SUMMARY class D6 (OPEN):** (1) Worst 10 Drawdowns: row #1 Depth is the same whole-record max drawdown the rail dashes. (2) EOY Returns and Calmar by Year for a break year that is NOT the Year-to-date year: both compound across it. (3) Style Drift and its Kolmogorov-Smirnov line: the statistic uses every day.
-
 ### SECURITY-TXT-EXPIRES-01 — `security.txt` Expires lapses on 2027-04-10 and nothing renews it (booked 2026-10-07, Phase 164.6.6.3.5)
 
 **Why it is open.** `public/.well-known/security.txt` carries `Expires: 2027-04-10T00:00:00.000Z`.
@@ -3006,18 +3000,6 @@ like counted keys (or refuse with `key_inputs_mismatch` when they carry holes), 
 fails first on today's code.
 ⛔ **Not a close:** a comment saying departed keys are rare.
 
-### 164.6.6.2.1-USDVIEW-READFAIL-CACHED — a failed BTC price read disables the factsheet USD toggle for the cache TTL (booked 2026-10-10, Phase 164.6.6.2.1 review SFH-03) (owned by Phase 237 FACTSHEETHONEST, v1.22; REQUIREMENTS.md CACHE-03; tagged 2026-11-23)
-
-**Why it is open.** `buildUsdView` returns `usdViewUnavailable: "price_read_failed"` as a normal
-payload, so the factsheet cache stores it under the payload key for up to an hour although the
-next read would succeed. The reason is shown to the user. Confidence 5, below the fix bar.
-
-**Owner:** unrouted; the next phase touching the factsheet payload cache.
-**Trigger:** a reported "USD view unavailable" that clears on its own, or that phase starting.
-**Gate (what closes it):** a failed price read renders but is not cached (as the builder's
-degraded-build path already does), with a test that fails first.
-⛔ **Not a close:** a shorter TTL.
-
 ### 164.6.6.2.1-HOLDINGS-UNITLESS-QTY — a native holdings row with a missing or malformed unit prints a bare BTC quantity (booked 2026-10-10, Phase 164.6.6.2.1 review SFH-04)
 
 **Why it is open.** `HoldingsTable` and `derivePhase07Fields` parse `quantity_unit`; a null or
@@ -3030,23 +3012,6 @@ Confidence 5, below the fix bar.
 **Gate (what closes it):** such a row shows a dash or a named reason for the quantity, never a bare
 number, with a test that fails first.
 ⛔ **Not a close:** inferring the unit from the symbol.
-
-### 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED — an owner's private factsheet shows "Data source —" for their own key-backed strategy (booked 2026-10-15, Phase 164.6.6.2.1 UAT item 2) (owned by Phase 237 FACTSHEETHONEST, v1.22; REQUIREMENTS.md FACT-04; tagged 2026-11-23)
-
-**Why it is open.** `src/app/factsheet/[id]/v2/page.tsx` reads the trust tier from
-`readPublicVerificationSignals`, which calls `get_published_trust_signals`, an RPC that answers only
-for PUBLISHED strategies. On a private strategy it returns nothing, so the Terms panel's "Data source"
-(`MandatePanels.tsx`) prints "—", even on the owner's own view of a strategy that is backed by an API
-key. Measured 2026-10-15 on PROD's only BTC-unit strategy (private): "—" in both the BTC and USD views.
-The two views agree, so the 164.6.6.2.1 CR-02 overlay is not at fault. User-facing, owner-only, and it
-withholds a true fact rather than showing a false one.
-
-**Owner:** unrouted; the next phase touching the factsheet trust tier or `get_published_trust_signals`.
-**Trigger:** an owner asks why their own factsheet does not say API-verified.
-**Gate (what closes it):** an owner viewing their own unpublished strategy sees its real tier,
-read through a path that also checks ownership. Anonymous and non-owner readers still get nothing for
-an unpublished strategy. A test fails first on the "—".
-⛔ **Not a close:** widening `get_published_trust_signals` to unpublished strategies for every caller.
 
 ### [167.1.2.2.2-CRON-TICK-RESIDUALS] — four MEDIUM residuals of `public.cron_sync_tick()` that the plan 01 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 01 Task 3) (owned by Phase 242 SECRETSHYGIENE, v1.23; REQUIREMENTS.md SECR-04; tagged 2026-11-23)
 
@@ -3296,16 +3261,6 @@ disagrees with Holdings for that account.
 **Fix.** Use the group-level marker day (the maximum over the account's keys), as
 `equity_reconstruction.py` does. Add a shared case.
 **Owner / Trigger:** the next phase touching `routers/match.py`.
-
-## Phase 170.3 (OGPUBLIC) — routed review items (logged 2026-10-11)
-
-### 170.3-OG-NOTFOUND-CACHE — a not-yet-published strategy's blank card is cached for a day or more (booked 2026-10-11, SFH-2, MEDIUM) (owned by Phase 237 FACTSHEETHONEST, v1.22; REQUIREMENTS.md CACHE-01; tagged 2026-11-23)
-
-**Why it is open.** A genuine not-found (an unpublished or unknown id) renders the generic card under
-`LONG_CACHE_CONTROL` (1 day `s-maxage` plus 7 days `stale-while-revalidate`). If a link is shared before
-publishing, unfurlers and the CDN keep the blank card after the strategy is published.
-**Fix.** Give a not-found a short cache, and keep the long cache for rendered data.
-**Owner / Trigger:** the next phase touching `src/app/api/og/`. Phase 209 (2026-11-14) touched it and left this open: the cache policy for a genuine not-found is a separate decision. A malformed id now takes the same not-found path, under the same long cache.
 
 ## Phase 164.6.8 (OUTAGEALERT) — routed review items (logged 2026-10-14)
 
@@ -5241,12 +5196,6 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 **Owner / Trigger:** unowned. Trigger: a Bybit key on PROD shows an on-chain deposit or withdrawal (the probe's `bybit_onchain_rows` above 0). Action: re-run the read-only probe (`analytics-service/scripts/derivegaps_probe.py`), read `bybit_paired_rows`, `bybit_unpaired_onchain_rows` and `bybit_near_miss_rows`, and bring the replace-versus-union question to the founder with those counts. Closed when the pairing is measured and the flow source is decided, or the founder rules otherwise.
 
 ## Phase 190 (FACTSHEETQUEUED) — routed items (logged 2026-11-03)
-
-### [190-RERUN-SURFACES-NOT-HOLDING] — surfaces outside D-05's reach still withhold a strategy's figures during a re-run (booked 2026-11-03, Phase 190 D-05, USER-FACING) (owned by Phase 237 FACTSHEETHONEST, v1.22; REQUIREMENTS.md FACT-02; tagged 2026-11-23)
-
-**Reading.** Phase 190 holds a strategy's last computed figures during a pending or computing re-run (D-02) on the factsheet, on every lane through the resolve stage, on the approval gate, on the discovery and owner lists and on /compare. The founder kept the reach there (D-05, 2026-11-03). Every other surface keeps its own terminal-success gate and so still withholds or blanks a re-running strategy: the share card image (`/api/og/factsheet/[id]`), the tear sheet and the two PDF routes (`/api/factsheet/[id]/pdf`, `/api/factsheet/[id]/tearsheet.pdf`), the returns API (`/api/strategies/[id]/returns`), recommendations, portfolios (`StrategyBreakdownTable` and the portfolio PDF) and the scenario composer. Three more items do not hold either. The strategy page's own panels (`getStrategyDetailV2`) keep a terminal-status gate and live data-quality chips. Three detail reads that share `PUBLIC_ANALYTICS_COLUMNS` carry no series and no marker alias, so they withhold during a re-run by design: `getPublicStrategyDetail`, `getFactsheetDetail` (the tear sheet read) and `getStrategyDetail` (the discovery page's own read; its factsheet does admit through the resolve stage). Composite approval during a re-stitch still answers 409 (PUB-01, plan 06 left it unchanged). In the derive-to-success window these surfaces show what they showed before the phase: the withheld or not-computed state while the row reads pending or computing, and the stored panels of a terminal-held row beside live data-quality chips. The ship PR for this phase merged before this entry was written, so the entry rides the records PR; the release notes name the same surfaces as known limits.
-
-**Owner / Trigger:** unowned. Trigger: the next phase that changes any listed surface's analytics gate, or a report of one of them going blank or mixing generations during a re-run. Closed when each listed surface follows plan 03's rule (`hasStoredAnalyticsResult` with `isRecomputeOverStoredResult`, plus `hasUnboundDerivePrestamp` where it reads the flags blob), or the founder rules it out.
 
 ### [190-SC5-POSTDEPLOY-REREAD] — the Phase 190 post-deploy finalize reading, the no-analytics check and the 390 px check are still unmeasured on PROD (booked 2026-11-03, Phase 190 SC-5, USER-FACING)
 
