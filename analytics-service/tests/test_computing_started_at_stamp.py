@@ -946,6 +946,9 @@ _TS_BENIGN_FILES: Final[dict[str, int]] = {
     "src/lib/types.ts": 1,
     # `EMPTY_ANALYTICS` — an in-memory placeholder, never sent to PostgREST.
     "src/lib/utils.ts": 1,
+    # Phase 237 `analyticsHold`: a READ — the row's status narrowed to a string or
+    # null for the hold verdict. It never writes strategy_analytics.
+    "src/lib/analytics-hold.ts": 1,
 }
 
 
@@ -1194,7 +1197,7 @@ def test_typescript_writer_census_counts() -> None:
     EXPECTED_PER_FILE: Final[dict[str, int]] = _TS_PAYLOAD_FILES
     EXPECTED_TOTAL = 4
     EXPECTED_BENIGN_PER_FILE: Final[dict[str, int]] = _TS_BENIGN_FILES
-    EXPECTED_BENIGN_TOTAL = 2
+    EXPECTED_BENIGN_TOTAL = 3  # Phase 237 adds src/lib/analytics-hold.ts (a read)
 
     hits = _scan_typescript()
     actual: dict[str, int] = {}
