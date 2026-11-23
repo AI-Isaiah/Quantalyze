@@ -622,19 +622,24 @@ Not a rename/refactor phase. The one-time deletion is a data operation and is sp
 | A8 | The data-dependence linter's path scope is `supabase/migrations/**` only, so an ad-hoc DO block in an orchestrator script is allowed | Q5 | if it also scans `docs/runbooks`, express the assertion as plain SQL (a `SELECT` with `CASE` and a forced division by zero) instead |
 | A9 | New code and function names used in this file are placeholders chosen by the planner | throughout | none |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **OQ-1: Where is the demoted key "named on its key card"?**
    - Known: `accountShareNote` returns null for a key that is itself not working (WR-02), which is exactly the demoted key.
    - Unclear: whether the founder wants a new sentence or accepts the existing status display.
    - Recommendation: add one sentence for "marked duplicate of a working holder, key itself not working", read DESIGN.md first; ask the founder only if the planner wants to skip it.
+   - RESOLVED (planning 2026-11-23): settled by plan 08 Task 3, which adds that sentence through `accountShareNote` on both key cards. Disconnected marked keys stay silent.
 2. **OQ-2: A demoted key that recovers (rotate-secret returns it to idle) becomes a live marked duplicate, possibly with a strategy.**
    - Known: readers count one account through the working holder; the marker is not cleared on recovery.
    - Unclear: whether that live marked key with its own strategy violates the criterion 3 intent ("no strategy publishes another key's numbers under its own name").
    - Recommendation: log it for the founder; do not decide in code. It is the shape the Q1 ruling accepts.
+   - RESOLVED (planning 2026-11-23): settled by plan 07, which sets the behaviour. The recovered key stays marked while the holder works; nothing is disconnected or unpublished; the slot moves back only by MT5D-08. Plan 11 states the behaviour in the route docblock and carries it to the founder in its SUMMARY's "For the founder" section, as recommended.
 3. **OQ-3: The exact index-last gate (F-7).** Recommendation in A5.
+   - RESOLVED (planning 2026-11-23): settled by gate A5. Plan 09 Task 3 writes the read-only census (`docs/runbooks/venue-server-backfill/census.sql`). Plan 10 Task 4 has the orchestrator run it on PROD before PR-3 opens, and any non-pass blocks PR-3.
 4. **OQ-4: Prune `allocator_equity_derived` rows `key_inputs:<deleted key id>` for the 13 keys?** Recommendation: yes, in the same transaction, listed in the pre-delete census and recorded in the SUMMARY, because the founder said "all associated ... data" and they are regenerable derived rows. Needs the founder's nod if the planner treats it as outside the confirmed manifest.
+   - RESOLVED (planning 2026-11-23), departing from this recommendation: plan 02 does NOT prune these rows in the delete transaction. Reason: the founder confirmed an exact manifest on 2026-11-23 (CONTEXT Q5, "Manifest confirmed"), and these rows are not in it. Deleting outside a confirmed manifest is what Q5's stop-on-any-difference rule forbids. Instead, plan 02's census counts the `key_inputs` rows and every other derived row keyed to the 13 keys or 2 strategies that no foreign key cascades. At its checkpoint the orchestrator reports that count to the founder and records the founder's decision (delete in a follow-up run, or leave). The decision is an owned follow-up, never a silent leftover.
 5. **OQ-5: Do the 2 strategies have off-manifest cross-user dependents?** Only the live census can answer (Q5 item 2). A nonzero count stops the run.
+   - RESOLVED (planning 2026-11-23): settled by plan 02. `census-dependents.sql` reports every foreign-key referencer. `delete.sql` aborts with nothing written when an off-manifest row is found: the blocking-FK, unnamed-FK-table and deep-cascade abort arms, each proven on the fixture by `src/__tests__/oneaccountonce-delete-sql-exec.test.ts`.
 
 ## Sources
 
