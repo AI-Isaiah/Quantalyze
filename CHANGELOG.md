@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.133.61.5] - 2026-11-23 — records: 155.2 runs on 2026-12-01 with the November monthly statements only
+
+Records PR. It holds no source, test, script, workflow or migration change. One commit on `records/155.2-monthly-statements`.
+
+### Changed
+- **155.2's run day moves to 2026-12-01, and Gate B uses monthly statements only** (founder ruling 2026-11-23, recorded in `155.2-CONTEXT.md`, `155.2-RULINGS.md` and `ROADMAP.md` per the deviation policy). The founder cannot produce the daily broker statements for 2026-10-23 to 2026-11-20. Gate B's `statement_equity` now comes from the November 2026 monthly statement of each account, and plan 12's verdict runs once those statements are in hand. This supersedes the after-weekend run day (Mon 2026-11-23), which is kept as lineage.
+
+### Notes
+- A monthly statement may carry equity only at its period end, not at the Fri 2026-11-20 edge that the weekend reading is bound to (D-E). Plans 11 to 14 are re-planned from the actual statements rather than patched now.
+- The 155.2 freeze window opens only at plan 12's recapture, so 225, 229 and the other phases it binds can merge until then and be inside the verdict.
+
 ## [0.133.61.4] - 2026-11-23 — records: start milestone v1.22 TRUTH — data you can trust (21 phases; v1.23 HARDEN planned)
 
 Records PR. It starts milestone v1.22 "TRUTH — data you can trust" and holds no source, test, script, workflow or migration change. Eight commits on `records/start-v1.22`: the milestone start, two research commits, requirements, the roadmap, the F-10 follow-up records, the `TODOS.md` triage cleanup and this release commit. Goal: every number, label and alert we show is correct, or it fails loudly.
