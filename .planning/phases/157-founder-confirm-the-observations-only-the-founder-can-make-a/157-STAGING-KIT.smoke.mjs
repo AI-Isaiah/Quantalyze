@@ -40,7 +40,7 @@ const ID = ["a".repeat(8), "b".repeat(4), "c".repeat(4), "d".repeat(4), "e".repe
 // Fresh context per test: its own fake window, spy, document and kit evaluation.
 // The kit refuses to install outside the page's JS world, which it detects by self.__next_f (a Next
 // app router global). The fake window defines it unless a case passes { nextF: false }.
-function makeEnv({ nextF = true, ignoreFetchAssign = false } = {}) {
+function makeEnv({ nextF = true, ignoreFetchAssign = false, installedVersion = null } = {}) {
   const spyCalls = [];
   const consoleErrors = [];
   const elements = new Map();
@@ -51,6 +51,7 @@ function makeEnv({ nextF = true, ignoreFetchAssign = false } = {}) {
     },
   };
   if (nextF) window.__next_f = [];
+  if (installedVersion !== null) window.__fconf = { version: installedVersion };
   if (ignoreFetchAssign) {
     const native = window.fetch;
     Object.defineProperty(window, "fetch", { get: () => native, set() {}, configurable: true });
@@ -84,6 +85,7 @@ function makeEnv({ nextF = true, ignoreFetchAssign = false } = {}) {
     loadError,
     consoleErrors,
     window,
+    document,
     spyCalls,
     elements,
     load,
@@ -217,6 +219,15 @@ test("(h) method normalisation: Request, (string, init) and (URL, init) all yiel
   assert.equal(env.spyCalls.length, 0);
 });
 
+test("a re-evaluation with a different kit version console.errors and throws, and does not replace the installed one", () => {
+  const env = makeEnv({ installedVersion: "head-0def03553-r1" });
+  assert.match(env.loadError.message, /kit version mismatch/);
+  assert.equal(env.consoleErrors.length, 1);
+  assert.match(env.consoleErrors[0].join(" "), /different kit version is already installed \(head-0def03553-r1/);
+  assert.equal(env.fconf().version, "head-0def03553-r1");
+  assert.equal(env.window.fetch.name === "fconfFetch", false);
+});
+
 test("(i) a second evaluation leaves window.fetch the same function (no double wrap)", () => {
   const env = makeEnv();
   const wrapped = env.window.fetch;
@@ -245,6 +256,36 @@ test("(l) if the assignment to window.fetch does not stick, the kit throws and p
   const env = makeEnv({ ignoreFetchAssign: true });
   assert.match(env.loadError.message, /window\.fetch is not the kit wrapper/);
   assert.equal(env.marker(), undefined);
+});
+
+test("arm paints first: if the marker cannot be drawn, arm throws and the state and logs are unchanged", async () => {
+  const env = makeEnv();
+  env.fconf().arm("connect");
+  const before = env.fconf().refused.length;
+  env.elements.delete("fconf-staging-marker");
+  const createElement = env.document.createElement;
+  env.document.createElement = () => {
+    throw new Error("no dom");
+  };
+  assert.throws(() => env.fconf().arm("submit", "DRAFT_LOOKUP_FAILED"), /no dom/);
+  env.document.createElement = createElement;
+  assert.equal(env.fconf().mode, "connect");
+  assert.equal(env.fconf().refused.length, before);
+  // the previous mode still answers: connect stubs create-with-key, and the envelope was never armed
+  assert.equal((await env.call(post("/api/strategies/create-with-key"))).status, 500);
+  assert.equal((await env.call(post("/api/strategies/finalize-wizard"))).status, 599);
+});
+
+test("the wrapper repaints a removed marker on every call, with the current state", async () => {
+  const env = makeEnv();
+  env.fconf().arm("submit", "DRAFT_LOOKUP_FAILED");
+  env.elements.delete("fconf-staging-marker");
+  assert.equal(env.marker(), undefined);
+  await env.call(APP("/api/no/such/route"));
+  assert.equal(env.marker().textContent, "STAGED RESPONSES ACTIVE — FCONF-03 (submit: DRAFT_LOOKUP_FAILED)");
+  env.elements.delete("fconf-staging-marker");
+  await env.call("https://telemetry.example.test/decide/");
+  assert.equal(env.marker().textContent, "STAGED RESPONSES ACTIVE — FCONF-03 (submit: DRAFT_LOOKUP_FAILED)");
 });
 
 test("arm rejects an unknown mode by message and leaves the mode unchanged", () => {

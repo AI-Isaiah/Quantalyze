@@ -4,8 +4,8 @@
 // (or run it through the browser tool), then call window.__fconf.arm("<mode>") BEFORE clicking the
 // wizard entry. A reload removes the wrapper and the marker together.
 //
-// Literals were read at HEAD 0def03553 (the `version` constant below). Re-read the sources if any
-// of them changed since:
+// Literals were read at HEAD 0def03553 (the `VERSION` constant below carries that HEAD plus a kit
+// revision, -rN, bumped whenever the logic changes). Re-read the sources if any of them changed since:
 //   - create-with-key route: the catch tail `NextResponse.json({ code }, { status, headers })` and
 //     the classifier rows that resolve to SEAM_INTERNAL_FAULT (all status 500); headers come from
 //     keyRouteFailureHeaders, which returns NO_STORE_HEADERS for a non-breaker error.
@@ -66,7 +66,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "head-0def03553";
+  var VERSION = "head-0def03553-r2";
   var JSON_CT = "application/json";
   var NO_STORE = "private, no-store";
   var MARKER_ID = "fconf-staging-marker";
@@ -356,6 +356,14 @@
   }
 
   if (window.__fconf) {
+    if (window.__fconf.version !== VERSION) {
+      // never keep an older kit's logic silently: the page already wraps fetch with it
+      console.error(
+        "[fconf] a different kit version is already installed (" + String(window.__fconf.version) +
+          ", this is " + VERSION + "); reload the tab, then paste this kit again",
+      );
+      throw new Error("[fconf] kit version mismatch; the installed kit was not replaced");
+    }
     console.log("[fconf] kit already installed; not wrapping twice");
     return;
   }
@@ -405,8 +413,8 @@
     return el;
   }
 
-  function paint() {
-    marker().textContent = markerText(state.mode, state.envelope);
+  function paint(mode, envelope) {
+    marker().textContent = markerText(mode, envelope);
   }
 
   function respond(d) {
@@ -418,6 +426,8 @@
     var method;
     var verdict;
     try {
+      // the marker is the founder's only on-screen proof; put it back if the page removed it
+      if (!document.getElementById(MARKER_ID)) paint(state.mode, state.envelope);
       href = new URL(hrefOf(input), location.href).href;
       method = methodOf(input, init);
       verdict = decide(method, href, state.mode, state.envelope);
@@ -453,8 +463,8 @@
     if (verdict.kind === "stub") {
       hits.push(entry(scrub(method, href), verdict.stub.status));
       if (verdict.stub.consumes) {
+        paint(state.mode, null);
         state.envelope = null;
-        paint();
       }
       return Promise.resolve(respond(verdict.stub));
     }
@@ -490,9 +500,10 @@
           throw new Error("[fconf] only the submit mode takes an envelope code");
         }
       }
+      // paint first: if the marker cannot be drawn, the state stays as it was
+      paint(mode, envelopeCode || null);
       state.mode = mode;
       state.envelope = envelopeCode || null;
-      paint();
       [hits, passed, refused, outside].forEach(function (log) {
         log.push({ at: new Date().toISOString(), mode: state.mode, envelope: state.envelope, boundary: true });
       });
@@ -510,5 +521,5 @@
     enumerable: true,
   });
   window.__fconf = ctl;
-  paint();
+  paint(null, null);
 })();
