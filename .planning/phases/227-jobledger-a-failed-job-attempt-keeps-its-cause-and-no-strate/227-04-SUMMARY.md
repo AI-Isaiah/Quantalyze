@@ -188,7 +188,7 @@ Docker is not available on this host, so `scripts/local-stack/run.sh up` cannot 
 - **Nothing calls the detector yet.** Plan 09's Python reader does. Until it runs, no row is written and nothing pages.
 - **`npm run schema:functions:check` is red by construction** (`snapshot-only: record_reconcile_readmit_exhaustions`) until plan 10 adds its `NAME_SET_RATCHET` row; plan 01 and the plan 10 text forbid editing `scripts/dump-sql-functions.ts` here. `npm run schema:functions` itself adds only the new snapshot file. The `baseline-content-drift` and VAC-08 rows for the new objects likewise appear until apply-on-merge and the post-apply re-dump (plan 11 owns the follow-up).
 - **Local-stack lane not run** (no Docker); see the substitution note above.
-- No census pin was edited (mutation floors, `FILES_FLOOR`/`ARMS_FLOOR`, ci.yml counts): a full `run.mjs` would see two more annotated sections and one more annotated file, which plan 10 measures and moves once.
+- **Census pins were not edited, and three vitest files read red because of this plan's new gate (measured by running the 32 vitest files that scan `supabase/migrations`; the other 29 pass).** They move once, in plan 10, from a measured run: `mutation-runner-floors.test.ts` (86 of 113 files annotated against `FILES_FLOOR` 85; 918 twins against `ARMS_FLOOR` 910, which is this file's eight), `mutation-annotation-parser.test.ts` (corpus ratio 113 against 112, plus the 918-versus-910 and 1042-versus-1028 twin and needle counts) and `contracts/ci-anti-skip-gate.contract.test.ts` (31 sentinel files against 30, and ci.yml's per-file arm table lacks this file's `ALL 7 ARMS EXECUTED`). Sibling plans add their own deltas to the same counts, which is why plan 10 owns them.
 
 ## Issues Encountered
 
