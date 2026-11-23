@@ -89,6 +89,10 @@
 -- pragma to match a gate log.
 -- ⚠️ VAC-08 (repo-vs-TEST body pairing, the test-db-drift job) is RED on the PR by
 -- construction until apply-on-merge brings TEST forward.
+-- The first pragma is for reset_stalled_compute_jobs, the second for reclaim_stuck_compute_jobs.
+--
+-- prod-body-ack: 3923ef09a61533f01897502dc83085e496d1da13d96b17f1add28df855dd93c2
+-- prod-body-ack: acf51c222c4581b1241bb8402ec054d77d3b177241926779bd151336a6217f76
 --
 -- Rollback: supabase/migrations/down/20261124120100-rollback.sql (manual, never auto-applied).
 -- It restores both functions to their 20260516104201 bodies and leaves the ledger rows in
@@ -333,3 +337,189 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION reclaim_stuck_compute_jobs(interval) FROM PUBLIC, anon, authenticated;
+
+-- ==========================================================================
+-- STEP 3: self-verify, CATALOGUE ONLY (reads no table row)
+-- ==========================================================================
+-- Each condition is computed into a named boolean and tested in its own IF, so a mutation
+-- twin of the gates (supabase/tests/test_reset_stalled_bridge_provenance.sql and
+-- test_compute_job_attempt_failures.sql) can stand one IF down and let the arm's OWN
+-- observable go red. Every RAISE is one literal. Bodies are read comment-stripped, so a
+-- comment can never satisfy a clause. Counts, not presence: reset has TWO passes, so a clause
+-- that one pass satisfies would hide the other pass losing it.
+DO $verify$
+DECLARE
+  v_rs_oid         oid := to_regprocedure('public.reset_stalled_compute_jobs(interval, jsonb)');
+  v_rc_oid         oid := to_regprocedure('public.reclaim_stuck_compute_jobs(interval)');
+  v_rs_body        text;
+  v_rc_body        text;
+  v_cfg            text[];
+  v_ret            oid;
+  v_rs_pin_ok      boolean;
+  v_rs_ret_ok      boolean;
+  v_rs_ledger_ok   boolean;
+  v_rs_bound_ok    boolean;
+  v_rs_bridge_ok   boolean;
+  v_rs_group_ok    boolean;
+  v_rs_keyless_ok  boolean;
+  v_rs_contract_ok boolean;
+  v_rs_count_ok    boolean;
+  v_rs_excl_ok     boolean;
+  v_rs_nokinds_ok  boolean;
+  v_rs_acl_ok      boolean;
+  v_rc_pin_ok      boolean;
+  v_rc_ret_ok      boolean;
+  v_rc_ledger_ok   boolean;
+  v_rc_bound_ok    boolean;
+  v_rc_bridge_ok   boolean;
+  v_rc_group_ok    boolean;
+  v_rc_keyless_ok  boolean;
+  v_rc_contract_ok boolean;
+  v_rc_nokinds_ok  boolean;
+  v_rc_acl_ok      boolean;
+BEGIN
+  -- ----- reset_stalled_compute_jobs
+  IF v_rs_oid IS NULL THEN
+    RAISE EXCEPTION 'jobledger: reset_stalled_compute_jobs(interval, jsonb) does not exist, so no stalled job is ever reset';
+  END IF;
+  v_rs_body := regexp_replace(pg_get_functiondef(v_rs_oid), '--[^\n]*', '', 'g');
+
+  SELECT p.proconfig, p.prorettype INTO v_cfg, v_ret FROM pg_proc p WHERE p.oid = v_rs_oid;
+  v_rs_pin_ok := COALESCE(v_cfg, ARRAY[]::text[]) @> ARRAY['search_path=public, pg_catalog'];
+  IF NOT v_rs_pin_ok THEN
+    RAISE EXCEPTION 'jobledger: reset_stalled_compute_jobs must pin search_path=public, pg_catalog, otherwise a SECURITY DEFINER function resolves names through the caller''s path';
+  END IF;
+  v_rs_ret_ok := v_ret = 'integer'::regtype;
+  IF NOT v_rs_ret_ok THEN
+    RAISE EXCEPTION 'jobledger: reset_stalled_compute_jobs must still RETURN integer, otherwise the worker''s watchdog_tick reads the reset count from the wrong type';
+  END IF;
+
+  v_rs_ledger_ok :=
+        (SELECT count(*) FROM regexp_matches(v_rs_body, 'INSERT INTO public\.compute_job_attempt_failures', 'g')) = 2
+    AND (SELECT count(*) FROM regexp_matches(v_rs_body, 'u\.old_attempts,\s*u\.old_claim_token,\s*''watchdog_reset'',\s*NULL,\s*''worker_stalled'',\s*u\.old_claimed_by', 'g')) = 2;
+  IF NOT v_rs_ledger_ok THEN
+    RAISE EXCEPTION 'jobledger: both passes of reset_stalled_compute_jobs must write a watchdog_reset ledger row carrying the attempt count and claim token held BEFORE the reset, otherwise a stall reads like a real error or names the wrong attempt';
+  END IF;
+
+  v_rs_bound_ok :=
+        (SELECT count(*) FROM regexp_matches(v_rs_body, 'LIMIT 500', 'g')) = 2
+    AND (SELECT count(*) FROM regexp_matches(v_rs_body, 'FOR UPDATE SKIP LOCKED', 'g')) = 2;
+  IF NOT v_rs_bound_ok THEN
+    RAISE EXCEPTION 'jobledger: both passes of reset_stalled_compute_jobs must keep LIMIT 500 and FOR UPDATE SKIP LOCKED (M-0781), otherwise one watchdog tick locks an unbounded backlog and blocks every concurrent claim';
+  END IF;
+
+  v_rs_bridge_ok :=
+        (SELECT count(*) FROM regexp_matches(v_rs_body, 'pg_advisory_xact_lock\(hashtext\(''mark_compute_job_bridge''\),\s*hashtext\(r_b\.strategy_id::text\)\)', 'g')) = 1
+    AND (SELECT count(*) FROM regexp_matches(v_rs_body, 'PERFORM sync_strategy_analytics_status\(r_b\.strategy_id,\s*r_b\.job_id\)', 'g')) = 1;
+  IF NOT v_rs_bridge_ok THEN
+    RAISE EXCEPTION 'jobledger: reset_stalled_compute_jobs must take the mark_compute_job_bridge advisory lock and call sync_strategy_analytics_status with the reset job id as trigger, otherwise a reset strategy keeps its stale status and curated sentence, or a side-kind reset bounces a published status';
+  END IF;
+
+  v_rs_group_ok := (SELECT count(*) FROM regexp_matches(v_rs_body, 'GROUP BY cj\.strategy_id,\s*cj\.kind', 'g')) = 1;
+  IF NOT v_rs_group_ok THEN
+    RAISE EXCEPTION 'jobledger: reset_stalled_compute_jobs must make one bridge call per distinct strategy AND kind, otherwise the bridge cannot judge each reset job''s kind itself';
+  END IF;
+
+  v_rs_keyless_ok := (SELECT count(*) FROM regexp_matches(v_rs_body, 'cj\.strategy_id IS NOT NULL', 'g')) = 1;
+  IF NOT v_rs_keyless_ok THEN
+    RAISE EXCEPTION 'jobledger: reset_stalled_compute_jobs must skip rows with a NULL strategy_id in its bridge loop, otherwise one stalled key-mode job makes the bridge raise and aborts the whole watchdog tick';
+  END IF;
+
+  v_rs_contract_ok :=
+        (SELECT count(*) FROM regexp_matches(v_rs_body, 'last_error\s*=\s*''worker_stalled''', 'g')) = 2
+    AND (SELECT count(*) FROM regexp_matches(v_rs_body, 'claim_token\s*=\s*NULL', 'g')) = 2;
+  IF NOT v_rs_contract_ok THEN
+    RAISE EXCEPTION 'jobledger: both passes of reset_stalled_compute_jobs must still set last_error to worker_stalled and NULL the claim_token (mig 117 P97 fence), otherwise a stalled worker''s late mark is accepted';
+  END IF;
+
+  v_rs_count_ok := (SELECT count(*) FROM regexp_matches(v_rs_body, 'v_reset := v_reset \+ v_partial', 'g')) = 2;
+  IF NOT v_rs_count_ok THEN
+    RAISE EXCEPTION 'jobledger: both passes of reset_stalled_compute_jobs must add their row count to the returned total, otherwise the worker logs and alerts on a wrong number of reset rows';
+  END IF;
+
+  v_rs_excl_ok := strpos(v_rs_body, 'NOT (p_per_kind_overrides ? kind)') > 0;
+  IF NOT v_rs_excl_ok THEN
+    RAISE EXCEPTION 'jobledger: the default pass of reset_stalled_compute_jobs must exclude kinds named in p_per_kind_overrides, otherwise a job inside its own kind''s window is reset under the shorter default';
+  END IF;
+
+  v_rs_nokinds_ok := strpos(v_rs_body, 'v_side_kinds') = 0;
+  IF NOT v_rs_nokinds_ok THEN
+    RAISE EXCEPTION 'jobledger: reset_stalled_compute_jobs must not spell the bridge''s side-kind list (v_side_kinds), otherwise two copies of that list drift apart';
+  END IF;
+
+  v_rs_acl_ok := NOT has_function_privilege('public', v_rs_oid, 'EXECUTE')
+             AND NOT has_function_privilege('anon', v_rs_oid, 'EXECUTE')
+             AND NOT has_function_privilege('authenticated', v_rs_oid, 'EXECUTE');
+  IF NOT v_rs_acl_ok THEN
+    RAISE EXCEPTION 'jobledger: reset_stalled_compute_jobs must not be executable by PUBLIC, anon or authenticated, otherwise any caller can reset running jobs';
+  END IF;
+
+  -- ----- reclaim_stuck_compute_jobs
+  IF v_rc_oid IS NULL THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs(interval) does not exist, so no stuck job is ever reclaimed';
+  END IF;
+  v_rc_body := regexp_replace(pg_get_functiondef(v_rc_oid), '--[^\n]*', '', 'g');
+
+  SELECT p.proconfig, p.prorettype INTO v_cfg, v_ret FROM pg_proc p WHERE p.oid = v_rc_oid;
+  v_rc_pin_ok := COALESCE(v_cfg, ARRAY[]::text[]) @> ARRAY['search_path=public, pg_catalog'];
+  IF NOT v_rc_pin_ok THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs must pin search_path=public, pg_catalog, otherwise a SECURITY DEFINER function resolves names through the caller''s path';
+  END IF;
+  v_rc_ret_ok := v_ret = 'integer'::regtype;
+  IF NOT v_rc_ret_ok THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs must still RETURN integer, otherwise its caller reads the reclaim count from the wrong type';
+  END IF;
+
+  v_rc_ledger_ok :=
+        (SELECT count(*) FROM regexp_matches(v_rc_body, 'INSERT INTO public\.compute_job_attempt_failures', 'g')) = 1
+    AND (SELECT count(*) FROM regexp_matches(v_rc_body, 'u\.old_attempts,\s*u\.old_claim_token,\s*''stall_reclaim'',\s*NULL,\s*NULL,\s*u\.old_claimed_by', 'g')) = 1;
+  IF NOT v_rc_ledger_ok THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs must write a stall_reclaim ledger row carrying the PRE-decrement attempt count and the held claim token, otherwise the record names an attempt that never stalled';
+  END IF;
+
+  v_rc_bound_ok :=
+        (SELECT count(*) FROM regexp_matches(v_rc_body, 'LIMIT 500', 'g')) = 1
+    AND (SELECT count(*) FROM regexp_matches(v_rc_body, 'FOR UPDATE SKIP LOCKED', 'g')) = 1;
+  IF NOT v_rc_bound_ok THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs must keep LIMIT 500 and FOR UPDATE SKIP LOCKED (M-0781), otherwise one call locks an unbounded backlog and blocks every concurrent claim';
+  END IF;
+
+  v_rc_bridge_ok :=
+        (SELECT count(*) FROM regexp_matches(v_rc_body, 'pg_advisory_xact_lock\(hashtext\(''mark_compute_job_bridge''\),\s*hashtext\(r_b\.strategy_id::text\)\)', 'g')) = 1
+    AND (SELECT count(*) FROM regexp_matches(v_rc_body, 'PERFORM sync_strategy_analytics_status\(r_b\.strategy_id,\s*r_b\.job_id\)', 'g')) = 1;
+  IF NOT v_rc_bridge_ok THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs must take the mark_compute_job_bridge advisory lock and call sync_strategy_analytics_status with the reclaimed job id as trigger, otherwise a reclaimed strategy keeps its stale status and curated sentence';
+  END IF;
+
+  v_rc_group_ok := (SELECT count(*) FROM regexp_matches(v_rc_body, 'GROUP BY cj\.strategy_id,\s*cj\.kind', 'g')) = 1;
+  IF NOT v_rc_group_ok THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs must make one bridge call per distinct strategy AND kind, otherwise the bridge cannot judge each reclaimed job''s kind itself';
+  END IF;
+
+  v_rc_keyless_ok := (SELECT count(*) FROM regexp_matches(v_rc_body, 'cj\.strategy_id IS NOT NULL', 'g')) = 1;
+  IF NOT v_rc_keyless_ok THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs must skip rows with a NULL strategy_id in its bridge loop, otherwise one stuck key-mode job makes the bridge raise and aborts the whole call';
+  END IF;
+
+  v_rc_contract_ok :=
+        (SELECT count(*) FROM regexp_matches(v_rc_body, 'attempts\s*=\s*GREATEST\(cj\.attempts\s*-\s*1,\s*0\)', 'g')) = 1
+    AND (SELECT count(*) FROM regexp_matches(v_rc_body, 'reclaim_count\s*=\s*cj\.reclaim_count\s*\+\s*1', 'g')) = 1;
+  IF NOT v_rc_contract_ok THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs must still decrement attempts (mig 109 P2) and bump reclaim_count, otherwise a reclaimed job burns an attempt it never ran or loses its reclaim audit trail';
+  END IF;
+
+  v_rc_nokinds_ok := strpos(v_rc_body, 'v_side_kinds') = 0;
+  IF NOT v_rc_nokinds_ok THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs must not spell the bridge''s side-kind list (v_side_kinds), otherwise two copies of that list drift apart';
+  END IF;
+
+  v_rc_acl_ok := NOT has_function_privilege('public', v_rc_oid, 'EXECUTE')
+             AND NOT has_function_privilege('anon', v_rc_oid, 'EXECUTE')
+             AND NOT has_function_privilege('authenticated', v_rc_oid, 'EXECUTE');
+  IF NOT v_rc_acl_ok THEN
+    RAISE EXCEPTION 'jobledger: reclaim_stuck_compute_jobs must not be executable by PUBLIC, anon or authenticated, otherwise any caller can reclaim running jobs';
+  END IF;
+
+  RAISE NOTICE 'jobledger: reset_stalled_compute_jobs and reclaim_stuck_compute_jobs verified (pinned search_path, integer result, ledger row per pass, LIMIT 500 and SKIP LOCKED kept, one sorted bridge call per strategy and kind, key-mode rows skipped, the 20260516104201 contract kept, no side-kind list, no anon or authenticated EXECUTE).';
+END
+$verify$;
