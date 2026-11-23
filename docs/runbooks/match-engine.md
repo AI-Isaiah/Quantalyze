@@ -201,7 +201,7 @@ them.
 criterion 7 said: *"Write ONE forward migration re-scheduling `match_engine_cron` to the achievable
 Vault-backed command."* **D1 supersedes it** — the registration this section performs in Step 2 is
 a runbook-hosted LIVE op, never a migration. The old wording is not deleted anywhere it survives as
-lineage; this is an additive flag, matched by a line in `TODOS.md`'s `[CRON-DRIFT-01]` entry.
+lineage; this is an additive flag, matched by a line in `TODOS.md`'s `[CRON-DRIFT-01]` entry (closed; entry deleted 2026-11-23).
 
 ### P0 — which database is this? (BLOCKING, and FIRST in this session — repeat CLAUDE.md's rule)
 

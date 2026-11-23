@@ -5,7 +5,8 @@
 - ✅ **v1.21 UX — trustworthy, navigable, lean** — Phases 192–206 (shipped 2026-11-13)
 - ✅ **v1.20 Backlog Burndown** — Phases 158–191 (shipped 2026-11-06)
 - ✅ **v1.19 JOB/RATE** — Phases 143–146, 146.1, 146.2 (shipped 2026-08-20)
-- 🚧 **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 155.2, 157 (resumed 2026-11-13)
+- 🚧 **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 207–220, all complete (resumed 2026-11-13; 155.2's remaining work, 157 and 221–225 moved to the next milestone 2026-11-23); ready for `/gsd-audit-milestone`
+- 📋 **Next milestone (not yet started)** — Phases 155.2, 157, 221–225 (moved out of v1.18 2026-11-23, founder)
 - ✅ **v1.17 MT5 — ingested, wizardable, surfaced** — Phases 147–154, 156 (shipped 2026-08-14)
 - ✅ **v1.16 Production Resilience & Reliability** — Phases 140–142 (shipped 2026-08-14)
 - Earlier milestones: see "Shipped Milestones" below.
@@ -49,7 +50,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 ---
 
-## Current Milestone: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 155.1, 155.2, 157)
+## Current Milestone: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 155.1, 207–220)
 
 **Goal:** The numbers Quantalyze renders for the live funded MT5 accounts MM2, MM3 and FX-AI_V are
 proven true against the terminal's and the broker's own figures, and the handful of observations
@@ -60,6 +61,10 @@ FCONF-01..04 — per `.planning/REQUIREMENTS.md`. Started 2026-08-14, parked 202
 2026-11-13. Research: `.planning/research/SUMMARY.md` (2026-11-13); its Phases A, B and C are 155,
 155.1 and 155.2 here. Phase numbers 155 and 157 were reserved for this milestone; 155.1 and 155.2
 were written by the roadmapper at creation, not inserted later, so they carry no INSERTED tag.
+
+⭐ **Milestone move 2026-11-23 (founder decisions; recorded here and in `157-CONTEXT.md` per the deviation policy).** Phase 157 FOUNDER-CONFIRM leaves v1.18 for the next milestone: "delay 157 into next milestone. Cannot do that now". Phases 221–225, booked into v1.18 the same day, move with it: "Move them too (Recommended)". v1.18 now holds 155, 155.1, 155.2 and 207–220, and 155.2 LIVEPARITY is its only open phase. FCONF-01..04 move with 157, so v1.18's scope is the 11 remaining requirements. 157 no longer rides in the 155.2 sitting; its FCONF-04 rotation still waits for 155.2's last live read with MM2's investor password. The 157 and 221–225 sections, overview bullets and Progress rows are under `## 📋 Next milestone` at the end of this file. The paragraphs in this section that name 157 or FCONF-01..04 as v1.18 scope are kept as lineage.
+
+⭐ **Second milestone move 2026-11-23 (founder decision; recorded here and in `155.2-CONTEXT.md` per the deviation policy).** Phase 155.2 LIVEPARITY's remaining work moves to the next milestone too: "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification." What moves: the broker statements, plans 155.2-11 to 155.2-14, the Gate B run, the full parity verdict, verification and phase complete. What stays recorded as shipped: plans 01 to 10 and 15 to 17 (13 of 17), whose code is on `main` as #1292 (plans 01 to 10), #1297 (plans 15 and 16) and #1306 (gap plan 17, `a73c87b8c`), the 2026-11-19 session and the weekend worksheet readings in the capture directory, and the D-E amendment to the Fri 2026-11-20 edge (#1305). The phase keeps its number and directory. MT5-07..10, MT5-15 and MT5-GOAL-01 move with it, so v1.18's scope is PARITY-01..04 and MT5-06, all complete. **v1.18 has no open phase:** 155, 155.1 and 207–220 are complete, so the milestone is ready for `/gsd-audit-milestone` and then `/gsd-complete-milestone`. ⛔ The advertising ban below still stands and travels with 155.2: MT5 is not advertised until 155.2 passes, in whatever milestone that is. The paragraph above and the paragraphs in this section that name 155.2 as v1.18 scope are kept as lineage.
 
 **Founder decisions D-A..D-E (2026-11-13) are binding on every phase.** They are stated once, in
 `.planning/REQUIREMENTS.md`, and cited here by id only: D-A "Pre-mark history: Accept, judge closed
@@ -134,8 +139,6 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 
 - [x] **Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down** - A PROD census per account, a read-only capture of our side, provenance-locked oracle intake, a compare engine shown RED on broken inputs, and the agent-checkable halves of MT5-09 and MT5-15 measured; no founder needed (completed 2026-11-14)
 - [x] **Phase 155.1: SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading** - One narrow tick-time read, asserted against the configured rule inside the leased derive and persisted write-once by a pure-DDL migration; parallel with 155, no trading day needed (completed 2026-11-19)
-- [ ] **Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%** - The founder's scripted session on MM2, MM3 and FX-AI_V, Gate A and Gate B per account, every surface the same, every gap fixed at its root or ruled on; after 155, session after the 155.1 deploy
-- [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
 - [x] **Phase 207: RETRYPROP — every error page's Try again button works** - Boundaries use Next's real `retry` prop; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth** - Quick UI fixes; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases (completed 2026-11-14)
@@ -224,53 +227,12 @@ Plans:
 **Wave 3** *(blocked on Wave 2 completion)*
 - [x] 155.1-05-PLAN.md — census moves: mutation floors and pins, sql-tests anti-skip floors, function-corpus snapshot and ratchet row (Wave 3)
 
-### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
-
-**Goal:** On one trading day, with the founder at the terminal, the numbers Quantalyze renders for MM2, MM3 and FX-AI_V are compared with the terminal's and the broker's own figures, and every difference is fixed at its root or ruled on by the founder, until the parity verdict passes on every surface. This is the only phase gate 2 blocks, and the phase whose pass lifts the advertising ban. Research Phase C.
-**Requirements**: MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01
-**Depends on:** Phase 155 (dress rehearsal green). The founder session inside this phase also waits on 155.1's reading deployed with a weekday PROD reading row per key; that is a deploy condition, not a completion dependency (see 155.1)
-**Plans:** TBD
-**UI hint**: no
-
-D-E amended 2026-11-22 (founder): the weekend edge is the Fri 2026-11-20 frozen close, read 2026-11-22 for all three accounts; for that edge only, the Gate B window runs past the 11-19 run day (see `REQUIREMENTS.md` D-E).
-
-Carried context, not requirements: timeout findings #8 and #10 are tuned only from percentile data across several nightlies, with fresh and cached logins split, and are booked separately if the data is not in by the milestone close (`REQUIREMENTS.md` Future). The product call on MT5 as a composite member stays out of scope.
-
-**Success Criteria** (what must be TRUE):
-1. The founder's trading-day session on the live funded accounts MM2, MM3 and FX-AI_V is recorded: real trade mode and the trading day per account, an All-History Report per account, the Summary block at an instant T, the statement figures (D-C), and the terminal-displayed time of 155.1's preselected near-midnight deal (MT5-06's last leg). A demo, the v1.15 soak account or a weekend-only run is refused as the run; the weekend reading (D-E) enters only as a Gate B edge. (MT5-08)
-2. For each account the harness reports Gate A (days before `S`, closed-trade balance basis, against the All-History export; D-A) and Gate B (days from `S`, open P&L included, against the statements and the weekend reading) within `MT5_PARITY_TOLERANCE`, as a return gap in points (D-B) checked separately for cumulative return, start level and end level, over windows that end before the run day. The instant-T reading is checked on D+1 after a re-anchoring sync. (MT5-07)
-3. Every surface that renders strategy performance, on the list fixed in 155 (the portfolio PDF and `scenario-blend-panels.ts` dropped, cited by symbol), shows the same numbers for these accounts in the founder's signed-in browser, bound to `computed_at`. This closes the data-layer matrix 155 measured. (MT5-09)
-4. Every discrepancy, from 155's pre-verification or the live run, is fixed at its root wherever it lives, shared backbone money-math included and never scoped to `exchange === 'mt5'`, and the comparison is re-run. A difference passes only within tolerance, consistently withheld on every surface, or in a named bucket with a recorded founder ruling; an empty `unexplained` list alone is not the exit. Every data-quality flag these accounts carry is eliminated or understood and accepted in writing. (MT5-10, MT5-15)
-5. The founder confirms live that an MT5 strategy he uploaded ingests, projects in a scenario and has a viewable factsheet. (MT5-GOAL-01)
-
-Plans:
-- [ ] TBD — plans not listed yet
-
-### Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made
-
-**Goal:** The observations only the founder can make about shipped wizard behaviour are made in the same sitting as the 155.2 session, and the spike investor password is rotated once no live read needs it, with gate 1 shown intact afterwards.
-**Requirements**: FCONF-01, FCONF-02, FCONF-03, FCONF-04
-**Depends on:** the 155.2 founder session (the same sitting, not 155.2's completion); FCONF-04's rotation comes after that session's last live read
-**Plans:** TBD
-**UI hint**: no (it observes shipped UI; a failed observation is a finding, not a new design)
-
-**Success Criteria** (what must be TRUE):
-1. With a live draft, the founder clicks `+ Strategy`, sees the resume banner, and Resume lands on the draft's step; the 2026-08-04 wizard restart does not recur. (FCONF-01)
-2. The founder sees the amber `wizard-sync-recomputing` block render as specified: its heading, no red envelope, no metric numbers. (FCONF-02)
-3. The founder sees the four 153.7 copy members render in a real wizard, and no Retry control appears on `SEAM_INTERNAL_FAULT`. (FCONF-03)
-4. `MT5_SPIKE_INVESTOR_PASSWORD` is rotated after the last live read that needs it, and gate 1 is re-checked afterwards: all three keys sync `complete` on a sync that ran after the rotation. (FCONF-04)
-
-Plans:
-- [ ] TBD — plans not listed yet
-
 ### Progress (v1.18)
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 155. PARITYHARNESS | 11/11 | Complete | 2026-11-14 |
 | 155.1. SERVERCLOCK | 6/6 | Complete | 2026-11-19 |
-| 155.2. LIVEPARITY | 0/? | Not started | - |
-| 157. FOUNDER-CONFIRM | 0/? | Not started | - |
 | 207. RETRYPROP | 1/1 | Complete | 2026-11-14 |
 | 208. UIQUICK | 5/5 | Complete | 2026-11-14 |
 | 209. SCRUBLEAKS | 5/5 | Complete | 2026-11-14 |
@@ -292,10 +254,8 @@ Plans:
 |-------|--------------|
 | 155 | PARITY-01, PARITY-02, PARITY-03, PARITY-04 |
 | 155.1 | MT5-06 |
-| 155.2 | MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 |
-| 157 | FCONF-01, FCONF-02, FCONF-03, FCONF-04 |
 
-15/15 mapped, each to exactly one phase. Two requirements have an earlier part in another phase, named in that phase's criteria: MT5-09 and MT5-15 are pre-verified at the data layer in 155 (criterion 5) and close in 155.2. MT5-06 is mapped to 155.1 and its near-midnight last leg is read in the 155.2 session (155.1 criterion 5, 155.2 criterion 1).
+⭐ 2026-11-23: FCONF-01..04 moved with 157 to the next milestone (founder, "delay 157 into next milestone. Cannot do that now"), so v1.18 maps 11/11 here. ⭐ Later the same day MT5-07..10, MT5-15 and MT5-GOAL-01 moved with 155.2 (founder, "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."), so v1.18 maps 5/5: PARITY-01..04 and MT5-06, all complete. The sentence that follows is kept as lineage. 15/15 mapped, each to exactly one phase. Two requirements have an earlier part in another phase, named in that phase's criteria: MT5-09 and MT5-15 are pre-verified at the data layer in 155 (criterion 5) and close in 155.2. MT5-06 is mapped to 155.1 and its near-midnight last leg is read in the 155.2 session (155.1 criterion 5, 155.2 criterion 1).
 
 ---
 
@@ -342,7 +302,7 @@ Plans:
 
 ⭐ **v1.20 Backlog Burndown — CLOSED 2026-11-06.** Its Phase 188 SC-4 residual (D-13) was closed by 202 RESIDCHURN and 203 B3TRUNC in v1.21.
 
-🚧 **v1.18 MT5-VERIFY & founder confirmations (Phases 155, 155.1, 155.2, 157)** — RESUMED 2026-11-13 and roadmapped; nothing started. Gate 1 (new investor passwords) cleared on PROD 2026-11-13. Gate 2 (the founder at the terminal on a trading day) blocks only the 155.2 session and 157. 155 and 155.1 start first, in parallel. Parked from 2026-08-20 to 2026-11-13; the parked text is in [`milestones/v1.21-ROADMAP.md`](milestones/v1.21-ROADMAP.md) as lineage.
+🚧 **v1.18 MT5-VERIFY & founder confirmations (Phases 155, 155.1, 155.2, 157)** — RESUMED 2026-11-13 and roadmapped; nothing started. Gate 1 (new investor passwords) cleared on PROD 2026-11-13. Gate 2 (the founder at the terminal on a trading day) blocks only the 155.2 session and 157. 155 and 155.1 start first, in parallel. Parked from 2026-08-20 to 2026-11-13; the parked text is in [`milestones/v1.21-ROADMAP.md`](milestones/v1.21-ROADMAP.md) as lineage. ⛔ CORRECTED 2026-11-23: 157 and 221–225 moved to the next milestone by founder decision ("delay 157 into next milestone. Cannot do that now"; "Move them too (Recommended)"). v1.18 holds 155, 155.1, 155.2 and 207–220; 155.2 is open, waiting on the broker statements, and everything else in v1.18 is complete. ⛔ CORRECTED again 2026-11-23: 155.2's remaining work moved to the next milestone as well (founder, "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."). v1.18 holds 155, 155.1 and 207–220, all complete, and is ready for `/gsd-audit-milestone` then `/gsd-complete-milestone`.
 
 ### Phase 207: RETRYPROP — every error page's Try again button works
 
@@ -654,6 +614,169 @@ Plans:
 Plans:
 **Wave 1**
 - [x] 220-01-PLAN.md — the extractor folds `AFTER UPDATE OF <columns>` triggers on auth.users, reads the lane's trigger columns from a 7th catalogue field and reports column drift as DRIFT; WHEN, REFERENCING and CONSTRAINT stay refused
+
+## 📋 Next milestone (not yet started) — Phases 155.2, 157, 221–225
+
+Moved out of v1.18 on 2026-11-23 by founder decision. 157 FOUNDER-CONFIRM: "delay 157 into next milestone. Cannot do that now". 221–225: "Move them too (Recommended)". Name, version and requirements are set when the milestone starts (`/gsd-new-milestone`); until then these phases keep their numbers, sections and plans unchanged. Requirements carried: FCONF-01..04 (157); 221–225 were booked without requirement ids. ⭐ 155.2 LIVEPARITY joined later the same day (founder, "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."), carrying MT5-07..10, MT5-15 and MT5-GOAL-01 and its four open plans (11–14); its 13 shipped plans stay recorded as shipped. 157's FCONF-04 rotation still waits for 155.2's last live read.
+
+### Phases (next milestone)
+
+- [ ] **Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%** - The founder's scripted session on MM2, MM3 and FX-AI_V, Gate A and Gate B per account, every surface the same, every gap fixed at its root or ruled on; after 155, session after the 155.1 deploy
+- [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
+- [ ] **Phase 221: SENTRYSCRUB2 — no Sentry event carries PostgREST details or hint from any capture site, and browser captures actually report** - Sentry scrub at the last hop for direct capture sites, then client Sentry init; independent of the MT5 parity phases
+- [ ] **Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists** - User-facing error copy and the benchmark outage label, with a migration; independent of the MT5 parity phases
+- [ ] **Phase 223: FLOWKINDS — every derive and compose path reads the same capital-flow kinds and refuses a malformed or truncated read by name** - Composite and flow-source half of the derive gaps (anchor and positions stay in TODOS); independent of the MT5 parity phases
+- [ ] **Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired** - Dead SQL, retired job-kind enqueues and inert plumbing, with a migration; independent of the MT5 parity phases
+- [ ] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23
+
+### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
+
+**Goal:** On one trading day, with the founder at the terminal, the numbers Quantalyze renders for MM2, MM3 and FX-AI_V are compared with the terminal's and the broker's own figures, and every difference is fixed at its root or ruled on by the founder, until the parity verdict passes on every surface. This is the only phase gate 2 blocks, and the phase whose pass lifts the advertising ban. Research Phase C.
+**Requirements**: MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01
+**Depends on:** Phase 155 (dress rehearsal green). The founder session inside this phase also waits on 155.1's reading deployed with a weekday PROD reading row per key; that is a deploy condition, not a completion dependency (see 155.1)
+**Plans:** 13/17 plans complete
+**UI hint**: no
+
+D-E amended 2026-11-22 (founder): the weekend edge is the Fri 2026-11-20 frozen close, read 2026-11-22 for all three accounts; for that edge only, the Gate B window runs past the 11-19 run day (see `REQUIREMENTS.md` D-E).
+
+Carried context, not requirements: timeout findings #8 and #10 are tuned only from percentile data across several nightlies, with fresh and cached logins split, and are booked separately if the data is not in by the milestone close (`REQUIREMENTS.md` Future). The product call on MT5 as a composite member stays out of scope.
+
+**Success Criteria** (what must be TRUE):
+1. The founder's trading-day session on the live funded accounts MM2, MM3 and FX-AI_V is recorded: real trade mode and the trading day per account, an All-History Report per account, the Summary block at an instant T, the statement figures (D-C), and the terminal-displayed time of 155.1's preselected near-midnight deal (MT5-06's last leg). A demo, the v1.15 soak account or a weekend-only run is refused as the run; the weekend reading (D-E) enters only as a Gate B edge. (MT5-08)
+2. For each account the harness reports Gate A (days before `S`, closed-trade balance basis, against the All-History export; D-A) and Gate B (days from `S`, open P&L included, against the statements and the weekend reading) within `MT5_PARITY_TOLERANCE`, as a return gap in points (D-B) checked separately for cumulative return, start level and end level, over windows that end before the run day. The instant-T reading is checked on D+1 after a re-anchoring sync. (MT5-07)
+3. Every surface that renders strategy performance, on the list fixed in 155 (the portfolio PDF and `scenario-blend-panels.ts` dropped, cited by symbol), shows the same numbers for these accounts in the founder's signed-in browser, bound to `computed_at`. This closes the data-layer matrix 155 measured. (MT5-09)
+4. Every discrepancy, from 155's pre-verification or the live run, is fixed at its root wherever it lives, shared backbone money-math included and never scoped to `exchange === 'mt5'`, and the comparison is re-run. A difference passes only within tolerance, consistently withheld on every surface, or in a named bucket with a recorded founder ruling; an empty `unexplained` list alone is not the exit. Every data-quality flag these accounts carry is eliminated or understood and accepted in writing. (MT5-10, MT5-15)
+5. The founder confirms live that an MT5 strategy he uploaded ingests, projects in a scenario and has a viewable factsheet. (MT5-GOAL-01)
+
+Plans:
+- [x] 155.2-01-PLAN.md — The Report parser reads the real MT5 build 5830 All-History Report (`td` headers, hidden `Cost` column)
+- [x] 155.2-02-PLAN.md — `_native_unit_present` no longer makes every real USD account's Gate A unmeasurable
+- [x] 155.2-03-PLAN.md — Gate A judged on the three real accounts from a sealed PROD capture
+- [x] 155.2-04-PLAN.md — Root-cause the cross_store findings F-155-01..03 (group G1)
+- [x] 155.2-05-PLAN.md — Group G2 fixed at its root in shared money-math: the per-key builder stamps each key's asset class
+- [x] 155.2-06-PLAN.md — G2 wired into the scenario composer and the scenario compare panel
+- [x] 155.2-07-PLAN.md — G2 finished in the server live baseline (`liveBaselineMetricsFromPerKeyDailies`)
+- [x] 155.2-08-PLAN.md — Root-cause the G3 convention gaps and the G4 freshness window; founder ruling questions
+- [x] 155.2-09-PLAN.md — `csv_source` classified from the code that writes it (MT5-15 machine side)
+- [x] 155.2-10-PLAN.md — Full-verdict preparation: run day and instant-T settled by the founder
+- [ ] 155.2-11-PLAN.md — Founder-only Gate B readings: weekend reading and broker statements (waits on the statements)
+- [ ] 155.2-12-PLAN.md — Re-run after the fixes are live and produce the full parity verdict
+- [ ] 155.2-13-PLAN.md — Criterion 3: every surface in the founder's signed-in browser
+- [ ] 155.2-14-PLAN.md — Founder-only exits: written rulings and the live MT5-GOAL-01 confirmation
+- [x] 155.2-15-PLAN.md — Gap closure G3-1 (a): the stored-curve reader includes the first-day return (TS and Python twin)
+- [x] 155.2-16-PLAN.md — Gap closure G4-1 (b): a key-mode derive enqueues the analytics recompute of its linked strategy
+- [x] 155.2-17-PLAN.md — Gap closure G5-1..G5-3: `oracle_account_mismatch`, the census counts the share link, Sharpe at the stored precision
+
+### Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made
+
+**Goal:** The observations only the founder can make about shipped wizard behaviour are made in the same sitting as the 155.2 session, and the spike investor password is rotated once no live read needs it, with gate 1 shown intact afterwards.
+**Requirements**: FCONF-01, FCONF-02, FCONF-03, FCONF-04
+**Depends on:** the 155.2 founder session (the same sitting, not 155.2's completion); FCONF-04's rotation comes after that session's last live read
+**Plans:** 1/3 plans complete
+**UI hint**: no (it observes shipped UI; a failed observation is a finding, not a new design)
+
+**Success Criteria** (what must be TRUE):
+1. With a live draft, the founder clicks `+ Strategy`, sees the resume banner, and Resume lands on the draft's step; the 2026-08-04 wizard restart does not recur. (FCONF-01)
+2. The founder sees the amber `wizard-sync-recomputing` block render as specified: its heading, no red envelope, no metric numbers. (FCONF-02)
+3. The founder sees the four 153.7 copy members render in a real wizard, and no Retry control appears on `SEAM_INTERNAL_FAULT`. (FCONF-03)
+4. `MT5_SPIKE_INVESTOR_PASSWORD` is rotated after the last live read that needs it, and gate 1 is re-checked afterwards: all three keys sync `complete` on a sync that ran after the rotation. (FCONF-04)
+
+Plans:
+- [x] 157-01-PLAN.md — the staging kit (fail-closed fetch router with a visible marker), its smoke test and the founder script
+- [ ] 157-02-PLAN.md — the founder makes the FCONF-01..03 observations under staged responses (founder checkpoint)
+- [ ] 157-03-PLAN.md — the MM2 investor password rotation after 155.2's last live read, then the gate-1 re-read on the next scheduled derive (founder checkpoint)
+
+### Phase 221: SENTRYSCRUB2 — no Sentry event carries PostgREST details or hint from any capture site, and browser captures actually report
+
+**Goal:** No Sentry event, from any capture site, server or browser, carries a PostgREST error's `details` or `hint`, and a capture made in browser code actually reaches Sentry. The last-hop scrub in `scrubSentryEvent` (`src/instrumentation.ts`) drops `details` and `hint` from a non-Error capture's `extra.__serialized__`, so the direct `Sentry.captureException` sites that bypass `scrubCaptureInput` are covered too. Only after that scrub ships does browser code get a client `Sentry.init` running the same scrub, so turning client capture on can never send an unscrubbed event. The auth callback's GoTrue `error` / `error_code` branch logs the error code (short, never `error_description`), so failed verifies become visible. Trigger: founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS". Owns `TODOS.md` `[209-SENTRY-DIRECT-CAPTURE-DETAILS]`, `[167.2.1-CLIENT-SENTRY-NOOP]` and `[219-CALLBACK-VERIFY-ERROR-LOG]` (fix directions and gates as written there).
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Success Criteria** (what must be TRUE):
+1. A real-SDK envelope test (the in-memory transport in `src/instrumentation.test.ts`) captures a plain object carrying `details` and `hint` sentinels through a direct `Sentry.captureException` call, and neither sentinel reaches the envelope; the test is shown RED before the fix.
+2. The scrub lands before, or in the same change as, the browser `Sentry.init`; no build ships a client init without the `details`/`hint` scrub in its `beforeSend`.
+3. A `captureToSentry` call in a `"use client"` module produces an event (proved by a test against the client init, not by reading config), and the client event passes through the same scrub as a server event.
+4. The auth callback's GoTrue error branch logs the `error_code` value, sliced short, and never `error_description`; a callback test sending `error_code=otp_expired` with the email-change marker asserts it, shown RED before the fix.
+5. The three TODOS entries above are deleted in the ship PR and named in its CHANGELOG entry.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists
+
+**Goal:** Every Python and SQL error sentence a user can read names the real cause and offers only a channel that exists (the contact form, never "contact support"), and a portfolio whose benchmark sources all failed says the benchmark is unavailable, not "stale". The `computation_error_copy` arms (`supabase/schema/functions/computation_error_copy.sql`) move by migration, so migration-reviewer and rls-policy-auditor apply before merge. `run_sync_trades_job` no longer returns DONE after recording an analytics failure that the bridge then erases to `complete`. Trigger: founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS". Owns `TODOS.md` `[212-CONTACT-SUPPORT-SURVIVORS]`, `[166.4.1-BENCHMARK-OUTAGE-LABEL]` and `[SYNCTRADES-ENQUEUE-DONE]` (readings, cautions and fix directions as written there, including that the 161.1 F1 remedy does not transfer to the sync-trades handler as-is).
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Success Criteria** (what must be TRUE):
+1. No string in `analytics-service` or in the `computation_error_copy` arms says "contact support"; each names the contact form or a remedy that works, and csv-finalize's `ENQUEUE_LOST_RACE_USER_COPY` is back in byte parity with the SQL ELSE arm, with the parity test reading the SQL arm instead of a hand-typed oracle.
+2. A total benchmark source failure (no price source and no recent cached day) writes a note distinct from the stale-cache note, and the page shows it with its own wording; a test drives both cases and tells them apart.
+3. When the follow-on analytics enqueue fails in `run_sync_trades_job`, the strategy's row does not read `complete` with no analytics; a test drives the failed enqueue through the bridge and asserts the stored status and error, shown RED before the fix.
+4. The migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, and every census it moves (schema snapshot, mutation floors, pins) moves in the same PR.
+5. The three TODOS entries above are deleted in the ship PR and named in its CHANGELOG entry.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 223: FLOWKINDS — every derive and compose path reads the same capital-flow kinds and refuses a malformed or truncated read by name
+
+**Goal:** The composite and flow-source half of the derive gaps: every derive and compose path reads the same capital-flow kinds for a venue, and refuses a malformed or truncated read by name instead of storing a series as complete. `run_stitch_composite_job` reads Bybit flows through the same source as `run_derive_broker_dailies_job` (`fetch_bybit_unified_flows`, Phase 186), the composite member read gets Phase 186's read refusal, and each funding caller still on `on_malformed="drop"` gets a recorded decision. Context: PROD has 6 active Bybit keys (measured 2026-11-23), so the Bybit composite path is no longer a no-exposure case. The anchor and positions entries in TODOS stay out of scope and stay open. Trigger: founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS". Owns `TODOS.md` `[180-BYBIT-LIVE-FLOW-KINDS]`, `[186-COMPOSITE-MEMBER-READ-GAPS]`, `[186-OTHER-FUNDING-CALLERS-DROP]` and `[186-REALIZED-MALFORMED-COUNT]` (readings and closing conditions as written there).
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Success Criteria** (what must be TRUE):
+1. The composite path and the per-key derive read the same Bybit flow kinds; a test feeds an off-chain (sub-account or universal transfer) flow to both and both book it as a flow, not P&L, shown RED before the fix.
+2. The composite member read refuses a truncated or failed realized or funding read by name, as the per-key derive does; a test drives each refusal.
+3. `run_sync_funding_job`, the composite member read and `okx_archive_job` each have a recorded decision (refuse by name or keep dropping), taken with the founder wherever a published number changes, and each decision is pinned by a test.
+4. The per-key count of `daily_pnl_malformed_<venue>` flags on PROD is recorded (read-only) and brought to the founder, and the founder's ruling on refusing a malformed realized row is recorded before any refusal is switched on.
+5. Every TODOS entry above that the phase closes is deleted in the ship PR and named in its CHANGELOG entry; the anchor and positions entries are untouched.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired
+
+**Goal:** Dead SQL, retired job kinds that still carry a live enqueue, and inert plumbing are removed, so nothing in the repo looks alive that is not. The dead `get_admin_compute_jobs` function is dropped by migration (migration-reviewer and rls-policy-auditor apply before merge). The retired job kinds' daily enqueue (`enqueue_poll_positions_for_all_strategies` and the retired `compute_analytics` family) is retired, filed as dead code and never as an outage. Phase 176's inert leftovers (`managerSideKeyIds`, `excludedManagerSide`, the `"legacy"` `equityCurveSource` value) and the reconstruct cap and marker machinery are deleted or given a live caller. `src/lib/database.types.ts` stops declaring functions that no longer exist. Trigger: founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS". Owns `TODOS.md` `[169-DEAD-ADMIN-JOBS-RPC]`, `[176-INERT-LEFTOVERS]`, `[176-RECONSTRUCT-CAP-MARKER-INERT]`, `[164.5-STALE-GENERATED-TYPES]` and the TODOS entry headed "Retired job kinds still carry a live daily enqueue that has fired nothing since 2026-06-14".
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Success Criteria** (what must be TRUE):
+1. `get_admin_compute_jobs` no longer exists on TEST or PROD after the migration applies, and no caller, test or census still names it.
+2. No daily enqueue creates or tries to create a job of a retired kind; the retired kinds' enqueue code and the `compute_job_kinds` rows go only once no queued row of that kind can still exist, measured read-only on PROD first.
+3. `managerSideKeyIds`, `excludedManagerSide` and the `"legacy"` `equityCurveSource` value are deleted together with their tests, and every cap, marker and orphaned item listed in `[176-RECONSTRUCT-CAP-MARKER-INERT]` is removed or given a live caller, with `test_the_d04_inert_helpers_stay` retired or rewritten to match.
+4. `src/lib/database.types.ts` declares no function that the schema lacks, and the way it is kept current (regeneration step with a freshness gate, or a recorded decision) is written down.
+5. The migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding; the five TODOS entries above are deleted in the ship PR and named in its CHANGELOG entry.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed
+
+**Goal:** A user cannot connect the same exchange account more than once: a second key or draft that reads the same account under the same owner is refused by name at connect time, and any such pair already stored is surfaced and resolved instead of publishing one account's numbers under two names. One key or account shared across several users stays allowed, and a strategy-linked key may also sit in an allocator book; that is never called "manager-only by design". Context: Phase 155.2 found on PROD a key marked as a duplicate of MM2's account under the same owner that publishes MM2's numbers under the name MM3, and MM2's login shared with a draft key for FX-AI_V with no share link between them. `analytics-service/services/account_identity.py` stamps the share link. Trigger: founder decisions 2026-11-23, "several accounts can use one key. one account should not use the same key several times".
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Success Criteria** (what must be TRUE):
+1. Connecting a key or saving a draft whose account identity matches a key the same owner already holds is refused with a named reason, in the wizard and in the API; a test drives it for an exchange key and for an MT5 login.
+2. The same account connected by two different users stays allowed and keeps its share link; a test pins that the refusal is per owner, and a strategy-linked key in an allocator book is unaffected.
+3. Every same-owner duplicate already stored on PROD is counted read-only and brought to the founder, and no strategy publishes another key's numbers under its own name once the phase ships.
+4. Two keys that share a login always carry a share link, so a shared login with no link cannot recur; a test drives the stamping in `account_identity.py` for that case.
+5. Any migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Progress (next milestone)
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 155.2. LIVEPARITY | 13/17 | Deferred to next milestone | - |
+| 157. FOUNDER-CONFIRM | 1/3 | Deferred to next milestone | - |
+| 221. SENTRYSCRUB2 | 0/? | Deferred to next milestone | - |
+| 222. ALERTTRUTH | 0/? | Deferred to next milestone | - |
+| 223. FLOWKINDS | 0/? | Deferred to next milestone | - |
+| 224. DEADLEFTOVERS | 0/? | Deferred to next milestone | - |
+| 225. ONEACCOUNTONCE | 0/? | Deferred to next milestone | - |
 
 ---
 

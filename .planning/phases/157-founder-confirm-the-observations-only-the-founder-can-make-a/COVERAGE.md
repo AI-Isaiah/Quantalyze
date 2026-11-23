@@ -1,0 +1,1 @@
+No external API integration: the phase observes shipped wizard UI through a browser-side response stub of the app's own routes and rotates one credential through the product's existing rotate-secret path.

@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.133.61.1] - 2026-11-23 — records: 155.2 and 157 phase records, phases 221–225 booked, 155.2's remaining work, 157 and 221–225 moved to the next milestone, TODOS re-confirmed against PROD
+
+Records PR. It combines four local records branches with the founder's milestone decisions of 2026-11-23. v1.18 now holds 155, 155.1 and 207–220. All of them are complete, so v1.18 has no open phase and is ready for `/gsd-audit-milestone` and then `/gsd-complete-milestone`. 155.2's remaining work, 157 and 221–225 wait in the next milestone. No source, test or migration change. The code of 155.2 gap plan 17 shipped in #1306 (v0.133.61.0).
+
+### Added
+- **The 155.2 LIVEPARITY phase directory on `main` for the first time.** It holds plans 01 to 17 and the summaries of plans 01 to 10, 15, 16 and 17. Plans 11 to 14 have no summary because they wait on the broker statements and on founder steps. It also holds CONTEXT, RESEARCH, PATTERNS, VALIDATION, the reviews (`155.2-REVIEW.md`, `155.2-REVIEW-GAPS.md`, `155.2-17-REVIEW.md`), `155.2-GATE-A.md`, `155.2-FINDINGS.md`, `155.2-RULINGS.md` with the 2026-11-23 rulings (k10 is MM3, k2 is excluded and disconnected through the product's own path, Sharpe compared at the stored precision, weekend `as_of` 2026-11-20), and `155.2-VERIFICATION.md` as the gap source (`status: gaps_found`; it is not a phase verdict). Every file carries labels, ordinals, ISO dates, counts and ratios only.
+- **`155.2-RECHECK-2026-11-23.md` and `155.2-RECHECK-2026-11-23b.md`.** The first finds the root cause of MM3's Gate A failures: the ordinal labelled MM3 (k2) was a second key on MM2's account. The second is the sealed post-plan-17 recapture with MM3 on k10. Gate A passes on all three labels, and the findings render clears all 31 rows. 3 of those rows (F-155-13, F-155-18, F-155-28) clear only because the composer-book Sharpe is still withheld. An addendum records this PR's PROD reads (below).
+- **The 157 FOUNDER-CONFIRM phase directory.** It holds CONTEXT, DISCUSSION-LOG, RESEARCH, VALIDATION, `COVERAGE.md`, the three plans and `157-01-SUMMARY.md`. Plan 01 built `157-STAGING-KIT.js`, a browser-side fetch router that fails closed and shows a visible marker. It stages the wizard states FCONF-02 and FCONF-03 need, in resume, amber, connect and submit modes. Plan 01 also built `157-STAGING-KIT.smoke.mjs` (47 `node:test` cases over the real kit file; not part of the vitest corpus) and `157-FOUNDER-SCRIPT.md`, a one-step-at-a-time script for FCONF-01..04. Plans 02 and 03 are founder checkpoints and have not run.
+- **`157-REVIEW.md`, two review rounds on the kit.** In round 1 the code reviewer found 2 critical and 3 warning items and the silent-failure hunter found 5 MEDIUM. All were fixed:
+  - CR-01: the key-permissions read is refused, because it writes an audit row and decrypts a credential.
+  - CR-02: the submit section opens the new tab, arms, confirms the marker and only then clicks.
+  - WR-01: writes outside the two prefixes are refused, and only the auth refresh passes.
+  - WR-02: the kit refuses to install outside the page world.
+  - WR-03: the smoke test reads the route sources for the staged literals.
+  - SFH-3, SFH-4 and SFH-5: the router catch logs its cause, each log entry carries its evidence, and the marker paints before state commits.
+  - The phase agent's own fix: the catch arm fails closed.
+  Round 2 found one new MEDIUM (a wrong-world evaluation could overwrite a live marker), which was fixed. LOW and Info items stay in the review.
+- **Phases 221–225 booked** with `/gsd-phase add` on founder decisions of 2026-11-23: 221 SENTRYSCRUB2, 222 ALERTTRUTH, 223 FLOWKINDS (the composite and flow-source half), 224 DEADLEFTOVERS and 225 ONEACCOUNTONCE ("several accounts can use one key. one account should not use the same key several times"). Each carries its goal, trigger, owned TODOS ids and success criteria, plus a phase directory `.gitkeep` and a STATE Roadmap Evolution line. Their TODOS entries stay open until each phase ships.
+
+### Changed
+- **157 and 221–225 moved out of v1.18 into the next milestone (founder decisions 2026-11-23).** For 157: "delay 157 into next milestone. Cannot do that now". For 221–225: "Move them too (Recommended)". `/gsd-phase --edit` keeps a phase in its milestone, so the ROADMAP was hand-edited:
+  - A new `## 📋 Next milestone (not yet started)` section, after Phase 220, carries the six overview bullets, the 157 and 221–225 sections, and its own Progress table.
+  - 157's row reads `1/3 | Deferred to next milestone` with plan 01 ticked. 221–225 read `0/? | Deferred to next milestone`.
+  - The decision is recorded in `157-CONTEXT.md` and in the ROADMAP, as the deviation policy requires. Dated notes were added, and the original text kept as lineage, in four places: the v1.18 milestone section, its Requirement Coverage (11/11), the `## Current position` paragraph, and `REQUIREMENTS.md`, where FCONF-01..04 move with 157 and v1.18 now carries 11 requirements.
+  - The name and version of the next milestone are not chosen here. `/gsd-new-milestone` sets them.
+- **155.2 LIVEPARITY's remaining work moved to the next milestone as well (founder decision 2026-11-23):** "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."
+  - What moves: the broker statements, plans 155.2-11 to 155.2-14, the Gate B run and the full verdict, verification, and phase complete. MT5-07..10, MT5-15 and MT5-GOAL-01 move with the phase.
+  - What stays recorded as shipped: 13 of 17 plans, with code in #1292, #1297 and #1306 (`a73c87b8c`); the 2026-11-19 session and the weekend worksheet readings; and the D-E edge amendment (#1305). The section, overview bullet and Progress row (`13/17 | Deferred to next milestone`) sit in the next-milestone section.
+  - The decision is recorded in `155.2-CONTEXT.md` and in the ROADMAP, with dated notes in `REQUIREMENTS.md`. v1.18 now carries 5 requirements: PARITY-01..04 and MT5-06, all complete.
+  - The ban on advertising MT5 still stands. It travels with 155.2.
+  - `gsd-tools query roadmap milestone-scope` returns the 16 v1.18 phases (155, 155.1 and 207–220). `roadmap analyze` reads 16 of 16 phases and 93 of 93 plans complete.
+- **STATE:** `status: All phases complete`. Current Position says v1.18 has no open phase and that the next steps are `/gsd-audit-milestone` and then `/gsd-complete-milestone`; it names what was deferred. There are Roadmap Evolution lines for both moves. The progress block reads 16 of 16 phases and 93 of 93 plans, and `state update-progress` re-derived 100%. That handler left `completed_plans` at 106, so it was set to 93 by hand. Earlier in this branch the 155.2 records moved the plan counts to 110 and 106, and the 157/221–225 move took the phase total to 17 at 94%.
+- **ROADMAP 155.2:** the 17 plan rows replace the TBD stub, with `**Plans:** 13/17 plans complete` and a Progress row of `13/17 | In Progress`. Plans 155.2-13 and 155.2-14 now point at the unwritten `155.2-VERDICT.md` plainly instead of by `@`-reference.
+- **ROADMAP 157:** the three plan rows replace the TBD stub.
+- **`TODOS.md` rewritten from PROD reads on 2026-11-23** (read-only, marker query first):
+  - `[175-NIGHTLY-MT5-DERIVE-CHECK]` is now a LIVE data-integrity item. MT5 `derive_broker_dailies` jobs ended `done` with `attempts=2` on 2026-11-05, 11-15 and 11-20 through 11-23. The retried jobs carry a null `last_error`, so the retry cause is unread. Two `failed_final` jobs on 2026-11-18 carry the server-clock mismatch text; that is the day 217 SERVERRULE shipped, and there have been none since.
+  - `167.2.1.1.1-COMPOSITE-NOT-REDERIVED-ON-MARKS`: `stitch_composite` ran for both PROD composites on 2026-11-08, and neither publishes `marks_since`.
+  - The "Phase 162 plan 162-08 filings" and "Phase 145 recorded deferrals" headers now state their real remaining counts.
+- VERSION and package.json 0.133.61.0 → 0.133.61.1.
+
+### Removed
+- **`TODOS.md` entries closed or duplicated, and deleted after each was re-confirmed on PROD on 2026-11-23:**
+  - `[166.4.1-CRON-SYNC-UNSCHEDULED]`: cron job `cron-sync-trades` is active, 14 of 14 runs in 14 days succeeded, and `strategy_sync_cursors` advanced that day.
+  - The two raw-prose `strategy_analytics` rows: both are `complete` with no `computation_error`.
+  - `[164.2-TYPES-REGEN-CHECK]`: part 1 is done, because both columns exist on PROD as nullable uuid and text and `database.types.ts` carries them in all three shapes. Part 2 can no longer be checked, because `net._http_response` keeps only hours and the window was September.
+  - The "(Wizard first-hop drop)" bullet: it duplicated the Phase 143 (D-05) entry.
+- **`TODOS.md` stale and fixed entries deleted by founder instruction (2026-11-23):** 164.7-VAULT-ABSENT-RULE, 164.5-BASELINE-PROVENANCE-COLS, PRBRANCH-STALEBASE-01, FANOUT-COHORT-PRIVATE-01, CRON-DRIFT-01 and CRON-OBS-01 (with their standing-rule paragraph), SHARE-QA-06, PLANVERIFY-CD-01, SKIP-01, 164.9.3.1-FANIN-GRAPH-RESIDUALS, 164.8.5-MANIFEST-SIDE-LOOP-DEAD, T-OPEN-04, PGLANE-SELFTEST-COUNT-UNPINNED, 164.5.1-TODOS-DISPOSITION-OWED, the Phase-142 migration-reviewer #14 item, and the fixed review-round bullets of 164.6.6.3.3-WITHHELD-RESIDUE, whose open D6 item stays. Pointers were fixed in `docs/runbooks/match-engine.md` and in four `TODOS.md` cross-references, each now marked "(closed; entry deleted 2026-11-23)".
+
+### Notes
+- **155.2's full CLI verdict is still refused**, for two reasons: the weekend near-midnight reading's provenance (`terminal_report_export`, where only `terminal_reading` is allowed), and the absent `statement_equity`. Gate B is unjudged and no `final_green` exists. Founder question (c) is still open: a strategy on a duplicate key publishes another account's numbers. 225 ONEACCOUNTONCE carries the fix.
+- **Code comments still cite some of the deleted ids as invariant labels** (for example `CRON-DRIFT-01` and `SKIP-01` in the prod-prober and the SQL corpus). They are lineage labels, not readers of `TODOS.md`. Migrations cannot be edited, and a records PR changes no code, so they stay.
+- The commits from the 157 and 155.2 branches are carried with their history. The 155.2 records branch's own release commit (v0.133.60.6) is replaced by this entry.
+
 ## [0.133.61.0] - 2026-11-23 — Phase 155.2 LIVEPARITY gap closure 2: the parity harness refuses a label bound to the wrong account, and compares Sharpe at the stored precision
 
 Code PR for gap plan 155.2-17 (gaps G5-1, G5-2, G5-3). It follows the 2026-11-23 recheck, which found that every MM3 Gate A reading so far had measured the MM2 account: the ordinal labelled MM3 was a second key on MM2's account. The founder ruled the same day that the harness must refuse that case by name and compare Sharpe at the stored precision. The harness is offline tooling: no product code path, migration or user-facing surface changes.

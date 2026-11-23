@@ -440,20 +440,6 @@ typography stays one tier per role.
 **Why it is open.** D-15 and its two extensions (phase CONTEXT) make every whole-record rail figure read "—" on a Withheld row at full history with no what-if. Plan 15 left three items undashed as ambiguous, and the founder chose on 2026-10-15 to ship and book them ("Ship as is, book them"). The plan 15 review (`164.6.6.3.3-15-REVIEW.md`, no HIGH) and the silent-failure pass added four MEDIUMs, booked under the review rule. **The four MEDIUMs were fixed the same day, the round-2 review's four more in round 3, and the round-3 review's two in round 4,** under the founder rule of 2026-10-15 ("fix also the medium user facing and data integrity issues"); the three founder-deferred items below stay open. Fix reports: `164.6.6.3.3-15-REVIEW-FIX.md`, `-R3.md`, `-R4.md`.
 
 - **Founder-deferred, plan 15 SUMMARY class D6 (OPEN):** (1) Worst 10 Drawdowns: row #1 Depth is the same whole-record max drawdown the rail dashes. (2) EOY Returns and Calmar by Year for a break year that is NOT the Year-to-date year: both compound across it. (3) Style Drift and its Kolmogorov-Smirnov line: the statistic uses every day.
-- **WR-01 (MEDIUM) FIXED in `3194279bf`:** the last EOY Returns row (strategy, benchmark, delta) and the last Calmar by Year row (Return, Max DD, Calmar) read "—" with no tone under `wholeRecordWithheld`, because that year is the dashed Year-to-date figure. Earlier years keep their figures. Tests D1 and D4 were flipped deliberately; a new WR-01 test pins the identity with YTD on a clean row.
-- **WR-02 (MEDIUM) FIXED in `3a0f2392c`:** Rolling Metrics "Now" (Volatility, Sharpe, Sortino) reads "—" with no accent under the gate. Test D5 was flipped deliberately.
-- **WR-03 (MEDIUM) FIXED in `cbeb6b2da`:** a render test of the rail on a Withheld row under mark-to-market (all 62 cells keep digits, no Withheld note; the same payload under cash dashes all 62). Seen RED with `railBasis` neutered to cash in the gate, restored from a byte backup.
-- **SFH-2 (MEDIUM) FIXED in `da19bdeb9`:** `BootstrapCIPanel` takes `wholeRecordWithheld` as a required boolean; `tsc` fails on an omitting caller (seen RED).
-- **Round 3 (review `164.6.6.3.3-15-REVIEW-R2.md`, four MEDIUMs, all FIXED 2026-10-15 under the same founder rule; fix report `164.6.6.3.3-15-REVIEW-FIX-R3.md`).** The Withheld verdict now has two scopes, both built on the one hook `useFullHistoryWithheld()` (`MetricsColumn.tsx`): the verdict itself (full-history panels, a zoom included) and the rail's slice-aware gate, `!selected && ` that verdict (D-78).
-  - **R2-WR-01 (MEDIUM) FIXED in `b512f5c03`:** the 3194279bf fix reused the slice-aware gate for EOY Returns and Calmar by Year, which always show the full history (labelled "Full history" in a zoom), so any zoom re-printed the withheld last-year row. Both panels take the verdict without the window term. Seen RED (the zoomed Withheld EOY cell read "-8.36%").
-  - **R2-WR-02 (MEDIUM) FIXED in `1eb83b4b6`:** `EndOfYearBarsPanel` printed the last calendar year, the dashed Year-to-date figure, as a bar, a value label and through the `scale ±N%` caption. **This corrects the entry above, which filed this bar under founder item 2: it is NOT a break-year row, it is the Year-to-date year, the case R2-WR-01 already decided to dash.** The panel takes `fullHistoryWithheld` as a required prop; under it the last year keeps its row label and loses both bars and both labels, and so drops out of `maxAbs`. A Dated row is unchanged. The earlier "charts show the whole record by design" rationale was wrong for a Withheld row (the Withheld note has no chart clause; only the Dated notes do). Seen RED.
-  - **R2-WR-03 (MEDIUM) FIXED in `6027c61c6`:** the Monthly Returns heatmap's last-row "YTD" cell reads "—" with no tone under the full-history verdict. Earlier rows' totals and every month cell (per-period entries) stay. Seen RED.
-  - **R2-WR-04 (MEDIUM) FIXED in `c4682c358`:** the three rolling charts' "avg" label (`showStratAverage`) is off under the rail's slice-aware gate: dropped at full history on a Withheld row, kept inside a zoom (there it is the visible range's average, a slice figure). Done in `PerformanceCharts` by config, so the frozen-island `TimeSeriesChart.tsx` is untouched. Seen RED.
-  - Tests in `bcc47eee9`: the mark-to-market render now covers the new copies (all four plus the rolling avg keep their figures; the same payload under cash dashes each; seen RED with the basis term neutered), and a zoom keeps the full-history copies dashed.
-- **Round 4 (review `164.6.6.3.3-15-REVIEW-R3.md`, two MEDIUMs, both FIXED 2026-10-15 under the same founder rule; fix report `164.6.6.3.3-15-REVIEW-FIX-R4.md`).**
-  - **R3-WR-01 (MEDIUM) FIXED in `514805e66`:** the Monthly Returns heatmap's last month cell (the month holding the record's last date) IS the Month-to-date figure the Returns panel dashes (same dates, same compounding; in January also the Year-to-date figure). Under the heatmap's existing full-history verdict it reads "—" with no tint and a figure-free title (`YYYY-MM: withheld`). Earlier month cells keep their figures. Round 3's assertion that every month cell stays was flipped for that one cell only, deliberately. Seen RED.
-  - **R3-WR-02 (MEDIUM) FIXED in `6add59aa7`:** the rolling charts' avg gate decided "zoomed" from `useWindowedView` (the held or deferred range) while the label is computed over the chart's live range, so a zoom-out gesture reaching the whole record printed the whole-record avg until the hold released. The gate now reads `resolveRangeScope(useXRange().xRange, ...)`. Seen RED with a real wheel tick and a faked settle timer, and RED again with the old gate restored from a byte backup.
-  - LOW fixed in `b97080820`: the zoom test now proves the zoom took effect on the Withheld render before it asserts the copies stay dashed.
 
 ### SECURITY-TXT-EXPIRES-01 — `security.txt` Expires lapses on 2027-04-10 and nothing renews it (booked 2026-10-07, Phase 164.6.6.3.5)
 
@@ -609,28 +595,6 @@ per-metric decision.
       ✅ **Destination: Phase 169.4 ALLOCTRUTH**, whose plans read BTC through `readBenchmarkPrices`
       and `mergeWithFixture`. **Closed when:** consumers build the overlay from closes (or levels)
       and the metrics from exactly-one-day returns, with a test for each across a missing day.
-- [ ] **`[166.4.1-CRON-SYNC-UNSCHEDULED]` Nothing schedules the analytics service's `/cron-sync`, so
-      portfolio analytics never recompute and the trade sync it carries does not run (booked
-      2026-10-09, Phase 166.4.1 D-03).** Evidence, counts and verdicts only (`166.4.1-RESEARCH.md`
-      Q2, read-only PROD reads with the marker query first): no schedule in `vercel.json`, the GitHub
-      workflow schedules, `supabase/functions/`, `analytics-service/railway.toml`, PROD `cron.job`
-      (0 jobs or functions mentioning it) or the Railway services. PROD `strategy_sync_cursors`
-      holds 0 rows although `routers/cron.py` writes one per strategy per tick. PROD holds 0
-      `compute_portfolio` jobs and the Next.js `computePortfolioAnalytics` has zero call sites. PROD's
-      6 `complete` `portfolio_analytics` rows were written by `scripts/seed-full-app-demo.ts`, not by
-      a compute (so no failure line was logged 2026-09-13..27). `docs/architecture/adr-0008-cron-architecture.md`
-      still names a Python-side cron_sync trigger and is stale. Nothing was built in 166.4.1.
-      **The first question (R-03) has an answer: live-key trade ingestion has no other path.**
-      `.planning/debug/cron-sync-unscheduled.md` (diagnosed 2026-10-09) found that the 4 live ccxt
-      strategy keys on PROD have had no trade ingestion for 14 to 156 days, hidden because the
-      "Synced Nd ago" pill reads `strategy_analytics.computed_at`. That root cause and its fix are
-      not repeated here.
-      **Owner:** Phase 167.1.2.2.2 TRADESYNC (booked 2026-10-09, on main via #985; ROADMAP section
-      `### Phase 167.1.2.2.2`), which owns the schedule, the cursor seeding and the "Synced" label.
-      **Trigger:** TRADESYNC's planning. **Closed when:** `/cron-sync` is either scheduled with a PROD
-      reading showing ticks (`strategy_sync_cursors` rows), or deliberately retired with its docstring
-      and ADR-0008 corrected. TRADESYNC's success criteria decide which; close this entry when its
-      verification passes.
 
 - [ ] **`[166.4.1-SERIES-CURVE-DATETIME]` The writers of the portfolio curve fields still emit ISO
       datetime strings; only one reader normalises them (booked 2026-10-09, Phase 166.4.1 plan 03).**
@@ -672,29 +636,6 @@ per-metric decision.
       **Closed when:** the `(None, True)` exit writes its own named note, distinct from the stale-cache
       note; the card renders it in the muted treatment, not amber; and a test that fails on today's
       single label pins both exits.
-
-- [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Four latent or loud defects on the fan-in graph and
-      the bridge's decision cascade (booked 2026-09-26; routed 2026-09-25 from the Phase 164.9.1
-      review round 1 to Phase 164.5.2, re-routed 2026-09-26 by founder decision).**
-      (1) **Stranded child:** a fan-in child whose parent is still open at enqueue and later
-      ends `failed_final` stays in `done_pending_children` forever. Latent: no caller passes
-      parents today.
-      (2) **Cascade 23505:** a second `match_decisions` delete can raise 23505 through the
-      `ON DELETE SET NULL` cascade onto `bridge_outcomes_legacy_per_strategy_holding_when_md_null`.
-      Pre-existing and loud; the admin decisions route issues these deletes.
-      (3) **Diamond deadlock:** the fan-in parent lock `FOR SHARE ... ORDER BY id` can deadlock
-      (40P01) against `mark_compute_job_done` when a child's parents include another waiting
-      child. Latent. Whoever first passes parents must treat 40P01 as retryable on both the
-      enqueue and the worker's mark path.
-      (4) **Lost release:** a concurrent fan-in "lost release" in `mark_compute_job_done` can
-      strand a two-parent child in `done_pending_children`. It is pre-existing: the body is
-      carried byte-for-byte from 20260603120000. Found by the Phase 164.5.2 round-1 review as
-      WR-02, and routed here 2026-09-26 (ROADMAP `### Phase 164.9.3.1`, "ROUTED IN 2026-09-26").
-      Its success test is a two-backend lane arm that fails on today's body.
-      (1) and (3) are recorded in the header of M1, `20260924230827_fanin_initial_status_10param.sql`.
-      ✅ **Destination: Phase 164.9.3.1 FANINGRAPH**, inserted 2026-09-26 via `/gsd-phase --insert`
-      and booked under the new-phase freeze, NOT started. The ROADMAP section holds one success
-      criterion per defect; this entry is the evidence.
 
 - [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
       with the same name are indistinguishable — the `description` that disambiguates them is
@@ -842,38 +783,6 @@ per-metric decision.
       The condition is recorded at the source in `scripts/prod-body-drift-check.sh`, in the
       `⛔ NO RATCHET HERE` block, so a reader of the refusal meets its own caveat.
 
-- [ ] **`[164.8.5-MANIFEST-SIDE-LOOP-DEAD]` ◆ **IN PROGRESS 2026-09-12 — the ORDERING half is code-complete on `phase-164.8.6-proberhygiene` but NOT MERGED, and carries a known defect.** The manifest-side loop now runs above every early return, with three one-lever controls each observed RED against the pre-hoist file. ⛔ The hoist introduced a regression the review caught: a `null` element in `manifest.jobs` THROWS at the new position, and because the loop is above every return the throw DISCARDS section (0)'s already-collected live PROD credential findings — a SUBSTITUTIVE refusal, the exact invariant this phase exists to enforce. Reproduced independently; under fix. ⚠️ `164.5.1` still owns the re-capture half.
-  ↳ ORIGINAL ENTRY: `compareManifest`'s MANIFEST-side hygiene loop sits
-      BELOW all three early returns, so it is dead on every production run today (booked
-      2026-09-11, found by the round-3 silent-failure hunt).**
-      ⛔ **MEASURED, and the deadness is not hypothetical:** `scripts/prod-prober/cron-manifest.json`
-      declares `normalization: ws-collapse-v1` while the arm computes `ws-collapse-v2`, so the
-      `manifest-invalid` early return fires on every real run and the manifest-side loop is never
-      reached.
-      ```
-      CONTROL: valid manifest      -> manifest-side credential defects: 1
-      normalization ws-collapse-v1 -> 0        schema_version wrong -> 0        marker mismatch -> 0
-      ```
-      ⚠️ **Deliberately NOT graded Critical**, and the reasoning is worth keeping: a credential
-      LIVE IN PROD is still reported on every one of those paths, because decision D1 hoisted the
-      PROD-side loop above every `return`. What this loop uniquely catches is a credential in
-      COMMITTED REPO TEXT that is no longer in PROD — a real class, but repo text, which gitleaks
-      also scans.
-      ⭐ **The coupling is the point, and it is a trap for whoever does the re-capture:** the
-      pending PROD re-capture clears `manifest-invalid`, which SILENTLY RE-ANIMATES this loop.
-      A check that has not run for weeks starts running again as a side effect of an unrelated
-      action. Whoever re-captures should know that before, not after.
-      ⛔ The fix pass's own audit table justified these early returns as "ADDITIVE by construction
-      — D1 hoisted the PROD hygiene loop above every `return`". That is only half true: D1 hoisted
-      the PROD loop; the manifest loop was never hoisted. A recorded justification that is
-      narrower than it reads is exactly the class this phase exists to eliminate.
-      <deferred>Phase 164.5.1 CRONREPOINT (the re-capture) AND Phase 164.8.6 VAULTTICKFIX (the
-      ordering fix)</deferred> — routed 2026-09-11. TWO destinations DELIBERATELY, not a
-      duplicate: 164.5.1 owns the re-capture that silently RE-ANIMATES the loop; 164.8.6 would
-      own moving the loop above `compareManifest`'s early returns so it stops being skippable
-      at all. Whichever lands first must say so in its SUMMARY.
-      **Evidence:** `.planning/phases/164.8.5-proberparse-*/164.8.5-REVIEW-R3.md`.
-
 - [ ] **`[T-OPEN-03]` `retention_compute_jobs_orphaned_running` was committed to
       `scripts/prod-prober/cron-manifest.json` with 0 newlines and lexed to a pure comment, so
       `visible = 0 of 1791` characters — an ATTRIBUTION gap, not a credential blind spot.**
@@ -888,19 +797,6 @@ per-metric decision.
       committed manifest today. **The RESIDUAL owned here is the CI GATE, not the data:** nothing
       in CI catches a future re-fold of the same shape, so this entry stays open until that gate
       exists.
-      Owner: Phase 164.5.1 CRONREPOINT, plan 07.
-
-- [ ] **`[T-OPEN-04]` The committed manifest declared `normalization: ws-collapse-v1` while the
-      cron-drift arm computed `ws-collapse-v2`, and two normalizations produce two different shas
-      for identical text — so the cron-drift arm was performing NO comparison at all and
-      `manifest-invalid` fired on every production run.**
-      MEASURED: the mismatch was caught by an hourly PRODUCTION probe an hour after it shipped,
-      and by nothing in CI — a control that silently stopped being able to find anything. The
-      DATA half was discharged by the same 2026-09-11 re-capture (`ws-collapse-v2`, run
-      `34611594511`, PR #776).
-      **The RESIDUAL owned here is the missing CI gate:** any future normalization bump re-opens
-      this identically, because nothing asserts the arm's exported `NORMALIZATION` and the
-      manifest's `normalization` key agree.
       Owner: Phase 164.5.1 CRONREPOINT, plan 07.
 
 - [ ] **`[164.8.5-HYGIENE-RESIDUALS]` ◆ **IN PROGRESS 2026-09-12 — code-complete on `phase-164.8.6-proberhygiene` (v0.77.35.0) but NOT MERGED, and NOT yet clean.** Phase 164.8.6 plan 08 replaced the per-shape exemptions with ONE whole-token measure (`tokenMeasure`). ⛔ A code review then found the new measure fires the credential rule — whose remedy is "treat the named secret as EXPOSED and rotate it" — on credential-free PROSE assembled by `concat_ws` / `format` / `||`, hourly, against production. Reproduced independently. Under fix. **Do not tick until merged and the false-positive class is closed with green-corpus rows that exercise the new mechanism** (the original zero-FP evidence was vacuous for it: zero of the 14 committed manifest commands contain `||` or any builder callee).
@@ -1034,67 +930,6 @@ per-metric decision.
       Owner: Phase 164.7 plan 07, re-entered at the same gate. Record:
       `164.7-ACTIVATION-RECORD.md`.
 
-- [ ] **`[164.7-VAULT-ABSENT-RULE]` The `vault-absent` cron-hygiene rule and a Phase 164.5 repoint
-      of jobid 1 are in direct conflict, and must move in ONE change (booked 2026-09-07, Phase
-      164.7 plan 05, from `164.7-RESEARCH.md` § Q1 Open Question 2).**
-      `scripts/prod-prober/arms/cron-drift.mjs`'s `vault-absent` rule fires when
-      `name === "match_engine_cron" && !text.includes("vault.decrypted_secrets")` — it requires
-      that literal string in the job's COMMAND TEXT. Phase 164.7 shipped
-      `public.match_engine_cron_tick()` (migration `20260907120000`), which reads Vault INSIDE its
-      body. So the moment Phase 164.5 item (7) repoints the live row to
-      `SELECT public.match_engine_cron_tick();`, the command text no longer contains the literal
-      and the rule fires **against a correct repair**. Phase 164.5 item 7 was SPLIT OUT to
-      Phase 164.5.1 CRONREPOINT on 2026-09-07 by founder decision — not renamed, not dropped.
-      ⛔ Do not discover this at repair time and
-      "fix" it by keeping a decorative `DO` wrapper around the call purely to satisfy a grep —
-      that is a gate shaped by its own false positive. **Three things move together, in one
-      commit:** (a) the rule — accept EITHER the literal or a call to a function whose committed
-      body contains it, and ship a RED fixture for the new arm, because a widened rule with no
-      fixture is a rule nobody has watched fail; (b)
-      `scripts/prod-prober/cron-manifest.json`, re-captured from PROD after the repair; and (c)
-      the live row itself. Owner: Phase 164.5.1 CRONREPOINT (Phase 164.5 item 7 was SPLIT OUT
-      here on 2026-09-07 by founder decision — not renamed, not dropped).
-
-- [ ] **`[164.2-TYPES-REGEN-CHECK]` After the migration PR merges and auto-applies to PROD,
-      re-derive the six `database.types.ts` lines that were hand-extended, and confirm no
-      failure upsert was lost in the schema-cache window (booked 2026-09-06, Phase 164.2 plan 10;
-      the hand-extension and this owed check are recorded in `164.2-06-SUMMARY.md` under the
-      `database.types.ts` bullet, "⚠️ For plan 10").**
-      Plan 06 added `computation_error_job_id` and `computation_error_source` to
-      `strategy_analytics`'s `Row`, `Insert` and `Update` **by hand**, in the generated
-      alphabetical position between `computation_error` and `computation_status` — six lines. It
-      could not be generated at authoring time because the CLI is linked to PROD, where the
-      columns did not yet exist (RESEARCH Open Q5).
-      **Two checks, both post-merge:**
-      1. Run the which-database marker query FIRST (this is a **READ-only** `gen types`, but the
-         CLI is linked to PROD and the habit is the guard), then
-         `supabase gen types typescript --linked` and confirm those six lines produce **no diff**.
-         A diff means the hand-extension guessed the generator's shape wrong and every consumer
-         of those types has been typed against a fiction.
-      2. On PROD, confirm **no failure upsert was lost in the PostgREST schema-cache window**
-         around the deploy: the writer starts sending the two marker keys the moment the Python
-         half ships, and PostgREST can answer `PGRST204` for a column it has not yet cached.
-         Read `net._http_response` and the worker logs for `PGRST204` in that interval. Plan 08
-         carries a P11 minimal-key fallback for exactly this, so the expected finding is ZERO
-         lost records — but "expected" is not "measured", and an effect never identifies the
-         writer.
-
-- [ ] **`[164.5-BASELINE-PROVENANCE-COLS]` `supabase/schema/baseline.sql` does not carry
-      `computation_error_source` / `computation_error_job_id`, and Phase 164.5 gates the baseline
-      hash (booked 2026-09-06, Phase 164.2 plan 10).**
-      `supabase/migrations/20260906120000_computation_error_provenance.sql` adds both columns to
-      `strategy_analytics` (plus the `..._computation_error_source_check` and
-      `..._computation_error_markers_together_check` constraints — see `[PROV-WRITER-23514]`).
-      **Measured at HEAD 2026-09-06:** `grep -c 'computation_error_source'
-      supabase/schema/baseline.sql` → **0**; the table's column list at `baseline.sql:5183` still
-      ends `"computation_error" "text",` with no marker columns after it.
-      **Why it is booked and not fixed here:** the baseline is a generated snapshot of APPLIED
-      PROD schema, and the migration has not merged, so regenerating it now would encode a
-      not-yet-true state. Phase 164.5 is the phase that gates the baseline hash — it must
-      regenerate `baseline.sql` after this migration auto-applies, or its own gate will fail on a
-      drift that is really just this pending apply. ⚠️ Sequence with
-      `[164.2-TYPES-REGEN-CHECK]`: both wait on the same PROD apply.
-
 - [ ] **`[164.2-RECLAIM-PROVENANCE]` `reclaim_stuck_compute_jobs` requeues without resetting the
       provenance markers, so a crash-recovered job can lose its curated sentence (booked
       2026-09-06, Phase 164.2 ship review).**
@@ -1193,18 +1028,6 @@ per-metric decision.
       handler (`insufficient_privilege OR check_violation`) does not catch, so the file dies OUTSIDE
       every arm. On this forge the unique index, not the INSERT policy, is the outer fence.
       **Fix:** forge a triple that does not collide, so the INSERT policy is the only fence.
-
-- [ ] **`[PRBRANCH-STALEBASE-01]` ⚠️ CLAUDE.md's PR-branch deletion guard resolves its base to the
-      LOCAL `main`, which is routinely stale.** The documented line is
-      `BASE=$(git rev-parse --abbrev-ref origin/HEAD | sed 's|origin/||')` -> the string `main`, so
-      the guard then diffs against whatever the local `main` branch happens to point at. MEASURED
-      2026-09-04: local `main` sat at `c2251b6d` while `origin/main` was `f82d9c1b`, and the guard
-      reported **6 `.planning/` files** in a PR that actually touches **none**. The failure mode is
-      conservative (a stale base shows EXTRA files, so it can only false-STOP, never false-PASS),
-      which is why it has never caused damage — but it makes the guard cry wolf and trains the
-      reader to wave it through, which is exactly how a real deletion would get merged.
-      **Fix:** pin the guard to `origin/main` directly (or `git fetch` + `git rev-parse origin/HEAD`
-      as a SHA) in the CLAUDE.md snippet, so it is independent of the local branch's freshness.
 
 - [ ] **`[REDUNDER-SWEEPCOPY]` `test_scenario_downgrade_sweep.sql` re-implements the sweep script
       it claims to prove, and nothing enforces they agree.** MEASURED 2026-09-04 (plan 164.4-08)
@@ -1603,10 +1426,12 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   The ROADMAP `### Phase 187` section stays as the spec: the six success criteria and the full census of mixed-case implicit calls.
   **Owner / Trigger:** the next milestone's planning, or sooner if a Binance key is connected to a published strategy or an allocator book. Data integrity: the fix changes published Binance numbers.
 
-- [ ] **[175-NIGHTLY-MT5-DERIVE-CHECK] — after the 2026-11-04 00:40Z derive, check that every MT5 derive ended clean under the US rule (logged 2026-11-03).**
-  Phase 175 closed with only one MT5 key derived under the rule (done on attempt 1, no clock configuration fault). The 2026-11-04 00:40Z nightly is the first run that derives all MT5 keys under it.
-  Check that every MT5 `derive_broker_dailies` job is `done` with `attempts=1` and that no `compute_jobs.last_error` carries a clock-configuration text. A job that is `done` with `attempts>1` can hide a fault a retry healed, so `attempts=1` is the test, not `done` alone. Read-only, marker query first.
-  **Owner / Trigger:** the first session after 2026-11-04 00:40Z. Not a phase; if a key fails, it is a fix against `analytics-service/services/mt5_server_clock.py` and the worker's rule setting.
+- [ ] **[175-NIGHTLY-MT5-DERIVE-CHECK] — MT5 derives keep needing a second attempt, and the retry cause is unread (logged 2026-11-03; rewritten 2026-11-23 as a LIVE data-integrity item).**
+  The original check (every MT5 `derive_broker_dailies` job `done` with `attempts=1`, no clock-configuration `last_error`) was read on PROD on 2026-11-23, read-only, marker query first. It does not pass:
+  - `attempts=2` on `done` jobs, created 2026-11-05 (1), 2026-11-15 (1), 2026-11-20 (1), 2026-11-21 (1), 2026-11-22 (1) and 2026-11-23 (2). Every other day since 2026-11-03 is `attempts=1` only. The retried jobs end with a null `last_error`, so what the first attempt hit is not recorded anywhere this read can see. A `done` after a retry can hide a fault the retry healed, which is why `attempts=1` is the test.
+  - Two `failed_final` jobs (`attempts=3`), both created 2026-11-18 (00:25Z and 00:40Z), carry `MT5 server clock does not match the configured rule (rule=us expected=+2h measured=+0h)`. One has no `api_key_id` (it does not join to a key), the other is an MT5 key. 2026-11-18 is the day Phase 217 SERVERRULE shipped the per-server rule; no clock-configuration `last_error` appears on any job created since 2026-11-19.
+  **Data integrity:** a derive that needs a retry rewrites the same account's published dailies, and nothing tells us whether the first attempt wrote anything or why it failed.
+  **Owner / Trigger:** unrouted, founder to assign. Trigger: now (it recurs daily since 2026-11-20). First make the first attempt's failure readable (the cause is lost when the retry succeeds), then fix it at its root. **Closed when:** seven consecutive nightly MT5 derives are all `done` with `attempts=1`, or the retry cause is named and fixed with a test.
 
 - **[192-ORPHANED-LANDING-VERIFY]** (logged 2026-11-07, Phase 192 PUBLICTRUTH; owner: unrouted, founder to assign). The landing verification section, form, results and progress components under `src/components/landing` are rendered nowhere after Phase 192 turned the home verify band into a sign-up link (no non-test importer outside that directory). `VerificationForm.tsx` still carries its false "never stored" line, and `/api/verify-strategy` stays in `PUBLIC_ROUTES` in `src/proxy.ts` with no caller. The public-truth census does not scan this directory for that reason. **Closed when:** the components are deleted together with their registry entries (`closed-sets.test.ts`, `complete-status-scan.test.ts`) and the public allowlist entry, or reused behind sign-in.
 
@@ -1741,85 +1566,6 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the
       three (founder rule 2026-09-08).
 
-### FANOUT-COHORT-PRIVATE-01 — the ledger-refresh fan-out enqueues NOTHING because every PROD strategy is `private` (booked 2026-09-17)
-
-**Measured 2026-09-17 on PROD, on the FIRST tick after Phase 164.5.1 activated the fan-out.**
-`cron.job_run_details` runid `11159`, jobid 40, `08:25:00.371Z`, `succeeded`. The job ran, was NOT
-dormant, ran to candidate selection and selected **ZERO** strategies: no `derive_broker_dailies`
-row in `compute_jobs`, and `ledger_refresh_staleness` byte-identical to the BEFORE census (6
-strategies, `min 23 / avg 52.50 / max 141` days).
-
-⚠️ **`return_message: "1 row"` is not "one job enqueued"** — the function returns an INTEGER and
-`SELECT f()` always returns one row. This is the SAME reading error as CRON-DRIFT-01 below, whose
-own record already says `succeeded / '1 row'` while six consecutive ticks were 401ing. Second
-instance of one class, five weeks apart.
-
-**Cause, per strategy:** `cooldown_jobs = 0` and `inflight = 0` for all six — neither the 20-hour
-attempt cooldown nor the in-flight guard excludes anything. The single binding conjunct is
-`s.status IN ('published','pending_review')` in `enqueue_ledger_refresh_for_strategies()`
-(`supabase/migrations/20260911130000_ledger_fanout_grantees_and_dormancy.sql`), and every
-production strategy carries `status = 'private'` — an owner-only terminal status added by
-`20260716130000_strategies_status_private.sql` (CONTRIB-02, Phase 110) for allocator-contributed
-strategies, which are real live strategies with real keys and real ledgers.
-`ledger_refresh_staleness` does not filter on `status`, so **the view and the fan-out disagree
-about the cohort totally: 6 stale rows, 0 eligible.** The string `private` appears **0 times** in
-both migrations — never considered, not considered and rejected. The pair mirrors
-`ALLOWED_STRATEGY_STATUSES` (`analytics-service/routers/cron.py:148` =
-`{draft, pending_review, published}`), never widened when `private` shipped in July 2026; the
-sibling fan-out `20260412094449:239` carries the same pair.
-
-⛔ **BLOCKS `T-164.5.1-09-07`** — the all-candidates-failed branch cannot be exercised while the
-candidate set is empty for an unrelated reason, so `164.5.1-VERIFICATION.md` cannot report
-`passed` and `WINDOWS.md` entry 60 cannot close.
-
-Founder decision 2026-09-17: admit `private`, as one forward migration behind the three reviewers.
-Owner: **Phase 164.5.1.1 FANOUTCOHORT.**
-
-⭐ **LEDGER ARM HALF-CLOSED 2026-09-17 by Phase 164.5.1.1 FANOUTCOHORT (plans 01-03).** Shipped:
-the forward migration `20260917120000_ledger_fanout_admit_private.sql` (one executable edit — the
-single-key fan-out's lifecycle conjunct gains the owner-only terminal status — plus the
-regenerated canonical snapshot); **two** new `test_ledger_refresh_fanout.sql` gate arms, both
-neuter-verified with the mutation confirmed APPLIED before its red was accepted — arm **P**, the
-first arm in this corpus ever to promote a fixture to that status and prove it IS enqueued, and
-arm **Q**, which derives the lifecycle DOMAIN from `pg_get_constraintdef` and the ADMITTED set
-from a comment-stripped `pg_get_functiondef` so the pair cannot silently diverge again; and
-`ARMS_FLOOR` raised **392 → 394** with the three coupled pins in
-`src/__tests__/mutation-runner-floors.test.ts`, read off the runner's own printed biting count.
-
-✅ **CLOSED 2026-09-20 by Phase 164.5.1.1 plan 04, on the NATURAL tick.** The paragraph that stood
-here said *"THE ENTRY IS NOT CLOSED, and the BLOCKS clause above is NOT lifted"*, and it was correct
-when written: the migration was written and unapplied, and the block lifted only when the fan-out's
-natural `25 * * * *` tick was measured selecting a non-empty candidate set against the BEFORE
-census. That measurement has now been taken.
-
-**The reading that closes it — tick `11231`, jobid 40, 2026-09-17 17:25:00.229704Z, `succeeded`.**
-TWO `derive_broker_dailies` rows in `compute_jobs`, created on the tick's own millisecond, both
-completed, no `last_error`; stale census **6 → 4**, avg days 52.50 → 56.75. ⭐ The average RISING is
-the tell: the two freshest rows left the set and the older ones remain. A FALLING average would have
-been the suspicious reading. ⛔ `return_message: "1 row"` proves nothing and is not cited here — the
-function returns INTEGER and `SELECT f()` always returns one row, the same misreading this entry
-already warned about twice. The verdict lives in `compute_jobs`, and that is where it was taken.
-Recorded in `164.5.1.1-PROD-SESSION.md` § B.
-
-⚠️ **The `T-164.5.1-09-07` clause closes by SUBSTITUTION, and the distinction is load-bearing.**
-The all-candidates-failed branch was NEVER exercised — the tick's two jobs both SUCCEEDED, so the
-branch stayed unreached. What closed the risk is **mutation-gate arm R** in
-`supabase/tests/test_ledger_refresh_fanout.sql`, merged as PR #810 during Phase **164.5.1's** own
-closure — a different phase and a different mechanism from the one plan 04 specified. ⭐ A permanent
-gate is arguably stronger than a one-off exercise, since it re-proves the branch every run rather
-than once; `164.5.1-SECURITY.md` recorded it as a disclosed substitution at `medium`, below the
-blocking threshold, and the founder accepted it for this truth. ⛔ It is NOT compliance with plan
-04's literal mechanism and must never be cited as though it were.
-
-⚠️ **One item is disclosed rather than closed:** plan 04 task 3's session record (§ B) carries no
-database-marker output of its own. Measured: **§ B performed no writes** — it observed a tick that
-fired on its own schedule and then read three tables — and the marker rule is scoped to statements
-that write, with § A (the apply, which did write) carrying its marker. So the miss is against the
-plan's literal acceptance criterion with zero safety consequence. It is surfaced for a founder
-decision, not graded away. See `164.5.1.1-PROD-SESSION.md` § C-3.
-⛔ And it did NOT fix the 141-day composite — see `FANOUT-COHORT-SIBLING-COMPOSITE-01` immediately
-below, which carries the measurement and the destination for that decision.
-
 ### FANOUT-COHORT-SIBLING-COMPOSITE-01 — the composite fan-out carries the SAME lifecycle literal, and has no schedule at all (booked 2026-09-17)
 
 **Measured 2026-09-17** by Phase 164.5.1.1 plan 03, from the canonical bodies under
@@ -1926,9 +1672,9 @@ bounded-rendering decision belongs with the work that is already reading these l
 ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
 (founder rule 2026-09-08).
 
-### FANOUT-FAILBRANCH-UNEXERCISED-01 / 164.5.1-TODOS-DISPOSITION-OWED — the two items Phase 164.5.1 leaves open (booked 2026-09-17)
+### FANOUT-FAILBRANCH-UNEXERCISED-01 — the item Phase 164.5.1 leaves open (booked 2026-09-17)
 
-Both come out of Phase 164.5.1's verification and its plan-09 security re-audit. Both existed
+It comes out of Phase 164.5.1's verification and its plan-09 security re-audit. It existed
 ONLY as prose inside `.planning/` until this entry, which is exactly the `FANOUT-GLOBAL-01`
 failure mode this milestone already records: an item with no `TODOS.md` id has no owner, no
 trigger and no phase.
@@ -1942,7 +1688,7 @@ section — this citation is retro-linked to it.)
       said the branch "becomes reachable AT activation and is exercised DELIBERATELY with the
       result recorded". ⛔ **The live exercise did NOT happen**, and the reason is worth keeping:
       at activation the candidate set was EMPTY for an unrelated reason — the cohort mismatch
-      booked as `FANOUT-COHORT-PRIVATE-01` above, every PROD strategy carrying `status='private'`.
+      booked as `FANOUT-COHORT-PRIVATE-01` (closed; entry deleted 2026-11-23), every PROD strategy carrying `status='private'`.
       So there was nothing to fail.
       **What exists instead, and it is a disclosed SUBSTITUTION, not compliance:** "arm R" in
       `supabase/tests/test_ledger_refresh_fanout.sql` — a permanent, `RED-UNDER-M`
@@ -1962,123 +1708,6 @@ section — this citation is retro-linked to it.)
       cohort question, and a widened cohort is the precondition for a real candidate to fail.
       ⛔ It does NOT block: `medium` is below `workflow.security_block_on` (`high`), so
       `threats_open` stays 0 and this never gated the ship.
-
-- [ ] **`[164.5.1-TODOS-DISPOSITION-OWED]` Six entries this phase substantively resolved are
-      still unchecked here, and a SUMMARY claims otherwise.**
-      `164.5.1-09-SUMMARY.md` lists `TODOS.md` under "Files Created/Modified" and states
-      `[VAULTTICK-EMPTYKEY-01]` and `[CRON-DRIFT-01]`'s live-row half were "dispositioned from
-      the recorded outputs". **MEASURED and FALSE:** `git show <commit> -- TODOS.md` on all three
-      plan-09 task commits (`2ca23014`, `f429067d`, `2ffb0b6c`) AND on the squash-merge
-      (`d6607a88`) returns an EMPTY diff in every case. Found independently three times — by
-      `gsd-verifier`, by `gsd-security-auditor`, and by the orchestrator re-running it rather
-      than accepting either.
-      **The six, all still `- [ ]` at HEAD with contradicting prose** (`VAULTTICK-EMPTYKEY-01`
-      still reads "STILL OPEN 2026-09-12"): `CRON-DRIFT-01` (live-row half only — the DETECT half
-      is Phase 164.1's), `VAULTTICK-EMPTYKEY-01`, `164.7-ACTIVATION-DEFERRED`,
-      `164.7-VAULT-ABSENT-RULE`, `164.8.5-MANIFEST-SIDE-LOOP-DEAD`,
-      `164.5.1-GATEWAY-CEILING-INVERSION`.
-      ⭐ **The evidence to close all six already exists** in `164.5.1-PROD-SESSION.md` — this is
-      transcription, not investigation.
-      ⛔ **Classified non-blocking, and the reasoning is stated rather than assumed.** It shares
-      `T-164.5.1-09-04`'s Repudiation *shape* — a claimed act with no supporting evidence — but
-      neither its mechanism nor its artifact: the production evidentiary trail in
-      `164.5.1-PROD-SESSION.md` is genuinely OUTPUT-based throughout and is untouched by this.
-      Backlog bookkeeping is neither data-integrity nor user-facing, which is the class this repo
-      scopes below the blocking threshold.
-      ⚠️ **Why it was not just done inline:** `TODOS.md` is a NON-PLANNING path, so any commit
-      touching it pulls a VERSION bump and a CHANGELOG entry with it. That coupling is why the
-      disposition was deferred once already; it deserves its own commit rather than a fold-in.
-      **Trigger:** the next deliberate `TODOS.md` pass. **Owner: Phase 164.1**, the next phase in
-      the agreed order and itself the owner of `CRON-DRIFT-01`'s DETECT half.
-
-### CRON-DRIFT-01 / CRON-OBS-01 — a PROD cron job 401'd hourly for 7 DAYS behind a green cron history (booked 2026-09-01)
-
-**Measured 2026-09-01, live in PROD.** Sentry `QUANTALYZE-18` (169 events, escalating, first seen
-2026-08-25T12:49Z) was `config_secret: SERVICE_KEY / config_fault: mismatched` from
-`analytics-service/main.py:833`. `net._http_response` ids 3479-3484 showed six consecutive hourly
-`401 {"detail":"Unauthorized"}` — while `cron.job_run_details` recorded `succeeded / '1 row'` for
-every one of those ticks.
-
-**Root cause.** A Railway `SERVICE_KEY` rotation on 2026-08-25 12:46. Someone created the Vault
-secret `analytics_service_key`, described it verbatim as "X-Service-Key for match_engine_cron
-(cron.job jobid 1)", and never re-pointed jobid 1 at it. The job kept an INLINE copy of the old
-key. First 401 landed 12:49:29 — three minutes after the vault write. Fixed 2026-09-01 by
-re-scheduling jobid 1 onto a `DO` block that reads `vault.decrypted_secrets`; verified id 3485
-`200 {"status":"ok","processed":14,"skipped":0,"failed":0}`.
-
-Two gaps remain, and neither is closed by that fix:
-
-- **[CRON-DRIFT-01] Nothing compares PROD `cron.job` against the repo's migrations.** PROD jobid 1
-  carried a hardcoded `url := 'https://…'` plus an inline key, while
-  `supabase/migrations/20260408215026_schedule_match_cron_hourly.sql:70-76` had rebuilt it on
-  `current_setting(...)` explicitly so "the secret never lands in `cron.job.command`". That rebuild
-  never took effect and nothing noticed for months. This is `VAC-04`'s shape (repo-vs-PROD function
-  body diff, shipped in v0.77.0.0) applied to `cron.job` — which has no equivalent.
-  ⚠️ **The GUC design in that migration is UNRUNNABLE on Supabase anyway**: `ALTER DATABASE … SET
-  app.analytics_service_key` returns `42501 permission denied to set parameter` because a custom
-  PLACEHOLDER GUC needs superuser and the `postgres` role is not one. So the migration as committed
-  could never have worked here. Any gate must compare against what is ACHIEVABLE, not just what the
-  migration says. Vault is the working mechanism.
-
-- **[CRON-OBS-01] Nothing watches `net._http_response`.** `net.http_post` is ASYNC: pg_cron logs
-  success for ENQUEUING and never sees the status code. Every other alarm is structurally blind
-  here — `/health` stays green (`SERVICE_KEY` skips `/health`, `/internal/*`, `/process-key`), and a
-  4xx never trips the 140.2 breaker. The PYAPI-06 Sentry capture was the ONLY instrument that
-  spoke, and it fires only for a NON-EMPTY wrong key (`if provided:` at `main.py:830`) — an absent
-  header would have been silent too. Needs a periodic check that fails loud on non-2xx in
-  `net._http_response`, counted and surfaced (⚠️ not a silent skip — that is `SKIP-01`).
-
-➡️ **ROUTED 2026-09-01 to Phase 164.1 (HARDEN-GUARDS — renamed PROD-OBSERVABILITY in the 2026-09-05 re-partition; the gate-hygiene half moved to 164.5/164.6).** That phase already owns this class — its
-title names the PYAPI-06 blind spot that let a production service-key mismatch run silently. NOT
-164.3/164.3.1: those own gate integrity (a control that cannot fail), this is production
-observability (a service down while every instrument reads green). ⭐ `CRON-OBS-01` and
-`MT5-WEDGE-OBS-01` are ONE mechanism with two targets — a periodic prober that fails loud — and
-are to be planned as one slice, not two.
-
-⭐ **SHIPPED in Phase 164.1 (2026-09-06, PR #746, v0.77.14.0) — the DETECT half of both.**
-`CRON-OBS-01` is the `cron-obs` arm: it joins `cron.job_run_details` to `net._http_response`
-and reports `cron-non-2xx`, `cron-no-observation` and `cron-transport-error`, so an async
-pg_net result can no longer hide behind a green cron history. It also carries an ATTRIBUTION
-FENCE (review WR-01): the join is time-only because `net._http_response` has no jobid, so a run
-with more than one response in its window is `measure-fail`, never a verdict — a foreign 200
-must not buy a pass for our own missing answer.
-`CRON-DRIFT-01` is the `cron-drift` arm, comparing live `cron.job` against the committed
-`scripts/prod-prober/cron-manifest.json` with ten secret-hygiene rules, each carrying a RED
-fixture proving it fires. The manifest was captured from PROD (run 34018613991) and every one
-of its 14 `command` strings was read individually and approved for publication by the founder.
-⛔ The REPAIR half of CRON-DRIFT-01 is NOT shipped and stays open below — it belongs to Phase
-164.5 item (7). The capture CONFIRMED the drift it describes: live jobid 1 runs a Vault-backed
-`DO` block, while migration `20260408215026` still schedules it on
-`current_setting('app.analytics_service_key')`, which returns 42501 on this platform. Both arms
-read GREEN on live run 34018874984.
-
-⭐ **DATED 2026-09-07 (Phase 164.7 APPSETTINGS) — the GUC half of `CRON-DRIFT-01` is CLOSED; the
-LIVE-ROW half stays open for Phase 164.5 item (7).** Phase 164.5 item 7 was SPLIT OUT to
-Phase 164.5.1 CRONREPOINT on 2026-09-07 by founder decision — not renamed, not dropped. What
-164.7 closed: the repo now DESCRIBES the
-mechanism PROD has been running since the 2026-09-01 hand repair — `public.match_engine_cron_tick()`
-in `20260907120000_analytics_service_settings_and_vault_tick.sql`, key from `vault.decrypted_secrets`,
-URL from `public.system_settings`, a loud `RAISE` on either absence — so a rebuild from migrations
-no longer reproduces an unrunnable job, and `20260408113029` / `20260408215026` carry dated
-`-- APP-GUC-LINEAGE:` headers naming that successor. A CI gate (`scripts/lint-app-guc.mjs`, wired
-into `sql-gate-lint`) now fails any NEW app-GUC reader written into `supabase/migrations/**`.
-⛔ What is NOT closed: the live `cron.job` row still runs the hand-written `DO` block rather than
-the callable, so repo and PROD agree in MECHANISM but not in TEXT. Repointing it is 164.5 item (7)
-— and see the `164.7-VAULT-ABSENT-RULE` entry above (named without its brackets on purpose: the
-bracketed form is the entry's unique key and a cross-reference must not create a second one),
-because the repoint trips the `vault-absent` hygiene rule unless the rule, the manifest and the
-row move in the same change.
-
-⛔ **FLAGGED 2026-09-16 (Phase 164.5.1 plan 08, D1) — the old repoint convention is SUPERSEDED, not
-merely superseded implicitly.** Phase 164.5 item 7's old wording — *"Write ONE forward migration
-re-scheduling `match_engine_cron` to the achievable Vault-backed command"* — is REPLACED by D1: the
-repoint registration lives in the RUNBOOK (`docs/runbooks/match-engine.md` § "Go-live: repoint
-`match_engine_cron` + ledger-refresh activation"), never in a migration. The old wording is not
-deleted anywhere it survives as lineage; this is an additive flag so both ledgers agree rather than
-disagreeing silently.
-
-⭐ **Standing rule until CRON-OBS-01 lands: `cron.job_run_details.status = 'succeeded'` is NOT
-evidence that a pg_net-based job worked.** Read `net._http_response`.
 
 - [ ] **[MT5-VERDICT-SINK-01] the MT5 capability verdict has NO durable sink, so an `undetermined` outcome is unverifiable the moment it scrolls out of the log** (booked 2026-09-05) — `_Mt5ValidateTrace.outcome` is carried to `emit_mt5_stage_event` (`analytics-service/services/mt5_client.py:205`), which writes a STRUCTURED LOG EVENT, not a row. There is no table to query for a historical `undetermined`, and Railway retention is short enough that a past occurrence is already gone. ⛔ **This is why Phase 161's first human-verification item has been unclosable for over a week**, and re-measuring it can only ever return "still nothing": measured 2026-09-05, `railway logs --service quantalyze-analytics --environment production` contains ZERO `mt5` lines of any kind. The absence of a sink makes that item permanently *unverifiable*, not merely not-yet-verified — a different and worse thing. ⭐ The verifier recommended exactly this on 2026-08-24 ("worth pairing with a durable sink when it is done") and it was never booked; it lived only inside `161-VERIFICATION.md`, which is the one file nobody planning the fix reads. **Fix:** persist which arm fired — a row, or a counter that survives rotation — so the sentence a founder actually read can be established after the fact. ⚠️ **Adjacent to, NOT the same as, `MT5-WEDGE-OBS-01`**: that arm probes LIVENESS (`-10004` vs `-10005`), this is a CAPABILITY verdict (`tradeapi_disabled` → which remedy sentence). Phase 164.1 is the closest live mechanism and the cheapest place to ride along, but it is a founder call whether it rides or waits — do not silently widen 164.1's scope to absorb it.
 
@@ -2201,14 +1830,6 @@ follows is everything that was not.
 Ran to close UAT 7 (Plausible) and UAT 9 (Sentry), which were recorded BLOCKED locally.
 Neither closed. Both found something better than a pass.
 
-- **[SHARE-QA-06] the scrub still enumerates WHERE to walk, even though it no longer
-  enumerates WHAT to scrub.** `scrubSentryEvent` names `request.url`, `transaction`,
-  `breadcrumbs`, `spans`, `contexts.trace`, `extra`, `tags`. Two of those were added only
-  after a live leak. Nothing proves the list matches what the SDK populates, and the wire
-  capture used above is the only thing that ever has. ⭐ Candidate mechanism for 164.3
-  (VACUITY): keep the capture harness and assert on transmitted bytes, rather than on a
-  fixture that mirrors the implementation's own idea of its surface.
-
 ### Phase 164 (SHARE) — browser-UAT findings (booked 2026-08-28)
 
 Source: `164-UAT.md`, 9 checkpoints against localhost pointed at TEST — 7 passed, 2 recorded
@@ -2241,32 +1862,6 @@ gap in the three original tables, not something 164.7 introduced.
 
 **Fix:** add the FORCE-RLS statements to the pg-lane fixtures (or to the affected apply lists) so
 the lane's row-security posture matches PROD. Guard fidelity — recorded, not blocking.
-
-### ⚠️ PLANVERIFY-CD-01 — plan `<automated>` blocks hardcode the PRIMARY checkout path, which is wrong under worktree isolation (measured 2026-09-07, phase 164.7 wave 1)
-
-Every `<automated>` verify in this repo's plans opens with an absolute
-`cd /Users/<user>/claude-projects/quantalyze`. That is correct when the executor runs in
-the primary checkout, and **wrong the moment the phase runs with `isolation="worktree"`** — the `cd`
-walks OUT of the agent's worktree and measures the primary tree, which contains none of that
-executor's new files.
-
-⛔ **The dangerous half is not the failure, it is the SUCCESS.** A verify that asserts *zero*
-occurrences of something (`grep -c … = 0`, "no stray token", "gate reports no findings") PASSES
-VACUOUSLY when pointed at a tree where the file does not exist yet. That is the same
-cannot-fail class the 164.7 plan-checker already caught twice inside these very plans.
-
-Measured: the 164.7-01 executor hit this and repointed the `cd` at its own worktree, changing only
-the path and keeping every other byte (including the `{ …; test $? = 1; }` groups). It reported the
-deviation. The two sibling executors were NOT warned, so the orchestrator must RE-RUN their verifies
-in the correct tree before accepting any wave-1 result rather than trusting the self-reports.
-
-**Newly exposed, not longstanding:** worktree parallelism was only enabled on 2026-09-07 after a
-stale memory claiming worktrees fork from `origin/HEAD` was disproved by measurement. Every prior
-phase ran sequentially in the primary checkout, where the hardcoded `cd` was a no-op.
-
-**Fix:** plans should open verifies with a repo-root resolution that works in both
-(`cd "$(git rev-parse --show-toplevel)"`) rather than an absolute path. Cheap, and it makes the
-verify measure whatever tree it is actually running in.
 
 ### ⚠️ GSD-03 — `gsd-tools query init.plan-phase` emits INVALID JSON whenever a prior phase's verify command contains SQL dollar-quoting (booked 2026-09-07, phase 164.7 planning)
 
@@ -2345,7 +1940,7 @@ hand. **Two independent gates were silent at once, and the run still looked clea
 - **[NYQ-01b] Backfill or explicitly waive 163 and 161.1.** Both shipped; the artifact is now
   archival, so a recorded waiver may be the honest close rather than a reconstructed document.
 
-⚠️ Same family as **SKIP-01** and **CI-MIGRATE-01**: a gate whose failure mode is *silence*, where
+⚠️ Same family as SKIP-01 (closed; entry deleted 2026-11-23) and **CI-MIGRATE-01**: a gate whose failure mode is *silence*, where
 the green run and the un-run run are indistinguishable from the outside. The standing lesson holds —
 **absence of a red is not evidence a gate fired.** Check the artifact, not the exit code.
 
@@ -2489,90 +2084,7 @@ there is nothing to strip, so:
   `pg_get_functiondef` directly — a green TEST run is not evidence.
 
 ⚠️ The gate arms were all measured green on BOTH databases on 2026-08-26, so nothing is broken
-today. See **SKIP-01** below: the drift is one symptom of TEST never receiving migrations at all.
-
-### ⛔ SKIP-01 — nothing applies migrations to TEST, so the OPS-08 gate SKIPs FOREVER (added 2026-08-26)
-
-✅ **REMEDY CONFIRMED BY MEASUREMENT 2026-08-26 (this instance only).** `20260826150000` was
-hand-applied to TEST via MCP (10-param body MD5 `f349af15a256ad00bd31952723ae7b00`, 7674 bytes —
-byte-identical to PROD), and PR #720's `sql-tests` lane then printed the *assertion* arm rather
-than the skip:
-
-```
-test_enqueue_internal_destrict.sql:775: NOTICE:  OPS-08 Part 1+3 OK: the deployed 10-param
-body carries no strict lost-race re-read, does raise serialization_failure on an exhausted
-one, and its catalog COMMENT still carries the revert-discriminator marker.
-```
-
-⚠️ This closes the *instance*, not the class. The green check itself proved nothing — the
-`SKIP (Part 3)` arm exits green too, which is what made this invisible. The evidence is the NOTICE
-text, read out of the job log. **CI-MIGRATE-01 remains the class fix**; until it lands, every new
-migration self-check is born silent on TEST.
-
-Found by live measurement after PR #717 merged, while checking whether the recorded "OPS-08
-code-complete, migration unapplied" state was still true. It is true — of the wrong database.
-
-⚠️ **ATTRIBUTION, corrected 2026-08-26.** The core fact was NOT discovered here. It was already
-written down in TWO places before this entry existed:
-- the migration's own header (`20260826150000:184-186`): *"Nothing applies migrations to the TEST
-  project automatically (supabase-migrate.yml targets PRODUCTION only)"*; and
-- Phase 163's verification report, which records that the gate prints `SKIP (Part 3)` and that
-  `ci.yml`'s whole-file anti-SKIP net keys on a marker STARTING `SKIP:` — which `SKIP (Part 3):`
-  does not match — concluding *"the lane is GREEN and no CI signal will ever report the unapplied
-  state."*
-
-What THIS entry adds is the **permanence**, which neither source drew out: because nothing applies
-migrations to TEST *at all*, the pre-apply state never resolves on its own. Both prior sources
-describe a condition that reads as transitional. It is not. That is the finding, and it is
-narrower than "SKIP-01 was discovered here".
-
-**The recorded state MOVED rather than went stale.** Measured on both databases 2026-08-26:
-
-| `_enqueue_compute_job_internal` (10-param) | PROD | TEST |
-|---|---|---|
-| `INTO STRICT` lost-race re-reads | **0** | **present** |
-| `serialization_failure` raise | **yes** | **no** |
-| OPS-08 marker comment | **yes** | **no** |
-
-So "the deployed function still carries all four `INTO STRICT`" is now FALSE for production and
-TRUE for TEST. Any note repeating the old sentence must name which database it means.
-
-**Why no CI signal will ever say so.** Three measured facts compose:
-
-1. **No workflow applies migrations to TEST.** All four migration-touching workflows checked:
-   `supabase-migrate.yml` targets `vars.SUPABASE_PROJECT_REF` (the PROD ref);
-   `migration-drift-check.yml` runs `db push --include-all --dry-run` — a dry run, also against
-   PROD; `migration-policy.yml` documents that no `db push` or other write is ever invoked;
-   `mutex-probe.yml` uses `TEST_SUPABASE_DB_URL` only to take a lock. TEST's ledger tops out one
-   migration short.
-2. `sql-tests` — the ONLY lane that executes real deployed SQL bodies — has five steps: install
-   psql, preflight, acquire mutex, run, release. **There is no migration-apply step.**
-3. TEST sits in the gate's *true pre-apply* state (pre-fix body AND no marker comment), which is
-   the one state `test_enqueue_internal_destrict.sql` deliberately waves through: `exit 0`,
-   `SKIP (Part 3)`.
-
-⭐ **The pre-apply tolerance was designed for the window between authoring a migration and it
-applying. For the only database CI runs against, that window NEVER CLOSES.** Parts 1+3 SKIP
-permanently. The de-stricted body that is live on production has been executed by **no test,
-ever, anywhere**.
-
-✅ Credit where due — the gate is not naive. It RAISES on a revert (pre-fix body + marker
-present), on a hybrid re-base (some arms moved), and on the marker going dark (post-fix body,
-no marker). It goes silent in exactly one state, and TEST is in that state permanently.
-
-- **[SKIP-01] Make the pre-apply SKIP expire, or give TEST the migrations.** Two shapes, and the
-  choice is a real decision, not a detail:
-  (a) apply `supabase/migrations/**` to TEST as a CI step before `sql-tests` — closes SKIP-01 and
-      **DRIFT-01** together, because both are the same root cause; or
-  (b) keep TEST as-is and make the pre-apply arm fail once the migration is older than some
-      threshold, so a permanent SKIP becomes loud.
-  ⚠️ (a) is the root fix but changes what `sql-tests` is allowed to do to a shared database that
-  has no worker and is already contended — see the shared-test-db mutex notes. Do not treat it
-  as a one-line CI edit.
-
-⚠️ This generalises past OPS-08. ANY migration's self-check that tolerates a pre-apply state is
-permanently silent on TEST by the same three facts. OPS-08 is where it was caught, not where it
-is confined.
+today. See SKIP-01 (closed; entry deleted 2026-11-23): the drift is one symptom of TEST never receiving migrations at all.
 
 ### Phase 163 / WR-01 — hygiene Rule 1 is INACTIVE in CI by design (added 2026-08-26)
 
@@ -2785,47 +2297,10 @@ surgical.
 
 ### CI / test-infra ratchet
 
-- **`[PGLANE-SELFTEST-COUNT-UNPINNED]` The pg-lane self-test's `N/6` denominator is a hand-typed
-  literal in NINE places and NOTHING pins it (raised 2026-09-04, Phase 164.4.1 plan 01 Task 3).**
-  `scripts/pg-lane/run.sh` spells its arm count at the SP-H01 history comment, the five
-  `=== SELF-TEST n/6:` captions, the SP-H01 denominator comment, the `$((6 - st_skipped))/6`
-  arithmetic and the final `PASSED (6/6)`. MEASURED at HEAD: adding arm 6 required editing all
-  nine by hand, and zero vitest arms read `run.sh`'s captions — so a seventh arm whose caption
-  said `7/7` while `PASSED (6/6)` stayed put would print a self-consistent-looking lie, and a
-  caption that silently drifted BELOW the real arm count would let a dropped arm read as a full
-  run. That is the same class SP-H01 itself was raised for; SP-H01 fixed the SKIP tally, not the
-  denominator.
-  ⚠️ Contrast `scripts/mutation-runner/run.mjs`, which also uses literal captions (`17/17`) but
-  whose coverage is DERIVED and enforced: `src/__tests__/mutation-runner-floors.test.ts:579-605`
-  ranges over `DEFECT_KINDS` and fails BY NAME on an unexercised kind. The `run.mjs` side is more
-  recent and more tested; the lane side is the laggard.
-  **Fix** = a vitest arm that counts the `=== SELF-TEST n/6:` captions in the lane script's bytes
-  and asserts the count equals the denominator in the `PASSED (N/N)` literal and in the
-  `$((N - st_skipped))/N` arithmetic — three independently-typed numbers forced to agree.
-  ⛔ Not fixed in 164.4.1 plan 01 ON PURPOSE (PATTERNS C2): the arm-6 edit follows the local
-  convention, and inventing a counting scheme mid-phase would mix a new mechanism into a substrate
-  change. Book it, then build it.
-  ✅ **BUILT 2026-09-05 (Phase 164.4.1 code review, IN-02).** `src/__tests__/drift-check-scripts
-  .test.ts`'s SP-H01 arm now counts the `=== SELF-TEST n/N:` captions in the comment-stripped
-  `self_test()` body and requires that count to equal the `PASSED (N/N)` denominator, requires each
-  caption's OWN denominator to match it, and (as before) requires the
-  `$((N - st_skipped))/N` arithmetic to use the same N — the three independently-typed numbers this
-  item asked to be forced to agree. The interim `PASSED \((\d+)\/(\d+)\)` halves-agree check was
-  SELF-CONSISTENT only: `totalArms` was read out of the caption, so six arms captioned `(7/7)`
-  passed. PROVEN ABLE TO FAIL by neutering exactly that case — `self_test() contains 6 numbered arm
-  captions but the verdict claims 7 … expected 6 to be 7` — then restored and confirmed by hash. An
-  in-test calibration also proves the caption predicate matches something, so agreement cannot come
-  from a regex that matches nothing.
-  ⚠️ RESIDUAL, deliberately not pinned: two of the original nine sites are PROSE (the SP-H01 history
-  comment at `run.sh:558` and the denominator comment), and the test strips comments before reading
-  — by design, since a first version of SP-H01 matched `SELF-TEST PASSED (5/5)` inside the very
-  comment explaining its own fix. A stale number in those two comments is a docs drift, not a
-  self-consistent lie about the arm count, which is what this item was raised for.
-
 - **`[PGLANE-SELFTEST-NUMERATOR-UNPINNED]` The new self-test caption pin constrains the arm COUNT
   and the DENOMINATOR, never the NUMERATORS (raised 2026-09-05, review of the 164.4.1 fix pass,
   IN-A).** `src/__tests__/drift-check-scripts.test.ts:3289-3300` — the pin
-  `[PGLANE-SELFTEST-COUNT-UNPINNED]` above asked for and got — does two things: it counts the
+  `[PGLANE-SELFTEST-COUNT-UNPINNED]` (closed; entry deleted 2026-11-23) asked for and got — does two things: it counts the
   `=== SELF-TEST n/N:` captions and requires that count to equal the verdict's `N`, and it requires
   each caption to match `=== SELF-TEST [0-9]+/N`. The numerator is `[0-9]+`. Nothing requires the
   numerators to be 1..N, to be distinct, or to be in order.
@@ -3129,10 +2604,6 @@ pass. Everything else from those eleven phases is now closed; these need a human
 live access, so they cannot be planned around.
 
 1. **⚠️ FOUNDER/OPS OWED — Phase 140's only `human_verification` item, never dispositioned.** "Watch Sentry during the next real Railway degradation window: confirm `CIRCUIT_OPEN` 503 envelopes appear and that no cascade-500s occur in the same window." Expected: `breaker:railway` trips against the LIVE Upstash, seam callers receive 503 `CIRCUIT_OPEN` + `Retry-After`, and no route emits a raw 500. **Not closable from the repo** — there is no live Upstash in CI/local (20+ test files delete the env vars) and no controllable Railway failure injection; declared manual-only in `140-VALIDATION.md`. `140-VERIFICATION.md` therefore still reads `human_needed` for this one reason, and that is correct, not a defect. *Close it opportunistically the next time Railway degrades.*
-
-### v1.16 Phase-142 (JOB) — deferred items (added 2026-08-02)
-
-2. **`.claude/agents/migration-reviewer.md` invariant #14 contradicts the repo's actual `BEGIN`/`COMMIT` convention.** The reviewer doc forbids `BEGIN`/`COMMIT` in migrations; **150 of 231 migrations use them, including the repo tip**. Per Rule 11 (conformance over taste inside the codebase) and Rule 7 (pick one, don't blend), Phase 142 followed the repo and pre-documented the deviation in its own migration header so review would not re-litigate it — but that is a per-migration workaround, and every future migration author hits the same contradiction and pays the same cost. The doc is the artifact that is wrong. Fix = update invariant #14 to match the repo (and say what `ROLLBACK` outside `supabase/tests/` still means, which is the part that IS enforced). Documentation-only, no runtime surface.
 
 ### v1.16 Phase-142.1 — planning residuals (added 2026-08-02, at plan time — NOT execution findings)
 
@@ -3445,21 +2916,12 @@ toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 
 ### Phase 162 (HONEST) — plan 162-08 filings (added 2026-08-26)
 
-Five items. Two are live data left unrepaired because plan 162-08 could not reach the PROD
-write lane; one is a founder scope call; two are hygiene. Evidence for all five:
+Two items remain (corrected 2026-11-23: the plan filed five; the TODOS sweeps deleted the closed ones,
+and the two raw-prose `strategy_analytics` rows were deleted after a read-only PROD read on 2026-11-23
+found both `complete` with no `computation_error`). Evidence for the original five:
 `.planning/milestones/v1.20-phases/162-honest-what-the-user-sees-is-true/162-CENSUS.md` (§Recompute — NOT
 EXECUTED, §str/None follow-through, §Discovery observation).
 
-- [ ] **Two `strategy_analytics` rows still render raw exception prose, and their only
-      re-write path is a dead job kind.** `ec722557-7781-44db-8f2c-edbe252957c0`
-      (`pending_review`) and `8581f739-1a7b-42a4-a209-3acfa327e259` (**published**) each carry
-      the bare 59-character `str`/`None` `TypeError` text in `computation_error`. Plan 162-02
-      fixed the *writer*, so no NEW row can leak this shape — but it cannot rewrite these two,
-      and plan 162-08's repair enqueue was blocked by the same credential denial above.
-      Disposition recorded as *awaiting-next-write*, with the caveat that makes it nearly
-      permanent: their only failing kind, `poll_positions`, has not been enqueued anywhere in
-      PROD since **2026-06-14**, so there may be no next write. The published one is a live
-      surface.
 - [ ] **Retired job kinds still carry a live daily enqueue that has fired nothing since
       2026-06-14 — dead code, low priority.** `enqueue_poll_positions_for_all_strategies`
       exists at HEAD (`analytics-service/main_worker.py:1026-1036`) but no `poll_positions` job
@@ -4839,7 +4301,8 @@ Both have a SAFE failure direction. Recorded so the trade-off is visible, not so
 
 ## Phase 145 — recorded deferrals (logged 2026-08-17)
 
-Three DELIBERATE deferrals from the JOB-06 csv-finalize atomicity fold
+Two DELIBERATE deferrals remain (corrected 2026-11-23: the wizard first-hop drop entry was deleted as a
+duplicate of the Phase 143 (D-05) entry, which carries the same mechanism) from the JOB-06 csv-finalize atomicity fold
 (`finalize_csv_strategy_with_returns`, migration `20260819120000`; 145-CONTEXT.md `<deferred>`).
 None is a defect in the fold; each carries the constraint that made it out-of-scope. Census
 citations are from `.planning/phases/145-job-csv-finalize-atomicity/145-REPRODUCTION.md`
@@ -4859,19 +4322,6 @@ citations are from `.planning/phases/145-job-csv-finalize-atomicity/145-REPRODUC
   population today and the item stays mid-term. Any future healer must key on a signal that
   distinguishes "enqueue errored" from "composite, legitimately job-terminal" (the D-09
   false-positive class).
-
-- [ ] **(Wizard first-hop drop) The API/wizard first-hop enqueue drop remains uncovered — ⛔ never
-  absorb it into Phase 145's surface by widening a predicate.** Phase 143 filed it as documented
-  non-coverage (`20260816140000:259-265`; the D-05 entry above): a dropped first `sync_trades`
-  enqueue leaves "no dailies AND no jobs", byte-identical to a brand-new strategy, so no csv-side
-  predicate catches it without re-enqueueing healthy strategies forever. It is shape-identical to
-  145's pre-fold windows A–C but has an UNSOLVED distinguishing-signal problem — which is exactly
-  why 145 dissolved its own windows via the fold instead of sweeping. Census (1)-minus-(2)
-  measured 2026-08-17: **PROD = 0** (no wizard first-hop population; PROD's 18 csv no-dailies rows
-  are all 2026-05 incident-era fossils), **TEST = 8107** (all non-csv — the e2e-seed residue
-  class). Closing it needs its own signal (`api_key_id` present + no job EVER + a longer grace)
-  with its own false-positive analysis — a separate mechanism, never a second predicate bolted
-  onto `20260816140000` or onto the fold's resolve arm.
 
 - [ ] **(Inert flag cleanup) Delete the dead `feature_flags.process_key_unified_backbone` row and
   the dead `PROCESS_KEY_UNIFIED_BACKBONE` env vars (Vercel Production + Railway
@@ -6122,11 +5572,13 @@ It runs the marker query first and reports counts only.
 
 **Owner / Trigger:** founder routing (founder 2026-11-02, "Correct the record, book the fix (Recommended)"), the next phase that touches the derive's mark writer or the log scrubber. Trigger: any reading that needs refusal counts by token. Closed when the refusal line names its token under a key the scrubber leaves alone (for example `refusal=`), with a test that runs the line through the scrubber and asserts the token survives.
 
-### 167.2.1.1.1-COMPOSITE-NOT-REDERIVED-ON-MARKS — no composite has been re-derived since marks started, so the composite marks path is unexercised on PROD (booked 2026-11-02, NAVMTM plan 14 SC-4 reading, DATA INTEGRITY)
+### 167.2.1.1.1-COMPOSITE-NOT-REDERIVED-ON-MARKS — both PROD composites were re-stitched on 2026-11-08 and still publish no `marks_since`, so the composite marks path does not reach the published row (booked 2026-11-02, NAVMTM plan 14 SC-4 reading; rewritten 2026-11-23, DATA INTEGRITY)
 
-**Reading.** On 2026-11-02 both PROD composites had every member key marked 7 of 7 days, but neither had a compute job since 2026-10-27 (last computed 2026-10-20 and 2026-10-21), so neither publishes `marks_since`. Plan 09's composite application of marks has not run on PROD.
+**Reading (2026-11-02).** Both PROD composites had every member key marked 7 of 7 days, but neither had a compute job since 2026-10-27, so neither published `marks_since`. Plan 09's composite application of marks had not run on PROD.
 
-**Owner / Trigger:** founder routing (founder 2026-11-02, "Book a re-derive check (Recommended)"). Trigger: now. First find out why no composite job was enqueued after marks started (which path is meant to re-stitch a composite when its members' series change), then confirm a composite re-derive reads its members' marks and publishes `marks_since`. Closed when a PROD composite carries `marks_since` from a re-derive, or the missing enqueue path is fixed with a test.
+**Reading (2026-11-23, read-only PROD, marker query first).** The "never re-derived" half is no longer true: `stitch_composite` ran for both composites on 2026-11-08 (13:00Z, `done`), and both `strategy_analytics` rows were recomputed that day (`complete_with_warnings`). Neither row's `data_quality_flags` carries `marks_since`. So a composite re-derive ran and the marks annotation still did not reach the published row. No `stitch_composite` job has been created for either since 2026-11-08.
+
+**Owner / Trigger:** founder routing (founder 2026-11-02, "Book a re-derive check (Recommended)"). Trigger: now. Find out why a composite re-derive publishes no `marks_since` although its members are marked (whether `stitch_composite` reads the members' marks at all, and whether the composite's compute carries the annotation), and why no `stitch_composite` job has been enqueued since 2026-11-08. Closed when a PROD composite carries `marks_since` from a re-derive, or the gap is fixed at its root with a test.
 
 ## Phase 167.2.1.1.2 (ACCTREBUILD) — routed items (logged 2026-10-22)
 
