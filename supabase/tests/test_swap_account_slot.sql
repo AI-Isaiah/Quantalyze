@@ -41,11 +41,12 @@ DELETE FROM auth.users
 -- One api_keys row, all-synthetic. A NULL sync status is a key that has never synced.
 CREATE FUNCTION pg_temp.sw_key(p_user uuid, p_login text, p_server text, p_sync text,
                                p_active boolean DEFAULT true,
-                               p_disc timestamptz DEFAULT NULL) RETURNS uuid
+                               p_disc timestamptz DEFAULT NULL,
+                               p_exchange text DEFAULT 'mt5') RETURNS uuid
 LANGUAGE sql AS $f$
   INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active,
                         disconnected_at, sync_status, venue_account_id, venue_server)
-  VALUES (p_user, 'mt5', 'swap slot', 'enc', p_active, p_disc, p_sync, p_login, p_server)
+  VALUES (p_user, p_exchange, 'swap slot', 'enc', p_active, p_disc, p_sync, p_login, p_server)
   RETURNING id
 $f$;
 
@@ -334,6 +335,95 @@ BEGIN
   SELECT venue_server INTO v_server FROM api_keys WHERE id = k_n;
   IF v_server IS DISTINCT FROM 'syn-srv-wild' THEN
     RAISE EXCEPTION 'TEST FAILED (SWAP-server-wildcard): the new key stored server % — expected the passed server, trimmed and lower-case', v_server;
+  END IF;
+
+  -- ----- SWAP-same-key. one key on both sides, or a blank login, is refused ------------
+  -- The call must name two different keys and a login that is not blank. Same key twice:
+  -- without the refusal the old holder is never found and the answer is NOT_FOUND. A NULL
+  -- login against an old holder that holds none: without the refusal the NULLs compare
+  -- equal and the swap SUCCEEDS, stamping the new key with no account.
+  -- RED-UNDER: remove the two-keys-and-non-blank-login refusal from the migration (IF
+  --            false): the same-key call answers ACCOUNT_SLOT_NOT_FOUND and the blank-login
+  --            call succeeds, so neither carries the identity token.
+  -- RED-UNDER-M: {"arm":"SWAP-same-key","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF p_new_key = p_old_holder OR v_login IS NULL OR v_login = '' THEN","replace":"IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-same', 'syn-srv-same', 'error');
+  v_res := pg_temp.sw_try(k_h, k_h, 'swap225-same', 'syn-srv-same');
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-same-key): a swap naming ONE key on both sides answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH', v_res;
+  END IF;
+  k_h := pg_temp.sw_key(uid_a, NULL, NULL, 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, NULL, NULL);
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-same-key): a swap with a NULL login answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH', v_res;
+  END IF;
+
+  -- ----- SWAP-not-found. a key that does not exist is refused -------------------------
+  -- RED-UNDER: remove the not-found refusal from the migration (IF false): the missing old
+  --            holder reads as owner NULL and the call answers ACCOUNT_SLOT_NOT_SAME_OWNER,
+  --            a different token.
+  -- RED-UNDER-M: {"arm":"SWAP-not-found","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF NOT v_found_new OR NOT v_found_old THEN","replace":"IF false THEN","occurrences":1}]}
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, gen_random_uuid(), 'swap225-nf', NULL);
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_NOT_FOUND' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-not-found): a swap naming an old holder that does not exist answered % — expected ACCOUNT_SLOT_NOT_FOUND', v_res;
+  END IF;
+
+  -- ----- SWAP-exchange. an account never moves to a key on another exchange -----------
+  -- The marker trigger does not compare exchanges, so nothing but this branch stops an mt5
+  -- account's slot moving onto an okx key.
+  -- RED-UNDER: remove the exchange comparison from the migration (IF false): the okx key
+  --            is stamped with the mt5 login and the swap SUCCEEDS.
+  -- RED-UNDER-M: {"arm":"SWAP-exchange","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_new_exchange IS DISTINCT FROM v_old_exchange THEN","replace":"IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-xch', NULL, 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL, true, NULL, 'okx');
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-xch', NULL);
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-exchange): a swap from an mt5 holder to an okx key answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH', v_res;
+  END IF;
+
+  -- ----- SWAP-old-marked. an old holder that is itself marked holds no slot -------------
+  -- H is marked 'duplicate' against a live key Y and still carries a login. It is not the
+  -- account's holder, so it has no slot to hand over.
+  -- RED-UNDER: remove the old-holder-is-marked refusal from the migration (IF false): H is
+  --            re-marked against the new key and the swap SUCCEEDS.
+  -- RED-UNDER-M: {"arm":"SWAP-old-marked","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_old_holder_of IS NOT NULL THEN","replace":"IF false THEN","occurrences":1}]}
+  k_d := pg_temp.sw_key(uid_a, 'swap225-om-y', NULL, NULL);
+  k_h := pg_temp.sw_key(uid_a, 'swap225-om-h', NULL, 'error');
+  UPDATE api_keys SET account_shared_with_api_key_id = k_d, account_share_kind = 'duplicate' WHERE id = k_h;
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-om-h', NULL);
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-old-marked): a swap with an old holder that is itself marked answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH', v_res;
+  END IF;
+
+  -- ----- SWAP-new-holds. a new key that already holds a login is refused ---------------
+  -- Without this branch step (d) overwrites the new key's own login: the account it held is
+  -- then held by nobody, and its duplicate dependents resolve to another account. Nothing
+  -- errors.
+  -- RED-UNDER: remove the new-key-holds-a-login refusal from the migration (IF false): the
+  --            new key's login is overwritten and the swap SUCCEEDS.
+  -- RED-UNDER-M: {"arm":"SWAP-new-holds","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_new_login IS NOT NULL THEN","replace":"IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-nh-a', NULL, 'error');
+  k_n := pg_temp.sw_key(uid_a, 'swap225-nh-b', NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-nh-a', NULL);
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-new-holds): a swap onto a new key that already holds a login answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH', v_res;
+  END IF;
+
+  -- ----- SWAP-new-marked-other. a new key marked against a different key is refused -----
+  -- N is marked 'duplicate' against a third key Y. Step (a) would unmark it and drop that
+  -- relationship.
+  -- RED-UNDER: remove the marked-against-another-key refusal from the migration (IF false):
+  --            step (a) unmarks N and the swap SUCCEEDS.
+  -- RED-UNDER-M: {"arm":"SWAP-new-marked-other","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF v_new_holder IS NOT NULL AND v_new_holder <> p_old_holder THEN","replace":"IF false THEN","occurrences":1}]}
+  k_d := pg_temp.sw_key(uid_a, 'swap225-nm-y', NULL, NULL);
+  k_h := pg_temp.sw_key(uid_a, 'swap225-nm-h', NULL, 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  UPDATE api_keys SET account_shared_with_api_key_id = k_d, account_share_kind = 'duplicate' WHERE id = k_n;
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-nm-h', NULL);
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-new-marked-other): a swap by a new key marked against a different key answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH', v_res;
   END IF;
 
   -- ----- SWAP-server-inherit. a NULL caller server never erases a captured one ----------
