@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.133.61.4] - 2026-11-23 — records: start milestone v1.22 TRUTH — data you can trust (21 phases; v1.23 HARDEN planned)
+
+Records PR. It starts milestone v1.22 "TRUTH — data you can trust" and holds no source, test, script, workflow or migration change. Eight commits on `records/start-v1.22`: the milestone start, two research commits, requirements, the roadmap, the F-10 follow-up records, the `TODOS.md` triage cleanup and this release commit. Goal: every number, label and alert we show is correct, or it fails loudly.
+
+### Added
+- **Milestone v1.22 started** (`.planning/PROJECT.md` `## Current Milestone`, `.planning/STATE.md`). Phase numbering continues after 225.
+- **v1.22 research** (`.planning/research/v1.22/`): STACK, FEATURES, ARCHITECTURE and PITFALLS, plus the synthesizer's SUMMARY. ARCHITECTURE's suggested build order and seams are what the roadmap's order and seam owners come from. The top-level `research/SUMMARY.md` is v1.18's and stays stale.
+- **`.planning/REQUIREMENTS.md` exists again**, with 116 requirements: 81 for v1.22 and 35 under "Planned for v1.23". It is bound by founder decisions F-1..F-10, carries D-A..D-E (with D-E's 2026-11-22 amendment) and the carried MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04 verbatim. Each requirement names the `TODOS.md` ids it closes in a `(covers: …)` note, and a traceability table maps every requirement to one phase.
+- **The v1.22 roadmap** (`.planning/ROADMAP.md`): 21 phases, the carried 155.2, 157, 222, 223 and 225 and the new 226 MT5SOAK through 241 DEMOCREDS, with 81/81 requirements mapped. It records the order (F-1: data integrity, then user-facing, then the security exception), five seam owners (S1–S5), and milestone-wide rules: PROOF-01 gate proof, the serial migration lane, the 155.2 freeze window and per-phase TODOS closure. The first phase to plan is 226 MT5SOAK (wave 0), beside a read-only Deribit diagnosis as a `/gsd-debug` session.
+- **v1.23 HARDEN planned** (founder ruling F-10, "Yes, split into two milestones"): security, alerting and tooling, holding the carried 221 SENTRYSCRUB2 and 224 DEADLEFTOVERS and the new 242–249. It starts after v1.22 closes. PROJECT.md now has a `## Planned Next Milestone: v1.23 HARDEN` section and an F-10 Key Decisions row.
+- **Owning-phase pointers in `TODOS.md`.** Every entry that a v1.22 or v1.23 requirement covers ends in a dated "Owned by Phase N NAME, v1.22" (or v1.23) line or heading suffix, naming the requirement ids. 100 entries were tagged across 29 phases. `175-NIGHTLY-MT5-DERIVE-CHECK` is owned by two (227 and 230). 155.2, 157 and 225's ONCE-01..04 cover no TODOS id.
+
+### Changed
+- **PROJECT.md "Current Milestone: v1.22" restated per F-10.** v1.22 scope is the data-integrity and user-facing tiers, the carried 155.2, 157, 222, 223 and 225, and the MT5 soak as wave 0. The SECR-01/02 exception (Phase 241 DEMOCREDS: delete the two demo accounts and remove their committed passwords) stays because `158-OPS-03` is the only HIGH item. The security, observability and CI/tooling bullets and the carried 221 and 224 now sit under v1.23. "Current State" was corrected to match.
+- **Stale pointers fixed outside the roadmapper's write targets.** MILESTONES.md's v1.18 close note pointed at "ROADMAP § Next milestone". It now carries a dated correction naming the v1.22 section, with 221 and 224 in v1.23. ROADMAP's v1.18 milestone-index line says where the moved phases went. Shipped `<details>` summaries are byte-identical.
+- **155.2's carried note** said "`REQUIREMENTS.md` was removed at the v1.18 close". It now carries a dated correction: the file exists again and carries D-A..D-E.
+- **`.planning/state.json`** names the 21 v1.22 phases, which drops 221 and 224 and adds 226–241, and next is `/gsd-plan-phase 226`. Its milestone already read v1.22.
+- **`TODOS.md`: L2028 trimmed, not deleted.** The Phase 163 / OPS-08 heading lost its stale finding, that TEST ran an older revision of `_enqueue_compute_job_internal`, and its `DRIFT-01` bullet. TEST was rebuilt from the baseline in 2026-09, and VAC-08 now measures body drift. PROC-02 and PROC-03 stay open, with a dated note saying so.
+- **`164.9-DATA-DEPENDENT-GUARD-CENSUS` repointed** so it no longer inherits from the entry deleted below. Its "other half" sentence now names the closed id and where its history lives.
+
+### Removed
+- **30 `TODOS.md` entries, re-verified at HEAD before deletion** (the 2026-11-23 triage; code was unchanged between the triage's measurement base and `main`):
+  - **8 FIXED:** `164.7-ACTIVATION-DEFERRED`, `164.8.2-EVIDENCE-DOTENV-LEAK`, `164.8-DATA-DEPENDENT-MIGRATION-ESCAPE` (deleted together with the census repoint), the worker orphaned-`running` DELETE-vs-reset decision, `VITEST-CORPUS-TIMEOUT-01`, `170.7-RANK-PAGE-CONTINUITY-TEST`, C-4 (`sync-progress` picks the newest job of any kind), and `MATCHCRON-500-INTERMITTENT`.
+  - **14 STALE:** `164.7-MARKER-GREP-VACUOUS`, the two 164.3 cosmetic verify-precision notes, `164.8-TEST-DATA-RESEEDED`, `170.4-WRITER-FALLBACK-SILENT`, the HoldingsTable D-15 line-citation note, the four 2026-08-14 branch-adjudication survivors (`fix/scenario-empty-daily-returns`, `fix/sync-status-superseded-failed`, `ci/pytest-xdist-parallel`, `wip/v1.16-phase140-fix-archive`; their section went with them), `PLANANCHOR-SUMMARY-FILTER-01`, both stale `158-OPS-04` entries (fencing tests not executing locally; e2e `auth.users` leak), and `PHASEDIR-ORPHAN-GITKEEP`. The L2028 DRIFT-01 half also counts here and is trimmed, as described above.
+  - **8 composite-only** (founder 2026-11-23, "Forget about composites"): `166.3.1-M3-ANCHOR-OPTIONS-UPL-RESIDUE`, `166.3.1-STITCH-ATTEMPT1-STALL`, `FANOUT-COHORT-SIBLING-COMPOSITE-01`, `164.6.6.2.3-COMPOSITE-DAYLEVEL-NOTE`, the composite onboarding-failure member naming (its Phase 162 heading went with it), C-5 (composite stitch `jobStatus` pin), the D-09 composite dropped-enqueue exclusion, and `167.2.1.1.1-COMPOSITE-NOT-REDERIVED-ON-MARKS`.
+- **Pointers to deleted ids fixed with dated notes:** CLAUDE.md's 164.8 currency note on `164.8-DATA-DEPENDENT-MIGRATION-ESCAPE`, `docs/runbooks/ledger-refresh-go-live.md` on `164.7-ACTIVATION-DEFERRED`, and five cross-references inside `TODOS.md`.
+
+### Notes
+- **Known leftover: Phase 223's directory slug** still reads `223-flowkinds-every-derive-and-compose-path-reads-the-same-capit`, the pre-F-2 title. Its roadmap title is now the flow-source half only. Renaming it would move files, so it was left alone.
+- **Ids that stay as class labels and were not edited:** `164.8-DATA-DEPENDENT-MIGRATION-ESCAPE` is still named by `supabase-migrate.yml`'s cause (3) as "the open case", pinned by `src/__tests__/supabase-migrate-test-first.test.ts`, and by applied migration comments. `FANOUT-COHORT-SIBLING-COMPOSITE-01` is still named by a comment in `supabase/tests/test_ledger_refresh_composite_arm.sql`. Changing a workflow, its test or a SQL gate file is outside a records PR. CLAUDE.md's dated note records the first id.
+- **The four branch-adjudication branches are still on `origin`.** Deleting them is the founder's call and is no longer tracked in `TODOS.md`.
+- ⛔ **MT5 stays unadvertised until 155.2 passes.**
+
 ## [0.133.61.3] - 2026-11-23 — records: close milestone v1.18 MT5-VERIFY & founder confirmations
 
 Records PR. It closes milestone v1.18 "MT5-VERIFY & founder confirmations" and holds no source, test, script or migration change. Five commits on `records/close-v1.18`. The v1.18 audit reads `passed`: 5/5 requirements (PARITY-01..04, MT5-06), 16/16 phases verified `passed` (155, 155.1, 207–220), 11/11 integration links and 4/4 flows.
