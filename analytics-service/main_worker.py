@@ -831,6 +831,54 @@ async def _safe_mark(
 
 
 # ---------------------------------------------------------------------------
+# Attempt-error recording for the two lost-mark paths (Phase 227, MT5D-01)
+# ---------------------------------------------------------------------------
+# `mark_compute_job_failed` writes the attempt's cause in its own transaction.
+# Two paths never reach that write: a 55P03 lock bound (the whole RPC rolled
+# back, the watchdog will reset the row) and a swallowed late 55006 (the
+# watchdog already reset it). Without a record the attempt would read as a bare
+# reset and the real error would live only in a log line. This reports the real
+# error through `record_compute_job_attempt_error`, which attests the claim
+# token against the job row or its existing reset row. It is telemetry: it
+# never raises into the loop, but it is never silent either.
+async def _record_attempt_error(
+    job_id: str,
+    claim_token: str | None,
+    error: str | None,
+    error_kind: str | None,
+) -> None:
+    if claim_token is None:
+        return
+    supabase = get_supabase()
+
+    def _record() -> Any:
+        return supabase.rpc(
+            "record_compute_job_attempt_error",
+            {
+                "p_job_id": job_id,
+                "p_claim_token": claim_token,
+                "p_error": error or "Unknown error",
+                "p_error_kind": error_kind or "unknown",
+            },
+        ).execute()
+
+    try:
+        await db_execute(_record)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "ATTEMPT_ERROR_RECORD_FAILED: could not record the real error of "
+            "job %s (%s): %r. The attempt will read as a watchdog reset only; "
+            "the error text is in this log: %s",
+            job_id, error_kind, exc, error,
+            extra={
+                "event_type": "attempt_error_record_failed",
+                "job_id": job_id,
+                "error_kind": error_kind,
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tick functions (testable)
 # ---------------------------------------------------------------------------
 
@@ -1126,14 +1174,28 @@ async def dispatch_tick(worker_id: str) -> None:
             # claim of the same heal re-alerts. A silent heal is the defect
             # class being closed; a duplicate alert is recoverable.
             _heal_key = _reconcile_heal_key(job, _meta)
-            if _meta.get("source") == "reconcile-sweep" and not _reconcile_alert_already_sent(_heal_key):
+            # Phase 227: the first-hop sweep (a dropped FIRST sync_trades enqueue)
+            # is a heal of the same class and alerts the same way, once per heal,
+            # under its own surface tag and message.
+            _heal_alert: tuple[str, str] | None = None
+            if _meta.get("source") == "reconcile-sweep":
+                _heal_alert = (
+                    "reconcile-sweep",
+                    "Dropped compute-job enqueue healed by reconciliation sweep",
+                )
+            elif _meta.get("source") == "first-hop-sweep":
+                _heal_alert = (
+                    "first-hop-sweep",
+                    "Dropped first sync_trades enqueue healed by first-hop sweep",
+                )
+            if _heal_alert is not None and not _reconcile_alert_already_sent(_heal_key):
                 with sentry_sdk.new_scope() as scope:
-                    scope.set_tag("surface", "reconcile-sweep")
+                    scope.set_tag("surface", _heal_alert[0])
                     scope.set_tag("job_kind", job.get("kind"))
                     scope.set_extra("strategy_id", job.get("strategy_id"))
                     scope.set_extra("detected_at", _meta.get("detected_at"))
                     sentry_sdk.capture_message(
-                        "Dropped compute-job enqueue healed by reconciliation sweep",
+                        _heal_alert[1],
                         level="warning",
                     )
                 _record_reconcile_alert(_heal_key)
@@ -1277,7 +1339,7 @@ async def dispatch_tick(worker_id: str) -> None:
                     ).execute()
 
                 try:
-                    await _safe_mark(
+                    late_failed_mark = await _safe_mark(
                         _mark_failed,
                         job_id=job["id"],
                         claim_token=claim_token,
@@ -1309,6 +1371,11 @@ async def dispatch_tick(worker_id: str) -> None:
                             "worker_id": worker_id,
                         },
                     )
+                    # MT5D-01: the mark rolled back, so the real error never
+                    # reached the attempt ledger. Record it (never raises).
+                    await _record_attempt_error(
+                        job["id"], claim_token, result.error_message, result.error_kind
+                    )
                 else:
                     logger.warning(
                         "Job %s failed (%s): %s",
@@ -1316,6 +1383,14 @@ async def dispatch_tick(worker_id: str) -> None:
                         result.error_kind,
                         result.error_message,
                     )
+                    if late_failed_mark:
+                        # _safe_mark swallowed a late 55006: the watchdog had
+                        # already reset the row, so the real error is recorded
+                        # here, not by the mark. (mark_done has no equivalent:
+                        # a finished job had no error.)
+                        await _record_attempt_error(
+                            job["id"], claim_token, result.error_message, result.error_kind
+                        )
 
             elif result.outcome == DispatchOutcome.DEFERRED:
                 logger.info("Job %s deferred (handler already called defer_compute_job)", job["id"])
@@ -1358,6 +1433,10 @@ async def dispatch_tick(worker_id: str) -> None:
                     label="mark_failed (fallback)",
                     outer_exc=exc,
                 )
+                if late_mark_swallowed:
+                    # MT5D-01: same as the FAILED branch above: the real error
+                    # (here the unclassified dispatch crash) was not marked.
+                    await _record_attempt_error(job["id"], claim_token, str(exc)[:500], "unknown")
                 if not late_mark_swallowed:
                     # mark_failed succeeded normally — the outer dispatch
                     # error is real and unattributed by any LATE_MARK_IGNORED

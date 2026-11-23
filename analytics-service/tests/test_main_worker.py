@@ -4365,3 +4365,194 @@ class TestHeartbeatClaimRenewal:
         )
 
 
+
+
+class TestAttemptErrorRecording:
+    """MT5D-01 (worker half): when the failed mark cannot land, the real error
+    is still recorded so the attempt reads as an error, not only as a reset."""
+
+    @staticmethod
+    def _failed_result() -> DispatchResult:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="exchange said no",
+            error_kind="permanent",
+        )
+
+    @pytest.mark.asyncio
+    async def test_lock_bound_failure_records_attempt_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """55P03 rolled the mark back, so the job stays running for the
+        watchdog. The real failure is recorded once through the worker-lost
+        RPC (job id, token, original message and kind), and the existing
+        MARK_FAILED_LOCK_BOUND log still fires."""
+        jobs = _tokened_jobs(1, kind="sync_trades")
+
+        def _mark_failed(_params: dict[str, Any]) -> Any:
+            raise _make_worker_api_error("55P03")
+
+        mock_supabase = _ledger_supabase(jobs, mark_failed=_mark_failed)
+
+        with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock(return_value=self._failed_result())):
+            await dispatch_tick("worker-lock-bound")
+
+        assert _calls_to(mock_supabase, "record_compute_job_attempt_error") == [
+            {
+                "p_job_id": "job-1",
+                "p_claim_token": "tok-1",
+                "p_error": "exchange said no",
+                "p_error_kind": "permanent",
+            }
+        ]
+        assert len(_events(caplog, "mark_failed_lock_bound")) == 1
+        # No generic fallback re-mark of the job as 'unknown'.
+        assert len(_calls_to(mock_supabase, "mark_compute_job_failed")) == 1
+
+    @pytest.mark.asyncio
+    async def test_late_mark_failed_records_attempt_error(self) -> None:
+        """A 55006 on the mark_failed label (the watchdog took the row while it
+        ran) is swallowed as a late mark, and the real error is recorded. On
+        the mark_done label nothing is recorded: a finished job had no error,
+        and the watchdog reset is recorded by the database."""
+        def _preempted(_params: dict[str, Any]) -> Any:
+            raise _make_worker_api_error("55006")
+
+        failed_sb = _ledger_supabase(
+            _tokened_jobs(1, kind="sync_trades"), mark_failed=_preempted
+        )
+        with patch("main_worker.get_supabase", return_value=failed_sb), \
+             patch("main_worker.dispatch", new=AsyncMock(return_value=self._failed_result())):
+            await dispatch_tick("worker-late-failed")
+        assert _calls_to(failed_sb, "record_compute_job_attempt_error") == [
+            {
+                "p_job_id": "job-1",
+                "p_claim_token": "tok-1",
+                "p_error": "exchange said no",
+                "p_error_kind": "permanent",
+            }
+        ]
+
+        done_sb = _ledger_supabase(
+            _tokened_jobs(1, kind="sync_trades"), mark_done=_preempted
+        )
+        with patch("main_worker.get_supabase", return_value=done_sb), \
+             patch("main_worker.dispatch", new=AsyncMock(return_value=_DONE)):
+            await dispatch_tick("worker-late-done")
+        assert _calls_to(done_sb, "record_compute_job_attempt_error") == []
+
+    @pytest.mark.asyncio
+    async def test_late_fallback_mark_records_attempt_error(self) -> None:
+        """The outer-catch path (dispatch itself raised) marks the job failed as
+        'unknown'; if that mark is a swallowed 55006 the unknown error text is
+        recorded the same way."""
+        def _preempted(_params: dict[str, Any]) -> Any:
+            raise _make_worker_api_error("55006")
+
+        mock_supabase = _ledger_supabase(
+            _tokened_jobs(1, kind="sync_trades"), mark_failed=_preempted
+        )
+
+        async def _explode(_job: dict[str, Any]) -> DispatchResult:
+            raise RuntimeError("worker-level crash")
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=_explode):
+            await dispatch_tick("worker-late-fallback")
+
+        assert _calls_to(mock_supabase, "record_compute_job_attempt_error") == [
+            {
+                "p_job_id": "job-1",
+                "p_claim_token": "tok-1",
+                "p_error": "worker-level crash",
+                "p_error_kind": "unknown",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["missing-rpc", "runtime"])
+    async def test_record_attempt_error_never_raises(
+        self, failure: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Telemetry must never fail the work it observes: a record RPC that
+        raises (including because the migration is not applied yet) is logged
+        and swallowed, and the loop goes on to the next job."""
+        jobs = _tokened_jobs(2, kind="sync_trades")
+
+        def _mark_failed(_params: dict[str, Any]) -> Any:
+            raise _make_worker_api_error("55P03")
+
+        def _record(_params: dict[str, Any]) -> Any:
+            if failure == "missing-rpc":
+                raise _make_worker_api_error("42883")
+            raise RuntimeError("record transport down")
+
+        mock_supabase = _ledger_supabase(jobs, mark_failed=_mark_failed, record=_record)
+        dispatch = AsyncMock(return_value=self._failed_result())
+
+        with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-record-never-raises")
+
+        assert dispatch.await_count == 2, "the loop must continue past the record failure"
+        events = _events(caplog, "attempt_error_record_failed")
+        assert len(events) == 2
+        assert events[0].job_id == "job-1"  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_record_attempt_error_without_token_is_a_noop(self) -> None:
+        """No claim token means nothing to attest, so no RPC is attempted."""
+        mock_supabase = _ledger_supabase([])
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            await main_worker._record_attempt_error("job-x", None, "boom", "permanent")
+        assert _calls_to(mock_supabase, "record_compute_job_attempt_error") == []
+
+
+class TestFirstHopHealAlert:
+    """A first sync_trades enqueue healed by the first-hop sweep alerts once,
+    exactly as the reconcile-sweep heal does, so a healed first hop is never
+    silent."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_heal_dedupe(self) -> Any:
+        main_worker._RECONCILE_ALERTED.clear()
+        yield
+        main_worker._RECONCILE_ALERTED.clear()
+
+    @pytest.mark.asyncio
+    async def test_first_hop_heal_claim_emits_sentry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        strategy_id = "33333333-3333-4333-8333-333333333333"
+        job = {
+            "id": "job-first-hop",
+            "kind": "sync_trades",
+            "strategy_id": strategy_id,
+            "claim_token": "tok-fh",
+            "metadata": {"source": "first-hop-sweep", "detected_at": "2026-11-23T00:00:00Z"},
+        }
+        spy = _FakeSentry()
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+        dispatch = AsyncMock(return_value=_DONE)
+
+        with patch("main_worker.get_supabase", return_value=_ledger_supabase([job])), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-first-hop-1")
+        assert len(spy.captures) == 1, spy.serialised()
+        capture = spy.captures[0]
+        assert capture["message"] == "Dropped first sync_trades enqueue healed by first-hop sweep"
+        assert capture["level"] == "warning"
+        assert capture["tags"].get("surface") == "first-hop-sweep"
+        assert capture["tags"].get("job_kind") == "sync_trades"
+        assert capture["extras"].get("strategy_id") == strategy_id
+        assert capture["extras"].get("detected_at") == "2026-11-23T00:00:00Z"
+
+        # The SAME heal claimed again (watchdog reset, re-claim): no second alert.
+        with patch("main_worker.get_supabase", return_value=_ledger_supabase([job])), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-first-hop-2")
+        assert len(spy.captures) == 1, "a re-claim of the same heal must not re-alert"
+        assert dispatch.await_count == 2
