@@ -15,6 +15,18 @@
 -- ARMS (listed and executed in this order; each twin's FIRST `TEST FAILED` must name its own arm):
 --   P1  a private strategy with an active, connected key and a cursor advanced 2 days ago gets
 --       exactly one poll_positions job carrying the daily idempotency key.
+--   P2  a published strategy with a done sync_trades job 3 days old and no cursor is still
+--       polled (today's cohort is kept).
+--   P3  a private strategy with a fresh cursor is NOT polled when its key is disconnected (P3),
+--       nor when its key is deactivated (P3/active).
+--   P4  a draft (P4) and an archived (P4/archived) strategy with fresh cursors are not polled.
+--   P5  a private strategy whose cursor is 40 days old (P5), or whose only done sync_trades job
+--       is 40 days old (P5/job), is not polled.
+--   P6  a second call on the same day while the first poll job is pending returns 0 and
+--       creates no second poll_positions job.
+--   P7  the deployed body still enqueues kind poll_positions under the daily- idempotency
+--       prefix with enqueued_by daily_loop (P7/body), and anon and authenticated cannot call it
+--       (P7).
 --
 -- Every `TEST FAILED (...)` raise sits DIRECTLY in the DO body (the mutation runner reads an
 -- identity only from a single-frame inline_code_block raise). pg_temp helpers return values and
@@ -87,6 +99,19 @@ DECLARE
   v_idem   text;
   v_key    uuid;
   v_p1     uuid;
+  v_p2     uuid;
+  v_p3a    uuid;
+  v_p3b    uuid;
+  v_p4a    uuid;
+  v_p4b    uuid;
+  v_p5a    uuid;
+  v_p5b    uuid;
+  v_p6     uuid;
+  v_body   text;
+  v_fn     oid;
+  v_anon   boolean;
+  v_authd  boolean;
+  v_pub    boolean;
 BEGIN
   INSERT INTO auth.users (id, email) VALUES (v_user, 'pc-' || v_user || '@invalid.local');
   INSERT INTO public.profiles (id, display_name) VALUES (v_user, 'pc') ON CONFLICT (id) DO NOTHING;
@@ -113,7 +138,149 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (P1): the poll job carries idempotency key %, expected the daily key for today and this strategy. The daily key is what keeps a second tick from enqueueing a second poll.', v_idem;
   END IF;
 
-  RAISE NOTICE 'ALL 1 ARMS EXECUTED (P1): a private strategy kept current by the cron sync is enqueued once with the daily idempotency key';
+  -- ===== ARM P2 - today's cohort is kept: a done sync_trades job and no cursor ======
+  v_p2 := pg_temp.pc_strategy(v_user, 'pc-p2', 'published', pg_temp.pc_key(v_user, true, NULL));
+  INSERT INTO public.compute_jobs (kind, strategy_id, status, updated_at)
+    VALUES ('sync_trades', v_p2, 'done', now() - interval '3 days');
+
+  SET LOCAL ROLE service_role;
+  v_ret := public.enqueue_poll_positions_for_all_strategies();
+  RESET ROLE;
+
+  v_cnt := pg_temp.pc_polls(v_p2);
+  -- RED-UNDER: drop the done-job side of the cohort's OR, so only the cursor admits a strategy.
+  --            A published strategy kept current by the user triggered sync, which writes a
+  --            done sync_trades job and no cursor, is then never polled again.
+  -- RED-UNDER-M: {"arm":"P2","apply":[{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"          EXISTS (\n            SELECT 1 FROM compute_jobs cj\n","replace":"          FALSE AND EXISTS (\n            SELECT 1 FROM compute_jobs cj\n","occurrences":1}]}
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (P2): a published strategy with a done sync_trades job 3 days old and no cursor has % poll_positions job(s), expected exactly 1. The widened cohort must keep what today''s cohort polls, or the strategies the user triggered sync keeps current lose their position snapshots.', v_cnt;
+  END IF;
+
+  -- ===== ARM P3 - a revoked key is never polled ======================================
+  -- Both strategies are private and carry a fresh cursor, so the status and the sync history
+  -- would admit them. Only the key's liveness says no.
+  v_p3a := pg_temp.pc_strategy(v_user, 'pc-p3a', 'private', pg_temp.pc_key(v_user, true, now() - interval '1 day'));
+  PERFORM pg_temp.pc_cursor(v_p3a, interval '1 day');
+  v_p3b := pg_temp.pc_strategy(v_user, 'pc-p3b', 'private', pg_temp.pc_key(v_user, false, NULL));
+  PERFORM pg_temp.pc_cursor(v_p3b, interval '1 day');
+
+  SET LOCAL ROLE service_role;
+  v_ret := public.enqueue_poll_positions_for_all_strategies();
+  RESET ROLE;
+
+  v_cnt := pg_temp.pc_polls(v_p3a);
+  -- RED-UNDER: drop the disconnected-key filter, so a strategy whose key the owner disconnected
+  --            is still read daily through the revoked connection (threat T-227-18).
+  -- RED-UNDER-M: {"arm":"P3","apply":[{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"        AND ak.disconnected_at IS NULL\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"  IF v_body NOT LIKE '%disconnected_at IS NULL%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%disconnected_at IS NULL%' THEN\n","occurrences":1}]}
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P3): a private strategy whose key is disconnected has % poll_positions job(s), expected 0. A revoked connection must stop all reads of that account.', v_cnt;
+  END IF;
+
+  v_cnt := pg_temp.pc_polls(v_p3b);
+  -- RED-UNDER: drop the active-key filter, so a deactivated key is still read daily.
+  -- RED-UNDER-M: {"arm":"P3/active","apply":[{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"        AND ak.is_active\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"  IF v_body NOT LIKE '%ak.is_active%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.is_active%' THEN\n","occurrences":1}]}
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P3/active): a private strategy whose key is deactivated has % poll_positions job(s), expected 0. A deactivated key must stop all reads of that account.', v_cnt;
+  END IF;
+
+  -- ===== ARM P4 - draft and archived strategies are not polled =======================
+  v_p4a := pg_temp.pc_strategy(v_user, 'pc-p4a', 'draft', pg_temp.pc_key(v_user, true, NULL));
+  PERFORM pg_temp.pc_cursor(v_p4a, interval '1 day');
+  v_p4b := pg_temp.pc_strategy(v_user, 'pc-p4b', 'archived', pg_temp.pc_key(v_user, true, NULL));
+  PERFORM pg_temp.pc_cursor(v_p4b, interval '1 day');
+
+  SET LOCAL ROLE service_role;
+  v_ret := public.enqueue_poll_positions_for_all_strategies();
+  RESET ROLE;
+
+  v_cnt := pg_temp.pc_polls(v_p4a);
+  -- RED-UNDER: add the draft status to the cohort's list, so an unfinished strategy is polled.
+  -- RED-UNDER-M: {"arm":"P4","apply":[{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"        AND s.status IN ('published', 'pending_review', 'private')\n","replace":"        AND s.status IN ('published', 'pending_review', 'private', 'draft')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"  IF v_body LIKE '%''draft''%' THEN\n","replace":"  IF FALSE AND v_body LIKE '%''draft''%' THEN\n","occurrences":1}]}
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P4): a draft strategy with a fresh cursor has % poll_positions job(s), expected 0. Unfinished strategies are not polled.', v_cnt;
+  END IF;
+
+  v_cnt := pg_temp.pc_polls(v_p4b);
+  -- RED-UNDER: add the archived status to the cohort's list, so a retired strategy is polled.
+  -- RED-UNDER-M: {"arm":"P4/archived","apply":[{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"        AND s.status IN ('published', 'pending_review', 'private')\n","replace":"        AND s.status IN ('published', 'pending_review', 'private', 'archived')\n","occurrences":1}]}
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P4/archived): an archived strategy with a fresh cursor has % poll_positions job(s), expected 0. Retired strategies are not polled.', v_cnt;
+  END IF;
+
+  -- ===== ARM P5 - a stale sync history admits nothing ================================
+  -- p5a: cursor 40 days old and no job. p5b: a done sync_trades job 40 days old and no cursor.
+  v_p5a := pg_temp.pc_strategy(v_user, 'pc-p5a', 'private', pg_temp.pc_key(v_user, true, NULL));
+  PERFORM pg_temp.pc_cursor(v_p5a, interval '40 days');
+  v_p5b := pg_temp.pc_strategy(v_user, 'pc-p5b', 'private', pg_temp.pc_key(v_user, true, NULL));
+  INSERT INTO public.compute_jobs (kind, strategy_id, status, updated_at)
+    VALUES ('sync_trades', v_p5b, 'done', now() - interval '40 days');
+
+  SET LOCAL ROLE service_role;
+  v_ret := public.enqueue_poll_positions_for_all_strategies();
+  RESET ROLE;
+
+  v_cnt := pg_temp.pc_polls(v_p5a);
+  -- RED-UNDER: widen the cursor side's window from 30 to 60 days, so a key that has not synced
+  --            for 40 days still gets a daily poll against an account that stopped answering.
+  -- RED-UNDER-M: {"arm":"P5","apply":[{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"                AND ssc.last_sync_at > (now() - interval '30 days')\n","replace":"                AND ssc.last_sync_at > (now() - interval '60 days')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"  IF (length(v_body) - length(replace(v_body, v_needle, ''))) / length(v_needle) <> 2 THEN\n","replace":"  IF FALSE AND (length(v_body) - length(replace(v_body, v_needle, ''))) / length(v_needle) <> 2 THEN\n","occurrences":1}]}
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P5): a private strategy whose cursor is 40 days old and that has no recent done sync_trades job has % poll_positions job(s), expected 0. The cursor only says the key works inside the 30 day window.', v_cnt;
+  END IF;
+
+  v_cnt := pg_temp.pc_polls(v_p5b);
+  -- RED-UNDER: widen the job side's window from 30 to 60 days.
+  -- RED-UNDER-M: {"arm":"P5/job","apply":[{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"                AND cj.updated_at > (now() - interval '30 days')\n","replace":"                AND cj.updated_at > (now() - interval '60 days')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"  IF (length(v_body) - length(replace(v_body, v_needle, ''))) / length(v_needle) <> 2 THEN\n","replace":"  IF FALSE AND (length(v_body) - length(replace(v_body, v_needle, ''))) / length(v_needle) <> 2 THEN\n","occurrences":1}]}
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P5/job): a private strategy whose only done sync_trades job is 40 days old has % poll_positions job(s), expected 0. The job side of the cohort is a 30 day window too.', v_cnt;
+  END IF;
+
+  -- ===== ARM P6 - the enqueue stays idempotent within a day ==========================
+  -- The first call enqueues the strategy's poll, the second finds it still pending. It must
+  -- return 0 and leave one job: a second tick the same day (a second worker replica, a retried
+  -- loop) must not double the exchange traffic.
+  v_p6 := pg_temp.pc_strategy(v_user, 'pc-p6', 'private', pg_temp.pc_key(v_user, true, NULL));
+  PERFORM pg_temp.pc_cursor(v_p6, interval '1 day');
+
+  SET LOCAL ROLE service_role;
+  v_ret := public.enqueue_poll_positions_for_all_strategies();
+  v_ret := public.enqueue_poll_positions_for_all_strategies();
+  RESET ROLE;
+
+  v_cnt := pg_temp.pc_polls(v_p6);
+  -- RED-UNDER: drop the in-flight pre-count condition from the increment, so a call that only
+  --            found an existing job still counts it as newly enqueued and the second call
+  --            reports work it did not do.
+  -- RED-UNDER-M: {"arm":"P6","apply":[{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"    IF v_existing_count = 0 AND v_job_id IS NOT NULL THEN\n","replace":"    IF v_job_id IS NOT NULL THEN\n","occurrences":1}]}
+  IF v_ret <> 0 OR v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (P6): the second daily enqueue the same day returned % and left % poll_positions job(s) for the strategy, expected 0 and exactly 1. The enqueue must stay idempotent per day.', v_ret, v_cnt;
+  END IF;
+
+  -- ===== ARM P7 - the call is unchanged and stays closed to browser roles ============
+  v_fn := to_regprocedure('public.enqueue_poll_positions_for_all_strategies()');
+  v_body := regexp_replace(pg_get_functiondef(v_fn), '--[^\n]*', '', 'g');
+  -- RED-UNDER: change the metadata marker the loop stamps on each job from daily_loop to another
+  --            value. The worker's call is unchanged but the jobs it enqueues no longer carry
+  --            the marker the admin views read to tell a daily poll from a manual one.
+  -- RED-UNDER-M: {"arm":"P7/body","apply":[{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"jsonb_build_object('enqueued_by', 'daily_loop', 'enqueued_at', now())","replace":"jsonb_build_object('enqueued_by', 'cohort_loop', 'enqueued_at', now())","occurrences":1}]}
+  IF v_body NOT LIKE '%''poll_positions'',%' OR v_body NOT LIKE '%''daily-poll-'' ||%'
+     OR v_body NOT LIKE '%''enqueued_by'', ''daily_loop''%' THEN
+    RAISE EXCEPTION 'TEST FAILED (P7/body): the deployed body no longer enqueues kind poll_positions under the daily- idempotency prefix with enqueued_by daily_loop. The worker calls this function with no arguments and the jobs it creates must look as they always did.';
+  END IF;
+
+  v_anon  := has_function_privilege('anon', v_fn, 'EXECUTE');
+  v_authd := has_function_privilege('authenticated', v_fn, 'EXECUTE');
+  v_pub   := EXISTS (SELECT 1
+                       FROM pg_proc p
+                       CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+                      WHERE p.oid = v_fn AND a.grantee = 0 AND a.privilege_type = 'EXECUTE');
+  -- RED-UNDER: leave authenticated out of the REVOKE, so any signed-in browser session can call
+  --            the daily fan-out and flood the exchanges with position polls (threat T-227-20).
+  -- RED-UNDER-M: {"arm":"P7","apply":[{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"REVOKE ALL ON FUNCTION enqueue_poll_positions_for_all_strategies FROM PUBLIC, anon, authenticated;\n","replace":"REVOKE ALL ON FUNCTION enqueue_poll_positions_for_all_strategies FROM PUBLIC, anon;\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120500_poll_positions_cohort.sql","find":"  IF has_function_privilege('anon', v_fn, 'EXECUTE') OR has_function_privilege('authenticated', v_fn, 'EXECUTE') THEN\n","replace":"  IF FALSE AND (has_function_privilege('anon', v_fn, 'EXECUTE') OR has_function_privilege('authenticated', v_fn, 'EXECUTE')) THEN\n","occurrences":1}]}
+  IF v_anon OR v_authd OR v_pub THEN
+    RAISE EXCEPTION 'TEST FAILED (P7): EXECUTE on the daily poll fan-out is held by anon=%, authenticated=%, PUBLIC=%, expected none of them. Only the worker (service_role) may call it.', v_anon, v_authd, v_pub;
+  END IF;
+
+  RAISE NOTICE 'ALL 7 ARMS EXECUTED (P1, P2, P3, P4, P5, P6, P7): a private cron-synced strategy is polled (P1), today''s job-synced cohort is kept (P2), a disconnected or deactivated key is never polled (P3), draft and archived strategies are not polled (P4), a 40 day old sync history admits nothing (P5), a second call the same day enqueues nothing (P6), and the call and its ACL are unchanged (P7)';
 END
 $$;
 
