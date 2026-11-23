@@ -595,28 +595,6 @@ per-metric decision.
       ✅ **Destination: Phase 169.4 ALLOCTRUTH**, whose plans read BTC through `readBenchmarkPrices`
       and `mergeWithFixture`. **Closed when:** consumers build the overlay from closes (or levels)
       and the metrics from exactly-one-day returns, with a test for each across a missing day.
-- [ ] **`[166.4.1-CRON-SYNC-UNSCHEDULED]` Nothing schedules the analytics service's `/cron-sync`, so
-      portfolio analytics never recompute and the trade sync it carries does not run (booked
-      2026-10-09, Phase 166.4.1 D-03).** Evidence, counts and verdicts only (`166.4.1-RESEARCH.md`
-      Q2, read-only PROD reads with the marker query first): no schedule in `vercel.json`, the GitHub
-      workflow schedules, `supabase/functions/`, `analytics-service/railway.toml`, PROD `cron.job`
-      (0 jobs or functions mentioning it) or the Railway services. PROD `strategy_sync_cursors`
-      holds 0 rows although `routers/cron.py` writes one per strategy per tick. PROD holds 0
-      `compute_portfolio` jobs and the Next.js `computePortfolioAnalytics` has zero call sites. PROD's
-      6 `complete` `portfolio_analytics` rows were written by `scripts/seed-full-app-demo.ts`, not by
-      a compute (so no failure line was logged 2026-09-13..27). `docs/architecture/adr-0008-cron-architecture.md`
-      still names a Python-side cron_sync trigger and is stale. Nothing was built in 166.4.1.
-      **The first question (R-03) has an answer: live-key trade ingestion has no other path.**
-      `.planning/debug/cron-sync-unscheduled.md` (diagnosed 2026-10-09) found that the 4 live ccxt
-      strategy keys on PROD have had no trade ingestion for 14 to 156 days, hidden because the
-      "Synced Nd ago" pill reads `strategy_analytics.computed_at`. That root cause and its fix are
-      not repeated here.
-      **Owner:** Phase 167.1.2.2.2 TRADESYNC (booked 2026-10-09, on main via #985; ROADMAP section
-      `### Phase 167.1.2.2.2`), which owns the schedule, the cursor seeding and the "Synced" label.
-      **Trigger:** TRADESYNC's planning. **Closed when:** `/cron-sync` is either scheduled with a PROD
-      reading showing ticks (`strategy_sync_cursors` rows), or deliberately retired with its docstring
-      and ADR-0008 corrected. TRADESYNC's success criteria decide which; close this entry when its
-      verification passes.
 
 - [ ] **`[166.4.1-SERIES-CURVE-DATETIME]` The writers of the portfolio curve fields still emit ISO
       datetime strings; only one reader normalises them (booked 2026-10-09, Phase 166.4.1 plan 03).**
@@ -951,30 +929,6 @@ per-metric decision.
       jobs; `ledger_refresh_fanout` is still absent from it and from PROD.
       Owner: Phase 164.7 plan 07, re-entered at the same gate. Record:
       `164.7-ACTIVATION-RECORD.md`.
-
-- [ ] **`[164.2-TYPES-REGEN-CHECK]` After the migration PR merges and auto-applies to PROD,
-      re-derive the six `database.types.ts` lines that were hand-extended, and confirm no
-      failure upsert was lost in the schema-cache window (booked 2026-09-06, Phase 164.2 plan 10;
-      the hand-extension and this owed check are recorded in `164.2-06-SUMMARY.md` under the
-      `database.types.ts` bullet, "⚠️ For plan 10").**
-      Plan 06 added `computation_error_job_id` and `computation_error_source` to
-      `strategy_analytics`'s `Row`, `Insert` and `Update` **by hand**, in the generated
-      alphabetical position between `computation_error` and `computation_status` — six lines. It
-      could not be generated at authoring time because the CLI is linked to PROD, where the
-      columns did not yet exist (RESEARCH Open Q5).
-      **Two checks, both post-merge:**
-      1. Run the which-database marker query FIRST (this is a **READ-only** `gen types`, but the
-         CLI is linked to PROD and the habit is the guard), then
-         `supabase gen types typescript --linked` and confirm those six lines produce **no diff**.
-         A diff means the hand-extension guessed the generator's shape wrong and every consumer
-         of those types has been typed against a fiction.
-      2. On PROD, confirm **no failure upsert was lost in the PostgREST schema-cache window**
-         around the deploy: the writer starts sending the two marker keys the moment the Python
-         half ships, and PostgREST can answer `PGRST204` for a column it has not yet cached.
-         Read `net._http_response` and the worker logs for `PGRST204` in that interval. Plan 08
-         carries a P11 minimal-key fallback for exactly this, so the expected finding is ZERO
-         lost records — but "expected" is not "measured", and an effect never identifies the
-         writer.
 
 - [ ] **`[164.2-RECLAIM-PROVENANCE]` `reclaim_stuck_compute_jobs` requeues without resetting the
       provenance markers, so a crash-recovered job can lose its curated sentence (booked
@@ -1472,10 +1426,12 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   The ROADMAP `### Phase 187` section stays as the spec: the six success criteria and the full census of mixed-case implicit calls.
   **Owner / Trigger:** the next milestone's planning, or sooner if a Binance key is connected to a published strategy or an allocator book. Data integrity: the fix changes published Binance numbers.
 
-- [ ] **[175-NIGHTLY-MT5-DERIVE-CHECK] — after the 2026-11-04 00:40Z derive, check that every MT5 derive ended clean under the US rule (logged 2026-11-03).**
-  Phase 175 closed with only one MT5 key derived under the rule (done on attempt 1, no clock configuration fault). The 2026-11-04 00:40Z nightly is the first run that derives all MT5 keys under it.
-  Check that every MT5 `derive_broker_dailies` job is `done` with `attempts=1` and that no `compute_jobs.last_error` carries a clock-configuration text. A job that is `done` with `attempts>1` can hide a fault a retry healed, so `attempts=1` is the test, not `done` alone. Read-only, marker query first.
-  **Owner / Trigger:** the first session after 2026-11-04 00:40Z. Not a phase; if a key fails, it is a fix against `analytics-service/services/mt5_server_clock.py` and the worker's rule setting.
+- [ ] **[175-NIGHTLY-MT5-DERIVE-CHECK] — MT5 derives keep needing a second attempt, and the retry cause is unread (logged 2026-11-03; rewritten 2026-11-23 as a LIVE data-integrity item).**
+  The original check (every MT5 `derive_broker_dailies` job `done` with `attempts=1`, no clock-configuration `last_error`) was read on PROD on 2026-11-23, read-only, marker query first. It does not pass:
+  - `attempts=2` on `done` jobs, created 2026-11-05 (1), 2026-11-15 (1), 2026-11-20 (1), 2026-11-21 (1), 2026-11-22 (1) and 2026-11-23 (2). Every other day since 2026-11-03 is `attempts=1` only. The retried jobs end with a null `last_error`, so what the first attempt hit is not recorded anywhere this read can see. A `done` after a retry can hide a fault the retry healed, which is why `attempts=1` is the test.
+  - Two `failed_final` jobs (`attempts=3`), both created 2026-11-18 (00:25Z and 00:40Z), carry `MT5 server clock does not match the configured rule (rule=us expected=+2h measured=+0h)`. One has no `api_key_id` (it does not join to a key), the other is an MT5 key. 2026-11-18 is the day Phase 217 SERVERRULE shipped the per-server rule; no clock-configuration `last_error` appears on any job created since 2026-11-19.
+  **Data integrity:** a derive that needs a retry rewrites the same account's published dailies, and nothing tells us whether the first attempt wrote anything or why it failed.
+  **Owner / Trigger:** unrouted, founder to assign. Trigger: now (it recurs daily since 2026-11-20). First make the first attempt's failure readable (the cause is lost when the retry succeeds), then fix it at its root. **Closed when:** seven consecutive nightly MT5 derives are all `done` with `attempts=1`, or the retry cause is named and fixed with a test.
 
 - **[192-ORPHANED-LANDING-VERIFY]** (logged 2026-11-07, Phase 192 PUBLICTRUTH; owner: unrouted, founder to assign). The landing verification section, form, results and progress components under `src/components/landing` are rendered nowhere after Phase 192 turned the home verify band into a sign-up link (no non-test importer outside that directory). `VerificationForm.tsx` still carries its false "never stored" line, and `/api/verify-strategy` stays in `PUBLIC_ROUTES` in `src/proxy.ts` with no caller. The public-truth census does not scan this directory for that reason. **Closed when:** the components are deleted together with their registry entries (`closed-sets.test.ts`, `complete-status-scan.test.ts`) and the public allowlist entry, or reused behind sign-in.
 
@@ -2960,21 +2916,12 @@ toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 
 ### Phase 162 (HONEST) — plan 162-08 filings (added 2026-08-26)
 
-Five items. Two are live data left unrepaired because plan 162-08 could not reach the PROD
-write lane; one is a founder scope call; two are hygiene. Evidence for all five:
+Two items remain (corrected 2026-11-23: the plan filed five; the TODOS sweeps deleted the closed ones,
+and the two raw-prose `strategy_analytics` rows were deleted after a read-only PROD read on 2026-11-23
+found both `complete` with no `computation_error`). Evidence for the original five:
 `.planning/milestones/v1.20-phases/162-honest-what-the-user-sees-is-true/162-CENSUS.md` (§Recompute — NOT
 EXECUTED, §str/None follow-through, §Discovery observation).
 
-- [ ] **Two `strategy_analytics` rows still render raw exception prose, and their only
-      re-write path is a dead job kind.** `ec722557-7781-44db-8f2c-edbe252957c0`
-      (`pending_review`) and `8581f739-1a7b-42a4-a209-3acfa327e259` (**published**) each carry
-      the bare 59-character `str`/`None` `TypeError` text in `computation_error`. Plan 162-02
-      fixed the *writer*, so no NEW row can leak this shape — but it cannot rewrite these two,
-      and plan 162-08's repair enqueue was blocked by the same credential denial above.
-      Disposition recorded as *awaiting-next-write*, with the caveat that makes it nearly
-      permanent: their only failing kind, `poll_positions`, has not been enqueued anywhere in
-      PROD since **2026-06-14**, so there may be no next write. The published one is a live
-      surface.
 - [ ] **Retired job kinds still carry a live daily enqueue that has fired nothing since
       2026-06-14 — dead code, low priority.** `enqueue_poll_positions_for_all_strategies`
       exists at HEAD (`analytics-service/main_worker.py:1026-1036`) but no `poll_positions` job
@@ -4354,7 +4301,8 @@ Both have a SAFE failure direction. Recorded so the trade-off is visible, not so
 
 ## Phase 145 — recorded deferrals (logged 2026-08-17)
 
-Three DELIBERATE deferrals from the JOB-06 csv-finalize atomicity fold
+Two DELIBERATE deferrals remain (corrected 2026-11-23: the wizard first-hop drop entry was deleted as a
+duplicate of the Phase 143 (D-05) entry, which carries the same mechanism) from the JOB-06 csv-finalize atomicity fold
 (`finalize_csv_strategy_with_returns`, migration `20260819120000`; 145-CONTEXT.md `<deferred>`).
 None is a defect in the fold; each carries the constraint that made it out-of-scope. Census
 citations are from `.planning/phases/145-job-csv-finalize-atomicity/145-REPRODUCTION.md`
@@ -4374,19 +4322,6 @@ citations are from `.planning/phases/145-job-csv-finalize-atomicity/145-REPRODUC
   population today and the item stays mid-term. Any future healer must key on a signal that
   distinguishes "enqueue errored" from "composite, legitimately job-terminal" (the D-09
   false-positive class).
-
-- [ ] **(Wizard first-hop drop) The API/wizard first-hop enqueue drop remains uncovered — ⛔ never
-  absorb it into Phase 145's surface by widening a predicate.** Phase 143 filed it as documented
-  non-coverage (`20260816140000:259-265`; the D-05 entry above): a dropped first `sync_trades`
-  enqueue leaves "no dailies AND no jobs", byte-identical to a brand-new strategy, so no csv-side
-  predicate catches it without re-enqueueing healthy strategies forever. It is shape-identical to
-  145's pre-fold windows A–C but has an UNSOLVED distinguishing-signal problem — which is exactly
-  why 145 dissolved its own windows via the fold instead of sweeping. Census (1)-minus-(2)
-  measured 2026-08-17: **PROD = 0** (no wizard first-hop population; PROD's 18 csv no-dailies rows
-  are all 2026-05 incident-era fossils), **TEST = 8107** (all non-csv — the e2e-seed residue
-  class). Closing it needs its own signal (`api_key_id` present + no job EVER + a longer grace)
-  with its own false-positive analysis — a separate mechanism, never a second predicate bolted
-  onto `20260816140000` or onto the fold's resolve arm.
 
 - [ ] **(Inert flag cleanup) Delete the dead `feature_flags.process_key_unified_backbone` row and
   the dead `PROCESS_KEY_UNIFIED_BACKBONE` env vars (Vercel Production + Railway
@@ -5637,11 +5572,13 @@ It runs the marker query first and reports counts only.
 
 **Owner / Trigger:** founder routing (founder 2026-11-02, "Correct the record, book the fix (Recommended)"), the next phase that touches the derive's mark writer or the log scrubber. Trigger: any reading that needs refusal counts by token. Closed when the refusal line names its token under a key the scrubber leaves alone (for example `refusal=`), with a test that runs the line through the scrubber and asserts the token survives.
 
-### 167.2.1.1.1-COMPOSITE-NOT-REDERIVED-ON-MARKS — no composite has been re-derived since marks started, so the composite marks path is unexercised on PROD (booked 2026-11-02, NAVMTM plan 14 SC-4 reading, DATA INTEGRITY)
+### 167.2.1.1.1-COMPOSITE-NOT-REDERIVED-ON-MARKS — both PROD composites were re-stitched on 2026-11-08 and still publish no `marks_since`, so the composite marks path does not reach the published row (booked 2026-11-02, NAVMTM plan 14 SC-4 reading; rewritten 2026-11-23, DATA INTEGRITY)
 
-**Reading.** On 2026-11-02 both PROD composites had every member key marked 7 of 7 days, but neither had a compute job since 2026-10-27 (last computed 2026-10-20 and 2026-10-21), so neither publishes `marks_since`. Plan 09's composite application of marks has not run on PROD.
+**Reading (2026-11-02).** Both PROD composites had every member key marked 7 of 7 days, but neither had a compute job since 2026-10-27, so neither published `marks_since`. Plan 09's composite application of marks had not run on PROD.
 
-**Owner / Trigger:** founder routing (founder 2026-11-02, "Book a re-derive check (Recommended)"). Trigger: now. First find out why no composite job was enqueued after marks started (which path is meant to re-stitch a composite when its members' series change), then confirm a composite re-derive reads its members' marks and publishes `marks_since`. Closed when a PROD composite carries `marks_since` from a re-derive, or the missing enqueue path is fixed with a test.
+**Reading (2026-11-23, read-only PROD, marker query first).** The "never re-derived" half is no longer true: `stitch_composite` ran for both composites on 2026-11-08 (13:00Z, `done`), and both `strategy_analytics` rows were recomputed that day (`complete_with_warnings`). Neither row's `data_quality_flags` carries `marks_since`. So a composite re-derive ran and the marks annotation still did not reach the published row. No `stitch_composite` job has been created for either since 2026-11-08.
+
+**Owner / Trigger:** founder routing (founder 2026-11-02, "Book a re-derive check (Recommended)"). Trigger: now. Find out why a composite re-derive publishes no `marks_since` although its members are marked (whether `stitch_composite` reads the members' marks at all, and whether the composite's compute carries the annotation), and why no `stitch_composite` job has been enqueued since 2026-11-08. Closed when a PROD composite carries `marks_since` from a re-derive, or the gap is fixed at its root with a test.
 
 ## Phase 167.2.1.1.2 (ACCTREBUILD) — routed items (logged 2026-10-22)
 
