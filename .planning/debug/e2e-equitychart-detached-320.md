@@ -1,8 +1,8 @@
 ---
-status: diagnosed
+status: resolved
 trigger: "main CI e2e-seeded red: target-size.spec.ts:246 EquityChart detached at 320px on /allocations"
 created: 2026-10-02
-updated: 2026-10-02
+updated: 2026-11-23
 goal: find_root_cause_only
 ---
 
@@ -101,3 +101,10 @@ files_changed: []
 same_class_unverified: Math.pow(10, floor(log10(...))) idiom also at AnalyticalPanels.tsx:249, CrossSignaturePanels.tsx:376, SignaturePanels.tsx:390, TimeSeriesChart.tsx:1487 (log path), EquityChart.tsx:867 (by inspection only). `10 ** n` measured equally engine-dependent in Node 22.
 inferences_not_measured: no CI artifact shows #418 (match is by identical error signature); "CI sometimes passes because the recovery render wins the race" is inferred; CI Node 22.23.3 assumed to share the V8 12.4 behaviour measured on 22.22.1.
 not_investigated: composite-factsheet-render.spec.ts:191 axe (cash basis) flake - plausible same class (factsheet surface), unverified.
+
+## Resolution note 2026-11-23 (debug sweep before closing milestone v1.18)
+
+verdict: RESOLVED. Phase 169.1.1 HYDRATIONTICKS fixed the root cause (squash commit 8b9b02e76, #925). Its verification is `status: passed` (`.planning/milestones/v1.20-phases/169.1.1-*/169.1.1-VERIFICATION.md`).
+- **Code.** `git grep 'Math.pow(10'` over `src/` finds only a test oracle (`src/lib/chart-ticks.test.ts`), and `git grep '10 \*\* '` over `src/` finds nothing outside tests. The idioms in this file's `same_class_unverified` list are gone too.
+- **Hydration guard.** `e2e/target-size.spec.ts` imports its `test` from `./helpers/hydration-guard`, so a React #418 now fails the spec.
+- **CI.** Main CI run 45146128310 (head 57bc06f2c, 2026-11-23) job `e2e-seeded` 137596297892 printed `306 passed`, `9 skipped`, and 0 `flaky` lines. The EquityChart tap-rect test skips only when the seed env is absent. The seed env was present: the seed-gated MYSTRATTABLE and SC6-DISCOVERY specs ran in the same job.

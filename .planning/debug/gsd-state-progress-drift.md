@@ -1,8 +1,8 @@
 ---
-status: diagnosed
+status: resolved
 trigger: "GSD state/progress is inconsistent (founder, 2026-10-04: 'what's wrong with state? /gsd-debug it')"
 created: 2026-10-04
-updated: 2026-10-04
+updated: 2026-11-23
 ---
 
 ## Symptoms
@@ -216,3 +216,15 @@ root_cause: |
 fix: (diagnose-only)
 verification: (diagnose-only)
 files_changed: []
+
+## Resolution note 2026-11-23 (debug sweep before closing milestone v1.18)
+
+verdict: RESOLVED. The repo-side cause was fixed by the founder decision of 2026-10-15 ("Fix our format + report upstream"). The two upstream behaviours that remain are documented and owned.
+- **Fix.** fef7336d9 (#1049) reshaped ROADMAP.md and STATE.md into the tool's own normal form. `scripts/check-planning-hygiene.ts` rules 6d, 6e and 7 fail `npm run lint` if the shapes come back.
+- **Measured at origin/main 57bc06f2c.**
+  - The current milestone's Progress table has 16 Status cells reading exactly `Complete` and no `Complete — note` cells. The 7 deferred phases are in the next-milestone table.
+  - STATE frontmatter reads `16 / 16`, `percent: 100`. The table-derived percent and the stored counters agree, so the 46/94 = 49 override this file found can no longer diverge on this shape.
+- **Residuals, which are not this repo's defect.** `phase complete` still selects the next phase in roadmap order, and it still re-derives `progress:` from disk.
+  - CLAUDE.md, under "GSD orchestration rules", the CORRECTED 2026-10-15 note, says to correct these by hand after a handler and to `git diff` after every handler run.
+  - Upstream ownership is in `.planning/research/gsd-tools-upstream-bugs.md`: item 4 (open-gsd/gsd-core#6170) and "Further items" (the next-phase comment on open-gsd/gsd-core#6019).
+- **Not adopted.** The `scripts/state-census.mjs` proposal in this file was not built. The reshape plus the lint rules replaced it.

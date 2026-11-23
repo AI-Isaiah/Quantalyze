@@ -1,8 +1,8 @@
 ---
-status: awaiting_human_verify
+status: resolved
 trigger: "14 live keys keep venue_account_id NULL although position polls run (167.1.2-08 census)"
 created: 2026-10-03
-updated: 2026-10-03
+updated: 2026-11-23
 ---
 
 # Debug: live keys whose venue_account_id is never stamped
@@ -183,3 +183,17 @@ residuals:
   - "JS String.trim vs Python str.strip differ on a few exotic code points; poll mirrors rotate, which already had that divergence from connect."
 human_verify: "After deploy + one poll cycle, PROD read-only (marker first): mt5.live_keys_unstamped_unmarked -> 0; one of the two pre-column MT5 keys marked 'duplicate' with the other as holder and exactly one api_key.account_duplicate_detected audit event for it. Both stamped with different values and neither marked = the premise (one account) did not hold; new finding, not a failed fix. See next_action."
 files_changed: [scripts/accounttruth-census.mjs, src/__tests__/accounttruth-census.test.ts, analytics-service/tests/test_account_identity_stamper.py, analytics-service/services/mt5_validation.py, analytics-service/services/mt5_client.py, analytics-service/services/job_worker.py, analytics-service/services/account_identity.py, analytics-service/routers/internal.py, .planning/phases/167.1.2-.../167.1.2-RECOMPUTE-RUNBOOK.md]
+
+## Resolution note 2026-11-23 (debug sweep before closing milestone v1.18)
+
+verdict: RESOLVED (the PROD reading this session's human-verify step asked for was done by the agent, read only).
+- **Fix on main.** Branch commits 09c1be0fb and 3fbdad866 were squash-merged in 9c1dc3137 (#939, ACCOUNTTRUTH PR C5): `services/mt5_validation.mt5_venue_account_id`, the MT5 arm of `services/account_identity._stamp`, and census bucket `live_keys_unstamped_unmarked` in `scripts/accounttruth-census.mjs`.
+- **PROD reading 2026-11-23** (marker named PRODUCTION). Census (a), the printed SQL, run read only:
+  - `all.live_keys 26`, `all.live_keys_venue_account_id_null 0`, `all.live_keys_unstamped_unmarked 0`;
+  - `mt5.live_keys 11`, `mt5.live_keys_unstamped_unmarked 0`.
+- **The two pre-column MT5 keys** (created 2026-08-04). Counts and booleans only:
+  - one is stamped, live, and carries no share kind;
+  - the other carries `account_share_kind = 'duplicate'` with that first key as its holder, and exactly 1 `api_key.account_duplicate_detected` audit event, dated 2026-10-04 (the first poll after deploy);
+  - the duplicate key was later disconnected by the orchestrator-owned cleanup.
+- **Verdict on the premise.** This is the expected reading in next_action ("exactly one of the two pre-column MT5 keys carrying account_share_kind='duplicate' with the other as holder, exactly one new audit event"). The one-account premise held.
+- **Still open, outside this session.** TODOS.md A-3 (login unique only per broker server) is unchanged.
