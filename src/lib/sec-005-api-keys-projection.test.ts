@@ -191,6 +191,16 @@ describe("SEC-005: api_keys column projection", () => {
     ]);
   });
 
+  // Phase 225 plan 01 (CONN-03, founder ruling Q2). Migration 20261123180000 adds
+  // api_keys.venue_server and grants it to nobody: the broker server is plaintext
+  // but the browser never reads it. A projection that named it would be a 42501 on
+  // every key read, so the allowlist must not carry it. The grant side is pinned in
+  // the SQL gate (arm 6v-no-grant); this is the browser-side half.
+  it("does not project api_keys.venue_server (the browser never reads the broker server)", () => {
+    expect(API_KEY_USER_COLUMNS_ARR).not.toContain("venue_server");
+    expect(API_KEY_USER_COLUMNS.split(", ")).not.toContain("venue_server");
+  });
+
   it("no source file uses .from(\"api_keys\").select(\"*\") or api_keys(*) embed", () => {
     const files = walk(SRC_ROOT);
     const offenders: Array<{ file: string; snippet: string; kind: string }> = [];

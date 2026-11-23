@@ -535,6 +535,7 @@ export type Database = {
           sync_status: string | null
           user_id: string
           venue_account_id: string | null
+          venue_server: string | null
         }
         Insert: {
           account_balance_native?: number | null
@@ -567,6 +568,7 @@ export type Database = {
           sync_status?: string | null
           user_id: string
           venue_account_id?: string | null
+          venue_server?: string | null
         }
         Update: {
           account_balance_native?: number | null
@@ -599,6 +601,7 @@ export type Database = {
           sync_status?: string | null
           user_id?: string
           venue_account_id?: string | null
+          venue_server?: string | null
         }
         Relationships: [
           {
@@ -3934,6 +3937,7 @@ export type Database = {
           p_placeholder_name: string
           p_user_id: string
           p_venue_account_id?: string
+          p_venue_server?: string
           p_wizard_session_id: string
         }
         Returns: {

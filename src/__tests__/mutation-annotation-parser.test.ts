@@ -1120,7 +1120,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): `armsSeen` 867 -> 891, the 24 twinned arms of the NEW gate test_mt5_server_clock_readings.sql. MEASURED: this file's run read `expected 891 to be 867`; `--parse-only` printed `coverage: files 83/110`, `arms: 0/891/0`, and the `--file` diagnostic run printed `arms: 24/24/0`, `biting: 24`.
     // ⭐ CURRENCY 2026-11-19 (Phase 219 ACCOUNTEMAIL, plan 03): `armsSeen` 891 -> 901, the 10 twinned arms of the NEW gate test_profiles_email_sync.sql. MEASURED: `--parse-only` printed `coverage: files 84/111`, `arms: 0/901/0`, and the `--file` diagnostic run of plan 01 printed `arms: 10/10/0`, `biting: 10`.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): `armsSeen` 901 -> 910, the 9 twinned arms of the NEW gate test_auth_user_has_password.sql. MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and the `--file` diagnostic run of plan 04 printed `arms: 9/9/0`, `biting: 9`.
-    expect(armsSeen).toBe(910);
+    // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 01): `armsSeen` 910 -> 914, the 4 twinned arms 6v-writes, 6v-check-blank, 6v-omitted and 6v-no-grant of the EXISTING gate test_api_keys_venue_identity_uniq.sql. MEASURED: this file's run read `expected 914 to be 910`, and `--parse-only` printed `coverage: files 85/112`, `arms: 0/914/0`.
+    expect(armsSeen).toBe(914);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1175,7 +1176,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): `stepsSeen` 984 -> 1008, +24 file steps (one edit step per twin) contributed by the NEW gate test_mt5_server_clock_readings.sql. MEASURED: the sibling pin read `expected 1008 to be 984` and `--parse-only` printed `coverage: files 83/110`, `arms: 0/891/0`, and the `--file` diagnostic run printed `arms: 24/24/0`, `biting: 24`.
     // ⭐ CURRENCY 2026-11-19 (Phase 219 ACCOUNTEMAIL, plan 03): `stepsSeen` 1008 -> 1018, +10 file steps (one edit step per twin) contributed by the NEW gate test_profiles_email_sync.sql. MEASURED: `--parse-only` printed `coverage: files 84/111`, `arms: 0/901/0`, and the `--file` diagnostic run of plan 01 printed `arms: 10/10/0`, `biting: 10`.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): `stepsSeen` 1018 -> 1028, +10 file steps contributed by the NEW gate test_auth_user_has_password.sql (nine twins, one edit step each, and arm 6's twin carries two edits). MEASURED: this file's run read `expected 1028 to be 1018`; `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and the `--file` diagnostic run of plan 04 printed `arms: 9/9/0`, `biting: 9`.
-    expect(stepsSeen).toBe(1028);
+    // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 01): `stepsSeen` 1028 -> 1030, +2 file steps: 6v-writes and 6v-omitted each carry one migration `edit` step, while 6v-check-blank and 6v-no-grant are `sql` steps, which this walk skips. MEASURED: the parser test read `expected 1030 to be 1028` at the old pin.
+    expect(stepsSeen).toBe(1030);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2146,7 +2148,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): `needles.length` 984 -> 1008, the same +24 file steps as `stepsSeen`, from the NEW gate test_mt5_server_clock_readings.sql. MEASURED: the sibling pin read `expected 1008 to be 984` and `--parse-only` printed `coverage: files 83/110`, `arms: 0/891/0`, and the `--file` diagnostic run printed `arms: 24/24/0`, `biting: 24`.
     // ⭐ CURRENCY 2026-11-19 (Phase 219 ACCOUNTEMAIL, plan 03): `needles.length` 1008 -> 1018, the +10 file steps (one edit step per twin) from the NEW gate test_profiles_email_sync.sql. MEASURED: `--parse-only` printed `coverage: files 84/111`, `arms: 0/901/0`, and the `--file` diagnostic run of plan 01 printed `arms: 10/10/0`, `biting: 10`.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): `needles.length` 1018 -> 1028, the same +10 file steps as `stepsSeen`, from the NEW gate test_auth_user_has_password.sql. MEASURED: this file's run read `expected 1028 to be 1018`; `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and the `--file` diagnostic run of plan 04 printed `arms: 9/9/0`, `biting: 9`.
-    expect(needles.length).toBe(1028);
+    // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 01): `needles.length` 1028 -> 1030, the same +2 file steps as `stepsSeen` (the `edit` steps of 6v-writes and 6v-omitted). MEASURED: this file's run read `expected 1030 to be 1028`.
+    expect(needles.length).toBe(1030);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
