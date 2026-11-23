@@ -85,7 +85,7 @@
 -- every call site in this file dies at
 -- `42725 function public.create_wizard_strategy(…) is not unique` — an
 -- ambiguity, not a regression. Measured 2026-09-04.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql"]}
 
 -- ==========================================================================
 -- Part 3a — structural: NEITHER anon NOR authenticated may hold EXECUTE on the
@@ -102,7 +102,7 @@ DECLARE
   -- has_function_privilege matches the DECLARED argument list EXACTLY). The
   -- constants must stay byte-identical to them, and to 20260814120000 §3.
   c_sig CONSTANT TEXT :=
-    'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)';
+    'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)';
   k_sig CONSTANT TEXT :=
     'public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid)';
   v_b_live   BOOLEAN;   -- 20260814120000 narrowed the SINGLE-KEY body
@@ -135,7 +135,7 @@ BEGIN
        'public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid)',
        'EXECUTE')
      OR NOT has_function_privilege(current_user,
-       'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)',
+       'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)',
        'EXECUTE') THEN
     RAISE EXCEPTION 'TEST BLOCKED (Part 3a-0): the connection role % holds no EXECUTE on one or both wizard RPCs, so NONE of this file''s direct wizard-RPC call sites can run. This failure is ENVIRONMENTAL, not a regression — it reports the lane''s database connection, not the schema or the migration. See 156-MEASUREMENTS.md A3.', current_user;
   END IF;
@@ -228,7 +228,7 @@ BEGIN
   --            because §3 of 20260814120000 pins the ACL exactly — editing the
   --            REVOKE there would change what the gate asserts rather than
   --            break it.
-  -- RED-UNDER-M: {"arm":"Part 3a-2b","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) TO authenticated"}]}
+  -- RED-UNDER-M: {"arm":"Part 3a-2b","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text) TO authenticated"}]}
   IF v_b_live <> v_b_live_k THEN
     RAISE EXCEPTION 'TEST FAILED (Part 3a-2a): THE TWO WIZARD RPCs ARE IN DIFFERENT STATES. create_wizard_strategy narrowed=%, add_wizard_composite_key narrowed=% (read from each comment-stripped body''s v_auth_uid). Migration 20260814120000 rewrites BOTH bodies in one file, so they cannot legitimately disagree: a migration landed on one twin and not the other. That asymmetry is the instance-not-class defect Phase 153.6 was convened to end — the composite door standing open while the single-key door is shut is not a lesser bug, it is the same bug on the path nobody looked at. Change one, change both, in the same migration.', v_b_live, v_b_live_k;
   END IF;
@@ -242,7 +242,7 @@ BEGIN
   -- strategy's grant: this file asserts the single-key ACL only for `anon` and
   -- `service_role`, never for `authenticated`. That gap is what this covers.
   IF v_b_live AND v_auth_c THEN
-    RAISE EXCEPTION 'TEST FAILED (Part 3a-2b): INCOHERENT HALF-STATE, AND IT IS THE WORST ONE. Both wizard RPC bodies carry NO v_auth_uid, so migration 20260814120000 narrowed them — but `authenticated` STILL HOLDS EXECUTE on create_wizard_strategy. Migration B DELETES the auth.uid() ownership comparison rather than relaxing it, on the premise that only service_role can reach these functions. With the body narrowed and the grant standing, any browser session can POST /rest/v1/rpc/create_wizard_strategy and mint a draft owned by ANY p_user_id it names — a cross-tenant write, strictly worse than either migration alone. ⚠️ This file pins the single-key ACL for anon and service_role only, so this line is the ONLY place it watches `authenticated` on that twin; the composite twin is covered by Part 3a''s own assertion below. Re-issue REVOKE ALL ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) FROM PUBLIC, anon, authenticated; in a migration NOW.';
+    RAISE EXCEPTION 'TEST FAILED (Part 3a-2b): INCOHERENT HALF-STATE, AND IT IS THE WORST ONE. Both wizard RPC bodies carry NO v_auth_uid, so migration 20260814120000 narrowed them — but `authenticated` STILL HOLDS EXECUTE on create_wizard_strategy. Migration B DELETES the auth.uid() ownership comparison rather than relaxing it, on the premise that only service_role can reach these functions. With the body narrowed and the grant standing, any browser session can POST /rest/v1/rpc/create_wizard_strategy and mint a draft owned by ANY p_user_id it names — a cross-tenant write, strictly worse than either migration alone. ⚠️ This file pins the single-key ACL for anon and service_role only, so this line is the ONLY place it watches `authenticated` on that twin; the composite twin is covered by Part 3a''s own assertion below. Re-issue REVOKE ALL ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text) FROM PUBLIC, anon, authenticated; in a migration NOW.';
   END IF;
   IF NOT v_b_live AND NOT (v_auth_c AND v_auth_k) THEN
     RAISE EXCEPTION 'TEST FAILED (Part 3a-2c): INCOHERENT HALF-STATE. `authenticated` has lost EXECUTE on at least one wizard RPC (create_wizard_strategy=%, add_wizard_composite_key=%) — so 20260814120000 §3 ran here — but the bodies still declare v_auth_uid, i.e. they are still the Migration A (20260813150106) two-arm bodies. Either §1/§2 of that migration did not apply, or a later migration re-based the bodies onto a stale source. This must not be reported as a skip.', v_auth_c, v_auth_k;
@@ -299,7 +299,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (Part 3a): CONNECT-A-KEY IS BROKEN — service_role holds no EXECUTE on add_wizard_composite_key. Since 20260814120000 it is the only role that may write one, so every COMPOSITE key add answers 42501. A REVOKE went one role too far, or the function was dropped. Re-GRANT; do not retry.';
   END IF;
   IF NOT has_function_privilege('service_role',
-       'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)',
+       'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)',
        'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED (Part 3a): CONNECT-A-KEY IS BROKEN — service_role holds no EXECUTE on create_wizard_strategy. Since 20260814120000 it is the only role that may write one, so every SINGLE-KEY connect answers 42501. A REVOKE went one role too far, or the function was dropped. Re-GRANT; do not retry.';
   END IF;
@@ -355,7 +355,7 @@ DECLARE
   -- this block runs (ON_ERROR_STOP aborts the file), so these two are read here
   -- purely to decide which calls are legal to make.
   c_sig CONSTANT TEXT :=
-    'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)';
+    'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)';
   k_sig CONSTANT TEXT :=
     'public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid)';
   v_b_live    BOOLEAN;
@@ -628,10 +628,10 @@ BEGIN
   -- pg_get_functiondef, but a post-verify only runs in the migration that
   -- carries it; it does not protect the function from the NEXT migration. This
   -- case runs in the sql-tests CI job on every PR forever.
-  -- ⚠️ ELEVEN positional args against the 12-arg signature is LEGAL —
-  -- p_venue_account_id defaults NULL, and Part 4a already calls it this way. Do
-  -- not "fix" it into an arity mismatch; the 12-arg pin lives at
-  -- test_api_keys_venue_identity_uniq.sql:41.
+  -- ⚠️ ELEVEN positional args against the 13-arg signature is LEGAL —
+  -- p_venue_account_id and p_venue_server default NULL, and Part 4a already calls
+  -- it this way. Do not "fix" it into an arity mismatch; the 13-arg pin lives in
+  -- test_api_keys_venue_identity_uniq.sql.
   SELECT count(*) INTO row_cnt_before FROM public.api_keys WHERE user_id = uid_c;
 
   -- (i) a MISMATCHED identity. ⛔ Keeps `'role', 'authenticated'` — a refusal
@@ -821,7 +821,11 @@ BEGIN
   --            disagreement is caught only by Part 4a's second check, and only
   --            because it compares the STORED column against the RETURNED id
   --            rather than trusting either alone.
-  -- RED-UNDER-M: {"arm":"Part 4a","apply":[{"kind":"edit","file":"supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","find":"    p_user_id, v_key_id, p_placeholder_name, 'draft', 'wizard',","replace":"    p_user_id, NULL, p_placeholder_name, 'draft', 'wizard',","occurrences":1}]}
+  --            2026-11-23 (Phase 225 plan 03): the twin edits migration
+  --            20261123180000, whose 13-parameter body supersedes
+  --            20260814120000's; an edit to the older file no longer reaches
+  --            the live function.
+  -- RED-UNDER-M: {"arm":"Part 4a","apply":[{"kind":"edit","file":"supabase/migrations/20261123180000_api_keys_venue_server.sql","find":"    p_user_id, v_key_id, p_placeholder_name, 'draft', 'wizard',","replace":"    p_user_id, NULL, p_placeholder_name, 'draft', 'wizard',","occurrences":1}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_c::text, 'role', 'service_role')::text, true);
 

@@ -156,7 +156,7 @@
 -- and is scored NO-IDENTITY rather than RED (MEASURED 2026-09-04). It needs
 -- 10-fixture-strategies-rls-baseline.sql ahead of it for the three empty
 -- relations it writes policies for.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/10-fixture-strategies-rls-baseline.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260405061912_rls_policies.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260810120000_lock_api_keys_exchange_column.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","scripts/pg-lane/fixtures/25-fixture-api-keys-e2e-census-seed.sql","supabase/migrations/20260823120000_revoke_api_keys_insert.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/10-fixture-strategies-rls-baseline.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260405061912_rls_policies.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260810120000_lock_api_keys_exchange_column.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","scripts/pg-lane/fixtures/25-fixture-api-keys-e2e-census-seed.sql","supabase/migrations/20260823120000_revoke_api_keys_insert.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql"]}
 
 BEGIN;
 
@@ -197,11 +197,11 @@ DECLARE
   v_rows_before int;
   v_rows_after  int;
   -- The two signatures, spelled once. ⛔ These must stay byte-identical to the
-  -- REVOKE/GRANT targets in 20260814120000 §3 and to that migration's own
-  -- post-verify (a)/(b)/(c): 12 args and 11 args. The arity pin lives in
-  -- test_api_keys_venue_identity_uniq.sql.
+  -- REVOKE/GRANT targets: 13 args for create_wizard_strategy (migration
+  -- 20261123180000; 20260814120000 §3 carried the 12-arg form) and 11 args for
+  -- the composite. The arity pin lives in test_api_keys_venue_identity_uniq.sql.
   v_create_sig CONSTANT text :=
-    'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)';
+    'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)';
   v_composite_sig CONSTANT text :=
     'public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid)';
 BEGIN
@@ -982,7 +982,7 @@ BEGIN
 
       IF has_function_privilege('authenticated', v_create_sig, 'EXECUTE') THEN
         RAISE EXCEPTION
-          'CONNECT-01 REGRESSION (5h): authenticated holds EXECUTE on create_wizard_strategy. MECHANISM: Supabase pg_default_acl for public functions granted by role postgres is postgres=X anon=X authenticated=X service_role=X, so a DROP + CREATE of a public function owned by postgres SILENTLY RE-GRANTS anon and authenticated — no error, nothing in the diff to read (it bit 20260812083206, whose post-verify at :867 exists for that reason). REMEDY: the migration that re-created this function must re-issue, in the same migration, REVOKE ALL ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) FROM PUBLIC, anon, authenticated; and GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) TO service_role;';
+          'CONNECT-01 REGRESSION (5h): authenticated holds EXECUTE on create_wizard_strategy. MECHANISM: Supabase pg_default_acl for public functions granted by role postgres is postgres=X anon=X authenticated=X service_role=X, so a DROP + CREATE of a public function owned by postgres SILENTLY RE-GRANTS anon and authenticated — no error, nothing in the diff to read (it bit 20260812083206, whose post-verify at :867 exists for that reason). REMEDY: the migration that re-created this function must re-issue, in the same migration, REVOKE ALL ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text) FROM PUBLIC, anon, authenticated; and GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text) TO service_role;';
       END IF;
       IF has_function_privilege('anon', v_create_sig, 'EXECUTE') THEN
         RAISE EXCEPTION
@@ -990,7 +990,7 @@ BEGIN
       END IF;
       IF NOT has_function_privilege('service_role', v_create_sig, 'EXECUTE') THEN
         RAISE EXCEPTION
-          'OUTAGE (5h): service_role lacks EXECUTE on create_wizard_strategy — a REVOKE went one role too far and EVERY connect-a-key is broken for every user. This is also the anti-vacuity positive for the two assertions above, which both read TRUE on a database where the function no longer exists. REMEDY: GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) TO service_role;';
+          'OUTAGE (5h): service_role lacks EXECUTE on create_wizard_strategy — a REVOKE went one role too far and EVERY connect-a-key is broken for every user. This is also the anti-vacuity positive for the two assertions above, which both read TRUE on a database where the function no longer exists. REMEDY: GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text) TO service_role;';
       END IF;
 
       IF has_function_privilege('authenticated', v_composite_sig, 'EXECUTE') THEN
