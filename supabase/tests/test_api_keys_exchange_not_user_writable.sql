@@ -197,9 +197,9 @@ DECLARE
   v_rows_before int;
   v_rows_after  int;
   -- The two signatures, spelled once. ⛔ These must stay byte-identical to the
-  -- REVOKE/GRANT targets in 20260814120000 §3 and to that migration's own
-  -- post-verify (a)/(b)/(c): 12 args and 11 args. The arity pin lives in
-  -- test_api_keys_venue_identity_uniq.sql.
+  -- REVOKE/GRANT targets: 13 args for create_wizard_strategy (migration
+  -- 20261123180000; 20260814120000 §3 carried the 12-arg form) and 11 args for
+  -- the composite. The arity pin lives in test_api_keys_venue_identity_uniq.sql.
   v_create_sig CONSTANT text :=
     'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)';
   v_composite_sig CONSTANT text :=
