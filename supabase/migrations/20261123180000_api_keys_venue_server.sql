@@ -68,6 +68,13 @@
 -- supabase/migrations/down/20261123180000-rollback.sql.
 -- ============================================================================
 
+-- VAC-04 acknowledgement (2026-11-23, PR-1 CI). PROD's live create_wizard_strategy/12
+-- body hashes the same as the committed baseline snapshot, so PROD carries the
+-- 20260814120000 body and no out-of-band patch. The 4 differing lines are this
+-- migration's own intended change (the 13th parameter, the venue_server INSERT column
+-- and value, and the tab/newline-aware trim on the login stamp). Overwriting it is intended:
+-- prod-body-ack: 402dd191bfe7b280e7ac81ee27c64d0a603991605fef18033525655cf20a877d
+
 SET LOCAL lock_timeout = '3s';
 
 -- --------------------------------------------------------------------------
