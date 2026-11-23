@@ -125,6 +125,10 @@ _KEYMAP_COLUMNS: Final[tuple[str, ...]] = (
     "strategy_status",
     "asset_class",
     "key_created_at",
+    # 155.2 G5-1: the account binding check. The login itself is never captured: only
+    # whether the key is a second key on another key's account, and its login's sha256.
+    "account_shared",
+    "venue_account_sha256",
 )
 
 CAPTURE_FILES: Final[Mapping[str, SliceSpec]] = MappingProxyType(

@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.133.61.0] - 2026-11-23 — Phase 155.2 LIVEPARITY gap closure 2: the parity harness refuses a label bound to the wrong account, and compares Sharpe at the stored precision
+
+Code PR for gap plan 155.2-17 (gaps G5-1, G5-2, G5-3). It follows the 2026-11-23 recheck, which found that every MM3 Gate A reading so far had measured the MM2 account: the ordinal labelled MM3 was a second key on MM2's account. The founder ruled the same day that the harness must refuse that case by name and compare Sharpe at the stored precision. The harness is offline tooling: no product code path, migration or user-facing surface changes.
+
+### Added
+- **`oracle_account_mismatch`, a new closed bucket that never passes (G5-1).** `oracle_account_check` in `services/mt5_parity.py` refuses a label before any leg is judged. Every window is RED with no legs and one reason: `account_shared` (the key carries `account_shared_with_api_key_id`), `login_differs` (the key's login is not the Report header's login), or `account_identity_absent` (the binding cannot be checked, so it fails closed). `scripts/mt5_parity_run.py` `_prepare` wires it into `evaluate_windows(account_mismatch=...)`, and the run exits non-zero naming the reason.
+- **`report_account_matches` in `services/mt5_parity_report.py`** hashes the Report's `Account:` login in-process and returns only True, False or None. The login never reaches `ParsedReport`, an exception, a log, the verdict JSON or the markdown.
+- **`capture-keymap.sql` captures `account_shared` and `venue_account_sha256`**, and `capture-contract.json` lists them. The raw login is still never captured.
+- `tests/test_mt5_parity_account_binding.py` (11 tests): share arm, login arm (with a no-leak check on stdout, stderr, verdict JSON and markdown), fail-closed arm, a matching control, and the login parser.
+
+### Changed
+- **`_compare_account` in `services/mt5_parity_findings.py` compares Sharpe at the product's stored precision, 3 decimals (G5-3).** `_stored_sharpe` rounds as `Number(sharpe.toFixed(3))` in `src/lib/scenario.ts` does (exact binary value, half up), so `-0.000` equals `0.000`. Before this, the 3 significant figure comparison could never agree on a Sharpe near zero once the store had cut it to 3 decimals. That is the residual of F-155-09 and F-155-14 on FX-AI_V. 3 decimals is stricter than 3 significant figures for a Sharpe of 1 or more, so a re-run may surface rows the old comparison hid.
+- **`census-accounts.sql` `keys_sharing_login` counts the `account_shared_with_api_key_id` link in both directions (G5-2)**, not only `venue_account_id` equality. A duplicate key carries a NULL `venue_account_id`, so the old count read 0 for exactly the case that hid the mis-bound MM3 label.
+- The bucket list pinned in `tests/test_mt5_parity_engine.py` and `tests/test_mt5_parity_pipeline.py` now has 9 entries. The synthetic capture fixture carries the two new keymap columns.
+- VERSION and package.json 0.133.60.5 → 0.133.61.0.
+
+### Tests
+- `tests/test_mt5_parity_findings.py`: three stored-precision Sharpe tests (equal at 3 decimals but not at 3 s.f., the reverse, and the half-up tie with negative zero).
+- `src/__tests__/mt5-parity-capture-sql.test.ts` pins the two-direction share link in the census. In `src/__tests__/mt5-parity-capture-sql-exec.test.ts` the K2 fixture is a duplicate key, so the census expects 1, 1 and 0 for k1, k2 and k3. The keymap test checks the new columns and that the login never appears in the output.
+- Each gate was neutered, went RED and went GREEN again after a byte restore. The Sharpe comparison put back to 3 s.f. failed 3 tests. The census put back to login equality failed 3. The share arm, the login arm and the runner wiring each removed failed 1, 1 and 3.
+
+### Notes
+- **A capture sealed before this change is refused at load**, because the keymap column set is exact. That includes the 2026-11-22 recapture. The ruling to relabel MM3 needs a fresh capture anyway. `contract_version` stays 1.
+- **Booked, not fixed (review MEDIUM, not user-facing).** `venue_account_sha256` is an unsalted sha256 of a short numeric login, so it can be reversed offline. It lives only in the gitignored capture directory, which already holds the raw Reports carrying the login. A per-run salt or an in-SQL comparison would close it.
+- The check compares the login and not the broker server, because the product's identity stores no server.
+- No `TODOS.md` entry is closed by this PR.
+
 ## [0.133.60.5] - 2026-11-23 — records: close 219 ACCOUNTEMAIL, amend D-E
 
 Records PR. Phase 219's code has been on `main` since #1291 (v0.133.53.0) and #1299 (v0.133.60.0). This PR records the founder's live PROD re-test and the phase's security audit, and closes the phase. It also records the founder's D-E ruling for Phase 155.2. No source, test or migration change.

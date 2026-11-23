@@ -48,6 +48,7 @@ from services.mt5_parity_capture import (
     our_mark,
 )
 from services.mt5_parity_intake import Reading, Worksheet, require_provenance
+from services.mt5_parity_report import report_account_matches
 from services.mt5_server_clock import Mt5ServerClock, server_clock_for_rule
 
 # The ONE parity tolerance (D-B): one percentage point of E at the window start.
@@ -71,6 +72,9 @@ ANNUALIZATION_CONVENTION: Final = "annualization_convention"
 WITHHELD_BY_GATE: Final = "withheld_by_gate"
 CLOCK_MISMATCH: Final = "clock_mismatch"
 UNEXPLAINED: Final = "unexplained"
+# 155.2 G5-1: the label's key is not the account the Report belongs to. Never a pass and
+# never ``unexplained``: nothing was compared, because the two sides are different accounts.
+ORACLE_ACCOUNT_MISMATCH: Final = "oracle_account_mismatch"
 
 Bucket = Literal[
     "within_tolerance",
@@ -81,6 +85,7 @@ Bucket = Literal[
     "withheld_by_gate",
     "clock_mismatch",
     "unexplained",
+    "oracle_account_mismatch",
 ]
 
 BUCKET_LABELS: Final[frozenset[str]] = frozenset(
@@ -93,6 +98,7 @@ BUCKET_LABELS: Final[frozenset[str]] = frozenset(
         WITHHELD_BY_GATE,
         CLOCK_MISMATCH,
         UNEXPLAINED,
+        ORACLE_ACCOUNT_MISMATCH,
     }
 )
 
@@ -1220,6 +1226,48 @@ def evaluate_account(
     )
 
 
+def oracle_account_check(capture: Capture, ordinal: str, report_bytes: bytes) -> str | None:
+    """Why the label's key is not the Report's account, or None when it is (155.2 G5-1).
+
+    MM3 was bound to a key that is a second key on MM2's account, so Gate A compared
+    MM2's books with MM3's Report and read two failures that were never parity
+    (155.2-RECHECK-2026-11-23.md). The reasons, checked in this order:
+
+    - ``account_shared``: the key carries ``account_shared_with_api_key_id``. The
+      product itself records it as a second key on another key's account.
+    - ``account_identity_absent``: the capture has no login hash for the key (or its
+      rows disagree), or the Report has no single readable ``Account:`` header. Fail
+      closed: an unverified binding is not a bound one.
+    - ``login_differs``: the Report's header login is not the key's login.
+
+    The logins are compared in-process by ``report_account_matches`` and never shown."""
+    rows = account_rows(capture, ordinal, "keymap")
+    shared = {r.get("account_shared") for r in rows}
+    if True in shared:
+        return "account_shared"
+    hashes = {r.get("venue_account_sha256") for r in rows}
+    if not rows or shared != {False} or len(hashes) != 1:
+        return "account_identity_absent"
+    digest = next(iter(hashes))
+    matches = report_account_matches(report_bytes, digest if isinstance(digest, str) else None)
+    if matches is None:
+        return "account_identity_absent"
+    return None if matches else "login_differs"
+
+
+def _account_mismatch_verdict(label: str, window: Window, why: str) -> AccountVerdict:
+    return AccountVerdict(
+        label=label,
+        gate=window.gate,
+        window_days=max((window.end - window.start).days, 0),
+        legs=(),
+        bucket=ORACLE_ACCOUNT_MISMATCH,
+        matched=(),
+        reason=f"{ORACLE_ACCOUNT_MISMATCH}:{why}",
+        passed=False,
+    )
+
+
 def evaluate_windows(
     capture: Capture,
     ordinal: str,
@@ -1231,6 +1279,7 @@ def evaluate_windows(
     run_day: date,
     oracle_label: str | None = None,
     capture_synthetic: bool = False,
+    account_mismatch: str | None = None,
 ) -> Verdict:
     """One account judged on every window, as a ``Verdict``.
 
@@ -1241,7 +1290,9 @@ def evaluate_windows(
     ``synthetic`` flag, or ``capture_synthetic`` (a capture materialised from a
     synthetic bundle): either side synthetic makes the verdict a rehearsal. An
     account whose ``trade_mode`` reading is not exactly ``real`` is RED on every window
-    (``trade_mode_not_real``)."""
+    (``trade_mode_not_real``). ``account_mismatch`` is ``oracle_account_check``'s
+    reason: when set, no window is compared and every window is RED with bucket
+    ``oracle_account_mismatch``."""
     capture_label = capture.labels[ordinal]
     used = capture_label if oracle_label is None else oracle_label
     view = worksheet
@@ -1254,6 +1305,15 @@ def evaluate_windows(
         if readings is None:
             raise OracleBindingRefused("worksheet has no account for the oracle label")
         view = Worksheet(synthetic=worksheet.synthetic, accounts={capture_label: readings})
+    if account_mismatch is not None:
+        return Verdict(
+            accounts=tuple(
+                replace(_account_mismatch_verdict(capture_label, w, account_mismatch), oracle_label=used)
+                for w in windows
+            ),
+            rehearsal=worksheet.synthetic or capture_synthetic,
+            run_day=run_day,
+        )
     accounts = tuple(
         replace(
             evaluate_account(

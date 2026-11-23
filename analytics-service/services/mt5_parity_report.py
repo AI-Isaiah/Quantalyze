@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import calendar
 import codecs
+import hashlib
 import json
 import math
 import re
@@ -508,6 +509,37 @@ def parse_report(data: bytes) -> ParsedReport:
         headers=names,
         fee_column_present="Fee" in names,
     )
+
+
+# The login is the first token of the header's ``Account:`` cell; a real Report follows
+# it with the currency, server and account mode, e.g. ``<login> (USD, <server>, ...)``.
+_ACCOUNT_LOGIN_RE: Final = re.compile(r"[^\s(]+")
+
+
+def report_account_matches(data: bytes, venue_account_sha256: str | None) -> bool | None:
+    """Whether the Report's header login is the key's login, compared in-process (155.2 G5-1).
+
+    The capture carries only the sha256 of the key's login text, so the Report's login
+    is stripped as ``services.mt5_validation.mt5_venue_account_id`` strips a stored login
+    (surrounding whitespace only, never ``int()``), hashed, and compared. The login
+    never leaves this function: it is not returned, logged, or put in an exception.
+    ``None`` when the comparison cannot be made: no captured hash, or no single
+    readable ``Account:`` row before the Deals section."""
+    if not venue_account_sha256:
+        return None
+    text, _encoding = _decode(data)
+    found: list[str] = []
+    for row in _collect_rows(text):
+        if _is_deals_marker(row):
+            break
+        if len(row) == 2 and row[0].text.strip().casefold() == "account:":
+            match = _ACCOUNT_LOGIN_RE.match(row[1].text.strip())
+            if match is not None:
+                found.append(match.group(0))
+    if len(found) != 1:
+        return None
+    digest = hashlib.sha256(found[0].encode("utf-8")).hexdigest()
+    return digest == venue_account_sha256.strip().lower()
 
 
 def oracle_deals_bytes(parsed: ParsedReport) -> bytes:

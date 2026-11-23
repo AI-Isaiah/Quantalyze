@@ -108,6 +108,9 @@ const WRITE_WORDS = [
  * keeps the set from growing past what the 14 committed files use.
  */
 const ALLOWED_CALLS: ReadonlySet<string> = new Set([
+  "convert_to",
+  "encode",
+  "sha256",
   "abs",
   "array_agg",
   "as",
@@ -286,8 +289,13 @@ describe.each([...EXPECTED_FILES])("mt5-parity census file %s", (name) => {
       /\bAS\s+venue_account_id\b/i.test(text),
       `${name} outputs the MT5 login as a column`,
     ).toBe(false);
-    // The login may appear only inside the keys_sharing_login comparison.
-    const rest = text.replace(/\bo\.venue_account_id\s*=\s*ak\.venue_account_id\b/g, "");
+    // The login may appear only inside the keys_sharing_login comparison, and in
+    // capture-keymap.sql only as its sha256 (155.2 G5-1: the harness compares it with the
+    // Report header login in-process, so the login itself never leaves the database).
+    const hashed = /encode\(sha256\(convert_to\(ak\.venue_account_id, 'UTF8'\)\), 'hex'\) AS venue_account_sha256/g;
+    const rest = text
+      .replace(/\bo\.venue_account_id\s*=\s*ak\.venue_account_id\b/g, "")
+      .replace(name === KEYMAP_FILE ? hashed : /$^/, "");
     expect(
       /venue_account_id/i.test(rest),
       `${name} touches venue_account_id outside the keys_sharing_login comparison`,
@@ -373,6 +381,15 @@ describe("census-accounts.sql carries the PARITY-04 fields", () => {
     ]) {
       expect(text, `census-accounts.sql must name ${col}`).toMatch(new RegExp(`\\b${col}\\b`));
     }
+  });
+
+  it("counts the account_shared_with_api_key_id link in keys_sharing_login, both directions", () => {
+    // A duplicate key has a NULL venue_account_id, so login equality alone read 0 for the
+    // key that carried MM3's name on MM2's account (155.2 RECHECK 2026-11-23).
+    expect(text).toMatch(/o\.account_shared_with_api_key_id\s*=\s*ak\.id/);
+    expect(text).toMatch(/ak\.account_shared_with_api_key_id\s*=\s*o\.id/);
+    // One row per other key, so a key equal by login AND linked still counts once.
+    expect(text).toMatch(/true IN \(o\.venue_account_id = ak\.venue_account_id,/);
   });
 
   it("prints a summary row for an empty census", () => {

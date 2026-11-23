@@ -23,7 +23,7 @@
             "strategy_id": "00000000-0000-4000-8000-0000000000b1",
             "strategy_status": "draft",
             "asset_class": "crypto",
-            "key_created_at": "2026-09-30T12:00:00Z"
+            "key_created_at": "2026-09-30T12:00:00Z", "account_shared": false, "venue_account_sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
           }
         ]
       },
@@ -38,7 +38,7 @@
             "strategy_id": "00000000-0000-4000-8000-0000000000b2",
             "strategy_status": "draft",
             "asset_class": "crypto",
-            "key_created_at": "2026-10-01T12:00:00Z"
+            "key_created_at": "2026-10-01T12:00:00Z", "account_shared": false, "venue_account_sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
           }
         ]
       }

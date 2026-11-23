@@ -152,7 +152,9 @@ def test_registry_is_consulted_before_the_unexplained_fallback(tmp_path: Path) -
 
 
 def test_taxonomy_is_closed_and_the_registry_never_registers_a_passing_bucket() -> None:
-    assert len(BUCKET_LABELS) == 8
+    # Nine since 155.2 G5-1 added oracle_account_mismatch (a binding refusal, never passing).
+    assert len(BUCKET_LABELS) == 9
+    assert "oracle_account_mismatch" not in PASSING_BUCKETS
     assert UNEXPLAINED in BUCKET_LABELS
     for bucket, _ in EXPLAINERS:
         assert bucket in BUCKET_LABELS

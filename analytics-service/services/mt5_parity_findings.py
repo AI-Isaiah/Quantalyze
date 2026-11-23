@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 import re
+from decimal import ROUND_HALF_UP, Decimal
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
@@ -540,6 +541,20 @@ def _should_carry(cell: _Cell, figure: str) -> bool:
     )
 
 
+_SHARPE_STORED_STEP: Final = Decimal("0.001")
+
+
+def _stored_sharpe(x: float) -> Decimal:
+    """Sharpe as the product stores it: ``Number(sharpe.toFixed(3))`` in
+    ``src/lib/scenario.ts`` (founder ruling (e), 2026-11-23). ``Decimal(x)`` is the
+    exact binary value and ``toFixed`` rounds that exact value half away from zero, so
+    ``ROUND_HALF_UP`` on it is the same rounding. Compared as numbers, so ``-0.000``
+    equals ``0.000``. Comparing at 3 significant figures instead raised a finding the
+    stored figures cannot show (FX-AI_V, 2026-11-22 recheck) and hid one they can
+    (a 1.2345 against 1.2354 gap above 1)."""
+    return Decimal(x).quantize(_SHARPE_STORED_STEP, rounding=ROUND_HALF_UP)
+
+
 def _compare_account(label: str, cells: Sequence[_Cell]) -> list[Finding]:
     """Compare the cells of one unit view, anchoring EACH figure on the first cell in
     surface order that carries that figure (the factsheet when it does). One anchor for
@@ -640,7 +655,7 @@ def _compare_account(label: str, cells: Sequence[_Cell]) -> list[Finding]:
                 continue
             if (
                 cell is sharpe_anchor or cell.gate["sharpe"] == "withheld" or sb is None
-                or ratio_3sf(sa) == ratio_3sf(sb)
+                or _stored_sharpe(sa) == _stored_sharpe(sb)
             ):
                 continue
             who = f"{cell.surface} and {_anchor_desc(sharpe_anchor, 'a shown Sharpe')}"
@@ -653,7 +668,7 @@ def _compare_account(label: str, cells: Sequence[_Cell]) -> list[Finding]:
             else:
                 add(
                     cell, "sharpe", UNEXPLAINED,
-                    f"{who} disagree on Sharpe at three significant figures and no "
+                    f"{who} disagree on Sharpe at the stored precision (3 decimals) and no "
                     "reannualization explains it",
                 )
 

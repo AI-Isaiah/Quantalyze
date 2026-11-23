@@ -7,7 +7,7 @@
       "table": "api_keys",
       "day_column": null,
       "row_shape": "columns",
-      "columns": ["api_key_id", "allocator_id", "label", "account_currency", "strategy_id", "strategy_status", "asset_class", "key_created_at"],
+      "columns": ["api_key_id", "allocator_id", "label", "account_currency", "strategy_id", "strategy_status", "asset_class", "key_created_at", "account_shared", "venue_account_sha256"],
       "extra_witness": []
     },
     "capture-strategy.sql": {

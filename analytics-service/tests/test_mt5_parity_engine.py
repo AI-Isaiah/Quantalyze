@@ -732,6 +732,8 @@ def test_the_taxonomy_is_the_eight_context_names_and_the_registry_order_is_fixed
         "withheld_by_gate",
         "clock_mismatch",
         "unexplained",
+        # 155.2 G5-1: a binding refusal, not an explainer (it is never in EXPLAINERS).
+        "oracle_account_mismatch",
     }
     assert [bucket for bucket, _ in EXPLAINERS] == [
         CLOCK_MISMATCH,
