@@ -113,6 +113,7 @@ from sentry_init import init_sentry
 from services.db import db_execute, db_read_with_retry, get_supabase
 from services.encryption import validate_kek_on_startup
 from services import trade_read_store
+from services.readmit_ceiling_alert import page_readmit_exhaustions
 from services.job_worker import (
     DispatchOutcome,
     ErrorKind,
@@ -1680,6 +1681,18 @@ async def watchdog_loop(interval: float = 60.0) -> None:
             await sweep_expired_trade_reads()
         except Exception as exc:  # noqa: BLE001
             logger.error("watchdog_loop trade read sweep failed: %s", type(exc).__name__)
+
+        # Phase 227 HEAL-03: a strategy whose reconcile readmit hit its ceiling pages a human from
+        # its durable row. The reader never raises and throttles itself; this guard is the loop's
+        # own rule that one task cannot end the others. The class name only is logged.
+        try:
+            await page_readmit_exhaustions()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "watchdog_loop readmit ceiling page failed: %s",
+                type(exc).__name__,
+                extra={"event_type": "readmit_ceiling_loop_guard"},
+            )
 
         try:
             await asyncio.wait_for(SHUTDOWN.wait(), timeout=interval)

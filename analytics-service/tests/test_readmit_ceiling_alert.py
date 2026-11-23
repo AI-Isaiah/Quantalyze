@@ -411,3 +411,86 @@ def test_the_source_is_a_member_of_ops_alert_sources() -> None:
     """A source outside the set is paged as 'unrecognised', and the cron route would answer
     400 to its email, so the founder would not be told about the strategy."""
     assert readmit_ceiling_alert._SOURCE in ops_alert.OPS_ALERT_SOURCES
+
+
+# ---------------------------------------------------------------- the watchdog loop wiring
+
+
+async def test_watchdog_loop_calls_readmit_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HEAL-03: the reader only protects anyone if the worker's existing recurring loop calls it."""
+    import main_worker
+
+    shutdown = asyncio.Event()
+    monkeypatch.setattr(main_worker, "SHUTDOWN", shutdown)
+    calls = 0
+
+    async def _noop() -> None:
+        return None
+
+    async def _reader() -> int:
+        nonlocal calls
+        calls += 1
+        shutdown.set()
+        return 0
+
+    monkeypatch.setattr(main_worker, "watchdog_tick", _noop)
+    monkeypatch.setattr(main_worker, "report_orphaned_capped_reconstructs", _noop)
+    monkeypatch.setattr(main_worker, "sweep_expired_trade_reads", _noop)
+    monkeypatch.setattr(main_worker, "page_readmit_exhaustions", _reader)
+
+    task = asyncio.create_task(main_worker.watchdog_loop(interval=0.01))
+    done, pending = await asyncio.wait({task}, timeout=3.0)
+    for p in pending:
+        p.cancel()
+
+    assert task in done, "watchdog_loop hung"
+    assert calls == 1
+    assert task.exception() is None
+
+
+async def test_watchdog_loop_survives_readmit_reader_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One task cannot end the others: a reader that raises (a contract break) must not stop
+    the loop, and the next pass still runs the reader and the trade-read sweep."""
+    import main_worker
+
+    shutdown = asyncio.Event()
+    monkeypatch.setattr(main_worker, "SHUTDOWN", shutdown)
+    reader_calls = 0
+    sweep_calls = 0
+
+    async def _noop() -> None:
+        return None
+
+    async def _sweep() -> None:
+        nonlocal sweep_calls
+        sweep_calls += 1
+
+    async def _reader() -> int:
+        nonlocal reader_calls
+        reader_calls += 1
+        if reader_calls == 1:
+            raise RuntimeError("fixture: reader blew up")
+        shutdown.set()
+        return 0
+
+    monkeypatch.setattr(main_worker, "watchdog_tick", _noop)
+    monkeypatch.setattr(main_worker, "report_orphaned_capped_reconstructs", _noop)
+    monkeypatch.setattr(main_worker, "sweep_expired_trade_reads", _sweep)
+    monkeypatch.setattr(main_worker, "page_readmit_exhaustions", _reader)
+    caplog.set_level(logging.ERROR)
+
+    task = asyncio.create_task(main_worker.watchdog_loop(interval=0.01))
+    done, pending = await asyncio.wait({task}, timeout=3.0)
+    for p in pending:
+        p.cancel()
+
+    assert task in done, "watchdog_loop hung"
+    assert reader_calls >= 2, f"the reader ran {reader_calls} time(s); its failure stopped the loop"
+    assert sweep_calls >= 2
+    assert task.exception() is None
+    guard = [
+        r for r in caplog.records if getattr(r, "event_type", None) == "readmit_ceiling_loop_guard"
+    ]
+    assert len(guard) >= 1
