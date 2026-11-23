@@ -1179,7 +1179,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): `stepsSeen` 1018 -> 1028, +10 file steps contributed by the NEW gate test_auth_user_has_password.sql (nine twins, one edit step each, and arm 6's twin carries two edits). MEASURED: this file's run read `expected 1028 to be 1018`; `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and the `--file` diagnostic run of plan 04 printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 01): `stepsSeen` 1028 -> 1030, +2 file steps: 6v-writes and 6v-omitted each carry one migration `edit` step, while 6v-check-blank and 6v-no-grant are `sql` steps, which this walk skips. MEASURED: the parser test read `expected 1030 to be 1028` at the old pin.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `stepsSeen` 1030 -> 1042, +12 file steps contributed by the NEW gate test_swap_account_slot.sql (twelve `edit` steps; the one `sql` step in SWAP-acl is skipped by this walk). MEASURED: this file's run read `expected 1042 to be 1030`.
-    expect(stepsSeen).toBe(1042);
+    // ⭐ CURRENCY 2026-11-23 (Phase 225, merge of plans 03 and 04): `stepsSeen` 1042 -> 1041. Plan 03 retargeted twin 3f in test_wizard_session_idempotency.sql to one DECLARE edit on A1's body, dropping one file step. MEASURED on the merged branch: `expected 1041 to be 1042`.
+    expect(stepsSeen).toBe(1041);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2152,7 +2153,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): `needles.length` 1018 -> 1028, the same +10 file steps as `stepsSeen`, from the NEW gate test_auth_user_has_password.sql. MEASURED: this file's run read `expected 1028 to be 1018`; `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and the `--file` diagnostic run of plan 04 printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 01): `needles.length` 1028 -> 1030, the same +2 file steps as `stepsSeen` (the `edit` steps of 6v-writes and 6v-omitted). MEASURED: this file's run read `expected 1030 to be 1028`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `needles.length` 1030 -> 1042, the same +12 file steps as `stepsSeen`, from the NEW gate test_swap_account_slot.sql. MEASURED: this file's run read `expected 1042 to be 1030`.
-    expect(needles.length).toBe(1042);
+    // ⭐ CURRENCY 2026-11-23 (Phase 225, merge of plans 03 and 04): `needles.length` 1042 -> 1041. Plan 03 retargeted twin 3f in test_wizard_session_idempotency.sql to one DECLARE edit on A1's body, dropping one file step. MEASURED on the merged branch: `expected 1041 to be 1042`.
+    expect(needles.length).toBe(1041);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
