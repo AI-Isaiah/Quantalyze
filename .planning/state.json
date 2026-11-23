@@ -14,16 +14,6 @@
       "status": "complete"
     },
     {
-      "number": "155.2",
-      "name": "LIVEPARITY",
-      "status": "pending"
-    },
-    {
-      "number": "157",
-      "name": "FOUNDER-CONFIRM",
-      "status": "pending"
-    },
-    {
       "number": "207",
       "name": "RETRYPROP",
       "status": "complete"
@@ -95,9 +85,9 @@
     }
   ],
   "next": {
-    "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 155.2)",
-    "reason": "Phase 3 of 18 — needs a plan"
+    "command": "/gsd-new-milestone",
+    "label": "Start a new milestone",
+    "reason": "All phases complete — start a new milestone"
   },
-  "updated_at": "2026-11-22T22:23:40.848Z"
+  "updated_at": "2026-11-23T11:15:20.552Z"
 }
