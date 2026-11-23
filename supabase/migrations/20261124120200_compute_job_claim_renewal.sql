@@ -86,3 +86,77 @@ COMMENT ON FUNCTION public.renew_compute_job_claims(uuid[], uuid[]) IS
 
 REVOKE ALL ON FUNCTION public.renew_compute_job_claims(uuid[], uuid[]) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.renew_compute_job_claims(uuid[], uuid[]) TO service_role;
+
+-- ───────────── self-verify: CATALOGUE ONLY, passes on an empty database.
+-- No compute_jobs row is read or written. Asserted: the function resolves under
+-- that exact signature and RETURNS SETOF uuid; it is SECURITY DEFINER with the
+-- exact search_path pin; its comment-stripped body compares claim_token and keys on
+-- status = 'running' and carries no row-skipping lock clause (DEC-03-B); EXECUTE
+-- is held by neither PUBLIC, anon nor authenticated and is held by service_role.
+-- The cardinality guard is deliberately NOT asserted here: the gate's arm R4 owns
+-- it behaviourally. Each clause that a mutated copy of this file would trip has
+-- its own `IF v_... THEN` line so the gate's mutation twins can stand exactly that
+-- clause down and let the apply succeed, which is what lets the gate, not the
+-- apply, go RED with the arm named.
+DO $verify$
+DECLARE
+  v_oid         oid := to_regprocedure('public.renew_compute_job_claims(uuid[],uuid[])');
+  v_secdef      boolean;
+  v_retset      boolean;
+  v_rettype     oid;
+  v_cfg         text[];
+  v_body        text;
+  v_public_exec boolean;
+  v_open_exec   boolean;
+BEGIN
+  IF v_oid IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: public.renew_compute_job_claims(uuid[], uuid[]) is missing';
+  END IF;
+
+  SELECT p.prosecdef, p.proretset, p.prorettype, p.proconfig
+    INTO v_secdef, v_retset, v_rettype, v_cfg
+    FROM pg_proc p WHERE p.oid = v_oid;
+
+  IF v_retset IS DISTINCT FROM TRUE OR v_rettype IS DISTINCT FROM 'uuid'::regtype::oid THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: renew_compute_job_claims does not RETURN SETOF uuid, so the worker cannot read which ids it still owns';
+  END IF;
+  IF v_secdef IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: renew_compute_job_claims is not SECURITY DEFINER, so the worker role could not reach compute_jobs through it';
+  END IF;
+  IF v_cfg IS NULL OR NOT ('search_path=public, pg_catalog' = ANY (v_cfg)) THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: renew_compute_job_claims does not pin search_path to public, pg_catalog (proconfig=%), so a SECURITY DEFINER body is search-path-hijackable', v_cfg;
+  END IF;
+
+  v_body := regexp_replace(regexp_replace(pg_get_functiondef(v_oid), '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+  IF v_body IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: the comment-stripped body came back NULL, so every body check below would pass without reading anything';
+  END IF;
+  IF v_body !~* '\yclaim_token\s*=' THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: renew_compute_job_claims no longer keys on claim_token, so a stale worker could renew a row the watchdog already took';
+  END IF;
+  IF v_body !~* 'status\s*=\s*''running''' THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: renew_compute_job_claims no longer restricts to status running, so it could re-lease a finished or pending row';
+  END IF;
+  IF v_body ~* 'skip\s+locked' THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: renew_compute_job_claims skips locked rows, so it could report success by omission for a row it never looked at (DEC-03-B)';
+  END IF;
+
+  v_public_exec := EXISTS (
+    SELECT 1
+      FROM pg_proc p, aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+     WHERE p.oid = v_oid AND a.grantee = 0 AND a.privilege_type = 'EXECUTE');
+  IF v_public_exec THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: PUBLIC holds EXECUTE on renew_compute_job_claims';
+  END IF;
+  v_open_exec := has_function_privilege('anon', v_oid, 'EXECUTE')
+              OR has_function_privilege('authenticated', v_oid, 'EXECUTE');
+  IF v_open_exec THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: anon or authenticated holds EXECUTE on renew_compute_job_claims, so a browser role could extend a lease';
+  END IF;
+  IF NOT has_function_privilege('service_role', v_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration 20261124120200 failed: service_role does not hold EXECUTE on renew_compute_job_claims, so the worker cannot renew';
+  END IF;
+
+  RAISE NOTICE 'Migration 20261124120200: renew_compute_job_claims exists (SETOF uuid, SECURITY DEFINER, pinned search_path, keyed on claim_token and status running, no row skipping) with EXECUTE for service_role only.';
+END
+$verify$;
