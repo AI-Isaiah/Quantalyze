@@ -348,8 +348,18 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * NAME_SET_RATCHET in scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply).
  * They are EXPECTED until that re-dump, and NO allowlist row was added for either. Raising this
  * floor records the function joining the corpus; it does NOT suppress any finding.
+ *
+ * MOVED 2026-11-23 (Phase 225 ONEACCOUNTONCE plan 04), 138 -> 139: one ADDITION, not a parser
+ * gain. `public.swap_account_slot(uuid, uuid, text, text)` enters the chain via forward migration
+ * 20261123180100_swap_account_slot.sql. MEASURED by `node scripts/baseline-content-drift-check.mjs`
+ * on this tree: `functions compared 139 - MATCH 134, DRIFT 4, SNAPSHOT_MISSING 1, SNAPSHOT_ONLY 0,
+ * UNCOMPARABLE 0`, `findings 2`. The SNAPSHOT_MISSING finding is `swap_account_slot/4`, whose
+ * migration is not on PROD yet (recorded as a dated `snapshot-only` row in NAME_SET_RATCHET in
+ * scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply). It is EXPECTED until
+ * that re-dump, and NO allowlist row was added for it. Raising this floor records the function
+ * joining the corpus; it does NOT suppress any finding.
  */
-export const COMPARED_FLOOR = 138;
+export const COMPARED_FLOOR = 139;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */
