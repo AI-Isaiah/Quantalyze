@@ -1178,7 +1178,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): 109 -> 110, the server-clock readings gate file (test_mt5_server_clock_readings.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 110 file(s); …' to match /scanned 109 file/`, and `node scripts/lint-sql-gates.mjs` printed `scanned 110 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s)`.
     // ⭐ CURRENCY 2026-11-19 (Phase 219 ACCOUNTEMAIL, plan 03): 110 -> 111, the profiles.email sync gate file (test_profiles_email_sync.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 111 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): 111 -> 112, the has-password gate file (test_auth_user_has_password.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 112 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
-    expect(res.out).toMatch(/scanned 112 file/);
+    // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): 112 -> 119, the seven phase gate files (migrations 20261124120000 to 20261124120600). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 119 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
+    expect(res.out).toMatch(/scanned 119 file/);
     expect(res.status, res.out).toBe(0);
   });
 
