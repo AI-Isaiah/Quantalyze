@@ -575,3 +575,171 @@ GRANT EXECUTE ON FUNCTION public.record_compute_job_attempt_error(uuid, uuid, te
 COMMENT ON FUNCTION public.record_compute_job_attempt_error(uuid, uuid, text, text) IS
   'Phase 227 MT5D-01 (migration 20261124120000): files a REAL worker error as a cause_class error record in compute_job_attempt_failures when mark_compute_job_failed could not land (SQLSTATE 55P03 closure bound, or a 55006 late mark after the watchdog took the claim). The claim token must be attested by the running job row or by an existing watchdog_reset / stall_reclaim record of the same job; otherwise nothing is written and it returns false. Returns whether a row was inserted. service_role only.';
 
+-- ==========================================================================
+-- STEP 5: self-verify, CATALOGUE ONLY (reads no table row)
+-- ==========================================================================
+-- Each condition is computed into a named boolean and tested in its own IF, so a mutation
+-- twin of the gate (supabase/tests/test_compute_job_attempt_failures.sql) can stand one IF
+-- down and let the arm's OWN observable go red. Every RAISE is one literal.
+DO $verify$
+DECLARE
+  v_tbl            oid := to_regclass('public.compute_job_attempt_failures');
+  v_rls            boolean;
+  v_policies       integer;
+  v_lits           text[];
+  v_uq_def         text;
+  v_fk_compute     boolean;
+  v_fk_strat_ok    boolean;
+  v_fk_key_ok      boolean;
+  v_priv_anon      boolean;
+  v_priv_auth      boolean;
+  v_priv_svc_sel   boolean;
+  v_priv_svc_write boolean;
+  v_mark_oid       oid := to_regprocedure('public.mark_compute_job_failed(uuid, text, text, uuid)');
+  v_mark_body      text;
+  v_pos_upd        integer;
+  v_pos_ins        integer;
+  v_rec_oid        oid := to_regprocedure('public.record_compute_job_attempt_error(uuid, uuid, text, text)');
+  v_rec_cfg        text[];
+  v_p5_oid         oid := to_regprocedure('public.claim_compute_jobs_with_priority(integer, text, boolean, text[], text[])');
+  v_p5_body        text;
+  v_table_ok       boolean;
+  v_rls_ok         boolean;
+  v_cause_ok       boolean;
+  v_uq_ok          boolean;
+  v_no_fk_ok       boolean;
+  v_cascade_ok     boolean;
+  v_acl_ok         boolean;
+  v_svc_ok         boolean;
+  v_ins_after_ok   boolean;
+  v_fences_ok      boolean;
+  v_rec_pin_ok     boolean;
+  v_rec_acl_ok     boolean;
+  v_clear_ok       boolean;
+BEGIN
+  v_table_ok := v_tbl IS NOT NULL;
+  IF NOT v_table_ok THEN
+    RAISE EXCEPTION 'jobledger: public.compute_job_attempt_failures does not exist, so a failed attempt keeps no cause';
+  END IF;
+
+  SELECT c.relrowsecurity INTO v_rls FROM pg_class c WHERE c.oid = v_tbl;
+  SELECT count(*) INTO v_policies FROM pg_policy p WHERE p.polrelid = v_tbl;
+  v_rls_ok := v_rls IS TRUE AND v_policies = 0;
+  IF NOT v_rls_ok THEN
+    RAISE EXCEPTION 'jobledger: compute_job_attempt_failures must have row level security enabled and no policy, otherwise a non-owner role can read or write broker-naming error text';
+  END IF;
+
+  SELECT array_agg(m[1] ORDER BY m[1]) INTO v_lits
+    FROM pg_constraint k,
+         LATERAL regexp_matches(pg_get_constraintdef(k.oid), '''([a-z_]+)''', 'g') AS m
+   WHERE k.conrelid = v_tbl
+     AND k.conname = 'compute_job_attempt_failures_cause_class_chk';
+  v_cause_ok := v_lits IS NOT DISTINCT FROM ARRAY['error', 'orphan_reaped', 'stall_reclaim', 'watchdog_reset'];
+  IF NOT v_cause_ok THEN
+    RAISE EXCEPTION 'jobledger: the cause_class CHECK must admit exactly error, watchdog_reset, stall_reclaim and orphan_reaped, otherwise a later plan''s record is refused or an unknown cause is stored';
+  END IF;
+
+  SELECT pg_get_constraintdef(k.oid) INTO v_uq_def
+    FROM pg_constraint k
+   WHERE k.conrelid = v_tbl
+     AND k.conname = 'compute_job_attempt_failures_attempt_cause_uq'
+     AND k.contype = 'u';
+  v_uq_ok := v_uq_def = 'UNIQUE (job_id, claim_token, cause_class)';
+  IF NOT v_uq_ok THEN
+    RAISE EXCEPTION 'jobledger: UNIQUE (job_id, claim_token, cause_class) is missing, so one attempt''s cause can be recorded twice';
+  END IF;
+
+  SELECT EXISTS (SELECT 1 FROM pg_constraint k
+                  WHERE k.conrelid = v_tbl AND k.contype = 'f'
+                    AND k.confrelid = to_regclass('public.compute_jobs'))
+    INTO v_fk_compute;
+  v_no_fk_ok := NOT v_fk_compute;
+  IF NOT v_no_fk_ok THEN
+    RAISE EXCEPTION 'jobledger: compute_job_attempt_failures must not reference compute_jobs by foreign key, otherwise the retention prunes delete the records Phase 230 reads';
+  END IF;
+
+  SELECT EXISTS (SELECT 1 FROM pg_constraint k
+                  WHERE k.conrelid = v_tbl AND k.contype = 'f'
+                    AND k.confrelid = to_regclass('public.strategies')
+                    AND k.confdeltype = 'c'
+                    AND (SELECT a.attname FROM pg_attribute a
+                          WHERE a.attrelid = v_tbl AND a.attnum = k.conkey[1]) = 'strategy_id')
+    INTO v_fk_strat_ok;
+  SELECT EXISTS (SELECT 1 FROM pg_constraint k
+                  WHERE k.conrelid = v_tbl AND k.contype = 'f'
+                    AND k.confrelid = to_regclass('public.api_keys')
+                    AND k.confdeltype = 'c'
+                    AND (SELECT a.attname FROM pg_attribute a
+                          WHERE a.attrelid = v_tbl AND a.attnum = k.conkey[1]) = 'api_key_id')
+    INTO v_fk_key_ok;
+  v_cascade_ok := v_fk_strat_ok AND v_fk_key_ok;
+  IF NOT v_cascade_ok THEN
+    RAISE EXCEPTION 'jobledger: strategy_id and api_key_id must cascade on delete to strategies and api_keys, otherwise error text naming a broker account outlives its owner';
+  END IF;
+
+  v_priv_anon := has_table_privilege('anon', v_tbl, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER');
+  v_priv_auth := has_table_privilege('authenticated', v_tbl, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER');
+  v_acl_ok := NOT v_priv_anon AND NOT v_priv_auth;
+  IF NOT v_acl_ok THEN
+    RAISE EXCEPTION 'jobledger: anon and authenticated must hold no privilege on compute_job_attempt_failures, otherwise broker-naming error text is readable or writable by them';
+  END IF;
+
+  v_priv_svc_sel   := has_table_privilege('service_role', v_tbl, 'SELECT');
+  v_priv_svc_write := has_table_privilege('service_role', v_tbl, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER');
+  v_svc_ok := v_priv_svc_sel AND NOT v_priv_svc_write;
+  IF NOT v_svc_ok THEN
+    RAISE EXCEPTION 'jobledger: service_role must hold SELECT and no write privilege on compute_job_attempt_failures, otherwise Phase 230 cannot read it or a direct writer bypasses the SECURITY DEFINER functions';
+  END IF;
+
+  -- mark_compute_job_failed: the ledger INSERT sits AFTER the status UPDATE, and the
+  -- fences this migration promised not to touch are still in the body. Comment-stripped
+  -- before any position test (a fence comment must not satisfy an anchor).
+  IF v_mark_oid IS NULL THEN
+    RAISE EXCEPTION 'jobledger: mark_compute_job_failed(uuid, text, text, uuid) does not exist, so no failure is marked at all';
+  END IF;
+  v_mark_body := regexp_replace(pg_get_functiondef(v_mark_oid), '--[^\n]*', '', 'g');
+  v_pos_upd := strpos(v_mark_body, 'last_error = p_error');
+  v_pos_ins := strpos(v_mark_body, 'INSERT INTO public.compute_job_attempt_failures');
+  v_ins_after_ok := v_pos_upd > 0 AND v_pos_ins > v_pos_upd;
+  IF NOT v_ins_after_ok THEN
+    RAISE EXCEPTION 'jobledger: mark_compute_job_failed must write the compute_job_attempt_failures record after the UPDATE that sets last_error, in the same transaction, otherwise a failed attempt keeps no cause';
+  END IF;
+  v_fences_ok := v_mark_body LIKE '%ERRCODE = ''55006''%'
+             AND v_mark_body LIKE '%ERRCODE = ''55P03''%'
+             AND v_mark_body LIKE '%mark_compute_job_bridge%';
+  IF NOT v_fences_ok THEN
+    RAISE EXCEPTION 'jobledger: mark_compute_job_failed lost its 55006 preemption fence, its 55P03 closure bound or the mark_compute_job_bridge advisory lock, which this migration promised not to touch';
+  END IF;
+
+  -- record_compute_job_attempt_error: pinned search_path, ACL.
+  IF v_rec_oid IS NULL THEN
+    RAISE EXCEPTION 'jobledger: record_compute_job_attempt_error(uuid, uuid, text, text) does not exist, so a worker-lost real error cannot be recorded';
+  END IF;
+  SELECT p.proconfig INTO v_rec_cfg FROM pg_proc p WHERE p.oid = v_rec_oid;
+  v_rec_pin_ok := COALESCE(v_rec_cfg, ARRAY[]::text[]) @> ARRAY['search_path=public, pg_catalog'];
+  IF NOT v_rec_pin_ok THEN
+    RAISE EXCEPTION 'jobledger: record_compute_job_attempt_error must pin search_path=public, pg_catalog, otherwise a SECURITY DEFINER function resolves names through the caller''s path';
+  END IF;
+  v_rec_acl_ok := NOT has_function_privilege('public', v_rec_oid, 'EXECUTE')
+              AND NOT has_function_privilege('anon', v_rec_oid, 'EXECUTE')
+              AND NOT has_function_privilege('authenticated', v_rec_oid, 'EXECUTE')
+              AND has_function_privilege('service_role', v_rec_oid, 'EXECUTE');
+  IF NOT v_rec_acl_ok THEN
+    RAISE EXCEPTION 'jobledger: record_compute_job_attempt_error must be executable by service_role only, otherwise any role can forge a failure record';
+  END IF;
+
+  -- CARRIED FORWARD from 20260927120000 self-verify item (6): the claim still clears the
+  -- previous attempt's error on re-claim. This ledger is correct only because that clear is
+  -- the one place a cause is erased, and the cause was written first.
+  IF v_p5_oid IS NULL THEN
+    RAISE EXCEPTION 'jobledger: claim_compute_jobs_with_priority(integer, text, boolean, text[], text[]) does not exist, so the M-1137 clear this ledger depends on cannot be checked';
+  END IF;
+  v_p5_body := pg_get_functiondef(v_p5_oid);
+  v_clear_ok := v_p5_body ~* 'last_error\s*=\s*NULL' AND v_p5_body ~* 'error_kind\s*=\s*NULL';
+  IF NOT v_clear_ok THEN
+    RAISE EXCEPTION 'jobledger: the 5-arg claim_compute_jobs_with_priority no longer clears last_error/error_kind on re-claim (M-1137/M-1138), which the attempt ledger is written ahead of';
+  END IF;
+
+  RAISE NOTICE 'jobledger: compute_job_attempt_failures verified (RLS on, no policy, four causes, unique attempt identity, no FK to compute_jobs, owner cascades, service_role SELECT only); mark_compute_job_failed writes the record after its status UPDATE; record_compute_job_attempt_error pinned and service_role only; the M-1137 clear is intact.';
+END
+$verify$;

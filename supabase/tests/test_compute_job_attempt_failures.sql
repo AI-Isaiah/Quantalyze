@@ -480,4 +480,164 @@ END $$;
 ROLLBACK;
 -- <<< ARM E6
 
-DO $$ BEGIN RAISE NOTICE 'ALL 7 ARMS EXECUTED (E1, E2, E4, E3, E3b, E5, E6) and passed - E1 attempt 1''s cause survives attempt 2''s re-claim and success; E2 a worker-lost error on a running job is recorded once; E4 a forged token or unknown job records nothing; E3 and E3b a late error is recorded beside its reset under the attempt that raised it; E5 a NULL error stays NULL; E6 a cascaded child records nothing.'; END $$;
+-- >>> ARM E7
+BEGIN;
+
+DO $$
+DECLARE
+  uid       UUID := gen_random_uuid();
+  k         UUID;
+  s         UUID;
+  j         UUID;
+  tok       UUID := gen_random_uuid();
+  v_state   TEXT;
+  v_msg     TEXT;
+  n_before  INTEGER;
+  n_after   INTEGER;
+  v_order_1 UUID[];
+  v_order_2 UUID[];
+  v_exp     UUID[];
+  v_attempts INTEGER[];
+  v_ok      BOOLEAN;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000', 'jl-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'jl', 'jl-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'jl e7', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'jl e7') RETURNING id INTO s;
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, claim_token, claimed_by, claimed_at)
+  VALUES (s, 'sync_trades', 'running', 1, 3, tok, 'e7-worker', now()) RETURNING id INTO j;
+
+  v_state := NULL; v_msg := NULL;
+  BEGIN
+    PERFORM mark_compute_job_failed(j, 'e7 attempt one', 'transient', tok);
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE; v_msg := SQLERRM;
+  END;
+  IF v_state IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (E7-SETUP): mark_compute_job_failed raised SQLSTATE % (message: %), so no record exists to outlive its job.', v_state, v_msg;
+  END IF;
+  -- Two more records for the same job at attempt 2, written in this one transaction, so
+  -- they share one recorded_at (now() is the transaction start). Only the id can order them.
+  INSERT INTO compute_job_attempt_failures (job_id, kind, strategy_id, job_created_at, attempt, claim_token, cause_class)
+  VALUES (j, 'sync_trades', s, now(), 2, gen_random_uuid(), 'watchdog_reset'),
+         (j, 'sync_trades', s, now(), 2, gen_random_uuid(), 'stall_reclaim');
+  SELECT count(*) INTO n_before FROM compute_job_attempt_failures f WHERE f.job_id = j;
+
+  -- The retention prune: the job row goes.
+  DELETE FROM compute_jobs WHERE id = j;
+
+  SELECT count(*) INTO n_after FROM compute_job_attempt_failures f WHERE f.job_id = j;
+  SELECT array_agg(f.id ORDER BY f.attempt, f.recorded_at, f.id) INTO v_order_1 FROM compute_job_attempt_failures f WHERE f.job_id = j;
+  SELECT array_agg(f.id ORDER BY f.attempt, f.recorded_at, f.id) INTO v_order_2 FROM compute_job_attempt_failures f WHERE f.job_id = j;
+  SELECT array_agg(f.attempt ORDER BY f.attempt, f.recorded_at, f.id) INTO v_attempts FROM compute_job_attempt_failures f WHERE f.job_id = j;
+  -- The expected order, computed independently: attempt ascending, then (recorded_at is
+  -- equal for all three) id ascending. No ORDER BY recorded_at is needed to state it.
+  SELECT array_agg(x.id ORDER BY x.attempt, x.id) INTO v_exp FROM compute_job_attempt_failures x WHERE x.job_id = j;
+
+  -- ===== ARM E7 — the records outlive the job row and read in a stable documented order =====
+  v_ok := COALESCE(
+        n_before = 3 AND n_after = 3
+    AND v_attempts = ARRAY[1, 2, 2]
+    AND v_order_1 = v_order_2 AND v_order_1 = v_exp, FALSE);
+  -- RED-UNDER: add `REFERENCES public.compute_jobs(id) ON DELETE CASCADE` to the ledger's job_id (with the STEP 5 no-foreign-key IF stood down), so pruning the job row deletes its records.
+  -- RED-UNDER-M: {"arm":"E7","apply":[{"kind":"edit","file":"supabase/migrations/20261124120000_jobledger_attempt_failures.sql","find":"  job_id          uuid        NOT NULL,\n","replace":"  job_id          uuid        NOT NULL REFERENCES public.compute_jobs(id) ON DELETE CASCADE,\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120000_jobledger_attempt_failures.sql","find":"IF NOT v_no_fk_ok THEN","replace":"IF FALSE AND NOT v_no_fk_ok THEN","occurrences":1}]}
+  IF NOT v_ok THEN
+    RAISE EXCEPTION 'TEST FAILED (E7): after the compute_jobs row was deleted the job still has % of % ledger row(s) (expected 3 of 3), and the read order (attempt, recorded_at, id) gave attempts % with the ids in the order an independent computation expects: % (expected {1,2,2} and true). The retention prunes must not erase the records Phase 230 reads, and equal recorded_at values must still read in a stable order.', n_after, n_before, COALESCE(v_attempts::text, 'NULL'), (v_order_1 = v_exp);
+  END IF;
+END $$;
+
+ROLLBACK;
+-- <<< ARM E7
+
+-- >>> ARM E8
+BEGIN;
+
+DO $$
+DECLARE
+  v_anon_sel_state  TEXT;
+  v_anon_sel_msg    TEXT;
+  v_auth_sel_state  TEXT;
+  v_auth_sel_msg    TEXT;
+  v_anon_fn_state   TEXT;
+  v_anon_fn_msg     TEXT;
+  v_auth_fn_state   TEXT;
+  v_auth_fn_msg     TEXT;
+  v_svc_sel_state   TEXT;
+  v_svc_ins_state   TEXT;
+  v_svc_ins_msg     TEXT;
+  n                 BIGINT;
+  v_bad             TEXT;
+BEGIN
+  -- anon: no SELECT on the table, no EXECUTE on the worker-lost RPC.
+  BEGIN
+    SET LOCAL ROLE anon;
+    SELECT count(*) INTO n FROM public.compute_job_attempt_failures;
+    RESET ROLE;
+  EXCEPTION WHEN OTHERS THEN
+    v_anon_sel_state := SQLSTATE; v_anon_sel_msg := SQLERRM;
+  END;
+  BEGIN
+    SET LOCAL ROLE anon;
+    PERFORM public.record_compute_job_attempt_error(gen_random_uuid(), gen_random_uuid(), 'x', 'unknown');
+    RESET ROLE;
+  EXCEPTION WHEN OTHERS THEN
+    v_anon_fn_state := SQLSTATE; v_anon_fn_msg := SQLERRM;
+  END;
+  -- authenticated: the same.
+  BEGIN
+    SET LOCAL ROLE authenticated;
+    SELECT count(*) INTO n FROM public.compute_job_attempt_failures;
+    RESET ROLE;
+  EXCEPTION WHEN OTHERS THEN
+    v_auth_sel_state := SQLSTATE; v_auth_sel_msg := SQLERRM;
+  END;
+  BEGIN
+    SET LOCAL ROLE authenticated;
+    PERFORM public.record_compute_job_attempt_error(gen_random_uuid(), gen_random_uuid(), 'x', 'unknown');
+    RESET ROLE;
+  EXCEPTION WHEN OTHERS THEN
+    v_auth_fn_state := SQLSTATE; v_auth_fn_msg := SQLERRM;
+  END;
+  -- service_role: may SELECT, may not INSERT. A REFUSED privilege reads "permission denied",
+  -- a privilege granted but stopped by RLS reads "new row violates row-level security", and
+  -- only the first proves no INSERT grant exists.
+  BEGIN
+    SET LOCAL ROLE service_role;
+    SELECT count(*) INTO n FROM public.compute_job_attempt_failures;
+    RESET ROLE;
+  EXCEPTION WHEN OTHERS THEN
+    v_svc_sel_state := SQLSTATE;
+  END;
+  BEGIN
+    SET LOCAL ROLE service_role;
+    INSERT INTO public.compute_job_attempt_failures (job_id, kind, job_created_at, attempt, cause_class)
+    VALUES (gen_random_uuid(), 'sync_trades', now(), 1, 'error');
+    RESET ROLE;
+  EXCEPTION WHEN OTHERS THEN
+    v_svc_ins_state := SQLSTATE; v_svc_ins_msg := SQLERRM;
+  END;
+
+  v_bad := CASE
+    WHEN v_anon_sel_state IS DISTINCT FROM '42501' OR v_anon_sel_msg NOT LIKE 'permission denied%' THEN 'anon can SELECT the table (SQLSTATE ' || COALESCE(v_anon_sel_state, 'none') || ')'
+    WHEN v_auth_sel_state IS DISTINCT FROM '42501' OR v_auth_sel_msg NOT LIKE 'permission denied%' THEN 'authenticated can SELECT the table (SQLSTATE ' || COALESCE(v_auth_sel_state, 'none') || ')'
+    WHEN v_anon_fn_state IS DISTINCT FROM '42501' OR v_anon_fn_msg NOT LIKE 'permission denied%' THEN 'anon can EXECUTE record_compute_job_attempt_error (SQLSTATE ' || COALESCE(v_anon_fn_state, 'none') || ')'
+    WHEN v_auth_fn_state IS DISTINCT FROM '42501' OR v_auth_fn_msg NOT LIKE 'permission denied%' THEN 'authenticated can EXECUTE record_compute_job_attempt_error (SQLSTATE ' || COALESCE(v_auth_fn_state, 'none') || ')'
+    WHEN v_svc_sel_state IS NOT NULL THEN 'service_role cannot SELECT the table (SQLSTATE ' || v_svc_sel_state || ')'
+    WHEN v_svc_ins_state IS DISTINCT FROM '42501' OR v_svc_ins_msg NOT LIKE 'permission denied%' THEN 'service_role holds INSERT on the table (SQLSTATE ' || COALESCE(v_svc_ins_state, 'none') || ', message ' || COALESCE(v_svc_ins_msg, 'none') || ')'
+    ELSE NULL
+  END;
+  -- RED-UNDER: grant INSERT on the ledger to service_role (with the STEP 5 service_role IF stood down), so a direct writer bypasses the SECURITY DEFINER functions.
+  -- RED-UNDER-M: {"arm":"E8","apply":[{"kind":"edit","file":"supabase/migrations/20261124120000_jobledger_attempt_failures.sql","find":"GRANT SELECT ON TABLE public.compute_job_attempt_failures TO service_role;","replace":"GRANT SELECT, INSERT ON TABLE public.compute_job_attempt_failures TO service_role;","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120000_jobledger_attempt_failures.sql","find":"IF NOT v_svc_ok THEN","replace":"IF FALSE AND NOT v_svc_ok THEN","occurrences":1}]}
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (E8): the ledger''s access model is not as the migration promises: %. anon and authenticated must hold no privilege on compute_job_attempt_failures and no EXECUTE on record_compute_job_attempt_error, and service_role may SELECT but never INSERT, so rows arrive only through the SECURITY DEFINER writers and the broker-naming error text stays private.', v_bad;
+  END IF;
+END $$;
+
+ROLLBACK;
+-- <<< ARM E8
+
+DO $$ BEGIN RAISE NOTICE 'ALL 9 ARMS EXECUTED (E1, E2, E4, E3, E3b, E5, E6, E7, E8) and passed - E1 attempt 1''s cause survives attempt 2''s re-claim and success; E2 a worker-lost error on a running job is recorded once; E4 a forged token or unknown job records nothing; E3 and E3b a late error is recorded beside its reset under the attempt that raised it; E5 a NULL error stays NULL; E6 a cascaded child records nothing; E7 the records outlive the job row and read in a stable order; E8 only service_role can SELECT and nobody can INSERT directly.'; END $$;
