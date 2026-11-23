@@ -32,7 +32,6 @@
 //   /rest/v1/ tables: strategy_analytics, strategies, api_keys, trades, csv_daily_returns,
 //                     strategy_keys, discovery_categories
 //   /api/ routes:     strategies/wizard-draft, strategies/<id>/sync-progress,
-//                     keys/<id>/permissions (never faked: it is a security verdict),
 //                     strategies/composite/members, keys/feeds (read by the preselect connect form)
 // Modes:
 //   resume   the kickoff stub and the pass list, nothing else (FCONF-01)
@@ -44,11 +43,14 @@
 //   submit   resume plus: POST finalize-wizard answered from ONE armed envelope (DRAFT_LOOKUP_FAILED,
 //            DRAFT_FINALIZE_FAILED or SEAM_RESPONSE_UNREADABLE), then the arm is consumed; with
 //            nothing armed it is refused (FCONF-03, submit step)
-// Never stubbed and never passed: DELETE /api/strategies/draft/<id>, every other non-GET/HEAD.
+// Never stubbed and never passed: DELETE /api/strategies/draft/<id>, every other non-GET/HEAD, and
+// GET /api/keys/<id>/permissions. That read is NOT a pure read: the route calls logAuditEvent (an
+// audit_log row on every call) and, on a Next-cache miss, the Python permission probe (a
+// key_permission_audit row, a live credential decrypt and a broker probe that may hit the shared
+// MT5 terminal). It is refused with 599, not stubbed, so the key-permission badge shows an error
+// while the kit is armed.
 //
 // submit-leg-derivation: YES, the submit leg needs no real write: a resumed draft whose analytics row is terminal but older than SYNC_FRESHNESS_WINDOW_MS takes SyncPreviewStep's stale branch, where probeExistingChain either skips the kickoff on the passed-through sync-progress read or the kickoff POST is stubbed, and both enter waiting_for_complete; the ladder poller treats isComputedAnalytics(status) as terminal with no computed_at-after-kickoff test, and onTerminal's single-key arm reaches setPhase passed only if the real trade and csv counts are not both zero and checkStrategyGate passes on the real row, otherwise the walk stops and the script says record and stop.
-//
-// no pass-through write exists in any mode
 (function () {
   "use strict";
 
@@ -193,7 +195,6 @@
   var PASS_API = [
     /^\/api\/strategies\/wizard-draft$/,
     SYNC_PROGRESS_RE,
-    /^\/api\/keys\/[^/]+\/permissions$/,
     /^\/api\/strategies\/composite\/members$/,
     /^\/api\/keys\/feeds$/,
   ];

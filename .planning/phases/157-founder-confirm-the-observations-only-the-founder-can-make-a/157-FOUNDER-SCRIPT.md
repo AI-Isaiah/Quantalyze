@@ -8,6 +8,7 @@ SC-1 names the entry `+ Strategy`; at HEAD the control is called "Add a strategy
 
 - What the marker is: while the staging kit is installed, a red bar across the top of the page reads `STAGED RESPONSES ACTIVE — FCONF-0x`, with the leg's number. It means the page is answering a few named requests from the browser instead of the server, so nothing staged reaches PROD.
 - **No marker on screen: do not click anything. Tell me.** A reload removes the kit and the marker together.
+- While the kit is armed, the key-permission badge on the sync preview shows an error. That is expected and is not a finding: the kit refuses that read, because the real one writes an audit row and decrypts the stored credential on our side.
 - Never click `Start fresh`, `Delete draft` or the delete confirm. The kit refuses the delete, but never test that.
 - Anything unexpected (gate red, an error you were not told to expect, the marker gone, a screen not described here): stop, describe it, and I record it as a finding. A failed observation is a finding, not a new design.
 - Injection order is always the same: you open the page, I inject the kit and arm the mode, you confirm the marker, and only then you click the entry. Arming comes BEFORE Resume, every time.

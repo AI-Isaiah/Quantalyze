@@ -312,12 +312,14 @@ test("amber: csv_daily_returns and trades list reads answer an empty array", asy
   assert.equal(env.spyCalls.length, 0);
 });
 
-test("the key permission verdict is never stubbed: it reaches the native fetch in every armed mode", async () => {
+test("the key permission read is refused in every armed mode and never sent (it writes an audit row and decrypts a credential)", async () => {
   for (const mode of ALL_MODES) {
     const env = makeEnv();
     env.fconf().arm(mode);
-    await env.call(APP(`/api/keys/${ID}/permissions`), { method: "GET", cache: "no-store" });
-    assert.equal(env.spyCalls.length, 1, mode);
+    const res = await env.call(APP(`/api/keys/${ID}/permissions`), { method: "GET", cache: "no-store" });
+    assert.equal(res.status, 599, mode);
+    assert.equal(env.spyCalls.length, 0, mode);
+    assert.deepEqual([...env.fconf().refused], ["GET /api/keys/:id/permissions"], mode);
   }
 });
 

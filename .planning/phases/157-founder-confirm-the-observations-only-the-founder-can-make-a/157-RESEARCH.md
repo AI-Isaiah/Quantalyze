@@ -236,7 +236,7 @@ Stub table by mode (the executor arms one mode per leg; all facts below are veri
 | sync_preview mount (if stale/none) | `GET /rest/v1/strategies?select=api_key_id&id=eq.<id>` then `GET /api/strategies/<id>/sync-progress` (`:818-835`) | read | pass |
 | sync_preview mount (if none in flight) | `POST /api/keys/sync` body `{"strategy_id":"<id>"}` (`:1055-1063`) | **WRITE (enqueues a sync)** | stub `{"ok":true,"queued":true}` |
 | waiting poll | `GET /rest/v1/strategy_analytics?select=computation_status,computation_error&strategy_id=eq.<id>` (`useStrategySyncPoller.ts:289-290`) + `GET /api/strategies/<id>/sync-progress` (`SyncPreviewStep.tsx:1347`) | read | pass |
-| passed phase | `GET /api/keys/<apiKeyId>/permissions` (`KeyPermissionBadge.tsx:139-142`, `cache: "no-store"`) | read (route file has no insert/update/upsert/rpc by grep, `permissions/route.ts`); probes the venue | pass (do not fake a security verdict) |
+| passed phase | `GET /api/keys/<apiKeyId>/permissions` (`KeyPermissionBadge.tsx:139-142`, `cache: "no-store"`) | NOT a pure read: `permissions/route.ts` calls `logAuditEvent` (an `audit_log` row on every call) and, on a cache miss, the Python permission probe (a `key_permission_audit` row, a live credential decrypt, a broker probe) | refuse 599 (not stubbed, not passed; review CR-01) |
 | Metadata mount | `GET /rest/v1/discovery_categories?select=id,name&order=sort_order` (`MetadataStep.tsx:628-633`) | read | pass |
 | Metadata / Review / "Use this key" | none (state + `localStorage` only) | — | — |
 | Submit click | `POST /api/strategies/finalize-wizard` | **WRITE (publishes)** | ALWAYS stub |
