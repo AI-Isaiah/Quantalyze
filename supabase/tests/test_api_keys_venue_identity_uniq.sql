@@ -828,6 +828,92 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (6v-writes): create_wizard_strategy stored venue_server % for the input ''  Synthetic-Broker-Live  '' — expected the trimmed lower-case form ''synthetic-broker-live'' written in the SAME INSERT that stamps venue_account_id (CONN-03). NULL here means the parameter is accepted and dropped', v_srv225;
   END IF;
 
+  -- ----- 6v-check-blank. a blank or over-long server is refused by NAME -----------
+  -- Without api_keys_venue_server_valid a whitespace-only value is a non-NULL
+  -- "server" no real broker has, and a 129-character value is unbounded user text in
+  -- an identity column. Asserted by constraint NAME so a different CHECK refusing it
+  -- cannot pass for this one.
+  -- RED-UNDER: DROP the LIVE api_keys_venue_server_valid constraint. A `sql` step,
+  --            not a migration edit: the CHECK is created by the migration, and the
+  --            drift worth catching is the constraint going missing after apply.
+  -- RED-UNDER-M: {"arm":"6v-check-blank","apply":[{"kind":"sql","stmt":"ALTER TABLE public.api_keys DROP CONSTRAINT api_keys_venue_server_valid"}]}
+  BEGIN
+    UPDATE api_keys SET venue_server = '   ' WHERE id = v_key225;
+    RAISE EXCEPTION 'TEST FAILED (6v-check-blank): a WHITESPACE-ONLY venue_server was ADMITTED — api_keys_venue_server_valid does not refuse a blank server, so a blank string becomes a distinct "server" that matches nothing and every wildcard rule reads it as a real value';
+  EXCEPTION WHEN check_violation THEN
+    GET STACKED DIAGNOSTICS v_cname = CONSTRAINT_NAME;
+    IF v_cname IS DISTINCT FROM 'api_keys_venue_server_valid' THEN
+      RAISE EXCEPTION 'TEST FAILED (6v-check-blank): a whitespace-only venue_server was refused by constraint % and not by api_keys_venue_server_valid', v_cname;
+    END IF;
+  END;
+  BEGIN
+    UPDATE api_keys SET venue_server = repeat('a', 129) WHERE id = v_key225;
+    RAISE EXCEPTION 'TEST FAILED (6v-check-blank): a 129-CHARACTER venue_server was ADMITTED — api_keys_venue_server_valid must cap the length at 128';
+  EXCEPTION WHEN check_violation THEN
+    GET STACKED DIAGNOSTICS v_cname = CONSTRAINT_NAME;
+    IF v_cname IS DISTINCT FROM 'api_keys_venue_server_valid' THEN
+      RAISE EXCEPTION 'TEST FAILED (6v-check-blank): a 129-character venue_server was refused by constraint % and not by api_keys_venue_server_valid', v_cname;
+    END IF;
+  END;
+
+  -- ----- 6v-omitted. today's 12-argument caller keeps working ---------------------
+  -- The routes that exist today omit p_venue_server. The migration must merge ahead of
+  -- the code that sends it, so a call without the parameter has to resolve and store
+  -- NULL (the wildcard). ⛔ NOT a typed `12 vs 13 positional` call: it is the NAMED
+  -- call PostgREST makes, because that is the shape that answers PGRST202 when the
+  -- parameter loses its default.
+  -- RED-UNDER: strip the DEFAULT NULL from BOTH trailing parameters in the migration
+  --            (p_venue_account_id and p_venue_server): the function then has thirteen
+  --            required parameters, and today's twelve-named-argument call no longer
+  --            resolves. Both defaults go together because PostgreSQL refuses a
+  --            required parameter after one with a default, so stripping only the
+  --            last would abort the apply instead of reaching this arm.
+  -- RED-UNDER-M: {"arm":"6v-omitted","apply":[{"kind":"edit","file":"supabase/migrations/20261123180000_api_keys_venue_server.sql","find":"p_venue_account_id TEXT DEFAULT NULL,\n  p_venue_server TEXT DEFAULT NULL","replace":"p_venue_account_id TEXT,\n  p_venue_server TEXT","occurrences":1}]}
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'service_role')::text, true);
+  BEGIN
+    SELECT w.strategy_id, w.api_key_id INTO v_strat225, v_key225
+      FROM public.create_wizard_strategy(
+        p_user_id := uid_a, p_exchange := 'mt5', p_label := 'wizcont225 omitted',
+        p_api_key_encrypted := 'enc', p_api_secret_encrypted := 'sec',
+        p_passphrase_encrypted := 'pass', p_dek_encrypted := 'dek', p_nonce := 'nonce',
+        p_kek_version := 1, p_placeholder_name := 'wizcont225 omitted draft',
+        p_wizard_session_id := gen_random_uuid(),
+        p_venue_account_id := c_acct225b) AS w;
+  EXCEPTION WHEN undefined_function THEN
+    PERFORM set_config('request.jwt.claims', NULL, true);
+    RAISE EXCEPTION 'TEST FAILED (6v-omitted): the twelve-named-argument create_wizard_strategy call (no p_venue_server) did not resolve (SQLSTATE %) — the new parameter has no DEFAULT, so every connect from a route that does not send it answers PGRST202', SQLSTATE;
+  END;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+
+  SELECT venue_account_id, venue_server INTO v_stamped, v_srv225
+    FROM api_keys WHERE id = v_key225;
+  IF v_stamped IS DISTINCT FROM c_acct225b THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-omitted): the call without p_venue_server did not stamp venue_account_id (got %, expected %)', v_stamped, c_acct225b;
+  END IF;
+  IF v_srv225 IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-omitted): a call that omitted p_venue_server stored venue_server % — the omitted parameter must store NULL, the wildcard every app fence reads', v_srv225;
+  END IF;
+
+  -- ----- 6v-no-grant. the browser roles hold nothing on the column ----------------
+  -- api_keys has no table-level SELECT for the browser roles, only a per-column
+  -- allowlist, and this column is deliberately not on it. has_column_privilege is
+  -- TRUE for a table-level grant as well, so it catches that route too.
+  -- RED-UNDER: GRANT SELECT (venue_server) to `authenticated` on the LIVE database —
+  --            the "the key card could show the server" shortcut that would put the
+  --            column into the browser's reach.
+  -- RED-UNDER-M: {"arm":"6v-no-grant","apply":[{"kind":"sql","stmt":"GRANT SELECT (venue_server) ON public.api_keys TO authenticated"}]}
+  IF has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'SELECT')
+     OR has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'INSERT')
+     OR has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'UPDATE') THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-no-grant): authenticated holds a privilege on api_keys.venue_server — the browser must never read or write the broker server (CONN-03, founder ruling Q2). A column grant was added, or a table-level grant returned';
+  END IF;
+  IF has_column_privilege('anon', 'public.api_keys', 'venue_server', 'SELECT')
+     OR has_column_privilege('anon', 'public.api_keys', 'venue_server', 'INSERT')
+     OR has_column_privilege('anon', 'public.api_keys', 'venue_server', 'UPDATE') THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-no-grant): anon holds a privilege on api_keys.venue_server';
+  END IF;
+
   -- ----- cleanup ------------------------------------------------------------
   -- Explicit, in FK order, rather than relying on the profiles→api_keys cascade.
   -- The wizard drafts the 6v arms minted hang off uid_a through strategies.
@@ -835,5 +921,5 @@ BEGIN
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);
 
-  RAISE NOTICE 'PASS (behavioural): duplicate LIVE identity refused (23505); a soft-disconnected row does NOT squat the slot; reconnecting into an occupied slot refused (23505); '''' and ''   '' refused (23514); a different tenant admitted the same identity; a second live okx row on one account refused and admitted once the first is disconnected (6f CCXT); the 13-parameter wizard RPC stores the normalised broker server in the same INSERT (6v-writes).';
+  RAISE NOTICE 'PASS (behavioural): duplicate LIVE identity refused (23505); a soft-disconnected row does NOT squat the slot; reconnecting into an occupied slot refused (23505); '''' and ''   '' refused (23514); a different tenant admitted the same identity; a second live okx row on one account refused and admitted once the first is disconnected (6f CCXT); the 13-parameter wizard RPC stores the normalised broker server in the same INSERT (6v-writes), a call that omits it stores NULL (6v-omitted), api_keys_venue_server_valid refuses a blank or 129-character server by name (6v-check-blank), and the browser roles hold no privilege on api_keys.venue_server (6v-no-grant).';
 END $behavioural$;
