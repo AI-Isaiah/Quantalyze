@@ -1,93 +1,118 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.18 — MT5-VERIFY & founder confirmations",
+  "milestone": "v1.22 — TRUTH — data you can trust",
   "phases": [
     {
-      "number": "155",
-      "name": "PARITYHARNESS",
-      "status": "complete"
+      "number": "155.2",
+      "name": "LIVEPARITY",
+      "status": "pending"
     },
     {
-      "number": "155.1",
-      "name": "SERVERCLOCK",
-      "status": "complete"
+      "number": "157",
+      "name": "FOUNDER-CONFIRM",
+      "status": "pending"
     },
     {
-      "number": "207",
-      "name": "RETRYPROP",
-      "status": "complete"
+      "number": "222",
+      "name": "ALERTTRUTH",
+      "status": "pending"
     },
     {
-      "number": "208",
-      "name": "UIQUICK",
-      "status": "complete"
+      "number": "223",
+      "name": "FLOWKINDS",
+      "status": "pending"
     },
     {
-      "number": "209",
-      "name": "SCRUBLEAKS",
-      "status": "complete"
+      "number": "225",
+      "name": "ONEACCOUNTONCE",
+      "status": "pending"
     },
     {
-      "number": "210",
-      "name": "PUBLICTRUTH",
-      "status": "complete"
+      "number": "226",
+      "name": "MT5SOAK",
+      "status": "pending"
     },
     {
-      "number": "211",
-      "name": "SYNCJOBS",
-      "status": "complete"
+      "number": "227",
+      "name": "JOBLEDGER",
+      "status": "pending"
     },
     {
-      "number": "212",
-      "name": "WIZTRUTH",
-      "status": "complete"
+      "number": "228",
+      "name": "KEYANSWERS",
+      "status": "pending"
     },
     {
-      "number": "213",
-      "name": "KEYFLOW",
-      "status": "complete"
+      "number": "229",
+      "name": "MT5DERIVE2",
+      "status": "pending"
     },
     {
-      "number": "214",
-      "name": "FRESHTRUTH",
-      "status": "complete"
+      "number": "230",
+      "name": "MT5NIGHTLY",
+      "status": "pending"
     },
     {
-      "number": "215",
-      "name": "TESTREACH",
-      "status": "complete"
+      "number": "231",
+      "name": "BYBITREADS",
+      "status": "pending"
     },
     {
-      "number": "216",
-      "name": "CSVSTATUS",
-      "status": "complete"
+      "number": "232",
+      "name": "OKXTRADES",
+      "status": "pending"
     },
     {
-      "number": "217",
-      "name": "SERVERRULE",
-      "status": "complete"
+      "number": "233",
+      "name": "DERIBITTRUTH",
+      "status": "pending"
     },
     {
-      "number": "218",
-      "name": "SELFHEAL",
-      "status": "complete"
+      "number": "234",
+      "name": "NOCAPITAL",
+      "status": "pending"
     },
     {
-      "number": "219",
-      "name": "ACCOUNTEMAIL",
-      "status": "complete"
+      "number": "235",
+      "name": "HOLDINGSTRUTH",
+      "status": "pending"
     },
     {
-      "number": "220",
-      "name": "EXTRACTOR",
-      "status": "complete"
+      "number": "236",
+      "name": "FIGUREMATH",
+      "status": "pending"
+    },
+    {
+      "number": "237",
+      "name": "FACTSHEETHONEST",
+      "status": "pending"
+    },
+    {
+      "number": "238",
+      "name": "NEVERCOMPUTED",
+      "status": "pending"
+    },
+    {
+      "number": "239",
+      "name": "SURFACECACHE",
+      "status": "pending"
+    },
+    {
+      "number": "240",
+      "name": "CONNECTTRUTH",
+      "status": "pending"
+    },
+    {
+      "number": "241",
+      "name": "DEMOCREDS",
+      "status": "pending"
     }
   ],
   "next": {
-    "command": "/gsd-new-milestone",
-    "label": "Start a new milestone",
-    "reason": "All phases complete — start a new milestone"
+    "command": "/gsd-plan-phase 226",
+    "label": "Plan the first phase (226 MT5SOAK, wave 0)",
+    "reason": "v1.22 roadmap created 2026-11-23 — 21 phases, Phase 226 needs a plan"
   },
-  "updated_at": "2026-11-23T11:15:20.552Z"
+  "updated_at": "2026-11-23T13:14:40.000Z"
 }
