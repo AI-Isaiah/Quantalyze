@@ -2,19 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.18
 milestone_name: MT5-VERIFY & founder confirmations
-current_phase_name: "parallel: 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM open; everything else complete"
+current_phase: "155.2"
+current_phase_name: 155.2 LIVEPARITY open, waiting on broker statements; 157 and 221-225 deferred to the next milestone
 status: executing
-stopped_at: Phase 219 complete pending its security audit; 155.2 weekend readings captured
-last_updated: "2026-11-22T22:23:40.787Z"
+stopped_at: 155.2 waits on the broker statements; 157 and 221-225 moved to the next milestone 2026-11-23
+last_updated: "2026-11-23T08:46:30.225Z"
 last_activity: 2026-11-23
-last_activity_desc: Phase 219 complete, transitioned to Phase 155.2
-state_head: 0fd87657e40214eb7e77ccebaa284fb8d3bea285
+last_activity_desc: 157 and 221-225 moved out of v1.18 by founder decision; 155.2 gap plan 17 recorded
+state_head: 621049ac9e24a866911518dd8cd47cf9ade136e6
 progress:
-  total_phases: 18
+  total_phases: 17
   completed_phases: 16
   total_plans: 110
   completed_plans: 106
-  percent: 89
+  percent: 94
 ---
 
 ## ⭐ STATE lineage
@@ -175,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: parallel — 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM open; 155, 155.1, 207-220 complete
+Phase: 155.2 LIVEPARITY open (waiting on the broker statements); 155, 155.1, 207-220 complete; 157 and 221-225 deferred to the next milestone
 Plan: per phase (see each phase directory)
-Status: 219 ACCOUNTEMAIL closed 2026-11-23 after the founder's live PROD re-test (219-UAT.md: 8 pass, tests 6/8/9 accepted untested live by founder ruling). 155.2 LIVEPARITY: 13 of 17 plans complete. Gap plan 17 (oracle_account_mismatch, census share link, Sharpe at the stored precision) executed 2026-11-23 after the founder ruled k10 is MM3; the post-plan-17 recapture passes Gate A on all three labels and clears 31 of 31 findings rows (155.2-RECHECK-2026-11-23b.md). Plans 11-14 still owe the broker statements and founder steps; the CLI verdict is also refused on a weekend-reading provenance rule. 157 FOUNDER-CONFIRM: FCONF-01 observed 2026-11-19; FCONF-02/03 need staged wizard states; FCONF-04 rotation after 155.2's last live read
-Last activity: 2026-11-23 — 155.2 gap plan 17 executed; post-fix recapture with MM3 on k10, Gate A passes on all three labels
-Progress: [█████████░] 89%
+Status: v1.18 holds 155, 155.1, 155.2 and 207-220; 155.2 is its only open phase. 155.2 LIVEPARITY: 13 of 17 plans complete. Gap plan 17 (oracle_account_mismatch, census share link, Sharpe at the stored precision) shipped 2026-11-23 (#1306) after the founder ruled k10 is MM3; the post-plan-17 recapture passes Gate A on all three labels and clears 31 of 31 findings rows (155.2-RECHECK-2026-11-23b.md). Plans 11-14 still owe the broker statements and founder steps; the CLI verdict is also refused on a weekend-reading provenance rule. 157 FOUNDER-CONFIRM (plan 01 done, 1/3) and 221-225 (booked 2026-11-23, unplanned) moved to the next milestone on 2026-11-23 by founder decision ("delay 157 into next milestone. Cannot do that now"; "Move them too (Recommended)")
+Last activity: 2026-11-23 — 157 and 221-225 moved to the next milestone; 155.2 gap plan 17 shipped and recaptured
+Progress: [█████████░] 94%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -720,6 +721,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 223 added (2026-11-23, /gsd-phase add, founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS"): FLOWKINDS, the composite and flow-source half: every derive and compose path reads the same capital-flow kinds and refuses a malformed or truncated read by name
 - Phase 224 added (2026-11-23, /gsd-phase add, founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS"): DEADLEFTOVERS, dead SQL, retired job kinds still enqueued and inert plumbing are retired
 - Phase 225 added (2026-11-23, /gsd-phase add, founder decision 2026-11-23, "several accounts can use one key. one account should not use the same key several times"): ONEACCOUNTONCE, a user cannot connect the same exchange account more than once, and one account shared across users stays allowed
+- Phases 157 and 221-225 moved out of v1.18 into the next milestone (2026-11-23, hand-edit because `/gsd-phase --edit` preserves a phase's milestone; founder decisions "delay 157 into next milestone. Cannot do that now" and, for 221-225, "Move them too (Recommended)"): v1.18 keeps 155, 155.1, 155.2 and 207-220, with 155.2 the only open phase
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 - Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
 

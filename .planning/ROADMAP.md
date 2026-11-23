@@ -5,7 +5,8 @@
 - ✅ **v1.21 UX — trustworthy, navigable, lean** — Phases 192–206 (shipped 2026-11-13)
 - ✅ **v1.20 Backlog Burndown** — Phases 158–191 (shipped 2026-11-06)
 - ✅ **v1.19 JOB/RATE** — Phases 143–146, 146.1, 146.2 (shipped 2026-08-20)
-- 🚧 **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 155.2, 157 (resumed 2026-11-13)
+- 🚧 **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 155.2, 207–220 (resumed 2026-11-13; 157 and 221–225 moved to the next milestone 2026-11-23)
+- 📋 **Next milestone (not yet started)** — Phases 157, 221–225 (moved out of v1.18 2026-11-23, founder)
 - ✅ **v1.17 MT5 — ingested, wizardable, surfaced** — Phases 147–154, 156 (shipped 2026-08-14)
 - ✅ **v1.16 Production Resilience & Reliability** — Phases 140–142 (shipped 2026-08-14)
 - Earlier milestones: see "Shipped Milestones" below.
@@ -49,7 +50,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 ---
 
-## Current Milestone: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 155.1, 155.2, 157)
+## Current Milestone: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 155.1, 155.2)
 
 **Goal:** The numbers Quantalyze renders for the live funded MT5 accounts MM2, MM3 and FX-AI_V are
 proven true against the terminal's and the broker's own figures, and the handful of observations
@@ -60,6 +61,8 @@ FCONF-01..04 — per `.planning/REQUIREMENTS.md`. Started 2026-08-14, parked 202
 2026-11-13. Research: `.planning/research/SUMMARY.md` (2026-11-13); its Phases A, B and C are 155,
 155.1 and 155.2 here. Phase numbers 155 and 157 were reserved for this milestone; 155.1 and 155.2
 were written by the roadmapper at creation, not inserted later, so they carry no INSERTED tag.
+
+⭐ **Milestone move 2026-11-23 (founder decisions; recorded here and in `157-CONTEXT.md` per the deviation policy).** Phase 157 FOUNDER-CONFIRM leaves v1.18 for the next milestone: "delay 157 into next milestone. Cannot do that now". Phases 221–225, booked into v1.18 the same day, move with it: "Move them too (Recommended)". v1.18 now holds 155, 155.1, 155.2 and 207–220, and 155.2 LIVEPARITY is its only open phase. FCONF-01..04 move with 157, so v1.18's scope is the 11 remaining requirements. 157 no longer rides in the 155.2 sitting; its FCONF-04 rotation still waits for 155.2's last live read with MM2's investor password. The 157 and 221–225 sections, overview bullets and Progress rows are under `## 📋 Next milestone` at the end of this file. The paragraphs in this section that name 157 or FCONF-01..04 as v1.18 scope are kept as lineage.
 
 **Founder decisions D-A..D-E (2026-11-13) are binding on every phase.** They are stated once, in
 `.planning/REQUIREMENTS.md`, and cited here by id only: D-A "Pre-mark history: Accept, judge closed
@@ -135,7 +138,6 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down** - A PROD census per account, a read-only capture of our side, provenance-locked oracle intake, a compare engine shown RED on broken inputs, and the agent-checkable halves of MT5-09 and MT5-15 measured; no founder needed (completed 2026-11-14)
 - [x] **Phase 155.1: SERVERCLOCK — the worker reads the MT5 server clock live and keeps every reading** - One narrow tick-time read, asserted against the configured rule inside the leased derive and persisted write-once by a pure-DDL migration; parallel with 155, no trading day needed (completed 2026-11-19)
 - [ ] **Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%** - The founder's scripted session on MM2, MM3 and FX-AI_V, Gate A and Gate B per account, every surface the same, every gap fixed at its root or ruled on; after 155, session after the 155.1 deploy
-- [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
 - [x] **Phase 207: RETRYPROP — every error page's Try again button works** - Boundaries use Next's real `retry` prop; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 208: UIQUICK — alert-digest link, browse error state and share-link failures tell the truth** - Quick UI fixes; independent of the MT5 phases (completed 2026-11-14)
 - [x] **Phase 209: SCRUBLEAKS — error reports carry no raw database details and never get lost** - Error-report leaks; independent of the MT5 phases (completed 2026-11-14)
@@ -150,11 +152,6 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 218: SELFHEAL — the wizard's MT5 key check heals an owed terminal scrub itself** - Wizard self-heal of the post-deploy scrub plus two resume-banner fixes, founder decisions 2026-11-19; independent of the MT5 parity phases (completed 2026-11-20)
 - [x] **Phase 219: ACCOUNTEMAIL — the signed-in account shows its email and can change it** - Account email display and change, founder decision 2026-11-19; independent of the MT5 parity phases (completed 2026-11-23)
 - [x] **Phase 220: EXTRACTOR — the baseline re-dump carrying the 219 migration can land and main goes green** - CI-only: the local-stack extractor accepts `UPDATE OF` auth.users triggers, then the bot re-dump lands; independent of the MT5 parity phases (completed 2026-11-20)
-- [ ] **Phase 221: SENTRYSCRUB2 — no Sentry event carries PostgREST details or hint from any capture site, and browser captures actually report** - Sentry scrub at the last hop for direct capture sites, then client Sentry init; independent of the MT5 parity phases
-- [ ] **Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists** - User-facing error copy and the benchmark outage label, with a migration; independent of the MT5 parity phases
-- [ ] **Phase 223: FLOWKINDS — every derive and compose path reads the same capital-flow kinds and refuses a malformed or truncated read by name** - Composite and flow-source half of the derive gaps (anchor and positions stay in TODOS); independent of the MT5 parity phases
-- [ ] **Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired** - Dead SQL, retired job-kind enqueues and inert plumbing, with a migration; independent of the MT5 parity phases
-- [ ] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
 
@@ -267,25 +264,6 @@ Plans:
 - [x] 155.2-16-PLAN.md — Gap closure G4-1 (b): a key-mode derive enqueues the analytics recompute of its linked strategy
 - [x] 155.2-17-PLAN.md — Gap closure G5-1..G5-3: `oracle_account_mismatch`, the census counts the share link, Sharpe at the stored precision
 
-### Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made
-
-**Goal:** The observations only the founder can make about shipped wizard behaviour are made in the same sitting as the 155.2 session, and the spike investor password is rotated once no live read needs it, with gate 1 shown intact afterwards.
-**Requirements**: FCONF-01, FCONF-02, FCONF-03, FCONF-04
-**Depends on:** the 155.2 founder session (the same sitting, not 155.2's completion); FCONF-04's rotation comes after that session's last live read
-**Plans:** 3 plans
-**UI hint**: no (it observes shipped UI; a failed observation is a finding, not a new design)
-
-**Success Criteria** (what must be TRUE):
-1. With a live draft, the founder clicks `+ Strategy`, sees the resume banner, and Resume lands on the draft's step; the 2026-08-04 wizard restart does not recur. (FCONF-01)
-2. The founder sees the amber `wizard-sync-recomputing` block render as specified: its heading, no red envelope, no metric numbers. (FCONF-02)
-3. The founder sees the four 153.7 copy members render in a real wizard, and no Retry control appears on `SEAM_INTERNAL_FAULT`. (FCONF-03)
-4. `MT5_SPIKE_INVESTOR_PASSWORD` is rotated after the last live read that needs it, and gate 1 is re-checked afterwards: all three keys sync `complete` on a sync that ran after the rotation. (FCONF-04)
-
-Plans:
-- [ ] 157-01-PLAN.md — the staging kit (fail-closed fetch router with a visible marker), its smoke test and the founder script
-- [ ] 157-02-PLAN.md — the founder makes the FCONF-01..03 observations under staged responses (founder checkpoint)
-- [ ] 157-03-PLAN.md — the MM2 investor password rotation after 155.2's last live read, then the gate-1 re-read on the next scheduled derive (founder checkpoint)
-
 ### Progress (v1.18)
 
 | Phase | Plans Complete | Status | Completed |
@@ -293,7 +271,6 @@ Plans:
 | 155. PARITYHARNESS | 11/11 | Complete | 2026-11-14 |
 | 155.1. SERVERCLOCK | 6/6 | Complete | 2026-11-19 |
 | 155.2. LIVEPARITY | 13/17 | In Progress | - |
-| 157. FOUNDER-CONFIRM | 0/? | Not started | - |
 | 207. RETRYPROP | 1/1 | Complete | 2026-11-14 |
 | 208. UIQUICK | 5/5 | Complete | 2026-11-14 |
 | 209. SCRUBLEAKS | 5/5 | Complete | 2026-11-14 |
@@ -308,11 +285,6 @@ Plans:
 | 218. SELFHEAL | 4/4 | Complete    | 2026-11-20 |
 | 219. ACCOUNTEMAIL | 9/9 | Complete    | 2026-11-23 |
 | 220. EXTRACTOR | 1/1 | Complete    | 2026-11-20 |
-| 221. SENTRYSCRUB2 | 0/? | Not started | - |
-| 222. ALERTTRUTH | 0/? | Not started | - |
-| 223. FLOWKINDS | 0/? | Not started | - |
-| 224. DEADLEFTOVERS | 0/? | Not started | - |
-| 225. ONEACCOUNTONCE | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.18)
 
@@ -321,9 +293,8 @@ Plans:
 | 155 | PARITY-01, PARITY-02, PARITY-03, PARITY-04 |
 | 155.1 | MT5-06 |
 | 155.2 | MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 |
-| 157 | FCONF-01, FCONF-02, FCONF-03, FCONF-04 |
 
-15/15 mapped, each to exactly one phase. Two requirements have an earlier part in another phase, named in that phase's criteria: MT5-09 and MT5-15 are pre-verified at the data layer in 155 (criterion 5) and close in 155.2. MT5-06 is mapped to 155.1 and its near-midnight last leg is read in the 155.2 session (155.1 criterion 5, 155.2 criterion 1).
+⭐ 2026-11-23: FCONF-01..04 moved with 157 to the next milestone (founder, "delay 157 into next milestone. Cannot do that now"), so v1.18 maps 11/11 here. The sentence that follows is kept as lineage. 15/15 mapped, each to exactly one phase. Two requirements have an earlier part in another phase, named in that phase's criteria: MT5-09 and MT5-15 are pre-verified at the data layer in 155 (criterion 5) and close in 155.2. MT5-06 is mapped to 155.1 and its near-midnight last leg is read in the 155.2 session (155.1 criterion 5, 155.2 criterion 1).
 
 ---
 
@@ -370,7 +341,7 @@ Plans:
 
 ⭐ **v1.20 Backlog Burndown — CLOSED 2026-11-06.** Its Phase 188 SC-4 residual (D-13) was closed by 202 RESIDCHURN and 203 B3TRUNC in v1.21.
 
-🚧 **v1.18 MT5-VERIFY & founder confirmations (Phases 155, 155.1, 155.2, 157)** — RESUMED 2026-11-13 and roadmapped; nothing started. Gate 1 (new investor passwords) cleared on PROD 2026-11-13. Gate 2 (the founder at the terminal on a trading day) blocks only the 155.2 session and 157. 155 and 155.1 start first, in parallel. Parked from 2026-08-20 to 2026-11-13; the parked text is in [`milestones/v1.21-ROADMAP.md`](milestones/v1.21-ROADMAP.md) as lineage.
+🚧 **v1.18 MT5-VERIFY & founder confirmations (Phases 155, 155.1, 155.2, 157)** — RESUMED 2026-11-13 and roadmapped; nothing started. Gate 1 (new investor passwords) cleared on PROD 2026-11-13. Gate 2 (the founder at the terminal on a trading day) blocks only the 155.2 session and 157. 155 and 155.1 start first, in parallel. Parked from 2026-08-20 to 2026-11-13; the parked text is in [`milestones/v1.21-ROADMAP.md`](milestones/v1.21-ROADMAP.md) as lineage. ⛔ CORRECTED 2026-11-23: 157 and 221–225 moved to the next milestone by founder decision ("delay 157 into next milestone. Cannot do that now"; "Move them too (Recommended)"). v1.18 holds 155, 155.1, 155.2 and 207–220; 155.2 is open, waiting on the broker statements, and everything else in v1.18 is complete.
 
 ### Phase 207: RETRYPROP — every error page's Try again button works
 
@@ -683,6 +654,38 @@ Plans:
 **Wave 1**
 - [x] 220-01-PLAN.md — the extractor folds `AFTER UPDATE OF <columns>` triggers on auth.users, reads the lane's trigger columns from a 7th catalogue field and reports column drift as DRIFT; WHEN, REFERENCING and CONSTRAINT stay refused
 
+## 📋 Next milestone (not yet started) — Phases 157, 221–225
+
+Moved out of v1.18 on 2026-11-23 by founder decision. 157 FOUNDER-CONFIRM: "delay 157 into next milestone. Cannot do that now". 221–225: "Move them too (Recommended)". Name, version and requirements are set when the milestone starts (`/gsd-new-milestone`); until then these phases keep their numbers, sections and plans unchanged. Requirements carried: FCONF-01..04 (157); 221–225 were booked without requirement ids.
+
+### Phases (next milestone)
+
+- [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
+- [ ] **Phase 221: SENTRYSCRUB2 — no Sentry event carries PostgREST details or hint from any capture site, and browser captures actually report** - Sentry scrub at the last hop for direct capture sites, then client Sentry init; independent of the MT5 parity phases
+- [ ] **Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists** - User-facing error copy and the benchmark outage label, with a migration; independent of the MT5 parity phases
+- [ ] **Phase 223: FLOWKINDS — every derive and compose path reads the same capital-flow kinds and refuses a malformed or truncated read by name** - Composite and flow-source half of the derive gaps (anchor and positions stay in TODOS); independent of the MT5 parity phases
+- [ ] **Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired** - Dead SQL, retired job-kind enqueues and inert plumbing, with a migration; independent of the MT5 parity phases
+- [ ] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23
+
+### Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made
+
+**Goal:** The observations only the founder can make about shipped wizard behaviour are made in the same sitting as the 155.2 session, and the spike investor password is rotated once no live read needs it, with gate 1 shown intact afterwards.
+**Requirements**: FCONF-01, FCONF-02, FCONF-03, FCONF-04
+**Depends on:** the 155.2 founder session (the same sitting, not 155.2's completion); FCONF-04's rotation comes after that session's last live read
+**Plans:** 1/3 plans complete
+**UI hint**: no (it observes shipped UI; a failed observation is a finding, not a new design)
+
+**Success Criteria** (what must be TRUE):
+1. With a live draft, the founder clicks `+ Strategy`, sees the resume banner, and Resume lands on the draft's step; the 2026-08-04 wizard restart does not recur. (FCONF-01)
+2. The founder sees the amber `wizard-sync-recomputing` block render as specified: its heading, no red envelope, no metric numbers. (FCONF-02)
+3. The founder sees the four 153.7 copy members render in a real wizard, and no Retry control appears on `SEAM_INTERNAL_FAULT`. (FCONF-03)
+4. `MT5_SPIKE_INVESTOR_PASSWORD` is rotated after the last live read that needs it, and gate 1 is re-checked afterwards: all three keys sync `complete` on a sync that ran after the rotation. (FCONF-04)
+
+Plans:
+- [x] 157-01-PLAN.md — the staging kit (fail-closed fetch router with a visible marker), its smoke test and the founder script
+- [ ] 157-02-PLAN.md — the founder makes the FCONF-01..03 observations under staged responses (founder checkpoint)
+- [ ] 157-03-PLAN.md — the MM2 investor password rotation after 155.2's last live read, then the gate-1 re-read on the next scheduled derive (founder checkpoint)
+
 ### Phase 221: SENTRYSCRUB2 — no Sentry event carries PostgREST details or hint from any capture site, and browser captures actually report
 
 **Goal:** No Sentry event, from any capture site, server or browser, carries a PostgREST error's `details` or `hint`, and a capture made in browser code actually reaches Sentry. The last-hop scrub in `scrubSentryEvent` (`src/instrumentation.ts`) drops `details` and `hint` from a non-Error capture's `extra.__serialized__`, so the direct `Sentry.captureException` sites that bypass `scrubCaptureInput` are covered too. Only after that scrub ships does browser code get a client `Sentry.init` running the same scrub, so turning client capture on can never send an unscrubbed event. The auth callback's GoTrue `error` / `error_code` branch logs the error code (short, never `error_description`), so failed verifies become visible. Trigger: founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS". Owns `TODOS.md` `[209-SENTRY-DIRECT-CAPTURE-DETAILS]`, `[167.2.1-CLIENT-SENTRY-NOOP]` and `[219-CALLBACK-VERIFY-ERROR-LOG]` (fix directions and gates as written there).
@@ -762,6 +765,17 @@ Plans:
 
 Plans:
 - [ ] TBD — plans not listed yet
+
+### Progress (next milestone)
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 157. FOUNDER-CONFIRM | 1/3 | Deferred to next milestone | - |
+| 221. SENTRYSCRUB2 | 0/? | Deferred to next milestone | - |
+| 222. ALERTTRUTH | 0/? | Deferred to next milestone | - |
+| 223. FLOWKINDS | 0/? | Deferred to next milestone | - |
+| 224. DEADLEFTOVERS | 0/? | Deferred to next milestone | - |
+| 225. ONEACCOUNTONCE | 0/? | Deferred to next milestone | - |
 
 ---
 

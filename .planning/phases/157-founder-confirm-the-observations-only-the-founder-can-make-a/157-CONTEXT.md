@@ -3,6 +3,8 @@
 **Gathered:** 2026-11-23
 **Status:** Ready for planning
 
+⭐ **Deferred to the next milestone, 2026-11-23 (founder decision; recorded here and in `ROADMAP.md` per the deviation policy).** Founder: "delay 157 into next milestone. Cannot do that now". The phase leaves v1.18 with FCONF-01..04. Phases 221–225 moved with it on the same day: "Move them too (Recommended)". State at the move: plan 01 done (staging kit, smoke test, founder script, reviewed); plans 02 and 03 not started, each a founder checkpoint. Nothing in this file is reversed. The decisions below stand. Two things change: 157 no longer rides in the 155.2 founder sitting, and the FCONF-04 rotation still waits for 155.2's last live read with MM2's investor password. When the next milestone starts, re-measure the kit against the shipped wizard before plan 02, because the routes it stubs may have moved by then.
+
 <domain>
 ## Phase Boundary
 

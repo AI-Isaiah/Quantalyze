@@ -35,6 +35,8 @@
 
 ### Founder confirmations (Phase 157)
 
+⭐ 2026-11-23 (founder, "delay 157 into next milestone. Cannot do that now"): FCONF-01..04 move with 157 to the next milestone. They stay listed here, unchanged, until that milestone's requirements are defined; they are no longer v1.18 scope.
+
 - [ ] **FCONF-01**: The founder confirms the 2026-08-04 wizard restart is gone: with a live draft, `+ Strategy` shows the resume banner and Resume lands on the draft's step.
 - [ ] **FCONF-02**: The founder sees the amber `wizard-sync-recomputing` block render as specified (heading, no red envelope, no metric numbers).
 - [ ] **FCONF-03**: The founder sees the four 153.7 copy members render in a real wizard, with NO Retry control on `SEAM_INTERNAL_FAULT`.
@@ -80,6 +82,7 @@
 Status cells stay a bare `Pending`, because `phase complete` flips only an exact `Pending`, `In Progress` or `Gaps Found` to `Complete`. Earlier parts in another phase, named in that phase's success criteria: MT5-06's near-midnight last leg is read in the 155.2 session; MT5-09's data layer and MT5-15's flag classification are pre-verified in 155.
 
 **Coverage:**
+- ⭐ 2026-11-23: FCONF-01..04 moved to the next milestone with 157 (founder, "delay 157 into next milestone. Cannot do that now"), so v1.18 now carries 11 requirements, all mapped. The three lines below are kept as lineage.
 - v1.18 requirements: 15 total
 - Mapped to phases: 15 (each to exactly one phase)
 - Unmapped: 0
