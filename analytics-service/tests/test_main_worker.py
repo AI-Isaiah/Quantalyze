@@ -2391,6 +2391,11 @@ class TestClaimedJobContract:
         def _rpc_side_effect(name: str, params: dict):
             if name == "claim_compute_jobs_with_priority":
                 return claim_chain
+            if name == "renew_compute_job_claims":
+                # Phase 227 claim fence: the realistic answer is "all still mine".
+                renew_chain = MagicMock()
+                renew_chain.execute.return_value = MagicMock(data=list(params["p_job_ids"]))
+                return renew_chain
             return mark_chain
 
         mock_supabase.rpc.side_effect = _rpc_side_effect
@@ -3119,7 +3124,8 @@ class _FakeSentry:
 def _mock_supabase_for(jobs: list[dict[str, Any]]) -> MagicMock:
     """The TestDispatchTick mocked-supabase harness (:39-110), reused verbatim.
 
-    The claim RPC returns `jobs`; every other RPC name (mark_compute_job_done /
+    The claim RPC returns `jobs`; the renew RPC echoes the ids it was asked to
+    renew (all still ours); every other RPC name (mark_compute_job_done /
     _failed) resolves to an inert chain.
     """
     mock_supabase = MagicMock()
@@ -3131,6 +3137,11 @@ def _mock_supabase_for(jobs: list[dict[str, Any]]) -> MagicMock:
     def _rpc_side_effect(name: str, params: dict) -> MagicMock:
         if name == "claim_compute_jobs_with_priority":
             return claim_chain
+        if name == "renew_compute_job_claims":
+            # Phase 227 claim fence: the realistic answer is "all still mine".
+            renew_chain = MagicMock()
+            renew_chain.execute.return_value = MagicMock(data=list(params["p_job_ids"]))
+            return renew_chain
         return mark_chain
 
     mock_supabase.rpc.side_effect = _rpc_side_effect
@@ -3896,3 +3907,208 @@ class TestReconcileSweepMarkerContract:
                 "inspecting a function that no longer carries the read, and "
                 "stays green while the alert is dead."
             )
+
+
+# ===========================================================================
+# Phase 227 JOBLEDGER plan 08: claim renewal fence, heartbeat renewal, lost-mark
+# attempt-error recording, first-hop heal capture.
+# ===========================================================================
+
+_WORKER_LOGGER = "quantalyze.analytics.worker"
+
+
+@pytest.fixture(autouse=True)
+def _renew_unavailable_log_is_test_scoped() -> Iterator[None]:
+    """The once-per-process 'renew RPC missing' log flag is process-wide, so a
+    test that trips it would silence the log for every later test. Reset it on
+    the way in and restore it on the way out, like the claim latch above."""
+    saved = main_worker._RENEW_UNAVAILABLE_LOGGED
+    main_worker._RENEW_UNAVAILABLE_LOGGED = False
+    try:
+        yield
+    finally:
+        main_worker._RENEW_UNAVAILABLE_LOGGED = saved
+
+
+def _ledger_supabase(
+    jobs: list[dict[str, Any]],
+    *,
+    renew: Any = None,
+    mark_failed: Any = None,
+    mark_done: Any = None,
+    record: Any = None,
+) -> MagicMock:
+    """Fake supabase answering every RPC the worker loop uses.
+
+    `renew` / `mark_failed` / `mark_done` / `record` are optional callables
+    taking the RPC params. They return the rpc `.data`, or raise to make the
+    `.execute()` fail the way PostgREST does. Default renew answers the
+    realistic "every row is still mine" (it echoes the requested ids)."""
+    mock_supabase = MagicMock()
+
+    def _rpc(name: str, params: dict[str, Any]) -> MagicMock:
+        chain = MagicMock()
+        if name == "claim_compute_jobs_with_priority":
+            chain.execute.return_value = MagicMock(data=jobs)
+            return chain
+        handler = {
+            "renew_compute_job_claims": renew,
+            "mark_compute_job_failed": mark_failed,
+            "mark_compute_job_done": mark_done,
+            "record_compute_job_attempt_error": record,
+        }.get(name)
+
+        def _execute() -> MagicMock:
+            if handler is not None:
+                return MagicMock(data=handler(params))
+            if name == "renew_compute_job_claims":
+                return MagicMock(data=list(params["p_job_ids"]))
+            return MagicMock(data=None)
+
+        chain.execute.side_effect = _execute
+        return chain
+
+    mock_supabase.rpc.side_effect = _rpc
+    return mock_supabase
+
+
+def _calls_to(mock_supabase: MagicMock, name: str) -> list[dict[str, Any]]:
+    return [c.args[1] for c in mock_supabase.rpc.call_args_list if c.args[0] == name]
+
+
+def _events(caplog: pytest.LogCaptureFixture, event_type: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if getattr(r, "event_type", None) == event_type]
+
+
+def _tokened_jobs(n: int, kind: str = "derive_allocator_equity") -> list[dict[str, Any]]:
+    return [
+        {
+            "id": f"job-{i}",
+            "kind": kind,
+            "strategy_id": f"s-{i}",
+            "claim_token": f"tok-{i}",
+        }
+        for i in range(1, n + 1)
+    ]
+
+
+_DONE = DispatchResult(outcome=DispatchOutcome.DONE)
+
+
+class TestClaimFence:
+    """HEAL-02 (worker half): never run a job the watchdog already took, and
+    never stall the queue because the renew RPC is not deployed yet."""
+
+    @pytest.mark.asyncio
+    async def test_claim_fence_skips_job_the_watchdog_took(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Business rule: a job whose claim the watchdog reclaimed is never run
+        a second time by the worker that lost it. The renew RPC answers only
+        the rows the caller still owns, so a job missing from that answer is
+        skipped before dispatch and the skip is logged for the operator."""
+        jobs = _tokened_jobs(2)
+        owned = {"job-1"}  # the watchdog took job-2 while job-1 was running
+        mock_supabase = _ledger_supabase(
+            jobs, renew=lambda p: [i for i in p["p_job_ids"] if i in owned]
+        )
+        dispatch = AsyncMock(return_value=_DONE)
+
+        with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-fence-skip")
+
+        dispatched = [c.args[0]["id"] for c in dispatch.await_args_list]
+        assert dispatched == ["job-1"], (
+            f"the watchdog-taken job must not be dispatched, got {dispatched}"
+        )
+        renews = _calls_to(mock_supabase, "renew_compute_job_claims")
+        # The fence renews the current job AND everything still waiting behind it.
+        assert renews[0]["p_job_ids"] == ["job-1", "job-2"]
+        assert renews[0]["p_claim_tokens"] == ["tok-1", "tok-2"]
+        assert renews[1]["p_job_ids"] == ["job-2"]
+        skips = _events(caplog, "claim_fence_skip")
+        assert len(skips) == 1
+        assert skips[0].job_id == "job-2"  # type: ignore[attr-defined]
+        assert skips[0].kind == "derive_allocator_equity"  # type: ignore[attr-defined]
+        assert skips[0].worker_id == "worker-fence-skip"  # type: ignore[attr-defined]
+        # The skipped job is not marked either: it is the watchdog's, not ours.
+        assert _calls_to(mock_supabase, "mark_compute_job_done") == [
+            {"p_job_id": "job-1", "p_claim_token": "tok-1"}
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", ["42883", "PGRST202"])
+    async def test_claim_fence_dispatches_when_renew_rpc_missing(
+        self, code: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Business rule: a worker deployed ahead of the migration (or after a
+        rollback) must not stall the queue. A missing renew RPC, spelled 42883
+        by Postgres or PGRST202 by PostgREST's schema cache, dispatches every
+        job exactly as before, and the degradation is logged once per process,
+        not once per job."""
+        jobs = _tokened_jobs(2)
+
+        def _missing(_params: dict[str, Any]) -> Any:
+            raise _make_worker_api_error(code)
+
+        mock_supabase = _ledger_supabase(jobs, renew=_missing)
+        dispatch = AsyncMock(return_value=_DONE)
+
+        with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-fence-missing")
+
+        assert [c.args[0]["id"] for c in dispatch.await_args_list] == ["job-1", "job-2"]
+        assert len(_events(caplog, "claim_renew_unavailable")) == 1
+        assert _events(caplog, "claim_fence_skip") == []
+        assert _events(caplog, "claim_fence_renew_error") == []
+
+    @pytest.mark.asyncio
+    async def test_claim_fence_skips_on_renew_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Business rule: ownership that cannot be confirmed is treated as not
+        owned (running a job twice is the defect), but only that one job is
+        lost: the watchdog returns it to the queue and the loop carries on."""
+        jobs = _tokened_jobs(2)
+        calls = {"n": 0}
+
+        def _renew(params: dict[str, Any]) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("connection reset")
+            return list(params["p_job_ids"])
+
+        mock_supabase = _ledger_supabase(jobs, renew=_renew)
+        dispatch = AsyncMock(return_value=_DONE)
+
+        with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-fence-error")
+
+        assert [c.args[0]["id"] for c in dispatch.await_args_list] == ["job-2"]
+        errors = _events(caplog, "claim_fence_renew_error")
+        assert len(errors) == 1
+        assert errors[0].levelno == logging.ERROR
+        assert errors[0].job_id == "job-1"  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_claim_fence_dispatches_tokenless_job(self) -> None:
+        """A row with no claim token (the legacy claim path) cannot be fenced,
+        so it dispatches as before and the renew RPC is never called."""
+        jobs = [{"id": "job-legacy", "kind": "sync_trades", "strategy_id": "s-1"}]
+        mock_supabase = _ledger_supabase(jobs)
+        dispatch = AsyncMock(return_value=_DONE)
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=dispatch):
+            await dispatch_tick("worker-fence-tokenless")
+
+        assert dispatch.await_count == 1
+        assert _calls_to(mock_supabase, "renew_compute_job_claims") == []
+
+

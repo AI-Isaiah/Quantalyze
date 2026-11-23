@@ -598,6 +598,93 @@ def _is_undefined_function_structured(exc: BaseException) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Claim renewal (Phase 227 JOBLEDGER, HEAL-02 worker half)
+# ---------------------------------------------------------------------------
+# The claim RPC stamps `claimed_at` on the whole batch (up to 5 jobs) and
+# dispatch_tick runs them one after another, so a job's watchdog clock includes
+# its batch-mates' runtime: a job waiting behind slow neighbours can be reset to
+# 'pending' and run a second time while its first claim is still queued here.
+# `renew_compute_job_claims` (migration 20261124120200) moves `claimed_at` to
+# now() for the rows the caller still owns (its own claim_token, status
+# 'running') and RETURNS the ids it renewed, so membership in the answer IS
+# ownership. Two uses:
+#   1. FENCE: before each dispatch, renew this job and everything still waiting
+#      behind it. A job missing from the answer was taken by the watchdog (the
+#      reset NULLs the token) and is skipped, never run (DEC-08-A).
+#   2. HEARTBEAT: while a job runs, renew the jobs still waiting every
+#      _CLAIM_RENEW_INTERVAL_S. The RUNNING job is never renewed (DEC-08-B), so a
+#      hung run still ages out under its own watchdog override.
+#
+# PostgREST reports a function missing from its schema cache as PGRST202, not
+# 42883 (routers/cron.py treats the table-missing pair 42P01 and PGRST205 as one
+# condition the same way), so both codes mean "the RPC is not deployed".
+_POSTGREST_UNDEFINED_FUNCTION: Final = "PGRST202"
+# Logged once per process: a worker deployed ahead of the migration would
+# otherwise repeat it for every claimed job.
+_RENEW_UNAVAILABLE_LOGGED: bool = False
+
+
+def _is_missing_rpc(exc: BaseException) -> bool:
+    """True iff `exc` says the RPC does not exist: the structured SQLSTATE 42883
+    or PostgREST's PGRST202, on `.code` or `.details["code"]`. Structured codes
+    only, never message text (the same rule the claim fallback latch follows)."""
+    if _is_undefined_function_structured(exc):
+        return True
+    if getattr(exc, "code", None) == _POSTGREST_UNDEFINED_FUNCTION:
+        return True
+    details = getattr(exc, "details", None)
+    return isinstance(details, dict) and details.get("code") == _POSTGREST_UNDEFINED_FUNCTION
+
+
+async def _renew_claims(job_ids: list[str], tokens: list[str]) -> set[str] | None:
+    """Renew the claims of `job_ids` (each under its own token in `tokens`).
+
+    Returns the set of ids the database still recognises as ours, or None when
+    the RPC is not deployed (the caller then proceeds exactly as before).
+    Every other exception propagates to the caller, which decides per site.
+
+    Goes through `db_execute`, not `db_read_with_retry`: that seam's docstring
+    names the watchdog reset and the job claim as its only write consumers and
+    says no other write gains a retry. The renew is idempotent, but a retried
+    ReadTimeout can cost about 6 minutes, which this call must never spend on
+    the dispatch loop. A transient failure here costs one skipped job and
+    latency (the watchdog returns it to the queue), never correctness.
+    """
+    global _RENEW_UNAVAILABLE_LOGGED
+    supabase = get_supabase()
+
+    def _renew() -> Any:
+        return supabase.rpc(
+            "renew_compute_job_claims",
+            {"p_job_ids": job_ids, "p_claim_tokens": tokens},
+        ).execute()
+
+    try:
+        result = await db_execute(_renew)
+    except Exception as exc:  # noqa: BLE001
+        if not _is_missing_rpc(exc):
+            raise
+        if not _RENEW_UNAVAILABLE_LOGGED:
+            _RENEW_UNAVAILABLE_LOGGED = True
+            logger.warning(
+                "renew_compute_job_claims is not deployed (%s): dispatching "
+                "claimed jobs without the claim fence. Apply migration "
+                "20261124120200 to restore it. Logged once per process.",
+                exc,
+                extra={"event_type": "claim_renew_unavailable"},
+            )
+        return None
+    renewed: set[str] = set()
+    for row in result.data or []:
+        # SETOF uuid arrives as a JSON array of strings; tolerate a one-column
+        # object shape rather than reading every row as "not ours".
+        value = next(iter(row.values()), None) if isinstance(row, dict) else row
+        if value is not None:
+            renewed.add(str(value))
+    return renewed
+
+
+# ---------------------------------------------------------------------------
 # Safe mark wrapper (DRY for the 3 try/except blocks in dispatch_tick)
 # ---------------------------------------------------------------------------
 # PR #149 review I5 (maintainability conf 9) + I6 (red-team conf 8):
@@ -861,7 +948,7 @@ async def dispatch_tick(worker_id: str) -> None:
 
     logger.info("Claimed %d jobs: %s", len(jobs), [j["id"] for j in jobs])
 
-    for job in jobs:
+    for index, job in enumerate(jobs):
         # FLIPRETRY-04: refresh healthz BETWEEN jobs. A dedicated backfill
         # worker processes a batch of bounded (wait_for-capped) 300s crawls
         # sequentially; without a per-job refresh, LAST_TICK_AT (stamped once
@@ -882,6 +969,54 @@ async def dispatch_tick(worker_id: str) -> None:
         # literal — that's the expected late-mark-ignored path, not a
         # failure. INVEST-P97 §Recommendation point 2.
         claim_token = job.get("claim_token")
+
+        # Phase 227 JOBLEDGER (HEAL-02) claim fence. The jobs still waiting behind
+        # this one, with their tokens: renewed here together with this job, and
+        # again by the heartbeat while this job runs. A job without a token
+        # (legacy claim path) cannot be fenced and is dispatched as before.
+        _waiting = [
+            (j["id"], tok)
+            for j in jobs[index + 1:]
+            if (tok := j.get("claim_token"))
+        ]
+        _waiting_ids = [jid for jid, _ in _waiting]
+        _waiting_tokens = [tok for _, tok in _waiting]
+        if claim_token:
+            try:
+                _renewed = await _renew_claims(
+                    [job["id"], *_waiting_ids], [claim_token, *_waiting_tokens]
+                )
+            except Exception as renew_exc:  # noqa: BLE001
+                # Ownership could not be confirmed. Dispatching an unconfirmed
+                # job is exactly the run-twice defect, so this ONE job is
+                # skipped (DEC-08-A); the watchdog returns it to the queue.
+                logger.error(
+                    "CLAIM_FENCE_RENEW_ERROR: could not confirm the claim on job "
+                    "%s (%s): %s. Skipping this job; the watchdog returns it to "
+                    "the queue.",
+                    job["id"], job.get("kind"), renew_exc,
+                    extra={
+                        "event_type": "claim_fence_renew_error",
+                        "job_id": job["id"],
+                        "kind": job.get("kind"),
+                        "worker_id": worker_id,
+                    },
+                )
+                continue
+            if _renewed is not None and job["id"] not in _renewed:
+                logger.warning(
+                    "CLAIM_FENCE_SKIP: job %s (%s) is no longer claimed by this "
+                    "worker (claim_token=%s): the watchdog took it. Not "
+                    "dispatching it, so it cannot run twice.",
+                    job["id"], job.get("kind"), claim_token,
+                    extra={
+                        "event_type": "claim_fence_skip",
+                        "job_id": job["id"],
+                        "kind": job.get("kind"),
+                        "worker_id": worker_id,
+                    },
+                )
+                continue
 
         # JOB-04 (Phase 143): a job carrying the reconcile-sweep marker means an
         # enqueue was DROPPED and the hourly sweep healed it by absence — the
