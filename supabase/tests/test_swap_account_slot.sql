@@ -11,8 +11,20 @@
 --
 -- WHAT THIS FILE PINS. The write ORDER the real marker trigger and the real unique index
 -- force (each ordering arm lets the REAL trigger refuse when its step is removed), every
--- refusal token with an unchanged two-row fingerprint, the D-18 legs (is_active included),
--- the NULL-is-wildcard server rule, and the service-role-only ACL.
+-- refusal TOKEN (each refusal branch has its own arm, and its twin removes that branch so
+-- the call falls through to a different outcome), the D-18 legs (is_active included), the
+-- NULL-is-wildcard server rule (a NULL caller server never erases a captured one, and the
+-- demoted holder gives its server up), the tab/newline normalisation of the login and the
+-- server, and the service-role-only ACL.
+--
+-- WHAT THIS FILE DOES NOT PIN: that a refused call leaves both rows unchanged. The helper
+-- below calls the swap inside BEGIN ... EXCEPTION, which is a subtransaction, and every
+-- refusal in the function is a RAISE, so PostgreSQL rolls the call's writes back before
+-- the handler runs. That guarantee is the database's, not this gate's: a body that wrote
+-- first and raised after would still pass here. (An earlier two-row fingerprint claimed to
+-- pin it and could not fail, so it was removed rather than kept as a decoration.) The lock
+-- order (two swaps on sibling duplicates of one holder) is argued in the migration header
+-- and is not driven here: the lane runs one session.
 --
 -- pgTAP is not set up in this project, so every assertion RAISEs `TEST FAILED (<arm>)` on
 -- failure and a clean run prints NOTICEs only.
@@ -50,24 +62,10 @@ LANGUAGE sql AS $f$
   RETURNING id
 $f$;
 
--- A fingerprint of the columns a swap writes or a refusal must leave alone, for two rows.
-CREATE FUNCTION pg_temp.sw_fp(p_a uuid, p_b uuid) RETURNS text
-LANGUAGE sql AS $f$
-  SELECT string_agg(format('%s|%s|%s|%s|%s',
-           coalesce(venue_account_id, '~'),
-           coalesce(venue_server, '~'),
-           coalesce(account_shared_with_api_key_id::text, '~'),
-           coalesce(account_share_kind, '~'),
-           coalesce(disconnected_at::text, '~')), ';' ORDER BY id)
-    FROM api_keys WHERE id IN (p_a, p_b)
-$f$;
-
--- Call the swap. Returns 'SUCCEEDED', or the raised message (the token), with
--- ' [ROWS CHANGED]' appended when a refused call left either row different.
+-- Call the swap. Returns 'SUCCEEDED', or the raised message (the token).
 CREATE FUNCTION pg_temp.sw_try(p_new uuid, p_old uuid, p_login text, p_server text) RETURNS text
 LANGUAGE plpgsql AS $f$
 DECLARE
-  v_before text := pg_temp.sw_fp(p_new, p_old);
   v_msg    text;
   v_err    text;
 BEGIN
@@ -79,9 +77,6 @@ BEGIN
   END;
   IF v_err IS NULL THEN
     RETURN 'SUCCEEDED';
-  END IF;
-  IF pg_temp.sw_fp(p_new, p_old) IS DISTINCT FROM v_before THEN
-    RETURN v_msg || ' [ROWS CHANGED]';
   END IF;
   RETURN v_msg;
 END
@@ -162,8 +157,8 @@ BEGIN
   END IF;
 
   -- ===== Ordering and refusal arms. Each seeds its own keys. ======================
-  -- Every refusal arm asserts the raised MESSAGE equals the token AND that neither row
-  -- changed (pg_temp.sw_try appends ' [ROWS CHANGED]' to the message otherwise).
+  -- Every refusal arm asserts the raised MESSAGE equals the token. (No rows-unchanged
+  -- assertion: subtransaction rollback guarantees it, see the header.)
   -- Where an arm's twin removes a check, the call falls through to a LATER step and
   -- succeeds or is refused by the real trigger under a different message, so the arm
   -- reddens by name. Servers stay equal-or-both-NULL in every arm but SWAP-server-*, so
@@ -223,7 +218,7 @@ BEGIN
   k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
   v_res := pg_temp.sw_try(k_n, k_h, 'swap225-owner', 'syn-srv-owner');
   IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_NOT_SAME_OWNER' THEN
-    RAISE EXCEPTION 'TEST FAILED (SWAP-owner): a swap across two owners answered % — expected ACCOUNT_SLOT_NOT_SAME_OWNER with both rows unchanged', v_res;
+    RAISE EXCEPTION 'TEST FAILED (SWAP-owner): a swap across two owners answered % — expected ACCOUNT_SLOT_NOT_SAME_OWNER', v_res;
   END IF;
 
   -- ----- SWAP-holder-working. a working holder keeps the account --------------------
@@ -234,7 +229,7 @@ BEGIN
   k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
   v_res := pg_temp.sw_try(k_n, k_h, 'swap225-holder-working', 'syn-srv-hw');
   IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_HOLDER_WORKING' THEN
-    RAISE EXCEPTION 'TEST FAILED (SWAP-holder-working): a swap against a WORKING holder answered % — expected ACCOUNT_SLOT_HOLDER_WORKING with both rows unchanged', v_res;
+    RAISE EXCEPTION 'TEST FAILED (SWAP-holder-working): a swap against a WORKING holder answered % — expected ACCOUNT_SLOT_HOLDER_WORKING', v_res;
   END IF;
 
   -- ----- SWAP-inactive-holder. an inactive holder is NOT working (the is_active leg) ---
@@ -262,7 +257,7 @@ BEGIN
   k_n := pg_temp.sw_key(uid_a, NULL, NULL, 'error');
   v_res := pg_temp.sw_try(k_n, k_h, 'swap225-new-failing', 'syn-srv-nf');
   IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_NEW_KEY_NOT_WORKING' THEN
-    RAISE EXCEPTION 'TEST FAILED (SWAP-new-failing): a swap by a failing new key answered % — expected ACCOUNT_SLOT_NEW_KEY_NOT_WORKING with both rows unchanged', v_res;
+    RAISE EXCEPTION 'TEST FAILED (SWAP-new-failing): a swap by a failing new key answered % — expected ACCOUNT_SLOT_NEW_KEY_NOT_WORKING', v_res;
   END IF;
 
   -- ----- SWAP-not-live. a departed key on either side is refused ----------------------
@@ -273,13 +268,13 @@ BEGIN
   k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
   v_res := pg_temp.sw_try(k_n, k_h, 'swap225-not-live', 'syn-srv-nl');
   IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_NOT_LIVE' THEN
-    RAISE EXCEPTION 'TEST FAILED (SWAP-not-live): a swap with a DISCONNECTED old holder answered % — expected ACCOUNT_SLOT_NOT_LIVE with both rows unchanged', v_res;
+    RAISE EXCEPTION 'TEST FAILED (SWAP-not-live): a swap with a DISCONNECTED old holder answered % — expected ACCOUNT_SLOT_NOT_LIVE', v_res;
   END IF;
   k_h := pg_temp.sw_key(uid_a, 'swap225-not-live-2', 'syn-srv-nl2', 'error');
   k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL, true, now());
   v_res := pg_temp.sw_try(k_n, k_h, 'swap225-not-live-2', 'syn-srv-nl2');
   IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_NOT_LIVE' THEN
-    RAISE EXCEPTION 'TEST FAILED (SWAP-not-live): a swap with a DISCONNECTED new key answered % — expected ACCOUNT_SLOT_NOT_LIVE with both rows unchanged', v_res;
+    RAISE EXCEPTION 'TEST FAILED (SWAP-not-live): a swap with a DISCONNECTED new key answered % — expected ACCOUNT_SLOT_NOT_LIVE', v_res;
   END IF;
 
   -- ----- SWAP-login. the caller must name the login the old holder holds --------------
@@ -290,7 +285,7 @@ BEGIN
   k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
   v_res := pg_temp.sw_try(k_n, k_h, 'swap225-login-other', 'syn-srv-login');
   IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
-    RAISE EXCEPTION 'TEST FAILED (SWAP-login): a swap naming a login the old holder does not hold answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH with both rows unchanged', v_res;
+    RAISE EXCEPTION 'TEST FAILED (SWAP-login): a swap naming a login the old holder does not hold answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH', v_res;
   END IF;
 
   -- ----- SWAP-server-conflict. two different broker servers are two accounts ----------
@@ -301,7 +296,7 @@ BEGIN
   k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
   v_res := pg_temp.sw_try(k_n, k_h, 'swap225-server-conflict', 'syn-srv-b');
   IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
-    RAISE EXCEPTION 'TEST FAILED (SWAP-server-conflict): a swap across two different broker servers answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH with both rows unchanged', v_res;
+    RAISE EXCEPTION 'TEST FAILED (SWAP-server-conflict): a swap across two different broker servers answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH', v_res;
   END IF;
 
   -- ----- SWAP-composite. a composite_member dependent keeps the slot where it is -------
@@ -316,7 +311,7 @@ BEGIN
   UPDATE api_keys SET account_shared_with_api_key_id = k_h, account_share_kind = 'composite_member' WHERE id = k_d;
   v_res := pg_temp.sw_try(k_n, k_h, 'swap225-composite', 'syn-srv-comp');
   IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_COMPOSITE_DEPENDENT' THEN
-    RAISE EXCEPTION 'TEST FAILED (SWAP-composite): a swap with a composite_member dependent on the old holder answered % — expected ACCOUNT_SLOT_COMPOSITE_DEPENDENT with both rows unchanged', v_res;
+    RAISE EXCEPTION 'TEST FAILED (SWAP-composite): a swap with a composite_member dependent on the old holder answered % — expected ACCOUNT_SLOT_COMPOSITE_DEPENDENT', v_res;
   END IF;
 
   -- ----- SWAP-server-wildcard. a server not captured yet matches any ------------------
@@ -507,5 +502,5 @@ BEGIN
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);
 
-  RAISE NOTICE 'PASS (swap_account_slot): a failing or inactive holder gives its slot to a working key and is marked duplicate against it, dependents follow, a marked new key is healed, the server wildcard holds; every refusal (owner, working holder, failing new key, departed key, login, server, composite dependent) leaves both rows unchanged; the function is service-role only and SECURITY DEFINER.';
+  RAISE NOTICE 'PASS (swap_account_slot): a failing or inactive holder gives its slot to a working key and is marked duplicate against it, dependents follow, a marked new key is healed, the server wildcard holds (a NULL caller server keeps the holder''s server, the demoted holder gives its server up, tab/newline-only values are blank); every refusal branch (same key or blank login, not found, owner, departed key, exchange, login, server, over-long server, old holder marked, new key holds a login, new key marked against another key, working holder, failing new key, composite dependent) answers its own token; the function is service-role only and SECURITY DEFINER.';
 END $swap$;
