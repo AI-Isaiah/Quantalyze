@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.133.61.6] - 2026-11-23 — Phase 231 BYBITREADS plan 02: the Bybit read probe (research first)
+
+The phase's ROADMAP says to measure the venue before changing any Bybit read, and this PR ships the tool that does it. It adds a reviewed, read-only, counts-only probe that the phase orchestrator runs once on the Railway backfill worker. The worker is the only place a key decrypts. It adds the probe, its tests and one shared test fake, with no change to any production read path. Two commits: the probe (squashed from 12 branch commits: 4 feature/test, 8 review fixes) and this release commit.
+
+### Added
+- **`analytics-service/scripts/bybitreads_probe.py`**, modelled on `scripts/derivegaps_probe.py`. It runs four sections per eligible Bybit key, labelled `k1..kN`:
+  - **A, trade window (VREAD-03).** The legacy execution-list shape (start on page 1 only) against seven-day windows with both bounds, plus the start-less shape. Verdict `truncated`, `not_truncated` or `undecided`; a quiet window never passes. It also runs a 365-day windowed sweep whose pages-per-window figure sizes plan 04's page cap.
+  - **B, deposits (VREAD-04).** The real on-chain and unified-flow readers over 729 days, paired by the service's own pairing, then reduced to one verdict from a closed table. Zero on-chain rows reads `undecided`.
+  - **C, exposure.** Stable coins other than USDT, using the shared `is_stable_value` rule. Open positions and read state per settle type (linear USDT, linear USDC, inverse). Inverse closed-pnl rows over 30 days, with its own read state.
+  - **D, funding.** One real `fetch_funding_bybit` walk with no start, timed in seconds, calls and rows per category. This is for census row C27, the daily funding timeout.
+- **Redaction contract.** The only path to stdout is `emit_record`, which allows only the closed vocabulary: labels, counts, booleans, tokens, 3-significant-figure seconds and the run date. Errors print the exception type only, and logging is off for the run. "Not measured" is the word `field-absent`, never 0.
+- **Read-only contract.** The database is reached only through `ReadOnlySupabase`, and every venue call through `ReadOnlyRecordingExchange` with a per-section call ceiling. A test pins on the file's own text that it has no write, order or transfer call.
+- **`deploy_fingerprint()`** returns `bybitreads 0 1 48 24 5 3`. The worker's deployed copy must print the same line before the run.
+- **`tests/test_bybitreads_probe.py`**, 118 cases. **`tests/_trade_pages.py`** gains `BybitExecutionBook` and `install_execution_list`, a fake that follows the venue's rule that a start-only execution request answers seven days.
+
+### Fixed (review rounds before the first merge)
+- **Round 1** (code reviewer and silent-failure hunter, 9 MEDIUM, no CRITICAL or HIGH). Each of the following now reads `failed`, `field-absent` or exit 1, never a clean 0, `ok`, `complete` or exit 0:
+  - a malformed venue reply, a row without an id or time, or a position row without a size;
+  - a failed inverse closed-pnl read, which now has its own state;
+  - a run that measured no key;
+  - a legacy walk that stops at its page cap or on a repeated cursor, and a start-less count that was cut off;
+  - an inverse funding category the fetcher skipped;
+  - a position `BadRequest`, which now reads failed, not refused;
+  - the sweep's page maximum while any sweep is incomplete.
+
+  The exit-code tests can now fail, and every `section_failures` arm is exercised.
+- **Round 2.** A repeated cursor on a position or closed-pnl read in section C is a failed read, matching section A. Every fix carries a neuter, RED, byte-restore, GREEN proof.
+
+### Notes
+- **A busy key now exits 1.** If its start-less walk hits the 8-page cap, the run exits 1 even though the other readings are good. Read the records before treating `probe-exit: 1` as broken.
+- **What the fingerprint does not prove.** It confirms that the import path works on the worker. It does not identify the commit, and the run is bound to the deployed commit separately (round-2 MEDIUM recorded, not fixed, with that reason).
+- **Not run yet.** Running it on the PROD worker needs founder approval and happens after this merges.
+
 ## [0.133.61.5] - 2026-11-23 — records: 155.2 runs on 2026-12-01 with the November monthly statements only
 
 Records PR. It holds no source, test, script, workflow or migration change. One commit on `records/155.2-monthly-statements`.
