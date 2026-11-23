@@ -116,3 +116,22 @@ None. No product endpoints, auth paths or schema were touched.
 - FOUND: 157-STAGING-KIT.js, 157-STAGING-KIT.smoke.mjs, 157-FOUNDER-SCRIPT.md
 - FOUND commits: 202d007b2, e82935efc, 3f1886c2a, ea9320a76
 - `node --check` on the kit exits 0; `node --test` on the smoke: 31 tests, 31 pass, 0 fail
+
+## Post-execution review (2026-11-23)
+
+The phase agent ran the review pair on the kit before handing it over. They were `gsd-code-reviewer` and `silent-failure-hunter`, rated MEDIUM+ only. The full record is in `157-REVIEW.md`.
+
+**Round 1** found 2 critical and 3 warning items from the code reviewer, plus 5 MEDIUM from the silent-failure hunter.
+- The phase agent fixed one item itself in `3b7eb5e8e`: the router catch failed open and now fails closed.
+- A `gsd-code-fixer` round fixed the rest in `2c02e2bc2..b692d64cf`:
+  - The key-permissions read is refused. It writes an audit row and runs a live decrypt.
+  - The submit section of the script was reordered.
+  - Writes outside the two prefixes are refused or logged.
+  - A page-world install guard was added.
+  - The literal cases now read the route source.
+  - Each log entry carries its evidence.
+  - The marker and state stay consistent.
+
+**Round 2:** the code reviewer found no new MEDIUM+. The silent-failure hunter found one MEDIUM, a marker that could misreport. The phase agent fixed it in `3d6306fcd`.
+
+The kit version is now `head-0def03553-r2`, and the smoke passes 47/47.
