@@ -190,6 +190,8 @@ D-E amended 2026-11-22 (founder): the weekend edge is the Fri 2026-11-20 frozen 
 
 **Freeze window (v1.22, roadmap 2026-11-23):** a change that moves MT5 numbers for MM2, MM3 or FX-AI_V merges before plan 12's recapture or after plan 14, never in between, because a merge in between voids plan 13's `computed_at` binding. It binds 225, 229, 234 and 236, and binds 230 and 233 if their fix moves these numbers. The research schedules plan 12's recapture after 225 and 229 deploy, so that their fixes (MM3 no longer publishing MM2's numbers, the `nav_twr.py` gaps) are inside the verdict. Plan 11 waits on the founder's broker statements.
 
+⭐ **Run day 2026-12-01, monthly statements only (founder ruling 2026-11-23; also in `155.2-CONTEXT.md` and `155.2-RULINGS.md`).** Founder (2026-11-23): "I would suggest, we do 155.2 on 1st of december with the new monthly statments only". Gate B's statement oracle is the November 2026 monthly statement per account; plan 12's recapture runs on or after 2026-12-01; plans 11 to 14 are re-planned from the actual statements. The freeze window opens only at plan 12's recapture, so until then number-moving phases (225, 229 and the others it binds) merge freely.
+
 Carried context, not requirements: timeout findings #8 and #10 are tuned only from percentile data across several nightlies, with fresh and cached logins split, and are booked separately if the data is not in by the milestone close (`milestones/v1.18-REQUIREMENTS.md` Future). The product call on MT5 as a composite member stays out of scope.
 
 **Success Criteria** (what must be TRUE):
