@@ -181,3 +181,21 @@ None.
 - FOUND commits: 40c709fb9, 3dd50879f (ancestors of HEAD)
 - Acceptance re-run: `grep -c "strategy_sync_cursors"` in the snapshot = 1, `grep -c "'private'"` in the snapshot = 1, `grep -c "TEST FAILED (P"` in the gate = 12, `grep -c "prod-body-ack:"` in the migration = 1, rollback present.
 - NOT satisfied: the Task 3 acceptance criteria that need the PROD marker result, the six counts and the private-added reading (deferred, loudly, above).
+
+## PROD measurement (taken by the phase orchestrator, 2026-11-23, closes the OPEN ITEM above)
+
+The phase orchestrator ran both queries above through the Supabase MCP, one per call, after the executor returned. The marker query came first and named PRODUCTION. The queries were SELECT only and are recorded here as counts only.
+
+| status | with_key | key_live | cursor_30d | job_30d | today_cohort | new_cohort | dropped_by_liveness |
+|---|---|---|---|---|---|---|---|
+| draft | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
+| pending_review | 2 | 2 | 2 | 1 | 1 | 2 | 0 |
+| private | 10 | 9 | 0 | 3 | 0 | 3 | 0 |
+| published | 2 | 2 | 2 | 0 | 0 | 2 | 0 |
+
+**Reading.**
+- The cohort grows from 1 strategy today to 7: 3 private, 2 published and 2 pending_review.
+- No key is dropped by the liveness conjunct.
+- **Finding (private):** the widening is not inert. 3 private strategies enter, all through the done-`sync_trades`-job arm. None of the private strategies has a `strategy_sync_cursors` row in the last 30 days, so the cursor arm adds no private strategy today.
+- The cursor arm does admit the 2 published strategies and 1 pending_review strategy that the job arm misses. Those are the strategies `/cron-sync` keeps current.
+- The other 6 private strategies with a live key stay outside the cohort on today's data, because they have neither a recent cursor nor a recent done job. That part of HEAL-05 has not reached them on today's data. It is recorded, not hidden.
