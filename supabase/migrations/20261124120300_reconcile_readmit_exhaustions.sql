@@ -226,3 +226,169 @@ COMMENT ON FUNCTION public.record_reconcile_readmit_exhaustions() IS
 
 REVOKE ALL ON FUNCTION public.record_reconcile_readmit_exhaustions() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_reconcile_readmit_exhaustions() TO service_role;
+
+-- ==========================================================================
+-- STEP 4: self-verifying DO block (catalogue only)
+-- ==========================================================================
+-- House style: RAISE EXCEPTION, never a silent NOTICE-skip. Asserts SHAPE, never behaviour
+-- and never data; behaviour is covered by supabase/tests/test_reconcile_readmit_exhaustions.sql.
+DO $verify$
+DECLARE
+  -- Every variable is DECLAREd up front: plpgsql compiles a DO block whole.
+  v_rel       regclass;
+  v_fn        oid;
+  v_overloads integer;
+  v_n         integer;
+  v_secdef    boolean;
+  v_config    text[];
+  v_srchpath  text;
+  v_defowner  text;
+  v_bypass    boolean;
+  v_super     boolean;
+  v_col       text;
+  v_body      text;
+BEGIN
+  v_rel := to_regclass('public.reconcile_readmit_exhaustions');
+  IF v_rel IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261124120300: public.reconcile_readmit_exhaustions is missing';
+  END IF;
+
+  -- ----- the table ------------------------------------------------------------
+  IF NOT EXISTS (SELECT 1 FROM pg_class c
+                  WHERE c.oid = v_rel AND c.relrowsecurity AND NOT c.relforcerowsecurity) THEN
+    RAISE EXCEPTION 'Migration 20261124120300: reconcile_readmit_exhaustions must have row security enabled and not forced';
+  END IF;
+  SELECT count(*) INTO v_n FROM pg_policy p WHERE p.polrelid = v_rel;
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120300: reconcile_readmit_exhaustions carries % row security policies, expected none', v_n;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c
+                  WHERE c.conrelid = v_rel
+                    AND c.conname = 'reconcile_readmit_exhaustions_strategy_generation_uq'
+                    AND c.contype = 'u'
+                    AND pg_get_constraintdef(c.oid) = 'UNIQUE (strategy_id, generation_key)') THEN
+    RAISE EXCEPTION 'Migration 20261124120300: the UNIQUE (strategy_id, generation_key) constraint is missing, so a repeated detection would write a second row for one exhaustion';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c
+                  WHERE c.conrelid = v_rel
+                    AND c.conname = 'reconcile_readmit_exhaustions_marker_count_chk'
+                    AND c.contype = 'c'
+                    AND pg_get_constraintdef(c.oid) LIKE '%marker_count >= 3%') THEN
+    RAISE EXCEPTION 'Migration 20261124120300: the marker_count >= 3 CHECK constraint is missing';
+  END IF;
+
+  -- No foreign key to compute_jobs: that is what lets a row outlive the 90-day retention
+  -- of the marker rows it was derived from.
+  SELECT count(*) INTO v_n
+    FROM pg_constraint c
+   WHERE c.conrelid = v_rel
+     AND c.contype = 'f'
+     AND c.confrelid = 'public.compute_jobs'::regclass;
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'Migration 20261124120300: reconcile_readmit_exhaustions carries % foreign key(s) to compute_jobs, so a row would die with the retention of its markers', v_n;
+  END IF;
+
+  -- strategy_id cascades, so a row is deleted with its strategy.
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c
+                  WHERE c.conrelid = v_rel
+                    AND c.contype = 'f'
+                    AND c.confrelid = 'public.strategies'::regclass
+                    AND c.confdeltype = 'c') THEN
+    RAISE EXCEPTION 'Migration 20261124120300: strategy_id does not reference public.strategies with ON DELETE CASCADE';
+  END IF;
+
+  -- ----- the privilege matrix --------------------------------------------------
+  IF has_table_privilege('anon', v_rel, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
+    RAISE EXCEPTION 'Migration 20261124120300: anon holds a privilege on reconcile_readmit_exhaustions';
+  END IF;
+  IF has_table_privilege('authenticated', v_rel, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
+    RAISE EXCEPTION 'Migration 20261124120300: authenticated holds a privilege on reconcile_readmit_exhaustions';
+  END IF;
+  IF NOT has_table_privilege('service_role', v_rel, 'SELECT') THEN
+    RAISE EXCEPTION 'Migration 20261124120300: service_role lacks SELECT on reconcile_readmit_exhaustions';
+  END IF;
+  IF has_table_privilege('service_role', v_rel, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
+    RAISE EXCEPTION 'Migration 20261124120300: service_role holds a table-level write privilege on reconcile_readmit_exhaustions';
+  END IF;
+  FOR v_col IN
+    SELECT a.attname FROM pg_attribute a
+     WHERE a.attrelid = v_rel AND a.attnum > 0 AND NOT a.attisdropped
+  LOOP
+    IF has_column_privilege('anon', v_rel, v_col, 'SELECT,INSERT,UPDATE,REFERENCES')
+       OR has_column_privilege('authenticated', v_rel, v_col, 'SELECT,INSERT,UPDATE,REFERENCES') THEN
+      RAISE EXCEPTION 'Migration 20261124120300: anon or authenticated holds a column privilege on reconcile_readmit_exhaustions';
+    END IF;
+    IF has_column_privilege('service_role', v_rel, v_col, 'INSERT,REFERENCES') THEN
+      RAISE EXCEPTION 'Migration 20261124120300: service_role holds a column INSERT privilege on reconcile_readmit_exhaustions';
+    END IF;
+    IF has_column_privilege('service_role', v_rel, v_col, 'UPDATE') IS DISTINCT FROM (v_col = 'paged_at') THEN
+      RAISE EXCEPTION 'Migration 20261124120300: service_role UPDATE on reconcile_readmit_exhaustions must be held on paged_at and on no other column';
+    END IF;
+  END LOOP;
+
+  -- ----- the function ----------------------------------------------------------
+  SELECT count(*) INTO v_overloads
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'record_reconcile_readmit_exhaustions';
+  IF v_overloads <> 1 THEN
+    RAISE EXCEPTION 'Migration 20261124120300: record_reconcile_readmit_exhaustions resolves to % functions in schema public, expected exactly 1', v_overloads;
+  END IF;
+
+  v_fn := to_regprocedure('public.record_reconcile_readmit_exhaustions()');
+  IF v_fn IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261124120300: public.record_reconcile_readmit_exhaustions() takes arguments or is missing';
+  END IF;
+
+  SELECT p.prosecdef, p.proconfig INTO v_secdef, v_config FROM pg_proc p WHERE p.oid = v_fn;
+  IF NOT v_secdef THEN
+    RAISE EXCEPTION 'Migration 20261124120300: record_reconcile_readmit_exhaustions is not SECURITY DEFINER, so it would read compute_jobs as the caller and write a table the caller cannot';
+  END IF;
+  SELECT c INTO v_srchpath
+    FROM unnest(COALESCE(v_config, ARRAY[]::text[])) AS c
+   WHERE c LIKE 'search_path=%';
+  IF v_srchpath IS NULL OR regexp_replace(v_srchpath, '\s', '', 'g') <> 'search_path=public,pg_catalog' THEN
+    RAISE EXCEPTION 'Migration 20261124120300: record_reconcile_readmit_exhaustions must pin search_path to public, pg_catalog (found %)', v_srchpath;
+  END IF;
+
+  -- The definer must be exempt from row security, because compute_jobs carries FORCE ROW
+  -- LEVEL SECURITY. rolsuper OR rolbypassrls, never rolbypassrls alone (a superuser
+  -- bypasses row security with that flag still false).
+  SELECT r.rolname, r.rolbypassrls, r.rolsuper
+    INTO v_defowner, v_bypass, v_super
+    FROM pg_proc p
+    JOIN pg_roles r ON r.oid = p.proowner
+   WHERE p.oid = v_fn;
+  IF v_defowner IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261124120300: could not resolve the owner of public.record_reconcile_readmit_exhaustions';
+  END IF;
+  IF NOT (COALESCE(v_bypass, FALSE) OR COALESCE(v_super, FALSE)) THEN
+    RAISE EXCEPTION 'Migration 20261124120300: public.record_reconcile_readmit_exhaustions is owned by role % (rolsuper=%, rolbypassrls=%), exempt from row security by neither route, so it would read zero markers from compute_jobs and report nothing forever', v_defowner, v_super, v_bypass;
+  END IF;
+
+  IF NOT has_function_privilege('service_role', v_fn, 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration 20261124120300: service_role lacks EXECUTE on record_reconcile_readmit_exhaustions, so the reader cannot call it';
+  END IF;
+  IF has_function_privilege('anon', v_fn, 'EXECUTE') OR has_function_privilege('authenticated', v_fn, 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration 20261124120300: anon or authenticated holds EXECUTE on record_reconcile_readmit_exhaustions';
+  END IF;
+  IF EXISTS (SELECT 1
+               FROM pg_proc p
+               CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+              WHERE p.oid = v_fn AND a.grantee = 0 AND a.privilege_type = 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration 20261124120300: PUBLIC holds EXECUTE on record_reconcile_readmit_exhaustions';
+  END IF;
+
+  -- The EXECUTABLE text, comments stripped, so prose describing a rule cannot satisfy it.
+  v_body := regexp_replace(regexp_replace(pg_get_functiondef(v_fn), '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+  IF v_body NOT LIKE '%) >= 3%' THEN
+    RAISE EXCEPTION 'Migration 20261124120300: the detector body lost its inverted ceiling comparison (>= 3), so it no longer selects the strategies the sweep refuses';
+  END IF;
+  IF v_body NOT LIKE '%ON CONFLICT (strategy_id, generation_key) DO NOTHING%' THEN
+    RAISE EXCEPTION 'Migration 20261124120300: the detector body lost its ON CONFLICT clause, so a repeated detection would raise instead of being a no-op';
+  END IF;
+
+  RAISE NOTICE 'Migration 20261124120300: reconcile_readmit_exhaustions and record_reconcile_readmit_exhaustions() verified from the catalogues';
+END
+$verify$;

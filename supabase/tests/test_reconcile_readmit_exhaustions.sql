@@ -31,6 +31,19 @@
 --           sweep, and the detector writes nothing for it.
 --   X4      a strategy that exhausts again after its oldest marker aged out (one deleted,
 --           a newer one added) gets a SECOND row whose generation_key is the newer marker.
+--   X5      non-candidates get no row: three markers plus a COMPLETE analytics row, three
+--           markers plus a PENDING job, and three markers on an ARCHIVED strategy.
+--   X6      the row survives the deletion of every marker row it was derived from (no foreign
+--           key to compute_jobs, which is what outlives the 90-day failed-row retention) and
+--           is deleted with its strategy.
+--   X7      the ACL: anon and authenticated cannot read the table or call the detector;
+--           service_role can read, can call the detector, can UPDATE paged_at, and cannot
+--           UPDATE marker_count.
+--
+-- The migration carries a catalogue-only self-verify block that refuses a bad apply. Each
+-- twin below that breaks something the block also checks LAYERS a second edit that neuters
+-- that one clause of the block, because an apply the block aborts never reaches the gate
+-- and so no arm could be the first failure (GRAMMAR.md, Shape 3).
 --
 -- Every `TEST FAILED (...)` raise sits DIRECTLY in the DO body (the mutation runner reads
 -- an identity only from a single-frame inline_code_block raise). pg_temp helpers return
@@ -110,6 +123,14 @@ DECLARE
   v_mc       integer;
   v_key      uuid;
   v_paged    timestamptz;
+  v_kind     text;
+  v_s3       uuid;
+  v_s5a      uuid;
+  v_s5b      uuid;
+  v_s5c      uuid;
+  v_s7       uuid;
+  v_m_new    uuid;
+  v_row      uuid;
 BEGIN
   -- A missing sweep is a red gate, never a skip: the whole point of X1 is to measure the
   -- real sweep command.
@@ -159,7 +180,7 @@ BEGIN
   --            exactly three markers is no longer selected. That is the off-by-one that
   --            leaves the one strategy the sweep just refused to readmit with no durable
   --            row at all, and nothing pages for it.
-  -- RED-UNDER-M: {"arm":"X1","apply":[{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"    ) >= 3\n","replace":"    ) > 3\n","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"X1","apply":[{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"    ) >= 3\n","replace":"    ) > 3\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"  IF v_body NOT LIKE '%) >= 3%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%) >= 3%' THEN\n","occurrences":1}]}
   IF v_ret < 1 OR v_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (X1): the sweep refused a strategy carrying three orphan markers and the detector wrote % durable row(s) for it (it returned %), expected exactly 1. An exhausted strategy stays silent: the sweep gave up on it, nothing records that, and the marker rows that prove it age out of the 90-day failed-row retention.', v_cnt, v_ret;
   END IF;
@@ -178,7 +199,247 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (X1/key): generation_key is % but the strategy''s NEWEST marker is %. The key must be the newest marker''s id, or two different exhaustions of one strategy cannot be told apart and the second page is swallowed.', v_key, v_m3;
   END IF;
 
-  RAISE NOTICE 'ALL 1 ARMS EXECUTED (X1): the real sweep refuses a strategy at three orphan markers and the detector writes one durable row for it, keyed on the newest marker.';
+  -- ===== ARM X2 - re-detecting the same exhaustion writes nothing =====================
+  -- The detector is called again for the SAME exhaustion. The call is wrapped, because a
+  -- body without its ON CONFLICT clause answers with a raw unique_violation, and a raw
+  -- error carries no identity: the handler turns it into a state the raise below names.
+  v_state := NULL;
+  BEGIN
+    PERFORM public.record_reconcile_readmit_exhaustions();
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  SELECT count(*) INTO v_cnt
+    FROM public.reconcile_readmit_exhaustions WHERE strategy_id = v_s1;
+  -- RED-UNDER: drop the detector's ON CONFLICT clause. A repeated detection then collides with
+  --            the UNIQUE (strategy_id, generation_key) constraint and raises, so the reader
+  --            that calls the detector on every pass fails every pass after the first
+  --            exhaustion, and nothing after that can ever be detected or paged.
+  -- RED-UNDER-M: {"arm":"X2","apply":[{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"\n    ON CONFLICT (strategy_id, generation_key) DO NOTHING;","replace":";","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"  IF v_body NOT LIKE '%ON CONFLICT (strategy_id, generation_key) DO NOTHING%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ON CONFLICT (strategy_id, generation_key) DO NOTHING%' THEN\n","occurrences":1}]}
+  IF v_state IS NOT NULL OR v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (X2): calling the detector again for the same exhaustion raised SQLSTATE % and left % row(s) for the strategy, expected no error and exactly 1. Re-detection must be a no-op, or the reader that calls it on every pass fails on the first strategy it has already recorded and every later exhaustion goes undetected.', v_state, v_cnt;
+  END IF;
+
+  -- ===== ARM X3 - the boundary partner: two markers is below the ceiling ================
+  -- Same shape as X1 with TWO markers, one below the ceiling. The detector is called FIRST,
+  -- while the strategy is still a pure sweep candidate: once the sweep readmits it, it carries
+  -- a pending job and is excluded from the detector for a reason that has nothing to do with
+  -- the ceiling. The call is wrapped because a detector whose comparison is loosened to two
+  -- hits the table's CHECK (marker_count >= 3) and raises a raw error with no identity.
+  v_s3 := pg_temp.xr_strategy(v_user, 'xr-x3', 'draft');
+  PERFORM pg_temp.xr_marker(v_s3, v_now - interval '2 days');
+  PERFORM pg_temp.xr_marker(v_s3, v_now - interval '1 day');
+  v_state := NULL;
+  BEGIN
+    PERFORM public.record_reconcile_readmit_exhaustions();
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  SELECT count(*) INTO v_cnt
+    FROM public.reconcile_readmit_exhaustions WHERE strategy_id = v_s3;
+  -- RED-UNDER: loosen the detector's inverted ceiling `) >= 3` to `) >= 2`. A strategy the sweep
+  --            WILL still readmit is then recorded as exhausted (here the table's own CHECK
+  --            refuses it, which the handler turns into a state), so the page fires for
+  --            strategies the sweep would still heal.
+  -- RED-UNDER-M: {"arm":"X3","apply":[{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"    ) >= 3\n","replace":"    ) >= 2\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"  IF v_body NOT LIKE '%) >= 3%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%) >= 3%' THEN\n","occurrences":1}]}
+  IF v_state IS NOT NULL OR v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (X3): the detector raised SQLSTATE % and recorded % exhaustion row(s) for a strategy carrying only TWO orphan markers, expected no error and none. The sweep still readmits this strategy, so recording it as exhausted pages for something the sweep would heal.', v_state, v_cnt;
+  END IF;
+  -- The real sweep, executed: at two markers it DOES readmit (the seed-integrity half).
+  EXECUTE v_command;
+  SELECT count(*), min(kind) INTO v_cnt, v_kind
+    FROM public.compute_jobs
+   WHERE strategy_id = v_s3 AND metadata->>'source' = 'reconcile-sweep';
+  IF v_cnt <> 1 OR v_kind IS DISTINCT FROM 'compute_analytics_from_csv' THEN
+    RAISE EXCEPTION 'TEST FAILED (X3): the real reconcile sweep did not readmit a strategy carrying two orphan markers (% sweep-marked jobs of kind %), expected exactly 1 compute_analytics_from_csv job. The seed is not one below the ceiling of the deployed sweep, so the detector and the sweep are not being compared at their shared boundary.', v_cnt, v_kind;
+  END IF;
+
+  -- ===== ARM X4 - a strategy that exhausts again gets a second row =====================
+  -- Retention deletes the oldest marker (m1) and the strategy cycles once more (a newer
+  -- marker): it carries three markers again and its newest marker is a different row. The
+  -- first exhaustion's row (keyed on m3) must stay, and a SECOND row keyed on the new marker
+  -- must appear, so the second exhaustion pages again.
+  DELETE FROM public.compute_jobs WHERE id = v_m1;
+  v_m_new := pg_temp.xr_marker(v_s1, v_now - interval '1 hour');
+  v_state := NULL;
+  BEGIN
+    PERFORM public.record_reconcile_readmit_exhaustions();
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  SELECT count(*) INTO v_cnt
+    FROM public.reconcile_readmit_exhaustions WHERE strategy_id = v_s1;
+  SELECT count(*), max(marker_count) INTO v_ret, v_mc
+    FROM public.reconcile_readmit_exhaustions
+   WHERE strategy_id = v_s1 AND generation_key = v_m_new;
+  -- RED-UNDER: order the detector's newest-marker subquery ascending. The key is then the oldest
+  --            surviving marker, which is not the newer marker the strategy just added, so the
+  --            second exhaustion is recorded under the wrong key. The twin neuters X1/key,
+  --            which pins the same expression one arm earlier and would otherwise fire first.
+  -- RED-UNDER-M: {"arm":"X4","apply":[{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"           ORDER BY cjm.created_at DESC, cjm.id DESC\n","replace":"           ORDER BY cjm.created_at ASC, cjm.id ASC\n","occurrences":1}],"neuter":[{"arm":"X1/key"}]}
+  IF v_state IS NOT NULL OR v_cnt <> 2 OR v_ret <> 1 OR v_mc <> 3 THEN
+    RAISE EXCEPTION 'TEST FAILED (X4): after the oldest marker aged out and a newer one arrived the detector raised SQLSTATE %, the strategy has % exhaustion row(s) (expected 2) and % of them keyed on the newer marker with marker_count % (expected 1 and 3). A strategy that exhausts a second time must page a second time, so the second exhaustion needs its own row.', v_state, v_cnt, v_ret, v_mc;
+  END IF;
+
+  -- ===== ARM X5 - non-candidates get no row ============================================
+  -- Three markers each, but each strategy is something the sweep itself would not touch for
+  -- a reason other than the ceiling: a COMPLETE analytics row, a PENDING job, an ARCHIVED
+  -- status. The detector must share those exclusions, or it pages for strategies that are
+  -- not stranded.
+  v_s5a := pg_temp.xr_strategy(v_user, 'xr-x5a', 'draft');
+  v_s5b := pg_temp.xr_strategy(v_user, 'xr-x5b', 'draft');
+  v_s5c := pg_temp.xr_strategy(v_user, 'xr-x5c', 'archived');
+  PERFORM pg_temp.xr_marker(s, v_now - interval '3 days') FROM unnest(ARRAY[v_s5a, v_s5b, v_s5c]) AS s;
+  PERFORM pg_temp.xr_marker(s, v_now - interval '2 days') FROM unnest(ARRAY[v_s5a, v_s5b, v_s5c]) AS s;
+  PERFORM pg_temp.xr_marker(s, v_now - interval '1 day') FROM unnest(ARRAY[v_s5a, v_s5b, v_s5c]) AS s;
+  INSERT INTO public.strategy_analytics (strategy_id, computation_status)
+    VALUES (v_s5a, 'complete');
+  INSERT INTO public.compute_jobs (kind, strategy_id, status, priority, attempts, next_attempt_at)
+    VALUES ('compute_analytics_from_csv', v_s5b, 'pending', 'normal', 0, now());
+  v_state := NULL;
+  BEGIN
+    PERFORM public.record_reconcile_readmit_exhaustions();
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  SELECT count(*) INTO v_cnt
+    FROM public.reconcile_readmit_exhaustions
+   WHERE strategy_id = ANY (ARRAY[v_s5a, v_s5b, v_s5c]);
+  -- RED-UNDER: drop the analytics NOT EXISTS conjunct from the detector. A strategy that already
+  --            has a COMPLETE analytics row is then recorded as exhausted although the sweep
+  --            has no business with it, so the page names a strategy whose figures are
+  --            healthy.
+  -- RED-UNDER-M: {"arm":"X5","apply":[{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"    AND NOT EXISTS (\n    SELECT 1\n    FROM public.strategy_analytics sa\n    WHERE sa.strategy_id = s.id\n    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed')\n    )\n","replace":"","occurrences":1}]}
+  IF v_state IS NOT NULL OR v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (X5): the detector raised SQLSTATE % and recorded % row(s) for three strategies that carry three orphan markers but are not sweep candidates (complete analytics, a pending job, archived), expected no error and none. The detector must share every exclusion of the sweep, or it pages for strategies that are not stranded.', v_state, v_cnt;
+  END IF;
+
+  -- ===== ARM X6 - the row outlives its markers and dies with its strategy ===============
+  -- The strategy's job rows are deleted (what the 90-day failed-row retention does to the
+  -- markers): both of its exhaustion rows must survive, because the whole point of the table
+  -- is to outlive them. Then the strategy goes, and its rows go with it.
+  DELETE FROM public.compute_jobs WHERE strategy_id = v_s1;
+  SELECT count(*) INTO v_cnt
+    FROM public.reconcile_readmit_exhaustions WHERE strategy_id = v_s1;
+  -- RED-UNDER: give generation_key a foreign key to compute_jobs with ON DELETE CASCADE. The
+  --            exhaustion rows then die with the marker rows they were derived from, which is
+  --            exactly when the evidence is gone, so the durable record does not outlive the
+  --            90-day retention and the reader finds nothing to page from.
+  -- RED-UNDER-M: {"arm":"X6","apply":[{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"  generation_key uuid        NOT NULL,\n","replace":"  generation_key uuid        NOT NULL REFERENCES public.compute_jobs(id) ON DELETE CASCADE,\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"     AND c.confrelid = 'public.compute_jobs'::regclass;\n","replace":"     AND c.confrelid = 'public.compute_job_kinds'::regclass;\n","occurrences":1}]}
+  IF v_cnt <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (X6): after every compute_jobs row of the strategy was deleted % exhaustion row(s) remain, expected 2. The row must outlive the job rows it was derived from (the 90-day failed-row retention deletes them), or the durable record disappears exactly when the evidence does.', v_cnt;
+  END IF;
+  DELETE FROM public.strategies WHERE id = v_s1;
+  SELECT count(*) INTO v_cnt
+    FROM public.reconcile_readmit_exhaustions WHERE strategy_id = v_s1;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (X6): % exhaustion row(s) remain after the strategy was deleted, expected 0. A row for a strategy that no longer exists would page about nothing, and would block the strategy''s own deletion if the key did not cascade.', v_cnt;
+  END IF;
+
+  -- ===== ARM X7 - the ACL ===============================================================
+  -- One more exhausted strategy so a row exists to be read and updated. Every role is
+  -- exercised through the privilege itself (SET LOCAL ROLE), never by inspecting a grant.
+  v_s7 := pg_temp.xr_strategy(v_user, 'xr-x7', 'draft');
+  PERFORM pg_temp.xr_marker(v_s7, v_now - interval '3 days');
+  PERFORM pg_temp.xr_marker(v_s7, v_now - interval '2 days');
+  PERFORM pg_temp.xr_marker(v_s7, v_now - interval '1 day');
+  PERFORM public.record_reconcile_readmit_exhaustions();
+  SELECT id INTO v_row FROM public.reconcile_readmit_exhaustions WHERE strategy_id = v_s7;
+
+  v_state := NULL;
+  SET LOCAL ROLE anon;
+  BEGIN
+    PERFORM count(*) FROM public.reconcile_readmit_exhaustions;
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  RESET ROLE;
+  -- RED-UNDER: GRANT SELECT on the table to anon, which the REVOKE above it had removed. Anyone
+  --            holding the public anon key can then read which strategies the platform gave up
+  --            on. The twin neuters the migration's two self-verify clauses that would abort
+  --            the apply on that grant.
+  -- RED-UNDER-M: {"arm":"X7","apply":[{"kind":"insert-after","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","anchor":"GRANT SELECT ON TABLE public.reconcile_readmit_exhaustions TO service_role;","text":"\nGRANT SELECT ON TABLE public.reconcile_readmit_exhaustions TO anon;","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"  IF has_table_privilege('anon', v_rel, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN\n","replace":"  IF FALSE AND has_table_privilege('anon', v_rel, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261124120300_reconcile_readmit_exhaustions.sql","find":"    IF has_column_privilege('anon', v_rel, v_col, 'SELECT,INSERT,UPDATE,REFERENCES')\n","replace":"    IF FALSE AND has_column_privilege('anon', v_rel, v_col, 'SELECT,INSERT,UPDATE,REFERENCES')\n","occurrences":1}]}
+  IF v_state IS DISTINCT FROM '42501' THEN
+    RAISE EXCEPTION 'TEST FAILED (X7): anon SELECT on reconcile_readmit_exhaustions answered SQLSTATE %, expected 42501 (insufficient_privilege). The table names the strategies the platform gave up on and must be unreadable to the public anon key.', v_state;
+  END IF;
+
+  v_state := NULL;
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    PERFORM count(*) FROM public.reconcile_readmit_exhaustions;
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  RESET ROLE;
+  IF v_state IS DISTINCT FROM '42501' THEN
+    RAISE EXCEPTION 'TEST FAILED (X7): authenticated SELECT on reconcile_readmit_exhaustions answered SQLSTATE %, expected 42501 (insufficient_privilege). A signed-in user must not read which strategies the platform gave up on.', v_state;
+  END IF;
+
+  v_state := NULL;
+  SET LOCAL ROLE anon;
+  BEGIN
+    PERFORM public.record_reconcile_readmit_exhaustions();
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  RESET ROLE;
+  IF v_state IS DISTINCT FROM '42501' THEN
+    RAISE EXCEPTION 'TEST FAILED (X7): anon EXECUTE on the detector answered SQLSTATE %, expected 42501. The detector is a SECURITY DEFINER writer and only service_role may call it.', v_state;
+  END IF;
+
+  v_state := NULL;
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    PERFORM public.record_reconcile_readmit_exhaustions();
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  RESET ROLE;
+  IF v_state IS DISTINCT FROM '42501' THEN
+    RAISE EXCEPTION 'TEST FAILED (X7): authenticated EXECUTE on the detector answered SQLSTATE %, expected 42501. The detector is a SECURITY DEFINER writer and only service_role may call it.', v_state;
+  END IF;
+
+  -- service_role: reads, calls the detector, stamps paged_at, and cannot touch marker_count.
+  v_state := NULL; v_cnt := NULL;
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.record_reconcile_readmit_exhaustions();
+    SELECT count(*) INTO v_cnt FROM public.reconcile_readmit_exhaustions WHERE id = v_row;
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  RESET ROLE;
+  IF v_state IS NOT NULL OR v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (X7): service_role could not call the detector and read its row (SQLSTATE %, % row(s) read, expected 1). The reader runs as service_role and needs both.', v_state, v_cnt;
+  END IF;
+
+  v_state := NULL; v_cnt := NULL;
+  SET LOCAL ROLE service_role;
+  BEGIN
+    UPDATE public.reconcile_readmit_exhaustions SET paged_at = v_now WHERE id = v_row;
+    GET DIAGNOSTICS v_cnt = ROW_COUNT;
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  RESET ROLE;
+  IF v_state IS NOT NULL OR v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (X7): service_role could not stamp paged_at (SQLSTATE %, % row(s) updated, expected 1). Without that the reader cannot record a delivered page and would page the same exhaustion again on every pass.', v_state, v_cnt;
+  END IF;
+
+  v_state := NULL;
+  SET LOCAL ROLE service_role;
+  BEGIN
+    UPDATE public.reconcile_readmit_exhaustions SET marker_count = 99 WHERE id = v_row;
+  EXCEPTION WHEN OTHERS THEN
+    v_state := SQLSTATE;
+  END;
+  RESET ROLE;
+  SELECT marker_count INTO v_mc FROM public.reconcile_readmit_exhaustions WHERE id = v_row;
+  IF v_state IS DISTINCT FROM '42501' OR v_mc <> 3 THEN
+    RAISE EXCEPTION 'TEST FAILED (X7): service_role UPDATE of marker_count answered SQLSTATE % and the stored value is %, expected 42501 and 3. marker_count and generation_key are written only by the detector, so a reader cannot rewrite the evidence it pages from.', v_state, v_mc;
+  END IF;
+
+  RAISE NOTICE 'ALL 7 ARMS EXECUTED (X1, X2, X3, X4, X5, X6, X7): the real sweep refuses a strategy at three orphan markers and the detector writes one durable row for it keyed on the newest marker (X1), re-detection writes nothing (X2), a strategy at two markers is left to the sweep (X3), a strategy that exhausts again gets a second row (X4), non-candidates get no row (X5), a row outlives its markers and dies with its strategy (X6), and only service_role may read the table, call the detector and stamp paged_at (X7).';
 END
 $$;
 
