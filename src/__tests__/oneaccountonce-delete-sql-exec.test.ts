@@ -723,6 +723,29 @@ describe("oneaccountonce delete.sql and census, EXECUTED on a throwaway cluster 
       expectAbort(db, before, runDelete(db), "[H-post-write]", "zz_unlisted_trade_child");
     });
 
+    it("track_counts off: check H would read all zeros, so the script refuses before any write [H-pre-write]", () => {
+      const db = clone();
+      const before = state(db);
+      // A session-level SET (this harness connects as a superuser) puts the counters out, exactly as a project with track_counts off would.
+      const res = psqlRaw(db, `SET track_counts = off;\n${fill(deleteSql())}`);
+      expectAbort(db, before, res, "[H-pre-write]", "track_counts is off (not on)");
+    });
+
+    it("api_keys delete counter disagrees with the manifest: a trigger deletes one extra key, so the counter moves by 4, not 3 [H-post-write]", () => {
+      const db = clone();
+      // XD is a decoy (another owner's duplicate-marked key, no dependents). An AFTER DELETE trigger removes it when the first manifest key goes.
+      // api_keys is in the confirmed list, so only the counter assertion can see it.
+      psql(
+        db,
+        `CREATE FUNCTION public.zz_extra_key_delete() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+           BEGIN DELETE FROM public.api_keys WHERE id = ${q(XD)}; RETURN NULL; END $$;
+         CREATE TRIGGER zz_extra_key_delete AFTER DELETE ON public.api_keys FOR EACH ROW EXECUTE FUNCTION public.zz_extra_key_delete();`,
+      );
+      expect(psql(db, `SELECT count(*) FROM public.api_keys WHERE id = ${q(XD)};`).trim()).toBe("1");
+      const before = state(db);
+      expectAbort(db, before, runDelete(db), "[H-post-write]", "api_keys delete counter moved by 4 but the manifest holds 3 keys");
+    });
+
     it("marker mismatch: EXPECTED_MARKER differs from the database's comment [A-marker]", () => {
       const db = clone();
       const before = state(db);

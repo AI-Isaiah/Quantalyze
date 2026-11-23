@@ -49,9 +49,12 @@ a marker that is not the pasted one (A-marker); discovery that differs from the 
 keys missing (D-protected); a strategy set that differs or a strategy of another owner (E-strategies); any
 row in a table that references `api_keys` or `strategies` and is outside the confirmed list, found from
 `pg_constraint` and never from a hand list (F-off-manifest); a strategy delete that removes a different
-count than expected (G-write); and, before COMMIT, a surviving manifest row, a changed protected key, or a
-table outside the confirmed list written by the deletes (H-post-write, measured with
-`pg_stat_xact_user_tables`, so a cascade into an unlisted table is caught however deep).
+count than expected (G-write); `track_counts` not `on` (H-pre-write: check H reads transaction statistics,
+which stay at zero with it off, so the script refuses before its first write); and, before COMMIT, a
+surviving manifest row, a changed protected key, a table outside the confirmed list written by the deletes,
+or an `api_keys` delete counter that did not move by exactly the manifest key count (H-post-write, measured
+with `pg_stat_xact_user_tables`, so a cascade into an unlisted table is caught however deep, and the counter
+check is the positive control that the measurement was live).
 
 ## Never set the GDPR sanitize bypass
 
