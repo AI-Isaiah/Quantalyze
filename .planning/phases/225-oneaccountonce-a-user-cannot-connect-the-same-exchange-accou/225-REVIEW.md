@@ -36,11 +36,21 @@ files_reviewed_list:
   - analytics-service/tests/test_derive_allocator_equity_job.py
 findings:
   critical: 0
+  warning: 0
+  info: 11
+  total: 11
+  necessity: 0
+status: issues_found
+round: 2
+round_2_reviewed: 2026-11-23T21:22:35Z
+round_2_head: 58110c278
+round_1_findings:
+  critical: 0
   warning: 4
   info: 7
-  total: 11
   necessity: 1
-status: issues_found
+  silent_failure_medium: 6
+  resolved_in_round_2: 12
 ---
 
 # Phase 225: Code Review Report (PR-1, plans 01-04)
@@ -273,3 +283,118 @@ Fix it.
 - Add an arm in which the old holder has a server and the caller passes NULL.
 
 The executor's "nothing is inherited" choice was an implementation detail, not a founder ruling. Keeping the captured server is the data-integrity-safe reading of Q2, where NULL is a wildcard and never erases a known server.
+
+## Round 2 (2026-11-23)
+
+**No MEDIUM or above is open.** All ten round-1 MEDIUM items (WR-01 to WR-04 and SF-M1 to SF-M6) are fixed in code, and each fix is pinned by an arm that bites. Round 2 found no new MEDIUM or above. What is left is LOW: five round-1 Info items this repo does not fix (IN-01, IN-03, IN-04, IN-05, IN-07) and six new LOW items (IN-08 to IN-13).
+
+**Re-reviewed:** 2026-11-23T21:22:35Z, worktree HEAD `58110c278a4dcd66c5febcf935c36810b5dd76f8`
+**Scope:** `git diff 6cb92a2fb..HEAD -- . ':!.planning'` (13 files), read in the context of the full files. The scope also took in the marker trigger (`20260925120000`), the FK action, plans 07, 08, 09 and 12 for call shapes, and the runner's census code.
+
+### What was run (on this host, at this HEAD)
+
+| run | result |
+|---|---|
+| `scripts/pg-lane/run.sh --apply <RED-UNDER-SETUP list> --gate supabase/tests/test_swap_account_slot.sql` | `PASS (swap_account_slot)`, exit 0 |
+| `node scripts/mutation-runner/run.mjs --file supabase/tests/test_swap_account_slot.sql` | `arms: 24/24/0`, `biting: 24`, `lane-invocations: 24`, every arm `RED (identity ok)`, `No defects in the narrowed scope`, exit 2 (by design) |
+| `node scripts/mutation-runner/run.mjs --file supabase/tests/test_api_keys_venue_identity_uniq.sql` | `arms: 14/14/0`, `biting: 14`, `lane-invocations: 14`, every arm `RED (identity ok)`, per-file row `sections 12 / judged 14 / annotated 14 / waived 0 / biting 14`, exit 2 (by design) |
+| A script over every `RED-UNDER-M` edit step in both gates | 28 of 28 needles anchor exactly `occurrences` times in their target file |
+| `npx vitest run src/__tests__/oneaccountonce-delete-sql-exec.test.ts` | 43 passed |
+| `npx vitest run` on `mutation-annotation-parser`, `mutation-runner-floors` and `gate-family-meta` | 262 passed. The first run of these three files together showed 2 failures. The visible frame was a 30 s real-corpus `--parse-only` spawn test, and the failure message was not captured. The two files that failed passed when run alone, and all three passed together on a second run. Not reproduced; cause not captured. |
+| `npx vitest run src/lib/account-share-note.test.ts src/lib/sec-005-api-keys-projection.test.ts` | 36 passed (the D-18 parity twin reads the swap migration and its snapshot) |
+| `pytest tests/test_derive_allocator_equity_job.py -k "d18 or tuple or parity or swap"` | 1 passed |
+| `npm run schema:functions:check` | `SQL function snapshot is current (137 functions)` |
+
+Not run here: the FULL mutation corpus (CI `sql-mutation` FULL on the PR head compares `ARMS_FLOOR` 940 with a real biting count) and the CI board.
+
+### Status per round-1 finding
+
+| id | status | evidence |
+|---|---|---|
+| **WR-01** lock order | **RESOLVED** | One id-ordered pass now locks the pair plus every row marked against the old holder (`20261123180100_swap_account_slot.sql:145-152`), and the function carries `SET lock_timeout = '3s'` (`:98`). The loop's second branch is now `ELSIF v_row.id = p_old_holder` (`:170`), so a dependent row is locked and does not overwrite the holder's locals. The round-1 trace (N1 and N2 both marked against H) now gives both swaps the same lock set in the same order. The second swap queues on the lowest id. When it wakes, the re-check drops N1 (now unmarked), re-reads H with a NULL login, and the call refuses with `ACCOUNT_SLOT_IDENTITY_MISMATCH`. There is no gate arm because the lane runs one session; the header (`:18-27`) and the gate header (`test_swap_account_slot.sql:25-27`) say so. **Verdict on the documented residual** (a dependent marked after the lock snapshot): it can produce only a raw 40P01 or 55P03, never a wrong write. The composite `EXISTS` (`:250-255`) and step (b) (`:271-275`) each run on a fresh statement snapshot, so they see a late dependent. A marking that has not committed by the time the swap holds H takes the marker trigger's `FOR SHARE` on H (`20260925120000:217-221`), queues behind the swap's `FOR UPDATE`, and then refuses `ACCOUNT_SHARE_HOLDER_IS_MARKED` on re-read. There is one more lock-order class the header does not name: see IN-08. |
+| **WR-02** / SF-M1 server inherit | **RESOLVED** | Step (c) clears `venue_server` on the demoted holder (`:280`). Step (d) stamps `COALESCE(v_server, v_old_server)` (`:288`). `v_old_server` is the normalised stored value, and the CHECK has already capped it at 128. Two new arms, `SWAP-server-inherit` (`test:430-439`) and `SWAP-demoted-server-clear` (`test:447-456`), bite. |
+| **WR-03** / SF-M3 refusal arms | **RESOLVED** | The function now has 14 `RAISE` sites: the 13 from round 1 plus the over-length server. Every one has its own arm. The six from round 1 are `SWAP-same-key`, `-not-found`, `-exchange`, `-old-marked`, `-new-holds` and `-new-marked-other` (`test:344-422`). Each twin was traced by hand to a different outcome: `NOT_FOUND`, `NOT_SAME_OWNER` or `SUCCEEDED`. The runner then confirmed all 24 arms `RED (identity ok)`. The header's claim that each branch has its own arm is now true. |
+| **WR-04** / SF-M2 vacuous fingerprint | **RESOLVED** | `sw_try` (`test:66-83`) returns only the token or `SUCCEEDED`. The header (`test:20-27`) and the arm-block comment (`test:160-161`) now say that subtransaction rollback guarantees nothing is written on a refusal, and that the gate does not pin it. The migration COMMENT's "nothing written" is a true statement about the database's behaviour. |
+| **SF-M4** normalisation | **RESOLVED** | `btrim(x, E' \t\r\n')` is used for the login and server in the swap (`:106-107`), for the stored server it reads (`:177`), and in the wizard INSERT (`20261123180000_api_keys_venue_server.sql:197`, snapshot `create_wizard_strategy.sql:109`). The same trim is in the CHECK's blank leg (`20261123180000:81`). An over-128 server is refused with `ACCOUNT_SLOT_IDENTITY_MISMATCH` before any lock (`:131-135`). Arms `SWAP-server-long`, `SWAP-server-ws`, `SWAP-login-ws`, `6v-writes-ws` and `6v-check-ws` bite. **Do the CHECK and the functions agree?** Yes for `venue_server`. Their blank sets are identical. The function checks length on the normalised value, and the CHECK checks it on the stored value, which is that same normalised value, and the COALESCE path only re-stores a value that already passed the CHECK. What remains is LOW: the login CHECK is unchanged (IN-10), and the wizard has no over-length token (IN-11). |
+| **SF-M5** check H positive control | **RESOLVED** | `[H-pre-write]` refuses unless `track_counts` is `on`, before the first write (`delete.sql:174-179`). The `api_keys` delete counter must move by exactly `array_length(v_keys, 1)` (`:249-258`). The counter check sits after the survivor, fingerprint and table-scan checks, so the existing arms keep their messages. It fails closed on a missing stats row, because a NULL `v_n` makes `IS DISTINCT FROM` true. The README run record says the guard came after the one PROD run. |
+| **SF-M6** exec-test arms | **RESOLVED** | Arms were added for the composite FK, the vacuity guard, `[G-write]` (by dropping the delete policy), `[H-post-write]` protected-key-changed, `[H-post-write]` manifest-survives, `track_counts` off, and the counter mismatch (`oneaccountonce-delete-sql-exec.test.ts:726-809`). Each asserts the check's own message through `expectAbort` (full per-table state compared before and after). The README now says the F scan covers declared foreign keys only and that soft references do not gate the script. 43 of 43 passed. |
+| IN-02 | RESOLVED for the swap | The wizard half remains as IN-11. |
+| IN-06 | RESOLVED | Folded into WR-02. |
+| IN-01, IN-03, IN-04, IN-05, IN-07 | OPEN, LOW | Unchanged. Recorded here only, per the repo rule. |
+
+### Regression checks requested
+
+- **Lock-set correctness.** Every row the body writes is in the up-front set, with one exception: a dependent that commits after the snapshot. Step (a) and step (d) write `p_new_key`, step (c) writes `p_old_holder`, and step (b) writes dependents of the old holder. The marker trigger's `FOR SHARE` and the FK `KEY SHARE` that steps (b) and (c) take land on `p_new_key`, which the swap already holds. Two swaps whose sets overlap therefore always lock in one global id order. The late-dependent residual is argued above. The one ordering the fix cannot make agree is IN-08.
+- **CHECK and function normalisation.** They agree for `venue_server` (see SF-M4). For the login they disagree (IN-10).
+- **Twin needles.** None became ambiguous: 28 of 28 anchor once. `SWAP-marked-new`'s `"  IF v_new_holder IS NOT NULL THEN"` does not match the sibling `... AND v_new_holder <> p_old_holder THEN`, because it includes `THEN`. `6v-writes` and the second step of `6v-writes-ws` share one find string, but they are separate arms, so each applies alone. Arm 3's body pattern was deliberately loosened to `%nullif(btrim(p_venue_account_id%` so that it is not the first failure under `6v-writes-ws`. It still pins the `NULLIF(btrim(` normalisation.
+- **Census.** `ARMS_FLOOR` 927 + 11 (swap, 13 to 24) + 2 (identity, 12 to 14) = **940**. `stepsSeen` and `needles.length` 1041 + 14 = **1055**: 13 new arms with one edit step each, plus `6v-writes-ws`, which carries two. Both match the needle listing. The synthetic per-file rows in `mutation-runner-floors.test.ts` match the runner's own measured rows (`sections 24 / judged 24` and `sections 12 / judged 14`). The "rows sum to 939" literal moves in step with them. `FILES_FLOOR` stays 86 because no file joined.
+
+### New findings (all LOW; none at MEDIUM or above)
+
+#### IN-08: The lock-order residual list misses writers that lock the holder before its dependents (holder hard delete)
+
+**Severity:** LOW (robustness; one side gets a raw 40P01; the data stays consistent)
+**File:** `supabase/migrations/20261123180100_swap_account_slot.sql:18-27` (header), `:145-152` (lock pass); `supabase/migrations/20260925120000_api_keys_account_identity.sql:115-116` (`ON DELETE SET NULL`)
+**Issue:** A hard delete of the old holder (`delete_allocator_api_key`) locks H first. The FK's `SET NULL` action then updates each dependent. The swap now locks dependents in id order before H. So for a dependent D with an id below H's:
+1. The swap holds D and waits on H.
+2. The delete holds H, and its `SET NULL` action waits on D.
+3. PostgreSQL breaks the cycle with 40P01.
+
+This is not wholly new. In the heal case, where the new key is itself a dependent with an id below H's, round 1's pair lock already took N before H. The fix widens that cycle from N to every dependent, and it removes the sibling-swap cycle that plan 09 actually drives. No lock order can agree with both the id-ordered swap and the FK action's holder-first order. Derived from the PostgreSQL lock rules and not reproduced on two sessions.
+**Fix:** Documentation only. Add this writer class to the header's "Residual" sentence beside the late-dependent case, so that the "makes both callers queue" claim is bounded.
+
+#### IN-09: `lock_timeout` produces a raw 55P03, which the COMMENT's refusal list does not name
+
+**Severity:** LOW
+**File:** `supabase/migrations/20261123180100_swap_account_slot.sql:98`, `:294`
+**Issue:** A wait longer than 3 s now ends as SQLSTATE 55P03. A residual cycle (IN-08, or a late dependent) ends as 40P01. Neither is one of the seven tokens plan 09 maps. Before the fix, a long wait was bounded only by the caller's statement timeout, so the class of error is not new.
+**Fix:** Add one sentence to the COMMENT or the header naming 55P03 and 40P01 as retryable outcomes that carry no token. Plan 09 and the PR-2 routes can then treat both as "retry later".
+
+#### IN-10: The login's database CHECK still trims spaces only
+
+**Severity:** LOW (latent: both app writers strip tabs before writing)
+**File:** `supabase/migrations/20260812083206_api_keys_venue_account_id.sql` (`api_keys_venue_account_id_nonblank`); `supabase/tests/test_swap_account_slot.sql:494`
+**Issue:** The tab-aware blank test now lives in the two functions and in the `venue_server` CHECK, but not in the login CHECK. A direct writer could still store a tab-only login that occupies an index slot. The direct writers are the validate-and-encrypt route's insert and the stamper's PostgREST update. JavaScript `.trim()` and Python `.strip()` both remove tabs, so this is latent. `SWAP-login-ws` seeds its holder with `E'\t'`, which only works because this CHECK admits it. A later tightening of the CHECK would turn that arm red because of its fixture, not because of the function. SF-M4 as specified named the `venue_server` CHECK only, so this is not a regression.
+**Fix:** Optional, in a future migration: give `api_keys_venue_account_id_nonblank` the same character set. Re-seed `SWAP-login-ws` at the same time.
+
+#### IN-11: `create_wizard_strategy` still raises a raw 23514 for an over-128 server
+
+**Severity:** LOW (the remainder of round-1 IN-02)
+**File:** `supabase/migrations/20261123180000_api_keys_venue_server.sql:197`
+**Issue:** Only the swap got the tokenised over-length refusal. A 129-character server sent through the wizard RPC reaches `api_keys_venue_server_valid` as 23514. The 154 comment in the same function calls that error class one "the wizard route has no handler for". The plan 07 and plan 08 routes normalise the server, but nothing in them is shown to cap it at 128.
+**Fix:** In PR-2, cap the length in the route's normaliser, or map 23514 on `api_keys_venue_server_valid` to the route's existing validation body.
+
+#### IN-12: The SQL blank set is narrower than the app's trim
+
+**Severity:** LOW (record)
+**File:** `supabase/migrations/20261123180100_swap_account_slot.sql:106-107`, `20261123180000_api_keys_venue_server.sql:81`, `:197`
+**Issue:** `E' \t\r\n'` does not include `\v`, `\f` or U+00A0. JavaScript `.trim()` and Python `.strip()` remove all three. So a value the app treats as blank could be non-blank to SQL, but only if it bypasses the app normaliser, and every planned caller normalises first.
+**Fix:** None needed. If the set is ever widened, change the CHECK and both functions together.
+
+#### IN-13: The load-bearing `ELSIF v_row.id = p_old_holder` has no deterministic arm
+
+**Severity:** LOW (a revert fails closed)
+**File:** `supabase/migrations/20261123180100_swap_account_slot.sql:170`
+**Issue:** Now that dependents are in the loop, the old-holder branch must not be a bare `ELSE`. If it were, a dependent that sorts after H would overwrite `v_old_*`. Only `SWAP-repoint` has a dependent, and its key ids are random, so it catches such a revert about half the time. A revert can only refuse, never write wrong:
+- `v_old_holder_of` becomes H, which is non-NULL.
+- `v_old_login` becomes the dependent's own login, or NULL.
+
+Either one trips an `IDENTITY_MISMATCH` branch before any write.
+**Fix:** Optional. Add an arm in which the dependent's id is forced above the holder's (insert with explicit uuids), with a `RED-UNDER-M` that edits `ELSIF v_row.id = p_old_holder THEN` to `ELSE`.
+
+---
+
+_Round 2 reviewed: 2026-11-23T21:22:35Z at `58110c278`_
+_Reviewer: Claude (gsd-code-reviewer)_
+_Depth: deep_
+
+## Silent-failure hunter round 2 (2026-11-23), merged by the orchestrator
+
+SF-M1 through SF-M6 are all CLOSED.
+
+New finding:
+
+- **SF2-N1 (MEDIUM, not user-facing, a regression-pinning gap).** The WR-01 lock-set fix, `OR account_shared_with_api_key_id = p_old_holder` in the FOR UPDATE pass of `swap_account_slot`, has no arm that fails if it is reverted. The lane runs a single session, so a revert would bring back a raw 40P01 without any gate going red. The deadlock was reproduced and proven fixed with a two-session harness outside the repo. That proof is in the round-1 fixer record.
+  - **Orchestrator decision:** this is a non-user-facing MEDIUM, so there is no fixer round. It is booked in TODOS.md as `[225-SWAP-LOCKSET-PIN]`.
+
+The migration-reviewer re-ran on round 2: clean, with 1 LOW (a stale re-base header sentence), recorded and not fixed. The rls-policy-auditor round-1 verdict stands. Round 2 changed no grant, policy or SECDEF attribute.
