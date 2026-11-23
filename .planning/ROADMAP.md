@@ -293,7 +293,7 @@ Plans:
 4. Two keys that share a login always carry a share link, so a shared login with no link cannot recur; a test drives the stamping in `account_identity.py` for that case. MT5 account identity includes the broker server, so the same login on two servers never collides, and the backfill uses no data-reading `DO` guard. (ONCE-04, CONN-03)
 5. An MT5 key whose sign-in keeps failing cannot claim an account's holder slot. A test drives a failing key beside a working one for the same account, and the working key holds the slot. (MT5D-08)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration (the CONN-03 identity change and backfill, any per-owner refusal constraint) passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 11 plans
+**Plans:** 12 plans
 
 Plans:
 - [ ] 225-01-PLAN.md — migration A1: `api_keys.venue_server` column and the 13-parameter `create_wizard_strategy` (PR-1)
@@ -304,9 +304,10 @@ Plans:
 - [ ] 225-06-PLAN.md — the shared server rule, holder pick and swap helper, TS and Python held equal by one fixture (PR-2)
 - [ ] 225-07-PLAN.md — the wizard connect, MT5 path: server-aware resolver, server write, failing-holder swap (PR-2)
 - [ ] 225-08-PLAN.md — the Exchanges-page connect gets the same rule, and the demoted key's card names its holder (PR-2)
-- [ ] 225-09-PLAN.md — the poll stamper: working-holder swap, server capture and backfill, backfill census (PR-2)
+- [ ] 225-09-PLAN.md — the poll stamper: a working key takes a failing holder's slot through the swap (PR-2)
 - [ ] 225-10-PLAN.md — migration B: the index gains the server member and reconnect agrees, after the backfill census passes (PR-3)
 - [ ] 225-11-PLAN.md — the wizard connect, every venue: post-validation refusal, interim race arm, per-owner pins (PR-2)
+- [ ] 225-12-PLAN.md — the poll stamper: MT5 server capture and backfill, cross-owner stamping, the backfill census (PR-2)
 
 ### Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks
 
