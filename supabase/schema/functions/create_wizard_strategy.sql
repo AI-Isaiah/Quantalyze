@@ -88,10 +88,11 @@ BEGIN
   -- trust boundary, not something this body can close.
   --
   -- 154 / WIZCONT-02: venue_account_id is stamped here for the same structural
-  -- reason, NORMALISED as NULLIF(btrim(...), ''): without btrim a stray space makes
-  -- the dedup miss, and without the NULLIF an unset field would arrive as a non-NULL
-  -- blank that api_keys_venue_account_id_nonblank refuses with a 23514 the wizard
-  -- route has no handler for.
+  -- reason, NORMALISED as NULLIF(btrim(..., E' \t\r\n'), ''): without the btrim a
+  -- stray space makes the dedup miss, and without the NULLIF an unset field would
+  -- arrive as a non-NULL blank that api_keys_venue_account_id_nonblank refuses with a
+  -- 23514 the wizard route has no handler for. The explicit character set (space, tab,
+  -- carriage return, newline) makes a tab-only value blank too (225 / SF-M4).
   --
   -- 225 / CONN-03: venue_server is stamped in the same INSERT, trimmed, lower-cased
   -- and blank-to-NULL. An omitted parameter stores NULL (the wildcard).
@@ -105,7 +106,7 @@ BEGIN
     p_user_id, p_exchange, p_label,
     p_api_key_encrypted, p_api_secret_encrypted, p_passphrase_encrypted,
     p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1), TRUE,
-    p_exchange, NULLIF(btrim(p_venue_account_id), ''), NULLIF(lower(btrim(p_venue_server)), '')
+    p_exchange, NULLIF(btrim(p_venue_account_id, E' \t\r\n'), ''), NULLIF(lower(btrim(p_venue_server, E' \t\r\n')), '')
   )
   RETURNING id INTO v_key_id;
 

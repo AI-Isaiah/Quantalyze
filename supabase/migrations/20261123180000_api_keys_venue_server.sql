@@ -49,9 +49,12 @@
 -- INSERT column.
 --
 -- NORMAL FORM OF THE SERVER: trim, then lower-case. The route normalises first; the
--- SQL expression is defence in depth. btrim trims spaces only, and lower() on non-ASCII
--- text depends on the database collation, so the column carries a blank and length
--- CHECK and NO normal-form CHECK. MT5 server names are ASCII identifiers in practice.
+-- SQL expression is defence in depth. The trim is btrim(x, E' \t\r\n') (space, tab,
+-- carriage return, newline), so a tab-only or newline-only login or server is blank
+-- and never a real identity; the same trim is in the blank leg of the CHECK below.
+-- lower() on non-ASCII text depends on the database collation, so the column carries a
+-- blank and length CHECK and NO normal-form CHECK. MT5 server names are ASCII
+-- identifiers in practice.
 --
 -- ⛔ NO DATA CENSUS RUNS INSIDE THIS MIGRATION. Shared TEST holds PROD's catalogue and
 -- none of its data, and a failed TEST apply blocks the PROD apply, so the verify block
@@ -75,7 +78,7 @@ ALTER TABLE public.api_keys ADD COLUMN venue_server text NULL;
 
 ALTER TABLE public.api_keys
   ADD CONSTRAINT api_keys_venue_server_valid
-  CHECK (venue_server IS NULL OR (btrim(venue_server) <> '' AND char_length(venue_server) <= 128));
+  CHECK (venue_server IS NULL OR (btrim(venue_server, E' \t\r\n') <> '' AND char_length(venue_server) <= 128));
 
 COMMENT ON COLUMN public.api_keys.venue_server IS
   'Phase 225 ONEACCOUNTONCE (CONN-03, founder ruling Q2). The normalised broker server of an MT5 key (trimmed, lower-cased), stored beside the bare login in venue_account_id so the same login on two different brokers is two different accounts. PLAINTEXT by founder ruling: a broker server name is not a credential. NULL means "not captured yet" and every app fence treats NULL as a wildcard that matches any server; a blank or over-128-character value is refused by api_keys_venue_server_valid. MT5 only. NOT granted to anon or authenticated, and not part of the browser column allowlist.';
@@ -173,10 +176,11 @@ BEGIN
   -- trust boundary, not something this body can close.
   --
   -- 154 / WIZCONT-02: venue_account_id is stamped here for the same structural
-  -- reason, NORMALISED as NULLIF(btrim(...), ''): without btrim a stray space makes
-  -- the dedup miss, and without the NULLIF an unset field would arrive as a non-NULL
-  -- blank that api_keys_venue_account_id_nonblank refuses with a 23514 the wizard
-  -- route has no handler for.
+  -- reason, NORMALISED as NULLIF(btrim(..., E' \t\r\n'), ''): without the btrim a
+  -- stray space makes the dedup miss, and without the NULLIF an unset field would
+  -- arrive as a non-NULL blank that api_keys_venue_account_id_nonblank refuses with a
+  -- 23514 the wizard route has no handler for. The explicit character set (space, tab,
+  -- carriage return, newline) makes a tab-only value blank too (225 / SF-M4).
   --
   -- 225 / CONN-03: venue_server is stamped in the same INSERT, trimmed, lower-cased
   -- and blank-to-NULL. An omitted parameter stores NULL (the wildcard).
@@ -190,7 +194,7 @@ BEGIN
     p_user_id, p_exchange, p_label,
     p_api_key_encrypted, p_api_secret_encrypted, p_passphrase_encrypted,
     p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1), TRUE,
-    p_exchange, NULLIF(btrim(p_venue_account_id), ''), NULLIF(lower(btrim(p_venue_server)), '')
+    p_exchange, NULLIF(btrim(p_venue_account_id, E' \t\r\n'), ''), NULLIF(lower(btrim(p_venue_server, E' \t\r\n')), '')
   )
   RETURNING id INTO v_key_id;
 

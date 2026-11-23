@@ -13,6 +13,7 @@ RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_catalog
+SET lock_timeout = '3s'
 AS $$
 DECLARE
   v_row            record;
@@ -20,8 +21,8 @@ DECLARE
   v_disconnected   timestamptz;
   v_sync_status    text;
   v_working        boolean;
-  v_login          text := btrim(p_venue_account_id);
-  v_server         text := NULLIF(lower(btrim(p_venue_server)), '');
+  v_login          text := btrim(p_venue_account_id, E' \t\r\n');
+  v_server         text := NULLIF(lower(btrim(p_venue_server, E' \t\r\n')), '');
   v_found_new      boolean := false;
   v_found_old      boolean := false;
   v_new_owner      uuid;
@@ -45,8 +46,16 @@ BEGIN
             DETAIL  = 'The new key and the old holder must be two different keys and the login must not be blank.';
   END IF;
 
-  -- 2. Lock both rows in id order, so two swaps (or a swap and a stamp) that touch the
-  --    same pair queue instead of deadlocking, and read each into the local variables.
+  IF char_length(v_server) > 128 THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The broker server is longer than 128 characters.';
+  END IF;
+
+  -- 2. Lock the two named rows AND every key marked against the old holder, in ONE
+  --    id-ordered pass, so two swaps (or a swap and a stamp) that touch any of these rows
+  --    queue on the same first row instead of deadlocking, and read the two named rows
+  --    into the local variables (a dependent row is locked and otherwise ignored here).
   --    The working-ness expression is written ONCE, here (D-18, founder 2026-09-27):
   --    active, connected, and a last sync that is NULL or none of the failing statuses.
   --    The explicit NULL leg is required: a status test over NULL is NULL, IF treats NULL
@@ -56,6 +65,7 @@ BEGIN
            account_shared_with_api_key_id, is_active, disconnected_at, sync_status
       FROM public.api_keys
      WHERE id IN (p_new_key, p_old_holder)
+        OR account_shared_with_api_key_id = p_old_holder
      ORDER BY id
        FOR UPDATE
   LOOP
@@ -75,14 +85,14 @@ BEGIN
       v_new_working  := v_working;
       v_new_login    := v_row.venue_account_id;
       v_new_holder   := v_row.account_shared_with_api_key_id;
-    ELSE
+    ELSIF v_row.id = p_old_holder THEN
       v_found_old     := true;
       v_old_owner     := v_row.user_id;
       v_old_exchange  := v_row.exchange;
       v_old_disc      := v_disconnected;
       v_old_working   := v_working;
       v_old_login     := v_row.venue_account_id;
-      v_old_server    := NULLIF(lower(btrim(v_row.venue_server)), '');
+      v_old_server    := NULLIF(lower(btrim(v_row.venue_server, E' \t\r\n')), '');
       v_old_holder_of := v_row.account_shared_with_api_key_id;
     END IF;
   END LOOP;
@@ -182,17 +192,18 @@ BEGIN
      AND account_share_kind = 'duplicate'
      AND id <> p_new_key;
 
-  -- (c) The old holder gives up the login and is marked, in ONE statement.
+  -- (c) The old holder gives up the login and the server and is marked, in ONE statement.
   UPDATE public.api_keys
      SET venue_account_id               = NULL,
+         venue_server                   = NULL,
          account_shared_with_api_key_id = p_new_key,
          account_share_kind             = 'duplicate'
    WHERE id = p_old_holder;
 
-  -- (d) The new key takes the account.
+  -- (d) The new key takes the account. A NULL caller server never erases the known one.
   UPDATE public.api_keys
      SET venue_account_id = v_login,
-         venue_server     = v_server
+         venue_server     = COALESCE(v_server, v_old_server)
    WHERE id = p_new_key;
 END;
 $$;
