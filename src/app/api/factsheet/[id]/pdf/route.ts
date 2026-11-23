@@ -12,6 +12,7 @@ import { publicIpLimiter, checkLimit, getClientIp, rateLimitDenyJson } from "@/l
 import { sanitizeFilename } from "@/lib/sanitize-filename";
 import { safeCompare } from "@/lib/timing-safe-compare";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { analyticsHold, HELD_RERUN_CACHE_CONTROL } from "@/lib/analytics-hold";
 
 export const maxDuration = 30;
 
@@ -233,8 +234,13 @@ export async function GET(
       // ETag binding (id:computed_at). Pre-fix only `computation_status` was
       // selected, so analytics.computed_at was always undefined and the ETag
       // collapsed to `"<id>:"` — useless for revalidation.
+      //
+      // Phase 237 FACT-02: the other four columns are the hold's evidence
+      // (`analyticsHold` asks whether the row stores a successful result and
+      // whether its flags are a composite or an unbound derive prestamp). They
+      // are read on the server only; the response is a PDF, never this row.
       .select(
-        "id, name, status, strategy_analytics (computation_status, computed_at)",
+        "id, name, status, strategy_analytics (computation_status, computed_at, cumulative_return, daily_returns, returns_series, data_quality_flags)",
       )
       .eq("id", id),
   )
@@ -249,11 +255,17 @@ export async function GET(
   // unavailable benchmark still compute valid metrics under this terminal
   // status. Parity with the /strategy/[id] factsheet render gate; without it a
   // complete_with_warnings strategy renders metrics on the page but 400s here.
-  if (
-    !analytics ||
-    (analytics.computation_status !== "complete" &&
-      analytics.computation_status !== "complete_with_warnings")
-  ) {
+  //
+  // Phase 237 FACT-02 (S3): the door is `analyticsHold`, the verdict the
+  // factsheet page itself applies, so the two cannot disagree. It admits a
+  // terminal success (`complete` and `complete_with_warnings`) and a pending or
+  // computing re-run over a stored success result. It refuses a first-ever
+  // compute, a failed row, a composite during a re-run and a terminal success
+  // whose derive prestamp left no bound snapshot (D-04, matching the factsheet's
+  // queued state). Admitting every pending row and letting the page decide would
+  // turn a first-ever compute from a 400 here into a 409 below.
+  const hold = analyticsHold(analytics);
+  if (!analytics || !hold.admitted) {
     return NextResponse.json(
       { error: "Analytics not computed" },
       { status: 400 },
@@ -304,7 +316,19 @@ export async function GET(
   // — id alone is not enough (different strategies could share computed_at
   // by coincidence, though unlikely), and computed_at alone collides
   // across strategies.
-  const etag = `"${id}:${analytics.computed_at ?? ""}"`;
+  //
+  // Phase 237 FACT-02 (T-237-10): a PDF printed from a held re-run says
+  // Updating, and `computed_at` is the LAST success's date, so it is the same
+  // date the terminal render will carry. A `:held` suffix keeps the two apart.
+  // An If-None-Match carrying the terminal ETag during a re-run does not 304
+  // (the factsheet says Updating, a cached terminal PDF would not), and the held
+  // ETag stops matching the moment the run finishes (the factsheet stops saying
+  // Updating, a cached held PDF would still say it). The held render also takes
+  // the short cache on both the 200 and the 304.
+  const etag = `"${id}:${analytics.computed_at ?? ""}${hold.updating ? ":held" : ""}"`;
+  const cacheControl = hold.updating
+    ? HELD_RERUN_CACHE_CONTROL
+    : "public, s-maxage=3600, stale-while-revalidate=86400";
   const ifNoneMatch = req.headers.get("if-none-match");
   if (ifNoneMatch && ifNoneMatch === etag) {
     return new NextResponse(null, {
@@ -313,7 +337,7 @@ export async function GET(
         ETag: etag,
         // Vary: Host — see CDN cache-key comment in the 200 branch.
         Vary: "Host",
-        "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",
+        "Cache-Control": cacheControl,
       },
     });
   }
@@ -421,7 +445,8 @@ export async function GET(
         // absorbing duplicate hits (e.g. social-card scrapers / a
         // newsletter blast). Match the sibling tearsheet.pdf route which
         // is also public and uses CDN s-maxage.
-        "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",
+        // A held re-run takes the short cache (Phase 237 FACT-02), see above.
+        "Cache-Control": cacheControl,
         // Audit-2026-05-07 red-team (HIGH#2) — PDF bytes are a function of
         // the Host header at generation time (via `appUrl(req)` → puppeteer
         // goto). Vercel routes preview deployments under multiple aliases

@@ -68,11 +68,9 @@ import {
 } from "@/lib/factsheet/native-to-usd";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { readTinyBaseDays } from "@/lib/tiny-base-flag";
-import {
-  deriveEmptySeriesState,
-  isRankableAnalyticsRow,
-  type SeriesState,
-} from "@/lib/closed-sets";
+import { deriveEmptySeriesState, isComputedAnalytics, type SeriesState } from "@/lib/closed-sets";
+import { analyticsHold } from "@/lib/analytics-hold";
+import { effectiveDataQualityFlags, hasUnboundDerivePrestamp } from "@/lib/stored-analytics-result";
 import { readPublicVerificationSignals, shouldCaptureDerivedRowRejection } from "@/lib/queries";
 import { RECORD_SCALAR_ALIASES, recordFromScalars } from "@/lib/figure-record-scalars";
 
@@ -145,8 +143,8 @@ export interface ReturnsResponse {
    * allocator join; a non-book leg had no source at all and rendered a
    * permanent em-dash).
    *
-   * `null` unless `isRankableAnalyticsRow` holds for this row — the SAME
-   * predicate that withholds the series. STALE-01 closed nine surfaces that
+   * `null` unless `analyticsHold(row).admitted` holds for this row (a terminal success, or a held
+   * re-run per Phase 237 FACT-02) — the SAME predicate that withholds the series. STALE-01 closed nine surfaces that
    * served a dead run's scalars as if they were current; widening this route
    * without carrying the gate through would re-open that class through a fresh
    * door. Also `null` on a stale build predating the widened select, and on a
@@ -228,6 +226,16 @@ export interface ReturnsResponse {
    * amount; emitted after the same published-or-owner probe as every field here.
    */
   tiny_base_days: string[];
+  /**
+   * Phase 237 / FACT-02 (surface S6) — `true` only while a re-run is in flight over a stored
+   * success result: the row is `pending` or `computing`, and the series, `cagr`, `sharpe` and
+   * `figure_*` above are the LAST success's, still true, served instead of withheld. `false` for a
+   * terminal-success row, a failed or withheld row, and an empty one. Always present on a 200, a
+   * machine surface carries the state as a field and never as a line of text. The verdict is
+   * `analyticsHold`, the factsheet resolve stage's own rule; the raw status never ships.
+   * Emitted only after the same published-or-owner probe as every field here.
+   */
+  analytics_updating: boolean;
 }
 
 export async function GET(
@@ -361,7 +369,7 @@ export async function GET(
       const { data, error } = await supabase
         .from("strategy_analytics")
         .select(
-          `daily_returns, returns_series, computation_status, data_quality_flags, cagr, sharpe, ${RECORD_SCALAR_ALIASES}`,
+          `daily_returns, returns_series, computation_status, data_quality_flags, cagr, sharpe, cumulative_return, computed_at, ${RECORD_SCALAR_ALIASES}`,
         )
         .eq("strategy_id", id)
         .maybeSingle();
@@ -408,6 +416,8 @@ export async function GET(
         computation_status?: unknown;
         cagr?: unknown;
         sharpe?: unknown;
+        cumulative_return?: unknown;
+        computed_at?: unknown;
         series_start?: unknown;
         series_end?: unknown;
         headline_since?: unknown;
@@ -444,16 +454,30 @@ export async function GET(
       // status ladder of their own: a row whose run did not finish is one row,
       // and everything it carries is equally dead. Deciding it twice is how the
       // two answers would eventually drift apart.
-      const analyticsRankable = isRankableAnalyticsRow({
-        computation_status: status,
-      });
+      //
+      // Phase 237 / FACT-02 — the decision is `analyticsHold`, the factsheet
+      // resolve stage's own rule: a terminal success is admitted, and so is a
+      // held re-run (a `pending` / `computing` row over a stored success result,
+      // which keeps the LAST success's numbers on screen). A `failed` row, a
+      // composite re-stitch and a terminal-success row with an unbound derive
+      // prestamp are NOT admitted, exactly as the factsheet withholds them.
+      // `analyticsRankable` keeps its name so every downstream use below is
+      // unchanged; it now reads "admitted".
+      const hold = analyticsHold(analyticsRow);
+      const analyticsRankable = hold.admitted;
+      // Phase 237 / FACT-02 (RESEARCH Pitfall 2) — the flags that belong to the
+      // numbers this row STORES. Inside a derive prestamp window the live flags
+      // are the new derive's while the series is the last success's, so curve
+      // method, composite, unit and tiny-base days are all read from the
+      // effective bag (the bound snapshot's flags), never from the live blob.
+      const effectiveFlags = effectiveDataQualityFlags(analyticsRow).flags;
       const daily_returns: DailyPoint[] = analyticsRankable
         ? resolveDailyReturnSeries(
             analyticsRow?.daily_returns,
             analyticsRow?.returns_series,
             // 164.6.6.2.2 D-05: the curve is read by the row's own method
             // (parsed here; the raw flags blob never ships).
-            curveMethodFromFlags(analyticsRow?.data_quality_flags),
+            curveMethodFromFlags(effectiveFlags),
           )
         : [];
 
@@ -504,7 +528,12 @@ export async function GET(
             ?.created_at;
           strategyCreatedAt = typeof createdAt === "string" ? createdAt : null;
         }
-        series_state = deriveEmptySeriesState(status, strategyCreatedAt);
+        // 237 WR-02: a terminal row the hold refuses only for the D-04 window is being
+        // computed (the factsheet says so too), not "empty": it has a full record.
+        series_state =
+          isComputedAnalytics(status) && hasUnboundDerivePrestamp(analyticsRow)
+            ? "computing"
+            : deriveEmptySeriesState(status, strategyCreatedAt);
       }
 
       // BLEND-01 — forward the published strategy's asset_class (null when
@@ -544,7 +573,9 @@ export async function GET(
 
       // CONSTIT-02 — strict `=== true` composite coercion (T-111-04). The raw
       // data_quality_flags blob is read here but only the boolean is emitted.
-      const dqf = (data as { data_quality_flags?: unknown } | null)?.data_quality_flags as
+      // Phase 237: from the EFFECTIVE flags (see `effectiveFlags` above), so a held row in the
+      // prestamp window reports the last success's composite, unit and tiny-base days.
+      const dqf = effectiveFlags as
         | { composite?: unknown; native_unit?: unknown; tiny_base_days?: unknown }
         | null
         | undefined;
@@ -570,7 +601,7 @@ export async function GET(
                 resolveDailyReturnSeries(
                   analyticsRow?.daily_returns,
                   analyticsRow?.returns_series,
-                  curveMethodFromFlags(analyticsRow?.data_quality_flags),
+                  curveMethodFromFlags(effectiveFlags),
                   true,
                 ),
                 returns_unit,
@@ -618,6 +649,7 @@ export async function GET(
         daily_returns_usd,
         native_unpriced,
         tiny_base_days,
+        analytics_updating: hold.updating,
       };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
     },

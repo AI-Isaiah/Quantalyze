@@ -1,5 +1,87 @@
 # Changelog
 
+## [0.133.63.0] - 2026-11-24 — Phase 237 FACTSHEETHONEST: every surface shows a strategy's true state
+
+Every surface that shows a strategy's figures now gives the same answer as the factsheet:
+- During a re-run, it holds the last computed figures with an "Updating" line.
+- When the record is Withheld, it withholds the panels that only a full record can support.
+- It never caches a failure for long.
+
+There is no migration, and no stored value changes. What changes is which figures appear, and where (see Notes). 30 source commits over 13 plans, plus one review-fix round.
+
+### Added
+- **`src/lib/analytics-hold.ts`, one hold verdict for every surface (FACT-02).** `analyticsHold(row)` returns `{updating, admitted}` using the factsheet's own Phase 190 rule:
+  - a re-run over a stored success keeps its figures, unless the row is a composite;
+  - a terminal row whose derive left no bound snapshot is not admitted (D-04).
+
+  The module also exports `HELD_RERUN_CACHE_CONTROL` (60 s, no stale-while-revalidate). It is wired into:
+  - the returns API, which adds `analytics_updating` to every 200;
+  - the share card;
+  - both PDF routes (factsheet and tear sheet);
+  - the recommendations page;
+  - the scenario composer, for drawer-added rows and book rows.
+- **The "Updating" line on held surfaces.** Each surface uses the Phase 190 D-06 copy: the share card under its stat row, each recommendation card, and composer rows (new registry entry `scenario.analytics-updating`).
+- **Owner trust tier on an unpublished factsheet (FACT-04).** `src/lib/factsheet/owner-trust-tier.ts` reads `strategy_verifications` (`trust_tier, created_at`).
+  - It reads through the request client, under the existing `strategy_verifications_owner_select` RLS policy, and only on the owner lane.
+  - The tier is applied after the build, so it never enters the shared payload cache.
+  - A failed read is logged, sent to Sentry, and shows "—".
+- **Withheld panels on a Withheld record (FACT-01, founder rulings Q1–Q3 of 2026-11-23).** Each withheld panel shows its title and one note naming the cause:
+  - Worst 10 Drawdowns, table and chart. It keeps its zoomed slice inside a zoom.
+  - EOY Returns, Calmar by Year and Style Drift, including Style Drift's KS figures. These stay withheld under a zoom.
+  - The EOY bar chart.
+  - The heatmap YTD cell on every row.
+  - The rolling chart's last-point hover value, which shows as a dash.
+
+  On a failed record these panels are not shown at all.
+- **`src/__tests__/recompute-verdict-census.test.ts`.** Every reader of the recompute verdict is classified by file and symbol with an exact count, and retired surfaces are asserted absent. A new reader cannot land unclassified.
+
+### Fixed
+- **A not-yet-published strategy's blank share card is no longer cached for a day (CACHE-01).**
+  - A failed, not-found, unpublished, malformed or figure-less card sends `no-store`.
+  - A held card gets 60 s.
+  - Only a rendered terminal card keeps the long cache.
+  - Unknown, unpublished and malformed ids still get an identical header and card.
+  - `OG_CARD_VERSION` is "3".
+- **A failed BTC price read no longer disables the USD toggle for the cache TTL (CACHE-03).**
+  - The build throws inside the `unstable_cache` callback, so nothing is stored. The page still renders the uncached payload.
+  - The payload key is bumped to v27.
+  - The line now tells the reader to reload, with registry action A-RELOAD.
+  - The failure is now captured to Sentry (stage `usd-view-price-read`).
+- **The share card, returns API and composer read curve method, unit, composite and tiny-base days from the effective flags,** that is, the stored numbers' own flags, not a derive's in-flight prestamp. Before, a simple-method curve could be differenced geometrically during a derive. The composer's book rows had the same defect; review round 1 found it (WR-01).
+- **Review round 1** (code reviewer and silent-failure hunter: 4 MEDIUM, no CRITICAL or HIGH; round 2 clean):
+  - WR-01, the book composer's flags, as above.
+  - WR-02: a complete row withheld for the D-04 window reads "computing" in the composer, not "No data".
+  - WR-03: on the strategies page, a held re-run's share note no longer says the factsheet is "not available yet". Pending and computing rows now go through `probeFactsheetBuildable`.
+  - SFH-M2: the Sentry capture above.
+
+### Removed
+- **`TODOS.md` entries closed by this phase:**
+  - `164.6.6.3.3-WITHHELD-RESIDUE` (FACT-01).
+  - `[190-RERUN-SURFACES-NOT-HOLDING]` (FACT-02). Its write-gate half, composite approval, is out by founder ruling Q4 (2026-11-23).
+  - `164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED` (FACT-04).
+  - `170.3-OG-NOTFOUND-CACHE` (CACHE-01), together with its now-empty "Phase 170.3 (OGPUBLIC)" section.
+  - `164.6.6.2.1-USDVIEW-READFAIL-CACHED` (CACHE-03).
+
+### Tests
+- Every plan and fix carries a neuter, RED, byte-restore, GREEN proof. The verifier also ran the phase's 31 changed test files against the pre-phase base: 26 went RED and the other 5 are reconciled existing suites.
+- **First CI run.** Two pins were updated for the new contract:
+  - The JOB-01 TypeScript writer census classifies `src/lib/analytics-hold.ts` as a read (benign total 2 → 3).
+  - The live anon OG probe now asserts `no-store`: its seeded strategy has no return series, so the card is figure-less. The absence of the failure path is still proven by the failure spy.
+- `phase-150-capital-ownership-invariant`: the P10 cache-callback length bound goes from 400 to 1000, plus a relative bound. The CACHE-03 throw lengthened the callback. Moving it into a helper would hide it from P7's ownership scan.
+
+### Notes
+- **Displayed figures change. Stored values do not.**
+  - A Withheld record now hides the panels listed above.
+  - Surfaces that blanked during a re-run (share card, returns API, PDFs, recommendations, composer) now show the last stored figures with "Updating".
+  - A terminal row whose derive left no bound snapshot now withholds on the share card, returns API, both PDFs and recommendations, matching the factsheet (D-04 parity).
+- **Recorded, not fixed.**
+  - A rolling chart's Export CSV and its last plotted point still carry the last rolling value (plan 09).
+  - The heatmap month holding the break still prints.
+  - `headline_since` and the share card's `?u=` read live flags during a derive.
+  - The PDF routes decide the hold before the render.
+  - The composer's "computing" label has no time bound after a failed protected refresh, as with the factsheet's queued state.
+- **Human checks outstanding:** the held share card PNG, and a real Withheld factsheet at full history and inside a zoom.
+
 ## [0.133.62.0] - 2026-11-23 — Phase 225 ONEACCOUNTONCE PR-1: the venue_server column, swap_account_slot, and the one-time same-owner duplicate delete
 
 This is the first of three PRs for Phase 225. It ships the SQL surface the later code PR builds on: two migrations, their gates, and the runbook for the one-time delete the founder confirmed. The delete already ran on PROD on 2026-11-23. No route or worker calls either new function yet; PR-2 wires them. Nineteen branch commits are grouped below.

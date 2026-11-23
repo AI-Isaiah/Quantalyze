@@ -1259,6 +1259,21 @@ describe("164.6.6.2.1 plan 11 — a native strategy ships a server-built USD pay
     expect("usdView" in payload).toBe(false);
   });
 
+  it("237 SFH-M2: a failed closes read is captured to Sentry at stage usd-view-price-read", async () => {
+    seed(single({ daily_returns: flatNative(30, "2024-01-01"), data_quality_flags: NATIVE_FLAGS }));
+    fake.btcError = { message: "boom", code: "57014" };
+    vi.mocked(captureToSentry).mockClear();
+    await usdOf();
+    const calls = vi
+      .mocked(captureToSentry)
+      .mock.calls.filter(([, o]) => o.tags.stage === "usd-view-price-read");
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toMatchObject({
+      tags: { stage: "usd-view-price-read", strategy_id: STRATEGY_ID },
+      extra: { code: "57014", message: "boom" },
+    });
+  });
+
   it("an empty closes table says no_priced_day and builds no USD payload", async () => {
     seed(single({ daily_returns: flatNative(30, "2024-01-01"), data_quality_flags: NATIVE_FLAGS }));
     fake.btcRows = [];

@@ -148,7 +148,12 @@ function ogStat(node: unknown, label: string): StatProps | undefined {
     const el = node as { type?: unknown; props?: Record<string, unknown> };
     const props = el.props;
     if (!props) return undefined;
-    if (props.label === label && typeof props.value === "string") {
+    // A unit card labels CAGR as "CAGR in BTC" (`withUnit`), so the label matches by that prefix too.
+    if (
+      typeof props.label === "string" &&
+      (props.label === label || props.label.startsWith(`${label} in `)) &&
+      typeof props.value === "string"
+    ) {
       expect(typeof el.type, "Stat must be a function component").toBe("function");
       const rendered = (el.type as (p: unknown) => { props: { children: Array<{ props: { style: { color: string } } }> } })(
         props,
@@ -193,7 +198,9 @@ async function renderOgCard(
   stored: Stored,
   flags: Record<string, unknown> = {},
   scalars: RecordScalarRow = CLEARED_SCALARS,
-): Promise<{ sharpe: StatProps; cagr: StatProps; maxDd: StatProps }> {
+  /** Columns that override the terminal-success fixture (a held re-run sets the status and `computed_at`). */
+  analyticsOverride: Record<string, unknown> = {},
+): Promise<{ sharpe: StatProps; cagr: StatProps; maxDd: StatProps; strings: string[]; cacheControl: string | null }> {
   STATE.strategyRow = {
     id: ID,
     name: "Parity Fixture",
@@ -216,13 +223,14 @@ async function renderOgCard(
         metrics_json_by_basis: null,
         data_quality_flags: flags,
         ...scalars,
+        ...analyticsOverride,
       },
     ],
   };
   const { GET } = await import("./route");
-  await GET(new Request(`http://localhost:3000/api/og/factsheet/${ID}`), {
+  const res = (await GET(new Request(`http://localhost:3000/api/og/factsheet/${ID}`), {
     params: Promise.resolve({ id: ID }),
-  });
+  })) as unknown as { headers: Headers };
   expect(ogCalls.length, "the route must construct a card").toBeGreaterThan(0);
   const card = ogCalls[ogCalls.length - 1];
   const sharpe = ogStat(card, "Sharpe");
@@ -231,7 +239,26 @@ async function renderOgCard(
   expect(sharpe, "the card must carry a Sharpe stat").toBeDefined();
   expect(cagr, "the card must carry a CAGR stat").toBeDefined();
   expect(maxDd, "the card must carry a Max DD stat").toBeDefined();
-  return { sharpe: sharpe!, cagr: cagr!, maxDd: maxDd! };
+  return {
+    sharpe: sharpe!,
+    cagr: cagr!,
+    maxDd: maxDd!,
+    strings: ogStrings(card),
+    cacheControl: res.headers.get("Cache-Control"),
+  };
+}
+
+/** Every string anywhere in the card's element tree (children or props). */
+function ogStrings(node: unknown, out: string[] = []): string[] {
+  if (typeof node === "string") {
+    out.push(node);
+  } else if (Array.isArray(node)) {
+    for (const c of node) ogStrings(c, out);
+  } else if (node && typeof node === "object") {
+    const props = (node as { props?: Record<string, unknown> }).props;
+    if (props) for (const v of Object.values(props)) ogStrings(v, out);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -512,5 +539,191 @@ describe("the card and the strip print and colour a rounded zero the same way (p
     expect(strip.colors.cagr).toBe("var(--color-positive)");
     expect(card.maxDd.color).toBe("#DC2626");
     expect(strip.colors.maxDd).toBe("var(--color-negative)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 237 FACT-02 (plan 05): a held re-run keeps the stored figures on the card
+// ---------------------------------------------------------------------------
+
+/** The element whose own children are exactly `text`, with its style. */
+function ogElementWithText(node: unknown, text: string): { style: Record<string, unknown> } | undefined {
+  if (Array.isArray(node)) {
+    for (const c of node) {
+      const v = ogElementWithText(c, text);
+      if (v) return v;
+    }
+    return undefined;
+  }
+  if (node && typeof node === "object") {
+    const props = (node as { props?: Record<string, unknown> }).props;
+    if (!props) return undefined;
+    if (props.children === text) return { style: (props.style ?? {}) as Record<string, unknown> };
+    return ogElementWithText(props.children, text);
+  }
+  return undefined;
+}
+
+describe("a held re-run: the card shows the strip's stored figures plus the Updating line (FACT-02, S5)", () => {
+  // The marker makes this row a pending/computing row OVER a stored success result
+  // (`hasStoredAnalyticsResult`: a series, a finite cumulative_return, a success marker).
+  const HELD_FLAGS = { cumulative_method: "geometric" };
+  const HELD = { computed_at: "2026-11-20T10:00:00Z" } as const;
+  const UPDATING = "Updating with the latest data. These figures are from the last completed computation.";
+  const HELD_CACHE = "public, max-age=60, s-maxage=60";
+
+  it.each(["pending", "computing"] as const)(
+    "a %s row over a stored success: the card equals the strip, the Updating line renders and the cache is the 60 s one",
+    async (status) => {
+      const card = await renderOgCard(LONG, STORED_LONG, HELD_FLAGS, CLEARED_SCALARS, {
+        ...HELD,
+        computation_status: status,
+      });
+      const strip = renderStrip(LONG, STORED_LONG, HELD_FLAGS);
+      // Hand-typed oracles beside the equality, so two matching dashes cannot pass.
+      expect(strip.sharpe).toBe("0.12");
+      expect(strip.cagr).toBe("+0.7%");
+      expect(strip.maxDd).toBe("-3.7%");
+      expect(card.sharpe.value).toBe(strip.sharpe);
+      expect(card.cagr.value).toBe(strip.cagr);
+      expect(card.maxDd.value).toBe(strip.maxDd);
+      expect(card.strings).toContain(UPDATING);
+      expect(card.cacheControl).toBe(HELD_CACHE);
+    },
+  );
+
+  it("control: the same row as complete prints the same figures with no Updating line and the long cache", async () => {
+    const card = await renderOgCard(LONG, STORED_LONG, HELD_FLAGS, CLEARED_SCALARS, HELD);
+    expect(card.sharpe.value).toBe("0.12");
+    expect(card.strings).not.toContain(UPDATING);
+    expect(card.cacheControl).toContain("s-maxage=86400");
+  });
+
+  it("the Updating line is #64748B at 20px; marginTop 24 alone, 8 after a figureNote, and after it in order", async () => {
+    const alone = await renderOgCard(LONG, STORED_LONG, HELD_FLAGS, CLEARED_SCALARS, {
+      ...HELD,
+      computation_status: "computing",
+    });
+    const aloneEl = ogElementWithText(ogCalls[ogCalls.length - 1], UPDATING);
+    expect(alone.strings).toContain(UPDATING);
+    expect(aloneEl?.style).toMatchObject({ fontSize: 20, color: "#64748B", marginTop: 24 });
+
+    await renderOgCard(LONG, STORED_LONG, HELD_FLAGS, UNDER_YEAR_SCALARS, {
+      ...HELD,
+      computation_status: "computing",
+    });
+    const card = ogCalls[ogCalls.length - 1];
+    const strings = ogStrings(card);
+    const noteIdx = strings.findIndex((s) => s.startsWith("Annualized from"));
+    expect(noteIdx, "a cleared-under-one-year record draws the marker note").toBeGreaterThan(-1);
+    expect(noteIdx).toBeLessThan(strings.indexOf(UPDATING));
+    expect(ogElementWithText(card, UPDATING)?.style).toMatchObject({ fontSize: 20, color: "#64748B", marginTop: 8 });
+  });
+
+  it("held over a Dated row prints the strip's own Dated figures (G1: the hold changes WHETHER the result is read, never which figures print)", async () => {
+    const flags = { ...HELD_FLAGS, twr_chain_broken: true, headline_since: "2025-09-01" };
+    const card = await renderOgCard(LONG, STORED_LONG, flags, CLEARED_SCALARS, {
+      ...HELD,
+      computation_status: "computing",
+    });
+    const strip = renderStrip(LONG, STORED_LONG, flags);
+    expect(card.sharpe.value).toBe("0.12");
+    expect(card.maxDd.value).toBe("-3.7%");
+    expect(card.sharpe.value).toBe(strip.sharpe);
+    expect(card.maxDd.value).toBe(strip.maxDd);
+    // E2: the card still withholds the suffix-only CAGR the strip shows.
+    expect(card.cagr.value).toBe("—");
+  });
+
+  it("held over a Withheld (legacy chain-broken) row prints the strip's own three dashes (G1)", async () => {
+    const flags = { ...HELD_FLAGS, twr_chain_broken: true };
+    const card = await renderOgCard(LONG, STORED_LONG, flags, CLEARED_SCALARS, {
+      ...HELD,
+      computation_status: "computing",
+    });
+    const strip = renderStrip(LONG, STORED_LONG, flags);
+    expect([strip.sharpe, strip.cagr, strip.maxDd]).toEqual(["—", "—", "—"]);
+    expect([card.sharpe.value, card.cagr.value, card.maxDd.value]).toEqual(["—", "—", "—"]);
+  });
+
+  // ---- The factsheet's own refusals and the last success's flags (RESEARCH Pitfall 2, D-04) ----
+
+  it("a computing row inside the derive prestamp window reads the last success's unit from its BOUND snapshot (Returns in BTC)", async () => {
+    // The derive hop replaced the live flags with a prestamp (no `cumulative_method`) and carried
+    // the last success's flags in `last_success_snapshot`, bound to the row's `computed_at`.
+    const flags = {
+      last_success_snapshot: {
+        computed_at: HELD.computed_at,
+        flags: { cumulative_method: "geometric", native_unit: "BTC" },
+      },
+    };
+    const card = await renderOgCard(LONG, STORED_LONG, flags, CLEARED_SCALARS, {
+      ...HELD,
+      computation_status: "computing",
+    });
+    expect(card.strings).toContain("Quantalyze · Institutional Factsheet · Returns in BTC");
+    expect(card.strings).toContain(UPDATING);
+    expect(card.sharpe.value).toBe("0.12");
+  });
+
+  it("control: an UNBOUND snapshot (another computed_at) is never used, so the prestamp holds nothing and the card is three dashes, no line, no-store", async () => {
+    const flags = {
+      last_success_snapshot: {
+        computed_at: "2026-01-01T00:00:00Z",
+        flags: { cumulative_method: "geometric", native_unit: "BTC" },
+      },
+    };
+    const card = await renderOgCard(LONG, STORED_LONG, flags, CLEARED_SCALARS, {
+      ...HELD,
+      computation_status: "computing",
+    });
+    expect([card.sharpe.value, card.cagr.value, card.maxDd.value]).toEqual(["—", "—", "—"]);
+    expect(card.strings).not.toContain(UPDATING);
+    expect(card.cacheControl).toBe("no-store");
+  });
+
+  it("a composite during a re-run: three dashes, no Updating line, no-store (matches the factsheet's queued state; RESEARCH A6)", async () => {
+    const card = await renderOgCard(LONG, STORED_LONG, { ...HELD_FLAGS, composite: true }, CLEARED_SCALARS, {
+      ...HELD,
+      computation_status: "computing",
+    });
+    expect([card.sharpe.value, card.cagr.value, card.maxDd.value]).toEqual(["—", "—", "—"]);
+    expect(card.strings).not.toContain(UPDATING);
+    expect(card.cacheControl).toBe("no-store");
+  });
+
+  it("a failed row with stored evidence: three dashes, no line, no-store (never held)", async () => {
+    const card = await renderOgCard(LONG, STORED_LONG, HELD_FLAGS, CLEARED_SCALARS, {
+      ...HELD,
+      computation_status: "failed",
+    });
+    expect([card.sharpe.value, card.cagr.value, card.maxDd.value]).toEqual(["—", "—", "—"]);
+    expect(card.strings).not.toContain(UPDATING);
+    expect(card.cacheControl).toBe("no-store");
+  });
+
+  it("D-04 behaviour change: a terminal-success row with an unbound derive prestamp prints three dashes and goes no-store, like the factsheet", async () => {
+    // `last_success_snapshot` KEY present (null: the derive had nothing to carry), no marker.
+    const card = await renderOgCard(LONG, STORED_LONG, { last_success_snapshot: null }, CLEARED_SCALARS, HELD);
+    expect([card.sharpe.value, card.cagr.value, card.maxDd.value]).toEqual(["—", "—", "—"]);
+    expect(card.strings).not.toContain(UPDATING);
+    expect(card.cacheControl).toBe("no-store");
+  });
+
+  it("a held row inside the prestamp window reads the headline verdict from the effective flags: a snapshot Dated row prints its stored Sharpe", async () => {
+    const flags = {
+      last_success_snapshot: {
+        computed_at: HELD.computed_at,
+        flags: { cumulative_method: "geometric", twr_chain_broken: true, headline_since: "2025-09-01" },
+      },
+    };
+    const card = await renderOgCard(LONG, STORED_LONG, flags, CLEARED_SCALARS, {
+      ...HELD,
+      computation_status: "computing",
+    });
+    expect(card.sharpe.value).toBe("0.12");
+    expect(card.maxDd.value).toBe("-3.7%");
+    // E2 reads the effective flags too: the stored CAGR covers only the suffix after the break.
+    expect(card.cagr.value).toBe("—");
   });
 });

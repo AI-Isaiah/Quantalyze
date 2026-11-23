@@ -329,7 +329,7 @@ describe("CalmarByYearPanel: signed zero (D-02)", () => {
       ...base,
       calmarByYear: [{ year: "2024", ret: -0.00004, max_dd: -0.00004, calmar: -0.004, days: 250 }],
     };
-    const { container } = mount(payload, <CalmarByYearPanel fullHistoryWithheld={false} />);
+    const { container } = mount(payload, <CalmarByYearPanel />);
     const cells = Array.from(container.querySelectorAll("tbody tr")[0].querySelectorAll("td")).map(c => c.textContent);
     expect(cells.slice(1, 4)).toEqual(["0.00%", "0.00%", "0.00"]);
   });

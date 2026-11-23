@@ -290,9 +290,12 @@ describe("194.1 B5 · /recommendations - each card's CAGR and Sharpe follow its 
     expect(analyticsSelect).toContain("trades_fetched_at");
     expect(analyticsSelect).toContain("series_end:returns_series->-1->>date");
     expect(analyticsSelect).toContain("record_observations:metrics_json->record_observations");
-    // Strip the four arrow aliases; no whole blob column may remain.
+    // Strip the four arrow aliases; no whole blob column may remain. Phase 237 FACT-02
+    // (ruling 2): `data_quality_flags` is now read whole, server-side, so `analyticsHold`
+    // can answer the composite and D-04 terms; the hold verdict reduces it to booleans
+    // (page.rerun-hold.test.tsx H10 pins that it never reaches the DOM).
     const bare = analyticsSelect.replace(/\w+:\w+->[^,]+/g, "");
-    for (const blob of ["returns_series", "metrics_json", "data_quality_flags"]) {
+    for (const blob of ["returns_series", "metrics_json"]) {
       expect(bare, `${blob} projected whole`).not.toContain(blob);
     }
 

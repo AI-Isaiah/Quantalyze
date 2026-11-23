@@ -6,7 +6,11 @@ import { withPublishedOnly } from "@/lib/visibility";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
 import { shortenOgDescription } from "@/lib/factsheet/og-description";
-import { isComputedAnalytics } from "@/lib/closed-sets";
+// Phase 237 FACT-02 / CACHE-01: the ONE held-re-run verdict every surface asks, and the copy the
+// card prints while a re-run is in flight (never an inlined sentence).
+import { analyticsHold, HELD_RERUN_CACHE_CONTROL } from "@/lib/analytics-hold";
+import { ANALYTICS_UPDATING_LINE } from "@/lib/status-surface-copy";
+import { effectiveDataQualityFlags } from "@/lib/stored-analytics-result";
 import { isUuid } from "@/lib/utils";
 // Phase 194.1 plan 06 (census B3; 194 D-04 as superseded by D-15, D-13, 2026-11-08): the card is
 // gated on the strategy's TOTAL record, built from the four alias scalars the embed carries.
@@ -38,11 +42,22 @@ import { formatRatio, formatSignedPercent, formatUnsignedPercent, percentTone } 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** A healthy card, or a genuine not-found: amortised across many unfurl hits. */
+/** A rendered terminal card (analytics admitted, figures drawn): amortised across many unfurl
+ *  hits. A genuine not-found and a card rendered without figures are NOT here: they go out
+ *  `FAILURE_CACHE_CONTROL` (Phase 237 CACHE-01, see the ladder at the header set). */
 const LONG_CACHE_CONTROL = "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800";
+/** Phase 237 FACT-02 / CACHE-01 (phase agent rulings 1 and 3, 2026-11-23): a card rendered from a
+ *  HELD re-run (the last success's figures plus the Updating line) is sent for 60 s and no longer,
+ *  with no `stale-while-revalidate`, so the line clears within a minute of the run finishing and
+ *  no CDN serves the held card after it expires. The literal has one source,
+ *  `HELD_RERUN_CACHE_CONTROL`, shared with both PDF routes; this alias keeps the OG cache
+ *  constants defined in this file (a test reads `FAILURE_CACHE_CONTROL` by regex). */
+const SHORT_CACHE_CONTROL = HELD_RERUN_CACHE_CONTROL;
 /** Review round 1 SFH-02: a card rendered from a FAILURE is never cached, so
  *  the next unfurl retries instead of freezing the failure for a day at the
- *  CDN (the precedent is the BTC benchmark route's `ERROR_CACHE_CONTROL`). */
+ *  CDN (the precedent is the BTC benchmark route's `ERROR_CACHE_CONTROL`).
+ *  Phase 237 CACHE-01 reuses it, with no new constant, for a not-found card and a
+ *  published card rendered without figures. */
 const FAILURE_CACHE_CONTROL = "no-store";
 
 /** Log a failure, then report it to Sentry after the response (throttled per
@@ -79,6 +94,9 @@ type AnalyticsEmbed = {
   sharpe?: unknown;
   max_drawdown?: unknown;
   data_quality_flags?: unknown;
+  /** Phase 237: binds a `last_success_snapshot` to the success that stored the numbers
+   *  (`effectiveDataQualityFlags`, `analyticsHold`). Never printed. */
+  computed_at?: unknown;
   metrics_json_by_basis?: unknown;
   cumulative_return?: unknown;
   volatility?: unknown;
@@ -160,7 +178,11 @@ export async function GET(
             // the resolved series, which is capped. The concatenation types the select `string`:
             // postgrest-js cannot parse the `->-1` index of the `series_end` alias at the type
             // level, so a literal would type every row as a `ParserError`; the row is cast below.
-            "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cumulative_return, volatility, cagr, sharpe, sortino, calmar, max_drawdown, data_quality_flags, metrics_json_by_basis, " +
+            // Phase 237 FACT-02: `computed_at` joins the embed. It binds a derive hop's
+            // `last_success_snapshot` to the success that stored the numbers, which the hold
+            // (`analyticsHold`) and the effective flags need. Read-only; it never leaves the
+            // server (this response is a PNG).
+            "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cumulative_return, volatility, cagr, sharpe, sortino, calmar, max_drawdown, data_quality_flags, computed_at, metrics_json_by_basis, " +
               RECORD_SCALAR_ALIASES +
               " )",
           )
@@ -206,6 +228,18 @@ export async function GET(
   // Phase 194.1 plan 06 (B3, D-15 / D-13): the ONE muted line under the stat row. Declared
   // beside the NaN sentinels so a throw below leaves it null, and the card still renders.
   let figureNote: string | null = null;
+  // Phase 237 CACHE-01 (phase agent ruling 1, 2026-11-23): true only once the route has entered
+  // the figure branch (analytics admitted, two or more series points) and computeOgHeadline has
+  // returned. It defaults to false and is declared beside the sentinels, so a throw inside the
+  // compute try leaves it false and the card goes no-store. A terminal Withheld card that
+  // entered the branch and prints dashes still counts as rendered: that is the row's true
+  // terminal state, so "no figures rendered" means "not rendered from admitted analytics".
+  let figuresRendered = false;
+  // Phase 237 FACT-02: the held-re-run verdict (`analyticsHold`) for this row. Declared beside the
+  // sentinels and defaulting to "not admitted, not updating", so a throw or a missing analytics row
+  // leaves the card on the dashes with no Updating line. `updating` is true only for a pending or
+  // computing row over a stored, non-composite success result.
+  let hold: { updating: boolean; admitted: boolean } = { updating: false, admitted: false };
   // Phase 164.6.6.2 plan 07 (D-12, T-164.6.6.2-22): the unit this card's CAGR is
   // in. It comes from the row's own `data_quality_flags.native_unit`, through the
   // one validator, and from NOTHING the caller sent: the page links the card as
@@ -229,15 +263,21 @@ export async function GET(
     // daily column is null. That fallback is the fix — the old gate tested the
     // daily column for array-ness, a null column failed it, and the metrics
     // were never computed at all, so the card rendered blank.
+    //
+    // Phase 237 FACT-02 (RESEARCH Pitfall 2): the unit and the curve method come from the EFFECTIVE
+    // flags, the ones that belong to the numbers the row stores. Inside the derive hop's prestamp
+    // window the live flags are the new run's while the series and figures are the last success's,
+    // so a held row would otherwise print the wrong unit and difference its curve the wrong way.
+    // The raw blob is read nowhere else on this route and never leaves the server (a PNG).
+    const effectiveFlags = effectiveDataQualityFlags(analytics).flags;
     unit = parseReturnsUnit(
-      (analytics?.data_quality_flags as { native_unit?: unknown } | null | undefined)
-        ?.native_unit,
+      (effectiveFlags as { native_unit?: unknown } | null | undefined)?.native_unit,
     );
     const rows = resolveDailyReturnSeries(
       analytics?.daily_returns,
       analytics?.returns_series,
       // 164.6.6.2.2 D-05: the curve is read by the row's own method.
-      curveMethodFromFlags(analytics?.data_quality_flags),
+      curveMethodFromFlags(effectiveFlags),
     );
     // STALE-01 — the SERIES is a job output too, so a run that did not finish
     // leaves the previous run's track sitting in these columns and nothing
@@ -257,11 +297,15 @@ export async function GET(
     // NaN sentinel as "—". A non-terminal row is the same answer to the same
     // question, so it reuses the same path: name + description + three
     // em-dashes. No new layout, no error card, and the route still cannot 500.
-    const computationStatus =
-      typeof analytics?.computation_status === "string"
-        ? analytics.computation_status
-        : null;
-    const analyticsComputed = isComputedAnalytics(computationStatus);
+    //
+    // Phase 237 FACT-02: the gate is `analyticsHold`, the factsheet resolve stage's own three
+    // refusals (not a terminal success and not a held re-run; a terminal row whose derive
+    // prestamp left no bound snapshot; a composite while updating). It admits a terminal success
+    // exactly as before and ALSO a pending or computing row over a stored success result, so a
+    // re-run keeps the last success's figures on the card with the Updating line, instead of
+    // the three dashes. A failed row, and a re-run with no stored result, are still never
+    // admitted, so a dead run's track is still never recomputed here (STALE-01 stands).
+    hold = analyticsHold(analytics);
     // Two points is the floor for any of the three metrics to mean anything
     // (computeOgHeadline returns NaN — the "—" sentinel — for a figure it cannot
     // support).
@@ -270,11 +314,14 @@ export async function GET(
     // factsheet shows (164.6.6.3.3 D-06), with CAGR's two named exceptions
     // (computeOgHeadline's docblock); only a key the embed did not carry falls
     // back to the computation, and a stored null hides.
-    if (analyticsComputed && rows.length >= 2) {
+    if (hold.admitted && rows.length >= 2) {
       // SFH-R2-01: the embed row itself, so a key PostgREST did not answer is
       // ABSENT from it (the page's `missing_keys` gate reads presence), not
       // undefined-valued as a picked literal would make it.
-      ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class, analytics));
+      // Phase 237: `hold.updating` is the fourth argument, so the three inner gates read the
+      // stored result of a held re-run exactly as the factsheet's resolve stage does.
+      ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class, analytics, hold.updating));
+      figuresRendered = true;
       // Phase 194.1 plan 06 (B3; 194 D-04 as superseded by D-15, D-13, 2026-11-08): the verdict is
       // the strategy's TOTAL record, from the stored alias scalars and never `rows.length` (the
       // resolved series is capped), exactly as the factsheet strip reads it. Withheld: Sharpe and
@@ -346,6 +393,13 @@ export async function GET(
         {figureNote && (
           <div style={{ marginTop: 24, fontSize: 20, color: "#64748B" }}>{figureNote}</div>
         )}
+        {/* Phase 237 FACT-02 (UI-SPEC S5): directly under the stat row, after the figureNote when
+            both render (the factsheet header's order). Only while a held re-run's figures are drawn. */}
+        {hold.updating && figuresRendered && (
+          <div style={{ marginTop: figureNote ? 8 : 24, fontSize: 20, color: "#64748B" }}>
+            {ANALYTICS_UPDATING_LINE}
+          </div>
+        )}
         <div style={{ marginTop: "auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ fontSize: 18, color: "#64748B" }}>quantalyze.xyz</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#1B6B5A", fontSize: 18, letterSpacing: 2 }}>
@@ -357,13 +411,30 @@ export async function GET(
     ),
     { width: 1200, height: 630 },
   );
-  // OG card is amortised across many unfurl hits (LinkedIn, Slack, Twitter
-  // each fetch on share). 1h browser TTL + 24h CDN TTL with stale-while-
-  // revalidate so a refresh after computed_at change picks up the new card
-  // within the SWR window without stampeding the underlying compute.
-  // SFH-02: a card rendered from a failed read or a failed compute is sent
-  // no-store instead, so one bad request is not served for a day.
-  response.headers.set("Cache-Control", failed ? FAILURE_CACHE_CONTROL : LONG_CACHE_CONTROL);
+  // Cache ladder (Phase 237 CACHE-01, phase agent ruling 1, 2026-11-23):
+  //   failed, genuine not-found, or no figures rendered  -> FAILURE_CACHE_CONTROL (no-store)
+  //   a held re-run with figures (the Updating line)     -> SHORT_CACHE_CONTROL (60 s, no SWR)
+  //   a rendered terminal card                           -> LONG_CACHE_CONTROL
+  // The long cache amortises a card over many unfurl hits (LinkedIn, Slack and Twitter each fetch
+  // on share): 1h browser TTL + 24h CDN TTL with stale-while-revalidate. It is only safe for a
+  // card whose content is final. A not-found card and a figure-less card are the opposite: a
+  // strategy published, or computed, after its first unfurl must show its real card on the VERY
+  // NEXT request, which no TTL can promise, so neither is stored by any cache. The held re-run
+  // card (the last success's figures plus the Updating line) is short-cached: it is true while the
+  // run is in flight, and the line must clear within a minute of the run finishing, which the
+  // long cache and its stale-while-revalidate could not promise.
+  // SFH-02: a card rendered from a failed read or a failed compute is no-store as before.
+  // One not-found boolean covers the malformed, unknown and unpublished ids, so the three send
+  // the IDENTICAL header and card and the response is no existence oracle (T-170.3-01).
+  const notFound = data === null && !failed;
+  response.headers.set(
+    "Cache-Control",
+    failed || notFound || !figuresRendered
+      ? FAILURE_CACHE_CONTROL
+      : hold.updating
+        ? SHORT_CACHE_CONTROL
+        : LONG_CACHE_CONTROL,
+  );
   return response;
 }
 

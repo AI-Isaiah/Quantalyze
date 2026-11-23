@@ -239,6 +239,7 @@ import type {
 } from "@/lib/queries";
 import { DegradeLine } from "@/components/degrade/DegradeLine";
 import { degradeSegments, type DegradeId } from "@/lib/degrade-warnings";
+import { ANALYTICS_UPDATING_LINE } from "@/lib/status-surface-copy";
 import {
   apiKeyLabelById as buildApiKeyLabelById,
   dataSourceLabel,
@@ -1362,6 +1363,14 @@ export function ScenarioComposer({
   const [addedSeriesStateById, setAddedSeriesStateById] = useState<
     Record<string, SeriesState>
   >({});
+  // Phase 237 / FACT-02 (UI-SPEC S8) — the lazily-fetched `analytics_updating`
+  // boolean for a drawer-added, NON-book strategy, keyed by id: the returns API
+  // holds a re-running row's stored figures and says so. Same lifecycle as
+  // addedSeriesStateById (settle writer + purge on remove). An id with NO entry
+  // is false: nothing has told us it is updating, so no line is printed.
+  const [addedAnalyticsUpdatingById, setAddedAnalyticsUpdatingById] = useState<
+    Record<string, boolean>
+  >({});
   // Ids whose lazy fetch is in flight — drives the honest "loading returns…"
   // affordance on the added row. While loading, the strategy contributes []
   // (warm-up-gated), NEVER a fabricated flat/zero series (Pitfall 4).
@@ -1675,6 +1684,7 @@ export function ScenarioComposer({
       metrics: SettledMetrics,
       native: { unit: string | null; usdSeries: DailyPoint[]; unpriced: boolean },
       tinyBaseDays: string[],
+      analyticsUpdating: boolean,
     ) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
       setAddedTinyBaseDaysById((prev) => ({ ...prev, [id]: tinyBaseDays }));
@@ -1690,6 +1700,9 @@ export function ScenarioComposer({
       // SCEN-01 — record what an EMPTY series means for this leg, so the row can
       // say "Syncing" or "No data" instead of rendering 0.00 with no signal.
       setAddedSeriesStateById((prev) => ({ ...prev, [id]: seriesState }));
+      // Phase 237 / FACT-02 — the held-re-run flag, written in the same settle
+      // step as series_state so the two can never describe different fetches.
+      setAddedAnalyticsUpdatingById((prev) => ({ ...prev, [id]: analyticsUpdating }));
       // HONEST-05 — record the co-served metric pair. Written UNCONDITIONALLY,
       // including when both are null: the WRITE is what turns "still asking"
       // into the settled claim the absence note is allowed to make (C-4).
@@ -1745,6 +1758,7 @@ export function ScenarioComposer({
           daily_returns_usd?: unknown;
           native_unpriced?: unknown;
           tiny_base_days?: unknown;
+          analytics_updating?: unknown;
         }) => {
           // A 200 with a non-array body is a malformed/failed response, NOT a
           // genuine empty series — treat it as a retryable failure (WR-01).
@@ -1813,6 +1827,11 @@ export function ScenarioComposer({
             native,
             // 188 D-07: the route already parsed the list; a stale deploy omits it -> none.
             readTinyBaseDays(d.tiny_base_days),
+            // Phase 237 / FACT-02 — strict boolean true only (T-237-14): an
+            // absent field (stale deploy), the string "true" or any malformed
+            // value is "not claimed updating", so no line is ever printed on a
+            // guess.
+            d.analytics_updating === true,
           );
         },
       )
@@ -2674,6 +2693,24 @@ export function ScenarioComposer({
     return map;
   }, [scenario.draft.addedStrategies, strategyById, addedSeriesStateById]);
 
+  // Phase 237 / FACT-02 (UI-SPEC S8) — the per-row "is this strategy re-running
+  // over its stored figures" flag the row's Updating line renders from, merged in
+  // the SAME precedence as addedSeriesStateByRef: a strategy in the book takes the
+  // book value (the My-allocation payload's `analytics_updating`, set server-side
+  // by `analyticsHold`), otherwise the lazily-fetched value, otherwise false. The
+  // book value wins even when it is false and a lazy body says true. ⛔ The
+  // composer reads a boolean only; it never re-derives the verdict.
+  const addedAnalyticsUpdatingByRef = useMemo<Record<string, boolean>>(() => {
+    const map: Record<string, boolean> = {};
+    for (const a of scenario.draft.addedStrategies) {
+      const found = strategyById.get(a.id);
+      map[a.id] = found
+        ? found.strategy.analytics_updating === true
+        : (addedAnalyticsUpdatingById[a.id] ?? false);
+    }
+    return map;
+  }, [scenario.draft.addedStrategies, strategyById, addedAnalyticsUpdatingById]);
+
   // UNIFY-04 — the display names of added strategies whose lazy returns fetch
   // is still in flight, for the honest "loading returns…" affordance. Derived
   // from the loading-id set ∩ the current added strategies (an id that was
@@ -2814,6 +2851,14 @@ export function ScenarioComposer({
       setAddedSeriesStateById((prev) => {
         if (!(id in prev)) return prev;
         const { [id]: _dropState, ...rest } = prev;
+        return rest;
+      });
+      // Phase 237 / FACT-02 — purge the fetched updating flag identically, or a
+      // re-add would print a STALE "Updating" line against a retry that has not
+      // answered yet.
+      setAddedAnalyticsUpdatingById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropUpdating, ...rest } = prev;
         return rest;
       });
       // HONEST-05 — purge the fetched metric pair identically. Leaving it would
@@ -6858,6 +6903,7 @@ export function ScenarioComposer({
           onRemoveAdded={handleRemoveAdded}
           coverageEligible={coverageEligible}
           addedSeriesStateByRef={addedSeriesStateByRef}
+          addedAnalyticsUpdatingByRef={addedAnalyticsUpdatingByRef}
         />
       </CollapsibleSection>
 
@@ -7399,6 +7445,13 @@ interface CompositionListProps {
    * tell a running job from terminal absence — UI-SPEC §3).
    */
   addedSeriesStateByRef: Record<string, SeriesState>;
+  /**
+   * Phase 237 / FACT-02 (UI-SPEC S8) — "is this strategy's analytics re-running
+   * over its stored figures", merged from the lazy returns route (book value
+   * wins, arriving in plan 13). Threaded READ-ONLY: the row prints the Updating
+   * line from it and never re-derives it.
+   */
+  addedAnalyticsUpdatingByRef: Record<string, boolean>;
 }
 
 /**
@@ -7454,6 +7507,7 @@ function CompositionList({
   onRemoveAdded,
   coverageEligible,
   addedSeriesStateByRef,
+  addedAnalyticsUpdatingByRef,
 }: CompositionListProps) {
   /**
    * Phase 152 SCEN-03 — the id of the ONE added row whose detail panel is open,
@@ -8362,6 +8416,14 @@ function CompositionList({
           // false next to one, and a render guard is cheaper than the assumption.
           const metricsUnavailable =
             metricsAbsent && metrics.state === "unavailable";
+          // Phase 237 / FACT-02 (UI-SPEC S8) — the Updating line is a claim about
+          // the figures ABOVE it ("these are from the last completed
+          // computation"), so it needs figures to qualify: it never renders
+          // beside the absent or unavailable notes, which say there are none.
+          const analyticsUpdating =
+            addedAnalyticsUpdatingByRef[a.id] === true &&
+            !metricsAbsentSettled &&
+            !metricsUnavailable;
           const detailOpen = expandedAddedId === a.id;
           return (
             <li
@@ -8702,6 +8764,20 @@ function CompositionList({
                         {`No ${unit} price available, so this strategy is left out of the USD blend.`}
                       </p>
                     </div>
+                  )}
+                  {/* Phase 237 / FACT-02 (UI-SPEC S8) — a held re-run: the row
+                      shows its stored figures and says they are the last
+                      completed computation. Same slot and muted voice as the
+                      notes around it, AFTER the unpriced note, and never beside
+                      the absent / unavailable notes (see `analyticsUpdating`). */}
+                  {analyticsUpdating && (
+                    <p
+                      className="mt-2 text-xs text-text-muted"
+                      data-degrade-id="scenario.analytics-updating"
+                      data-testid={`scenario-detail-analytics-updating-${a.id}`}
+                    >
+                      {ANALYTICS_UPDATING_LINE}
+                    </p>
                   )}
                   {/* BOTH missing AND settled → one sentence that names the
                       remedy, instead of two dashes that name nothing.

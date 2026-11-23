@@ -330,11 +330,13 @@ describe("anon strategies live probe - the real public readers as a signed-out v
         params: Promise.resolve({ id: seeded.strategyId! }),
       });
       expect(res.status).toBe(200);
-      // SFH-02: a card rendered from a failed read or compute is sent no-store.
-      expect(res.headers.get("Cache-Control")).not.toBe("no-store");
+      // The failure path is proven absent by afterSpy, not by the header: since
+      // Phase 237 CACHE-01 a figure-less card is also no-store, and the seed carries
+      // no return series, so this card renders without figures and is no-store too.
+      expect(res.headers.get("Cache-Control")).toBe("no-store");
       expect(afterSpy, "the route reported a read or compute failure").not.toHaveBeenCalled();
-      // A genuine not-found also answers 200 with the long cache and the generic
-      // card, so the element must name the seeded strategy to prove the row was read.
+      // A genuine not-found also answers 200 (no-store) with the generic card, so
+      // the element must name the seeded strategy to prove the row was read.
       expect(ogCalls).toHaveLength(1);
       expect(JSON.stringify(ogCalls[0].element)).toContain(strategyName);
     },

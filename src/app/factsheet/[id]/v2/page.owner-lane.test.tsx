@@ -243,8 +243,15 @@ function mockRequestClient() {
           STATE.observed.requestOrFilters.push(filter);
           return chain;
         },
+        // Phase 237 (FACT-04): the owner lane's tier read chains order/limit on
+        // `strategy_verifications`. No verification row for these draft fixtures.
+        order: () => chain,
+        limit: () => chain,
         maybeSingle: () => {
           STATE.observed.events.push(sawOr ? `${table}:owner` : table);
+          if (table === "strategy_verifications") {
+            return Promise.resolve({ data: null, error: null });
+          }
           return Promise.resolve(
             sawOr
               ? { data: STATE.ownerRow, error: STATE.probeError }
@@ -340,7 +347,8 @@ function givenOwnerDraft() {
   STATE.publishedRow = null;
   // `user_id` is the session user: the owner lane is reachable only for a row
   // the session owns, and Phase 196's viewer resolution compares the two (an
-  // owner needs no profile read, which keeps the request-client read count at 3).
+  // owner needs no profile read, which keeps the request-client read count at 4:
+  // Lane A probe, Lane B probe, share-state, and the Phase 237 owner tier read).
   STATE.ownerRow = { ...signatureRow("Draft Alpha"), status: "draft", user_id: OWNER_UID };
   STATE.adminRow = adminStrategyRow("draft");
   STATE.sessionUser = { id: OWNER_UID };
@@ -535,7 +543,14 @@ describe("SC4 — uniform notFound, session-keyed owner predicate", () => {
     // still pinned exactly, not loosened to `>= 2`, because an unbounded
     // number of request-client reads on this lane is itself the thing worth
     // noticing — every one of them runs on a page an owner loads.
-    expect(STATE.observed.requestSelects).toHaveLength(3);
+    //
+    // Phase 237 (FACT-04) widened it again, from 3 to 4: the owner lane now also
+    // reads the latest `strategy_verifications` row on the same request-scoped
+    // client, so the owner sees their own data source. Still pinned exactly, and
+    // the new read's projection is pinned below: it must never grow past the two
+    // columns the overlay needs (the table carries `encrypted_credentials`).
+    expect(STATE.observed.requestSelects).toHaveLength(4);
+    expect(STATE.observed.requestSelects[3]).toBe("trust_tier, created_at");
     expect(STATE.observed.requestSelects[0]).toBe(SIGNATURE_SELECT);
     const laneBSelect = STATE.observed.requestSelects[1];
     for (const col of SIGNATURE_SELECT.split(", ")) {

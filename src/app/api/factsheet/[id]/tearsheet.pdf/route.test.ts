@@ -556,3 +556,159 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — an error page is never print
     expect(captureToSentry).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Phase 237 (FACTSHEETHONEST) FACT-02 surface S4 — a pending or computing re-run over a stored
+ * success result keeps the tear sheet PDF published. The door is `analyticsHold`, the verdict the
+ * tear sheet page applies, so a first-ever compute (no stored result) is still refused HERE with a
+ * 400. Admitting every pending row would reach the page, find the pending state, and answer a 503
+ * plus a Sentry error. A held render takes the short cache; the terminal render keeps its own.
+ */
+describe("GET /api/factsheet/[id]/tearsheet.pdf — a held re-run stays published (Phase 237 FACT-02, S4)", () => {
+  const COMPUTED_AT = "2026-05-17T00:00:00.000Z";
+  const HELD_CACHE = "public, max-age=60, s-maxage=60";
+  const TERMINAL_CACHE = "public, s-maxage=300, stale-while-revalidate=300";
+  let selectSpy: ReturnType<typeof vi.fn>;
+
+  /** A row that stores a successful compute: series, finite headline, success-written flags. */
+  const evidence = {
+    computed_at: COMPUTED_AT,
+    cumulative_return: 0.12,
+    returns_series: [{ date: "2026-05-01", value: 0.01 }],
+    data_quality_flags: { cumulative_method: "compounded" },
+  };
+
+  function serveAnalytics(analytics: Record<string, unknown> | null) {
+    const single = vi.fn().mockResolvedValue({
+      data: {
+        id: STRATEGY_ID,
+        name: "Momentum Strategy",
+        status: "published",
+        strategy_analytics: analytics === null ? [] : [analytics],
+      },
+      error: null,
+    });
+    const eq2 = vi.fn().mockReturnValue({ single });
+    const eq1 = vi.fn().mockReturnValue({ eq: eq2 });
+    selectSpy = vi.fn().mockReturnValue({ eq: eq1 });
+    const from = vi.fn().mockReturnValue({ select: selectSpy });
+    vi.mocked(createAdminClient).mockReturnValue({ from } as never);
+  }
+
+  async function get() {
+    const { GET } = await import("./route");
+    return GET(
+      new NextRequest(`https://quantalyze.xyz/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`, {
+        method: "GET",
+      }),
+      mkParams(),
+    );
+  }
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.mocked(checkLimit).mockReset();
+    vi.mocked(checkLimit).mockResolvedValue({ success: true, retryAfter: 0 } as never);
+    vi.mocked(createAdminClient).mockReset();
+    const puppeteer = await import("@/lib/puppeteer");
+    vi.mocked(puppeteer.acquirePdfSlot).mockReset();
+    vi.mocked(puppeteer.launchBrowser).mockReset();
+    vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
+    const newPage = vi.fn().mockResolvedValue({
+      goto: vi.fn().mockResolvedValue({ status: () => 200 }),
+      setDefaultNavigationTimeout: vi.fn(),
+      setDefaultTimeout: vi.fn(),
+      setViewport: vi.fn().mockResolvedValue(undefined),
+      evaluate: evaluateOn(["tearsheet-main"]),
+      pdf: vi.fn().mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46])),
+    });
+    vi.mocked(puppeteer.launchBrowser).mockResolvedValue({
+      newPage,
+      close: vi.fn().mockResolvedValue(undefined),
+    } as never);
+  });
+
+  afterEach(() => {
+    process.env = { ...ENV_BACKUP };
+  });
+
+  async function expectRefused() {
+    const res = await get();
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("Analytics not computed");
+    const puppeteer = await import("@/lib/puppeteer");
+    expect(puppeteer.acquirePdfSlot).not.toHaveBeenCalled();
+    expect(puppeteer.launchBrowser).not.toHaveBeenCalled();
+  }
+
+  it.each(["pending", "computing"])(
+    "T1: a %s row over a stored success is admitted and prints with the held cache, Vary unchanged",
+    async (status) => {
+      serveAnalytics({ computation_status: status, ...evidence });
+      const res = await get();
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Cache-Control")).toBe(HELD_CACHE);
+      expect(res.headers.get("Vary")).toBe("Cookie, Authorization, Host");
+    },
+  );
+
+  it("T2: a terminal-success row keeps its s-maxage=300 header byte for byte", async () => {
+    serveAnalytics({ computation_status: "complete", ...evidence });
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe(TERMINAL_CACHE);
+    expect(res.headers.get("Vary")).toBe("Cookie, Authorization, Host");
+  });
+
+  it.each(["running", "computing", "pending"])(
+    "T3: a %s row WITHOUT stored evidence is still refused (control, first-ever compute)",
+    async (status) => {
+      serveAnalytics({ computation_status: status, computed_at: COMPUTED_AT });
+      await expectRefused();
+    },
+  );
+
+  it("T4: a failed row is refused even with stored evidence", async () => {
+    serveAnalytics({ computation_status: "failed", ...evidence });
+    await expectRefused();
+  });
+
+  it("T5: a composite row during a re-run is refused, matching the factsheet's queued state", async () => {
+    serveAnalytics({
+      computation_status: "computing",
+      ...evidence,
+      data_quality_flags: { cumulative_method: "compounded", composite: true },
+    });
+    await expectRefused();
+  });
+
+  it("T6: a terminal-success row with an unbound derive prestamp is refused (D-04, a behaviour change)", async () => {
+    serveAnalytics({
+      computation_status: "complete",
+      ...evidence,
+      data_quality_flags: { last_success_snapshot: null },
+    });
+    await expectRefused();
+  });
+
+  it("T7: no analytics row at all is refused", async () => {
+    serveAnalytics(null);
+    await expectRefused();
+  });
+
+  it("T8: the select names every evidence column, or the hold is dead code", async () => {
+    serveAnalytics({ computation_status: "complete", ...evidence });
+    await get();
+    const selected = String(selectSpy.mock.calls[0][0]);
+    for (const col of [
+      "computation_status",
+      "computed_at",
+      "cumulative_return",
+      "daily_returns",
+      "returns_series",
+      "data_quality_flags",
+    ]) {
+      expect(selected).toContain(col);
+    }
+  });
+});

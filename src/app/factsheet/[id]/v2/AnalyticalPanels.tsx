@@ -10,6 +10,7 @@ import { pct, pctSigned, ratio } from "./format";
 import type { FigureState } from "@/lib/figure-gate";
 import { Term } from "@/components/ui/Term";
 import type { TermKey } from "@/lib/glossary";
+import type { ReactNode } from "react";
 
 /**
  * Three analytical panels rounding out the v2 page:
@@ -283,7 +284,7 @@ export function ScopeNote({ text }: { text: string }) {
   );
 }
 
-export function CalmarByYearPanel({ fullHistoryWithheld }: { fullHistoryWithheld: boolean }) {
+export function CalmarByYearPanel({ withheldBody }: { withheldBody?: ReactNode }) {
   // Phase 103 (MTM-04): per-year Calmar recomputes from the strategy's own daily
   // series → follows the active basis (cash view === payload).
   const payload = usePayload();
@@ -293,26 +294,36 @@ export function CalmarByYearPanel({ fullHistoryWithheld }: { fullHistoryWithheld
   const selected = useWindowedView(payload).scope.kind === "selected";
   const rows = view.calmarByYear;
   if (rows.length === 0) return null;
-  // Plan 15 review WR-01 (founder 2026-10-15): the record's last calendar year is the Year-to-date
-  // figure, dashed in the Returns panel on a Withheld row, and Calmar is Return / |Max DD|. On that
-  // row the last year's Return, Max DD and Calmar read "—" (decided once in `MetricsColumn`, passed
-  // in). The year label and the day count are not figures and stay.
-  const lastYear = view.dates.length > 0 ? view.dates[view.dates.length - 1].slice(0, 4) : null;
   // Flag any partial-year row — < 200 trading days means Calmar is annualised
   // from a stub and shouldn't be treated as comparable to a full-year value.
   const hasPartial = rows.some(r => r.days < 200);
+  const header = (
+    <header className="mb-2 border-b border-text pb-1">
+      {selected ? (
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary"><Term k="calmar">Calmar</Term> by Year</h3>
+          <ScopeNote text={FULL_HISTORY_NOTE} />
+        </div>
+      ) : (
+        <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary"><Term k="calmar">Calmar</Term> by Year</h3>
+      )}
+    </header>
+  );
+  // Phase 237 FACT-01 (founder Q2): on a Withheld full-history view the by-year rows compound across
+  // the break, and a Withheld row cannot name which year holds it, so no year row prints. The
+  // note arrives as `withheldBody`, decided once in `MetricsColumn`, which this file never imports
+  // (MetricsColumn imports this file, so that would be a cycle). The header and ScopeNote stay.
+  if (withheldBody != null) {
+    return (
+      <section>
+        {header}
+        {withheldBody}
+      </section>
+    );
+  }
   return (
     <section>
-      <header className="mb-2 border-b border-text pb-1">
-        {selected ? (
-          <div className="flex items-baseline gap-2">
-            <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary"><Term k="calmar">Calmar</Term> by Year</h3>
-            <ScopeNote text={FULL_HISTORY_NOTE} />
-          </div>
-        ) : (
-          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary"><Term k="calmar">Calmar</Term> by Year</h3>
-        )}
-      </header>
+      {header}
       <table className="w-full text-micro">
         <thead>
           <tr className="border-b border-border/60">
@@ -326,7 +337,6 @@ export function CalmarByYearPanel({ fullHistoryWithheld }: { fullHistoryWithheld
         <tbody>
           {rows.map(r => {
             const partial = r.days < 200;
-            const dashed = fullHistoryWithheld && r.year === lastYear;
             return (
               <tr key={r.year} className="border-b border-border/30 last:border-0">
                 <td className="py-1 pr-2 font-mono text-text-2">
@@ -341,9 +351,9 @@ export function CalmarByYearPanel({ fullHistoryWithheld }: { fullHistoryWithheld
                     </span>
                   )}
                 </td>
-                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{dashed ? "—" : pctSigned(r.ret, 2)}</td>
-                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{dashed ? "—" : pct(r.max_dd, 2)}</td>
-                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{dashed ? "—" : ratio(r.calmar)}</td>
+                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{pctSigned(r.ret, 2)}</td>
+                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{pct(r.max_dd, 2)}</td>
+                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{ratio(r.calmar)}</td>
                 <td className="py-1 pl-2 text-right font-mono tabular-nums text-text-2">{r.days}</td>
               </tr>
             );

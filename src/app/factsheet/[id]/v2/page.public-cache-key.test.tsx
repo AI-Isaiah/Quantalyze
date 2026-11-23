@@ -33,7 +33,7 @@
  *
  * All ids, names and figures are synthetic.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render } from "@testing-library/react";
 import type { ReactElement } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -79,6 +79,7 @@ import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { OG_CARD_VERSION } from "@/lib/factsheet/og-metrics";
+import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-payload";
 
 const STRATEGY_ID = "51a10001-0000-4000-8000-0000000000d2";
 
@@ -119,8 +120,44 @@ function adminRow(analytics: { computed_at: string; computation_status: string; 
 
 let adminReads = 0;
 
+/**
+ * Phase 237 CACHE-03: what the `benchmark_prices` table answers for the NEXT build.
+ * A test sets it before each request, so one request can see a failed read and the
+ * next a good one, exactly the blip the cache must not remember. `reads` counts the
+ * queries the BTC reader issued. The default is an empty successful page.
+ */
+const btcFake = {
+  rows: [] as { date: string; close_price: number | string | null }[],
+  error: null as unknown,
+  reads: 0,
+};
+
+/** A PostgREST-shaped `benchmark_prices` query: honours the reader's filters, order and limit. */
+function btcQuery() {
+  btcFake.reads += 1;
+  const f = { gte: null as string | null, lte: null as string | null, lt: null as string | null, asc: true, limit: Infinity };
+  const b: Record<string, unknown> = {};
+  b.select = () => b;
+  b.eq = () => b;
+  b.gte = (_c: string, v: string) => ((f.gte = v), b);
+  b.lte = (_c: string, v: string) => ((f.lte = v), b);
+  b.lt = (_c: string, v: string) => ((f.lt = v), b);
+  b.order = (_c: string, o?: { ascending?: boolean }) => ((f.asc = o?.ascending !== false), b);
+  b.limit = (n: number) => ((f.limit = n), b);
+  b.then = (resolve: (v: unknown) => unknown) => {
+    if (btcFake.error) return resolve({ data: null, error: btcFake.error });
+    const rows = btcFake.rows
+      .filter((r) => (f.gte === null || r.date >= f.gte) && (f.lte === null || r.date <= f.lte) && (f.lt === null || r.date < f.lt))
+      .sort((x, y) => (f.asc ? x.date.localeCompare(y.date) : y.date.localeCompare(x.date)))
+      .slice(0, f.limit);
+    return resolve({ data: rows, error: null });
+  };
+  return b;
+}
+
 function mockAdmin(strategy: unknown, error: unknown = null): SupabaseClient {
   const from = (table: string) => {
+    if (table === "benchmark_prices") return btcQuery();
     const chain = {
       select: () => chain,
       eq: () => chain,
@@ -205,6 +242,9 @@ beforeEach(() => {
   cacheStore.clear();
   cacheKeys.length = 0;
   adminReads = 0;
+  btcFake.rows = [];
+  btcFake.error = null;
+  btcFake.reads = 0;
   vi.mocked(readPublicVerificationSignals).mockResolvedValue(
     new Map([[STRATEGY_ID, { trust_tier: "api_verified", status: "verified" }]]) as never,
   );
@@ -287,7 +327,7 @@ describe("WR-02 — the public factsheet cache is keyed by the analytics run it 
     await request({ computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY });
     // No stamp and no provenance on the row: both members read the literal "none".
     // 166.3.1 D-05: the row's status is the last member.
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v26", STRATEGY_ID, T0, "none", "none", "complete"]]);
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v27", STRATEGY_ID, T0, "none", "none", "complete"]]);
   });
 });
 
@@ -357,7 +397,7 @@ describe("167.1.2.2.2 plan 10 - a tick or a provenance write that leaves compute
     expect(cacheKeys).toHaveLength(1);
     const [version, id, computed, stamp, fingerprint, status] = cacheKeys[0] as string[];
     expect([version, id, computed, stamp, status]).toEqual([
-      "factsheet-v2-payload-v26",
+      "factsheet-v2-payload-v27",
       STRATEGY_ID,
       T0,
       FETCH_1,
@@ -378,7 +418,7 @@ describe("166.3.1 D-05 - the key's last member is the row's computation_status",
       {},
       null,
     );
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v26", STRATEGY_ID, T0, "none", "none", "none"]]);
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v27", STRATEGY_ID, T0, "none", "none", "none"]]);
   });
 });
 
@@ -411,6 +451,125 @@ describe("166.3.1 D-05 - STATUS-MOVES-KEY: a status change under a held computed
       expect(adminReads, "the status change reached the builder").toBe(2);
     });
   }
+});
+
+/**
+ * Phase 237 CACHE-03 (TODOS 164.6.6.2.1-USDVIEW-READFAIL-CACHED). WHY THIS MATTERS (Rule 9):
+ * a native-unit (BTC) strategy's payload carries a USD view built from the stored daily
+ * BTC closes. When that read blips, the build answers `usdViewUnavailable:
+ * "price_read_failed"`, and `unstable_cache` stores whatever the callback returns, so one
+ * blip disabled the USD toggle for every reader for the whole 3600 s TTL (the key moves
+ * only on a new analytics run). The fix throws a `FactsheetDegradedBuildError` out of the
+ * callback for exactly that reason: the page renders the payload, nothing is stored, the
+ * next view rebuilds. A shorter TTL is not a close. These cases run on the keyed double
+ * above, which stores a returned value and lets a throw propagate before the store, as
+ * Next's miss path does (the installed `unstable-cache.js` is read in the plan SUMMARY).
+ */
+describe("237 CACHE-03 - a failed BTC price read is rendered, never stored", () => {
+  const DAY_MS = 86_400_000;
+  const isoPlus = (start: string, i: number) =>
+    new Date(Date.parse(`${start}T00:00:00Z`) + i * DAY_MS).toISOString().slice(0, 10);
+  /** 30 consecutive native days of flat 0.0 returns, labelled BTC (a native-unit strategy). */
+  const NATIVE_RUN = {
+    computed_at: T0,
+    computation_status: "complete",
+    daily_returns: Array.from({ length: 30 }, (_, i) => ({ date: isoPlus("2024-01-01", i), value: 0 })),
+    data_quality_flags: { native_unit: "BTC" },
+  };
+  /** Daily closes that price every native day, with a wobble so the USD series is not constant. */
+  function closes(start: string) {
+    return Array.from({ length: 30 }, (_, i) => ({
+      date: isoPlus(start, i),
+      close_price: 60000 + 900 * i + (i % 2 === 0 ? 400 : -250),
+    }));
+  }
+  const GOOD_CLOSES = closes("2024-01-01");
+  const READ_BLIP = { message: "synthetic outage", code: "57014" };
+
+  const failRead = () => {
+    btcFake.error = READ_BLIP;
+    btcFake.rows = [];
+  };
+  const goodRead = () => {
+    btcFake.error = null;
+    btcFake.rows = GOOD_CLOSES;
+  };
+
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    // The builder logs a failed read (console.error) and an unpriced view (console.warn) by design.
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it("GOOD-AFTER-BAD: request 1's failed read has no USD view; request 2 under the same key rebuilds and carries one", async () => {
+    failRead();
+    const first = findPayload(await request(NATIVE_RUN));
+    expect(first?.usdViewUnavailable).toBe("price_read_failed");
+    expect(first?.usdView).toBeUndefined();
+    expect(btcFake.reads, "the BTC price read was never reached, so the case proves nothing").toBeGreaterThan(0);
+
+    goodRead();
+    const second = findPayload(await request(NATIVE_RUN));
+    expect(adminReads, "the failed read was replayed from the cache instead of rebuilt").toBe(2);
+    expect(second?.usdView, "the retried view has no USD view").toBeDefined();
+    expect(second?.usdViewUnavailable).toBeUndefined();
+    // Every request used the one shape-versioned key.
+    expect(new Set(cacheKeys.map((k) => JSON.stringify(k))).size).toBe(1);
+    expect(cacheKeys[0][0]).toBe("factsheet-v2-payload-v27");
+  });
+
+  it("BOUNDARY: a no_priced_day build is a data fact and IS stored; request 2 is served from the store", async () => {
+    // Closes that cover none of the strategy's days: a fact about the stored data, not a blip.
+    btcFake.rows = closes("2019-01-01");
+    const first = findPayload(await request(NATIVE_RUN));
+    expect(first?.usdViewUnavailable).toBe("no_priced_day");
+
+    const second = findPayload(await request(NATIVE_RUN));
+    expect(second?.usdViewUnavailable).toBe("no_priced_day");
+    expect(adminReads, "a no_priced_day payload was rebuilt instead of served from the store").toBe(1);
+  });
+
+  it("IDEMPOTENCY: two failed reads in a row are both rebuilt and nothing is stored; a good read is stored once and then served", async () => {
+    failRead();
+    expect(findPayload(await request(NATIVE_RUN))?.usdViewUnavailable).toBe("price_read_failed");
+    expect(findPayload(await request(NATIVE_RUN))?.usdViewUnavailable).toBe("price_read_failed");
+    expect(adminReads, "a failed read was stored").toBe(2);
+    expect(cacheStore.size, "nothing is stored while the read keeps failing").toBe(0);
+
+    goodRead();
+    expect(findPayload(await request(NATIVE_RUN))?.usdView).toBeDefined();
+    expect(adminReads).toBe(3);
+    expect(cacheStore.size, "the good read is stored once").toBe(1);
+
+    expect(findPayload(await request(NATIVE_RUN))?.usdView).toBeDefined();
+    expect(adminReads, "the view after the good read was rebuilt instead of served from the store").toBe(3);
+  });
+
+  it("PRECISION: the retried view's usdView deep-equals a direct uncached build over the same closes", async () => {
+    failRead();
+    await request(NATIVE_RUN);
+    goodRead();
+    const retried = findPayload(await request(NATIVE_RUN));
+    expect(retried?.usdView).toBeDefined();
+
+    // The same resolve-and-build, uncached, with no cache and no page in front of it.
+    vi.mocked(createAdminClient).mockReturnValue(mockAdmin(adminRow(NATIVE_RUN)));
+    const direct = await fetchAndBuildPayloadWithReason(STRATEGY_ID, (q) => q);
+    expect(direct.payload?.usdView).toBeDefined();
+    // The page decorates the shared payload AFTER the cache with the viewer-independent
+    // trust tier and peer ranks (`withTrustTier`, `withPeerRanks`), on the USD view too.
+    // Those two are not figures this fix touches, so they are set aside; every other
+    // field, the numbers included, must be identical: the fix adds no conversion path.
+    const figures = (v: FactsheetPayload["usdView"]) =>
+      v && { ...v, payload: { ...v.payload, trustTier: null, peerRanks: null } };
+    expect(figures(retried?.usdView)).toEqual(figures(direct.payload?.usdView));
+  });
 });
 
 describe("164.6.6.2-07 - the share card link carries the strategy's unit as a cache key", () => {

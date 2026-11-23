@@ -62,7 +62,7 @@ import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentManda
  * The text carries no warning glyph. The slot renders `WITHHELD_GLYPH` on the
  * "withheld" variant only (B17); a Dated note is a steady-state statement.
  */
-export type HeadlineNoteSlot = "strip" | "stripRelative" | "main" | "returns" | "maxdd" | "cumulative";
+export type HeadlineNoteSlot = "strip" | "stripRelative" | "main" | "returns" | "maxdd" | "cumulative" | "panel";
 
 export interface HeadlineNote {
   variant: "dated" | "withheld";
@@ -125,6 +125,20 @@ export function headlineCoverageNote(
   if (dataQuality?.twrChainBroken !== true) return null;
   const reasons = joinGuardPhrases(dataQuality.headlineGuardReasons ?? []);
   if (isHeadlineWithheld(dataQuality, basis)) {
+    // Phase 237 FACT-01 (UI-SPEC 1.4): the "panel" slot is the body of a withheld rail panel
+    // (Worst 10 Drawdowns here; EOY Returns, Calmar by Year and Style Drift in plan 12). The
+    // same cause mapping as the strip, with panel-specific sentences, so a panel never says
+    // "Headline figures" about a table.
+    if (slot === "panel") {
+      if (dataQuality.headlineWithheldCause === "recomputing") {
+        return { variant: "withheld", text: "Withheld while the headline figures are recomputed." };
+      }
+      if (dataQuality.headlineWithheldCause === "failed") return null;
+      return {
+        variant: "withheld",
+        text: `Withheld: this panel covers earlier history, which is unreliable (it includes ${reasons}), and the span after it has not been measured yet.`,
+      };
+    }
     if (slot !== "strip" && slot !== "stripRelative" && slot !== "main") return null;
     // D-14 (R2-03): the cause picks the sentence. A recompute says so and names no
     // span or reason; a failed row says nothing, because the page already states
@@ -170,7 +184,30 @@ export function headlineCoverageNote(
       };
     case "cumulative":
       return { variant: "dated", text: `Measured since ${date}. Every return in this panel covers only that span.` };
+    case "panel":
+      // A Dated row keeps its panels (UI-SPEC 1.4); the slot never produces a Dated sentence.
+      return null;
   }
+}
+
+/**
+ * Phase 237 FACT-01 (UI-SPEC 1.4): the ONE body of a withheld panel. Exactly one paragraph, the
+ * Main Metrics Withheld markup without its `mb-2` (it is the last element). The colour is inline
+ * so the degrade scan's trip pattern never fires; no role or aria-live (UI-SPEC G3).
+ */
+export function PanelWithheldNote({
+  note,
+  testId = "panel-withheld-note",
+}: {
+  note: HeadlineNote;
+  testId?: string;
+}) {
+  return (
+    <p data-testid={testId} className="text-fixed-10 italic" style={{ color: headlineNoteColor(note.variant) }}>
+      {headlineNoteGlyph(note.variant)}
+      {note.text}
+    </p>
+  );
 }
 
 /**
@@ -318,6 +355,29 @@ export function MetricsColumn({
   const fullHistoryWithheld = useFullHistoryWithheld();
   const wholeRecordWithheld = !selected && fullHistoryWithheld;
   const wr = (formatted: string) => dashIf(wholeRecordWithheld, formatted);
+  // Phase 237 FACT-01 (founder Q1): Worst 10 Drawdowns withholds its whole body on this same
+  // verdict, decided once here. Inside a zoom (`wholeRecordWithheld` false) it keeps its own
+  // windowed slice. The failed cause has no note, so the panel is not mounted at all.
+  const panelNote = headlineCoverageNote(payload.dataQuality, railBasis, "panel");
+  const worstDrawdownsPanel =
+    wholeRecordWithheld && panelNote === null ? null : (
+      <WorstDrawdownsTablePanel wholeRecordWithheld={wholeRecordWithheld} note={panelNote} />
+    );
+  // Phase 237 FACT-01 (founder Q2, Q3): EOY Returns, Calmar by Year and Style Drift show the whole
+  // record even inside a zoom, so they gate on `fullHistoryWithheld` (not `wholeRecordWithheld`)
+  // and stay withheld under a range. Same verdict, same note, decided once here. On the failed
+  // cause (gate on, no note) they are not mounted at all, as for Worst 10 above.
+  const wholeRecordPanelOmitted = fullHistoryWithheld && panelNote === null;
+  const wholeRecordPanelNote = fullHistoryWithheld ? panelNote : null;
+  const eoyReturnsPanel = wholeRecordPanelOmitted ? null : (
+    <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} withheldNote={wholeRecordPanelNote} />
+  );
+  const calmarByYearPanel = wholeRecordPanelOmitted ? null : (
+    <CalmarByYearPanel withheldBody={wholeRecordPanelNote ? <PanelWithheldNote note={wholeRecordPanelNote} /> : undefined} />
+  );
+  const styleDriftPanel = wholeRecordPanelOmitted ? null : (
+    <StyleDriftPanel withheldBody={wholeRecordPanelNote ? <PanelWithheldNote note={wholeRecordPanelNote} /> : undefined} />
+  );
   // B19: the benchmark cells beside the headline rows (see headlineBenchSource).
   const hb = headlineBenchSource(payload.dataQuality, railBasis, selected, jointCmp);
   // UI-SPEC 1.6 (B20): 6 Month / 1 Year row presence follows the record's length (the
@@ -572,7 +632,7 @@ export function MetricsColumn({
               name: "Performance",
               children: (
                 <>
-                  <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} fullHistoryWithheld={fullHistoryWithheld} />
+                  {eoyReturnsPanel}
                   <RollingMetricsPanel scope={scope} wholeRecordWithheld={wholeRecordWithheld} record={figureRec} variant="document" />
                 </>
               ),
@@ -583,18 +643,18 @@ export function MetricsColumn({
                 <>
                   <BootstrapCIPanel wholeRecordWithheld={wholeRecordWithheld} figureState={gateState} variant="document" />
                   {bestWorstPanel}
-                  <CalmarByYearPanel fullHistoryWithheld={fullHistoryWithheld} />
-                  <WorstDrawdownsTablePanel />
+                  {calmarByYearPanel}
+                  {worstDrawdownsPanel}
                   <ExtendedMetricsPanel wholeRecordWithheld={wholeRecordWithheld} variant="document" />
                 </>
               ),
             },
-            (hasStyleDrift || scenarioMode) && {
+            ((hasStyleDrift && !wholeRecordPanelOmitted) || scenarioMode) && {
               name: "Style",
               scopeNote: selected ? FULL_HISTORY_NOTE : undefined,
               children: (
                 <>
-                  <StyleDriftPanel />
+                  {styleDriftPanel}
                   {scenarioMode && payload.ingestSource === "csv" && payload.scenarioPeer != null && <PeerPercentilePanel />}
                   {scenarioMode && <OwnBookDeltaPanel />}
                 </>
@@ -698,7 +758,7 @@ export function MetricsColumn({
             <Row term="profit_factor" label="Profit Factor" value={wr(ratio(m.profit_factor))} bench={wr(ratio(b?.profit_factor))} />
           </Kpm>
         </Panel>
-        <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} fullHistoryWithheld={fullHistoryWithheld} />
+        {eoyReturnsPanel}
         <RollingMetricsPanel scope={scope} wholeRecordWithheld={wholeRecordWithheld} record={figureRec} />
         {/* D-04: the panel mounts at full history only, so `gateState` here is the RECORD-scope verdict. */}
         {!selected && <CumulativeReturnsPanel figureState={gateState} />}
@@ -727,8 +787,8 @@ export function MetricsColumn({
         {/* D-04 / D-15: the panel follows the windowed view, so it gets the same record-scope verdict as the headline rows. */}
         <BootstrapCIPanel wholeRecordWithheld={wholeRecordWithheld} figureState={gateState} />
         {bestWorstPanel}
-        <CalmarByYearPanel fullHistoryWithheld={fullHistoryWithheld} />
-        <WorstDrawdownsTablePanel />
+        {calmarByYearPanel}
+        {worstDrawdownsPanel}
         <ExtendedMetricsPanel wholeRecordWithheld={wholeRecordWithheld} />
       </>
         ),
@@ -739,7 +799,7 @@ export function MetricsColumn({
         scopeNote: selected ? FULL_HISTORY_NOTE : undefined,
         children: (
       <>
-        <StyleDriftPanel />
+        {styleDriftPanel}
         {/* PeerPercentile ranks the scenario BLEND — Phase 42 (PEER-01, ADR-0025):
             it carries an additive `scenarioPeer` ranked vs the REAL verified
             universe (never an ingestSource flip; the three genuinely-synthetic
@@ -1546,7 +1606,13 @@ function ratioStr(win: number, loss: number): string {
  * recovery dates plus depth and three duration columns (peak→trough,
  * trough→recovery, total). Indices map to dates via payload.dates.
  */
-function WorstDrawdownsTablePanel() {
+function WorstDrawdownsTablePanel({
+  wholeRecordWithheld,
+  note,
+}: {
+  wholeRecordWithheld: boolean;
+  note: HeadlineNote | null;
+}) {
   // Phase 103 (MTM-04): the worst-10 table follows the active basis so it stays
   // coherent with the Worst-DDs chart bands. Its indices are into the ACTIVE date
   // axis, so BOTH strategyWorst10 AND dates must come from the view (an MTM index
@@ -1556,6 +1622,13 @@ function WorstDrawdownsTablePanel() {
   const { view } = useWindowedView(usePayload());
   const rows = view.strategyWorst10;
   if (rows.length === 0) return null;
+  if (wholeRecordWithheld && note !== null) {
+    return (
+      <Panel title="Worst 10 Drawdowns">
+        <PanelWithheldNote note={note} />
+      </Panel>
+    );
+  }
   return (
     <Panel title="Worst 10 Drawdowns">
       {/* 54-01b: no --text-fixed-10.5 token exists (54-01a added integer-px
@@ -1623,7 +1696,7 @@ function WorstDrawdownsTablePanel() {
  * Comparator-reactive — picker swap re-renders the right two columns.
  * Falls back to a strategy-only single column when comparator = NONE.
  */
-function EoyReturnsPanel({ scopeNote, fullHistoryWithheld }: { scopeNote?: string; fullHistoryWithheld: boolean }) {
+function EoyReturnsPanel({ scopeNote, withheldNote }: { scopeNote?: string; withheldNote: HeadlineNote | null }) {
   // Phase 103 (MTM-04, root-cause flip): the EOY table follows the active basis to
   // match the rest of the rail (and the EOY bar chart in DistributionPanels). Both
   // the strategy per-year (`view.strategyMetrics.yearly`) and the comparator daily
@@ -1646,14 +1719,20 @@ function EoyReturnsPanel({ scopeNote, fullHistoryWithheld }: { scopeNote?: strin
   }
   const hasBench = cmpKey !== "none";
   const years = Array.from(new Set([...Object.keys(stratYearly), ...Object.keys(benchYearly)])).sort();
-  // Plan 15 review WR-01 (founder 2026-10-15): the record's last calendar year is built by
-  // `compute()` from the same dates as the Year-to-date return, which the Returns panel dashes
-  // on a Withheld row (the benchmark's too). On that row the last year's strategy, benchmark and
-  // delta cells read "—" with no tone; every earlier year covers its own calendar year and stays.
-  const lastYear = view.dates.length > 0 ? view.dates[view.dates.length - 1].slice(0, 4) : null;
   // SFH-M-05 (keeps D-54): the year whose comparator cell covers part of it only.
   const partialYear = hasBench ? comparatorPartialYear(cmp.through, view.dates, COMPARATOR_CALENDARS[cmpKey]) : null;
   if (years.length === 0) return null;
+  // Phase 237 FACT-01 (founder Q2): on a Withheld full-history view no by-year row prints, because
+  // the year that holds the break compounds across it and a Withheld row cannot name which year
+  // that is. The header and the Full history scope note stay; the comparator header goes with the
+  // table it labels. The verdict is decided once in `MetricsColumn` and arrives as `withheldNote`.
+  if (withheldNote !== null) {
+    return (
+      <Panel title={withUnit("EOY Returns", payload.returnsUnit ?? null)} scopeNote={scopeNote}>
+        <PanelWithheldNote note={withheldNote} />
+      </Panel>
+    );
+  }
   return (
     <Panel title={withUnit("EOY Returns", payload.returnsUnit ?? null)} benchHeader={hasBench ? cmp.shortName : undefined} scopeNote={scopeNote}>
       <table className="w-full text-fixed-11">
@@ -1673,9 +1752,8 @@ function EoyReturnsPanel({ scopeNote, fullHistoryWithheld }: { scopeNote?: strin
         </thead>
         <tbody>
           {years.map(year => {
-            const dashed = fullHistoryWithheld && year === lastYear;
-            const s = dashed ? undefined : stratYearly[year];
-            const b = hasBench && !dashed ? benchYearly[year] : undefined;
+            const s = stratYearly[year];
+            const b = hasBench ? benchYearly[year] : undefined;
             const delta = s != null && b != null ? s - b : null;
             return (
               <tr key={year} className="border-b border-border/30 last:border-0">

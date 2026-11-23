@@ -120,7 +120,8 @@ vi.mock("next/server", async (importActual) => ({
   after: afterSpy,
 }));
 
-/** The long cache a healthy (or genuinely not-found) card carries. */
+/** The long cache a rendered terminal card carries (Phase 237 CACHE-01: a not-found or
+ *  figure-less card is no-store, never this). */
 const LONG_CACHE = "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800";
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -536,6 +537,9 @@ describe("GET /api/og/factsheet/[id]", () => {
     // The pre-147 columns stay (no accidental narrowing of the embed).
     expect(STATE.observed.select).toContain("daily_returns");
     expect(STATE.observed.select).toContain("asset_class");
+    // Phase 237 FACT-02: `computed_at` binds a last-success snapshot to the success that stored
+    // the numbers; without it the hold and the effective flags cannot answer for a derive prestamp.
+    expect(STATE.observed.select).toContain("computed_at");
     // Non-vacuity: this route is PUBLIC (anon unfurl traffic). withPublishedOnly
     // is unchanged, so returns_series is read for published rows only.
     expect(STATE.observed.filters).toContainEqual(["status", "published"]);
@@ -562,8 +566,9 @@ describe("GET /api/og/factsheet/[id]", () => {
  * generic "Strategy — — —" card and cache it for a day at the CDN plus a week
  * of stale-while-revalidate, with nothing logged. A failure now reaches
  * console.error AND Sentry, and the card it produces is sent `no-store` so the
- * next unfurl retries. A genuine not-found (no row, no error) keeps the long
- * cache: that answer is correct and stable.
+ * next unfurl retries. Phase 237 CACHE-01: a genuine not-found (no row, no error)
+ * is no-store too, so a strategy published after its first unfurl shows its real
+ * card on the very next request (route.cache-ttl.test.tsx proves that end to end).
  */
 describe("GET /api/og/factsheet/[id] — failure paths are reported and never cached long (SFH-02)", () => {
   it("F1 — a PostgREST error is logged, captured to Sentry, and the card is sent no-store", async () => {
@@ -587,13 +592,13 @@ describe("GET /api/og/factsheet/[id] — failure paths are reported and never ca
     consoleSpy.mockRestore();
   });
 
-  it("F2 — a genuine not-found (no row, no error) keeps the long cache and reports nothing", async () => {
+  it("F2 — CACHE-01: a genuine not-found (no row, no error) is sent no-store and reports nothing", async () => {
     STATE.strategyRow = null;
     STATE.readError = null;
     const { GET } = await import("./route");
     const res = (await GET(makeRequest(), ctx(PUBLISHED_ID))) as unknown as { headers: Headers };
 
-    expect(res.headers.get("Cache-Control")).toBe(LONG_CACHE);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
     const { captureToSentry } = await import("@/lib/sentry-capture");
     expect(captureToSentry).not.toHaveBeenCalled();
   });

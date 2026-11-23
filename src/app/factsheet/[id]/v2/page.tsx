@@ -29,6 +29,7 @@ import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { OG_CARD_VERSION } from "@/lib/factsheet/og-metrics";
 import { provenanceFingerprint } from "@/lib/factsheet/provenance-fingerprint";
 import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
+import { readOwnerTrustTier } from "@/lib/factsheet/owner-trust-tier";
 import { readPeerRanks, withPeerRanks } from "@/lib/factsheet/peer-ranks";
 import { buildFactsheetJsonLd } from "@/lib/factsheet/json-ld";
 import {
@@ -125,21 +126,36 @@ class FactsheetReadError extends Error {
 }
 
 /**
- * 169.1 review round 1 (SFH HIGH-1) — the public build succeeded, but its
- * `cash_settlement` conventions read failed, so the payload was built on the
- * config tier (D-30) and may draw its curve on a method the stored headline was
- * not computed under. Thrown from inside the `unstable_cache` callback, exactly
- * like `FactsheetReadError`, so that build is never stored for the analytics
- * run. Unlike a `read_error` it CARRIES the payload: a blip must not blank a
- * factsheet (D-30), so the page renders it, uncached. The resolve stage has
- * already captured the failed read once. Module-private.
+ * A public build that SUCCEEDED but is a degraded view of the strategy, so it
+ * must never be stored for the analytics run. Thrown from inside the
+ * `unstable_cache` callback, exactly like `FactsheetReadError`. Unlike a
+ * `read_error` it CARRIES the payload: a blip must not blank a factsheet
+ * (D-30), so the page renders it, uncached. Two causes, named in the message:
+ *   - `conventions_read_failed` (169.1 review round 1, SFH HIGH-1): the
+ *     `cash_settlement` conventions read failed, so the payload was built on
+ *     the config tier (D-30) and may draw its curve on a method the stored
+ *     headline was not computed under. The resolve stage has already captured
+ *     the failed read once.
+ *   - `price_read_failed` (Phase 237 CACHE-03): the daily BTC closes read
+ *     failed, so a native-unit strategy's payload carries no USD view
+ *     (`usdViewUnavailable`). Stored, that blip would disable the USD toggle
+ *     for every reader for the TTL.
+ * Module-private.
  */
+type DegradedBuildReason = "conventions_read_failed" | "price_read_failed";
+
 class FactsheetDegradedBuildError extends Error {
   readonly payload: FactsheetPayload;
-  constructor(payload: FactsheetPayload) {
-    super("public factsheet build: built on the config tier after a failed conventions read");
+  readonly reason: DegradedBuildReason;
+  constructor(payload: FactsheetPayload, reason: DegradedBuildReason) {
+    super(
+      reason === "price_read_failed"
+        ? "public factsheet build: the daily BTC closes read failed"
+        : "public factsheet build: built on the config tier after a failed conventions read",
+    );
     this.name = "FactsheetDegradedBuildError";
     this.payload = payload;
+    this.reason = reason;
   }
 }
 
@@ -215,12 +231,30 @@ function buildFactsheetPayloadCached(
   // The composite residual of D-07 is closed by Phase 169 plan 169-07 (169
   // D-41): the composite reader throws on a failed `csv_daily_returns` read and
   // the resolve stage answers `read_error`, so the throw below covers it.
+  //
+  // The callback throws for two further causes, each carrying its payload as a
+  // `FactsheetDegradedBuildError` (rendered uncached, same store semantics as
+  // above): a failed `cash_settlement` conventions read, and, since Phase 237
+  // CACHE-03, a failed BTC price read (`usdViewUnavailable: "price_read_failed"`).
+  // Re-measured for CACHE-03 in the installed Next (16.x): a miss awaits the
+  // callback before `cacheNewResult` (so the throw stores nothing), and a throwing
+  // stale revalidation keeps the last good entry.
   return unstable_cache(
     async () => {
       const built = await fetchAndBuildPayloadWithReason(id, withPublishedOnly);
       if (built.reason === "read_error") throw new FactsheetReadError();
       // SFH HIGH-1: a degraded build is rendered, never stored (see the class).
-      if (built.payload && built.conventionsDegraded) throw new FactsheetDegradedBuildError(built.payload);
+      if (built.payload && built.conventionsDegraded) {
+        throw new FactsheetDegradedBuildError(built.payload, "conventions_read_failed");
+      }
+      // Phase 237 CACHE-03: a failed BTC price read is the same kind of blip and
+      // is rendered, never stored, so the next view rebuilds and retries it.
+      // ONLY `price_read_failed`: `no_priced_day` is a fact about the stored
+      // data (no close covers the strategy's days), cached like any other. A
+      // shorter TTL is not a close (TODOS 164.6.6.2.1-USDVIEW-READFAIL-CACHED).
+      if (built.payload && built.payload.usdViewUnavailable === "price_read_failed") {
+        throw new FactsheetDegradedBuildError(built.payload, "price_read_failed");
+      }
       return built.payload;
     },
     // Cache key carries a shape-version suffix. Bump it (e.g. -v2 → -v3)
@@ -304,7 +338,8 @@ function buildFactsheetPayloadCached(
     // Bumped v23→v24 (Phase 201.1 POLISHRESIDUALS D-05, 2026-11-12): for the same inputs the matrix label of a strategy named 13 characters changes from 11 characters and an ellipsis to the whole name, and a longer name keeps 12 characters, without a shape change; under v23 an entry built before the deploy would keep the old label for the 1 h TTL drain.
     // Bumped v24→v25 (Phase 210 PUBLICTRUTH, 2026-11-14, one bump for the phase): the payload shape changes twice. The api arm no longer carries the demo peer cohort or the demo allocator blends (D-10), so a v24 entry would keep shipping invented figures in the RSC payload for the 1 h TTL drain; and the payload gains the optional `unrecoveredGapsUnavailable` (D-17), set when `series_provenance.unrecovered_gaps` is malformed, and because the key's other members do not move when a gap record is malformed, a v24 entry would keep serving "no gaps".
     // Bumped v25→v26 (Phase 155.2 plan 15, G3-1 (a), 2026-11-20): for the same inputs, a curve-derived strategy's daily series, its metrics and its short-series verdict now include day 0, without a shape change. The stored `returns_series` curve has no base point, so the row reader now reads its first level against the implicit 1.0 and n stored points make n daily returns, not n-1 (a curve at the writer cap of 5000 points keeps n-1). The key's other members do not move at deploy, so under v25 an entry built before the deploy would keep serving the n-1 series for the 1 h TTL drain.
-    ["factsheet-v2-payload-v26", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
+    // Bumped v26→v27 (Phase 237 CACHE-03, 2026-11-23): the payload shape is unchanged, and a failed BTC price read is no longer stored. An entry stored before the deploy may hold a `price_read_failed` payload (USD toggle disabled), which the throw above cannot evict, so under v26 it would keep serving for the 1 h TTL drain.
+    ["factsheet-v2-payload-v27", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -521,6 +556,14 @@ export default async function FactsheetV2Page({
   // typed by Lane A's column list, which does not carry them.
   let ownerSource: string | null = null;
   let ownerApiKeyId: string | null = null;
+  // Phase 237 / FACT-04 — the owner's own data source on their UNPUBLISHED strategy,
+  // read on the OWNER LANE only (inside the `ownRow.status !== "published"` block).
+  // `get_published_trust_signals` answers nothing for a draft, so without this the
+  // owner read "Data source —" on their own key-backed strategy. Lane-local and
+  // applied through `withTrustTier` after the build for exactly the reason
+  // `ownershipMark` is: it must NEVER enter `buildFactsheetPayloadCached`, its key or
+  // its stored payload, which anonymous readers are served for the full TTL.
+  let ownerTrustTier: TrustTierKind | null = null;
   if (signRes.error || !signature) {
     const {
       data: { user },
@@ -673,6 +716,13 @@ export default async function FactsheetV2Page({
         });
       }
       hasActiveShare = !!shareRow && shareRow.revoked_at === null;
+      // FACT-04: the latest verification row on the REQUEST client (RLS on). The
+      // `strategy_verifications_owner_select` policy is the ownership check, and the
+      // read is fail-soft (null on any failure, reported inside the helper), so a
+      // transient drop leaves "Data source —" and never blanks the owner's page. Never
+      // the admin client; never called for a published row, an anon reader or a
+      // non-owner, none of which reach this block.
+      ownerTrustTier = await readOwnerTrustTier(supabase, id);
     }
   }
   const signAnalytics = Array.isArray(signature.strategy_analytics)
@@ -952,7 +1002,10 @@ export default async function FactsheetV2Page({
   // client — NOT service role), which fails soft + logs to Sentry on a read
   // error — a transient drop stays visible without blanking the page (FINDING-4
   // b06-silentfailure: the silent-drop logging now lives inside the helper).
-  const rawTrustTier = verificationSignals.get(id)?.trust_tier ?? null;
+  // FACT-04: on the owner lane the published signal is empty by construction, so the
+  // owner's own tier fills in; a published row (lane "public") keeps its published
+  // signal. The three-literal check below validates whichever value arrives.
+  const rawTrustTier = verificationSignals.get(id)?.trust_tier ?? ownerTrustTier ?? null;
   const trustTier: TrustTierKind | null =
     rawTrustTier === "api_verified" || rawTrustTier === "csv_uploaded" || rawTrustTier === "self_reported"
       ? rawTrustTier
