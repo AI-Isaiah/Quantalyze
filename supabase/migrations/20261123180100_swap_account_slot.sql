@@ -15,6 +15,17 @@
 -- locks taken in id order, close that window and serialise two swaps, or a swap and a
 -- stamp, on the same rows.
 --
+-- THE LOCK SET IS THE PAIR PLUS THE OLD HOLDER'S DEPENDENTS, TAKEN IN ONE id-ORDERED
+-- PASS. Step (b) writes every 'duplicate' dependent of the old holder. If those rows
+-- were locked only when step (b) reached them, two swaps on sibling duplicates of one
+-- failing holder (N1 and N2 both marked against H) would take locks in opposite orders
+-- and one of them would answer a raw 40P01. Locking them up front, in the same
+-- ORDER BY id, makes both callers queue on the same first row instead. The function
+-- also carries SET lock_timeout = '3s' like create_wizard_strategy, so a wait is
+-- bounded. Residual: a dependent that points at the old holder only AFTER the lock
+-- query's snapshot is not in the set; no gate drives two sessions, so that is argued
+-- here and not tested.
+--
 -- THE CALLER PASSES THE LOGIN AND THE SERVER. The function does not read them off the
 -- new row (an unstamped key carries neither). It re-checks EVERY fact itself on the
 -- locked rows: same owner, both keys live, same exchange, the old holder really holds
@@ -75,6 +86,7 @@ RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_catalog
+SET lock_timeout = '3s'
 AS $$
 DECLARE
   v_row            record;
@@ -107,8 +119,10 @@ BEGIN
             DETAIL  = 'The new key and the old holder must be two different keys and the login must not be blank.';
   END IF;
 
-  -- 2. Lock both rows in id order, so two swaps (or a swap and a stamp) that touch the
-  --    same pair queue instead of deadlocking, and read each into the local variables.
+  -- 2. Lock the two named rows AND every key marked against the old holder, in ONE
+  --    id-ordered pass, so two swaps (or a swap and a stamp) that touch any of these rows
+  --    queue on the same first row instead of deadlocking, and read the two named rows
+  --    into the local variables (a dependent row is locked and otherwise ignored here).
   --    The working-ness expression is written ONCE, here (D-18, founder 2026-09-27):
   --    active, connected, and a last sync that is NULL or none of the failing statuses.
   --    The explicit NULL leg is required: a status test over NULL is NULL, IF treats NULL
@@ -118,6 +132,7 @@ BEGIN
            account_shared_with_api_key_id, is_active, disconnected_at, sync_status
       FROM public.api_keys
      WHERE id IN (p_new_key, p_old_holder)
+        OR account_shared_with_api_key_id = p_old_holder
      ORDER BY id
        FOR UPDATE
   LOOP
@@ -137,7 +152,7 @@ BEGIN
       v_new_working  := v_working;
       v_new_login    := v_row.venue_account_id;
       v_new_holder   := v_row.account_shared_with_api_key_id;
-    ELSE
+    ELSIF v_row.id = p_old_holder THEN
       v_found_old     := true;
       v_old_owner     := v_row.user_id;
       v_old_exchange  := v_row.exchange;
@@ -260,7 +275,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.swap_account_slot(uuid, uuid, text, text) IS
-  'Phase 225 ONEACCOUNTONCE (MT5D-08, Q1, D-25), migration 20261123180100: moves an account''s holder slot from a same-owner key that is NOT working (D-18) to a same-owner key that IS, in ONE transaction on both rows locked FOR UPDATE in id order: the new key is stamped with the login and the normalised server, the old holder gives up its login and is marked ''duplicate'' against the new key, and every ''duplicate'' dependent of the old holder is re-pointed at the new key. Nothing is disconnected or deleted. Returns void; the caller audits and enqueues the recompose. Refusals (message = token, static DETAIL, nothing written): ACCOUNT_SLOT_NOT_FOUND P0002; ACCOUNT_SLOT_NOT_SAME_OWNER 42501; ACCOUNT_SLOT_NOT_LIVE 55000; ACCOUNT_SLOT_IDENTITY_MISMATCH 22023; ACCOUNT_SLOT_HOLDER_WORKING 55000; ACCOUNT_SLOT_NEW_KEY_NOT_WORKING 55000; ACCOUNT_SLOT_COMPOSITE_DEPENDENT 23000 (a composite_member dependent is out of scope, F-2). Service-role only; callers are the connect routes and the analytics identity stamper.';
+  'Phase 225 ONEACCOUNTONCE (MT5D-08, Q1, D-25), migration 20261123180100: moves an account''s holder slot from a same-owner key that is NOT working (D-18) to a same-owner key that IS, in ONE transaction on the two rows and the old holder''s dependents locked FOR UPDATE in one id-ordered pass (function-level lock_timeout 3s): the new key is stamped with the login and the normalised server, the old holder gives up its login and is marked ''duplicate'' against the new key, and every ''duplicate'' dependent of the old holder is re-pointed at the new key. Nothing is disconnected or deleted. Returns void; the caller audits and enqueues the recompose. Refusals (message = token, static DETAIL, nothing written): ACCOUNT_SLOT_NOT_FOUND P0002; ACCOUNT_SLOT_NOT_SAME_OWNER 42501; ACCOUNT_SLOT_NOT_LIVE 55000; ACCOUNT_SLOT_IDENTITY_MISMATCH 22023; ACCOUNT_SLOT_HOLDER_WORKING 55000; ACCOUNT_SLOT_NEW_KEY_NOT_WORKING 55000; ACCOUNT_SLOT_COMPOSITE_DEPENDENT 23000 (a composite_member dependent is out of scope, F-2). Service-role only; callers are the connect routes and the analytics identity stamper.';
 
 REVOKE ALL ON FUNCTION public.swap_account_slot(uuid, uuid, text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.swap_account_slot(uuid, uuid, text, text) TO service_role;
