@@ -1,0 +1,88 @@
+-- ============================================================================
+-- Phase 227 JOBLEDGER, plan 03 (HEAL-02): renew_compute_job_claims
+-- ============================================================================
+-- A token-fenced lease renewal for compute_jobs.claimed_at.
+--
+-- THE TRACED ROOT CAUSE. The worker claims up to five jobs in one call
+-- (claim_compute_jobs_with_priority stamps every claimed row with the same
+-- claimed_at = now() and a fresh claim_token), then dispatches them ONE AFTER
+-- ANOTHER. A job that sits in the worker's batch list behind slow batch-mates
+-- keeps the claimed_at of the claim, so its age grows with its batch-mates'
+-- runtime. reset_stalled_compute_jobs resets any running row older than its
+-- kind's threshold (derive_allocator_equity: the worker's '20 minutes'
+-- override) and NULLs its claim_token, while the worker still holds the row in
+-- its list. The worker then dispatches the row it no longer owns: the job runs
+-- a second time, and its terminal write is refused with 55006 because the
+-- token no longer matches. The work ran twice and its result was thrown away.
+--
+-- THE FIX. This function moves claimed_at to now() for a set of (id, token)
+-- pairs, but only for rows that are still running under the CALLER'S OWN token.
+-- The worker (plan 08) calls it before each dispatch and from its heartbeat, so
+-- a waiting row stays young for as long as its worker is alive and looping. A
+-- frozen worker stops renewing, its rows age out, and the watchdog resets them
+-- exactly as it does today.
+--
+-- DECISIONS.
+--   DEC-03-A Fence on the token, not the worker id. A row renews only when
+--     status = 'running' and its claim_token equals the caller's. The watchdog
+--     NULLs the token in the same UPDATE that resets the row, so a row the
+--     watchdog already took can never be renewed by its old worker.
+--   DEC-03-B No row-skipping lock clause. A row being reset right now is locked
+--     by the watchdog; this UPDATE waits for that one row, then sees the NULL
+--     token and renews nothing. Skipping locked rows would let a renew report
+--     success-by-omission for a row it never looked at. It touches at most five
+--     rows, so the wait is bounded by one watchdog statement.
+--   DEC-03-C Returns the renewed ids. The worker reads membership of the
+--     returned set to decide whether it still owns a row (plan 08's pre-dispatch
+--     fence).
+--
+-- REJECTED OPTIONS (RESEARCH, HEAL-02).
+--   B  A started_at column: it moves the watchdog's clock for the running row
+--      but not for a row that has not started, so it does not close the class.
+--   C  Batch size 1: cuts throughput fivefold and leaves every other kind with
+--      a batch behind a slow job open.
+--   D  Raise the threshold: forbidden by the phase boundary. A larger number
+--      is not a close; the row still ages through its batch-mates.
+--
+-- WHAT THIS DOES NOT TOUCH. reset_stalled_compute_jobs, the claim pair and every
+-- watchdog threshold are unchanged. This function writes no column but
+-- claimed_at: attempts, claimed_by, claim_token and next_attempt_at stay as they
+-- are. Until plan 08 calls it, no production behaviour changes.
+-- ============================================================================
+
+CREATE FUNCTION public.renew_compute_job_claims(
+  p_job_ids      uuid[],
+  p_claim_tokens uuid[]
+)
+RETURNS SETOF uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $function$
+BEGIN
+  IF p_job_ids IS NULL
+     OR p_claim_tokens IS NULL
+     OR cardinality(p_job_ids) <> cardinality(p_claim_tokens) THEN
+    RAISE EXCEPTION 'renew_compute_job_claims: p_job_ids and p_claim_tokens must be non-null arrays of equal length'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  RETURN QUERY
+  WITH renewed AS (
+    UPDATE compute_jobs c
+       SET claimed_at = now()
+      FROM unnest(p_job_ids, p_claim_tokens) AS r(id, tok)
+     WHERE c.id = r.id
+       AND c.claim_token = r.tok
+       AND c.status = 'running'
+    RETURNING c.id
+  )
+  SELECT renewed.id FROM renewed;
+END
+$function$;
+
+COMMENT ON FUNCTION public.renew_compute_job_claims(uuid[], uuid[]) IS
+  'Phase 227 JOBLEDGER HEAL-02. Moves claimed_at to now() for each (id, claim_token) pair whose row is still status running under exactly that token, and returns the ids it renewed. A row the watchdog already reset (token NULLed), a row not running, and a token that does not match renew nothing and are absent from the result, so the caller reads membership of the result as "I still own this row". Mismatched or NULL arrays raise invalid_parameter_value. Writes no column but claimed_at. Never call it for the row currently executing: that row''s staleness stays governed by its own per-kind watchdog override. service_role only.';
+
+REVOKE ALL ON FUNCTION public.renew_compute_job_claims(uuid[], uuid[]) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.renew_compute_job_claims(uuid[], uuid[]) TO service_role;
