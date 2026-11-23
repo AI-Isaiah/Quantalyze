@@ -2,13 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
-status: planning
-last_updated: "2026-11-23T13:14:40.000Z"
+current_phase: 225
+current_phase_name: ONEACCOUNTONCE
+status: executing
+stopped_at: "v1.22 roadmap created (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK"
+last_updated: "2026-11-23T18:42:06.000Z"
 last_activity: 2026-11-23
+last_activity_desc: "v1.22 roadmap created: 21 phases (155.2, 157, 222, 223, 225, 226–241), 81/81 requirements mapped"
+state_head: b37bb4e05999e9191bddc9c662a9694643d94a5a
 progress:
   total_phases: 21
   completed_phases: 0
-  total_plans: 20
+  total_plans: 32
   completed_plans: 14
   percent: 0
 ---
@@ -171,9 +176,9 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 226 (MT5SOAK) — ready to plan; wave 0, beside the read-only Deribit diagnosis
+Phase: 225 (ONEACCOUNTONCE) — READY TO EXECUTE
 Plan: —
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-11-23 — v1.22 roadmap created: 21 phases (155.2, 157, 222, 223, 225, 226–241), 81/81 requirements mapped
 Progress: [░░░░░░░░░░] 0%
 

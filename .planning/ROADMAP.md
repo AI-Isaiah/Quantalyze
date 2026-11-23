@@ -296,18 +296,29 @@ Plans:
 **Plans:** 12 plans
 
 Plans:
+**Wave 1**
 - [ ] 225-01-PLAN.md — migration A1: `api_keys.venue_server` column and the 13-parameter `create_wizard_strategy` (PR-1)
 - [ ] 225-02-PLAN.md — the same-owner duplicate census and the one-time delete, run by the orchestrator on PROD (PR-1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 225-03-PLAN.md — move every SQL gate pin to the 13-parameter signature (PR-1)
 - [ ] 225-04-PLAN.md — migration A2: `swap_account_slot`, the one place a holder slot moves; the orchestrator ships PR-1 and confirms both migrations on PROD before wave 3 (PR-1)
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 225-05-PLAN.md — an own-draft match is refused by name, `VENUE_DRAFT_IN_PROGRESS` (PR-2)
 - [ ] 225-06-PLAN.md — the shared server rule, holder pick and swap helper, TS and Python held equal by one fixture (PR-2)
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 225-07-PLAN.md — the wizard connect, MT5 path: server-aware resolver, server write, failing-holder swap (PR-2)
 - [ ] 225-08-PLAN.md — the Exchanges-page connect gets the same rule, and the demoted key's card names its holder (PR-2)
 - [ ] 225-09-PLAN.md — the poll stamper: a working key takes a failing holder's slot through the swap (PR-2)
-- [ ] 225-10-PLAN.md — migration B: the index gains the server member and reconnect agrees, after the backfill census passes (PR-3)
+
+**Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 225-11-PLAN.md — the wizard connect, every venue: post-validation refusal, interim race arm, per-owner pins (PR-2)
 - [ ] 225-12-PLAN.md — the poll stamper: MT5 server capture and backfill, cross-owner stamping, the backfill census (PR-2)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 225-10-PLAN.md — migration B: the index gains the server member and reconnect agrees, after the backfill census passes (PR-3)
 
 ### Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks
 
