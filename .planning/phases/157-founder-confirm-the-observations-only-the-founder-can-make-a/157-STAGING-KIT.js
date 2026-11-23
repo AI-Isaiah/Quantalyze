@@ -22,9 +22,16 @@
 //
 // Router: method-aware and fail closed. Every same-origin /api/ call and every /rest/v1/ call is
 // answered by a stub row, passed through (explicit GET/HEAD list only) or refused with status 599.
-// Anything outside those two prefixes (auth, telemetry, RSC fetches, assets) reaches the original
-// fetch untouched. Before arm() the stub and pass tables are empty, so everything is refused.
+// Outside those two prefixes, a GET or HEAD (RSC fetches, assets, auth reads) reaches the original
+// fetch untouched. A non-GET/HEAD outside them is decided by path:
+//   - same-origin and not under /api/, or any origin under /functions/v1/, /storage/v1/ or
+//     /graphql/v1/: refused 599;
+//   - under /auth/v1/: only POST /auth/v1/token (the session refresh) passes, the rest is refused;
+//   - anything else (cross-origin telemetry such as PostHog or Sentry): passed, and logged in
+//     __fconf.outside so it is visible.
+// Before arm() the stub and pass tables are empty, so every /api/ and /rest/v1/ call is refused.
 // The kit never reads request bodies, request headers or any browser storage.
+// The only writes that reach the network are the session refresh and that outside telemetry.
 //
 // Every mode stubs:   POST /api/keys/sync                       200 queued (a resume would otherwise
 //                                                               enqueue a real sync on the draft)
@@ -276,15 +283,28 @@
     return { kind: "refuse", status: 599, reason: reason };
   }
 
+  var BACKEND_WRITE_RE = /^\/(functions|storage|graphql)\/v1(\/|$)/;
+
+  // a non-GET/HEAD outside /api/ and /rest/v1/ (see the router note in the header)
+  function outsideWrite(m, path, sameOrigin) {
+    if (BACKEND_WRITE_RE.test(path)) return refuse("backend-write");
+    if (path.indexOf("/auth/v1/") === 0) {
+      return m === "POST" && path === "/auth/v1/token" ? { kind: "pass" } : refuse("auth-write");
+    }
+    if (sameOrigin) return refuse("same-origin-write");
+    return { kind: "outside", write: true };
+  }
+
   // decide(method, urlString, mode, envelope) -> { kind: "stub" | "pass" | "refuse" | "outside", ... }
   function decide(method, urlString, mode, envelope) {
     var u = new URL(urlString, location.href);
     var path = cleanPath(u);
-    var isApi = u.origin === location.origin && path.indexOf("/api/") === 0;
+    var sameOrigin = u.origin === location.origin;
+    var isApi = sameOrigin && path.indexOf("/api/") === 0;
     var isRest = path.indexOf("/rest/v1/") === 0;
-    if (!isApi && !isRest) return { kind: "outside" };
     var m = method.toUpperCase();
     var isRead = m === "GET" || m === "HEAD";
+    if (!isApi && !isRest) return isRead ? { kind: "outside" } : outsideWrite(m, path, sameOrigin);
     if (mode) {
       var stub = stubFor(m, path, u, mode, envelope);
       if (stub) return { kind: "stub", status: stub.status, stub: stub };
@@ -331,6 +351,7 @@
   var hits = [];
   var passed = [];
   var refused = [];
+  var outside = [];
 
   function marker() {
     var el = document.getElementById(MARKER_ID);
@@ -372,7 +393,10 @@
         }),
       );
     }
-    if (verdict.kind === "outside") return orig(input, init);
+    if (verdict.kind === "outside") {
+      if (verdict.write) outside.push(scrub(method, href));
+      return orig(input, init);
+    }
     if (verdict.kind === "stub") {
       hits.push(scrub(method, href));
       if (verdict.stub.consumes) {
@@ -414,6 +438,7 @@
     hits: hits,
     passed: passed,
     refused: refused,
+    outside: outside,
     version: VERSION,
   };
   Object.defineProperty(ctl, "mode", {

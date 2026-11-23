@@ -88,18 +88,59 @@ test("(c) connect: a draft DELETE is refused with 599, logged with the id scrubb
   assert.equal(env.spyCalls.length, 0);
 });
 
-test("(d) an auth token refresh reaches the native fetch exactly once", async () => {
+test("(d) only the auth token refresh reaches the native fetch exactly once; every other /auth/v1/ write is refused", async () => {
   const env = makeEnv();
   env.fconf().arm("connect");
-  await env.call("https://proj.supabase.example/auth/v1/token?grant_type=refresh_token", { method: "POST" });
+  const res = await env.call("https://proj.supabase.example/auth/v1/token?grant_type=refresh_token", { method: "POST" });
+  assert.equal(res.status, 200);
+  assert.equal(env.spyCalls.length, 1);
+  assert.deepEqual([...env.fconf().passed], ["POST /auth/v1/token"]);
+  for (const [method, path] of [["PUT", "/auth/v1/user"], ["POST", "/auth/v1/logout"], ["POST", "/auth/v1/signup"]]) {
+    const refused = await env.call(`https://proj.supabase.example${path}`, { method });
+    assert.equal(refused.status, 599, `${method} ${path}`);
+  }
   assert.equal(env.spyCalls.length, 1);
 });
 
-test("(e) a cross-origin telemetry POST reaches the native fetch", async () => {
+test("(e) a cross-origin telemetry POST reaches the native fetch and is logged in outside", async () => {
   const env = makeEnv();
   env.fconf().arm("connect");
-  await env.call("https://telemetry.example.test/capture/", { method: "POST" });
+  const res = await env.call("https://telemetry.example.test/capture/", { method: "POST" });
+  assert.equal(res.status, 200);
   assert.equal(env.spyCalls.length, 1);
+  assert.deepEqual([...env.fconf().outside], ["POST /capture"]);
+  assert.deepEqual([...env.fconf().refused], []);
+});
+
+test("an outside GET reaches the native fetch and is not logged in outside", async () => {
+  const env = makeEnv();
+  env.fconf().arm("connect");
+  await env.call("https://telemetry.example.test/decide/", { method: "GET" });
+  await env.call(APP("/strategies/new/wizard?_rsc=abc"));
+  assert.equal(env.spyCalls.length, 2);
+  assert.deepEqual([...env.fconf().outside], []);
+});
+
+test("every mode refuses a same-origin write outside /api/ and a backend write on functions, storage or graphql, never sent", async () => {
+  const SUPA = "https://proj.supabase.example";
+  const targets = [
+    [APP("/strategies/new/wizard"), "POST"],
+    [APP("/strategies"), "PUT"],
+    [`${SUPA}/functions/v1/anything`, "POST"],
+    [`${SUPA}/storage/v1/object/bucket/x`, "POST"],
+    [`${SUPA}/graphql/v1`, "POST"],
+    ["https://elsewhere.example.test/storage/v1/object/x", "DELETE"],
+  ];
+  for (const mode of ALL_MODES) {
+    const env = makeEnv();
+    env.fconf().arm(mode);
+    for (const [url, method] of targets) {
+      assert.equal((await env.call(url, { method })).status, 599, `${mode} ${method} ${url}`);
+    }
+    assert.equal(env.spyCalls.length, 0, mode);
+    assert.equal(env.fconf().refused.length, targets.length, mode);
+    assert.deepEqual([...env.fconf().outside], [], mode);
+  }
 });
 
 test("(f) before any arm, a same-origin /api/ GET is refused (fail closed with no mode)", async () => {
