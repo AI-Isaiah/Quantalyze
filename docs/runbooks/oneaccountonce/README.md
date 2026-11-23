@@ -10,6 +10,11 @@
 > several users is NOT touched: equal identity under two owners is the share link, and every user keeps
 > their own factsheet.
 
+> **Run record.** `delete.sql` ran once on PROD on 2026-11-23, and `track_counts` was measured `on` there, so
+> check H was live for that run. The hardening in this file's check list that follows (the `track_counts`
+> pre-write guard, the `api_keys` delete counter assertion and the extra exec-test arms) came after that run
+> and describes any re-use, not the run itself.
+
 The orchestrator runs this on PROD through the Supabase MCP. An executor has no MCP and no PROD access.
 Every statement is read-only except `delete.sql`. `src/__tests__/oneaccountonce-delete-sql-exec.test.ts`
 executes every file here on a throwaway local cluster (the real `delete_allocator_api_key` and the real
@@ -55,6 +60,11 @@ surviving manifest row, a changed protected key, a table outside the confirmed l
 or an `api_keys` delete counter that did not move by exactly the manifest key count (H-post-write, measured
 with `pg_stat_xact_user_tables`, so a cascade into an unlisted table is caught however deep, and the counter
 check is the positive control that the measurement was live).
+
+**What the F scan does not cover.** Check F finds foreign keys from `pg_constraint`, so it covers DECLARED
+foreign keys only. A column that holds a key or strategy id with no foreign key (a soft reference) is
+invisible to it. Those rows are reported by `census-dependents.sql` (`non_fk_column`, `non_fk_derived`) and do
+NOT gate the script: `delete.sql` neither counts them nor stops on them.
 
 ## Never set the GDPR sanitize bypass
 
