@@ -196,6 +196,45 @@
 
 ---
 
+## Milestone: v1.18 — MT5-VERIFY & founder confirmations
+
+**Shipped:** 2026-11-23 (v0.133.39.2 → v0.133.61.2, PRs #1258–#1310)
+**Phases:** 16 (155, 155.1, 207–220) | **Plans:** 93 | **Timeline:** started 2026-08-14, parked 2026-08-20, resumed 2026-11-13 → 2026-11-23, 46 commits on main over 11 days
+
+### What Was Built
+- An MT5 parity harness that accepts only external oracles, captures our side read-only from PROD and was shown to fail on three broken inputs before any real verdict (155).
+- A live MT5 server-clock read inside every leased derive, kept write-once, with the rule chosen per broker server (155.1, 217).
+- A TODOS-driven correctness tranche booked from the 2026-11-13 prune: working error-page retry, scrubbed error reports, truthful public cues, sync high-waters, key and draft flow, freshness readings, test reach, CSV status, wizard self-heal (207–216, 218).
+- Account email display and change (219) and the extractor fix that let its baseline re-dump land (220).
+
+### What Worked
+- **Building the harness before the founder sat down.** 155 measured every agent-checkable item first and handed 155.2 a census and 18 named findings, so the one founder session could be short and scripted.
+- **Proving the harness can fail before trusting it.** Three byte-backup RED proofs and a rehearsal flag that cannot read as final green kept the first real verdict honest.
+- **Parallel phase agents on independent tranches.** 207–214 all completed on 2026-11-14 while the MT5 phases waited on the founder.
+- **Moving founder-gated work out instead of holding the milestone.** The 2026-11-23 rulings let v1.18 close on what shipped, with the carried requirements and decisions recorded in one archived file.
+
+### What Was Inefficient
+- **The milestone's own goal did not close in it.** The goal named live parity, and it waited on broker statements, so 155.2 and 157 moved out and v1.18 closed on its harness and a tranche of unrelated fixes.
+- **Scope changed three times on the close day** (157 out, 221–225 booked then moved, 155.2 out), each needing ROADMAP, STATE and REQUIREMENTS edits in a records PR.
+- **Baseline re-dumps and census moves rode behind migrations** (219 needed 220 before main went green, plus two stale ratchet-row deletions).
+- **`audit-open` still refuses on archived history,** so the pre-close check was done by hand again.
+
+### Patterns Established
+- Oracle provenance is a closed set in code, and our own gateway can never be an oracle.
+- A founder ruling that moves scope is quoted verbatim where the scope lives, and moved requirements travel with their phase into the next milestone, carried in the archive until it starts.
+- Raw money figures stay in an untracked capture directory; tracked records carry only ratios, ordinals and verdicts, behind a scanner.
+
+### Key Lessons
+- A milestone whose goal needs external documents (broker statements) should treat their arrival as a gate at roadmap time, not at the last phase.
+- Booking a correctness tranche into a verification milestone gets work shipped, but it dilutes the milestone's story; name such tranches as their own milestone next time.
+
+### Cost Observations
+- Model mix: the orchestrator and code review on the large model; executors, fixers, verifiers and security auditors on the mid model.
+- Sessions: many, with phases run in parallel by phase agents.
+- Notable: 16 phases in 11 working days after the resume; the MT5 phases were bound by founder availability and trading days, not by agent throughput.
+
+---
+
 ## Cross-Milestone Trends
 
 ### Process Evolution
@@ -204,3 +243,4 @@
 - v1.10: the per-phase **fresh-context Fable red team** graduated from optional to standard — it caught real defects the opus review + opus verifier missed on multiple phases, confirming that model diversity (not just pass count) is what closes the gap. The recurring miss is the reverse: verification-ledger bookkeeping drift keeps resurfacing at close (v1.5 → v1.10).
 - v1.20: verification became a historical fact with drift as a separate report, and gates must be seen RED before they count. The recurring cost moved from review passes to nightly-bound PROD readings.
 - v1.21: a persona review became the requirement source and closed 32/32 in a week; record-based withholding with a per-surface census replaced per-page fixes. The close exposed a tool refusal on archived history, recorded and drafted upstream.
+- v1.18: an agent-built harness proved it could fail before the founder's single scripted session, and founder-gated work moved to the next milestone instead of holding the close. The milestone's own goal (live parity) carried over with its phase.

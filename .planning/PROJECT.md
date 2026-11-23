@@ -19,12 +19,45 @@ read says so by name instead of publishing a partial curve, and a share link is 
 Since v1.21 the app reads as one product: each role lands on its own page, a strategy has one page
 (the factsheet), a figure means the same thing on every page and is withheld on a short record,
 viewing writes nothing, and the public site tells one true story with the demo retired.
+Since v1.18 an agent-built parity harness can prove our MT5 numbers wrong against the terminal's and the
+broker's own figures, and the worker reads the MT5 server clock in every derive. MT5 is still not advertised:
+the live parity run (Phase 155.2) has not passed yet.
 
 ## Core Value
 
 Allocators act on Bridge recommendations and see whether those suggestions
 actually worked — and can model the impact of composition changes before they
 make them.
+
+## ✅ Shipped: v1.18 MT5-VERIFY & founder confirmations (2026-08-14 → 2026-11-23; parked 2026-08-20 → 2026-11-13)
+
+**Closed 2026-11-23 with audit `passed`** (`.planning/milestones/v1.18-MILESTONE-AUDIT.md`): requirements **5/5**
+satisfied (PARITY-01..04, MT5-06), phases **16/16** verified `passed`, integration 11/11 links and 4/4 flows, app
+version v0.133.39.2 through v0.133.61.2. Phases 155, 155.1 and 207–220.
+
+**Delivered:**
+- **Parity harness (155)** — provenance-locked oracle intake (terminal reading, terminal report export, broker
+  statement only), a read-only PROD capture behind SELECT-only SQL, Gate A and Gate B verdicts shown RED on three
+  broken inputs and GREEN after a byte-backup restore, and the pre-flight census for MM2, MM3 and FX-AI_V.
+- **Server clock (155.1, 217)** — one tick-time-only read inside the leased derive, asserted against the configured
+  rule and kept write-once; the rule is chosen per broker server (eu, us or utc).
+- **Truthful errors and remedies (207, 208, 209, 212, 216, 218)** — working Try again buttons, scrubbed error
+  reports, wizard and key screens that name the real cause, a 422 for a malformed CSV, and a wizard that heals an
+  owed MT5 terminal scrub itself.
+- **Sync, keys and freshness (210, 211, 213, 214)** — trade fetches resume from the stored high-water, a key and
+  its draft can never be mixed up, and public cues and freshness readings come from real data.
+- **Account email (219)** and **test reach and CI (215, 220)** — the account shows and changes its email behind a
+  password gate; every money-math and error-contract test runs; the extractor accepts the 219 trigger.
+
+**Moved to the next milestone (founder rulings 2026-11-23):** Phase 155.2 LIVEPARITY's remaining work with
+MT5-07..10, MT5-15 and MT5-GOAL-01; Phase 157 FOUNDER-CONFIRM with FCONF-01..04; Phases 221–225. Their requirement
+text and the binding founder decisions D-A..D-E (1% return gap including open P&L from the first mark, closed P&L
+before it, windows ending before the run day) are carried in `.planning/milestones/v1.18-REQUIREMENTS.md`.
+⛔ MT5 is not advertised until 155.2 passes.
+
+**Close notes:** `audit-open` still refuses on the archived 153 VERIFICATION status, so the pre-close check was
+done by hand (no open UAT, debug sessions resolved by #1310, no quick tasks, threads or seeds). Tech debt: 214 has
+no SECURITY.md, 220 no VALIDATION.md.
 
 ## ✅ Shipped: v1.21 UX — trustworthy, navigable, lean (2026-11-06 → 2026-11-13)
 
@@ -117,41 +150,6 @@ cleared from every book).
 (user call 2026-08-20) on the highest-risk items. Out of milestone by construction: founder-gated ops
 (RESEND key, Zavara activation, sFOX/Nautilus go-live, MT5 live parity = v1.18) and founder-decision
 items (AUM basis, retunes). Full detail: `MILESTONES.md` + `milestones/v1.20-*`.
-
-## Current Milestone: v1.18 MT5-VERIFY & founder confirmations (started 2026-08-14, parked 2026-08-20, RESUMED 2026-11-13)
-
-**Goal:** The numbers Quantalyze renders for the live funded MT5 accounts **MM2, MM3 and FX-AI_V**
-are proven true against the terminal's own figures, and the handful of observations only the
-founder can make are made.
-
-**Target features:**
-- **Phase 155 MT5-VERIFY:** server-UTC offset measured live with a near-midnight deal regression
-  (MT5-06); external-oracle parity against the terminal within 1% including open P&L over a window
-  ending before the run day (MT5-07, MT5-08); the same numbers on strategy detail, factsheet,
-  composer, PDF and browse (MT5-09); every divergence fixed at its root, uncapped, and the
-  `complete_with_warnings` flags explained (MT5-10, MT5-15); umbrella acceptance MT5-GOAL-01.
-- **Phase 157 FOUNDER-CONFIRM:** the wizard-resume restart gone, the amber recomputing block seen,
-  the four 153.7 copy members rendering (no Retry on `SEAM_INTERNAL_FAULT`), and
-  `MT5_SPIKE_INVESTOR_PASSWORD` rotated.
-
-**Resumed 2026-11-13 (founder):** "New milestone v1.18", accounts MM2, MM3 and FX-AI_V, and
-"Later, after planning": agents plan and pre-build the parity harness and pre-verify every
-agent-checkable item first, then the founder gives one short scripted terminal session on the next
-trading day. ⭐ **Gate 1 is cleared, measured on PROD 2026-11-13:** all three keys show
-`sync_status='complete'` with `last_sync_at` 01:02–01:09 UTC that day, so the new investor
-passwords are in. Gate 2 (the founder at the terminal on a trading day) still stands, for the
-terminal readings only. Carried context for Phase 155 from `TODOS.md`: timeout findings #8 and #10
-(need the real latency data) and the product call on MT5 as a composite member.
-
-The former v1.16 carry (Phases 143–146) shipped and closed as **v1.19 on 2026-08-20** (audit
-`tech_debt`, 9/9 requirements; archive at `.planning/milestones/v1.19-ROADMAP.md`).
-
-⭐ **Parity tolerance is settled at 1%, INCLUDING open P&L** (founder call 2026-08-14). The
-measurement window MUST end before the day of the run: `broker_dailies` anchors to today
-(`initial capital = current_equity − total_pnl`), so error accrues *backward* and comparing today's
-equity is near-tautological.
-
----
 
 ## ✅ Shipped: v1.17 MT5 — ingested, wizardable, surfaced (2026-08-04 → 2026-08-14)
 
@@ -300,13 +298,19 @@ options MTM smoothing.
 - ✓ LEAN-01..07 — one strategies list, one strategy page, `/portfolios` removed and Decks hidden, one entry point each for adding a strategy, keys and renaming, a summary-first factsheet, three-tab My allocation, leftovers removed — v1.21
 - ✓ RESID-01..02 — the 188 value churn attributed or named unexplained (control capture across a quiet nightly; 1142 of 1214 attributed, 72 unexplained), book b3's `out_of_window_flow` and `window_truncated` explained as intended behaviour — v1.21
 
+- ✓ **MT5-VERIFY & founder confirmations (v1.18, Phases 155, 155.1, 207–220, 5 of 5 requirements)**:
+- ✓ PARITY-01..04 — an MT5 parity harness that accepts only external oracles, goes RED on broken inputs, captures our side read-only and records a per-account pre-flight census — v1.18
+- ✓ MT5-06 — the MT5 server-UTC offset measured live inside the leased derive, asserted against the configured rule and kept write-once — v1.18
+
 ### Active
 
-<!-- Carried out of v1.21 (closed 2026-11-13). The next milestone's requirements are defined at its start. -->
+<!-- Carried out of v1.18 (closed 2026-11-23). The next milestone's requirements are defined at its start. -->
 
-- **v1.18 (current):** MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15 and the umbrella MT5-GOAL-01 (Phase 155), plus the Phase 157 founder confirmations. See `.planning/REQUIREMENTS.md`.
+- **Carried to the next milestone with Phase 155.2 LIVEPARITY (founder 2026-11-23):** MT5-07, MT5-08, MT5-09, MT5-10, MT5-15 and the umbrella MT5-GOAL-01, bound by founder decisions D-A..D-E. Text in `milestones/v1.18-REQUIREMENTS.md`.
+- **Carried to the next milestone with Phase 157 FOUNDER-CONFIRM (founder 2026-11-23):** FCONF-01..04. Text in `milestones/v1.18-REQUIREMENTS.md`.
+- Phases 221–225 (booked without requirement ids) also moved to the next milestone.
 
-The items below stay carried for a later milestone; they are not v1.18 scope.
+The items below stay carried for a later milestone.
 
 - **Composer range as dates (founder 2026-11-13, "Book a fix")** — save the composer's selected range as dates so presets like 12M always end on the latest day, and re-pin "kept when the series grows" to mean the same dates are kept. Next milestone; `TODOS.md` `201.1-COMPOSER-RANGE-AS-DATES`.
 - **TERMS-01, TERMS-02** (deferred out of v1.21 by the fix-and-trim scope) — manager-entered fees, terms and thesis on the factsheet; net vs gross, base currency and "Data source" for every strategy.
@@ -432,6 +436,9 @@ layer. Full per-phase detail: `.planning/MILESTONES.md` + `milestones/v1.6-*`.
 | **v1.21: composer range stored as dates (founder 2026-11-13, "Book a fix")** | Indices drift when the axis grows at the front; the "kept when the series grows" contract is re-pinned to mean the same dates are kept. | — Pending (next milestone, `201.1-COMPOSER-RANGE-AS-DATES`) |
 | **v1.21 close: skip gsd-tools' `audit-open` pre-close check, record it (founder 2026-11-13)** | It refuses on seven archived VERIFICATION statuses outside its closed set; rewriting historical verdicts is not acceptable. Upstream issue drafted. | — Pending (until gsd-core reads archived reports leniently) |
 | **v1.18: MT5 server time rule per broker server, by full server-label hash (Phase 217, founder 2026-11-18)** | `MT5_SERVER_TIME_RULES` maps hash to eu/us/utc; the default variables stay for unmapped servers; `utc` is fixed offset 0, so no migration. Founder override of 155.1 D-01: an unmapped mismatch writes and pages instead of refusing, accepting mis-dated days until the server is mapped. | — Pending (post-deploy UAT: the UTC key's next derive writes a `match` reading) |
+| **v1.18: founder decisions D-A..D-E bind the MT5 parity verdict (founder 2026-11-13; D-E amended 2026-11-22)** | Pre-mark days are judged on closed P&L, the 1% is a return gap in points including open P&L from the first mark, broker statements are the historical oracle, one narrow tick-time clock read is admitted, and the weekend edge is a frozen terminal close. Stated in `milestones/v1.18-REQUIREMENTS.md`. | — Pending (155.2's Gate B run, next milestone) |
+| **v1.18: 155.2's remaining work, 157 and 221–225 move to the next milestone (founder 2026-11-23)** | "delay 157 into next milestone. Cannot do that now"; "Move them too (Recommended)"; "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification." v1.18 closes on what shipped instead of waiting on the statements. | ✓ Good (v1.18 closed 2026-11-23, audit passed) |
+| **v1.18 close: the pre-close artifact check done by hand (2026-11-23)** | `audit-open` still refuses on the archived 153 VERIFICATION status; the historical report is not edited. Checked by hand: no open UAT, debug sessions resolved, no quick tasks, threads or seeds. | ✓ Good (verified_closeout) |
 
 ## Evolution
 
@@ -451,6 +458,11 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ## Current State
+
+**v1.18 MT5-VERIFY & founder confirmations shipped and closed 2026-11-23** (audit `passed`, 5/5
+requirements, 16/16 phases `passed`). See the `## ✅ Shipped: v1.18` section above. The next milestone is not
+started; it already holds Phases 155.2, 157 and 221–225 and carries MT5-07..10, MT5-15, MT5-GOAL-01 and
+FCONF-01..04. MT5 stays unadvertised until 155.2 passes.
 
 **v1.21 UX — trustworthy, navigable, lean shipped and closed 2026-11-13** (audit `tech_debt`, 32/32
 requirements, 18/18 phases `passed`). See the `## ✅ Shipped: v1.21` section above. The next milestone is not
@@ -527,4 +539,4 @@ the WCAG-AA floor stay green.
 </details>
 
 ---
-*Last updated: 2026-11-18 after Phase 217 (previously 2026-11-13 at v1.18 resume (after v1.21 closed, audit tech_debt, 32/32). Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.)*
+*Last updated: 2026-11-23 after the v1.18 milestone (previously 2026-11-18 after Phase 217). Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.*

@@ -1,5 +1,25 @@
 # Milestones
 
+## v1.18 — MT5-VERIFY & founder confirmations (CLOSED 2026-11-23, v0.133.39.2 → v0.133.61.2)
+
+**16 phases (155, 155.1, 207–220), 93 plans, 55 tasks, PRs #1258–#1310, 2026-11-13 → 2026-11-23.** Started 2026-08-14, parked 2026-08-20, resumed 2026-11-13.
+Audit `passed`: 5/5 requirements (PARITY-01..04, MT5-06), 16/16 phases verified, 11/11 integration links, 4/4 flows.
+Archive: `.planning/milestones/v1.18-ROADMAP.md`, `v1.18-REQUIREMENTS.md`, `v1.18-MILESTONE-AUDIT.md`, phases in `v1.18-phases/`.
+
+### Key Accomplishments
+1. **A parity harness that can fail (PARITY-01..04; 155)** — oracle inputs are locked to `terminal_reading`, `terminal_report_export` or `broker_statement`; our side is captured read-only from PROD through SELECT-only SQL behind a write-keyword gate; Gate A (pre-mark, realized balance) and Gate B (open P&L) verdicts go RED on a reclassified BALANCE deal, a one-hour clock shift and a dropped oldest deal and GREEN after a byte-backup restore; the pre-flight census for MM2, MM3 and FX-AI_V and 18 named findings were handed to 155.2. Raw figures stay untracked.
+2. **The MT5 server clock is read, not assumed (MT5-06; 155.1, 217)** — every leased derive reads the broker clock through one tick-time-only `Mt5Client` read, asserts it against the configured rule and keeps a write-once reading row before any other write, paging once on a mismatch; 217 makes the rule per broker server (eu, us or utc) so a UTC-keeping server passes, and by founder override an unmapped server's mismatch now writes and pages instead of refusing (155.1 D-01 refused).
+3. **Error pages and error reports tell the truth (207, 208, 209, 212, 216)** — every Try again button calls Next's real `retry`; error reports carry no raw database details and are not lost; the wizard and key screens name the real cause and a remedy that can work; a malformed CSV answers 422 with no Retry offered.
+4. **Sync, keys and freshness can no longer drift silently (210, 211, 213, 214)** — trade fetches resume from the stored daily high-water instead of the poll-overwritten `last_sync_at`, enqueue dedup keeps the caller's intent, a key and its draft can never be mixed up and every key state has a way out, and public factsheet cues and freshness readings come from real data.
+5. **The wizard heals itself and the account has an email (218, 219)** — the MT5 key check pays an owed terminal scrub inline under its lease; the signed-in account shows its email and can change it behind a password gate, with the sign-in email copied to the profile by a SECURITY DEFINER trigger.
+6. **Tests and CI reach what they guard (215, 220)** — every money-math and error-contract test actually runs and test apps match production; the local-stack extractor folds `AFTER UPDATE OF` auth.users triggers so the 219 baseline re-dump could land.
+
+### Close notes
+- **Moved to the next milestone, not gaps (founder rulings 2026-11-23):** Phase 155.2 LIVEPARITY's remaining work — the broker statements, plans 11–14, the Gate B run, verification and phase complete — with MT5-07..10, MT5-15 and MT5-GOAL-01 ("Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."); its 13 shipped plans (01–10, 15–17; PRs #1292, #1297, #1306) stay recorded as shipped. Phase 157 FOUNDER-CONFIRM with FCONF-01..04 ("delay 157 into next milestone. Cannot do that now"). Phases 221–225 ("Move them too (Recommended)"). Their directories stay in `.planning/phases/`, their sections in ROADMAP § Next milestone, and the carried requirement text, with D-A..D-E, in `v1.18-REQUIREMENTS.md` under "Carried to the next milestone".
+- ⛔ **MT5 is still not advertised.** The ban lifts only when 155.2 passes, in whatever milestone that is.
+- **Pre-close artifact check, by hand.** `gsd-tools query audit-open` still refuses on the archived `v1.17-phases/153-*/153-VERIFICATION.md` (status `failed`, outside its closed set; the file was not edited). Checked by hand instead: no open UAT, all 7 tracked debug sessions resolved by #1310, no quick tasks, threads or seeds. Closeout type `verified_closeout`. Known verification overrides: 0 newly acknowledged, 0 carried forward.
+- **Known deferred items at close:** the audit's tech debt (214 has no SECURITY.md, 220 has no VALIDATION.md) and Nyquist coverage (six phases compliant, nine draft, one missing). Open `TODOS.md` work is triaged separately as input to the next milestone.
+
 ## v1.21 — UX: trustworthy, navigable, lean (CLOSED 2026-11-13, v0.133.24.0 → v0.133.39.0)
 
 **18 phases (192–206 with 194.1, 194.2 and 201.1 inserted), 217 plans, 99 tasks, PRs #1210–#1256, 2026-11-06 → 2026-11-13.**

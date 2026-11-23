@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.133.61.3] - 2026-11-23 — records: close milestone v1.18 MT5-VERIFY & founder confirmations
+
+Records PR. It closes milestone v1.18 "MT5-VERIFY & founder confirmations" and holds no source, test, script or migration change. Five commits on `records/close-v1.18`. The v1.18 audit reads `passed`: 5/5 requirements (PARITY-01..04, MT5-06), 16/16 phases verified `passed` (155, 155.1, 207–220), 11/11 integration links and 4/4 flows.
+
+### Added
+- **The v1.18 milestone audit** (`.planning/milestones/v1.18-MILESTONE-AUDIT.md`), archived from the untracked report the audit run wrote. One frontmatter line was corrected to match ROADMAP: 155.2's remaining plans are 11–14, not "14-17" (plans 15–17 shipped).
+- **Carried requirements, kept in the archive.** `.planning/milestones/v1.18-REQUIREMENTS.md` opens with a "Carried to the next milestone" section. It names MT5-07..10, MT5-15 and MT5-GOAL-01 (with Phase 155.2) and FCONF-01..04 (with Phase 157), quotes the two founder rulings of 2026-11-23, and marks the founder decisions D-A..D-E (with the 2026-11-22 D-E amendment) and the Out of Scope advertising row as carried too, because they bind 155.2 and are stated nowhere else. Until `/gsd-new-milestone` writes the next requirements, that file is their only copy. The requirement text below the note is unchanged.
+
+### Changed
+- **v1.18 is archived.** `.planning/milestones/v1.18-ROADMAP.md`, `v1.18-REQUIREMENTS.md` and `v1.18-MILESTONE-AUDIT.md` are written, and the 16 phase directories moved to `.planning/milestones/v1.18-phases/`. `.planning/REQUIREMENTS.md` is removed for the next milestone.
+- **What stays in `.planning/phases/`:** 155.2, 157 and 221–225, which the founder moved to the next milestone on 2026-11-23. Their directories, their ROADMAP sections, overview bullets and Progress rows (`## 📋 Next milestone`) survived the reorganize unchanged, except two pointers into the removed `REQUIREMENTS.md` (D-E and Future), which now name the archive.
+- **ROADMAP collapsed** to the milestone index with a v1.18 summary block. The MT5 advertising ban and the public-repo labels-only rule, which lived only in the collapsed v1.18 section, are restated under Current position. **MILESTONES.md** has a curated v1.18 entry in place of the 41 tool-extracted bullets. **PROJECT.md** got its evolution review: a v1.18 Shipped section replaces the Current Milestone section, PARITY-01..04 and MT5-06 moved to Validated, the ten carried requirements listed under Active, three v1.18 decisions added to Key Decisions. **RETROSPECTIVE.md** has a v1.18 section and a trend line. **STATE.md** reads "Milestone v1.18 complete" with the next step `/gsd-new-milestone`, and `state.json`'s next command matches.
+- **Two pending plans repointed.** `155.2-13-PLAN.md` cited `155-FINDINGS.md` and `157-03-PLAN.md` had an @-reference to `155.1-SPIKE-RUNBOOK.md`, both under the old `phases/` path. `verify-plan-anchors --pending` went red on the @-reference after the move; both now name `milestones/v1.18-phases/`, and it is clean again (6 pending plans, 19 claims).
+- **No test, script or workflow needed repointing.** As at the v1.21 close (#1257) and unlike the v1.20 close (#1208), nothing outside `.planning` names a v1.18 phase path or `.planning/REQUIREMENTS.md`. The 29 vitest files that read `.planning` give the same counts before and after the move, run one file per call. `check-planning-hygiene` and `verify-plan-anchors --pending` are clean.
+
+### Notes
+- **Pre-close artifact check, by hand.** `gsd-tools query audit-open` still refuses on the archived `v1.17-phases/153-*/153-VERIFICATION.md` (status `failed`, outside its closed set). The file was not edited. Checked by hand: no open UAT, all 7 tracked debug sessions resolved by #1310, no quick tasks, threads or seeds. Closeout type `verified_closeout`.
+- ⛔ **MT5 stays unadvertised until 155.2 passes,** in whatever milestone that is.
+- **Recorded rather than fixed, from the audit:** 214 has no SECURITY.md and 220 no VALIDATION.md; Nyquist coverage is six phases compliant, nine draft and one missing.
+- **Deliberate deviations from the generic close workflow, per the brief:** branches are kept, no quick-task archive (none exist), no git tag is created in this PR, and the next milestone is not started.
+
 ## [0.133.61.2] - 2026-11-23 — records: the seven open debug sessions closed as resolved before v1.18 closes
 
 Records PR. It holds no source, test or migration change. The seven tracked GSD debug sessions that were still open (`awaiting_human_verify` or `diagnosed`) were each re-measured at `main` 57bc06f2c and are now `status: resolved`. Every one of them was fixed by a phase that already shipped, so the sweep needed no new fix and no PROD write. The PROD reads were read only, with the marker query first. The files stay in `.planning/debug/`, the same place as the other resolved sessions, because tests, services and scripts cite their paths.
