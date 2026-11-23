@@ -6,10 +6,10 @@ current_phase: 227
 current_phase_name: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job
 status: executing
 stopped_at: "v1.22 roadmap created (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK"
-last_updated: "2026-11-23T18:36:34.896Z"
+last_updated: "2026-11-23T18:38:51.714Z"
 last_activity: 2026-11-23
-last_activity_desc: "v1.22 roadmap created: 21 phases (155.2, 157, 222, 223, 225, 226–241), 81/81 requirements mapped"
-state_head: 1cb738e7a443d03bf4e4d98166f7cf1136d2b1ff
+last_activity_desc: Phase 227 execution started
+state_head: cd5fbf76f4fd45fd13b1abe65cbc94c9cd17ac47
 progress:
   total_phases: 21
   completed_phases: 0
@@ -32,7 +32,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-23)
 
-**Current focus:** v1.22 TRUTH — data you can trust; roadmap created 2026-11-23 (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK (wave 0)
+**Current focus:** Phase 227 — JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -176,10 +176,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 227 (JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job) — READY TO EXECUTE
-Plan: —
-Status: Ready to execute
-Last activity: 2026-11-23 — v1.22 roadmap created: 21 phases (155.2, 157, 222, 223, 225, 226–241), 81/81 requirements mapped
+Phase: 227 (JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job) — EXECUTING
+Plan: 1 of 11
+Status: Executing Phase 227
+Last activity: 2026-11-23 — Phase 227 execution started
 Progress: [░░░░░░░░░░] 0%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
