@@ -515,6 +515,13 @@ class TestWatchdogTick:
         15-minute derive_broker_dailies batch-mates can still pass 20 minutes
         (SC-3 is partly met, TODOS ``[166.5.1-DERIVE-BATCH-RESET-RESIDUAL]``).
         It does not cover the mark RPCs' own SQL or the claim-token 55006 fence.
+
+        2026-11-23: Phase 227 HEAL-02 closed that residual with the claim renewal
+        (``renew_compute_job_claims``, called by dispatch_tick before each dispatch
+        and from its heartbeat); the renewal itself is covered by TestClaimFence and
+        TestHeartbeatClaimRenewal below and by the SQL gate arm R1 of
+        supabase/tests/test_compute_job_claim_renewal.sql. The text above stays as
+        lineage.
         """
         mock_supabase = MagicMock()
         chain = MagicMock()
@@ -4110,5 +4117,251 @@ class TestClaimFence:
 
         assert dispatch.await_count == 1
         assert _calls_to(mock_supabase, "renew_compute_job_claims") == []
+
+
+
+
+class TestHeartbeatClaimRenewal:
+    """While one job runs, the claims of the jobs queued behind it stay fresh
+    (HEAL-02), and a hung running job still ages out under its own override."""
+
+    @staticmethod
+    async def _await_until(predicate: Any, what: str, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        while not predicate() and time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+        assert predicate(), f"timed out waiting for: {what}"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_renews_waiting_rows_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Business rule: a job queued behind a slow batch-mate must not age
+        out under the watchdog, and the RUNNING job must never be renewed, so
+        a genuinely hung run still resets under its own threshold."""
+        import main_worker_healthz
+
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.01)
+        monkeypatch.setattr(main_worker, "_CLAIM_RENEW_INTERVAL_S", 0.02)
+        jobs = _tokened_jobs(3)
+        running: dict[str, str | None] = {"id": None}
+        seen: list[tuple[str | None, list[str]]] = []
+
+        def _renew(params: dict[str, Any]) -> Any:
+            seen.append((running["id"], list(params["p_job_ids"])))
+            return list(params["p_job_ids"])
+
+        mock_supabase = _ledger_supabase(jobs, renew=_renew)
+
+        async def _dispatch(job: dict[str, Any]) -> DispatchResult:
+            running["id"] = job["id"]
+            try:
+                if job["id"] == "job-1":
+                    await self._await_until(
+                        lambda: any(r == "job-1" for r, _ in seen),
+                        "a heartbeat renewal during job-1's run",
+                    )
+                return _DONE
+            finally:
+                running["id"] = None
+
+        _saved = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_dispatch):
+                await dispatch_tick("worker-hb-renew")
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved
+
+        during_job_1 = [ids for r, ids in seen if r == "job-1"]
+        assert during_job_1, "the heartbeat never renewed the waiting rows"
+        for ids in during_job_1:
+            assert ids == ["job-2", "job-3"], (
+                f"the heartbeat renewed {ids}: only the jobs still waiting may "
+                "be renewed, never the running job-1"
+            )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_renew_is_throttled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The renewal rate is _CLAIM_RENEW_INTERVAL_S, not the 30 s healthz
+        tick: with the renew interval far above the heartbeat, many heartbeat
+        ticks pass during one run and none of them calls the renew RPC."""
+        import main_worker_healthz
+
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.01)
+        monkeypatch.setattr(main_worker, "_CLAIM_RENEW_INTERVAL_S", 60.0)
+        jobs = _tokened_jobs(2)
+        running: dict[str, str | None] = {"id": None}
+        seen: list[str | None] = []
+
+        def _renew(params: dict[str, Any]) -> Any:
+            seen.append(running["id"])
+            return list(params["p_job_ids"])
+
+        mock_supabase = _ledger_supabase(jobs, renew=_renew)
+        ticks: list[float] = []
+
+        async def _dispatch(job: dict[str, Any]) -> DispatchResult:
+            running["id"] = job["id"]
+            try:
+                if job["id"] == "job-1":
+                    # Anti-vacuity: prove the heartbeat really ticked several
+                    # times (LAST_TICK_AT keeps advancing) before asserting
+                    # that none of those ticks renewed anything.
+                    last = main_worker_healthz.LAST_TICK_AT
+                    deadline = time.monotonic() + 5.0
+                    while len(ticks) < 4 and time.monotonic() < deadline:
+                        await asyncio.sleep(0.005)
+                        if main_worker_healthz.LAST_TICK_AT != last:
+                            last = main_worker_healthz.LAST_TICK_AT
+                            ticks.append(last)
+                return _DONE
+            finally:
+                running["id"] = None
+
+        _saved = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_dispatch):
+                await dispatch_tick("worker-hb-throttle")
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved
+
+        assert len(ticks) >= 4, "the heartbeat never ticked, so this proves nothing"
+        assert seen, "the pre-dispatch fence should have renewed at least once"
+        assert "job-1" not in seen, (
+            "the heartbeat called the renew RPC during job-1's run despite the "
+            "renew interval being far above the heartbeat interval"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_renew_error_never_escapes(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failing renew inside the heartbeat is logged and swallowed: a
+        heartbeat that raised would end its task and freeze the healthz tick,
+        and the running job's own result must be untouched."""
+        import main_worker_healthz
+
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.01)
+        monkeypatch.setattr(main_worker, "_CLAIM_RENEW_INTERVAL_S", 0.02)
+        jobs = _tokened_jobs(2)
+        running: dict[str, str | None] = {"id": None}
+        failures: list[str] = []
+
+        def _renew(params: dict[str, Any]) -> Any:
+            if running["id"] == "job-1":
+                failures.append("x")
+                raise RuntimeError("renew transport down")
+            return list(params["p_job_ids"])
+
+        mock_supabase = _ledger_supabase(jobs, renew=_renew)
+
+        async def _dispatch(job: dict[str, Any]) -> DispatchResult:
+            running["id"] = job["id"]
+            try:
+                if job["id"] == "job-1":
+                    # Two failed renewals prove the heartbeat survived the
+                    # first failure and kept running.
+                    await self._await_until(
+                        lambda: len(failures) >= 2, "two failed heartbeat renewals"
+                    )
+                return _DONE
+            finally:
+                running["id"] = None
+
+        _saved = main_worker_healthz.LAST_TICK_AT
+        try:
+            with caplog.at_level(logging.INFO, logger=_WORKER_LOGGER), \
+                 patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_dispatch):
+                await dispatch_tick("worker-hb-error")
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved
+
+        assert _calls_to(mock_supabase, "mark_compute_job_done")[0] == {
+            "p_job_id": "job-1",
+            "p_claim_token": "tok-1",
+        }, "the heartbeat renew failure must not change the running job's result"
+        events = _events(caplog, "claim_renew_heartbeat_failed")
+        assert len(events) >= 2
+        assert all(e.levelno == logging.WARNING for e in events)
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_renew_hang_does_not_freeze_healthz(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A renew call that hangs must not stop the healthz stamp: the
+        heartbeat bounds the call, so a slow database cannot restart a worker
+        mid-crawl (the FLIPRETRY-04 failure this heartbeat exists to prevent)."""
+        import threading
+
+        import main_worker_healthz
+
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.01)
+        monkeypatch.setattr(main_worker, "_CLAIM_RENEW_INTERVAL_S", 0.02)
+        monkeypatch.setattr(main_worker, "_CLAIM_RENEW_TIMEOUT_S", 0.05)
+        jobs = _tokened_jobs(2)
+        running: dict[str, str | None] = {"id": None}
+        release = threading.Event()
+        entered = threading.Event()
+
+        def _renew(params: dict[str, Any]) -> Any:
+            if running["id"] == "job-1":
+                entered.set()
+                release.wait(5.0)
+            return list(params["p_job_ids"])
+
+        mock_supabase = _ledger_supabase(jobs, renew=_renew)
+        advanced: list[float] = []
+
+        async def _dispatch(job: dict[str, Any]) -> DispatchResult:
+            running["id"] = job["id"]
+            try:
+                if job["id"] == "job-1":
+                    await self._await_until(entered.is_set, "the renew to start hanging")
+                    last = main_worker_healthz.LAST_TICK_AT
+                    deadline = time.monotonic() + 5.0
+                    while len(advanced) < 3 and time.monotonic() < deadline:
+                        await asyncio.sleep(0.005)
+                        if main_worker_healthz.LAST_TICK_AT != last:
+                            last = main_worker_healthz.LAST_TICK_AT
+                            advanced.append(last)
+                    release.set()
+                return _DONE
+            finally:
+                running["id"] = None
+
+        _saved = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_dispatch):
+                await dispatch_tick("worker-hb-hang")
+        finally:
+            release.set()
+            main_worker_healthz.LAST_TICK_AT = _saved
+
+        assert len(advanced) >= 3, (
+            "healthz stopped advancing while a heartbeat renew call hung"
+        )
+
+    def test_claim_renew_interval_bound(self) -> None:
+        """A misconfigured interval fails at import, not by letting waiting
+        rows reset: it must be above 0 and below the smallest watchdog
+        threshold in force (the 10-minute default or any per-kind override)."""
+        smallest = min(
+            [_watchdog_seconds("10 minutes")]
+            + [_watchdog_seconds(v) for v in WATCHDOG_PER_KIND_OVERRIDES.values()]
+        )
+        assert main_worker._SMALLEST_WATCHDOG_THRESHOLD_S == smallest
+        assert 0 < main_worker._CLAIM_RENEW_INTERVAL_S < smallest
+        for bad in (0.0, -1.0, smallest, smallest + 1.0):
+            with pytest.raises(ValueError):
+                main_worker._validate_claim_renew_interval(bad, smallest)
+        assert main_worker._validate_claim_renew_interval(smallest - 1.0, smallest) == (
+            smallest - 1.0
+        )
 
 

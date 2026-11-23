@@ -384,6 +384,11 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # close is a lease/heartbeat renewing claimed_at (founder deferred it; TODOS
     # [166.5.1-DERIVE-BATCH-RESET-RESIDUAL]). The mark refusals stay loud, so a
     # recurrence surfaces as 2A / A.
+    # 2026-11-23, Phase 227 HEAL-02 CLOSED that residual: dispatch_tick renews the
+    # claims of the jobs waiting behind a running one (renew_compute_job_claims,
+    # at each dispatch and from the heartbeat every _CLAIM_RENEW_INTERVAL_S), so a
+    # waiting run's claim age no longer grows with its batch-mates' runtime. The
+    # 20 minutes below now bounds a run's OWN time, not its wait.
     "derive_allocator_equity": "20 minutes",  # handler timeout = 5 minutes
     # Phase 86 (COMP-02) — the composite fans out over N member keys and, when
     # MTM is admissible, crawls each Deribit member TWICE (cash + mark_to_market),
@@ -397,6 +402,68 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # derive/sync_trades 15→30 pairing. The kind is deliberately NOT in BACKFILL_KINDS.
     "okx_archive_rebuild": "30 minutes",  # handler timeout = 15 minutes
 }
+
+# ---------------------------------------------------------------------------
+# Claim renewal cadence (Phase 227 JOBLEDGER, HEAL-02, DEC-08-C)
+# ---------------------------------------------------------------------------
+# The smallest threshold the watchdog applies to any row: the 10-minute default
+# `watchdog_tick` passes, or the smallest per-kind override. The heartbeat must
+# renew waiting rows well inside it, or a waiting row resets between renewals.
+_WATCHDOG_DEFAULT_THRESHOLD: Final = "10 minutes"
+_INTERVAL_UNIT_SECONDS: Final[dict[str, int]] = {
+    "second": 1,
+    "seconds": 1,
+    "minute": 60,
+    "minutes": 60,
+    "hour": 3600,
+    "hours": 3600,
+}
+
+
+def _interval_seconds(text: str) -> float:
+    """Seconds in a single-term Postgres INTERVAL literal ('15 minutes'), the
+    only shape the override map and the default threshold use. LOUD on any other
+    shape: a threshold this module cannot measure cannot bound the renewal."""
+    parts = text.strip().split()
+    if len(parts) != 2 or parts[1] not in _INTERVAL_UNIT_SECONDS:
+        raise ValueError(
+            f"unsupported watchdog threshold {text!r}: expected "
+            f"'<int> <{'/'.join(sorted(_INTERVAL_UNIT_SECONDS))}>'"
+        )
+    return int(parts[0]) * _INTERVAL_UNIT_SECONDS[parts[1]]
+
+
+_SMALLEST_WATCHDOG_THRESHOLD_S: Final[float] = min(
+    _interval_seconds(v)
+    for v in (_WATCHDOG_DEFAULT_THRESHOLD, *WATCHDOG_PER_KIND_OVERRIDES.values())
+)
+
+
+def _validate_claim_renew_interval(interval: float, smallest_threshold_s: float) -> float:
+    """The renew interval must be above 0 (0 busy-loops the heartbeat) and below
+    the smallest watchdog threshold (at or above it a waiting row can reset
+    between two renewals). Raised at import, like _HEARTBEAT_INTERVAL_S."""
+    if not 0.0 < interval < smallest_threshold_s:
+        raise ValueError(
+            f"_CLAIM_RENEW_INTERVAL_S must be in (0, {smallest_threshold_s}); got "
+            f"{interval} - a value at or above the smallest watchdog threshold "
+            f"lets waiting rows reset between renewals; 0 busy-loops."
+        )
+    return interval
+
+
+# How often the heartbeat renews the claims of the jobs still waiting behind the
+# running one. 120 s is several heartbeats apart and a small fraction of the
+# smallest watchdog threshold (5 minutes, poll_positions).
+_CLAIM_RENEW_INTERVAL_S: Final[float] = _validate_claim_renew_interval(
+    120.0, _SMALLEST_WATCHDOG_THRESHOLD_S
+)
+# Bound on ONE heartbeat renew call. The heartbeat also stamps healthz, so a
+# renew that hangs (a slow database; the client read timeout is 120 s) must not
+# hold the stamp past healthz's 90 s STALE_THRESHOLD and restart the worker
+# mid-crawl, the failure FLIPRETRY-04 exists to prevent. Well under
+# STALE_THRESHOLD minus the heartbeat interval.
+_CLAIM_RENEW_TIMEOUT_S: Final[float] = 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -1113,10 +1180,50 @@ async def dispatch_tick(worker_id: str) -> None:
             # backstopped by the per-kind OUTER wait_for (dispatch → transient) plus
             # the DB watchdog re-claim, NOT by healthz. Cancelled in `finally` so it
             # never outlives its job.
-            async def _heartbeat() -> None:
+            #
+            # Phase 227 JOBLEDGER (HEAL-02): the same heartbeat keeps the claims
+            # of the jobs still WAITING behind this one fresh, at most every
+            # _CLAIM_RENEW_INTERVAL_S, so a job queued behind slow batch-mates
+            # is not reset by the watchdog and run twice. It never renews the
+            # running job (DEC-08-B): that row's age stays governed by its own
+            # watchdog override, so a hung run still ages out and resets. The
+            # healthz stamp stays FIRST and unchanged; the renew is bounded by
+            # _CLAIM_RENEW_TIMEOUT_S and can never raise, because a heartbeat
+            # that raised would end the task and freeze the health tick. The
+            # waiting list is bound at creation (default arguments), like the
+            # closures below, so a later loop iteration cannot rebind it.
+            async def _heartbeat(
+                waiting_ids: list[str] = _waiting_ids,
+                waiting_tokens: list[str] = _waiting_tokens,
+            ) -> None:
+                last_renew = time.monotonic()
                 while True:
                     await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
                     main_worker_healthz.LAST_TICK_AT = time.time()
+                    if (
+                        waiting_ids
+                        and time.monotonic() - last_renew >= _CLAIM_RENEW_INTERVAL_S
+                    ):
+                        last_renew = time.monotonic()
+                        try:
+                            await asyncio.wait_for(
+                                _renew_claims(waiting_ids, waiting_tokens),
+                                timeout=_CLAIM_RENEW_TIMEOUT_S,
+                            )
+                        except Exception as renew_exc:  # noqa: BLE001
+                            logger.warning(
+                                "CLAIM_RENEW_HEARTBEAT_FAILED: could not renew the "
+                                "claims of %d waiting job(s) behind job %s: %r. "
+                                "They age toward the watchdog until the next "
+                                "renewal succeeds.",
+                                len(waiting_ids), job["id"], renew_exc,
+                                extra={
+                                    "event_type": "claim_renew_heartbeat_failed",
+                                    "job_id": job["id"],
+                                    "waiting_job_ids": waiting_ids,
+                                    "worker_id": worker_id,
+                                },
+                            )
 
             _hb = asyncio.create_task(_heartbeat())
             # `dispatch(job: dict)` in services.job_worker accepts a plain dict;
