@@ -171,6 +171,13 @@ BEGIN
     RAISE EXCEPTION '[F-off-manifest] pg_constraint returned no foreign key into api_keys or strategies; the scan would be vacuous; nothing written';
   END IF;
 
+  -- [H-pre-write] check H reads pg_stat_xact_user_tables. With track_counts off every delta is 0 and
+  -- the check would pass without measuring anything, so refuse to write unless the counters are live.
+  IF current_setting('track_counts') IS DISTINCT FROM 'on' THEN
+    RAISE EXCEPTION '[H-pre-write] track_counts is % (not on), so check H would read all zeros and prove nothing; nothing written',
+      current_setting('track_counts');
+  END IF;
+
   -- Everything below this line writes. Resolve the owners first, and take the transaction-local
   -- statistics baseline so check H measures only this transaction's own writes.
   SELECT array_agg(DISTINCT k.user_id ORDER BY k.user_id) INTO v_owners
@@ -238,6 +245,17 @@ BEGIN
         r.schemaname, r.relname, r.d_ins, r.d_upd, r.d_del;
     END IF;
   END LOOP;
+
+  -- Positive control for the loop above: the api_keys delete counter must have moved by exactly the
+  -- manifest key count. A counter that read 0 (stats off) or a delete that removed a different number
+  -- of keys than the manifest holds both fail here.
+  SELECT t.n_tup_del - COALESCE((v_base -> 'public.api_keys' ->> 2)::bigint, 0) INTO v_n
+    FROM pg_stat_xact_user_tables t
+   WHERE t.schemaname = 'public' AND t.relname = 'api_keys';
+  IF v_n IS DISTINCT FROM array_length(v_keys, 1) THEN
+    RAISE EXCEPTION '[H-post-write] the api_keys delete counter moved by % but the manifest holds % keys; nothing written',
+      v_n, array_length(v_keys, 1);
+  END IF;
 
   SELECT string_agg(t.relname || '=' || (t.n_tup_del - COALESCE((v_base -> (t.schemaname || '.' || t.relname) ->> 2)::bigint, 0)),
                     ', ' ORDER BY t.relname)

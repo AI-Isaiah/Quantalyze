@@ -723,6 +723,91 @@ describe("oneaccountonce delete.sql and census, EXECUTED on a throwaway cluster 
       expectAbort(db, before, runDelete(db), "[H-post-write]", "zz_unlisted_trade_child");
     });
 
+    // The F scan reads declared foreign keys from pg_constraint. A soft reference (a uuid column with no
+    // constraint) is invisible to it by construction; census-dependents.sql reports those and they do not gate
+    // the script (see the README). There is no arm for that and no fixture could make one: it is a limit, not a branch.
+    it("composite foreign key into api_keys: the script cannot count it and stops [F-off-manifest]", () => {
+      const db = clone();
+      psql(
+        db,
+        `ALTER TABLE public.api_keys ADD CONSTRAINT zz_api_keys_id_user_uq UNIQUE (id, user_id);
+         CREATE TABLE public.zz_composite_ref (key_id uuid, owner_id uuid, FOREIGN KEY (key_id, owner_id) REFERENCES public.api_keys (id, user_id));`,
+      );
+      expect(psql(db, `SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND conrelid = 'public.zz_composite_ref'::regclass AND array_length(conkey, 1) = 2;`).trim()).toBe("1");
+      const before = state(db);
+      expectAbort(db, before, runDelete(db), "[F-off-manifest]", "composite foreign key this script cannot count");
+    });
+
+    it("no foreign key into api_keys or strategies at all: the scan would be vacuous and stops [F-off-manifest]", () => {
+      const db = clone();
+      psql(
+        db,
+        `DO $$ DECLARE r record; BEGIN
+           FOR r IN SELECT conrelid::regclass AS t, conname FROM pg_constraint
+                     WHERE contype = 'f' AND confrelid IN ('public.api_keys'::regclass, 'public.strategies'::regclass)
+           LOOP EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', r.t, r.conname); END LOOP;
+         END $$;`,
+      );
+      expect(psql(db, `SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND confrelid IN ('public.api_keys'::regclass, 'public.strategies'::regclass);`).trim()).toBe("0");
+      const before = state(db);
+      expectAbort(db, before, runDelete(db), "[F-off-manifest]", "the scan would be vacuous");
+    });
+
+    it("strategy delete removes fewer rows than expected: the owner's delete policy is gone, so row-level security hides every row [G-write]", () => {
+      const db = clone();
+      psql(db, `DROP POLICY strategies_delete ON public.strategies;`);
+      const before = state(db);
+      expectAbort(db, before, runDelete(db), "[G-write]", "removed 0 of 1 expected strategies");
+    });
+
+    it("a protected key changes during the run: a trigger on the key delete rewrites its venue_account_id [H-post-write]", () => {
+      const db = clone();
+      // api_keys is in the confirmed list, so neither the table scan nor the counter sees the update; only the fingerprint does.
+      psql(
+        db,
+        `CREATE FUNCTION public.zz_touch_protected() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+           BEGIN UPDATE public.api_keys SET venue_account_id = 'tampered' WHERE id = ${q(M0)}; RETURN NULL; END $$;
+         CREATE TRIGGER zz_touch_protected AFTER DELETE ON public.api_keys FOR EACH ROW EXECUTE FUNCTION public.zz_touch_protected();`,
+      );
+      const before = state(db);
+      expectAbort(db, before, runDelete(db), "[H-post-write]", "a protected key changed during the run");
+    });
+
+    it("a manifest key survives its delete: a BEFORE DELETE trigger swallows the row, so the RPC removes nothing and raises nothing [H-post-write]", () => {
+      const db = clone();
+      psql(
+        db,
+        `CREATE FUNCTION public.zz_swallow_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN IF OLD.id = ${q(D2)} THEN RETURN NULL; END IF; RETURN OLD; END $$;
+         CREATE TRIGGER zz_swallow_delete BEFORE DELETE ON public.api_keys FOR EACH ROW EXECUTE FUNCTION public.zz_swallow_delete();`,
+      );
+      const before = state(db);
+      expectAbort(db, before, runDelete(db), "[H-post-write]", "a manifest key or strategy still exists after the deletes");
+    });
+
+    it("track_counts off: check H would read all zeros, so the script refuses before any write [H-pre-write]", () => {
+      const db = clone();
+      const before = state(db);
+      // A session-level SET (this harness connects as a superuser) puts the counters out, exactly as a project with track_counts off would.
+      const res = psqlRaw(db, `SET track_counts = off;\n${fill(deleteSql())}`);
+      expectAbort(db, before, res, "[H-pre-write]", "track_counts is off (not on)");
+    });
+
+    it("api_keys delete counter disagrees with the manifest: a trigger deletes one extra key, so the counter moves by 4, not 3 [H-post-write]", () => {
+      const db = clone();
+      // XD is a decoy (another owner's duplicate-marked key, no dependents). An AFTER DELETE trigger removes it when the first manifest key goes.
+      // api_keys is in the confirmed list, so only the counter assertion can see it.
+      psql(
+        db,
+        `CREATE FUNCTION public.zz_extra_key_delete() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+           BEGIN DELETE FROM public.api_keys WHERE id = ${q(XD)}; RETURN NULL; END $$;
+         CREATE TRIGGER zz_extra_key_delete AFTER DELETE ON public.api_keys FOR EACH ROW EXECUTE FUNCTION public.zz_extra_key_delete();`,
+      );
+      expect(psql(db, `SELECT count(*) FROM public.api_keys WHERE id = ${q(XD)};`).trim()).toBe("1");
+      const before = state(db);
+      expectAbort(db, before, runDelete(db), "[H-post-write]", "api_keys delete counter moved by 4 but the manifest holds 3 keys");
+    });
+
     it("marker mismatch: EXPECTED_MARKER differs from the database's comment [A-marker]", () => {
       const db = clone();
       const before = state(db);
