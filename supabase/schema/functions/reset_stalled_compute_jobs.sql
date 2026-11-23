@@ -2,13 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260516104201_compute_jobs_audit_2026_05_07_residual.sql
--- ====================================================================
--- M-0781 (cont.): reset_stalled_compute_jobs — LIMIT + SKIP LOCKED
--- ====================================================================
--- Same per-tick bound applied to the per-kind watchdog. Each kind's
--- pass is independently bounded at 500. mig 117 P97 claim_token=NULL
--- invalidation preserved.
+-- source migration: 20261124120100_jobledger_reset_ledger_and_bridge.sql
+-- ==========================================================================
+-- STEP 1: reset_stalled_compute_jobs, re-based on 20260516104201
+-- ==========================================================================
 CREATE OR REPLACE FUNCTION reset_stalled_compute_jobs(
   p_stale_threshold    INTERVAL DEFAULT interval '10 minutes',
   p_per_kind_overrides JSONB    DEFAULT NULL
@@ -23,6 +20,10 @@ DECLARE
   v_partial   INTEGER;
   v_kind      TEXT;
   v_threshold INTERVAL;
+  -- HEAL-04 / MT5D-01 (phase 227): the ids this call reset, for the bridge loop below.
+  v_ids       UUID[] := '{}';
+  v_pass_ids  UUID[];
+  r_b         RECORD;
 BEGIN
   IF p_stale_threshold IS NULL OR p_stale_threshold <= interval '0' THEN
     RAISE EXCEPTION 'reset_stalled_compute_jobs: p_stale_threshold must be > 0, got %', p_stale_threshold
@@ -34,53 +35,117 @@ BEGIN
     FOR v_kind IN SELECT jsonb_object_keys(p_per_kind_overrides) LOOP
       v_threshold := (p_per_kind_overrides ->> v_kind)::INTERVAL;
 
-      UPDATE compute_jobs
-         SET status          = 'pending',
-             claimed_at      = NULL,
-             claimed_by      = NULL,
-             next_attempt_at = now(),
-             last_error      = 'worker_stalled',
-             claim_token     = NULL    -- mig 117: P97 fence invalidation
-       WHERE id IN (
-         SELECT id FROM compute_jobs
-           WHERE status = 'running'
-             AND kind = v_kind
-             AND claimed_at IS NOT NULL
-             AND claimed_at < (now() - v_threshold)
-           ORDER BY claimed_at
-           LIMIT 500
-           FOR UPDATE SKIP LOCKED
-       );
+      -- HEAL-04 / MT5D-01 (phase 227): the same bounded UPDATE, now in one statement with
+      -- its ledger rows. `old` takes the row locks (SKIP LOCKED) and remembers the token,
+      -- attempts and worker the row held BEFORE the reset; `upd` is the existing UPDATE;
+      -- `ins` writes one watchdog_reset record per reset row.
+      WITH old AS (
+        SELECT id,
+               claim_token AS old_claim_token,
+               attempts    AS old_attempts,
+               claimed_by  AS old_claimed_by
+          FROM compute_jobs
+         WHERE status = 'running'
+           AND kind = v_kind
+           AND claimed_at IS NOT NULL
+           AND claimed_at < (now() - v_threshold)
+         ORDER BY claimed_at
+         LIMIT 500
+         FOR UPDATE SKIP LOCKED
+      ), upd AS (
+        UPDATE compute_jobs cj
+           SET status          = 'pending',
+               claimed_at      = NULL,
+               claimed_by      = NULL,
+               next_attempt_at = now(),
+               last_error      = 'worker_stalled',
+               claim_token     = NULL    -- mig 117: P97 fence invalidation
+          FROM old
+         WHERE cj.id = old.id
+        RETURNING cj.id, cj.kind, cj.strategy_id, cj.api_key_id, cj.exchange, cj.created_at,
+                  old.old_claim_token, old.old_attempts, old.old_claimed_by
+      ), ins AS (
+        INSERT INTO public.compute_job_attempt_failures
+               (job_id, kind, strategy_id, api_key_id, exchange, job_created_at,
+                attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+        SELECT u.id, u.kind, u.strategy_id, u.api_key_id, u.exchange, u.created_at,
+               u.old_attempts, u.old_claim_token, 'watchdog_reset', NULL, 'worker_stalled', u.old_claimed_by
+          FROM upd u
+        ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING
+      )
+      SELECT count(*), COALESCE(array_agg(upd.id), '{}'::uuid[])
+        INTO v_partial, v_pass_ids
+        FROM upd;
 
-      GET DIAGNOSTICS v_partial = ROW_COUNT;
       v_reset := v_reset + v_partial;
+      v_ids   := v_ids || v_pass_ids;
     END LOOP;
   END IF;
 
   -- Default threshold pass: kinds NOT in the override map.
-  UPDATE compute_jobs
-     SET status          = 'pending',
-         claimed_at      = NULL,
-         claimed_by      = NULL,
-         next_attempt_at = now(),
-         last_error      = 'worker_stalled',
-         claim_token     = NULL    -- mig 117: P97 fence invalidation
-   WHERE id IN (
-     SELECT id FROM compute_jobs
-       WHERE status = 'running'
-         AND claimed_at IS NOT NULL
-         AND claimed_at < (now() - p_stale_threshold)
-         AND (
-           p_per_kind_overrides IS NULL
-           OR NOT (p_per_kind_overrides ? kind)
-         )
-       ORDER BY claimed_at
-       LIMIT 500
-       FOR UPDATE SKIP LOCKED
-   );
+  WITH old AS (
+    SELECT id,
+           claim_token AS old_claim_token,
+           attempts    AS old_attempts,
+           claimed_by  AS old_claimed_by
+      FROM compute_jobs
+     WHERE status = 'running'
+       AND claimed_at IS NOT NULL
+       AND claimed_at < (now() - p_stale_threshold)
+       AND (
+         p_per_kind_overrides IS NULL
+         OR NOT (p_per_kind_overrides ? kind)
+       )
+     ORDER BY claimed_at
+     LIMIT 500
+     FOR UPDATE SKIP LOCKED
+  ), upd AS (
+    UPDATE compute_jobs cj
+       SET status          = 'pending',
+           claimed_at      = NULL,
+           claimed_by      = NULL,
+           next_attempt_at = now(),
+           last_error      = 'worker_stalled',
+           claim_token     = NULL    -- mig 117: P97 fence invalidation
+      FROM old
+     WHERE cj.id = old.id
+    RETURNING cj.id, cj.kind, cj.strategy_id, cj.api_key_id, cj.exchange, cj.created_at,
+              old.old_claim_token, old.old_attempts, old.old_claimed_by
+  ), ins AS (
+    INSERT INTO public.compute_job_attempt_failures
+           (job_id, kind, strategy_id, api_key_id, exchange, job_created_at,
+            attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+    SELECT u.id, u.kind, u.strategy_id, u.api_key_id, u.exchange, u.created_at,
+           u.old_attempts, u.old_claim_token, 'watchdog_reset', NULL, 'worker_stalled', u.old_claimed_by
+      FROM upd u
+    ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING
+  )
+  SELECT count(*), COALESCE(array_agg(upd.id), '{}'::uuid[])
+    INTO v_partial, v_pass_ids
+    FROM upd;
 
-  GET DIAGNOSTICS v_partial = ROW_COUNT;
   v_reset := v_reset + v_partial;
+  v_ids   := v_ids || v_pass_ids;
+
+  -- HEAL-04 / MT5D-01 (phase 227): re-derive the status of every strategy a reset row
+  -- belongs to, once per distinct (strategy_id, kind), through the existing bridge.
+  -- Every row lock is already held (the SKIP LOCKED selections above); the per-strategy
+  -- advisory locks come AFTER them, in ONE sorted order (hashtext of the strategy id, the
+  -- id, the kind) so two callers that bridge overlapping strategy sets cannot take them in
+  -- opposite orders. The bridge itself decides whether a side-kind job bounces the status
+  -- (its own early return); this loop spells no kind list. A key-mode row has a NULL
+  -- strategy_id and makes no call.
+  FOR r_b IN
+    SELECT cj.strategy_id, cj.kind, min(cj.id::text)::uuid AS job_id
+      FROM compute_jobs cj
+     WHERE cj.id = ANY (v_ids)
+       AND cj.strategy_id IS NOT NULL
+     GROUP BY cj.strategy_id, cj.kind
+     ORDER BY hashtext(cj.strategy_id::text), cj.strategy_id, cj.kind
+  LOOP
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(r_b.strategy_id::text));
+    PERFORM sync_strategy_analytics_status(r_b.strategy_id, r_b.job_id);
+  END LOOP;
 
   RETURN v_reset;
 END;
