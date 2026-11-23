@@ -91,3 +91,113 @@ CREATE TRIGGER compute_jobs_record_orphan_reaped_attempt
   FOR EACH ROW
   WHEN (OLD.status = 'running' AND NEW.status = 'failed_final' AND NEW.error_kind = 'orphaned')
   EXECUTE FUNCTION public.record_orphan_reaped_attempt();
+
+-- ==========================================================================
+-- STEP 3: self-verify, CATALOGUE ONLY (reads no table row)
+-- ==========================================================================
+-- pg_trigger, pg_get_triggerdef, pg_proc, pg_constraint and has_function_privilege only, so
+-- scripts/lint-migration-data-dependence.mjs passes and the apply cannot refuse on a
+-- database whose tables are empty. Each condition is computed into a named boolean and
+-- tested in its own IF, so a mutation twin of the gate
+-- (supabase/tests/test_orphan_reaped_attempt_record.sql) can stand one IF down and let the
+-- arm's OWN observable go red. Every RAISE is one literal naming the consequence.
+DO $verify$
+DECLARE
+  v_fn            oid := to_regprocedure('public.record_orphan_reaped_attempt()');
+  v_tbl           oid := to_regclass('public.compute_jobs');
+  v_n             integer;
+  v_enabled       "char";
+  v_def           text;
+  v_secdef        boolean;
+  v_cfg           text[];
+  v_cause_def     text;
+  v_fn_ok         boolean;
+  v_one_ok        boolean;
+  v_enabled_ok    boolean;
+  v_after_ok      boolean;
+  v_row_ok        boolean;
+  v_running_ok    boolean;
+  v_final_ok      boolean;
+  v_orphaned_ok   boolean;
+  v_secdef_ok     boolean;
+  v_pin_ok        boolean;
+  v_acl_ok        boolean;
+  v_cause_ok      boolean;
+BEGIN
+  v_fn_ok := v_fn IS NOT NULL;
+  IF NOT v_fn_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: public.record_orphan_reaped_attempt() does not exist, so a reaped orphan keeps no record of its cause';
+  END IF;
+
+  SELECT count(*) INTO v_n
+    FROM pg_trigger t
+   WHERE t.tgrelid = v_tbl AND t.tgfoid = v_fn AND NOT t.tgisinternal;
+  v_one_ok := v_n = 1;
+  IF NOT v_one_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: exactly one trigger on public.compute_jobs must call record_orphan_reaped_attempt(), otherwise a reaped orphan is recorded twice or not at all';
+  END IF;
+
+  SELECT t.tgenabled, pg_get_triggerdef(t.oid) INTO v_enabled, v_def
+    FROM pg_trigger t
+   WHERE t.tgrelid = v_tbl AND t.tgfoid = v_fn AND NOT t.tgisinternal;
+
+  v_enabled_ok := v_enabled = 'O';
+  IF NOT v_enabled_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: the compute_jobs_record_orphan_reaped_attempt trigger must be enabled, otherwise the terminalizer reaps orphans without a record';
+  END IF;
+
+  v_after_ok := position('AFTER UPDATE OF status ON' IN v_def) > 0;
+  IF NOT v_after_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: the trigger must be AFTER UPDATE OF status, otherwise it fires on every compute_jobs update (a hot table) instead of only on a status change';
+  END IF;
+
+  v_row_ok := position('FOR EACH ROW' IN v_def) > 0;
+  IF NOT v_row_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: the trigger must be row level, otherwise it cannot read the claim token and attempt count of each reaped job';
+  END IF;
+
+  v_running_ok := position('''running''' IN v_def) > 0;
+  IF NOT v_running_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: the trigger WHEN must name the running status, otherwise a job that never ran is recorded as a reaped attempt';
+  END IF;
+
+  v_final_ok := position('''failed_final''' IN v_def) > 0;
+  IF NOT v_final_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: the trigger WHEN must name the failed_final status, otherwise a retried or finished job is recorded as a reaped attempt';
+  END IF;
+
+  v_orphaned_ok := position('''orphaned''' IN v_def) > 0;
+  IF NOT v_orphaned_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: the trigger WHEN must name error_kind orphaned, otherwise a failure written by mark_compute_job_failed is recorded a second time under a cause it did not have';
+  END IF;
+
+  SELECT p.prosecdef, p.proconfig INTO v_secdef, v_cfg FROM pg_proc p WHERE p.oid = v_fn;
+  v_secdef_ok := v_secdef IS TRUE;
+  IF NOT v_secdef_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: record_orphan_reaped_attempt() must be SECURITY DEFINER, otherwise the role that fires the trigger needs INSERT on the ledger, which no role holds';
+  END IF;
+
+  v_pin_ok := COALESCE(v_cfg, ARRAY[]::text[]) @> ARRAY['search_path=public, pg_catalog'];
+  IF NOT v_pin_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: record_orphan_reaped_attempt() must pin search_path=public, pg_catalog, otherwise a SECURITY DEFINER function resolves names through the caller''s path';
+  END IF;
+
+  v_acl_ok := NOT has_function_privilege('public', v_fn, 'EXECUTE')
+          AND NOT has_function_privilege('anon', v_fn, 'EXECUTE')
+          AND NOT has_function_privilege('authenticated', v_fn, 'EXECUTE');
+  IF NOT v_acl_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: record_orphan_reaped_attempt() must be executable by no API role, otherwise any signed-in caller can invoke a SECURITY DEFINER writer of the ledger';
+  END IF;
+
+  SELECT pg_get_constraintdef(k.oid) INTO v_cause_def
+    FROM pg_constraint k
+   WHERE k.conrelid = to_regclass('public.compute_job_attempt_failures')
+     AND k.conname = 'compute_job_attempt_failures_cause_class_chk';
+  v_cause_ok := COALESCE(position('''orphan_reaped''' IN v_cause_def), 0) > 0;
+  IF NOT v_cause_ok THEN
+    RAISE EXCEPTION 'orphan_reaped: the ledger cause_class CHECK from migration 20261124120000 must admit orphan_reaped, otherwise the trigger''s INSERT is refused and aborts the terminalizer''s whole UPDATE';
+  END IF;
+
+  RAISE NOTICE 'orphan_reaped: compute_jobs_record_orphan_reaped_attempt verified (one enabled row-level AFTER UPDATE OF status trigger, WHEN running to failed_final with error_kind orphaned); the function is SECURITY DEFINER, search_path pinned, executable by no API role; the ledger CHECK admits orphan_reaped.';
+END
+$verify$;
