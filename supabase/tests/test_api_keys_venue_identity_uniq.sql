@@ -65,16 +65,19 @@
 -- create_wizard_strategy canary — so a migration EDIT aborts the apply instead of
 -- reaching the gate. The `sql` steps drift the LIVE object after apply, which is
 -- what this gate exists to catch: state that was correct once and is not now.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql"]}
 
 DO $$
 DECLARE
+  -- ⭐ THIRTEEN types as of Phase 225 / CONN-03 (migration 20261123180000 added the
+  -- trailing p_venue_server TEXT DEFAULT NULL by DROP + CREATE). The 12-type form no
+  -- longer resolves: has_function_privilege raises undefined_function on it.
   c_sig CONSTANT TEXT :=
-    'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)';
-  -- ⚠️ ELEVEN types, not twelve. add_wizard_composite_key has no
-  -- p_venue_account_id — the composite path stamps no venue identity. The arity
-  -- asymmetry is real; has_function_privilege's text form matches the DECLARED
-  -- argument list EXACTLY, so borrowing c_sig's 12 types here would raise
+    'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)';
+  -- ⚠️ ELEVEN types, not thirteen. add_wizard_composite_key has no
+  -- p_venue_account_id or p_venue_server — the composite path stamps no venue
+  -- identity. The arity asymmetry is real; has_function_privilege's text form
+  -- matches the DECLARED argument list EXACTLY, so borrowing c_sig's 13 types here would raise
   -- undefined_function and report "function does not exist" instead of a verdict.
   k_sig CONSTANT TEXT :=
     'add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid)';
@@ -276,14 +279,16 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (3): create_wizard_strategy does not accept p_venue_account_id — the WIZCONT-02 identity is never stamped and the dedup index governs nothing';
   END IF;
 
-  -- The stamp site NORMALISES: NULLIF(btrim(p_venue_account_id), ''). Losing the
+  -- The stamp site NORMALISES: NULLIF(btrim(p_venue_account_id, E' \t\r\n'), ''). Losing the
   -- btrim makes ' 5551234' and '5551234' index as DIFFERENT keys, so the dedup
   -- misses the very re-connect it exists to catch. Losing the NULLIF turns an
   -- unset form field ('' from a `?? ''`) into a 23514 against
   -- api_keys_venue_account_id_nonblank that the wizard route has no handler for.
   -- Asserted here because the expression is one "simplification" away from being
-  -- the bare parameter again.
-  IF v_fn_src NOT ILIKE '%nullif(btrim(p_venue_account_id)%' THEN
+  -- the bare parameter again. The pattern stops before the closing parenthesis on purpose:
+  -- the btrim CHARACTER SET (tab and newline count as blank) is pinned by arm 6v-writes-ws,
+  -- and a pattern that named it would make this earlier arm the first failure of that twin.
+  IF v_fn_src NOT ILIKE '%nullif(btrim(p_venue_account_id%' THEN
     RAISE EXCEPTION 'TEST FAILED (3): create_wizard_strategy stamps venue_account_id WITHOUT the NULLIF(btrim(...), '''') normalisation — whitespace would make the dedup miss, and a blank field would hit api_keys_venue_account_id_nonblank as an unhandled 23514';
   END IF;
 
@@ -478,7 +483,7 @@ BEGIN
   --            WOULD HIDE: it is reachable only while v_b_live, so its RED is
   --            also the proof that migration 20260814120000 is live on the lane
   --            and the skip is inert (see the header).
-  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) TO authenticated"}]}
+  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text) TO authenticated"}]}
   IF v_b_live THEN
     IF v_auth_exec THEN
       RAISE EXCEPTION 'TEST FAILED (4): authenticated HOLDS EXECUTE on create_wizard_strategy — Phase 156 / CONNECT-01 withdrew it (migration 20260814120000). A re-GRANT re-opens the direct PostgREST door and a browser session can mint an attested_venue of its choosing, which is precisely the forgery this file''s venue-identity assertions assume is impossible. If no migration did this deliberately, a DROP + CREATE re-granted it silently via pg_default_acl — re-issue the REVOKE in that same migration.';
@@ -605,6 +610,15 @@ DECLARE
   c_okx_acct  CONSTANT TEXT := 'okx-acct-7001';
   v_refused   BOOLEAN;
   v_stamped   TEXT;
+  -- Phase 225 / CONN-03 (arms 6v-*). Synthetic values only: a public repo.
+  c_acct225   CONSTANT TEXT := 'wizcont225-acct-1';
+  c_acct225b  CONSTANT TEXT := 'wizcont225-acct-2';
+  v_strat225  UUID;
+  v_key225    UUID;
+  v_srv225    TEXT;
+  v_cname     TEXT;
+  v_ws_err    TEXT;
+  v_key_ws    UUID;
 BEGIN
   email_a := 'test-wizcont02-venue-a-' || v_run || '@quantalyze.test';
   email_b := 'test-wizcont02-venue-b-' || v_run || '@quantalyze.test';
@@ -776,10 +790,192 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (6f CCXT): a new live okx row after the first was disconnected was refused with SQLSTATE % (%), not admitted', SQLSTATE, SQLERRM;
   END;
 
+  -- ===== Phase 225 / CONN-03 — api_keys.venue_server (migration 20261123180000) ====
+  -- The column and the 13th create_wizard_strategy parameter are new, and the unique
+  -- index is NOT changed by that migration (plan 10 owns it), so every arm below reads
+  -- the column, the function or the privileges, never the index.
+  -- The wizard RPC admits service_role only (auth.role() reads request.jwt.claims),
+  -- so each call sets that claim first and clears it again right after.
+
+  -- ----- 6v-writes. the server lands in the SAME INSERT, normalised ---------------
+  -- A caller passes the server with stray spaces and upper-case letters; the stored
+  -- value must be the trimmed lower-case form. venue_account_id is asserted too: it
+  -- proves the call reached the INSERT as the privileged owner (the scrub trigger
+  -- would NULL it for any other writer), so a NULL venue_server below is the
+  -- parameter's fault and nothing else's.
+  -- RED-UNDER: replace the stamp expression NULLIF(lower(btrim(p_venue_server, E' \t\r\n')), '')
+  --            in the migration's INSERT with a bare NULL — the "forgot to wire the
+  --            parameter" regression: the 13th parameter is accepted and ignored, so
+  --            every MT5 key stays at the wildcard forever and the index change
+  --            (plan 10) fences nothing.
+  -- RED-UNDER-M: {"arm":"6v-writes","apply":[{"kind":"edit","file":"supabase/migrations/20261123180000_api_keys_venue_server.sql","find":"NULLIF(lower(btrim(p_venue_server, E' \\t\\r\\n')), '')","replace":"NULL","occurrences":1}]}
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'service_role')::text, true);
+  SELECT w.strategy_id, w.api_key_id INTO v_strat225, v_key225
+    FROM public.create_wizard_strategy(
+      p_user_id := uid_a, p_exchange := 'mt5', p_label := 'wizcont225 writes',
+      p_api_key_encrypted := 'enc', p_api_secret_encrypted := 'sec',
+      p_passphrase_encrypted := 'pass', p_dek_encrypted := 'dek', p_nonce := 'nonce',
+      p_kek_version := 1, p_placeholder_name := 'wizcont225 writes draft',
+      p_wizard_session_id := gen_random_uuid(),
+      p_venue_account_id := c_acct225,
+      p_venue_server := '  Synthetic-Broker-Live  ') AS w;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+
+  SELECT venue_account_id, venue_server INTO v_stamped, v_srv225
+    FROM api_keys WHERE id = v_key225;
+  IF v_stamped IS DISTINCT FROM c_acct225 THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-writes): the wizard RPC did not stamp venue_account_id (got %, expected %) — the call never reached the privileged INSERT, so the server assertion below would be vacuous',
+      v_stamped, c_acct225;
+  END IF;
+  IF v_srv225 IS DISTINCT FROM 'synthetic-broker-live' THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-writes): create_wizard_strategy stored venue_server % for the input ''  Synthetic-Broker-Live  '' — expected the trimmed lower-case form ''synthetic-broker-live'' written in the SAME INSERT that stamps venue_account_id (CONN-03). NULL here means the parameter is accepted and dropped', v_srv225;
+  END IF;
+
+  -- ----- 6v-writes-ws. a tab/newline-only login or server is blank, so it stores NULL ----
+  -- btrim with no character set trims spaces only, so a login or server made of tabs and
+  -- newlines would be stored as a real, non-wildcard identity. The call is made inside a
+  -- handler that only records, so a refusal by api_keys_venue_server_valid is read as a
+  -- named failure of this arm and not as a raw error.
+  -- RED-UNDER: trim the login and the server stamps with a bare btrim (spaces only) in the
+  --            migration's INSERT: the tab-only login is stored as an identity and the
+  --            tab-and-newline server is refused by the CHECK.
+  -- RED-UNDER-M: {"arm":"6v-writes-ws","apply":[{"kind":"edit","file":"supabase/migrations/20261123180000_api_keys_venue_server.sql","find":"NULLIF(btrim(p_venue_account_id, E' \\t\\r\\n'), '')","replace":"NULLIF(btrim(p_venue_account_id), '')","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261123180000_api_keys_venue_server.sql","find":"NULLIF(lower(btrim(p_venue_server, E' \\t\\r\\n')), '')","replace":"NULLIF(lower(btrim(p_venue_server)), '')","occurrences":1}]}
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'service_role')::text, true);
+  v_ws_err := NULL;
+  v_key_ws := NULL;
+  BEGIN
+    SELECT w.api_key_id INTO v_key_ws
+      FROM public.create_wizard_strategy(
+        p_user_id := uid_a, p_exchange := 'mt5', p_label := 'wizcont225 ws',
+        p_api_key_encrypted := 'enc', p_api_secret_encrypted := 'sec',
+        p_passphrase_encrypted := 'pass', p_dek_encrypted := 'dek', p_nonce := 'nonce',
+        p_kek_version := 1, p_placeholder_name := 'wizcont225 ws draft',
+        p_wizard_session_id := gen_random_uuid(),
+        p_venue_account_id := E' \t\n ',
+        p_venue_server := E' \t\r\n ') AS w;
+  EXCEPTION WHEN OTHERS THEN
+    v_ws_err := SQLSTATE || ' ' || SQLERRM;
+  END;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  IF v_ws_err IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-writes-ws): create_wizard_strategy refused a tab/newline-only login and server (%) — they must normalise to NULL (blank), not reach the INSERT as values', v_ws_err;
+  END IF;
+  SELECT venue_account_id, venue_server INTO v_stamped, v_srv225
+    FROM api_keys WHERE id = v_key_ws;
+  IF v_stamped IS NOT NULL OR v_srv225 IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-writes-ws): create_wizard_strategy stored login % and server % for a tab/newline-only login and server — both must be NULL', v_stamped, v_srv225;
+  END IF;
+
+  -- ----- 6v-check-blank. a blank or over-long server is refused by NAME -----------
+  -- Without api_keys_venue_server_valid a whitespace-only value is a non-NULL
+  -- "server" no real broker has, and a 129-character value is unbounded user text in
+  -- an identity column. Asserted by constraint NAME so a different CHECK refusing it
+  -- cannot pass for this one.
+  -- RED-UNDER: DROP the LIVE api_keys_venue_server_valid constraint. A `sql` step,
+  --            not a migration edit: the CHECK is created by the migration, and the
+  --            drift worth catching is the constraint going missing after apply.
+  -- RED-UNDER-M: {"arm":"6v-check-blank","apply":[{"kind":"sql","stmt":"ALTER TABLE public.api_keys DROP CONSTRAINT api_keys_venue_server_valid"}]}
+  BEGIN
+    UPDATE api_keys SET venue_server = '   ' WHERE id = v_key225;
+    RAISE EXCEPTION 'TEST FAILED (6v-check-blank): a WHITESPACE-ONLY venue_server was ADMITTED — api_keys_venue_server_valid does not refuse a blank server, so a blank string becomes a distinct "server" that matches nothing and every wildcard rule reads it as a real value';
+  EXCEPTION WHEN check_violation THEN
+    GET STACKED DIAGNOSTICS v_cname = CONSTRAINT_NAME;
+    IF v_cname IS DISTINCT FROM 'api_keys_venue_server_valid' THEN
+      RAISE EXCEPTION 'TEST FAILED (6v-check-blank): a whitespace-only venue_server was refused by constraint % and not by api_keys_venue_server_valid', v_cname;
+    END IF;
+  END;
+  BEGIN
+    UPDATE api_keys SET venue_server = repeat('a', 129) WHERE id = v_key225;
+    RAISE EXCEPTION 'TEST FAILED (6v-check-blank): a 129-CHARACTER venue_server was ADMITTED — api_keys_venue_server_valid must cap the length at 128';
+  EXCEPTION WHEN check_violation THEN
+    GET STACKED DIAGNOSTICS v_cname = CONSTRAINT_NAME;
+    IF v_cname IS DISTINCT FROM 'api_keys_venue_server_valid' THEN
+      RAISE EXCEPTION 'TEST FAILED (6v-check-blank): a 129-character venue_server was refused by constraint % and not by api_keys_venue_server_valid', v_cname;
+    END IF;
+  END;
+
+  -- ----- 6v-check-ws. a tab/newline-only server is refused by NAME ---------------------
+  -- 6v-check-blank pins a spaces-only value; the CHECK's blank leg must also treat tab,
+  -- carriage return and newline as blank.
+  -- RED-UNDER: give the CHECK's blank leg a bare btrim (spaces only) in the migration: the
+  --            tab/newline-only value is admitted.
+  -- RED-UNDER-M: {"arm":"6v-check-ws","apply":[{"kind":"edit","file":"supabase/migrations/20261123180000_api_keys_venue_server.sql","find":"btrim(venue_server, E' \\t\\r\\n') <> ''","replace":"btrim(venue_server) <> ''","occurrences":1}]}
+  BEGIN
+    UPDATE api_keys SET venue_server = E'\t\r\n' WHERE id = v_key225;
+    RAISE EXCEPTION 'TEST FAILED (6v-check-ws): a TAB/NEWLINE-ONLY venue_server was ADMITTED — api_keys_venue_server_valid trims spaces only, so a blank server is stored as a real identity';
+  EXCEPTION WHEN check_violation THEN
+    GET STACKED DIAGNOSTICS v_cname = CONSTRAINT_NAME;
+    IF v_cname IS DISTINCT FROM 'api_keys_venue_server_valid' THEN
+      RAISE EXCEPTION 'TEST FAILED (6v-check-ws): a tab/newline-only venue_server was refused by constraint % and not by api_keys_venue_server_valid', v_cname;
+    END IF;
+  END;
+
+  -- ----- 6v-omitted. today's 12-argument caller keeps working ---------------------
+  -- The routes that exist today omit p_venue_server. The migration must merge ahead of
+  -- the code that sends it, so a call without the parameter has to resolve and store
+  -- NULL (the wildcard). ⛔ NOT a typed `12 vs 13 positional` call: it is the NAMED
+  -- call PostgREST makes, because that is the shape that answers PGRST202 when the
+  -- parameter loses its default.
+  -- RED-UNDER: strip the DEFAULT NULL from BOTH trailing parameters in the migration
+  --            (p_venue_account_id and p_venue_server): the function then has thirteen
+  --            required parameters, and today's twelve-named-argument call no longer
+  --            resolves. Both defaults go together because PostgreSQL refuses a
+  --            required parameter after one with a default, so stripping only the
+  --            last would abort the apply instead of reaching this arm.
+  -- RED-UNDER-M: {"arm":"6v-omitted","apply":[{"kind":"edit","file":"supabase/migrations/20261123180000_api_keys_venue_server.sql","find":"p_venue_account_id TEXT DEFAULT NULL,\n  p_venue_server TEXT DEFAULT NULL","replace":"p_venue_account_id TEXT,\n  p_venue_server TEXT","occurrences":1}]}
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'service_role')::text, true);
+  BEGIN
+    SELECT w.strategy_id, w.api_key_id INTO v_strat225, v_key225
+      FROM public.create_wizard_strategy(
+        p_user_id := uid_a, p_exchange := 'mt5', p_label := 'wizcont225 omitted',
+        p_api_key_encrypted := 'enc', p_api_secret_encrypted := 'sec',
+        p_passphrase_encrypted := 'pass', p_dek_encrypted := 'dek', p_nonce := 'nonce',
+        p_kek_version := 1, p_placeholder_name := 'wizcont225 omitted draft',
+        p_wizard_session_id := gen_random_uuid(),
+        p_venue_account_id := c_acct225b) AS w;
+  EXCEPTION WHEN undefined_function THEN
+    PERFORM set_config('request.jwt.claims', NULL, true);
+    RAISE EXCEPTION 'TEST FAILED (6v-omitted): the twelve-named-argument create_wizard_strategy call (no p_venue_server) did not resolve (SQLSTATE %) — the new parameter has no DEFAULT, so every connect from a route that does not send it answers PGRST202', SQLSTATE;
+  END;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+
+  SELECT venue_account_id, venue_server INTO v_stamped, v_srv225
+    FROM api_keys WHERE id = v_key225;
+  IF v_stamped IS DISTINCT FROM c_acct225b THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-omitted): the call without p_venue_server did not stamp venue_account_id (got %, expected %)', v_stamped, c_acct225b;
+  END IF;
+  IF v_srv225 IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-omitted): a call that omitted p_venue_server stored venue_server % — the omitted parameter must store NULL, the wildcard every app fence reads', v_srv225;
+  END IF;
+
+  -- ----- 6v-no-grant. the browser roles hold nothing on the column ----------------
+  -- api_keys has no table-level SELECT for the browser roles, only a per-column
+  -- allowlist, and this column is deliberately not on it. has_column_privilege is
+  -- TRUE for a table-level grant as well, so it catches that route too.
+  -- RED-UNDER: GRANT SELECT (venue_server) to `authenticated` on the LIVE database —
+  --            the "the key card could show the server" shortcut that would put the
+  --            column into the browser's reach.
+  -- RED-UNDER-M: {"arm":"6v-no-grant","apply":[{"kind":"sql","stmt":"GRANT SELECT (venue_server) ON public.api_keys TO authenticated"}]}
+  IF has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'SELECT')
+     OR has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'INSERT')
+     OR has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'UPDATE') THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-no-grant): authenticated holds a privilege on api_keys.venue_server — the browser must never read or write the broker server (CONN-03, founder ruling Q2). A column grant was added, or a table-level grant returned';
+  END IF;
+  IF has_column_privilege('anon', 'public.api_keys', 'venue_server', 'SELECT')
+     OR has_column_privilege('anon', 'public.api_keys', 'venue_server', 'INSERT')
+     OR has_column_privilege('anon', 'public.api_keys', 'venue_server', 'UPDATE') THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-no-grant): anon holds a privilege on api_keys.venue_server';
+  END IF;
+
   -- ----- cleanup ------------------------------------------------------------
   -- Explicit, in FK order, rather than relying on the profiles→api_keys cascade.
+  -- The wizard drafts the 6v arms minted hang off uid_a through strategies.
+  DELETE FROM strategies WHERE user_id IN (uid_a, uid_b);
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);
 
-  RAISE NOTICE 'PASS (behavioural): duplicate LIVE identity refused (23505); a soft-disconnected row does NOT squat the slot; reconnecting into an occupied slot refused (23505); '''' and ''   '' refused (23514); a different tenant admitted the same identity; a second live okx row on one account refused and admitted once the first is disconnected (6f CCXT).';
+  RAISE NOTICE 'PASS (behavioural): duplicate LIVE identity refused (23505); a soft-disconnected row does NOT squat the slot; reconnecting into an occupied slot refused (23505); '''' and ''   '' refused (23514); a different tenant admitted the same identity; a second live okx row on one account refused and admitted once the first is disconnected (6f CCXT); the 13-parameter wizard RPC stores the normalised broker server in the same INSERT (6v-writes) and a tab/newline-only login or server stores NULL (6v-writes-ws), a call that omits it stores NULL (6v-omitted), api_keys_venue_server_valid refuses a blank or 129-character server by name (6v-check-blank) and a tab/newline-only one (6v-check-ws), and the browser roles hold no privilege on api_keys.venue_server (6v-no-grant).';
 END $behavioural$;

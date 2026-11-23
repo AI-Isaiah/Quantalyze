@@ -30,7 +30,7 @@
 -- ⚠️ THE APPLY LIST CLEARS THE `:274` SKIP: it carries 20260814120000, so the
 -- baseline prints `Section 4 OK` and `PASS: … ALL assertions armed`, never the
 -- one-skip variant (MEASURED 2026-09-04).
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260728120000_csv_finalize_double_submit_idempotency.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260728120000_csv_finalize_double_submit_idempotency.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql"]}
 
 DO $$
 DECLARE
@@ -67,7 +67,7 @@ BEGIN
   -- reason. If this RAISE ever fires, read that plan's ordered arms; do not
   -- improvise one here.
   IF NOT has_function_privilege(current_user,
-        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
+        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST BLOCKED (0): the connection role % holds no EXECUTE on create_wizard_strategy, so this suite''s direct wizard-RPC call sites cannot run at all. This failure is ENVIRONMENTAL, not a regression — nothing about the schema or the migration is being reported here. See 156-MEASUREMENTS.md A3.', current_user;
   END IF;
 
@@ -203,7 +203,7 @@ BEGIN
   v_b_live  := v_fn_code NOT LIKE '%v_auth_uid%';
 
   v_auth_exec := has_function_privilege('authenticated',
-    'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE');
+    'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)', 'EXECUTE');
 
   -- ----- 3f. BOTH OR NEITHER — the half-state must RED, not skip -------------
   -- ⭐ THIS IS WHAT STOPS SECTION 4'S SKIP BEING A HOLE. A skip is honest only
@@ -243,7 +243,12 @@ BEGIN
   --            (e)'s `auth.uid()` check, the ACL checks and the SECURITY DEFINER
   --            checks all still run, so the state the lane reaches is the real
   --            half-state and not a migration with its verification switched off.
-  -- RED-UNDER-M: {"arm":"3f","apply":[{"kind":"edit","file":"supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","find":"DECLARE\n  v_jwt_role TEXT;\n  v_key_id UUID;\n  v_strategy_id UUID;\nBEGIN\n  -- ⭐ FINAL GATE (Phase 156 Migration B). Migration A's `authenticated` arm is","replace":"DECLARE\n  v_jwt_role TEXT;\n  v_auth_uid UUID;\n  v_key_id UUID;\n  v_strategy_id UUID;\nBEGIN\n  -- ⭐ FINAL GATE (Phase 156 Migration B). Migration A's `authenticated` arm is","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","find":"  IF strpos(v_create_code, 'v_auth_uid') > 0 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  --            2026-11-23 (Phase 225 plan 03): the twin now edits migration
+  --            20261123180000, which supersedes 20260814120000's body, so the
+  --            body a lane ends on is A1's. A1's verify is catalogue-only (no
+  --            e2 body grep), so the single DECLARE edit is enough; the second
+  --            step that stood (e2) down no longer has a target.
+  -- RED-UNDER-M: {"arm":"3f","apply":[{"kind":"edit","file":"supabase/migrations/20261123180000_api_keys_venue_server.sql","find":"DECLARE\n  v_jwt_role TEXT;\n  v_key_id UUID;\n  v_strategy_id UUID;\nBEGIN\n  -- FINAL GATE (Phase 156 Migration B, carried unchanged).","replace":"DECLARE\n  v_jwt_role TEXT;\n  v_auth_uid UUID;\n  v_key_id UUID;\n  v_strategy_id UUID;\nBEGIN\n  -- FINAL GATE (Phase 156 Migration B, carried unchanged).","occurrences":1}]}
   IF v_auth_exec IS FALSE AND NOT v_b_live THEN
     RAISE EXCEPTION 'TEST FAILED (3f): INCOHERENT HALF-STATE. `authenticated` holds no EXECUTE on create_wizard_strategy — so migration 20260814120000 §3 ran here — but the body still declares v_auth_uid, i.e. it is still the Migration A (20260813150106) two-arm body. Either §1/§2 of that migration did not apply, or a later migration re-based the body onto a stale source. This is not a state any deployment should be in, and it must not be reported as a skip.';
   END IF;
@@ -300,7 +305,7 @@ BEGIN
     RAISE NOTICE 'SKIP (section 4, the `authenticated` negative ONLY): migration 20260814120000 (Phase 156 Migration B) is NOT applied to this database — create_wizard_strategy''s comment-stripped body still declares v_auth_uid, i.e. it is the Migration A (20260813150106) two-arm body, under which `authenticated` HOLDING EXECUTE is the CORRECT and intended state. EXACTLY ONE assertion was skipped: "authenticated must NOT hold EXECUTE on create_wizard_strategy". Everything else in this file RAN — the column, the partial-unique index, all four body canaries, the anon negative, the service_role positive, and the section 3f both-or-neither coherence checks. This assertion arms itself the moment Migration B lands; nothing needs editing to re-enable it.';
   END IF;
   IF has_function_privilege('anon',
-        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
+        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED: anon must NOT have EXECUTE on create_wizard_strategy';
   END IF;
 
@@ -325,7 +330,7 @@ BEGIN
   -- nonetheless totally broken. No negative can see that. This line can — which
   -- is why its message names the OUTAGE rather than the privilege.
   IF NOT has_function_privilege('service_role',
-        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
+        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text)', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED: CONNECT-A-KEY IS BROKEN — service_role holds no EXECUTE on create_wizard_strategy. Since Phase 156 (20260814120000) it is the ONLY role that may write a wizard draft, so every single-key connect answers 42501. A REVOKE went one role too far, or the function was dropped. The fix is to re-GRANT, not to retry.';
   END IF;
 
