@@ -289,7 +289,8 @@ is then blocked by an operational fault outside this activation, and the honest 
 so, not to activate around it.
 
 ⛔ **DATED 2026-09-16 — the 2026-09-10 and 2026-09-12 readings recorded in this runbook's own prose
-(and in `TODOS.md`'s `[PREFLIGHT-P3C-UNRUNNABLE]` / `[164.7-ACTIVATION-DEFERRED]` entries) are
+(and in `TODOS.md`'s `[PREFLIGHT-P3C-UNRUNNABLE]` / `[164.7-ACTIVATION-DEFERRED]` entries; the latter was closed and deleted 2026-11-23, since PROD's
+`ledger_refresh_fanout` job is active and listed in `scripts/prod-prober/cron-manifest.json`) are
 DATED, and neither was produced by running this query.** The `completed_at` column did not exist,
 so the query aborted 42703 every time it was actually run; both recorded values were derived by
 arithmetic from the terminal Journal instead. Re-run this repaired query FRESH at activation time

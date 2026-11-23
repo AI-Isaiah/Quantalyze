@@ -236,6 +236,7 @@ founder can take.
   - **What:** when GoTrue's `/verify` itself fails (expired, already used or scanner-consumed token) it redirects to `/auth/callback` with `error` / `error_code` and no code, token hash or message. Since the Phase 219 gap, a request whose accepted `next` carries the email-change marker lands on the Account tab for that case, and nothing is logged, so a run of failed verifies cannot be seen. The marker-path exchange failure already logs its code and status.
   - **Fix direction:** log the `error_code` value only, sliced to a short length, in that branch. Never log `error_description`, which GoTrue fills with free text.
   - **Gate:** a callback test that sends `error_code=otp_expired` with the marker and asserts the console line carries the code and not the description, shown RED before the fix.
+      ⭐ **Owned by Phase 221 SENTRYSCRUB2, v1.23; REQUIREMENTS.md SCRB-03; tagged 2026-11-23.**
 
 - [ ] **`[212-CONTACT-SUPPORT-SURVIVORS]` The SQL error copy and five Python strings still say "contact support", a channel that does not exist** (logged 2026-11-14, Phase 212 WIZTRUTH ship; user-facing)
   - **What:** Phase 212 replaced every in-app "contact support" pointer in `src` with the contact form. Two places sit outside that census:
@@ -245,20 +246,24 @@ founder can take.
   - **Why open:** the SQL change needs a migration, which Phase 212's SC7 ruled out. So csv-finalize's `ENQUEUE_LOST_RACE_USER_COPY` and the SQL ELSE arm are deliberately NOT in byte parity now
     (`csv-finalize/route.test.ts` uses a hand-typed oracle). When the migration lands, restore the parity test against the SQL arm.
   - **Owner:** a later migration phase (not yet booked). Trigger: the next phase that writes a migration touching analytics error copy.
+      ⭐ **Owned by Phase 222 ALERTTRUTH, v1.22; REQUIREMENTS.md ERRC-01; tagged 2026-11-23.**
 
 - [ ] **[209-SENTRY-DIRECT-CAPTURE-DETAILS]** (logged 2026-11-14, Phase 209 SCRUBLEAKS review residual, CONTEXT `<deferred>`; MEDIUM, security/data-integrity; owner: unassigned, book a phase when taken up) **Direct `Sentry.captureException` call sites bypass `scrubCaptureInput`, so a plain PostgREST error object captured there still carries `details` and `hint` to Sentry under `extra.__serialized__`.**
   - **Why:** Phase 209 scrubbed the `captureToSentry` chokepoint and made `beforeSend` total; the SDK serialises a non-Error capture into `extra.__serialized__`, which `scrubSentryEvent` scrubs for share tokens only. Measured in review: `alert-digest` (two sites) ships `details`/`hint` this way.
   - **Candidate sites:** `alert-digest` (2), `admin.ts`, `founder-lp-report`, `ops-alert`, `for-quants-lead`, `error.tsx`/`global-error.tsx`, plus `audit.ts`, `for-quants-leads-admin.ts`, `preferences.ts`. Find them with `grep -rn -a 'Sentry.captureException' src --include=*.ts --include=*.tsx`, excluding tests.
   - **Fix direction:** one arm in `scrubSentryEvent` (`src/instrumentation.ts`) that drops `details`/`hint` from `extra.__serialized__`, so every direct site is covered at the last hop; or route the sites through `captureToSentry`.
   - **Gate:** a real-SDK envelope test (the in-memory transport in `src/instrumentation.test.ts`) capturing a plain object with `details`/`hint` sentinels, shown RED before the fix.
+      ⭐ **Owned by Phase 221 SENTRYSCRUB2, v1.23; REQUIREMENTS.md SCRB-01; tagged 2026-11-23.**
 
 - [ ] **[198-FD3-SIDEBAR-ADD-A-STRATEGY]** (logged 2026-11-09, Phase 198 MYBOOK, founder decision FD-3 2026-11-08; owner: unassigned, book a phase when taken up). On the allocator workspace, the sidebar and mobile-nav "Add a Strategy" still open the manager `WizardClient`. Phase 198 took the wizard off the My allocation header only; the header now opens the allocator's own add-allocation flow. The founder chose to leave the sidebar entry alone in that phase and book this follow-up. Decide what "Add a Strategy" means for an allocator (the add-allocation flow, a manager-only entry, or hidden), and update `e2e/wizard-resume.spec.ts`, which now reaches the wizard through the sidebar.
 
 - [ ] **[198-SHARED-ACCOUNT-FALLBACK-UNNAMED]** (logged 2026-11-09, Phase 198 MYBOOK review round 3 residual of R3-01, MEDIUM, user-facing; owner: unassigned). In `MissingDataMessage.tsx`, the `not_syncing` fallback now prints unless every attributed key is named. `shared_account_failing` still counts printed lines, not the keys the reason attributes, because its producer carries no attributed-key list. So a shared-account key whose history reaches yesterday can go unnamed when another key of the same cause prints a line. Fix: have the producer in `key-data-gaps.ts` / `queries.ts` (`deriveKeyDataGapsField`) emit the attributed key ids for that cause, then apply the R3-01 rule to it. Test: two keys, both shared-account failing, one with a gap and one with data through yesterday; both must be covered.
+      ⭐ **Owned by Phase 235 HOLDINGSTRUTH, v1.22; REQUIREMENTS.md HOLD-05; tagged 2026-11-23.**
 
 - [ ] **[DEPS-REACT-HOOKS-7.1-LINT]** (logged 2026-10-30, found landing PR #1157, which superseded Dependabot #1122-#1124; owner: unassigned, book a phase when taken up) `eslint-config-next` 16.3.8 to 16.4.2 was LEFT OUT of #1157 because it pulls `eslint-plugin-react-hooks` 7.1.1, which raises 64 new lint errors in `src/` across six rules: `set-state-in-effect`, `refs`, `purity`, `immutability`, `preserve-manual-memoization` and `error-boundaries`. ⛔ Do NOT land it by downgrading those rules to `warn`; fix the sites, then take the bump. Dependabot will re-propose it; that PR stays red until the sites are fixed. Done when `eslint-config-next` is at 16.4.2 or later, `eslint.config.mjs` is unchanged in rule severity, and `npm run lint` exits 0.
 
 - **[170.1-CSV-ODD-SPELLING-REJECTED]** (logged 2026-10-19, Phase 170.1 COPY final silent-failure hunt F2, MEDIUM, user-facing; owner: CSV timezone/header follow-up phase). **Still open (narrowed 2026-10-19 by `317ac4dd1` and 2026-10-20 by `4231f3de7`):** year-first (ISO) cells in a day-first column and ISO cells in a US month-first column are accepted again with the right range. A month-name cell (`12 Mar 2024`) in a numeric-date column stays a loud row rejection by choice (reading it needs a month-name parse). **Closed when:** the founder accepts that as final, or a month-name parse ships with a test.
+      ⭐ **Owned by Phase 240 CONNECTTRUTH, v1.22; REQUIREMENTS.md CONN-06; tagged 2026-11-23.**
 
 - **[170.1.2-VERIFIER-RESIDUALS]** (logged 2026-10-20, Phase 170.1.2 LABELS verification W-1 to W-7, none a FAILED truth; owner: the next phase touching each surface). One line each:
   - W-1 (WARNING): `src/components/strategy/TrustTierLabel.tsx` reads `TRUST_TIER_TOKENS[trustTier]` with no guard and no census on `strategy_verifications_trust_tier_check`, so a new tier would make `/admin/csv-status` throw instead of reading a fallback; unreachable today.
@@ -269,27 +274,31 @@ founder can take.
 - **[170.1-CSV-OFFSET-DATE-SHIFT-PROD]** (logged 2026-10-16, Phase 170.1 COPY, review finding D14-M3, founder decision "Measure now"; owner: the CSV timezone phase if the founder's split is booked, otherwise the founder). Before Phase 170.1's D-14 round, a CSV upload whose `date` column carried a single UTC offset with a time (for example `T00:00:00+02:00`, or `T20:00:00-05:00`) validated, and the `daily_returns_series` the wizard then finalized could sit one calendar day off the dates the user wrote, while the validator's `date_range` showed the written dates. 170.1 fixes it for new uploads (`daily_returns` and `daily_nav` keep the wall-clock date). **What cannot be measured:** the original upload is not kept anywhere; the validate envelope (`preview`, `date_range`) goes back to the browser and is never persisted, so only the parsed dates in `csv_daily_returns.date` exist, and a uniform one-day shift is invisible in them. **PROD reading 2026-10-16 (read-only, counts only, marker first):** 27 strategies with `source = 'csv'`, 0 published; 18 have no daily rows; 9 have a daily series. Weekday signature of those 9: 2 are Mon–Fri only (a shift would have made them Sun–Thu or Tue–Sat, so those 2 are unshifted); 7 carry every weekday, where a shift cannot be seen; 0 show a Sun–Thu or Tue–Sat signature. The 35 per-key series in `csv_daily_returns` (`api_key_id` set) are all seven-day, so equally undetectable. **Exposure today:** nothing published; at most 7 unpublished CSV strategies could carry a shifted series, unprovable either way. **Closed when:** the founder accepts the reading, or the owners of those strategies re-upload (a re-upload of the same file now stores the written dates). Trigger: any of the 7 being submitted for publication, or a user report of dates one day off.
 
 - **[170.1-STRATEGIES-NOTE-WAIT-WORDING]** (logged 2026-10-16, Phase 170.1 COPY plan 06 follow-up, coordinator decision the same day; owner: Phase 170.1.2 LABELS, or the next phase that touches the `/strategies` share notes). D-08 ("notes follow the body") was scoped deliberately to two kinds: `analytics_failed`, and `finished_not_built` for a job that FINISHED without a buildable factsheet. Every other unpublished row whose recipient arm is `not_available` still gets the KCS12-MINT-B note, `MINT_TOKEN_NOTES.not_available` in `src/lib/status-surface-copy.ts`: "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds." **Trigger:** an unpublished strategy on `/strategies` whose compute state is `failed`, `stalled` or `never_started` (all three map to the `not_available` arm in `recipientArm`), without the `analytics_failed` embed. For those rows "not available yet … once a computation succeeds" tells the owner to wait, while nothing is running and nothing will succeed without an action. **Closed when:** each of the three states gets a note that names what the owner can do (or the founder rules the wait wording correct for one of them), with a `page.key-pill.test.tsx` case per state asserting the rendered sentence, and the `it.each` over those states in that file re-pointed rather than deleted.
+      ⭐ **Owned by Phase 238 NEVERCOMPUTED, v1.22; REQUIREMENTS.md FACT-05; tagged 2026-11-23.**
 
 - **[166.5-PDF-MIXED-VINTAGE-WINDOW]** (logged 2026-10-15, Phase 166.5 COMPUTEDATSTAMP plan 07, Pitfall 6; owner: a FOUNDER decision; trigger: a factsheet PDF that disagrees with its own lazy panels). The analytics runner now stamps `computed_at` in the same upsert as the metrics, and writes the sibling series (the rolling, drawdown, grid and log-return kinds the lazy panels read) AFTER it through `upsert_strategy_analytics_series_batch`. The factsheet payload cache (`unstable_cache`, keyed on `computed_at`) is NOT exposed: it builds only from the metrics row and the cash, MTM and smoothed-MTM series, all written BEFORE the stamp. The PDF route (`src/app/api/factsheet/[id]/pdf/route.ts`) IS exposed: it renders the page with puppeteer `networkidle0`, so the lazy panels fetch the sibling series, and a render that lands between the stamp and the sibling write shows NEW scalars beside the PREVIOUS run's lazy panels. That PDF carries ETag `id:computed_at` under the NEW date, `Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400`, and answers `If-None-Match` with 304, so the CDN can serve it for up to 3600 s (stale up to 86400 s more) and a revalidating client keeps it 304-valid until the next real recompute moves `computed_at`. Before this phase the bridge stamped AFTER the siblings, so such a render carried the OLD date and was replaced on revalidation. **Window width, measured 2026-10-15 on the local stack:** one `upsert_strategy_analytics_series_batch` round trip through PostgREST as the service role, 12 kinds, 560 034 bytes (real `compute_all_metrics` output over 1 100 daily points plus two synthetic kinds), 5 calls: median 24.1 ms, max 41.6 ms. A LOWER BOUND for PROD (no network hop). Only a PDF requested inside that interval is affected, and the sibling write is skipped entirely for a strategy with no sibling kinds. **Closing option:** write the sibling series BEFORE the success write, as the cash series already is (`_persist_cash_series` before `_mark_complete`), folding a sibling failure into that write's flags (`sibling_kinds_failed`) instead of the current after-the-fact flag upsert. That moves the stamp to be the last write of a good compute again. **Closed when:** a test proves a sibling-series write never lands after the date moves (the order of the two writes is asserted in both the CSV runner and the composite stitch), or the founder accepts the window and this entry is struck with the width above recorded.
 
 - **[166.5-STALE01-PREMISE]** (logged 2026-10-15, Phase 166.5 COMPUTEDATSTAMP plan 07; owner: Phase 166.5 follow-up, a FOUNDER decision; trigger: a failed row now carries an honest last-good date). STALE-01 (`src/lib/queries.ts`, `isComputedAnalytics` and the `failed` / `pending` / `computing` arm below it) hides every figure on a ranked-list row whose analytics status is not a computed one. Its stated reason was that the date beside those figures dated the FAILURE, not the numbers (the status bridge re-stamped `computed_at` on every transition). Since Phase 166.5 the bridge writes no date and the analytics runner stamps it on its success write only, so a failed or computing row carries the date of its LAST GOOD compute, and the premise the gate rests on has changed. **Question for the founder:** should a failed or computing row now show its last good figures beside that honest date, instead of hiding them? **If yes:** the arm returns the stored figures (with the badge reading the last good date, and a visible "last run failed" cue so a dead figure is never presented as current), `isRankableAnalyticsRow` and the percentile cohort gate must be re-decided in the same change so the cell and the cohort cannot disagree (RANK-01), and the `computing` arm stops costing a published row its figures for the ~10-15 minutes a job runs. **If no:** the arm is kept as it is and only its comment changes; hiding stays the product rule. **Behaviour today:** unchanged by Phase 166.5. The comments in `queries.ts` were rewritten to the new truth and point here. **Closed when:** the founder answers, and either the arm changes with a test that fails on today's behaviour or this entry is struck with the decision recorded.
 
 - **[166.5-COMPUTED-AT-NEVER-COMPUTED-DEFAULT]** (logged 2026-10-15, Phase 166.5 COMPUTEDATSTAMP review round 2; owner: none routed, it REVERSES CONTEXT R-04 so it needs a FOUNDER decision first; trigger: a portfolio constituent reading > 0, or the next phase that touches `computed_at` readers). `strategy_analytics.computed_at` is `DEFAULT now() NOT NULL`, so a row nothing has ever computed (the bridge's INSERT arms omit the column, the runner's `computing` entry write inserts it) carries the date of its INSERT, a date no compute wrote. Phase 166.5 narrows this (before it, the bridge re-stamped such a row on every hop) but does not remove it, and CONTEXT R-04 recorded it as a known limit. **PROD reading 2026-10-15 (read-only, marker first):** 12 never-computed rows, 0 of them portfolio constituents, which is why it is booked and not fixed. **Where it shows:** the portfolio page reads the raw column for the donut slice tooltip (`src/app/(dashboard)/portfolios/[id]/page.tsx`, `SyncBadge`: "Analytics last computed 3h ago" over a strategy nothing computed) and for `staleConstituents` (a never-computed row is not `stale` for its first 48 h, so the amber warning omits it); the breakdown table for the same row shows no date, so the two surfaces disagree. **The root fix the review evaluated:** `ALTER TABLE public.strategy_analytics ALTER COLUMN computed_at DROP DEFAULT, ALTER COLUMN computed_at DROP NOT NULL`, a one-off `UPDATE ... SET computed_at = NULL` for rows that never completed, and `StrategyAnalytics.computed_at: string | null` in `src/lib/types.ts`. NULL is the honest encoding, `computeFreshness(null)` already returns `stale`, and the bridge INSERT arms already omit the column. **Four caveats that make it not ready as a quick change:** (1) **The 166.3.1 hold trigger defeats a plain backfill UPDATE.** `strategy_analytics_hold_computed_at_until_success()` (`20261013120000_strategy_analytics_hold_computed_at_until_success.sql`, BEFORE UPDATE) does `NEW.computed_at := OLD.computed_at` whenever `computation_status IN ('failed','computing')`, so for exactly the rows the UPDATE targets it reports success and changes nothing; it sticks only for `pending`. The migration needs a trigger-aware path (disable the trigger around the UPDATE inside the transaction, or let an explicit NULL through and update that migration's verify anchors and the SQL gate that pins the body), and in every case a post-UPDATE `DO` block that asserts zero never-completed non-NULL rows remain, so a no-op fails loud. (2) **It reverses CONTEXT R-04** ("first-ever rows keep the column `DEFAULT now()` (NOT NULL); recorded as a known limit"), which is why it is a founder decision and its own phase. (3) **The rollback cannot restore `NOT NULL` honestly.** Once NULLs exist, `SET NOT NULL` fails unless the rollback first writes a value into them, which reintroduces the false "computed now" date the change exists to remove; the rollback has to name the value it writes and why. (4) **NULL semantics at readers that never saw one:** `ORDER BY computed_at DESC` puts NULLs FIRST by default in Postgres and PostgREST (no such site on `strategy_analytics` in `src/lib/queries.ts`, but re-check SQL functions, e.g. `get_allocator_recommendations` returning `sa.computed_at AS analytics_computed_at`); `x > sa.computed_at` silently evaluates false (the `ledger_refresh_staleness` view projects the column); the factsheet payload cache key and the PDF ETag must treat NULL as a distinct, non-colliding value; every other `INSERT INTO strategy_analytics` site (5 in the baseline, including the wizard RPCs and `finalize_csv_strategy_with_returns`) starts producing NULL, so each consumer needs the typecheck sweep. It also moves the baseline snapshot, the carried-migration marker, VAC-04 and baseline-content-drift, and needs `migration-reviewer` and `rls-policy-auditor` clean before merge because PROD auto-applies with no human stop. **Closed when:** the founder decides, and either the migration ships with the four caveats answered in its own gate (a NULL backfill that visibly sticks on a `computing` row, a rollback that names its fill value, a NULL arm for each reader above) or this entry is struck with the decision recorded.
+      ⭐ **Owned by Phase 238 NEVERCOMPUTED, v1.22; REQUIREMENTS.md FACT-03; tagged 2026-11-23.**
 
 - **[164.6.8-OPS-ALERT-EMAIL-UNCONFIGURED]** (logged 2026-10-14, OUTAGEALERT plan 09 drill, founder decision D-15; owner: the founder). The founder-email paging channel cannot send, because production has no Resend key configured in Vercel. The 2026-10-14 drill (19:50 UTC, `source=drill`) reached the analytics side and Sentry, and then `POST /api/cron/ops-alert` answered 502 with `EmailSkippedError: [email] Resend not configured`. It failed loud, as designed: the Next.js route logged the error to Sentry and the Python side logged `ops_alert: the founder email POST was not accepted (status=502)`. Founder decision D-15 (2026-10-14): Sentry is the only live paging channel for now ("Sentry only for now"); the email code stays shipped and loud, and this is not a defect in it. Until this closes, an outage page reaches a human only through the Sentry rule "Ops alert: outage (164.6.8)", and the closures of the entries listed in the Phase 164.6.8 plan 09 SUMMARY rest on that Sentry delivery alone. Done when Resend is configured in Vercel production, the plan 09 drill is re-sent, and the founder confirms the email arrives (the route answers 200 instead of 502). Not a close: a green deploy, or a unit test of the route. Trigger: the founder wants a second paging channel, or the first outage whose Sentry notification is missed. ⭐ **2026-10-15, D-16 (Phase 164.6.8 plan 10):** a RECOVERED notice is now credited once its Sentry capture returns an event id, so the open-page record closes while email is unconfigured. Known limit routed here: the Sentry rule "Ops alert: outage (164.6.8)" filters `ops_alert_event=outage`, so a credited recovered capture notifies nobody until the Sentry rule is widened (or a second rule added). Until email works or the rule is widened, a recovery is visible in Sentry but not pushed to the founder. ⭐ **2026-10-15 (founder: "Widen the rule to recovered"):** the rule was widened the same day. A second action group on `ops_alert_event=recovered` sends the same email to the issue owners, so a recovery is now pushed through Sentry like an outage. What stays open here is the email channel alone.
 - **[170.6.1-SYNCBADGE-OTHER-MOUNTS]** (logged 2026-10-14, DISCOVERYPHONE (2/2), D-06; owner: the next phase touching any of these surfaces). PR-B names the venue a strategy's trades come from on the Discovery table and grid only. Measured 2026-10-14: `CompositionDonut`, `StrategyBreakdownTable` and `/recommendations` mount `SyncBadge` and render no venue label today, and `StrategyHeader` passes `exchange` but its badge resolves to no bound and renders nothing, and the component is mounted on no page. Action: decide whether these surfaces should name the venue; if so, feed them the venue read (`readPublishedTradeVenues` is module-private in `src/lib/queries.ts`, so it needs exporting or a shared helper), and update the source-reading pin in `src/lib/queries.trade-venues.test.ts` deliberately, because it asserts these four files pass neither `tradeVenues` nor `listedExchanges`. Trigger: the next phase touching any of them.
 - **[170.6.1-PUBLIC-TRADEFETCHVENUE]** (logged 2026-10-14, DISCOVERYPHONE (2/2), D-07; owner: a TRADESYNC state decision for the founder). Public mounts pass `tradeFetchVenue={null}` to `SyncBadge`, so a never-fetched key strategy reads as no claim rather than "No trade fetch recorded yet". PR-B deliberately changed only the label and tooltip, because feeding the state's venue turns every null-stamp row on a public surface into a visible "never fetched" claim. Done when the founder decides whether the public badge should carry that claim and, if so, the venue read feeds `resolveTradeFetch` with the state tests updated in the same commit.
 - **[166.3.1-NOCAP-MT5-A2-CIRCULAR]** (logged 2026-10-13, NAVBREACH review round 1, SFH F3, MEDIUM conf 5; owner: a future phase touching the allocator compose). For MT5 the stored realized terminal is the live balance, so the A2 check (stored terminal at or below `DUST_NAV_FLOOR`) does not independently confirm a live `dust`/`nonpositive` read. A transient zero balance without `balance_error` could make a funded MT5 key exit while the book stays trustworthy, and a negative equity exits under `nonpositive` with no sign recorded. `refresh_allocator_equity_daily` requires an independent clean-empty poll for the same reasons. Done when the no-capital exit requires independent proof (the poll-outcome audit or a terminal not derived from the live read) and `nonpositive` with negative equity degrades or records its sign.
   ⭐ 2026-11-02 (Phase 176 LEGACYRETIRE): the `refresh_allocator_equity_daily` comparison no longer exists (its job body was deleted by Phase 176 plan 11 (PR 2, shipped in v0.133.15.0)); the A2 check itself is unaffected. Stays open.
+      ⭐ **Owned by Phase 234 NOCAPITAL, v1.22; REQUIREMENTS.md NOCAP-01; tagged 2026-11-23.**
 - **[166.3.1-NOCAP-FALLBACK-TRACE]** (logged 2026-10-13, NAVBREACH review round 1, SFH F1, MEDIUM conf 6; owner: as above). When a no-capital candidate falls back to `dropped_key` (compose-level refusal, blocking reason, or the job-level revert), only a log line records it. The payload carries no flag or counter, so a regression in A3 would look like today's state. Done when a benign payload token (for example `no_capital_exit_refused`) with a counts-only field marks every fallback.
+      ⭐ **Owned by Phase 234 NOCAPITAL, v1.22; REQUIREMENTS.md NOCAP-03; tagged 2026-11-23.**
 - **[166.3.1-NOCAP-NONNAV-EXCEPTIONS]** (logged 2026-10-13, NAVBREACH review round 1, SFH F2, MEDIUM conf 5; owner: as above). The "a candidate never costs the book its stored row" revert covers `NavReconstructionError` only. A `KeyError`/`ValueError`/`TypeError` from a candidate's inputs in the compose or the apply loop escapes the job, leaving the row stale on every retry. Done when any exception while candidates are in play reverts to the stored inputs once, with the exception class logged.
+      ⭐ **Owned by Phase 234 NOCAPITAL, v1.22; REQUIREMENTS.md NOCAP-02; tagged 2026-11-23.**
 - **[166.3.1-NOCAP-SEGMENT-REASON-RESIDUE]** (logged 2026-10-13, NAVBREACH review round 2, WR-04, MEDIUM; owner: a future phase touching the allocator compose). When a no-capital candidate's interior hole lacks its stored segment terminals, the candidate falls back but the payload keeps `key_inputs_mismatch` as a blocking reason that today's payload never carries. The book is still untrustworthy either way, so it never reads wrongly trustworthy; only the reason differs. Done when a refused candidate leaves the payload byte-equal to the no-candidate payload, with a test on that shape.
+      ⭐ **Owned by Phase 234 NOCAPITAL, v1.22; REQUIREMENTS.md NOCAP-04; tagged 2026-11-23.**
 - **[166.3.1-SYNC-PANEL-UNSTAMPED-FAILURES]** (logged 2026-10-13, NAVBREACH secure-phase T-25; plan 03 was to book it and is deferred; owner: a future phase touching analytics failure writers). Eight failure paths write `strategy_analytics` `failed` with no `computation_error_job_id`, so a failed-to-failed Retry on the key-card Sync panel gets no evidence (c) and waits for the ~120 s cap: the sync-trades `_mark_analytics_failed`, the stuck-computing reaper, bridge-generic `failed_final`s, a stamped writer that is not the latest failure, the `upsert_or_drop_provenance` degrade, `_unrecoverable_reissue_payload`, `run_csv_strategy_analytics` with `job_id=None`, and the TS pre-enqueue writers. The list with reasons is in the plan 07 SUMMARY. UX cost only, not integrity. Done when each path either stamps an id or the panel has another evidence signal for it, with a fast-fail test per class.
-- **[166.3.1-M3-ANCHOR-OPTIONS-UPL-RESIDUE]** (logged 2026-10-15, NAVBREACH plan 05, MEDIUM, data integrity; owner/trigger: Phase 167.1.2.1.1 WRITERRESIDUALS or the next phase touching the Deribit anchor). Two recomputes of the composite in two quiet UTC sessions agree to the last digit on members 1 and 2 but member 3 differs on 64 of 143 common days, by up to 5.5e-08 (none above 1e-7; median 2.3e-09). Hypothesis, unconfirmed: member 3 holds an open options book (probe: `has_open_options_book` true, `options_session_upl_nonzero` true, `gate_candidate_rpl_only` `breach:1.54`), and its session options UPL moves the anchor between sessions; members 1 and 2 have no options book and are exact. SC-3 was accepted at 1e-7 absolute (D-12). Done when the comparison is re-run on a session where the options book is flat, or the anchor is computed with and without the options UPL, and the residue is either removed or shown to be float noise.
-- **[166.3.1-STITCH-ATTEMPT1-STALL]** (logged 2026-10-15, NAVBREACH plan 05, MEDIUM; owner: the next phase touching the job worker or `stitch_composite`). Run 2's `stitch_composite` was claimed, then showed no update for about 25 minutes and was reclaimed by the worker's own recovery; attempt 2 ran to `done`, 49 minutes after the enqueue in total against about 18 minutes for run 1. Cause not investigated. Done when the worker logs for that window say why the first attempt stalled (a deploy restart, a lost heartbeat, a hung venue call) and the cause is fixed or recorded as benign.
 - **[CI-LIVE-DB-LANE-GATEWAY-502]** (logged 2026-10-15, main CI run 38711968694 on the #1042 merge; owner: the next phase touching `scripts/local-stack/run.sh` or the live-DB lane). `frontend-live-db-lane` failed once: the claim RPC call in `compute-jobs-audit-2026-05-07-g10b.test.ts` (arm "P12-harm: a parented child is not claimable before its parent is done") received "An invalid response was received from the upstream server" from the runner-private local stack's gateway, so the execution ledger flagged one NEW failing arm. The same arm passed on the PR's own run and on main's next push; the lane passed 22 of the last 23 executed runs. Not a fan-in logic failure. Done when a second occurrence is either absent over the next 50 lane runs (close), or, if it recurs, the gateway or PostgREST log for that window names the cause and it is fixed at the source (never a retry around the arm).
 
-### 201.1-COMPOSER-RANGE-AS-DATES — the composer saves its selected range as dates, so 12M always ends on the latest day (booked 2026-11-13, Phase 201.1 review, founder decision at the v1.21 close, user-facing)
+### 201.1-COMPOSER-RANGE-AS-DATES — the composer saves its selected range as dates, so 12M always ends on the latest day (booked 2026-11-13, Phase 201.1 review, founder decision at the v1.21 close, user-facing) (owned by Phase 239 SURFACECACHE, v1.22; REQUIREMENTS.md CACHE-02; tagged 2026-11-23)
 
 **Reading (Phase 201.1, 2026-11-12).** The scenario composer keeps the user's selected range as indices into the date axis (`userRange` in `factsheet-context.tsx`, kept while `userRange[1] <= maxIdx`). When the axis grows at the FRONT, because an earlier day is added, the same indices point at different days, so a 12M pick drifts off the latest day. 201.1 fixed the opening-range defect and the shrunk-axis case (WR-01, `56ae54095`) and booked this one, because storing dates conflicts with the pinned "kept when the series grows" contract. Recorded in `201.1-VERIFICATION.md` (Notes, item 4) and the v1.21 milestone audit.
 
@@ -408,7 +417,7 @@ Details are in `202-REVIEW.md` Round 3 and `202-REVIEW-DISPOSITION.md`.
 
 **What closing it means.** (1) and (2) are fixed with a RED self-test case each. (3) and (4) are printed by the gate: written versus finished, and the unjobbed scopes by name.
 
-### 202-MT5-CLOCK-LEAD-01 — confirm or rule out the MT5 server-clock switch as the cause of the (d) values Phase 202 left unexplained (booked 2026-11-07, Phase 202)
+### 202-MT5-CLOCK-LEAD-01 — confirm or rule out the MT5 server-clock switch as the cause of the (d) values Phase 202 left unexplained (booked 2026-11-07, Phase 202) (owned by Phase 230 MT5NIGHTLY, v1.22; REQUIREMENTS.md MT5D-03; tagged 2026-11-23)
 
 **Why it is open.** Phase 202 (RESIDCHURN) left s6, s9 and s10 (72 of 188's 1214 moved values, b0 to b1) and s2, s5, s8 and s13 (87 values, c0 to c1) in bucket (d), unexplained. Founder decision D-16 ("Don't widen; book it") kept them in (d) under the rule as fixed. Plan 05 and plan 07 measured a lead that is not a code commit: the worker's MT5 server-clock setting (`resolve_mt5_server_clock()`, `mt5_server_clock.py`), recorded as a fixed offset from 2026-11-01 and switched to the US rule on 2026-11-03. In both pairs, the set of MT5 strategies re-derived across the switch equals the set that moved, and the changed days fall in US-rule summer. The winter control is not clean: 29 winter rows vanished from s9 (b0 to b1) and from s2 (c0 to c1), the same 29 days. The lead comes from the repo's record of the setting, not a read of the Railway variables, and no derive was replayed.
 
@@ -435,7 +444,7 @@ other lines are DM Sans `text-caption` (12 to 13 px), while the pill (`text-xs`)
 move to `text-caption`, after checking every surface that mounts the component, and DESIGN.md's
 typography stays one tier per role.
 
-### 164.6.6.3.3-WITHHELD-RESIDUE — a Withheld factsheet still prints three whole-record readings outside the rail's single figures (booked 2026-10-15, Phase 164.6.6.3.3 plan 15 close; ten of thirteen closed 2026-10-15, three founder-deferred items and one hover note open)
+### 164.6.6.3.3-WITHHELD-RESIDUE — a Withheld factsheet still prints three whole-record readings outside the rail's single figures (booked 2026-10-15, Phase 164.6.6.3.3 plan 15 close; ten of thirteen closed 2026-10-15, three founder-deferred items and one hover note open) (owned by Phase 237 FACTSHEETHONEST, v1.22; REQUIREMENTS.md FACT-01; tagged 2026-11-23)
 
 **Why it is open.** D-15 and its two extensions (phase CONTEXT) make every whole-record rail figure read "—" on a Withheld row at full history with no what-if. Plan 15 left three items undashed as ambiguous, and the founder chose on 2026-10-15 to ship and book them ("Ship as is, book them"). The plan 15 review (`164.6.6.3.3-15-REVIEW.md`, no HIGH) and the silent-failure pass added four MEDIUMs, booked under the review rule. **The four MEDIUMs were fixed the same day, the round-2 review's four more in round 3, and the round-3 review's two in round 4,** under the founder rule of 2026-10-15 ("fix also the medium user facing and data integrity issues"); the three founder-deferred items below stay open. Fix reports: `164.6.6.3.3-15-REVIEW-FIX.md`, `-R3.md`, `-R4.md`.
 
@@ -488,7 +497,7 @@ it or keep the hold with the reason measured. Adopt the new version and remove t
 in the same PR.
 ⛔ **Not a close:** shipping 2.2.0 to production on the strength of the lane being skipped or relaxed.
 
-### QUANTSTATS-0086-REDERIVE-01 — quantstats is held at 0.0.81; adopting 0.0.86 changes reported risk figures (booked 2026-10-05, Dependabot #953)
+### QUANTSTATS-0086-REDERIVE-01 — quantstats is held at 0.0.81; adopting 0.0.86 changes reported risk figures (booked 2026-10-05, Dependabot #953) (owned by Phase 236 FIGUREMATH, v1.22; REQUIREMENTS.md FIG-03, FIG-05; tagged 2026-11-23)
 
 **Why it is open.** Dependabot #953 bumped quantstats 0.0.81 → 0.0.86. Upstream 0.0.85/0.0.86 are
 statistical corrections, and the repo's own gates went red on them: `test_rank05_quantstats_pin_is_still_0_0_81`,
@@ -582,6 +591,7 @@ per-metric decision.
       **Owner:** the next migration-carrying phase. **Trigger:** that phase's planning.
       **Closed when:** a migration drops the function, `database.types.ts` loses it, and
       `grep -rn get_admin_compute_jobs src` finds only lineage comments.
+      ⭐ **Owned by Phase 224 DEADLEFTOVERS, v1.23; REQUIREMENTS.md DEAD-01; tagged 2026-11-23.**
 
 - [ ] **`[169.2-BTC-GAP-RETURN-STAMP]` A BTC return across a missing stored day is stamped as one
       day's move (booked 2026-09-27, Phase 169.2 D-47, review round 3 WR-01).**
@@ -636,6 +646,7 @@ per-metric decision.
       **Closed when:** the `(None, True)` exit writes its own named note, distinct from the stale-cache
       note; the card renders it in the muted treatment, not amber; and a test that fails on today's
       single label pins both exits.
+      ⭐ **Owned by Phase 222 ALERTTRUTH, v1.22; REQUIREMENTS.md ERRC-02; tagged 2026-11-23.**
 
 - [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
       with the same name are indistinguishable — the `description` that disambiguates them is
@@ -699,6 +710,7 @@ per-metric decision.
       claims instead. Until it lands, P1's payload is deliberately UNSTAMPED and
       `tests/test_computation_error_provenance_census.py` carves it out by exact key set with
       `EXPECTED_INERT_SITES = 1`, so re-stamping it takes that count to 0 and reddens the gate.
+      ⭐ **Owned by Phase 222 ALERTTRUTH, v1.22; REQUIREMENTS.md ERRC-03; tagged 2026-11-23.**
 
 - [ ] **`[PROV-WRITER-23514]` The provenance markers sit on the FAILURE-RECORDING path, so a
       writer bug must cost the provenance and NOT the failure record (booked 2026-09-06,
@@ -870,65 +882,7 @@ per-metric decision.
       illusion that something keeps it current. The right fix is a types-regeneration step with a
       freshness gate; until one exists, a declaration for an RPC that has zero `.rpc()` call sites
       is dead weight, not a defect.
-
-- [ ] **`[164.7-MARKER-GREP-VACUOUS]` Plan 07's verify block greps for `which_database` OUTSIDE the
-      ACTIVATED/DEFERRED branch, so on the DEFER path the leg CANNOT FAIL (found by `gsd-verifier`,
-      2026-09-10).**
-      `164.7-07-PLAN.md:149` runs `grep -a -c 'which_database' "$R"` before the `if grep -a -q
-      '^## ACTIVATED'` split. On a DEFER path no PROD statement runs, so no marker OUTPUT can exist —
-      yet the leg still demands the STRING. It passes on the query text alone, and would pass
-      identically for a fabricated record that merely mentions the marker.
-      ⭐ `164.7-ACTIVATION-RECORD.md` discloses this honestly and in bold (*"Do not read this section
-      as evidence that the marker was checked"*), so the RECORD is not misleading. The DEFECT is the
-      CONTROL: a verify leg that cannot fail on the path actually taken is the anti-vacuity class
-      this project ranks above correctness, and disclosure in prose is not a substitute for a gate
-      that bites.
-      **Fix:** move the `which_database` assertion INSIDE the ACTIVATED branch (where a marker output
-      genuinely must exist and can be asserted non-empty), and give the DEFERRED branch its own
-      assertion that no PROD statement was run — e.g. the manifest is byte-identical to `origin/main`,
-      which the branch already checks, plus an explicit `grep -c '^## DEFERRED'` of exactly 1.
-      ⛔ Do NOT "fix" it by deleting the leg; the ACTIVATED path genuinely needs it.
-      Owner: **Phase 164.8.4 GATERESIDUE** (gate-integrity leftovers below the ship bar).
-
-- [ ] **`[164.7-ACTIVATION-DEFERRED]` Phase 164.7 plan 07's PROD activation of the 161.1
-      ledger-refresh switch was DEFERRED 2026-09-10 at its founder gate, on a FAILED pre-flight —
-      criteria 3 and 4 are BLOCKED by an operational fault outside this phase.**
-      **Failed pre-flight:** P3-C (mt5 `compute_jobs` `done` within 3 days).
-      **Measured value:** the newest usable mt5 job is ~2026-09-07 04:0xZ. The MT5 terminal broke at
-      **04:05:08** that day — five minutes AFTER the 04:00Z `poll-allocator-positions` tick and
-      before the 05:00Z `refresh-allocator-equity` tick — and failed identically for three days
-      (`'<key A>': authorization on VantageMarkets-Live 14 failed (Invalid account)`). At the
-      decision point the gap was ~3.5 days against a 3-day window.
-      ⚠️ **Both enqueue jobs are DAILY, not hourly** (`0 4 * * *` jobid 15, `0 5 * * *` jobid 17), so
-      no wait inside 2026-09-10 could have closed the gap.
-      ⛔ **Forcing was considered and declined on blast radius:**
-      `enqueue_refresh_allocator_equity_for_all()` / `enqueue_poll_allocator_positions_for_all_keys()`
-      enqueue for EVERY key at EVERY venue — a full cross-venue day-run to produce one mt5 row for a
-      pre-flight. The activation closes a reproducibility gap, not an outage; there is no time
-      pressure that justifies it.
-      **Re-entry condition:** after the 04:00Z and 05:00Z ticks on **2026-09-11**, re-run P3-C from
-      `164.7-ACTIVATION-PREFLIGHT.md` (P0 marker first). MT5 has been authorized again since
-      2026-09-10 ~16:10Z — issue #753 closed, prober run **34500455961** reported `conclusion:
-      success` (its `Open or update the prod-prober issue` step was SKIPPED).
-      ⛔ **CORRECTED 2026-09-11 — the REASON recorded here was wrong, and it has been cited as
-      evidence in a later session.** That step is NOT gated on a `^❌` line. Its `if:` is
-      `failure() && steps.probe.outcome == 'failure' && inputs.arm == ''`
-      (`.github/workflows/prod-prober.yml:353`, measured at this commit), so a SKIP means the probe step did not end in
-      `failure` — which is not the same statement, and on a SCHEDULED run it is a much weaker one,
-      because the POSTURE LINE makes a scheduled probe exit 0 on purpose. Read `conclusion:` on the
-      run, or the runner log's own `❌ N defect(s)` line; never infer "zero defects" from a skipped
-      issue step.
-      ⚠️ **AND UNTIL 2026-09-11 THE PROBE STEP COULD NOT REACH ITS OWN POSTURE LINE.** GitHub runs
-      a `run:` block under `/usr/bin/bash -e {0}`, so the bare `node scripts/prod-prober/run.mjs >
-      "$RUNNER_LOG" 2>&1` terminated the step on any non-zero exit — before the `cat`, before the
-      `^❌` step-summary block and before the `exit 0`. Measured that day: 10 of the last 12
-      SCHEDULED runs `conclusion: failure`, i.e. an hourly red check on main's HEAD. Fixed with
-      `|| status=$?` in both branches. Any earlier reading of this workflow's conclusions predates
-      that fix and should be re-measured rather than trusted.
-      **Nothing was written to PROD.** `scripts/prod-prober/cron-manifest.json` is untouched at 14
-      jobs; `ledger_refresh_fanout` is still absent from it and from PROD.
-      Owner: Phase 164.7 plan 07, re-entered at the same gate. Record:
-      `164.7-ACTIVATION-RECORD.md`.
+      ⭐ **Owned by Phase 224 DEADLEFTOVERS, v1.23; REQUIREMENTS.md DEAD-05; tagged 2026-11-23.**
 
 - [ ] **`[164.2-RECLAIM-PROVENANCE]` `reclaim_stuck_compute_jobs` requeues without resetting the
       provenance markers, so a crash-recovered job can lose its curated sentence (booked
@@ -949,6 +903,7 @@ per-metric decision.
       a lane arm in `supabase/tests/test_sync_status_curated_sentence_survives.sql` that
       reclaims, re-stamps a DIFFERENT sentence under the SAME job id, and reads the curated
       sentence back.
+      ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; REQUIREMENTS.md HEAL-04; tagged 2026-11-23.**
 
 - [ ] **`[164.2-SEAMCODE-UNION]` `UPSTREAM_STATUS_TO_SEAM_CODE`'s "every value is a key of
       `SEAM_CODE_TO_WIZARD_CODE`" law is enforced by a source-text scan, not by the compiler
@@ -1156,19 +1111,6 @@ per-metric decision.
       predates the additions). Not user-facing and not data-integrity, so recorded rather than
       blocking, per the stopping rule.
 
-- [ ] **Two cosmetic verify-precision notes from Phase 164.3's plan gate (logged 2026-08-29).**
-      Neither is user-facing nor data-integrity, so neither blocked the phase — recorded so they are
-      not re-derived.
-      1. `164.3-02-PLAN.md` Task 3 asserts the OPS-08-F9 floors with `grep -a "SENTINEL_FLOOR=8"`,
-         which would also match `SENTINEL_FLOOR=80` or a comment containing the string. It is
-         verify-and-record of an ALREADY-DONE raise (floors are 8 and 166 at `ci.yml:1738-1739`),
-         not a shipped control, so a loose match cannot hide a regression here. Tighten to an
-         anchored exact match if the arm ever becomes load-bearing.
-      2. `164.3-07-PLAN.md` Task 1's verify masks the status of its `local-stack ... down` teardown
-         (`up && test; RC=$?; down; exit $RC`). That is deliberate — it preserves the TEST verdict
-         rather than letting a teardown hiccup overwrite it — and orphaned containers are caught
-         independently by the lane's `--self-test` no-containers assertion and by the next `up`.
-
 - [ ] **`[VAC-04-ROLE]` Swap Phase 164.3's repo-vs-PROD body diff onto a zero-table-grant role.**
       Booked 2026-08-29 as the deferred half of a founder ruling, so it is not lost.
       **Current state (deliberate, not an oversight):** VAC-04 runs as a step inside
@@ -1185,7 +1127,7 @@ per-metric decision.
       ⚠️ Not urgent and not blocking: this changes WHICH credential is used, not whether the control
       works. Do not let it gate the phase.
 
-### RANK-SPLAT-01 — the anon metrics surface is unbounded by construction (booked 2026-08-26)
+### RANK-SPLAT-01 — the anon metrics surface is unbounded by construction (booked 2026-08-26) (owned by Phase 243 DBBACKSTOP, v1.23; REQUIREMENTS.md DBACC-01; tagged 2026-11-23)
 
 - **[RANK-SPLAT-01] Still open (re-measured 2026-11-14).** The `metrics_json` half is done: `src/lib/factsheet/fetch-and-build-payload.ts` selects named `metrics_json->x` aliases and its test forbids a bare `metrics_json`. `strategy_analytics.metrics_json_by_basis` is still selected as a whole column in that same select, so whatever the analytics stage writes into it becomes readable by an anonymous visitor of a published strategy with no review step. **Closed when:** that column is projected as a named alias set (or through an RPC that returns one), pinned by a test that FAILS when a new key appears in the projection.
 
@@ -1263,24 +1205,6 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       direction, so it costs a false alarm rather than a false pass. Recorded so the next person to
       see it red knows it is this, not a stripper regression.
 
-- [ ] **`[164.8.2-EVIDENCE-DOTENV-LEAK]` a local test wrapper injects repo credentials and turns 16
-      SKIPPED live-DB suites into real writes against SHARED TEST (booked 2026-09-10, Phase 164.8.2
-      gate run; routed to Phase 164.8.4).**
-      **MEASURED.** A recorded full-suite run reported `16 failed | 853 passed`, `39 failed`, with
-      skips collapsed from **19 files / 280 tests to 3 / 94**. A plain `npx vitest run` in the same
-      tree at the same commit is GREEN with skips intact, and none of the 16 failing files is in the
-      branch diff.
-      **CAUSE.** `gstack-evidence` carries `#!/usr/bin/env bun`, and bun AUTO-LOADS `.env.local` into
-      `process.env`; the child `vitest` inherits it, `HAS_LIVE_DB` flips true, and the gated suites
-      run for real. The wrapper HAS a scrubber for exactly this and it did not fire.
-      ⚠️ **The failures were the harmless half — the WRITES are the item.** Those suites INSERT
-      (`user_notes`, `match_decisions`); the observed `42501` / `22023` / rate-limit / NOT-NULL
-      errors are real answers from a real remote database. PROD was NOT touched
-      (`assertNotProductionSupabaseUrl` throws before any `getAdmin()` write, and these were ordinary
-      DB errors rather than that assertion), so it was SHARED TEST.
-      ⛔ **Do not close this by editing the skip gates.** `it.skipIf(!HAS_LIVE_DB)` is correct; the
-      defect is that `HAS_LIVE_DB` became true by accident.
-
 - [ ] **`[164.8.2-GATE-RESIDUE]` seven small gate-integrity leftovers from Phase 164.8.2's four
       review rounds, each below the bar that blocked the ship, none with an owner (booked
       2026-09-10; routed to Phase 164.8.4).**
@@ -1357,6 +1281,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       to add Session Replay or a browser `Sentry.init`.
       **Owner:** the founder decides between (a) and (b), because (a) is a security decision.
       Unrouted until then.
+      ⭐ **Owned by Phase 221 SENTRYSCRUB2, v1.23; REQUIREMENTS.md SCRB-02; tagged 2026-11-23.**
 
 - [ ] **`[167.2.1-LOCAL-STACK-NO-CROSS-WORKTREE-LOCK]` two worktrees running the local-stack lane at
       once collide on the same containers (booked 2026-09-26, Phase 167.2.1 FACTSHEETBUILDABLE)** —
@@ -1419,6 +1344,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   185 plan 10 (PROD, 2026-11-03, after the 185 deploy): valuing options at market cut the book's days above +50% from 6 to 2. The cumulative did not come down: whole history x3516 to x3836, 2025 x1008 to x999, 2026 x2.07 to x2.09. So cash-basis options are not what drives the multi-year compounding, as the 185-01 debug session already suspected.
   The founder chose a TODOS entry, not a phase (185 D-14, 2026-11-03), under the same day's rule that purely Deribit work leaves v1.20.
   **Owner / Trigger:** the next milestone's planning. Start from the 185-01 debug session and the plan 10 `sc4-book:` and `sc4-report:` lines.
+      ⭐ **Owned by Phase 233 DERIBITTRUTH, v1.22; REQUIREMENTS.md DBOOK-01; tagged 2026-11-23.**
 
 - [ ] **[187-BINANCEINCOME-NEXT-MILESTONE] — Binance futures realized P&L and funding never reach the derive, because the income call uses a method name the pinned ccxt does not have (retired from v1.20 2026-11-03).**
   The founder moved Phase 187 BINANCEINCOME out of v1.20 on 2026-11-03: "put binance into todos". Not planned, nothing shipped.
@@ -1432,6 +1358,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   - Two `failed_final` jobs (`attempts=3`), both created 2026-11-18 (00:25Z and 00:40Z), carry `MT5 server clock does not match the configured rule (rule=us expected=+2h measured=+0h)`. One has no `api_key_id` (it does not join to a key), the other is an MT5 key. 2026-11-18 is the day Phase 217 SERVERRULE shipped the per-server rule; no clock-configuration `last_error` appears on any job created since 2026-11-19.
   **Data integrity:** a derive that needs a retry rewrites the same account's published dailies, and nothing tells us whether the first attempt wrote anything or why it failed.
   **Owner / Trigger:** unrouted, founder to assign. Trigger: now (it recurs daily since 2026-11-20). First make the first attempt's failure readable (the cause is lost when the retry succeeds), then fix it at its root. **Closed when:** seven consecutive nightly MT5 derives are all `done` with `attempts=1`, or the retry cause is named and fixed with a test.
+      ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; Phase 230 MT5NIGHTLY, v1.22; REQUIREMENTS.md MT5D-01, MT5D-02; tagged 2026-11-23.**
 
 - **[192-ORPHANED-LANDING-VERIFY]** (logged 2026-11-07, Phase 192 PUBLICTRUTH; owner: unrouted, founder to assign). The landing verification section, form, results and progress components under `src/components/landing` are rendered nowhere after Phase 192 turned the home verify band into a sign-up link (no non-test importer outside that directory). `VerificationForm.tsx` still carries its false "never stored" line, and `/api/verify-strategy` stays in `PUBLIC_ROUTES` in `src/proxy.ts` with no caller. The public-truth census does not scan this directory for that reason. **Closed when:** the components are deleted together with their registry entries (`closed-sets.test.ts`, `complete-status-scan.test.ts`) and the public allowlist entry, or reused behind sign-in.
 
@@ -1450,6 +1377,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       because the schema-only baseline does not carry the privilege state. This entry also absorbs
       `[164.9-BASELINE-PRIVILEGES-ABSENT]`, which carried the same seven. ⛔ Not closed by weakening an
       assertion, skipping the arms or growing the ledger. **Closed when:** the ledger is empty.
+      ⭐ **Owned by Phase 249 TESTLANES, v1.23; REQUIREMENTS.md LANE-01; tagged 2026-11-23.**
 
 - [ ] **`[164.9-DATA-DEPENDENT-GUARD-CENSUS]` 83 anonymous-block guards across 63 applied
       migrations raise on data TEST does not have — the class is now REFUSED at author time, and
@@ -1459,8 +1387,9 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       refusal(s) across 63 files**, seeded verbatim into the dated shrink-only ledger
       `scripts/lint-migration-data-dependence-baseline.txt`. Regenerate rather than trust these
       figures; the run prints them.
-      **WHY IT EXISTS, and it is the other half of `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`.**
-      That entry asked for a MECHANISM and plan 09 built one: a hermetic refusal in
+      **WHY IT EXISTS, and it is the other half of `164.8-DATA-DEPENDENT-MIGRATION-ESCAPE`** (closed by
+      Phase 164.9; its entry was deleted 2026-11-23, and its history stays in CLAUDE.md's Phase 164.8
+      currency note). That entry asked for a MECHANISM and plan 09 built one: a hermetic refusal in
       `sql-gate-lint` that fires on the pull request, with no opt-out marker, so a NEW guard of
       this shape cannot merge. It deliberately did NOT touch the 79 that already merged —
       repairing an APPLIED migration re-enters the apply pipeline and is a separate act with its
@@ -1487,148 +1416,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       named successor phase booked via `/gsd-phase --edit` — recorded here rather than left
       blank, and surfaced in `164.9-09-SUMMARY.md` as a routed deferral for that booking.
 
-- [ ] **`[164.8-TEST-DATA-RESEEDED]` The restore destroyed every row in shared TEST's `public`
-      schema and that is NOT reversible; what TEST holds now is whatever CI has written since
-      (booked 2026-09-09, Phase 164.8 plan 04, recorded there as W6).**
-      **WHAT WAS LOST.** Restore run `34274355596`, head `88581b8bc66415bfa86b7d5a019741b1cbd0ff49`
-      dropped and rebuilt `public` from `supabase/schema/baseline.sql`, which `BASELINE.md`
-      records as "schema only, **0 data statements**". Every `public` table therefore came back
-      EMPTY. The backup artifact (`test-restore-backup-34274355596`, 90-day retention) holds the
-      old ledger byte-exact and the old SCHEMA — **it does not hold the old rows**, so this is a
-      one-way door by construction and not by oversight.
-      **WHAT RE-CREATED WHAT, read off the first `main` CI run after the restore PR (#764) rather
-      than predicted** — run **`34329426898`**, head **`a622df279dcdf4fe6f58d39f990eeaa008aaed99`**:
-      `e2e-seeded` **success**, `e2e` **success**, `python` **success**. The seed path is
-      `SEED_CONFIRM_STAGING=true npx tsx scripts/seed-demo-data.ts`, which re-populates the
-      8-strategy demo set the seed-gated Playwright specs require, inside the held mutex and
-      before the test-env build.
-      ✅ **NO spec failed for a missing pre-existing row.** That is the measurement this entry
-      was opened to record, and it came back clean: nothing was re-seeded by hand, and nothing
-      needs to be. The only red on that run was `sql-tests` on
-      `test_commit_scenario_batch_p1956_range.sql` Test 5 — a stale CONSTRAINT assertion the
-      restore revealed, not a missing row — fixed in PR #765 (`b8951132`).
-      ⚠️ **WHY THIS STAYS OPEN ANYWAY.** A green run proves the seeded set is sufficient for the
-      specs that ran; it does not establish a CONTRACT. Nothing today states what a run may
-      assume about TEST's rows, so the next spec that quietly depends on a row it did not create
-      will fail at the next restore rather than at review. ⚠️ Note also that PR #767
-      (Phase 164.8.1 REFDATA) landed AFTER this restore: a FUTURE restore replays allowlisted
-      migration-seeded reference data, so "every public table comes back empty" describes the
-      2026-09-08 restore and will not describe the next one.
-      ✅ **Destination: Phase 164.9 TESTISOLATION** — the per-run seed contract. "Whose rows is a
-      run asserting about" and "which rows may a run assume exist" are one question.
-      ⚠️ **ROUTING NOTE (2026-09-21, Phase 164.9 planning):** this entry names Phase 164.9
-      TESTISOLATION as its destination, but Phase 164.9's `ROADMAP.md` `**Requirements**` line
-      does not cite `[164.8-TEST-DATA-RESEEDED]`. Phase 164.9's plan 01 did NOT claim this entry
-      and leaves the routing discrepancy for a decision — its destination, disposition and scope
-      are unchanged by this note.
-
-- [x] **`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` A migration that is VALID on PROD can REFUSE on
-      TEST because TEST has PROD's catalogue and none of its rows — and under the locked Area 1
-      Q2 rule that refusal BLOCKS the production deploy. There is no escape hatch (booked
-      2026-09-09, Phase 164.8 plan-checker finding B4).**
-      ✅ **CLOSED by Phase 164.9 TESTISOLATION** (recorded 2026-11-14, TODOS sweep 2):
-      `scripts/lint-migration-data-dependence.mjs` refuses a data-reading `DO`-block guard at author
-      time, with no opt-out marker, and the 83 applied ones are carried by
-      `[164.9-DATA-DEPENDENT-GUARD-CENSUS]`. Kept only because that open entry inherits from this one.
-      **WHY IT EXISTS.** TEST was restored from a SCHEMA-ONLY dump (`BASELINE.md`: **0 data
-      statements**), so it reproduces PROD's CATALOGUE and never its ROWS. This repo's house
-      style for a migration precondition is a data-reading `DO` block that `RAISE EXCEPTION`s on
-      an unexpected count — `supabase/migrations/20260907130000_ledger_refresh_switch_to_system_flags.sql:925-935`
-      is the specimen (`SELECT enabled INTO v_seeded …` then `RAISE EXCEPTION`). Such a migration
-      reads a PROD-populated table, applies cleanly to PROD, and refuses on TEST.
-      ⛔ **Area 3's `TEST-NOT-APPLICABLE` header pragma was the declared escape hatch and was NOT BUILT**
-      — deliberately, because it has no consumer today (see the closed
-      `[164.5-TEST-VAC08-DROP-UNAPPLIABLE]` for the full two-part verdict).
-      **TRIGGER — the condition that says this entry has come due, stated so a human recognises
-      it under pressure:** `apply-test-verdict` reports **failure cause (3)** — `apply-test` RED
-      on a `RAISE` from a data-reading `DO` block — **while PROD's `plan` dry-run is CLEAN**. That
-      divergence is the signature; a failure that is red on BOTH sides is an ordinary bad
-      migration and is not this.
-      **INTERIM REMEDY — revert the merge.** ⛔ NOT an edit to `.github/workflows/supabase-migrate.yml`.
-      Area 1 Q2 (a failed TEST apply blocks the PROD apply) is LOCKED, and editing the pipeline
-      under deploy pressure to get a deploy out is precisely the failure mode this entry exists to
-      prevent. Reverting restores a known state and costs one merge.
-      **CANDIDATE SHAPES — decide in the destination phase, not by inertia:**
-      (i) the retired `-- TEST-NOT-APPLICABLE: <reason>` header pragma, parsed by ONE piece of
-      code that BOTH `apply-test` and VAC-08 read (two switches drift, and the apply would then
-      abort on exactly the migrations VAC-08 was told to forgive), shipped with the THREE-arm
-      proof 164.8 `CONTEXT.md` Area 3 specifies — RED for an unpragma'd genuine absence, GREEN for
-      the pragma'd migration, **RED for a pragma whose stated reason is FALSE**; arm 3 is what
-      stops a pragma becoming a mute button; or
-      (ii) a per-run SEED CONTRACT that makes the read valid on TEST, so the migration never
-      needs forgiving.
-      ✅ **Destination: Phase 164.9 TESTISOLATION.** That phase's goal is what a run may assume
-      about TEST's rows ("the restore changes what a clean starting state even means"), and a
-      data-reading migration refusing on TEST is exactly a claim about what TEST's rows are.
-      ⛔ **Phase 164.10 BODYDRIFT was checked and REJECTED as the home** — it is three PROD
-      function BODIES and carries no data-contract scope. Recorded so the rejection is not
-      re-litigated.
-      ⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the
-      three (founder rule 2026-09-08).
-
-### FANOUT-COHORT-SIBLING-COMPOSITE-01 — the composite fan-out carries the SAME lifecycle literal, and has no schedule at all (booked 2026-09-17)
-
-**Measured 2026-09-17** by Phase 164.5.1.1 plan 03, from the canonical bodies under
-`supabase/schema/functions/` — the replayed current definitions, which is the right place to ask
-this question, because a migration-by-migration search answers a different one and can be fooled by
-a later redefinition. `enqueue_ledger_composite_refresh` carries the two-value lifecycle conjunct at
-`supabase/schema/functions/enqueue_ledger_composite_refresh.sql:266`, identical to the one
-Phase 164.5.1.1 widened in the single-key fan-out and left alone here.
-
-⛔ **THREE OF THAT PHASE'S OWN RESEARCH ARTIFACTS SAY OTHERWISE AND ARE WRONG.**
-`164.5.1.1-RESEARCH.md` and `164.5.1.1-PATTERNS.md` both assert the composite function "has no
-status conjunct at all", and all three of RESEARCH / PATTERNS / VALIDATION then instruct that
-`supabase/tests/test_ledger_refresh_composite_arm.sql`'s foreign-candidate precondition be widened
-in lockstep. The premise is false — the researcher read a partial line range — so the instruction is
-refused, and the refusal is now written into the gate file itself beside the literal it protects.
-**Widening that guard ALONE would be a false abort, not a tighter gate:** it would abort the file on
-a committed row the guarded function would itself refuse to enqueue, on a SHARED test project,
-surfacing in a file that has nothing to do with the cause. ⛔ Do not re-derive that instruction from
-those three documents.
-
-**What a user observes today: NOTHING, and that is the finding.** The function is not scheduled and
-is not called. Zero matching rows in the captured production cron manifest
-(`scripts/prod-prober/cron-manifest.json`, captured `2026-09-17T08:05:56Z` against the PROD
-database marker), no caller anywhere in `analytics-service/` or `src/`, and
-`20260825140000_ledger_refresh_composite_arm.sql` applied it DORMANT in its own `RAISE NOTICE`
-(*"no schedule registered"*). So widening this conjunct on its own would change nothing observable,
-and the absent schedule is the larger question.
-
-⛔ **THE 141-DAY COMPOSITE IS NOT FIXED BY PHASE 164.5.1.1, AND MUST NEVER BE REPORTED AS SUCH**
-(CTX-10, founder-locked). The oldest factsheet in the 2026-09-17 census is excluded from the
-SINGLE-KEY fan-out by that function's `is_composite` conjunct — D-01, by name and by design — and
-from the composite fan-out by the absence of any schedule. **Reversing D-01 is a separate decision
-with its own evidence, and it must be taken deliberately rather than arrive as a side effect of a
-literal edit.** That is precisely the class of silent side effect Phase 164.5.1.1 existed to clean up.
-
-**TRIGGER — the condition that says this entry has come due:** anyone proposes to widen the
-composite conjunct, to register a schedule for the composite fan-out, or to "complete" the widening
-in `test_ledger_refresh_composite_arm.sql`. Any one of the three pulls in the other two and pulls in
-D-01; none of them is a one-line change.
-✅ **Destination: Phase 164.5.1.2 FANOUTSIBLINGS** — inserted into the ROADMAP 2026-09-17 directly
-after 164.5.1.1, with this measurement in its goal. Owner: that phase.
-⭐ This entry has an OWNER, a TRIGGER and a PHASE because a TODOS line alone has none of the three
-(founder rule 2026-09-08).
-
-⛔ **DESTINATION CORRECTION — 2026-09-19, at Phase 164.5.1.2's close.** The Destination line above
-is now STALE and this note supersedes it: **Phase 164.5.1.2 closed WITHOUT addressing this entry,
-deliberately and on the record.** The founder descoped the composite site at that phase's CONTEXT
-time (D-01, 2026-09-17) — `enqueue_ledger_composite_refresh` is NOT SCHEDULED, is called by
-nothing, and no user observes it — so 164.5.1.2's success criteria covered TWO sites by design, the
-single-key poll and the trade-sync constant, and never this third one. Nothing here was measured and
-left undone; it was ruled out of scope before any plan was written.
-
-⛔ **THIS ENTRY DELIBERATELY HAS NO OWNER PHASE, AND THAT IS THE DECISION — NOT AN OVERSIGHT.**
-Re-pointing it at a live phase would fabricate scheduled work for a fan-out nobody has scheduled and
-no user can see, which is the opposite of what the descope decided. It stays **TRIGGER-GATED**: the
-TRIGGER stated above is the sole thing that activates it, and any one of those three proposals pulls
-in the other two and pulls in D-01. ⭐ The founder rule that every deferral names an owner phase is
-answered here by an explicit standing decision rather than by a phase number — recorded so a future
-reader finds a reasoned "no owner, by design", not a dangling pointer at a finished phase.
-⚠️ Nothing about the 141-day composite factsheet changed; the CTX-10 prohibition above stands in
-full and is not weakened by this note.
-
-### FANOUT-COHORT-SIBLING-POLL-01 — the April poll-positions fan-out carries the same literal, IS live, and is excluded twice over (booked 2026-09-17)
+### FANOUT-COHORT-SIBLING-POLL-01 — the April poll-positions fan-out carries the same literal, IS live, and is excluded twice over (booked 2026-09-17) (owned by Phase 227 JOBLEDGER, v1.22; REQUIREMENTS.md HEAL-05; tagged 2026-11-23)
 
 **Still open.** `enqueue_poll_positions_for_all_strategies`
 (`supabase/schema/functions/enqueue_poll_positions_for_all_strategies.sql`) admits only `published` and
@@ -2025,42 +1813,9 @@ these four are the deliberate carry-overs, each with the reason it was not fixed
   That substitution is the precise defect class Phase 164.3 exists to catch, and it would be
   a poor look to commit it in the ledger entry for the phase's own work.
 
-### Phase 163 / OPS-08 — TEST runs an OLDER REVISION of `_enqueue_compute_job_internal` (added 2026-08-26, corrected + root-caused 2026-08-26)
+### Phase 163 / OPS-08 — reviewer and gate-convention process items PROC-02 and PROC-03 (added 2026-08-26; trimmed 2026-11-23)
 
-Found while pre-flighting the OPS-08 migration's gate arms against both databases. Three
-reviewers independently worried that one gate arm is "meaningful on PROD and vacuous on
-TEST". Measuring it explains exactly why, and the cause is broader than that one arm.
-
-| | definition length | line-comment markers | carries the `--` comment naming the strict form |
-|---|---|---|---|
-| PROD 7-param | 4622 | 23 | yes |
-| TEST 7-param | 3093 | **0** | no |
-
-⭐ **CORRECTED 2026-08-26 — "comment-stripped build" was the wrong framing and should not be
-repeated.** Re-measured: PROD's 7-param body stripped of comments is **3172** chars; TEST's raw
-body is **3093**. Not equal, so TEST is NOT this definition minus its comments — TEST is running
-an **older revision** of the function. The observable (0 comment markers vs PROD's 23) is the
-same; the explanation is not, and the wrong one implies a stripping mechanism that does not exist.
-
-⭐ **ROOT CAUSE IS NO LONGER UNKNOWN.** TEST's migration ledger explains it. TEST records
-`version` as the *application* timestamp with the migration's own timestamp in `name`
-(e.g. version `20260826084633` / name `20260826140000`); PROD records the migration timestamp
-as `version`, once each. TEST also carries **duplicate applications** — the three
-`ledger_refresh_*` migrations and `sync_status_protect_marked_refresh` each appear TWICE, at two
-different application times. That is a `db push` re-run over a partially-reset database, not the
-`supabase-migrate` workflow. Different mechanism, different history, hence different bodies.
-
-**Why it matters, concretely.** The migration's gate strips comments before matching,
-because plpgsql stores `prosrc` verbatim. On PROD that strip is LOAD-BEARING: PROD's
-7-param carries `INTO STRICT` inside a comment, and the 7-param parity arm is an ABSENCE
-arm, so without the strip the arm would fire and **abort the production deploy**. On TEST
-there is nothing to strip, so:
-
-- regressing the comment-strip leaves CI **green on TEST** and **breaks the PROD deploy** —
-  first observation would be a failed auto-apply, since merging `supabase/migrations/**`
-  applies to PROD;
-- removing the block-comment pass (added to close a demonstrated `/* */` evasion) changes
-  **zero** TEST results. CI cannot detect the removal of the mechanism CI depends on.
+⛔ **TRIMMED 2026-11-23 (TODOS triage before v1.22).** The finding this heading carried, that TEST ran an older revision of `_enqueue_compute_job_internal`, and its `[DRIFT-01]` bullet are stale: TEST was rebuilt from `supabase/schema/baseline.sql` in 2026-09 (CLAUDE.md, the Phase 164.8 restore), and repo-vs-TEST body drift is now measured by VAC-08 (`scripts/test-ledger-drift-check.sh`, in the `test-db-drift` job). They were deleted. PROC-02 and PROC-03 below stay open.
 
 - **[PROC-02] Reviewers must declare execution status, and UNEXECUTED blocks.** `gsd-code-reviewer`
   is read-only by construction, and nothing in the loop says so — three clean reviews of a
@@ -2078,13 +1833,6 @@ there is nothing to strip, so:
   SQL-gate section and add the sql-gate-lint rule that a NEW gate file without `RED-UNDER` is red.
   **Owner: Phase 164.6 GATE-HYGIENE.** Booked 2026-09-05; same missing-entry defect as PROC-02.
 
-- **[DRIFT-01] Re-align TEST's `_enqueue_compute_job_internal` with the repo definition**, or
-  record deliberately that TEST is an older mirror. Until then, no CI run can exercise the
-  comment-strip, and any change to it must be pre-flighted against PROD by reading
-  `pg_get_functiondef` directly — a green TEST run is not evidence.
-
-⚠️ The gate arms were all measured green on BOTH databases on 2026-08-26, so nothing is broken
-today. See SKIP-01 (closed; entry deleted 2026-11-23): the drift is one symptom of TEST never receiving migrations at all.
 
 ### Phase 163 / WR-01 — hygiene Rule 1 is INACTIVE in CI by design (added 2026-08-26)
 
@@ -2117,7 +1865,7 @@ actually secret. The local gate plus the structural rules is the right cost/bene
   this note. One env line plus one secret; no scanner change needed, the precedence chain
   already reads it first.
 
-### Phase 163 / SEC-03 — H-0001 census RE-MEASURED, and the debt is bigger than recorded (added 2026-08-26)
+### Phase 163 / SEC-03 — H-0001 census RE-MEASURED, and the debt is bigger than recorded (added 2026-08-26) (owned by Phase 244 ACCESSGUARDS, v1.23; REQUIREMENTS.md DBACC-05; tagged 2026-11-23)
 
 - **[H-0001] Bring the six `H_0001_UNCOVERED_ALLOWLIST` routes under the audit law**, one
   per-site decision at a time, shrinking the allowlist as each lands. **Still open (re-measured
@@ -2216,12 +1964,10 @@ surgical.
   (`portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts`) and matching
   (`match.py`) compute bespoke annualization/Sharpe. Parity-gated but real divergence risk —
   absorb into the unified backbone.
+      ⭐ **Owned by Phase 236 FIGUREMATH, v1.22; REQUIREMENTS.md FIG-01, FIG-02; tagged 2026-11-23.**
 - **Deribit `correction` residual** — a capital-reason row carrying a trading token and no
   capital word still classifies as trading P&L. Tighten the word-boundary classifier.
-- **Worker orphaned-`running` purge: DELETE vs reset** (founder decision at FLIP) — same
-  migration; TEST wants DELETE, PROD wants reset (a sustained >4h outage would lose live
-  jobs). Window already widened 2h→4h.
-
+      ⭐ **Owned by Phase 233 DERIBITTRUTH, v1.22; REQUIREMENTS.md DBOOK-02; tagged 2026-11-23.**
 ### Reliability / observability
 - **No cron migration in the repo has EVER asserted `cron.job.username`/`database`** (found
   2026-08-19 by the RLS audit of Phase 146.2's R3 migration; INHERITED gap, not introduced —
@@ -2251,9 +1997,11 @@ surgical.
   exhaustion vs. an external exhaustion query/alert. ⚠️ Interacts with the 90-day retention wall,
   which DELETES the marker rows that ARE the counter — so the bound is "3 per retention window",
   and a strategy can silently resume cycling after ~90d with no notification at either edge.
+      ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; REQUIREMENTS.md HEAL-03; tagged 2026-11-23.**
 - **Phase-19 hourly cron never decommissioned** (PR-D) — soak gate passed, cron still running.
 - **Match-engine cron health check missing** — no `/api/cron/health-check` route; match-engine
   cron failures are invisible (silent data staleness).
+      ⭐ **Owned by Phase 246 ALERTREADERS, v1.23; REQUIREMENTS.md ALRT-08; tagged 2026-11-23.**
 - **Cron/email idempotency & budget** — founder-LP cron double-email if lambda dies post-Resend
   (idempotency row on `(cron_name, year_month)`); founder-LP 85s worst-case > 60s maxDuration;
   Resend webhook svix-id idempotency store; email correlation-id fragmentation (per-email not
@@ -2267,6 +2015,7 @@ surgical.
 - **⚖️ ARCHITECTURE DECISION OWED: `api_keys` writes have left the RLS-enforced plane entirely** (raised by the Phase-160 RLS audit, 2026-08-23; MEDIUM, no leak today). With UPDATE revoked (`20260810120000`) and now INSERT revoked (Phase 160), **no RLS-subject role can write `api_keys` at all** — so `api_keys_owner`'s `WITH CHECK (user_id = auth.uid())` (`20260405061912_rls_policies.sql:22`) is dead on every path, and the sole writer is a `createAdminClient()` route running BYPASSRLS. That contradicts ADR-0001's "RLS is THE authorization layer". The *current* writer is correctly gated (uid comes only from `withAuth`'s `user.id`; the `...encrypted` spread is closed by a strip-mode Zod schema plus the `quantalyze/no-passthrough-on-ipc` lint rule, with a hostile-`user_id` oracle in `route.test.ts`). The residual is structural: any FUTURE admin-client route inserting `api_keys` with a request-supplied uid would write into another tenant's key list with **nothing in the database** to stop it.
   - ⛔ `FORCE RLS` is NOT the remedy: a service_role insert has no `sub` claim, so `user_id = auth.uid()` is NULL and every connect would fail.
   - The available DB-level backstop is a `BEFORE INSERT` trigger (BYPASSRLS skips RLS, not triggers). The repo already has this exact pattern twice for this exact class: `enforce_strategy_keys_owner_coherence` (`20260710120000:66`) and `check_strategy_api_key_ownership` (`20260410225609`). Decide whether `api_keys.user_id` warrants the same now that the last non-bypassed writer is gone.
+      ⭐ **Owned by Phase 243 DBBACKSTOP, v1.23; REQUIREMENTS.md DBACC-02; tagged 2026-11-23.**
 - **CSP uses `unsafe-inline`/`unsafe-eval`** — move to nonce-based CSP.
 - **VCR cassette over-redaction** — misses token/hmac/digest/nonce (and over-matches
   signal/signedAt/pubkey); replace with per-broker allowlist.
@@ -2392,26 +2141,6 @@ surgical.
   as pending is accounted for somewhere in `TODOS.md`, which is a new mechanism and was not worth
   building at phase close. Deliberately deferred, not overlooked.
 
-- **`[VITEST-CORPUS-TIMEOUT-01]` A corpus test passes only on an idle box — 5 s budget, ~4 s of work
-  (measured 2026-09-04, Phase 164.4 close).** `src/__tests__/drift-check-scripts.test.ts` — the
-  `[VAC04-C1] … CORPUS` case scans all 262 `supabase/migrations/**` files against two structural
-  readers inside vitest's **default 5000 ms** timeout. MEASURED, same tree, same commit, twice each:
-  loaded box ⇒ `Error: Test timed out in 5000ms`, full suite **193.9 s**, 1 failed / 13905 passed;
-  quiet box ⇒ **102.7 s**, 13906 passed, exit 0. Isolated, the file is 333/333 green but takes
-  42.1 s, so this one case sits close to the budget even with nothing else running.
-  ⚠️ It is NOT a flake in the "ignore it" sense — the budget is genuinely too small for the work,
-  and the corpus only grows with each migration, so the margin shrinks monotonically. CI has not
-  hit it because the vitest shards spread the load, which means the first symptom will be a
-  mysterious red shard, not a clear one.
-  **Fix = an explicit per-test timeout carrying the measurement** (`it(..., { timeout: 30_000 })`
-  with a comment recording 42 s/333 tests and the 262-file denominator), NOT a global
-  `testTimeout` bump, which would hide every other near-budget test. Not blocking: unrelated to
-  Phase 164.4's subject (its corpus is `supabase/migrations/**`, which the phase does not touch),
-  and both the full suite and CI are green.
-
-- Shared test-DB sql/e2e race (fence flake); Railway analytics deploys skip silently on red
-  main CI (verify `commitHash` + `/health`); `repro-key-flow.sh` Layer-A leak gate is a CI
-  no-op; `cassette-refresh.yml` failed 17/17 with no alerting.
 - **`analytics-service/tests/` is entirely untyped — 5,439 `mypy --strict` errors across 182 of
   213 test files** (MEASURED 2026-08-02 from Phase 142; `test_main_worker.py` alone = 59, which
   is typical at ~30/file, NOT an outlier). ⚠️ **This is CONFORMANCE, not drift**: `ci.yml:1130`
@@ -2507,7 +2236,7 @@ surgical.
   `services/error_contract.py:6,8` still say "the four classes" in prose — the table has had
   five rows since 140.1.1 plan 01. One-word comment fix, batch it with the above.)*
 
-### v1.16 Phase-140.1.2 review — findings routed onward (added 2026-07-26)
+### v1.16 Phase-140.1.2 review — findings routed onward (added 2026-07-26) (owned by Phase 240 CONNECTTRUTH, v1.22; REQUIREMENTS.md CONN-05; tagged 2026-11-23)
 
 > From the 140.1.2 code review (0 Critical, 0 High, 7 Medium, 6 Low). The four in-fence items
 > (M-02, M-04, M-05, M-06) plus L-03/L-04/L-05 and W-02 were fixed in that phase. These are the
@@ -2934,6 +2663,7 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       fires for the entire fleet, every day. One such rule shipped as the derive-gap trigger in
       the HONEST-02 decision table; the correction is now recorded in 162-CENSUS.md itself, not
       only in a sibling SUMMARY.
+      ⭐ **Owned by Phase 224 DEADLEFTOVERS, v1.23; REQUIREMENTS.md DEAD-02; tagged 2026-11-23.**
 - [ ] **`StrategyGrid`'s sync-badge gate is one half short of the table's — guard hygiene, NOT
       user-facing.** Table: `mayClaimSyncRecency = hasComputedAnalytics && !s.is_example`
       (`StrategyTable.tsx:982-983`). Grid: `{!s.is_example && (`
@@ -3023,7 +2753,7 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       so it goes through `migration-reviewer` + `rls-policy-auditor` + `silent-failure-hunter`
       before any apply, and its self-verify must be CATALOG-ONLY — a data-reading `RAISE
       EXCEPTION` applies to PROD and REFUSES on TEST, and a refused TEST apply blocks the PROD
-      apply (`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`).
+      apply (`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`; closed, entry deleted 2026-11-23).
       ⛔ **Forbidden closure: re-wording ROADMAP criterion 2 to match whatever ships.** The
       criterion carries a dated amendment naming exactly this gap; a silent re-word would erase
       the only record that the replacement half was never measured.
@@ -3052,27 +2782,36 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       or user-facing gap does, and this is test-transport). Interim owner: the founder.
 
 ---
+      ⭐ **Owned by Phase 249 TESTLANES, v1.23; REQUIREMENTS.md LANE-02; tagged 2026-11-23.**
 
 ## Phase 167.1.2 (ACCOUNTTRUTH) — founder close-out decisions (logged 2026-10-11)
 
 - **[167.1.2-DRAFT-CLASH-SAYS-SO]** (owner: the next key-connect phase; D-23). A key whose exchange account matches the user's OWN unfinished draft answers 200 `deduped` and drops the new credential without a word. Done when the connect routes refuse with a message naming the existing draft (finish or delete it first), with a test that fails on today's silent dedupe.
+      ⭐ **Owned by Phase 225 ONEACCOUNTONCE, v1.22; REQUIREMENTS.md CONN-01; tagged 2026-11-23.**
 - **[167.1.2-ORPHAN-COPY-FIX]** (owner: the next key-connect phase; D-24). KEY_ORPHANED sends an allocator-role owner to email security instead of naming the key to Disconnect, and an owner whose only holder is an archived composite gets KEY_VENUE_ALREADY_CONNECTED while My Strategies offers "Finish setup". Done when every role is told which key to Disconnect and the archived case names the archived strategy.
+      ⭐ **Owned by Phase 228 KEYANSWERS, v1.22; REQUIREMENTS.md CONN-04; tagged 2026-11-23.**
 - **[167.1.2-MT5-FAILING-HOLDER]** (owner: the next MT5 phase; D-25; was IN-R2-01). An MT5 key whose sign-in keeps failing can claim its account's holder slot. Done when a failing key never holds the slot and a working key on the same account takes it, with a test.
+      ⭐ **Owned by Phase 225 ONEACCOUNTONCE, v1.22; REQUIREMENTS.md MT5D-08; tagged 2026-11-23.**
 
 ## Phase 164.6.6.2.3 (FLOWTIMING) — routed items (logged 2026-10-11)
 
 - **[164.6.6.2.3-DERIBIT-INTRADAY-TIMING]** (owner: a future phase; trigger: FLOWTIMING shipped). Deribit's raw log carries deposit and trade timestamps, but its P&L is not attributed to positions, so D-02's "capital at the position's open" cannot be computed and Deribit runs at FLOWTIMING's day-level rule (D-07). Research measured 9 PROD Deribit keys and 79 flow days on 2026-10-11. Done when Deribit P&L is attributed to positions and its flow days use the timed return. Founder decision FLOWTIMING-Q2, 2026-10-11.
-- **[164.6.6.2.3-COMPOSITE-DAYLEVEL-NOTE]** (logged 2026-10-12, FLOWTIMING review round 1, SFH F2, MEDIUM conf 6; owner: ⭐ re-routed 2026-10-15 after NAVBREACH declined it: the next phase touching `run_stitch_composite_job` or the composite factsheet arm. Original owner, kept as lineage: 166.3.1 NAVBREACH, which owns the composite recompute). `run_stitch_composite_job` does not propagate a member's `flow_timing_day_level` (nor `small_base_measured`, nor D-15's large-flow annotation) to the composite, and the composite factsheet arm never carries the note, so a composite with day-level flow days shows neither a warning nor the note. Done when member annotations are OR-ed into the composite flags and surfaced, or the omission is recorded as intended. Round 2 SFH F3 (conf 4) re-found it and added: when both flags are set, the factsheet prints only the small-base text.
-  DECLINED 2026-10-15 by Phase 166.3.1 NAVBREACH: propagating FLOWTIMING's member annotations (`flow_timing_day_level`, `small_base_measured`, D-15's large-flow note) into `run_stitch_composite_job` and the composite factsheet is not part of NAVBREACH's SC-1..SC-5. FLOWTIMING's code was not on this phase's branch when SC-5 was planned (2026-10-13), so it was never planned or tested here, and taking it now would widen the composite surface plan 04's recompute measured after that measurement. The owner needs re-routing; the entry stays open.
 - **[164.6.6.2.3-INCEPTION-DAY0-PNL]** (logged 2026-10-12, FLOWTIMING review round 1, SFH F3, MEDIUM conf 6; owner: a future phase). The day-level inception skip in `chain_linked_twr` drops day-0 P&L as NaN with no flag (the predicate never looks at P&L), and an MT5 day 0 whose `DayTiming` could not be built falls into that skip before the day-level counter. Done when a day-0 with P&L and no timing is counted, or the docstring states the silent drop as D-12's intent.
+      ⭐ **Owned by Phase 229 MT5DERIVE2, v1.22; REQUIREMENTS.md MT5D-05; tagged 2026-11-23.**
 - **[164.6.6.2.3-MT5-BASIS-SILENT-NONE]** (logged 2026-10-12, FLOWTIMING review round 1, SFH F4, MEDIUM conf 5; owner: a future phase). `_native_key_usd_writer_basis` returns None silently (a missing close on a quiet day, a first day absent from the P&L map, a None carried level) and the store gate skips the write without a log, so a timed MT5 key composes on the legacy roll with no signal. Done when a timed MT5 key without a basis logs a counted warning or blocks as the holed-key case does.
+      ⭐ **Owned by Phase 229 MT5DERIVE2, v1.22; REQUIREMENTS.md MT5D-07; tagged 2026-11-23.**
 - **[164.6.6.2.3-EMPTY-COHORT0-REFUND]** (logged 2026-10-12, FLOWTIMING review round 1, review WR-04 conf 5 and SFH F5 conf 5, MEDIUM; owner: a future phase). A timed day that re-funds an emptied account (prev <= 0, a deposit, then a trade) is dropped with `negative_nav_guard`/`dust_nav_guard` because an EMPTY cohort 0 is still judged, and the interior `twr_chain_broken` cuts the headline to the suffix. Done when an empty cohort 0 is skipped whenever a later cohort is judged, with a test that goes RED today.
+      ⭐ **Owned by Phase 229 MT5DERIVE2, v1.22; REQUIREMENTS.md MT5D-04; tagged 2026-11-23.**
 - **[164.6.6.2.3-DRYRUN-VERDICT-ATTRIBUTION]** (logged 2026-10-12, FLOWTIMING review round 1, WR-05, MEDIUM conf 5; owner: none, the dry-run harness is a one-shot measurement tool). `flowtiming_dry_run.py` classifies every unguarded MT5 row as "confirmed day-0" by construction (day 0 is NaN before and after), so "confirmed flow-only" can never print and the reference row's day-1 flow-dominated cause is attributed to day 0; `offset_s` silently defaults to 0. The founder-approved DRYRUN (2026-10-12) carries this limit. Done when the classifier works per stored flag and day, if the harness is reused.
 - **[164.6.6.2.3-D15-THRESHOLD-BAND]** (logged 2026-10-13, FLOWTIMING review round 2, SFH F2, MEDIUM conf 5; owner: a future phase). D-15 annotates a day-level flow day only when `abs(flow) >= prev` (`FLOW_TIMING_LARGE_RATIO = 1.0`), but the inflation factor is about `(prev + F)/prev`, so a flow just under the ratio inflates the day with no flag: prev 1,000 plus an untimed 900 deposit earning 10% publishes +19% against about +10% as a clean `complete`. This follows the founder's D-15 choice. Done when the ratio is lowered with a measured rationale, or the band is recorded as accepted in CONTEXT.
+      ⭐ **Owned by Phase 229 MT5DERIVE2, v1.22; REQUIREMENTS.md MT5D-06; tagged 2026-11-23.**
 - **[164.6.6.2.3-D17-GUARD-DISCONTINUITY]** (logged 2026-10-13, FLOWTIMING review round 3 R3-01, MEDIUM conf 6; owner: a future phase; accepted by founder D-18). A vanishingly small flow on a day whose carried position lost about 90% or more of the account turns a measured day into a guarded NaN and breaks the chain, dropping earlier history. Flagged by the guard key, never silent. Done when a guard rule exists that is continuous in the flow AND refuses a near-zero base, or the limit is re-decided.
 - **[164.6.6.2.3-SOAK-BTC-FLOORS]** (logged 2026-10-13, FLOWTIMING review round 3 R3-02, MEDIUM conf 7; owner: a future phase touching `scripts/mt5_soak.py`). The soak calls `combine_mt5_deal_ledger` with no `floors` and judges guarded days on `USD_FLOORS`, while `job_worker` passes the account unit's floors. A BTC-denominated MT5 account therefore reads `vacuous` and red in the soak for a reason unrelated to reconstruction. Done when the soak resolves the unit with `classify_account_currency` and passes its floors to both calls, with a `currency="BTC"` test.
+      ⭐ **Owned by Phase 226 MT5SOAK, v1.22; REQUIREMENTS.md SOAK-01; tagged 2026-11-23.**
 - **[164.6.6.2.3-SOAK-TIMED-DAYS-UNCHECKED]** (logged 2026-10-13, FLOWTIMING review round 3 R3-03 conf 7 and SFH M-1 conf 8, MEDIUM; owner: a future phase touching `scripts/mt5_soak.py`). On a timed day the soak's return check rejects only an infinite value: 7.0, NaN or -0.99 on a timed day all read `recon_ok=True`, and there is no floor on the checked share (1 untimed day out of 200 is green). Done when a timed-day NaN must be guard-explained, the timed day is recomputed by an independent D-17 cohort walk from the raw deals, a timed-day 1e-3 nudge goes RED, and a minimum checked share is enforced.
+      ⭐ **Owned by Phase 226 MT5SOAK, v1.22; REQUIREMENTS.md SOAK-02; tagged 2026-11-23.**
 - **[164.6.6.2.3-SOAK-DAY-ATTRIBUTION]** (logged 2026-10-13, FLOWTIMING review round 3 SFH M-2, MEDIUM conf 5; owner: as above). The soak's expected return uses the fold's own per-day P&L, so a deal bucketed onto the wrong UTC day shifts `P_t` and `NAV_{t-1}` together and every check stays green. Done when the soak accumulates an independent per-day trading P&L from the raw deals and compares it day by day.
+      ⭐ **Owned by Phase 226 MT5SOAK, v1.22; REQUIREMENTS.md SOAK-03; tagged 2026-11-23.**
 
 ## Phase 167.1.2.2 (DERIVECRON) — routed items (logged 2026-10-07)
 
@@ -3096,7 +2835,7 @@ a test that fails first when the guard is removed.
 ⛔ **Not a close:** a measurement of zero mismatches so far; the fail-closed bracket is why none
 show, and it is not a serialization.
 
-### 167.1.2.2-BYBIT-STATIC-EGRESS — the Bybit key's IP allow-list needs a stable egress address, and the founder step is still pending (booked 2026-10-09, Phase 167.1.2.2 D-17(a))
+### 167.1.2.2-BYBIT-STATIC-EGRESS — the Bybit key's IP allow-list needs a stable egress address, and the founder step is still pending (booked 2026-10-09, Phase 167.1.2.2 D-17(a)) (owned by Phase 231 BYBITREADS, v1.22; REQUIREMENTS.md VREAD-05; tagged 2026-11-23)
 
 **Why it is open.** The plan 05 re-rehearsal read the one Bybit owner INCOMPLETE twice, on the
 exchange's 'Unmatched IP' refusal: the key is bound to an IP allow-list, and Railway's live config
@@ -3134,7 +2873,7 @@ phase touching the materiality ratio.
 first on an account with a nonzero `options_session_upl`.
 ⛔ **Not a close:** a note that the warning is "only a heuristic".
 
-### 167.1.2.2.1-CAGR-EMPTY-SPAN — the factsheet CAGR annualizes over calendar days, including emptied stretches (booked 2026-10-10, RESEARCH 3.4)
+### 167.1.2.2.1-CAGR-EMPTY-SPAN — the factsheet CAGR annualizes over calendar days, including emptied stretches (booked 2026-10-10, RESEARCH 3.4) (owned by Phase 236 FIGUREMATH, v1.22; REQUIREMENTS.md FIG-04; tagged 2026-11-23)
 
 **Why it is open.** An emptied stretch composes as zero capital with no return (SC-3), but the
 factsheet CAGR annualizes over the calendar span, so a book that was empty for long stretches reads
@@ -3159,7 +2898,7 @@ the old wedge produced, and no form in the re-baseline runbook reads it by desig
 behind a stated basis flag, with a test.
 ⛔ **Not a close:** reconnecting the key to re-derive it without the owner's consent.
 
-### 167.1.2.2.1-WRITER-BASIS-VALUES — writer-basis mode checks the calendar, never the values (booked 2026-10-10, PR-2 review WR-01, confidence 5)
+### 167.1.2.2.1-WRITER-BASIS-VALUES — writer-basis mode checks the calendar, never the values (booked 2026-10-10, PR-2 review WR-01, confidence 5) (owned by Phase 229 MT5DERIVE2, v1.22; REQUIREMENTS.md HOLD-03; tagged 2026-11-23)
 
 **Why it is open.** A `key_inputs` row and a returns set from two derives that share the last NAV
 day pass the gate: the lagging-row check compares last days only. That happens with a same-day
@@ -3230,7 +2969,7 @@ form containing one.
 
 ## Phase 164.6.6.2.1 (BTCUSDVIEW) — routed items (logged 2026-10-09)
 
-### 164.6.6.2.1-DISCOVERY-RANKING-HONESTY — Discovery ranks a BTC strategy's returns beside USD strategies' returns (booked 2026-10-09, Phase 164.6.6.2.1 D-14)
+### 164.6.6.2.1-DISCOVERY-RANKING-HONESTY — Discovery ranks a BTC strategy's returns beside USD strategies' returns (booked 2026-10-09, Phase 164.6.6.2.1 D-14) (owned by Phase 239 SURFACECACHE, v1.22; REQUIREMENTS.md CACHE-04; tagged 2026-11-23)
 
 **Why it is open.** Phase 164.6.6.2.1 labels a native-unit strategy on `StrategyTable` with an
 "in BTC" chip (D-05, D-12), but the Discovery ranking, its sort order and its percentile badges
@@ -3262,7 +3001,7 @@ like counted keys (or refuse with `key_inputs_mismatch` when they carry holes), 
 fails first on today's code.
 ⛔ **Not a close:** a comment saying departed keys are rare.
 
-### 164.6.6.2.1-USDVIEW-READFAIL-CACHED — a failed BTC price read disables the factsheet USD toggle for the cache TTL (booked 2026-10-10, Phase 164.6.6.2.1 review SFH-03)
+### 164.6.6.2.1-USDVIEW-READFAIL-CACHED — a failed BTC price read disables the factsheet USD toggle for the cache TTL (booked 2026-10-10, Phase 164.6.6.2.1 review SFH-03) (owned by Phase 237 FACTSHEETHONEST, v1.22; REQUIREMENTS.md CACHE-03; tagged 2026-11-23)
 
 **Why it is open.** `buildUsdView` returns `usdViewUnavailable: "price_read_failed"` as a normal
 payload, so the factsheet cache stores it under the payload key for up to an hour although the
@@ -3287,7 +3026,7 @@ Confidence 5, below the fix bar.
 number, with a test that fails first.
 ⛔ **Not a close:** inferring the unit from the symbol.
 
-### 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED — an owner's private factsheet shows "Data source —" for their own key-backed strategy (booked 2026-10-15, Phase 164.6.6.2.1 UAT item 2)
+### 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED — an owner's private factsheet shows "Data source —" for their own key-backed strategy (booked 2026-10-15, Phase 164.6.6.2.1 UAT item 2) (owned by Phase 237 FACTSHEETHONEST, v1.22; REQUIREMENTS.md FACT-04; tagged 2026-11-23)
 
 **Why it is open.** `src/app/factsheet/[id]/v2/page.tsx` reads the trust tier from
 `readPublicVerificationSignals`, which calls `get_published_trust_signals`, an RPC that answers only
@@ -3304,7 +3043,7 @@ read through a path that also checks ownership. Anonymous and non-owner readers 
 an unpublished strategy. A test fails first on the "—".
 ⛔ **Not a close:** widening `get_published_trust_signals` to unpublished strategies for every caller.
 
-### [167.1.2.2.2-CRON-TICK-RESIDUALS] — four MEDIUM residuals of `public.cron_sync_tick()` that the plan 01 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 01 Task 3)
+### [167.1.2.2.2-CRON-TICK-RESIDUALS] — four MEDIUM residuals of `public.cron_sync_tick()` that the plan 01 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 01 Task 3) (owned by Phase 242 SECRETSHYGIENE, v1.23; REQUIREMENTS.md SECR-04; tagged 2026-11-23)
 
 **Why it is open.** The three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter)
 reported the tick migration CLEAN with no CRITICAL or HIGH. The worst finding was MEDIUM, so under the
@@ -3347,7 +3086,7 @@ the reader is removed.
 - **Shipped in v0.131.5.0 (Phase 164.6.8 OUTAGEALERT, 2026-10-14), live check pending in plan 09, NOT closed.** Item 4 (nothing reads the run) is answered in code by the `cron_sync` heartbeat arm of `public.ops_staleness_check()`. Items 1-3 are untouched. Item 4 closes with `167.1.2.2.2-TRADESYNC-STALENESS-ALARM`, on plan 09's live check.
 - ✅ **Item 4 CLOSED 2026-10-14 by Phase 164.6.8 OUTAGEALERT plan 09, with `167.1.2.2.2-TRADESYNC-STALENESS-ALARM`.** The pending line above is kept as lineage. The `cron_sync` heartbeat arm of `public.ops_staleness_check()` is registered at `40 * * * *` (19:54 UTC) and its first tick at 20:40:00 UTC succeeded with an `ok` observer row and no page; the drill reached the Sentry rule "Ops alert: outage (164.6.8)" and the founder confirmed it notified them without opening Sentry (D-15: Sentry is the only live channel, so this closure relies on that delivery; email is booked as `164.6.8-OPS-ALERT-EMAIL-UNCONFIGURED`). The gate's test was seen RED with the reader removed (plan 02). Items 1, 2 and 3 stay OPEN and untouched.
 
-### [167.1.2.2.2-PROVENANCE-GATE-RESIDUALS] — MEDIUM residuals of the `trades_fetched_at` / `series_provenance` column migration and its gate that the plan 02 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 02 Task 3)
+### [167.1.2.2.2-PROVENANCE-GATE-RESIDUALS] — MEDIUM residuals of the `trades_fetched_at` / `series_provenance` column migration and its gate that the plan 02 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 02 Task 3) (owned by Phase 248 SQLGATES2, v1.23; REQUIREMENTS.md SQLG-03; tagged 2026-11-23)
 
 **Why it is open.** migration-reviewer, rls-policy-auditor and silent-failure-hunter reported
 `20261010130000_strategy_analytics_trade_fetch_provenance.sql` and `test_strategy_analytics_trade_fetch_provenance.sql`
@@ -3403,6 +3142,7 @@ reads an unpublished row's value. (5) plan 05's red-first test on a `computing` 
   2026-08-01. The OKXHISTORY reconciliation is the detector (`info.archive_only_in_live_reach` in the job result:
   archive activity on a day inside live reach with no live row). **Trigger (narrowed 2026-10-15):** an OKX
   derive sets `daily_pnl_truncated_okx` or the OKXHISTORY reconciliation reports an archive-only day inside live reach.
+      ⭐ **Owned by Phase 232 OKXTRADES, v1.22; REQUIREMENTS.md VREAD-07; tagged 2026-11-23.**
 - **[167.1.2.2.2-BINANCE-INCOME-PAGINATION]** (logged 2026-10-11, PR-B fix round; owner: the next phase that ships a Binance strategy key). The Binance income call uses `limit=1000` with no pagination and no truncation flag, so a capped Binance window is still invisible. No Binance key on PROD today. Done when it paginates or stamps `daily_pnl_truncated_binance`.
 - **[167.1.2.2.2-INCOME-FALLBACK-PRODUCER-PIN]** (logged 2026-10-11, PR-B review round 3 R3-ME-01, MEDIUM, confidence 5; owner: the next phase that ships a Binance strategy key). The cron reads `daily_pnl_binance_income_fallback` through its own string constant in `routers/cron.py`, and the fetcher writes it as a separate literal in `services/exchange.py`. The round-3 tests hand the flag to the cron through a patched buffer, so a rename on the fetcher side would silently reopen R2-ME-01 (Binance spot fills stored over daily P&L). Done when one test runs the real `fetch_daily_pnl` with the income call failing and the spot call succeeding and asserts `_fetch_degradation` names the flag, or when both sides import one constant. Dormant until a Binance strategy key exists on PROD. Also correct the comment beside the cron constant: nothing in the tree reads the flag by name for an admin health card.
 
@@ -3454,7 +3194,7 @@ asynchronous.
 ⛔ **Not a close:** the arithmetic that a filtered tick fits in 180 seconds, or a rehearsal that finished
 inside the timeout (it never exercised cancellation).
 
-### 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD — `api_keys.last_fetched_trade_timestamp` reads ahead of the data it claims to cover (booked 2026-10-10, Phase 167.1.2.2.2 research section 3)
+### 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD — `api_keys.last_fetched_trade_timestamp` reads ahead of the data it claims to cover (booked 2026-10-10, Phase 167.1.2.2.2 research section 3) (owned by Phase 232 OKXTRADES, v1.22; REQUIREMENTS.md VREAD-08; tagged 2026-11-23)
 
 **Why it is open.** On 2026-10-09 the column read 44.7 days old for one strategy's key while that
 strategy's newest stored trade was 50.7 days old, i.e. the cursor sat 6 days ahead of the stored data. A
@@ -3485,18 +3225,6 @@ still passes. Founder D-10 booked this rather than fixing it in round 1.
 **Owner:** the next phase that touches `e2e/helpers/geometry.ts`.
 **Trigger:** any edit to the pinned-header helpers.
 
-### 170.7-RANK-PAGE-CONTINUITY-TEST — nothing pins that `#n` continues across pages (booked 2026-10-11, Phase 170.7 review round 2 WR-04)
-
-**Why it is open.** Since D-11, `rankOrdinals` in `StrategyTable.tsx` numbers ranked rows over the
-full `filtered` list. That is the only thing that makes page 2 start at #21. Every test uses
-fewer than `PAGE_SIZE` rows, so changing the loop to `paged` would restart page 2 at #1 and no
-test would fail. Round-2 MEDIUM, test-only, so it is booked rather than fixed under the standing rule.
-**Fix.** Add two tests: a Discovery mount with 21 or more ranked rows, where clicking Next shows
-#21, and a manager Created-sort mount with one unranked row on page 1, where page 2's first ranked
-row shows #20. Prove both go RED under the `paged` change.
-**Owner:** the next phase that touches `StrategyTable` pagination or ranking.
-**Trigger:** any edit to `rankOrdinals`.
-
 ### 170.7-E2E-HELPER-SILENT-SKIPS — two geometry helpers return quietly instead of failing (booked 2026-10-11, Phase 170.7 D-10)
 
 **Why it is open.** `assertPinnedCellsMatchHeaders` returns silently when `overflowOf` names no
@@ -3507,15 +3235,6 @@ today, because the default `overflowOf` matches and the region is asserted visib
 **Owner / Trigger:** as 170.7-E2E-HEADER-PROBE-COVERAGE.
 
 ## Phase 170.4 (ALLOCHOLDINGS) — routed review items (logged 2026-10-11)
-
-### 170.4-WRITER-FALLBACK-SILENT — the 42P10 fallback is visible only as an INFO log line (SFH-2, MEDIUM, conf 6)
-
-**Why it is open.** Until PR 2's per-key index exists, every holdings poll retries on the pre-D10
-target, and two keys holding one symbol on one day overwrite each other (D-08 is false in that
-window). Nothing reaches Sentry.
-**Fix.** Log a warning plus a one-shot Sentry capture per process, with a stable tag, and make the tag
-reading zero part of the gate for removing the fallback (`[170.4-HOLDINGS-UPSERT-FALLBACK]`).
-**Owner:** 170.4 PR 2 (plan 10).
 
 ### 170.4-HOLDINGS-UPSERT-FALLBACK — remove the writer's 42P10 fallback once PR 2 is applied on PROD (booked 2026-10-11, Phase 170.4 plan 10)
 
@@ -3528,13 +3247,13 @@ every holdings poll with 42P10 in that window.
 with its tests (`test_persist_holdings_conflict_target.py`). In the SAME change, update the header of
 `supabase/migrations/down/20261011120000-rollback.sql`: that manual rollback relies on the fallback to
 keep ingestion alive after it runs, so once the constant is gone the writer must be rolled back FIRST
-(review INFO-2). Do `170.4-WRITER-FALLBACK-SILENT` first or with it, so the fallback's use is observable
+(review INFO-2). Do `170.4-WRITER-FALLBACK-SILENT` (stale; entry deleted 2026-11-23, the five-column unique index exists on PROD and in the baseline, so the fallback window is closed) first or with it, so the fallback's use is observable
 before it is removed.
 **Owner:** Phase 170.4 follow-up.
 **Trigger:** PR 2's PROD apply verified: the marker query names PROD, and `pg_indexes` on
 `allocator_holdings` shows the five-column unique index and not the four-column one.
 
-### 170.4-IDENTITY-READ-COMPLETENESS — a holdings row whose key is missing from the identity read counts as its own account (SFH, MEDIUM, booked 2026-10-11)
+### 170.4-IDENTITY-READ-COMPLETENESS — a holdings row whose key is missing from the identity read counts as its own account (SFH, MEDIUM, booked 2026-10-11) (owned by Phase 235 HOLDINGSTRUTH, v1.22; REQUIREMENTS.md HOLD-01; tagged 2026-11-23)
 
 **Why it is open.** `keyAccountOf`'s `key:<id>` fallback gives a holdings row whose `api_key_id` is
 absent from the `api_keys` identity read its own account, so a same-account pair could double count.
@@ -3544,7 +3263,7 @@ Reachable only if the foreign key is bypassed. Plan 14 noted that no test seeds 
 a test per reader.
 **Owner / Trigger:** the next /allocations data phase.
 
-### 170.4-DASHBOARD-MARKER-READ-SILENT — the dashboard drops `markerReadError` (SFH-3, MEDIUM, conf 6)
+### 170.4-DASHBOARD-MARKER-READ-SILENT — the dashboard drops `markerReadError` (SFH-3, MEDIUM, conf 6) (owned by Phase 235 HOLDINGSTRUTH, v1.22; REQUIREMENTS.md HOLD-04; tagged 2026-11-23)
 
 **Why it is open.** A failed `native_unpriced:` read keeps an unpriced key's older rows in Holdings,
 Exposure and the live total, with no note and no Sentry capture. The commit route does report the same
@@ -3564,7 +3283,7 @@ allocator-book prompts, so this copy is outside them.
 accounts yet; without one, keep the connect prompt.
 **Owner / Trigger:** the next /allocations copy pass (e.g. 170.6 DISPLAYPOLISH).
 
-### 170.4-MATCH-UNPRICED-PER-KEY — the scorer applies the native-unpriced marker per key, not per account (SFH-4, MEDIUM, conf 5)
+### 170.4-MATCH-UNPRICED-PER-KEY — the scorer applies the native-unpriced marker per key, not per account (SFH-4, MEDIUM, conf 5) (owned by Phase 235 HOLDINGSTRUTH, v1.22; REQUIREMENTS.md HOLD-02; tagged 2026-11-23)
 
 **Why it is open.** When key A of an account carries a marker for day D and key B's newest rows are on
 D-1, the TS reader and the equity refresh drop B's rows, but `match.py` keeps them, so the match AUM
@@ -3575,7 +3294,7 @@ disagrees with Holdings for that account.
 
 ## Phase 170.3 (OGPUBLIC) — routed review items (logged 2026-10-11)
 
-### 170.3-OG-NOTFOUND-CACHE — a not-yet-published strategy's blank card is cached for a day or more (booked 2026-10-11, SFH-2, MEDIUM)
+### 170.3-OG-NOTFOUND-CACHE — a not-yet-published strategy's blank card is cached for a day or more (booked 2026-10-11, SFH-2, MEDIUM) (owned by Phase 237 FACTSHEETHONEST, v1.22; REQUIREMENTS.md CACHE-01; tagged 2026-11-23)
 
 **Why it is open.** A genuine not-found (an unpublished or unknown id) renders the generic card under
 `LONG_CACHE_CONTROL` (1 day `s-maxage` plus 7 days `stale-while-revalidate`). If a link is shared before
@@ -3590,7 +3309,7 @@ item is MEDIUM at confidence 5-6, survived the fix rounds, and is recorded rathe
 stopping rule. Each names an owner and a trigger and none is routed to a phase of its own. Most share one theme,
 the alert path's own failure modes.
 
-### 164.6.8-F3-SENTRY-HALF-NOOP — the Sentry half of a page can no-op silently, leaving the email as the only channel with no signal (booked 2026-10-14, SFH F3, MEDIUM, confidence 6)
+### 164.6.8-F3-SENTRY-HALF-NOOP — the Sentry half of a page can no-op silently, leaving the email as the only channel with no signal (booked 2026-10-14, SFH F3, MEDIUM, confidence 6) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-02; tagged 2026-11-23)
 
 **Failure scenario.** `SENTRY_DSN` is unset or `before_send` drops the event: `capture_message` returns None, the
 code ignores it, and the page goes out on one hop (email) without any log that it is one hop. A 502 on the email
@@ -3599,7 +3318,7 @@ then loses the page with nothing at ERROR.
 startup when the DSN is unset in production. Place: `analytics-service/services/ops_alert.py`.
 **Owner / Trigger:** the next phase touching `ops_alert.py`; or any page found to have reached nobody.
 
-### 164.6.8-F4-WR03-DEBT-PAGE-NEVER-ENDS — a relaunch debt paid outside the heal tick's check leaves the page open with stale state (booked 2026-10-14, SFH F4 and REVIEW WR-03, MEDIUM, confidence 5-6)
+### 164.6.8-F4-WR03-DEBT-PAGE-NEVER-ENDS — a relaunch debt paid outside the heal tick's check leaves the page open with stale state (booked 2026-10-14, SFH F4 and REVIEW WR-03, MEDIUM, confidence 5-6) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-01; tagged 2026-11-23)
 
 **Failure scenario.** A debt-owed busy tick pages. The debt is later cleared by the validation scrub path, the boot
 relaunch, or a heal cancelled by the monitor's `wait_for` before the settle check. The next heal starts with
@@ -3609,7 +3328,7 @@ is busy with a relaunch debt, and the next debt episode's page carries the earli
 every tick, or call the settle from `clear_mt5_relaunch_debt`'s callers. Test: debt cleared between two ticks.
 **Owner / Trigger:** the next phase touching `mt5_relogin.py` or `mt5_outage_alert.py`; or a debt page with no end.
 
-### 164.6.8-F5-READER-DELIVERY-UNOBSERVED — `ops_staleness_check()`'s own delivery failure is invisible (booked 2026-10-14, SFH F5, MEDIUM, confidence 6; acknowledged out of scope by D-03)
+### 164.6.8-F5-READER-DELIVERY-UNOBSERVED — `ops_staleness_check()`'s own delivery failure is invisible (booked 2026-10-14, SFH F5, MEDIUM, confidence 6; acknowledged out of scope by D-03) (owned by Phase 246 ALERTREADERS, v1.23; REQUIREMENTS.md ALRT-05; tagged 2026-11-23)
 
 **Failure scenario.** `net.http_post` is asynchronous and the function never reads `net._http_response`. A rotated
 service key (401), a 5xx or a timeout leaves the tick green with the observer row saying `error` and the route
@@ -3622,7 +3341,7 @@ until plan 09 registers the job.
 **Owner / Trigger:** sibling of `PROBER-ALERT-DELIVERY-UNVERIFIED-01` (untouched by D-03); same close. Trigger: any
 staleness page that should have fired and did not.
 
-### 164.6.8-F6-SCRUB-READER-NEWEST-ONLY — the scrub-row reader reads one row per tick and hides its own read errors at WARNING (booked 2026-10-14, SFH F6, MEDIUM, confidence 6)
+### 164.6.8-F6-SCRUB-READER-NEWEST-ONLY — the scrub-row reader reads one row per tick and hides its own read errors at WARNING (booked 2026-10-14, SFH F6, MEDIUM, confidence 6) (owned by Phase 246 ALERTREADERS, v1.23; REQUIREMENTS.md ALRT-06; tagged 2026-11-23)
 
 **Failure scenario.** A `failed` or `refused` scrub row followed by a `scrubbed` row inside one monitor interval is
 never seen (only the newest row is read), so a client login possibly left on the terminal is never paged. Separately,
@@ -3632,7 +3351,7 @@ consecutive read failures and page `mt5_terminal_scrub` / `reader_failed` at a s
 `analytics-service/services/mt5_validation_liveness.py`.
 **Owner / Trigger:** the next phase touching `mt5_validation_liveness.py`; or a scrub failure found unpaged.
 
-### 164.6.8-N2-OPEN-RECORD-FAILS-AT-WARNING — a failed open-page write is logged at WARNING, so the loss of restart recovery is invisible (booked 2026-10-14, SFH round 2 N2, MEDIUM, confidence 6)
+### 164.6.8-N2-OPEN-RECORD-FAILS-AT-WARNING — a failed open-page write is logged at WARNING, so the loss of restart recovery is invisible (booked 2026-10-14, SFH round 2 N2, MEDIUM, confidence 6) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-04; tagged 2026-11-23)
 
 **Failure scenario.** Supabase is down through an incident: no `ops_alert_open` row exists, so a redeploy ends the
 incident silently and the founder's last message stays OUTAGE. The only trace is WARNING lines.
@@ -3641,7 +3360,7 @@ consecutive failures per source and raise to ERROR at 2-3. Keep the retry. Place
 `analytics-service/services/ops_alert_open.py`.
 **Owner / Trigger:** as `164.6.8-F3-SENTRY-HALF-NOOP`.
 
-### 164.6.8-N3-SCRUB-SECOND-FAILURE-SUPPRESSED — a second failed scrub of the same cause inside an hour is marked paged and dropped (booked 2026-10-14, SFH round 2 N3, MEDIUM, confidence 6)
+### 164.6.8-N3-SCRUB-SECOND-FAILURE-SUPPRESSED — a second failed scrub of the same cause inside an hour is marked paged and dropped (booked 2026-10-14, SFH round 2 N3, MEDIUM, confidence 6) (owned by Phase 246 ALERTREADERS, v1.23; REQUIREMENTS.md ALRT-06; tagged 2026-11-23)
 
 **Failure scenario.** Scrub row A `failed` pages at T; no `scrubbed` row follows; row B `failed` with the same cause
 at T+20m is a new row, the reader marks it paged, and the hourly window drops it. B, possibly a different account,
@@ -3650,7 +3369,7 @@ is never reported. The code delivers one page per cause per hour, not one per ro
 that skips the window. Test: outage A, outage B with no recovery, B captures.
 **Owner / Trigger:** fixed together with `164.6.8-F6-SCRUB-READER-NEWEST-ONLY`.
 
-### 164.6.8-WR05-ALERT-PATH-HANDLERS-AT-WARNING — the paging path's own failure handlers log below the Sentry event level (booked 2026-10-14, REVIEW WR-05, MEDIUM, confidence 6)
+### 164.6.8-WR05-ALERT-PATH-HANDLERS-AT-WARNING — the paging path's own failure handlers log below the Sentry event level (booked 2026-10-14, REVIEW WR-05, MEDIUM, confidence 6) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-04; tagged 2026-11-23)
 
 **Failure scenario.** The tracker, debt, scrub-reader and probe handlers catch failures of the paging path and log
 at WARNING. A probe whose outer tick bound always bites never feeds `note_outage_reading`, so a validation terminal
@@ -3660,7 +3379,7 @@ that no rule sees.
 `tick_deadline` reading. Places: `mt5_outage_alert.py`, `mt5_validation_liveness.py`, `mt5_session_monitor.py`.
 **Owner / Trigger:** as `164.6.8-F3-SENTRY-HALF-NOOP`.
 
-### 164.6.8-WR06-CRON-SYNC-ERRORS-PAGE-ON-PER-KEY-FAULTS — the `two_consecutive_errors` arm pages on one flaky key and re-pages hourly with no recovery (booked 2026-10-14, REVIEW WR-06, MEDIUM, confidence 5)
+### 164.6.8-WR06-CRON-SYNC-ERRORS-PAGE-ON-PER-KEY-FAULTS — the `two_consecutive_errors` arm pages on one flaky key and re-pages hourly with no recovery (booked 2026-10-14, REVIEW WR-06, MEDIUM, confidence 5) (owned by Phase 246 ALERTREADERS, v1.23; REQUIREMENTS.md ALRT-07; tagged 2026-11-23)
 
 **Failure scenario.** The `cron_sync` heartbeat row is `error` when ANY key's status is non-ok (`transient_failure`,
 `held`, `partial`, `timeout`). One venue flaky for two days gives two consecutive `error` rows, and
@@ -3672,7 +3391,7 @@ notice or a once-per-episode bound. Place: the `ops_staleness_check` reader (mig
 `analytics-service/routers/cron.py` `_cron_sync_heartbeat_row`. A migration change, so it needs a new stamp.
 **Owner / Trigger:** the first false `two_consecutive_errors` page after plan 09 registers the job.
 
-### 164.6.8-WR-R4-01-SENTRY-CREDIT-INSIDE-RULE-INTERVAL — an outage is credited to Sentry although the rule's 60-minute action interval suppresses the notification (booked 2026-10-14, round-4 review WR-R4-01, MEDIUM, confidence 6)
+### 164.6.8-WR-R4-01-SENTRY-CREDIT-INSIDE-RULE-INTERVAL — an outage is credited to Sentry although the rule's 60-minute action interval suppresses the notification (booked 2026-10-14, round-4 review WR-R4-01, MEDIUM, confidence 6) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-02; tagged 2026-11-23)
 
 **Failure scenario.** 10:00 the jobs terminal pages OUTAGE (Sentry notifies, email sent). 10:20 it recovers and the
 RECOVERED email is the founder's newest message. 10:40 it relapses with the same cause: the recovery dropped the
@@ -3686,7 +3405,7 @@ read from one named constant that cites the rule), or retry the email on a relap
 **Owner / Trigger:** the next phase touching `ops_alert.py`; or a flapping terminal. Needs a relapse with the same
 cause inside 60 minutes plus one email failure.
 
-### 164.6.8-R4-SFH-F1-DUPLICATE-RECOVERY — a second healthy reading during the held recovery wait starts a duplicate recovery with false "restarted" wording (booked 2026-10-14, round-4 SFH F1, MEDIUM, confidence 5)
+### 164.6.8-R4-SFH-F1-DUPLICATE-RECOVERY — a second healthy reading during the held recovery wait starts a duplicate recovery with false "restarted" wording (booked 2026-10-14, round-4 SFH F1, MEDIUM, confidence 5) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-01; tagged 2026-11-23)
 
 **Failure scenario.** A run ends on a healthy reading; `_send_recovered` sends the notice and holds the delivery wait
 in a task for up to 15 s. The next healthy reading for the same role finds no run, calls `_durable_recovery_request`,
@@ -3698,7 +3417,7 @@ RECOVERED messages, one with false wording.
 `analytics-service/services/mt5_outage_alert.py`.
 **Owner / Trigger:** fixed together with `164.6.8-WR-R4-01-SENTRY-CREDIT-INSIDE-RULE-INTERVAL`.
 
-### 164.6.8-WR-D16-01-PROBE-BOUND-INLINE-CLOSE — a Sentry-credited recovery closes the open page inline, outside the probe tick's budget (booked 2026-10-15, plan 10 review WR-D16-01, MEDIUM, confidence 5)
+### 164.6.8-WR-D16-01-PROBE-BOUND-INLINE-CLOSE — a Sentry-credited recovery closes the open page inline, outside the probe tick's budget (booked 2026-10-15, plan 10 review WR-D16-01, MEDIUM, confidence 5) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-03; tagged 2026-11-23)
 
 **Failure scenario.** Before D-16 only the founder email could decide a recovered notice, so `_send_recovered` in
 `mt5_outage_alert.py` always closed the open page from a held task. Since D-16 a Sentry event id decides it before
@@ -3737,7 +3456,7 @@ Five MEDIUM findings from the PR-A review army (plan 03), booked rather than fix
 user-facing today and each sits below the confidence bar for a fixer round. Verdict files:
 `03-REVIEW-SFH.md` and `03-REVIEW-SFH-R2.md` in the phase directory.
 
-### 170.6.1.1-CENSUS-STALE-AXES — the static census pin can go stale silently on three axes (booked 2026-10-14, SFH-4, MEDIUM, confidence 6)
+### 170.6.1.1-CENSUS-STALE-AXES — the static census pin can go stale silently on three axes (booked 2026-10-14, SFH-4, MEDIUM, confidence 6) (owned by Phase 248 SQLGATES2, v1.23; REQUIREMENTS.md SQLG-01; tagged 2026-11-23)
 
 **Why it is open.** `src/lib/anon-strategies-projection.test.ts` reads source text from hand-copied lists.
 (a) `ANON_ROUTE_DIRS` is a subset of `PUBLIC_ROUTES` in `src/proxy.ts`, and nothing asserts that a new public
@@ -3753,7 +3472,7 @@ reason so an omission is a decision. Neuter each axis once and see it RED.
 **Owner / Trigger:** PR-B of this phase (it moves the census); otherwise the next phase that touches the pin
 or adds a public route prefix.
 
-### 170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD — `Strategy.api_key_id` optional removes the compiler's guard on owner reads (booked 2026-10-14, SFH-5, MEDIUM, confidence 5)
+### 170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD — `Strategy.api_key_id` optional removes the compiler's guard on owner reads (booked 2026-10-14, SFH-5, MEDIUM, confidence 5) (owned by Phase 244 ACCESSGUARDS, v1.23; REQUIREMENTS.md DBACC-04; tagged 2026-11-23)
 
 **Why it is open.** Making the field optional lets owner-surface code that truth-tests `strategy.api_key_id`
 (`strategies/page.tsx`, `edit/page.tsx`) compile against a row that may be a public projection and silently read
@@ -3763,7 +3482,7 @@ or adds a public route prefix.
 **Owner / Trigger:** the next phase that touches `src/lib/types.ts`'s `Strategy`, or any owner page that
 reports "no key" for a connected strategy.
 
-### 170.6.1.1-GATE-HIDDEN-EXEMPTIONS-UNENFORCED — the gate's hidden-column exemption list is not asserted hidden (booked 2026-10-15, PR-B review WR-01, MEDIUM, confidence 7)
+### 170.6.1.1-GATE-HIDDEN-EXEMPTIONS-UNENFORCED — the gate's hidden-column exemption list is not asserted hidden (booked 2026-10-15, PR-B review WR-01, MEDIUM, confidence 7) (owned by Phase 248 SQLGATES2, v1.23; REQUIREMENTS.md SQLG-02; tagged 2026-11-23)
 
 **Why it is open.** `supabase/tests/test_strategies_anon_grants.sql`'s `HIDDEN_COLUMN_EXEMPTIONS` only removes
 columns from GRANT 3's "every other column is anon-readable" sweep. No arm checks that an exempted column is
@@ -3776,7 +3495,7 @@ would then require that grant, so the two disagree as soon as the list is non-em
 RED-UNDER twin, and move the census by one arm.
 **Owner / Trigger:** the first change that adds an entry to `HIDDEN_COLUMN_EXEMPTIONS`.
 
-### 170.6.1.1-LANDING-CAPTURE-THROTTLE — the landing social-proof read errors capture up to 3 events per page view (booked 2026-10-14, SFH-R2 R2-2, MEDIUM, confidence 6)
+### 170.6.1.1-LANDING-CAPTURE-THROTTLE — the landing social-proof read errors capture up to 3 events per page view (booked 2026-10-14, SFH-R2 R2-2, MEDIUM, confidence 6) (owned by Phase 247 SENTRYHELD, v1.23; REQUIREMENTS.md HELD-02; tagged 2026-11-23)
 
 **Why it is open.** `getSocialProofStats` in `src/app/(marketing)/page.tsx` calls `captureToSentry` for each failed
 count on every request. Under a column-grant outage on the most-visited anonymous page that burns Sentry quota
@@ -3786,7 +3505,7 @@ render the same dash, so a visitor cannot tell an outage from a genuine zero; Se
 sure the first event per window is still sent.
 **Owner / Trigger:** the next phase touching the landing page's stats, or any Sentry quota alert from it.
 
-### 170.6.1.1-FAILANONREAD-CAPTURE-HELD — `failAnonRead` fires its capture without holding the promise (booked 2026-10-14, SFH-R2 R2-3, MEDIUM, confidence 4)
+### 170.6.1.1-FAILANONREAD-CAPTURE-HELD — `failAnonRead` fires its capture without holding the promise (booked 2026-10-14, SFH-R2 R2-3, MEDIUM, confidence 4) (owned by Phase 247 SENTRYHELD, v1.23; REQUIREMENTS.md HELD-01; tagged 2026-11-23)
 
 **Why it is open.** `failAnonRead` in `src/lib/queries.ts` calls `captureToSentry` and throws at once without
 holding the returned promise, so on a serverless cold finish the tagged `{op, code}` event can be lost. Low
@@ -3821,6 +3540,7 @@ without its `code` tag.
   `20261022T2325`) ingested 1606 archive bills for the in-scope account and all 1606 are USDT, so `non_usd_ccy` did not
   fire. The trigger (a non-USDT bill in any strategy's window) is not met and the live `fetch_daily_pnl` path is
   still unconverted and unmeasured for bill classes outside the archive window.
+      ⭐ **Owned by Phase 232 OKXTRADES, v1.22; REQUIREMENTS.md VREAD-06; tagged 2026-11-23.**
 
 ## Phase 164.9.3.1 (FANINGRAPH) — routed items (logged 2026-10-15)
 
@@ -3930,27 +3650,6 @@ Three entries are new: one known limit (CONTEXT D-16) and two residuals from the
 
 - [ ] WR-03: guard-test case 7c auth.uid() occurrence-count runs over pg_get_functiondef incl. comments (4 comment hits ≥ 3 threshold) — vacuous as a live-DB control; vitest pin P4 already covers the invariant comment-stripped. Fix: strip comments in 7c or count against exact === 7 total occurrences. (.planning/phases/150-*/150-REVIEW.md)
 - [ ] (WR-02 fix note) `bg-card` is a dead class — no `--color-card` token in globals.css @theme; 7 files repo-wide render transparent notice backgrounds. One cleanup pass wanted.
-- [ ] (/code-review high, lens 5) HoldingsTable.tsx D-15 comment cites StrategyTable.tsx:1067-1085; the precedent now lives at :1169-1179 — cite by phrase not line number.
-
-### Phase 162 (HONEST) — composite failure no longer names the offending member (added 2026-08-26)
-
-- [ ] **On a composite onboarding failure the user is told the composite failed, but not WHICH
-      member key caused it.** HONEST-01 / UI-SPEC C-2 removed the `computation_error` appendix
-      from the wizard error envelope — correctly, because that column carried raw Python
-      exception text and server-SCRUBBING is not curation. But that appendix was also the only
-      thing naming the offending member ("… (deribit) failed to reconstruct: …"). The envelope
-      now renders generic `GATE_ANALYTICS_FAILED` copy, so a user with a 3-key composite learns
-      only that something failed.
-      **This is the reader half of the gap Phase 164.2 already owns.** 164.2 covers the writer
-      half (the status bridge overwrites the runner's curated sentence on both transition
-      branches, so `computation_error_copy`'s output reaches no user). Even once the writer is
-      fixed, THIS path still will not render it — the appendix is gone by design. The real fix
-      is a curated, member-naming field in the envelope, not re-threading the column.
-      **Do NOT close by re-threading `computation_error`** — that is precisely the regression
-      HONEST-01 closed, and `e2e/composite-onboarding.spec.ts` now asserts its absence.
-      **Found:** ship gate for v0.74.0.0 — `e2e-seeded` went red on the stale assertion, which
-      is how the information loss surfaced at all.
-
 ### Phase 151 (AUM) — deferred by ruling from plan 151-04 (added 2026-08-07)
 
 - [ ] **sFOX holdings: consider the `get_balance_history` `usd_value` NAV anchor instead of per-asset `get_balances`** — deferred from Phase 151, RESEARCH Open Q2. `_fetch_sfox_balance_rows` honours the CONTEXT lock on `get_balances()`, whose rows carry a STRING quantity and NO USD valuation, and whose facade has no ticker endpoint — so a non-stable asset is honestly SKIPPED and named rather than priced at an invented rate. `get_balance_history` returns a daily `usd_value` NAV series: an account-level USD anchor structurally identical to MT5's `account_info().equity`, which would value the whole book with no pricing problem at all. Switching is a CONTEXT amendment (a different method than the one locked), so it belongs to the sFOX go-live phase, not to 151. Until then a live sFOX key with non-stable holdings under-reports its AUM by exactly those assets — visibly, via the `complete_with_warnings` copy that names them.
@@ -4102,6 +3801,7 @@ Raised by the `/ship` pre-landing + adversarial reviews. The four that met the b
   shape for a typo'd password. ⭐ Highest-value of this batch: silent, and it is the ordinary
   "I rotated my credentials" path. Needs a product call — update-in-place, or refuse with copy
   that names the remedy (there is no credential-update UI today; the client UPDATE is revoked).
+      ⭐ **Owned by Phase 228 KEYANSWERS, v1.22; REQUIREMENTS.md CONN-02; tagged 2026-11-23.**
 - [ ] **A-3 — `venue_account_id` is the MT5 login alone, but a login is only unique within a broker
   server.** Two accounts at different brokers sharing a login number collide on
   `(user_id, exchange, venue_account_id)` → wrong-account resolution. Server-qualifying the value
@@ -4113,19 +3813,11 @@ Raised by the `/ship` pre-landing + adversarial reviews. The four that met the b
   clash between two of one owner's keys surfaces as a `duplicate` marker (a key-card note plus an
   audit event), not as a connect refusal. Re-score this entry if another path ever creates an MT5
   key with a NULL `venue_account_id`.
+      ⭐ **Owned by Phase 225 ONEACCOUNTONCE, v1.22; REQUIREMENTS.md CONN-03; tagged 2026-11-23.**
 - [ ] **Orphaned `api_keys` rows from a deleted composite draft are never swept.**
   `cleanup_abandoned_wizard_drafts.sql:19-24,41-49` cannot see them (the draft row is gone, and the
   keys were never in `strategy_keys`). Found while fixing the composite-draft misclassification;
   the deletion path is now closed, but rows already orphaned in PROD stay orphaned.
-- [ ] **C-4 — `sync-progress` picks the strictly-newest job of any kind, with no in-flight
-  preference.** A short-circuit `process_key_long` answering `done` in seconds can mask a prior
-  chain's `compute_analytics_from_csv` still `running`, suppressing the amber block in exactly the
-  state the UI-SPEC says must show it. Bounded by the stall backstop. Changing it means revisiting
-  154-04's deliberate two-pass selection.
-- [ ] **C-5 — SF-3's keep-last-known now pins `jobStatus`, which is newly load-bearing.**
-  Composite-only. If a `stitch_composite` row is DELETEd out from under the client (the
-  orphaned-running purge does DELETE in prod), `jobStatus` freezes and `showRecomputing` latches.
-  Bounded by the stall backstop.
 - [ ] **Two copy-honesty nits in `SyncPreviewStep.tsx`.** (a) the lead paragraph still asserts a
   present-tense exchange fetch under the amber/interrupted blocks, where the identical in-card
   claim was just suppressed as false — gate it on `inFlightClaimIsCurrent` too; (b) with the
@@ -4192,92 +3884,11 @@ named files are unmodified by the phase, so neither was quietly half-done.
   **Decide one way:** either scrub + add a CI grep, or amend the rule to name refs as non-secret
   and keep the prohibition for keys/JWTs/connection strings only. ⛔ Do NOT half-do it.
 
-### Branch & worktree adjudication, 2026-08-14 — four survivors with real unmerged work
-
-Context: 37 stale branches and 9 orphaned agent worktrees accumulated. Every one was adjudicated
-**by content** (`grep -aF` per added line against `origin/main`), not by branch age or `git cherry`
-— ⭐ patch-id is USELESS here because squash-merges give shipped work a different id, so merged
-branches read as "62 commits ahead" forever. 33 were verified shipped and deleted. **These four
-were NOT, and all four are now pushed to `origin` so they are no longer local-only:**
-
-> ⚠️ Triage 2026-08-20: all four verified superseded/stale at HEAD — branch deletion is the remaining act, pending founder.
-
-- [ ] **`fix/scenario-empty-daily-returns` — 143 of 164 added lines absent from main.** A real bug
-  fix: resolves the lazy-returns series through the analytics column-drift resolver, across
-  `api/strategies/[id]/returns/route.ts`, `factsheet/allocator-portfolio-payload.ts` and
-  `portfolio-math-utils.ts`. Its own comment records the load-bearing fact: **the legacy
-  `daily_returns` column has NO production writer** — the real series lives in `returns_series`,
-  the `(1+r).cumprod()` wealth curve the analytics service writes (`metrics.py:775-778`).
-  ⚠️ Dated 2026-08-04 and never merged. **Decide: land it or close it with a reason.**
-
-- [ ] **`fix/sync-status-superseded-failed` — an entire MIGRATION that never landed.**
-  `supabase/migrations/20260705130000_sync_status_supersede_failed.sql` and its gate
-  `supabase/tests/test_sync_status_supersede_failed.sql` are **absent from main**.
-  ⚠️ A migration sitting unmerged for 5+ weeks is either abandoned-on-purpose or dropped by
-  accident, and the branch name does not say which. ⛔ Do NOT merge it blind — merging
-  `supabase/migrations/**` AUTO-APPLIES to PROD. Read it first; it is adjacent to Phase 144's
-  reaper-status work, so check for conflict before v1.16 Phase 144 lands.
-
-- [ ] **`ci/pytest-xdist-parallel` — 23% of its additions absent from main.** Parallelizes the
-  analytics-service Python CI (`pytest.ini`, `Makefile`, `conftest.py`, `requirements-dev.txt`,
-  `ci.yml`). Cheap, useful, never merged. ⚠️ Check it against the `-p no:randomly`/VCR-cassette
-  constraints before landing — parallel pytest plus cassettes is exactly where LIVE broker calls
-  leak in.
-  ⭐ 2026-10-14 (Phase 164.9.8.1 PYXDIST) — what was measured:
-  - The `shared_test_db` xdist group never formed. The conftest grouping hook ran after xdist's own hook
-    had read the markers, so no nodeid received the group suffix until the hook got `tryfirst=True`
-    (gate: `analytics-service/tests/test_xdist_group_is_real.py`, seen RED without the decorator).
-  - ⭐ 2026-10-28: the group stopped forming again under pytest 9.2.0, for a different reason. pytest
-    9.2.0 keeps a node's id in `Node._id` and xdist 3.8.0 still writes the suffix to `item._nodeid`,
-    which nothing reads any more, so hook order is not involved. Upstream pytest-dev/pytest-xdist#1386,
-    fixed by #1388 on xdist main and not released. `requirements-dev.txt` caps `pytest<9.2` until an
-    xdist release carries it; the same gate went RED on 9.2.0 and is GREEN under the cap.
-  - The limiter-identity flake was `routers.*` module pollution: fixtures that evicted a module without
-    restoring it. Fixed in the polluters through `tests/limiter_stub.py` (`restoring` / `evicted`); the
-    victim test is byte-identical. Exhaustive bisect after the fix: 316 of 316 file-level and 452 of 452
-    node-level pairs GREEN (0 RED), against 17 RED nodes in one polluter file before it.
-  - The VCR concern is ruled out by reading: `tests/conftest_vcr.py` sets `record_mode="once"`, so
-    cassettes replay only and nothing re-records under parallel workers.
-  - Coverage is combined and enforced under xdist. On the same tree, serial TOTAL 93.57 percent and
-    `-n auto --dist loadgroup` TOTAL 93.57 percent (24238 statements both), a delta of 0.00 point; the
-    same parallel run with the floor raised to 99 exited 1 with `Coverage failure: total of 94 is less
-    than fail-under=99`. The floor of 80 is unchanged.
-  - The Phase-97 parallelization TODOS entry no longer exists: tracker consolidation `193afe818`
-    dropped it. The pointer in the old `ci.yml` comment was dangling, and the entry is NOT re-created.
-  - Parallel pytest reaches main through this phase, not by merging this branch, so this branch's own
-    disposition (land it or close it) is unchanged.
-  - ⛔ CORRECTED 2026-10-15: the soak and wall-time figures are NOT in the plan 04 SUMMARY. Founder decision D-14 moved both to PR #1054's CI, and the readings are in this phase's VERIFICATION ("Human items resolved"): 20 of 20 green on CI run `38776484715`, and the `python` job at 340 to 497 s against a 654.5 s threshold. Shipped as v0.132.1.6 (#1054).
-
-- [ ] **`wip/v1.16-phase140-fix-archive` — 91% divergent (4,046 of 4,441 added lines absent).**
-  Highest divergence of any branch, but **no file it touches is missing from main**, so this reads
-  as a superseded WIP approach from the Phase 140 era (2026-07-25) rather than lost work. Kept
-  rather than deleted *because* 91% is too high to dismiss on a heuristic. **Decide: skim it once
-  and delete, or cherry-pick anything still true.**
-
-⭐ Also rescued: `.claude/worktrees/agent-a06a853e5acc0cdd0` held **264 uncommitted lines** across
-`SyncPreviewStep.tsx` and three of its tests. Main already carries the recomputing block so it
-looks superseded, but the diff was saved rather than assumed — session scratchpad,
-`rescued-worktree-a06a853e-uncommitted.patch`. ⚠️ Scratchpad is session-scoped; if this matters,
-move it into the repo.
-
 ## Phase 143 — recorded deferrals (logged 2026-08-17)
 
-Both are DELIBERATE non-coverages of the JOB-04 dropped-enqueue sweep
+Both were DELIBERATE non-coverages of the JOB-04 dropped-enqueue sweep (the composite one, D-09, was dropped 2026-11-23 by the founder's "Forget about composites" ruling; one remains)
 (`supabase/migrations/20260816140000_reconcile_dropped_enqueue_sweep.sql`), documented in that
 file's header and in `143-CONTEXT.md`. Neither is a bug in the sweep; each needs its own mechanism.
-
-- [ ] **(D-09) Composite strategies stranded without analytics are EXCLUDED from the sweep — they
-  need a `stitch_composite` re-run mechanism with its own predicate.** The sweep excludes any
-  strategy with a `public.strategy_keys` member row. This is **money safety, not optimization**:
-  `run_stitch_composite_job` writes `csv_daily_returns` itself (`job_worker.py:6786-6803`) but
-  `JOB_CHAIN_FOLLOW_ON["stitch_composite"]` is the empty tuple (`job_worker.py:527`), so a composite
-  is chain-terminal and legitimately never gets a `compute_analytics_from_csv` job. Enqueueing one
-  would hand the composite headline to the single-key computation its own handler deliberately
-  abandoned — a √252-vs-√365 annualization divergence plus a 0.0 gap-fill that "fabricated flat
-  performance" (`job_worker.py:6808-6822`). Silent corruption of a CORRECT row on a money surface is
-  strictly worse than the un-healed hole. ⚠️ Not hypothetical: the 143-02 census found **1 composite
-  on PROD carrying dailies**, currently protected only by a terminal analytics row — i.e. one failed
-  terminal write away from being the exact false positive this conjunct stops.
 
 - [ ] **(D-05) The wizard/API first-hop enqueue drop is NOT covered.** A `finalize-wizard` strategy
   whose `sync_trades` enqueue dropped has **no dailies at all**, and "no dailies AND no jobs" is
@@ -4286,6 +3897,7 @@ file's header and in `143-CONTEXT.md`. Neither is a bug in the sweep; each needs
   sweep would re-enqueue healthy strategies forever. Closing it needs a different signal
   (`api_key_id` present + no job EVER + a longer grace) with its own false-positive analysis — a
   separate mechanism, not a second predicate bolted into this migration.
+      ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; REQUIREMENTS.md HEAL-01; tagged 2026-11-23.**
 
 - [ ] **(follow-on, from the 143-04 live tick) `cron.job_run_details.return_message` does NOT carry
   a pg_cron body's RAISE NOTICE text on this Supabase build — it carries the command tag (`DO`).**
@@ -4498,6 +4110,7 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   `rate_limit.py:89-91`) — founder call required. Recommendation: key the anon tier per-IP
   (30/h per IP) to preserve the anti-abuse intent while removing the shared ceiling, or raise
   the shared tier when teaser traffic warrants.
+      ⭐ **Owned by Phase 240 CONNECTTRUTH, v1.22; REQUIREMENTS.md RLIM-01; tagged 2026-11-23.**
 - [ ] **csv-validate: 12× over the shared `/process-key` tenant tier + stale docblock
   citation.** Measured: Vercel `csvValidateLimiter` 20/min/user = 1200/h (`ratelimit.ts:206`)
   vs `/process-key` tenant 100/h (`rate_limit.py:100`) SHARED with keys/sync and
@@ -4508,6 +4121,7 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   (`csv-validate/route.ts:6` imports `postProcessKey`; `/csv/validate` has no TS caller).
   Recommendation: founder call between raising `_PROCESS_KEY_TENANT_LIMIT` or adding a
   csv-scoped tier; fix the stale docblock citation in the same commit as whichever lands.
+      ⭐ **Owned by Phase 240 CONNECTTRUTH, v1.22; REQUIREMENTS.md RLIM-02; tagged 2026-11-23.**
 
 ## Phase 146 close-out notes (logged 2026-08-18)
 
@@ -4586,34 +4200,6 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   Source: `.github/workflows/ci.yml`'s `frontend-test` job header, which carries this same record so
   the ledger and the workflow say the same thing — until now only the workflow did; and
   `.planning/milestones/v1.20-phases/164.6.3-cidocspath-a-docs-only-pr-stops-running-the-code-gates-and-a/164.6.3-02-SUMMARY.md`.
-
-- [ ] **`[PLANANCHOR-SUMMARY-FILTER-01]` the `-pr` filter strips SUMMARY files, so every COMPLETED
-  plan reads as PENDING on `main` forever — and `plan-anchor-verify` keeps its `file:line` anchors
-  live against a tree that has moved on (logged 2026-09-09, at the PR #767 merge gate).**
-  MEASURED on PR #767. `plan-anchor-verify` treats a PLAN.md with no sibling SUMMARY.md as pending
-  and re-resolves every anchor it asserts. `/gsd-pr-branch` filters `.planning/phases/` out of the
-  PR head **by design**, so a plan's SUMMARY never reaches `main` while the PLAN itself — written
-  in an earlier, unfiltered commit — is already there. The pair is split permanently.
-  ⛔ **This is not cosmetic and not a PR-only artifact.** `164.8-05-PLAN.md` claimed
-  `supabase-migrate.yml:1-251` contains the `Push migrations to production` step. True on `main`
-  (:211). Phase 164.8 plan 05 and its review added ~870 lines to that workflow and moved the step
-  to :1038 — so the claim went stale ON `main` the moment the PR landed, and `plan-anchor-verify`
-  would have been RED on `main`, not merely on the PR. It was caught only because the filtered
-  branch happened to surface it first.
-  ⚠️ The blast radius is every future renumbering of any file a landed PLAN cites, and it GROWS:
-  each shipped phase adds more permanently-pending plans. The one-off fix applied at #767 was to
-  correct that single anchor and carry the corrected PLAN through the filter as a named exception
-  — which is a workaround, not a resolution, and it needs a filter exception every time.
-  Candidate directions, none chosen here: let the filter carry SUMMARY files (they are the
-  completion marker the gate reads); or mark a plan complete by something the filter preserves;
-  or have the gate treat a plan whose phase is `COMPLETE` in ROADMAP.md as not pending. ⛔ Do NOT
-  "fix" it by weakening `plan-anchor-verify` — a gate that stops resolving anchors is the silent-
-  gate class this milestone exists to remove.
-  **OWNER 2026-09-09: Phase 164.6 GATE-HYGIENE.** Routed there because "when is a gate invoked,
-  and can I prove it still bites" is exactly 164.6's competence, and it already owns the sibling
-  `[CI-DOCSPATH-01]`.
-  Source: measured live at the PR #767 merge gate; the corrected anchor and its dated reason are
-  in `.planning/milestones/v1.20-phases/164.8-testpreprod-test-becomes-a-real-pre-prod/164.8-05-PLAN.md`.
 
 ## Phase 146.2 — recorded deferrals (logged 2026-08-19)
 
@@ -4819,6 +4405,7 @@ runaway), and every v1.19 requirement is satisfied as written.
   `.planning/milestones/v0.17.0.0-phases/13-*` and `.planning/milestones/v0.16.0.0-phases/11-PATTERNS.md`.
   Those are historical artifacts and were deliberately left untouched in this pass; the full
   `.planning/` sweep belongs to **v1.20's SEC-02 requirement**, which owns it end to end.
+      ⭐ **Owned by Phase 241 DEMOCREDS, v1.22; REQUIREMENTS.md SECR-01, SECR-02; tagged 2026-11-23.**
 
 - [ ] **[158-OPS-04] eligibility flip deferred: MODE 2 never measured (same missing
   credentials).** `scripts/drain-test-compute-backlog.ts --flip-eligibility` reduces tomorrow's
@@ -4830,29 +4417,6 @@ runaway), and every v1.19 requirement is satisfied as written.
   keys, plus a 7-day age cutoff covering the per-run e2e fixtures), so this is a run, not a
   design. **Fix:** step 4 of the evidence file's protocol, then step 5 if step 4's output reads
   unambiguous.
-- [ ] **[158-OPS-04] the two stamped fencing tests did not execute locally.** `python3 -m pytest
-  tests/test_compute_jobs_fencing.py -q` from `analytics-service/` reports `16 passed, 28
-  skipped`, and `test_defer_compute_job_token_fence` + `test_defer_compute_job_null_token_backcompat`
-  are among the skips (`test Supabase project not configured (local dev)`). The stamps were
-  verified by region-scoped grep only (falsifiable: the same grep returns 0 against the
-  pre-change revision). CI carries the `TEST_SUPABASE_*` secrets and hard-fails rather than
-  skipping, so the first real execution of the stamped payloads is the phase's CI run — watch
-  it rather than assuming.
-- [ ] **[158-OPS-04] e2e specs leak 2 `auth.users` rows per CI run, by convention (158-REVIEW
-  WR-11).** `seedTestAllocator` mints users that nothing ever deletes: `seed-test-project.ts`
-  calls `auth.admin.createUser` in **four** places and `deleteUser` in **none**, and the
-  `cleanup*` helpers it does export delete strategies, not users. Specs affected today:
-  `my-strategies` (new this phase, 2 users/run), plus the pre-existing `composer-axe`,
-  `composite-onboarding` and `axe-app-wide`. This is exactly the unbounded TEST-artifact
-  accumulation OPS-04's drain script exists to mop up, arriving through a second door that the
-  drain does **not** cover (it targets `compute_jobs` and `api_keys`, not `auth.users`).
-  ⚠️ Do **not** point-fix this in a single spec — that forks the convention in one file and
-  leaves the class open. **Fix:** add user teardown to the shared helper (register minted ids,
-  `admin.auth.admin.deleteUser` in a `cleanupSeededUsers`), audit the FK cascade for every
-  caller, then adopt it across all four specs. Its own reviewed change.
-  Counted first: `select count(*) from auth.users where email like '<seed pattern>%'` on TEST,
-  so the close is measured rather than asserted.
-
 ## Phase 158 — OPS-03 orphan e2e spec dispositions (logged 2026-08-20)
 
 OPS-03 closes as a CLASS, not a partial fix. Census re-derived at HEAD this session (not
@@ -4921,6 +4485,7 @@ No spec below is a delete-candidate: every route they target still exists (verif
   the 15.** 544 lines including two genuine RLS proofs (unauthenticated `PUT /api/watchlist`
   → 401, and user-B cannot read user-A's favorites) plus an anon `/browse/[slug]` chrome
   check — security assertions currently running nowhere. Prioritize this one.
+      ⭐ **Owned by Phase 244 ACCESSGUARDS, v1.23; REQUIREMENTS.md DBACC-06; tagged 2026-11-23.**
 - [ ] **[158-OPS-03] `for-quants-landing.spec.ts` — wire-later (seeded list).**
   Seed-contract-conformant; most of its 11 cases are anon (`/for-quants`, `/security`,
   `security.txt`) but one describe is logged-in-gated, so the seeded batch is the right home.
@@ -5179,7 +4744,7 @@ follows is what was deliberately left, with the reason.
 
 ## Phase 164.3 round-4 residuals — ⚠️ SUPERSEDED 2026-08-29: 9 of 11 are now OWNED BY PHASE 164.3.1
 
-### [SECRETSCAN-FULLHISTORY-01] gitleaks full-history scan surfaces fixture secrets a PR scan never sees
+### [SECRETSCAN-FULLHISTORY-01] gitleaks full-history scan surfaces fixture secrets a PR scan never sees (owned by Phase 242 SECRETSHYGIENE, v1.23; REQUIREMENTS.md SECR-03; tagged 2026-11-23)
 
 **Measured 2026-09-05** on `workflow_dispatch` run 33938272686 (branch `phase-164.4.1-pgcron-lane`,
 head `f04ce51b`). `secret-scan` FAILED with findings in ~15 pre-existing files —
@@ -5249,25 +4814,24 @@ gitleaks auto-loads `.gitleaks.toml` from cwd, so omitting `-c` tests nothing.
       ⛔ Do NOT fix this by loosening the refusal: the empty-set refusal is correct for the hazard
       it was built for, and weakening it re-opens the hole Phase 164.8 closed.
       **Owner:** Phase 164.9 TESTISOLATION, which already owns TEST's ledger shape and the
-      `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` sibling.
+      `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` sibling (closed; entry deleted 2026-11-23).
 
 None of these is blocking under the stopping rule (no user-facing or data-integrity
 blast radius). All were surfaced while the fixer grew
 `supabase/tests/test_analytics_service_settings_and_vault_tick.sql` from 7 arms to 11
 and the three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter)
 read the result.
-
-- [ ] **[MATCHCRON-500-INTERMITTENT] `match_engine_cron` is answering HTTP 500 on most hourly ticks, live and unfixed.** MEASURED on PROD 2026-09-12 from `net._http_response`: 09:00 **500**, 10:00 **500**, 11:00 **500**, 12:00 200, 13:00 **500**, 14:00 200, 15:00 **500** — 5 of 7. The 200s return `{"status":"ok","processed":0,"skipped":14,...}` in ~27-28 s; the 500s return a bare `Internal Server Error`. ⚠️ The Railway worker LOOP is healthy (`claim_compute_jobs_with_priority` returning 200 every 30 s), so this is the match-engine cron ROUTE, not the worker. ⛔ Not caused by the deploy churn: the 500s start at 09:00Z, before the day's 13:44Z and 14:39Z deploys. ⚠️ **Blocks nothing today but gates the ledger fan-out**: `enqueue_ledger_refresh_for_strategies` feeds the SAME analytics service, so activating Phase 164.5.1's `ledger_refresh_fanout` into a service failing two thirds of its ticks would manufacture an incident. ⚠️ Root cause NOT established — the current deployment post-dates the failures so its logs do not cover them. ⭐ Side observation while looking: the service logs EVERY line at `severity: error`, including `httpx INFO ... 200 OK`, so a real error is indistinguishable from routine traffic in Railway's log view. **Owner: Phase 164.6 GATE-HYGIENE.**
+      ⭐ **Owned by Phase 248 SQLGATES2, v1.23; REQUIREMENTS.md SQLG-04; tagged 2026-11-23.**
 
 - [ ] **[LINT-CACHE-MASKS-WARNINGS] `npm run lint` uses `eslint --cache`, so a warning can stop being reported and the job's verdict depends on cache warmth.** ⛔ MEASURED 2026-09-12: `frontend-lint` FAILED on PR #785 — a **planning-only** PR, 56 files all under `.planning/phases/`, **zero `src/` changes** — with `✖ 2 problems (0 errors, 2 warnings)` and exit 1 (lint runs at zero-warning tolerance). The same two warnings were GREEN on `main` and on PR #784 at the same time. Reproduced on an unmodified checkout of `main`'s `src/`: `npx eslint --no-cache` reports both, `--cache` on a warm `node_modules/.cache/.eslintcache` reports neither. So `main` was latently RED and every green `frontend-lint` was a cache hit, not a measurement. ⚠️ The two instances are fixed in v0.77.37.0 (`EquityChart.tsx` exhaustive-deps `period`; an `eslint-disable-next-line` in `ContributionWizardOverlay.tsx:121` that suppressed nothing) — **the MECHANISM is what this entry owns**, not those two. **THE CLASS:** a control whose report depends on a cache is a control that can go quiet without anything changing — the absence-reads-as-a-pass shape this milestone is named for, same family as the `pg_net` green-cron lesson. **Fix options, to be decided rather than assumed:** (a) drop `--cache` from the CI invocation only (keeps the local dev speed-up, makes the gate a real measurement), (b) key the cache on config+lockfile so a stale entry cannot survive, or (c) a dedicated `--no-cache --max-warnings 0` CI step. ⛔ Do NOT 'fix' this by raising the warning tolerance — the tolerance is not the defect. **Owner: Phase 164.6 GATE-HYGIENE.**
-- [ ] **[PHASEDIR-ORPHAN-GITKEEP] An empty orphan phase directory makes `gsd-tools` BLIND to the phase, and the `-pr` filter recreates it after it is fixed.** ⛔ MEASURED 2026-09-12: `.planning/phases/` held TWO directories matching `164.1-*` — the live `164.1-prod-observability-…` and a stale `164.1-harden-guards-…` containing nothing but a `.gitkeep` (the phase's ORIGINAL name, before it was renamed). `find-phase` cannot disambiguate two prefix matches, so `query init.phase-op 164.1` returned `phase_found: false`, `roadmap analyze` reported the phase as **`empty` with `plan_count: 0`** despite 6 PLANs and 6 SUMMARYs tracked on `main`, and `roadmap.update-plan-progress 164.1` refused with `"No plans found"`. **Consequence, and it is the reason this is not cosmetic:** Phase 164.1's ROADMAP line sat at `5/6 plans executed` with `164.1-06` unchecked for six days while the plan was `status: complete` and fully shipped to `main` — the bookkeeping could not be corrected by the tool that exists to correct it. ⚠️ This was ALREADY FIXED ONCE and REGRESSED: commit `46daa47c` *"drop the empty 164.1-harden-guards orphan dir that broke find-phase"* removed it, and `22a5fe96` *"strip transient .planning/phases artifacts from the review diff"* put a `.gitkeep` back — the `-pr` filter empties a phase directory but keeps the directory, which is exactly the orphan. So this recurs on every future rename-then-filter, silently. **Fix:** the filter must drop an emptied phase directory entirely rather than leave a `.gitkeep`, AND `find-phase` must FAIL LOUD on an ambiguous prefix match naming both candidates instead of returning `phase_found: false` (a not-found answer for a phase that exists is the absence-reads-as-a-pass shape this milestone is named for). ⚠️ The filter lives in GLOBAL gsd-core (`~/.claude/gsd-core/workflows/pr-branch.md`), which `/gsd-update` overwrites — so per this repo's own precedent the durable backstop is a REPO-OWNED check that fails when two directories share a phase-number prefix. **Owner: Phase 164.6 GATE-HYGIENE.**
-
+      ⭐ **Owned by Phase 249 TESTLANES, v1.23; REQUIREMENTS.md LANE-03; tagged 2026-11-23.**
 - [ ] **[164.7-PLAN03-EVIDENCE-01] Plan 03's lane evidence is not re-derivable from the artifacts it left.** The SUMMARY cites a lane result without the workdir, the apply list, or the exit code that would let a later reader reproduce it. Nothing is known to be WRONG — this is a provenance gap, not a contradicted claim. Recorded because "measured" with no re-derivable trace is exactly the shape that let a false stated-reason survive review twice in this milestone (see `[GATE-COMMENT-D2-FALSE]`). **Fix:** when re-touching plan 03's area, re-run the lane and record the invocation verbatim beside the number.
 
 ## Phase 164.7 (APPSETTINGS) — post-merge `gsd-code-reviewer` deep audit (logged 2026-09-10)
 
 - [ ] **[164.7-MIGRATION-COMMENT-DRIFT] ⚠️ **STILL OPEN 2026-09-12, and the attempted fix was DELIBERATELY REVERTED.** Phase 164.8.6 plan 04 made the two blocks agree; a round-1 reviewer graded that **CRITICAL** because it was a comment-only edit to an **ALREADY-APPLIED** migration, and it was reverted — the corrections were carried into the sibling `20260911130000`'s header instead. MEASURED at HEAD: the file is byte-identical to its Phase 164.7 state and still carries BOTH `:7-11` (the two-hash pragma) and `:141-146` ("DELIBERATELY ABSENT from this file today") with unfilled `<measured in plan 06>` placeholders, and NO forward pointer. ⛔ The remedy is NOT to re-apply the edit. Routed to **Phase 164.5.1 CRONREPOINT**, to be corrected FORWARD as header prose in the next migration that legitimately touches this ground. (⚠️ An interim routing to a Phase 164.8.6.1 POSTAPPLY was written here on 2026-09-12 and is VOID — that phase was dissolved the same day rather than opening a third level of sub-iteration; the ROADMAP entry for 164.5.1 carries the item.)
   ↳ ORIGINAL ENTRY: `20260907130000` carries two contradictory VAC-04 acknowledgement blocks** — the second says the pragma is absent while the first *is* the pragma — and `20260907130000`'s comment-strip false-pass analysis is inverted for its own check 6 (WR-03 + WR-08). Comment-only, on APPLIED migrations. ⚠️ Blocked on the same open question as 164.5.1's criterion 6: *does a comment-only edit to an applied migration change what the CLI plans?* No such reading has ever been taken (recorded as PATTERNS TRAP A in `164.7-06-SUMMARY.md`). **Take that reading before editing either file.** **Owner: Phase 164.8.6 VAULTTICKFIX.**
+      ⭐ **Owned by Phase 248 SQLGATES2, v1.23; REQUIREMENTS.md SQLG-05; tagged 2026-11-23.**
 
 ## Phase 164.8.3 (PROBERAUTH) — residuals (logged 2026-09-13)
 
@@ -5355,7 +4919,7 @@ re-measured at HEAD on the branch rather than carried over as dated claims.
       `vitest.local-stack.config.ts` declare it; `vitest.redis.config.ts` and
       `scripts/vitest.config.ts` declare no `setupFiles` at all and are standalone root configs.
       A run through either of those two inherits live-DB credentials silently, which is the exact
-      class `[164.8.2-EVIDENCE-DOTENV-LEAK]` booked: a wrapper that injects `.env.local` turns
+      class `[164.8.2-EVIDENCE-DOTENV-LEAK]` (fixed; entry deleted 2026-11-23) booked: a wrapper that injects `.env.local` turns
       SKIPPED live-DB suites into real writes against SHARED TEST.
       **FIX SHAPE:** wire the guard into both lanes. ⛔ Not by relaxing the guard, and ⛔ not by
       touching the skip gates, which are correct. ⚠️ Confirm first whether either lane has a
@@ -5411,7 +4975,7 @@ its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and ge
       than the dump that refuses on an empty or unidentified database reddens EVERY lane-booting
       job until the dump is regenerated after its PRODUCTION apply (booked 2026-09-24, Phase
       164.4.2 plan 10).**
-      This is the lane analogue of `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`, and it does not
+      This is the lane analogue of `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]` (closed; entry deleted 2026-11-23), and it does not
       duplicate that entry: read the escape entry for the house style (a data-reading `DO` block
       that `RAISE EXCEPTION`s on an unexpected count) and for its candidate shapes. The lane
       replays every migration the committed marker says the dump does not carry, in filename
@@ -5467,6 +5031,7 @@ its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and ge
       `## 🔴 FIX NOW` and give it a phase.
       **Trigger:** now. It is a measurement, and only the founder can take it.
       **Owner:** THE FOUNDER.
+      ⭐ **Owned by Phase 249 TESTLANES, v1.23; REQUIREMENTS.md LANE-04; tagged 2026-11-23.**
 
 ### TRUNCREVOKE-ADMIN-DETECTOR-01 — a read-only PROD check for the `supabase_admin` TRUNCATE, TRIGGER and MAINTAIN residual (booked 2026-10-08, founder D-05 of 164.9.7; widened 2026-10-09, founder D-09 of 164.9.7.1)
 
@@ -5486,7 +5051,7 @@ It runs the marker query first and reports counts only.
 **Until then (D-07 compensating controls).** The migration's own self-check raises on any remaining MAINTAIN holder on every PG17 apply; one manual PG17 RED was recorded in the 164.9.7.1 plan 02 SUMMARY; `src/__tests__/local-stack-lane-wiring.test.ts` pins that the gate lists MAINTAIN in its PG17 branch and that the local-stack lane stays at major 17 or newer; and this booking.
 **Owner:** whoever next touches `scripts/pg-lane` or the `sql-mutation` job in `.github/workflows/ci.yml`. **Trigger:** the runner image resolving PostgreSQL 17 for the pg-lane, or the next MAINTAIN-related gate edit.
 
-### TRIGGERREVOKE-LOCKHOLD-01 — a client role can still hold a table-wide ACCESS EXCLUSIVE lock through UPDATE or DELETE (booked 2026-10-09, founder D-08 of 164.9.7.1)
+### TRIGGERREVOKE-LOCKHOLD-01 — a client role can still hold a table-wide ACCESS EXCLUSIVE lock through UPDATE or DELETE (booked 2026-10-09, founder D-08 of 164.9.7.1) (owned by Phase 243 DBBACKSTOP, v1.23; REQUIREMENTS.md DBACC-03; tagged 2026-11-23)
 
 **Why.** Phase 164.9.7.1 revokes MAINTAIN, but `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE` is also permitted to a holder of UPDATE, DELETE or TRUNCATE (PostgreSQL 17 `LOCK` documentation). Measured on PG 17.6: `authenticated` holding UPDATE and DELETE and no MAINTAIN took an ACCESS EXCLUSIVE lock; `VACUUM` and `ANALYZE` as that role only warned and skipped, and `REFRESH MATERIALIZED VIEW` raised `permission denied`. So the phase closes the TRIGGER attach vector and VACUUM, CLUSTER, REINDEX and REFRESH MATERIALIZED VIEW as a client, and does NOT close the lock-hold outage the 164.9.7 review and the ROADMAP goal sentence described. A client connection that opens a transaction, takes the lock and idles blocks every other reader and writer of that table until it ends. Row-level policies cannot stop it: they never evaluate `LOCK`.
 **What to build.** A role-level `statement_timeout` and `idle_in_transaction_session_timeout` on `anon` and `authenticated`, bounding how long any client transaction can hold a lock. This is an **unmeasured assumption** (RESEARCH A5): measure that the PostgREST path honours a role-level setting and that no legitimate client request needs longer, on TEST first, before relying on it. Revoking UPDATE and DELETE is not an option (they are the product's write path).
@@ -5534,7 +5099,7 @@ It runs the marker query first and reports counts only.
 
 ## Phase 166.5.1 (SENTRYTRIAGE) — routed items (logged 2026-10-21)
 
-### 166.5.1-DERIVE-BATCH-RESET-RESIDUAL — a derive_allocator_equity run behind slow batch-mates can still pass 20 minutes and be reset (booked 2026-10-21, 166.5.1 D-05 / code review WR-01, DATA INTEGRITY)
+### 166.5.1-DERIVE-BATCH-RESET-RESIDUAL — a derive_allocator_equity run behind slow batch-mates can still pass 20 minutes and be reset (booked 2026-10-21, 166.5.1 D-05 / code review WR-01, DATA INTEGRITY) (owned by Phase 227 JOBLEDGER, v1.22; REQUIREMENTS.md HEAL-02; tagged 2026-11-23)
 
 **Reading.** Phase 166.5.1 gave `derive_allocator_equity` a 20-minute watchdog override (`WATCHDOG_PER_KIND_OVERRIDES` in `analytics-service/main_worker.py`). The claim RPC stamps one `claimed_at` on a whole batch of 5 (`p_batch_size` in `_claim_priority`) and `dispatch_tick` runs the batch one job after another, so a job's staleness clock includes its batch-mates' runtime. On the backfill worker the batch-mates are `derive_broker_dailies` jobs, each with a 15-minute handler timeout. A derive job behind two slow ones can pass 20 minutes. The watchdog then returns the row to `pending`, its runner's `mark_compute_job_done` / `mark_compute_job_failed` is refused (P0002, QUANTALYZE-2A / A), and the job can run twice. PROD measurement, read-only 2026-10-21, last 14 days: 110 `derive_allocator_equity` jobs, median claim age 5.8 s, max 604 s; whole 5-job batches containing one finished within 606 s; 2 jobs had attempts=2, both re-runs (2026-10-15 and 2026-10-18). That 606 s is capped by the old 10-minute reset, so it is a floor, not the tail.
 
@@ -5548,7 +5113,7 @@ It runs the marker query first and reports counts only.
 
 ## Phase 167.2.1.1 (UPNLVENUES) — routed items (logged 2026-10-22)
 
-### 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR — the Bybit derive anchor reads the USDT coin only while the reconstruct anchor and the holdings poll read every coin (booked 2026-10-22, 167.2.1.1 plan 01 decision PD-E, DATA INTEGRITY)
+### 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR — the Bybit derive anchor reads the USDT coin only while the reconstruct anchor and the holdings poll read every coin (booked 2026-10-22, 167.2.1.1 plan 01 decision PD-E, DATA INTEGRITY) (owned by Phase 231 BYBITREADS, v1.22; REQUIREMENTS.md VREAD-01; tagged 2026-11-23)
 
 **Reading.** The derive anchor (`fetch_usdt_balance_with_status`) reads only the USDT coin. The reconstruct anchor and the holdings poll sum every stable coin. For an account holding a non-USDT coin the three paths disagree by that coin's balance. Pinned by `test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin`. Exposure is unmeasured until the D-01 live read.
 
@@ -5556,7 +5121,7 @@ It runs the marker query first and reports counts only.
 
 2026-11-02 (Phase 176 LEGACYRETIRE): unaffected. `_fetch_current_equity` survives for the Binance mark, so `test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin` still compares the derive anchor with it. **Stays open.**
 
-### 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY — Bybit positions are read for USDT-settled linear contracts only, so other settle categories carry uPnL the anchor does not add (booked 2026-10-22, 167.2.1.1 RESEARCH, DATA INTEGRITY)
+### 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY — Bybit positions are read for USDT-settled linear contracts only, so other settle categories carry uPnL the anchor does not add (booked 2026-10-22, 167.2.1.1 RESEARCH, DATA INTEGRITY) (owned by Phase 231 BYBITREADS, v1.22; REQUIREMENTS.md VREAD-02; tagged 2026-11-23)
 
 **Still open (narrowed 2026-11-02 by Phase 176).** The holdings poll still lists USDT-settled linear Bybit positions only (ccxt `fetch_positions()` with no symbols, and the raw-V5 fallback asks for settleCoin USDT), so USDC-settled perps and inverse positions, and their uPnL, are missing from holdings. The reconstruct anchor that shared the gap was deleted by Phase 176, and the Bybit mark reads the Unified Trading Account totals. **Closed when:** the holdings poll reads every settle category, with a test.
 
@@ -5572,14 +5137,6 @@ It runs the marker query first and reports counts only.
 
 **Owner / Trigger:** founder routing (founder 2026-11-02, "Correct the record, book the fix (Recommended)"), the next phase that touches the derive's mark writer or the log scrubber. Trigger: any reading that needs refusal counts by token. Closed when the refusal line names its token under a key the scrubber leaves alone (for example `refusal=`), with a test that runs the line through the scrubber and asserts the token survives.
 
-### 167.2.1.1.1-COMPOSITE-NOT-REDERIVED-ON-MARKS — both PROD composites were re-stitched on 2026-11-08 and still publish no `marks_since`, so the composite marks path does not reach the published row (booked 2026-11-02, NAVMTM plan 14 SC-4 reading; rewritten 2026-11-23, DATA INTEGRITY)
-
-**Reading (2026-11-02).** Both PROD composites had every member key marked 7 of 7 days, but neither had a compute job since 2026-10-27, so neither published `marks_since`. Plan 09's composite application of marks had not run on PROD.
-
-**Reading (2026-11-23, read-only PROD, marker query first).** The "never re-derived" half is no longer true: `stitch_composite` ran for both composites on 2026-11-08 (13:00Z, `done`), and both `strategy_analytics` rows were recomputed that day (`complete_with_warnings`). Neither row's `data_quality_flags` carries `marks_since`. So a composite re-derive ran and the marks annotation still did not reach the published row. No `stitch_composite` job has been created for either since 2026-11-08.
-
-**Owner / Trigger:** founder routing (founder 2026-11-02, "Book a re-derive check (Recommended)"). Trigger: now. Find out why a composite re-derive publishes no `marks_since` although its members are marked (whether `stitch_composite` reads the members' marks at all, and whether the composite's compute carries the annotation), and why no `stitch_composite` job has been enqueued since 2026-11-08. Closed when a PROD composite carries `marks_since` from a re-derive, or the gap is fixed at its root with a test.
-
 ## Phase 167.2.1.1.2 (ACCTREBUILD) — routed items (logged 2026-10-22)
 
 ### 167.2.1.1.2-WEALTH-RETURNS-CAPLOG-FLAKE — a wealth-returns test counts every WARNING on its worker, so a stray urllib3 retry reds the python job (booked 2026-10-23, CI)
@@ -5590,7 +5147,7 @@ It runs the marker query first and reports counts only.
 
 ## Phase 167.2.1.1.2.1 (TRADEPAGES) — routed items (logged 2026-10-23)
 
-### 167.2.1.1.2.1-STRATEGY-BYBIT-7DAY — the strategy trade sync sends a Bybit start and no end, so an old start may read only its first 7 days (booked 2026-10-23, 167.2.1.1.2.1 RESEARCH, DATA INTEGRITY, candidate, not measured)
+### 167.2.1.1.2.1-STRATEGY-BYBIT-7DAY — the strategy trade sync sends a Bybit start and no end, so an old start may read only its first 7 days (booked 2026-10-23, 167.2.1.1.2.1 RESEARCH, DATA INTEGRITY, candidate, not measured) (owned by Phase 231 BYBITREADS, v1.22; REQUIREMENTS.md VREAD-03; tagged 2026-11-23)
 
 **Reading.** `_fetch_raw_trades_bybit` in `analytics-service/services/exchange.py` sends `startTime` on the first page and never `endTime`. Bybit documents a start-only execution-list request as answering the start through the start plus 7 days (RESEARCH Q8, assumption A7), so a strategy backfill whose start is more than 7 days old may read only its first week. Whether the cursor continues past that week is not shown by the documentation and is unmeasured. The daily sync, whose start is recent, is not affected. Phase 167.2.1.1.2.1 fixed the allocator rebuild's own Bybit read with 7-day windows and an explicit end; CONTEXT deferred this loop, and that fix does not touch it.
 
@@ -5616,7 +5173,7 @@ It runs the marker query first and reports counts only.
 
 ## Phase 176 (LEGACYRETIRE) — routed items (logged 2026-10-31)
 
-### 176-INERT-LEFTOVERS — the managerSide* plumbing and the equityCurveSource "legacy" value are inert after Phase 176 (booked 2026-10-31, Phase 176 plans 03 and 05, CLEANUP)
+### 176-INERT-LEFTOVERS — the managerSide* plumbing and the equityCurveSource "legacy" value are inert after Phase 176 (booked 2026-10-31, Phase 176 plans 03 and 05, CLEANUP) (owned by Phase 224 DEADLEFTOVERS, v1.23; REQUIREMENTS.md DEAD-03; tagged 2026-11-23)
 
 **Reading.** Since D-01 (Phase 176 plan 03) `allocatorEligibleApiKeyIds` equals `eligibleKeyIds` in `getMyAllocationDashboard`, so `managerSideKeyIds` (`src/app/(dashboard)/allocations/lib/live-holdings-summary.ts`) is always empty and `excludedManagerSide` is always zero. The composer's partial-book note still reads both. `equityCurveSource` keeps its two-value type because `equityChartWidgetDataSchema`'s enum pins it; since Phase 176 its `"legacy"` value means "no trustworthy derived curve", and no legacy source is read. Nothing is wrong on screen, and no number depends on either.
 
@@ -5628,7 +5185,7 @@ It runs the marker query first and reports counts only.
 
 **Owner / Trigger:** Phase 176. Trigger: PR 2 of the phase, or any change to the holding branch of `compute_bridge_outcome_deltas`. Closed when (a) has a reader or a warning, (b) has +90d, +180d and +30d `needs_recompute` arms that bite, and (c) the header claim or the date check is corrected; (d) is recorded behaviour and closes by decision only.
 
-### 176-RECONSTRUCT-CAP-MARKER-INERT — the history reconstruct's cap and marker machinery and what the crawl's deletion orphaned are inert; their removal is booked (booked 2026-10-31, Phase 176 plan 11, D-04)
+### 176-RECONSTRUCT-CAP-MARKER-INERT — the history reconstruct's cap and marker machinery and what the crawl's deletion orphaned are inert; their removal is booked (booked 2026-10-31, Phase 176 plan 11, D-04) (owned by Phase 224 DEADLEFTOVERS, v1.23; REQUIREMENTS.md DEAD-04; tagged 2026-11-23)
 
 **Reading.** Phase 176 plan 11 deleted the legacy equity writers (`persist_equity_snapshots`, `_purge_allocator_equity_snapshots`, `_allocator_has_equity_snapshots`, `replace_equity_snapshots`, `replace_equity_snapshots_window`), both job bodies (`run_reconstruct_allocator_history_job`, `run_refresh_allocator_equity_daily_job`) and the bootstrap gate's Python twin (`_owed_reconstructs_for_zero_snapshot_book`) from `analytics-service/services/equity_reconstruction.py`. The founder chose `go` on 2026-11-01, so the history crawl only those bodies used went with them: 114 symbols in all (5,892 lines of definitions, 6,104 with the comment blocks above them), and the module fell from 8,122 lines to its survivors. The scripts `allocator_history_probe.py` and `e2_allocator_ground_truth.py` were deleted with it. The founder's decision is recorded as D-08 in `176-CONTEXT.md`.
 
@@ -5660,19 +5217,19 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 
 **Owner / Trigger:** unowned. Trigger: a stored `equity_curve` row carries `shared_account_no_working_key` on PROD. Action: bring the case to the founder with the count (include it under the 2026-10-28 rule, which needs a plan). Closed when decided and built, or the founder rules otherwise.
 
-### [186-REALIZED-MALFORMED-COUNT] — count the production keys whose realized trade history carries a malformed row, before refusing on one is reconsidered (booked 2026-11-04, Phase 186 fix round 2, founder D-12, DATA INTEGRITY)
+### [186-REALIZED-MALFORMED-COUNT] — count the production keys whose realized trade history carries a malformed row, before refusing on one is reconsidered (booked 2026-11-04, Phase 186 fix round 2, founder D-12, DATA INTEGRITY) (owned by Phase 223 FLOWKINDS, v1.22; REQUIREMENTS.md FLOWK-03; tagged 2026-11-23)
 
 **Reading.** Review R2-04 found that refusing a key on one unparseable realized row would keep the key out of the book on every daily derive for as long as the row stays in the walk (OKX reads back to the account's start), and that no one had counted how many production keys carry such a row. Founder 2026-11-04, AskUserQuestion, D-12: "Flag it, don't refuse (Recommended)": "The key keeps publishing, as it does today. The dropped row is recorded as a data-quality flag rather than only a log line, and a TODO books a production count. Refusing can be switched on later once the count shows it is safe." So a malformed realized row is stamped `daily_pnl_malformed_<venue>` in the realized read's data-quality buffer (and logged at WARNING), and the derive no longer refuses on it. Fix round 3 (review R3-03) persists the flag: the derive drains the buffer and writes it where a SELECT can count it. Strategy mode: `strategy_analytics.data_quality_flags->>'daily_pnl_malformed_<venue>'` (a bool, present only while the latest read dropped a row; a clean re-read clears it; never a guard key, so it does not promote `complete_with_warnings`). Key mode: `allocator_equity_derived.payload->'daily_pnl_malformed'` on the key's `key_inputs:<api_key_id>` row (a list of the `daily_pnl_malformed_<venue>` names; owner-only, rewritten whole on every derive). The production count is therefore a read-only SELECT over those two places, and needs no new realized read.
 
 **Owner / Trigger:** unowned. Trigger: the next read-only probe run of the realized read (`analytics-service/scripts/derivegaps_probe.py`), or the next phase that touches `daily_pnl_read_verdict`. Action: count, per key, the `daily_pnl_malformed_<venue>` flag in the two places above once the fix has run through a daily derive (read-only; no probe run is needed), bring the per-key counts to the founder, and only then decide whether a refusal (or an uncomputable day, SC-6) is safe. Closed when the count is recorded and the founder has ruled, or the founder rules otherwise.
 
-### [186-OTHER-FUNDING-CALLERS-DROP] — three funding callers keep dropping a malformed funding row with a warning (booked 2026-11-04, Phase 186 fix round 1 review, DATA INTEGRITY)
+### [186-OTHER-FUNDING-CALLERS-DROP] — three funding callers keep dropping a malformed funding row with a warning (booked 2026-11-04, Phase 186 fix round 1 review, DATA INTEGRITY) (owned by Phase 223 FLOWKINDS, v1.22; REQUIREMENTS.md FLOWK-02; tagged 2026-11-23)
 
 **Reading.** Phase 186 asks the per-key derive's funding read for `on_malformed="raise"` and refuses the key by name when a funding row is dropped (`funding_rows_malformed`). Three other callers of the same fetchers keep the default `on_malformed="drop"`: `run_sync_funding_job`, the composite member read path, and `okx_archive_job`. A malformed funding row there is dropped with a WARNING and the series is stored as complete. Round 1 left them unfixed because each is a separate job with its own retry and recovery behaviour. The composite member path is the same gap as `[186-COMPOSITE-MEMBER-READ-GAPS]` for funding.
 
 **Owner / Trigger:** unowned. Trigger: a funding row is reported dropped by `fetch_funding_okx`, `fetch_funding_bybit` or `fetch_funding_binance` in the worker log of one of those three callers, or the next phase that edits `services/funding_fetch.py`. Action: decide per caller whether it refuses by name (as the derive does) or keeps dropping, with the founder where a published number changes. Closed when each of the three has a recorded decision, or the founder rules otherwise.
 
-### [186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED] — Bybit on-chain deposits that do not appear as Unified TRANSFER rows are unverified, so replace versus union was not decided on evidence (booked 2026-11-04, Phase 186 fix round 1 review, DATA INTEGRITY)
+### [186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED] — Bybit on-chain deposits that do not appear as Unified TRANSFER rows are unverified, so replace versus union was not decided on evidence (booked 2026-11-04, Phase 186 fix round 1 review, DATA INTEGRITY) (owned by Phase 231 BYBITREADS, v1.22; REQUIREMENTS.md VREAD-04; tagged 2026-11-23)
 
 **Reading.** Phase 186 reads Bybit Unified-edge transfers as flows (D-02) and the 186-04 gate set the flow source to `replace` (the Unified rows stand in for the on-chain reader). That verdict rested on the one measured Bybit key having no on-chain rows (`g2-flow-verdict: replace (no on-chain rows on PROD)`). With zero on-chain rows, replace and union give the same flows today, so the probe could not tell them apart. Whether a Bybit on-chain deposit also appears as a Unified TRANSFER row is therefore unverified: if it does not, `replace` would drop it from the flows and book the deposit as P&L.
 
@@ -5680,7 +5237,7 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 
 ## Phase 190 (FACTSHEETQUEUED) — routed items (logged 2026-11-03)
 
-### [190-RERUN-SURFACES-NOT-HOLDING] — surfaces outside D-05's reach still withhold a strategy's figures during a re-run (booked 2026-11-03, Phase 190 D-05, USER-FACING)
+### [190-RERUN-SURFACES-NOT-HOLDING] — surfaces outside D-05's reach still withhold a strategy's figures during a re-run (booked 2026-11-03, Phase 190 D-05, USER-FACING) (owned by Phase 237 FACTSHEETHONEST, v1.22; REQUIREMENTS.md FACT-02; tagged 2026-11-23)
 
 **Reading.** Phase 190 holds a strategy's last computed figures during a pending or computing re-run (D-02) on the factsheet, on every lane through the resolve stage, on the approval gate, on the discovery and owner lists and on /compare. The founder kept the reach there (D-05, 2026-11-03). Every other surface keeps its own terminal-success gate and so still withholds or blanks a re-running strategy: the share card image (`/api/og/factsheet/[id]`), the tear sheet and the two PDF routes (`/api/factsheet/[id]/pdf`, `/api/factsheet/[id]/tearsheet.pdf`), the returns API (`/api/strategies/[id]/returns`), recommendations, portfolios (`StrategyBreakdownTable` and the portfolio PDF) and the scenario composer. Three more items do not hold either. The strategy page's own panels (`getStrategyDetailV2`) keep a terminal-status gate and live data-quality chips. Three detail reads that share `PUBLIC_ANALYTICS_COLUMNS` carry no series and no marker alias, so they withhold during a re-run by design: `getPublicStrategyDetail`, `getFactsheetDetail` (the tear sheet read) and `getStrategyDetail` (the discovery page's own read; its factsheet does admit through the resolve stage). Composite approval during a re-stitch still answers 409 (PUB-01, plan 06 left it unchanged). In the derive-to-success window these surfaces show what they showed before the phase: the withheld or not-computed state while the row reads pending or computing, and the stored panels of a terminal-held row beside live data-quality chips. The ship PR for this phase merged before this entry was written, so the entry rides the records PR; the release notes name the same surfaces as known limits.
 
@@ -5696,7 +5253,7 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 **Owner / Trigger:** unowned. Trigger: the next wizard contribution finalized on PROD. Closed when the SC-2 reading is recorded with `wizard_contributions_finalized_after_deploy` at least 1, SC-4 is observed on PROD, and the 390 px rendering is observed, or the founder rules otherwise.
 ## Phase 194 (FIGURETRUTH) — routed items (logged 2026-11-07)
 
-### [194-ENGINE-CONSTANTS] — the stored, factsheet and Scenario engines still annualise with different year lengths and standard-deviation conventions (booked 2026-11-07, Phase 194 RESEARCH Open Question 2, DATA INTEGRITY)
+### [194-ENGINE-CONSTANTS] — the stored, factsheet and Scenario engines still annualise with different year lengths and standard-deviation conventions (booked 2026-11-07, Phase 194 RESEARCH Open Question 2, DATA INTEGRITY) (owned by Phase 236 FIGUREMATH, v1.22; REQUIREMENTS.md FIG-01, FIG-05; tagged 2026-11-23)
 
 **Reading.** The stored engine (`analytics-service/services/metrics.py`) annualises CAGR on 365 days and Sharpe with ddof 1. The factsheet's narrowed-range engine (`compute.ts`) uses 365.25 and ddof 0, and Scenario (`scenario.ts`) uses 365.25 and ddof 1. At full history the stored overlay makes the factsheet's seven headline scalars agree with the stored values (D-01); a narrowed range and a blend are computed by their own engine and are labelled as different engines, not reconciled. The D-14 residual (A-194-D14-02) is the same family: the factsheet's 126- and 30-row rolling windows use the population standard deviation (ddof 0) while the 365-day window uses the producer's sample standard deviation (ddof 1). Aligning the constants is not decided by any D-0x.
 

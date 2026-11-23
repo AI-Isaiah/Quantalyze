@@ -80,7 +80,10 @@ about the CLI link and the marker.
   `scripts/lint-migration-data-dependence.mjs`, which refuses a new data-reading `DO`-block guard at
   author time with no opt-out marker. The 83 already-applied guards are carried by
   `[164.9-DATA-DEPENDENT-GUARD-CENSUS]`. The `TODOS.md` entry is ticked and kept only because that
-  open entry inherits from it. Reverting the merge stays the remedy if such a refusal ever reaches
+  open entry inherits from it. ⛔ **CORRECTED 2026-11-23 (TODOS triage before v1.22):** the entry is
+  now DELETED from `TODOS.md`, and `[164.9-DATA-DEPENDENT-GUARD-CENSUS]` was repointed in the same
+  commit so it no longer needs it. The id survives only as a class label (in `supabase-migrate.yml`'s
+  cause (3), its pinning test and applied migration comments); this paragraph is its record. Reverting the merge stays the remedy if such a refusal ever reaches
   `apply-test` anyway.
   ⚠️ Since PR #767 (Phase 164.8.1 REFDATA, merged AFTER the restore above) a FUTURE restore
   replays allowlisted migration-seeded reference data, so "every public table comes back empty"
