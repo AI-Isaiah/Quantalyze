@@ -453,3 +453,89 @@ def real_ccxt_client(
     else:
         client.privateGetTradeFillsHistory = _fills_history
     return client
+
+
+class BybitExecutionBook:
+    """An async callable ``(params)`` over in-memory trades, answering the way Bybit's
+    ``GET /v5/execution/list`` does on the RAW endpoint (module docstring, bybit): a request
+    carrying only a start answers start to start plus 7 days (only an end, end minus 7 days to
+    end); NEITHER bound answers the last 7 days up to ``now_ms``; both bounds more than 7 days
+    apart raise ``ccxt.BadRequest``; a start older than 730 days raises ``ccxt.BadRequest``
+    (retCode 10001). ``limit`` defaults to 50 and is capped at 100. Rows come newest first,
+    paged by ``nextPageCursor`` (``c<offset>``), inside the ``retCode`` / ``result`` envelope.
+
+    A request that carries a cursor and no bound continues the query that issued the cursor (the
+    venue's cursor belongs to its query), so a legacy walk's cursor pages stay inside the first
+    week. ``repeat_cursor`` answers, on every cursor page, the cursor it was sent. Every call's
+    params are recorded on ``.calls`` (an erroring call too).
+    """
+
+    def __init__(
+        self,
+        trades: Iterable[dict[str, Any]],
+        *,
+        now_ms: int,
+        repeat_cursor: bool = False,
+    ) -> None:
+        inspect.markcoroutinefunction(self)
+        self.trades = [copy.deepcopy(t) for t in trades]
+        for index, trade in enumerate(self.trades):
+            if trade.get("id") is None:
+                trade["id"] = f"book{index:05d}"
+        self._now_ms = now_ms
+        self._repeat_cursor = repeat_cursor
+        self._query: tuple[int, int] | None = None
+        self.calls: list[dict[str, Any]] = []
+
+    def _bounds(self, params: dict[str, Any]) -> tuple[int, int]:
+        has_start = "startTime" in params
+        has_end = "endTime" in params
+        if has_start and has_end:
+            return int(params["startTime"]), int(params["endTime"])
+        if has_start:
+            start = int(params["startTime"])
+            return start, start + BYBIT_WINDOW_MS
+        if has_end:
+            end = int(params["endTime"])
+            return end - BYBIT_WINDOW_MS, end
+        if params.get("cursor") and self._query is not None:
+            return self._query
+        return self._now_ms - BYBIT_WINDOW_MS, self._now_ms
+
+    async def __call__(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = dict(params)
+        self.calls.append(copy.deepcopy(params))
+        start, end = self._bounds(params)
+        if "startTime" in params and start < self._now_ms - BYBIT_TWO_YEAR_MS:
+            raise ccxt.BadRequest("bybit retCode 10001: fixture start older than two years")
+        chunk, next_cursor = bybit_select(
+            self.trades,
+            start=start,
+            end=end,
+            cursor=params.get("cursor"),
+            size=min(int(params.get("limit", 50)), BYBIT_PAGE_CAP),
+        )
+        self._query = (start, end)
+        if self._repeat_cursor and params.get("cursor"):
+            next_cursor = str(params["cursor"])
+        return {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "category": "linear",
+                "nextPageCursor": next_cursor or "",
+                "list": [_raw_bybit_execution(t) for t in chunk],
+            },
+        }
+
+
+def install_execution_list(
+    exchange: Any, trades: Iterable[dict[str, Any]], *, now_ms: int, **options: Any
+) -> BybitExecutionBook:
+    """Point the client's snake_case execution-list method at a ``BybitExecutionBook``.
+
+    The snake_case name is the one the code under test calls; the camelCase attribute is a
+    separate attribute on a ccxt client, so assigning that one leaves the real method in place."""
+    book = BybitExecutionBook(trades, now_ms=now_ms, **options)
+    exchange.private_get_v5_execution_list = AsyncMock(side_effect=book)
+    return book
