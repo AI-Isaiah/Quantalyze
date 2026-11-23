@@ -150,6 +150,11 @@ account number or PROD id in tracked text. Raw captures stay in the untracked ca
 - [x] **Phase 218: SELFHEAL — the wizard's MT5 key check heals an owed terminal scrub itself** - Wizard self-heal of the post-deploy scrub plus two resume-banner fixes, founder decisions 2026-11-19; independent of the MT5 parity phases (completed 2026-11-20)
 - [x] **Phase 219: ACCOUNTEMAIL — the signed-in account shows its email and can change it** - Account email display and change, founder decision 2026-11-19; independent of the MT5 parity phases (completed 2026-11-23)
 - [x] **Phase 220: EXTRACTOR — the baseline re-dump carrying the 219 migration can land and main goes green** - CI-only: the local-stack extractor accepts `UPDATE OF` auth.users triggers, then the bot re-dump lands; independent of the MT5 parity phases (completed 2026-11-20)
+- [ ] **Phase 221: SENTRYSCRUB2 — no Sentry event carries PostgREST details or hint from any capture site, and browser captures actually report** - Sentry scrub at the last hop for direct capture sites, then client Sentry init; independent of the MT5 parity phases
+- [ ] **Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists** - User-facing error copy and the benchmark outage label, with a migration; independent of the MT5 parity phases
+- [ ] **Phase 223: FLOWKINDS — every derive and compose path reads the same capital-flow kinds and refuses a malformed or truncated read by name** - Composite and flow-source half of the derive gaps (anchor and positions stay in TODOS); independent of the MT5 parity phases
+- [ ] **Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired** - Dead SQL, retired job-kind enqueues and inert plumbing, with a migration; independent of the MT5 parity phases
+- [ ] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23
 
 ### Phase 155: PARITYHARNESS — an agent-built harness can prove our MT5 numbers wrong before the founder sits down
 
@@ -301,6 +306,11 @@ Plans:
 | 218. SELFHEAL | 4/4 | Complete    | 2026-11-20 |
 | 219. ACCOUNTEMAIL | 9/9 | Complete    | 2026-11-23 |
 | 220. EXTRACTOR | 1/1 | Complete    | 2026-11-20 |
+| 221. SENTRYSCRUB2 | 0/? | Not started | - |
+| 222. ALERTTRUTH | 0/? | Not started | - |
+| 223. FLOWKINDS | 0/? | Not started | - |
+| 224. DEADLEFTOVERS | 0/? | Not started | - |
+| 225. ONEACCOUNTONCE | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.18)
 
@@ -670,6 +680,86 @@ Plans:
 Plans:
 **Wave 1**
 - [x] 220-01-PLAN.md — the extractor folds `AFTER UPDATE OF <columns>` triggers on auth.users, reads the lane's trigger columns from a 7th catalogue field and reports column drift as DRIFT; WHEN, REFERENCING and CONSTRAINT stay refused
+
+### Phase 221: SENTRYSCRUB2 — no Sentry event carries PostgREST details or hint from any capture site, and browser captures actually report
+
+**Goal:** No Sentry event, from any capture site, server or browser, carries a PostgREST error's `details` or `hint`, and a capture made in browser code actually reaches Sentry. The last-hop scrub in `scrubSentryEvent` (`src/instrumentation.ts`) drops `details` and `hint` from a non-Error capture's `extra.__serialized__`, so the direct `Sentry.captureException` sites that bypass `scrubCaptureInput` are covered too. Only after that scrub ships does browser code get a client `Sentry.init` running the same scrub, so turning client capture on can never send an unscrubbed event. The auth callback's GoTrue `error` / `error_code` branch logs the error code (short, never `error_description`), so failed verifies become visible. Trigger: founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS". Owns `TODOS.md` `[209-SENTRY-DIRECT-CAPTURE-DETAILS]`, `[167.2.1-CLIENT-SENTRY-NOOP]` and `[219-CALLBACK-VERIFY-ERROR-LOG]` (fix directions and gates as written there).
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Success Criteria** (what must be TRUE):
+1. A real-SDK envelope test (the in-memory transport in `src/instrumentation.test.ts`) captures a plain object carrying `details` and `hint` sentinels through a direct `Sentry.captureException` call, and neither sentinel reaches the envelope; the test is shown RED before the fix.
+2. The scrub lands before, or in the same change as, the browser `Sentry.init`; no build ships a client init without the `details`/`hint` scrub in its `beforeSend`.
+3. A `captureToSentry` call in a `"use client"` module produces an event (proved by a test against the client init, not by reading config), and the client event passes through the same scrub as a server event.
+4. The auth callback's GoTrue error branch logs the `error_code` value, sliced short, and never `error_description`; a callback test sending `error_code=otp_expired` with the email-change marker asserts it, shown RED before the fix.
+5. The three TODOS entries above are deleted in the ship PR and named in its CHANGELOG entry.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists
+
+**Goal:** Every Python and SQL error sentence a user can read names the real cause and offers only a channel that exists (the contact form, never "contact support"), and a portfolio whose benchmark sources all failed says the benchmark is unavailable, not "stale". The `computation_error_copy` arms (`supabase/schema/functions/computation_error_copy.sql`) move by migration, so migration-reviewer and rls-policy-auditor apply before merge. `run_sync_trades_job` no longer returns DONE after recording an analytics failure that the bridge then erases to `complete`. Trigger: founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS". Owns `TODOS.md` `[212-CONTACT-SUPPORT-SURVIVORS]`, `[166.4.1-BENCHMARK-OUTAGE-LABEL]` and `[SYNCTRADES-ENQUEUE-DONE]` (readings, cautions and fix directions as written there, including that the 161.1 F1 remedy does not transfer to the sync-trades handler as-is).
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Success Criteria** (what must be TRUE):
+1. No string in `analytics-service` or in the `computation_error_copy` arms says "contact support"; each names the contact form or a remedy that works, and csv-finalize's `ENQUEUE_LOST_RACE_USER_COPY` is back in byte parity with the SQL ELSE arm, with the parity test reading the SQL arm instead of a hand-typed oracle.
+2. A total benchmark source failure (no price source and no recent cached day) writes a note distinct from the stale-cache note, and the page shows it with its own wording; a test drives both cases and tells them apart.
+3. When the follow-on analytics enqueue fails in `run_sync_trades_job`, the strategy's row does not read `complete` with no analytics; a test drives the failed enqueue through the bridge and asserts the stored status and error, shown RED before the fix.
+4. The migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, and every census it moves (schema snapshot, mutation floors, pins) moves in the same PR.
+5. The three TODOS entries above are deleted in the ship PR and named in its CHANGELOG entry.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 223: FLOWKINDS — every derive and compose path reads the same capital-flow kinds and refuses a malformed or truncated read by name
+
+**Goal:** The composite and flow-source half of the derive gaps: every derive and compose path reads the same capital-flow kinds for a venue, and refuses a malformed or truncated read by name instead of storing a series as complete. `run_stitch_composite_job` reads Bybit flows through the same source as `run_derive_broker_dailies_job` (`fetch_bybit_unified_flows`, Phase 186), the composite member read gets Phase 186's read refusal, and each funding caller still on `on_malformed="drop"` gets a recorded decision. Context: PROD has 6 active Bybit keys (measured 2026-11-23), so the Bybit composite path is no longer a no-exposure case. The anchor and positions entries in TODOS stay out of scope and stay open. Trigger: founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS". Owns `TODOS.md` `[180-BYBIT-LIVE-FLOW-KINDS]`, `[186-COMPOSITE-MEMBER-READ-GAPS]`, `[186-OTHER-FUNDING-CALLERS-DROP]` and `[186-REALIZED-MALFORMED-COUNT]` (readings and closing conditions as written there).
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Success Criteria** (what must be TRUE):
+1. The composite path and the per-key derive read the same Bybit flow kinds; a test feeds an off-chain (sub-account or universal transfer) flow to both and both book it as a flow, not P&L, shown RED before the fix.
+2. The composite member read refuses a truncated or failed realized or funding read by name, as the per-key derive does; a test drives each refusal.
+3. `run_sync_funding_job`, the composite member read and `okx_archive_job` each have a recorded decision (refuse by name or keep dropping), taken with the founder wherever a published number changes, and each decision is pinned by a test.
+4. The per-key count of `daily_pnl_malformed_<venue>` flags on PROD is recorded (read-only) and brought to the founder, and the founder's ruling on refusing a malformed realized row is recorded before any refusal is switched on.
+5. Every TODOS entry above that the phase closes is deleted in the ship PR and named in its CHANGELOG entry; the anchor and positions entries are untouched.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired
+
+**Goal:** Dead SQL, retired job kinds that still carry a live enqueue, and inert plumbing are removed, so nothing in the repo looks alive that is not. The dead `get_admin_compute_jobs` function is dropped by migration (migration-reviewer and rls-policy-auditor apply before merge). The retired job kinds' daily enqueue (`enqueue_poll_positions_for_all_strategies` and the retired `compute_analytics` family) is retired, filed as dead code and never as an outage. Phase 176's inert leftovers (`managerSideKeyIds`, `excludedManagerSide`, the `"legacy"` `equityCurveSource` value) and the reconstruct cap and marker machinery are deleted or given a live caller. `src/lib/database.types.ts` stops declaring functions that no longer exist. Trigger: founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, FLOWKINDS (composite half), DEADLEFTOVERS". Owns `TODOS.md` `[169-DEAD-ADMIN-JOBS-RPC]`, `[176-INERT-LEFTOVERS]`, `[176-RECONSTRUCT-CAP-MARKER-INERT]`, `[164.5-STALE-GENERATED-TYPES]` and the TODOS entry headed "Retired job kinds still carry a live daily enqueue that has fired nothing since 2026-06-14".
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Success Criteria** (what must be TRUE):
+1. `get_admin_compute_jobs` no longer exists on TEST or PROD after the migration applies, and no caller, test or census still names it.
+2. No daily enqueue creates or tries to create a job of a retired kind; the retired kinds' enqueue code and the `compute_job_kinds` rows go only once no queued row of that kind can still exist, measured read-only on PROD first.
+3. `managerSideKeyIds`, `excludedManagerSide` and the `"legacy"` `equityCurveSource` value are deleted together with their tests, and every cap, marker and orphaned item listed in `[176-RECONSTRUCT-CAP-MARKER-INERT]` is removed or given a live caller, with `test_the_d04_inert_helpers_stay` retired or rewritten to match.
+4. `src/lib/database.types.ts` declares no function that the schema lacks, and the way it is kept current (regeneration step with a freshness gate, or a recorded decision) is written down.
+5. The migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding; the five TODOS entries above are deleted in the ship PR and named in its CHANGELOG entry.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed
+
+**Goal:** A user cannot connect the same exchange account more than once: a second key or draft that reads the same account under the same owner is refused by name at connect time, and any such pair already stored is surfaced and resolved instead of publishing one account's numbers under two names. One key or account shared across several users stays allowed, and a strategy-linked key may also sit in an allocator book; that is never called "manager-only by design". Context: Phase 155.2 found on PROD a key marked as a duplicate of MM2's account under the same owner that publishes MM2's numbers under the name MM3, and MM2's login shared with a draft key for FX-AI_V with no share link between them. `analytics-service/services/account_identity.py` stamps the share link. Trigger: founder decisions 2026-11-23, "several accounts can use one key. one account should not use the same key several times".
+**Requirements**: TBD
+**Depends on:** none (independent of the MT5 parity phases)
+**Success Criteria** (what must be TRUE):
+1. Connecting a key or saving a draft whose account identity matches a key the same owner already holds is refused with a named reason, in the wizard and in the API; a test drives it for an exchange key and for an MT5 login.
+2. The same account connected by two different users stays allowed and keeps its share link; a test pins that the refusal is per owner, and a strategy-linked key in an allocator book is unaffected.
+3. Every same-owner duplicate already stored on PROD is counted read-only and brought to the founder, and no strategy publishes another key's numbers under its own name once the phase ships.
+4. Two keys that share a login always carry a share link, so a shared login with no link cannot recur; a test drives the stamping in `account_identity.py` for that case.
+5. Any migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
 
 ---
 
