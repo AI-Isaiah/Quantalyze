@@ -460,6 +460,49 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SWAP-demoted-server-clear): the demoted holder still carries server % beside a NULL login', v_server;
   END IF;
 
+  -- ----- SWAP-server-long. an over-long server is a token, not a raw 23514 --------------
+  -- The old holder has no server (the wildcard), so no mismatch can stand in for the refusal.
+  -- RED-UNDER: remove the over-length refusal from the migration (IF false): the call
+  --            reaches the new-key stamp and api_keys_venue_server_valid raises a raw 23514.
+  -- RED-UNDER-M: {"arm":"SWAP-server-long","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"IF char_length(v_server) > 128 THEN","replace":"IF false THEN","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-long', NULL, 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-long', repeat('a', 129));
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-server-long): a swap naming a 129-character server answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH before any write', v_res;
+  END IF;
+
+  -- ----- SWAP-server-ws. a tab/newline-only server is blank, so it is the wildcard -------
+  -- btrim with no character set trims spaces only, so a tab-and-newline server would be a
+  -- real, non-wildcard identity (and then hit the CHECK as a raw 23514).
+  -- RED-UNDER: trim the caller's server with a bare btrim (spaces only) in the migration's
+  --            declaration: the tab-and-newline value is kept and the new-key stamp raises
+  --            a raw 23514 instead of succeeding with a NULL server.
+  -- RED-UNDER-M: {"arm":"SWAP-server-ws","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"v_server         text := NULLIF(lower(btrim(p_venue_server, E' \\t\\r\\n')), '');","replace":"v_server         text := NULLIF(lower(btrim(p_venue_server)), '');","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-server-ws', NULL, 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-server-ws', E' \t\r\n ');
+  IF v_res IS DISTINCT FROM 'SUCCEEDED' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-server-ws): a swap naming a tab-and-newline-only server answered % — expected SUCCEEDED, the server being blank', v_res;
+  END IF;
+  SELECT venue_server INTO v_server FROM api_keys WHERE id = k_n;
+  IF v_server IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-server-ws): the new key stored server % — a tab-and-newline-only server must normalise to NULL', v_server;
+  END IF;
+
+  -- ----- SWAP-login-ws. a tab-only login is blank, not an identity ----------------------
+  -- The old holder carries a tab-only login (a legacy value the nonblank CHECK let in). A
+  -- caller naming the same tab-only login must be refused as blank, not matched to it.
+  -- RED-UNDER: trim the caller's login with a bare btrim (spaces only) in the migration's
+  --            declaration: the tab matches the holder's tab and the swap SUCCEEDS.
+  -- RED-UNDER-M: {"arm":"SWAP-login-ws","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"v_login          text := btrim(p_venue_account_id, E' \\t\\r\\n');","replace":"v_login          text := btrim(p_venue_account_id);","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, E'\t', NULL, 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, E'\t', NULL);
+  IF v_res IS DISTINCT FROM 'ACCOUNT_SLOT_IDENTITY_MISMATCH' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-login-ws): a swap naming a tab-only login answered % — expected ACCOUNT_SLOT_IDENTITY_MISMATCH, the login being blank', v_res;
+  END IF;
+
   -- Explicit, in FK order, rather than relying on the profiles -> api_keys cascade.
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);

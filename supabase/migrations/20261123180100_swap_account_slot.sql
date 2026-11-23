@@ -54,6 +54,12 @@
 -- Composites are out of scope (F-2 / Q4). A failing holder inside a composite keeps its
 -- slot and the working key stays marked 'duplicate', which is today's stable state.
 --
+-- NORMAL FORM OF THE LOGIN AND THE SERVER: btrim(x, E' \t\r\n'), so a tab-only or
+-- newline-only value is blank and never a real identity; the server is then lower-cased
+-- and blank-to-NULL. A server longer than 128 characters after that is refused with a
+-- token BEFORE any lock or write, instead of reaching api_keys_venue_server_valid as a
+-- raw 23514.
+--
 -- ⛔ THE D-18 TUPLE LIVES IN THIS BODY ONCE. The parity tests (src/lib/account-share-note.test.ts
 -- and analytics-service/tests/test_derive_allocator_equity_job.py) read the one status
 -- tuple from this file and require it to equal the TypeScript and Python sets. Do not
@@ -97,8 +103,8 @@ DECLARE
   v_disconnected   timestamptz;
   v_sync_status    text;
   v_working        boolean;
-  v_login          text := btrim(p_venue_account_id);
-  v_server         text := NULLIF(lower(btrim(p_venue_server)), '');
+  v_login          text := btrim(p_venue_account_id, E' \t\r\n');
+  v_server         text := NULLIF(lower(btrim(p_venue_server, E' \t\r\n')), '');
   v_found_new      boolean := false;
   v_found_old      boolean := false;
   v_new_owner      uuid;
@@ -120,6 +126,12 @@ BEGIN
     RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
       USING ERRCODE = '22023',
             DETAIL  = 'The new key and the old holder must be two different keys and the login must not be blank.';
+  END IF;
+
+  IF char_length(v_server) > 128 THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The broker server is longer than 128 characters.';
   END IF;
 
   -- 2. Lock the two named rows AND every key marked against the old holder, in ONE
@@ -162,7 +174,7 @@ BEGIN
       v_old_disc      := v_disconnected;
       v_old_working   := v_working;
       v_old_login     := v_row.venue_account_id;
-      v_old_server    := NULLIF(lower(btrim(v_row.venue_server)), '');
+      v_old_server    := NULLIF(lower(btrim(v_row.venue_server, E' \t\r\n')), '');
       v_old_holder_of := v_row.account_shared_with_api_key_id;
     END IF;
   END LOOP;

@@ -21,8 +21,8 @@ DECLARE
   v_disconnected   timestamptz;
   v_sync_status    text;
   v_working        boolean;
-  v_login          text := btrim(p_venue_account_id);
-  v_server         text := NULLIF(lower(btrim(p_venue_server)), '');
+  v_login          text := btrim(p_venue_account_id, E' \t\r\n');
+  v_server         text := NULLIF(lower(btrim(p_venue_server, E' \t\r\n')), '');
   v_found_new      boolean := false;
   v_found_old      boolean := false;
   v_new_owner      uuid;
@@ -44,6 +44,12 @@ BEGIN
     RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
       USING ERRCODE = '22023',
             DETAIL  = 'The new key and the old holder must be two different keys and the login must not be blank.';
+  END IF;
+
+  IF char_length(v_server) > 128 THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The broker server is longer than 128 characters.';
   END IF;
 
   -- 2. Lock the two named rows AND every key marked against the old holder, in ONE
@@ -86,7 +92,7 @@ BEGIN
       v_old_disc      := v_disconnected;
       v_old_working   := v_working;
       v_old_login     := v_row.venue_account_id;
-      v_old_server    := NULLIF(lower(btrim(v_row.venue_server)), '');
+      v_old_server    := NULLIF(lower(btrim(v_row.venue_server, E' \t\r\n')), '');
       v_old_holder_of := v_row.account_shared_with_api_key_id;
     END IF;
   END LOOP;
