@@ -192,3 +192,20 @@ Notes for PR-1: the migration timestamps `20261123180000` and `20261123180100` a
 - FOUND: `supabase/migrations/20261123180100_swap_account_slot.sql`, `supabase/migrations/down/20261123180100-rollback.sql`, `supabase/schema/functions/swap_account_slot.sql`, `supabase/tests/test_swap_account_slot.sql`.
 - FOUND commits `6f1ddf80b`, `4edad1355`, `0e2c5458b` (ancestors of HEAD); `git rev-list --count 6a1084ad56cb4a3982587d2a39b1606377510d79..HEAD` = 3 before this SUMMARY's own commit.
 - STATE.md and ROADMAP.md not modified.
+
+## Task 4 result (orchestrator, 2026-11-24)
+
+- PR-1 (#1315) merged as `3cc96839a`.
+- supabase-migrate.yml run 45280186079 succeeded on that merge SHA: apply-test, apply, redump-dump and redump-pr all passed.
+- The marker query named PROD. The marker text itself is not reproduced here.
+
+Catalogue query (verbatim):
+
+| signature | prosecdef | authenticated_exec | service_role_exec |
+|---|---|---|---|
+| create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text,text) | true | false | true |
+| swap_account_slot(uuid,uuid,text,text) | true | false | true |
+
+Column query (verbatim): `venue_server | text | YES`.
+
+PROD catalogue gate: PASSED
