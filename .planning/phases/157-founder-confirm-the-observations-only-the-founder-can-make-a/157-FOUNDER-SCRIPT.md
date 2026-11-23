@@ -7,7 +7,8 @@ SC-1 names the entry `+ Strategy`; at HEAD the control is called "Add a strategy
 ## 0. Before you start (read once)
 
 - What the marker is: while the staging kit is installed, a red bar across the top of the page reads `STAGED RESPONSES ACTIVE — FCONF-0x`, with the leg's number. It means the page is answering a few named requests from the browser instead of the server, so nothing staged reaches PROD.
-- **No marker on screen: do not click anything. Tell me.** A reload removes the kit and the marker together.
+- **No marker on screen: do not click anything. Tell me.** A reload removes the kit and the marker together. A marker reading `STAGING KIT NOT ACTIVE — wrong context` means the kit did not install in the page's own context: do not click, tell me.
+- The marker alone does not prove the page's requests are staged, so in every leg I also read back `window.__fconf.mode` and the fetch identity check before your first click.
 - While the kit is armed, the key-permission badge on the sync preview shows an error. That is expected and is not a finding: the kit refuses that read, because the real one writes an audit row and decrypts the stored credential on our side.
 - Never click `Start fresh`, `Delete draft` or the delete confirm. The kit refuses the delete, but never test that.
 - Anything unexpected (gate red, an error you were not told to expect, the marker gone, a screen not described here): stop, describe it, and I record it as a finding. A failed observation is a finding, not a new design.
@@ -31,7 +32,7 @@ Tell me (a), (b), (c) or a combination. It picks the connect route in section 4.
 ## 2. FCONF-01: resume banner and Resume (mode `resume`)
 
 1. Open a NEW normal tab and go to `/strategies`. A new tab has a fresh per-tab nonce, so the banner shows.
-2. I arm `resume`. Confirm the marker reads `STAGED RESPONSES ACTIVE — FCONF-01`.
+2. I arm `resume`. Confirm the marker reads `STAGED RESPONSES ACTIVE — FCONF-01`. Before your first click I read back `window.__fconf.mode` and the fetch identity check (`window.fetch.name` is `fconfFetch`) in the page's own context, and I tell you when both read right. Do not click before that.
 3. Click "Add a strategy". Expect `We saved your progress.` and `A draft from an earlier session is ready.`, with two buttons: `Resume draft` and `Start fresh`. Do not click Start fresh.
 4. Click `Resume draft`. Expect the draft's step: the sync preview with the heading `Computing your verified factsheet`, or the factsheet preview with `Use this key and continue`.
 5. I read back what the kit refused and passed. Nothing should be refused except page-chrome reads.
@@ -40,7 +41,7 @@ Tell me (a), (b), (c) or a combination. It picks the connect route in section 4.
 
 ## 3. FCONF-02: the amber block (mode `amber`)
 
-1. New tab, `/strategies`. I arm `amber`. Confirm the marker reads `STAGED RESPONSES ACTIVE — FCONF-02`.
+1. New tab, `/strategies`. I arm `amber`. Confirm the marker reads `STAGED RESPONSES ACTIVE — FCONF-02`. Before your first click I read back `window.__fconf.mode` and the fetch identity check (`window.fetch.name` is `fconfFetch`) in the page's own context, and I tell you when both read right. Do not click before that.
 2. Click "Add a strategy", then `Resume draft`.
 3. Within the first minute, expect an amber-bordered box headed `Recomputing this strategy's analytics` with the body `The previous result is out of date and is being recalculated. This screen updates when it finishes — your draft is saved.`
 4. Expect no red error box and no metric numbers. The elapsed counter may tick, and that is expected.
@@ -48,10 +49,10 @@ Tell me (a), (b), (c) or a combination. It picks the connect route in section 4.
 
 ## 4. FCONF-03 connect: SEAM_INTERNAL_FAULT (mode `connect`)
 
-Two variants, picked by section 1.
+Two variants, picked by section 1. Before the first click of either: I arm `connect`, you confirm the marker reads `STAGED RESPONSES ACTIVE — FCONF-03 (connect)`, and I read back `window.__fconf.mode` and the fetch identity check (`window.fetch.name` is `fconfFetch`) in the page's own context. Then I tell you when both read right. Do not click before that.
 
-- (a) Overlay, if you saw the sidebar action: I arm `connect`. Click the sidebar "Add a strategy". Expect `Connect your exchange` with no banner, because the draft read is staged as none and your live draft is untouched.
-- (b) Page route, if you saw only the header button: I arm `connect`. Click the header "Add a strategy", then `Resume draft` if the banner shows (a same-tab entry resumes silently). On the sync preview click `Try another key`; it only changes the step and deletes nothing. Expect `Connect your exchange`.
+- (a) Overlay, if you saw the sidebar action: click the sidebar "Add a strategy". Expect `Connect your exchange` with no banner, because the draft read is staged as none and your live draft is untouched.
+- (b) Page route, if you saw only the header button: click the header "Add a strategy", then `Resume draft` if the banner shows (a same-tab entry resumes silently). On the sync preview click `Try another key`; it only changes the step and deletes nothing. Expect `Connect your exchange`.
 - Variant (b) branch: if the preview never shows `Try another key` (it renders only once the preview has passed or a gate failed), record and stop, and cite the kit's `submit-leg-derivation:` line.
 - Both variants: type the words "not a real key" in the API key field and in the API secret field. Click `Validate key and continue`.
 - Expect the title `Something failed on our side while we checked this key.`
@@ -64,7 +65,7 @@ Two variants, picked by section 1.
 ## 5. FCONF-03 submit: the three finalize answers (mode `submit`, one per click)
 
 1. Open a NEW normal tab and go to `/strategies`. Do not click anything yet. This is the leg where a miss publishes the draft, so you never walk in an unarmed tab.
-2. I arm `submit` with `DRAFT_LOOKUP_FAILED` in that tab. Confirm the marker there reads `STAGED RESPONSES ACTIVE — FCONF-03 (submit: DRAFT_LOOKUP_FAILED)`.
+2. I arm `submit` with `DRAFT_LOOKUP_FAILED` in that tab. Confirm the marker there reads `STAGED RESPONSES ACTIVE — FCONF-03 (submit: DRAFT_LOOKUP_FAILED)`. Before your first click I read back `window.__fconf.mode` and the fetch identity check (`window.fetch.name` is `fconfFetch`) in the page's own context, and I tell you when both read right. Do not click before that.
 3. Only then click "Add a strategy", then `Resume draft` if the banner shows. On the preview click `Use this key and continue`, then continue through the Metadata step and the Review step. Click the submit button (`Add to Strategies` in the overlay, `Submit for review` on the page).
 4. Expect the title `We could not read this draft.` and the cause `A read of your draft failed on our side before anything else ran. Nothing was submitted and nothing was changed — the fault is in our database, not in your key, your exchange or your data. Reads like this usually succeed on the next attempt.`
 5. Expect the fix lines `Wait a moment and try again — the read usually succeeds on retry.` and `If it keeps failing, send the correlation id below through the contact form. Your draft is saved either way.` Expect a Retry button.

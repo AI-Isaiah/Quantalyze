@@ -15,7 +15,9 @@ const APP = (p) => `${ORIGIN}${p}`;
 const ID = ["a".repeat(8), "b".repeat(4), "c".repeat(4), "d".repeat(4), "e".repeat(12)].join("-");
 
 // Fresh context per test: its own fake window, spy, document and kit evaluation.
-function makeEnv() {
+// The kit refuses to install outside the page's JS world, which it detects by self.__next_f (a Next
+// app router global). The fake window defines it unless a case passes { nextF: false }.
+function makeEnv({ nextF = true, ignoreFetchAssign = false } = {}) {
   const spyCalls = [];
   const elements = new Map();
   const window = {
@@ -24,6 +26,11 @@ function makeEnv() {
       return new Response('{"spy":true}', { status: 200 });
     },
   };
+  if (nextF) window.__next_f = [];
+  if (ignoreFetchAssign) {
+    const native = window.fetch;
+    Object.defineProperty(window, "fetch", { get: () => native, set() {}, configurable: true });
+  }
   const document = {
     createElement: () => ({ id: "", textContent: "", style: {} }),
     body: { appendChild: (el) => elements.set(el.id, el) },
@@ -32,6 +39,7 @@ function makeEnv() {
   const location = { origin: ORIGIN, href: `${ORIGIN}/strategies` };
   const context = vm.createContext({
     window,
+    self: window,
     document,
     location,
     URL,
@@ -42,8 +50,14 @@ function makeEnv() {
     __FCONF_TEST__: true,
   });
   const load = () => vm.runInContext(KIT_SRC, context, { filename: "157-STAGING-KIT.js" });
-  load();
+  let loadError = null;
+  try {
+    load();
+  } catch (err) {
+    loadError = err;
+  }
   return {
+    loadError,
     window,
     spyCalls,
     elements,
@@ -180,6 +194,29 @@ test("(i) a second evaluation leaves window.fetch the same function (no double w
   const wrapped = env.window.fetch;
   env.load();
   assert.equal(env.window.fetch, wrapped);
+});
+
+test("(j) outside the page's JS world (no self.__next_f) the kit does not wrap fetch, paints NOT ACTIVE and throws", async () => {
+  const env = makeEnv({ nextF: false });
+  assert.match(env.loadError.message, /not in the page's JS world/);
+  assert.equal(env.window.fetch.name === "fconfFetch", false);
+  assert.equal(env.fconf(), undefined);
+  assert.equal(env.marker().textContent, "STAGING KIT NOT ACTIVE — wrong context");
+  await env.call(APP("/api/anything"));
+  assert.equal(env.spyCalls.length, 1);
+});
+
+test("(k) after install window.fetch is the kit wrapper, and the in-world install paints the marker", () => {
+  const env = makeEnv();
+  assert.equal(env.loadError, null);
+  assert.equal(env.window.fetch.name, "fconfFetch");
+  assert.equal(env.marker().textContent, "STAGED RESPONSES ACTIVE — FCONF-0x (no mode armed)");
+});
+
+test("(l) if the assignment to window.fetch does not stick, the kit throws and paints no marker", () => {
+  const env = makeEnv({ ignoreFetchAssign: true });
+  assert.match(env.loadError.message, /window\.fetch is not the kit wrapper/);
+  assert.equal(env.marker(), undefined);
 });
 
 test("arm rejects an unknown mode by message and leaves the mode unchanged", () => {

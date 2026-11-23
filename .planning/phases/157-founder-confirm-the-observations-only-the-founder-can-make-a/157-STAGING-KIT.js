@@ -341,6 +341,15 @@
 
   // ---- install ------------------------------------------------------------------------------------
 
+  // The marker is DOM and the DOM is shared across JS worlds; window.fetch is not. A Next app router
+  // always defines self.__next_f in the page's own world, so its absence means this evaluation is in
+  // another world (for example an extension's isolated one) and wrapping fetch here would stage
+  // nothing while a painted marker claimed otherwise. Do not wrap, say so on screen, and throw.
+  if (typeof self.__next_f === "undefined") {
+    marker().textContent = "STAGING KIT NOT ACTIVE — wrong context";
+    throw new Error("[fconf] not in the page's JS world (self.__next_f is undefined); fetch not wrapped");
+  }
+
   if (window.__fconf) {
     console.log("[fconf] kit already installed; not wrapping twice");
     return;
@@ -375,7 +384,7 @@
     return new Response(d.body, { status: d.status, headers: d.headers });
   }
 
-  window.fetch = function fconfFetch(input, init) {
+  function fconfFetch(input, init) {
     var href;
     var method;
     var verdict;
@@ -416,7 +425,12 @@
         headers: { "Content-Type": JSON_CT },
       }),
     );
-  };
+  }
+
+  window.fetch = fconfFetch;
+  if (window.fetch !== fconfFetch) {
+    throw new Error("[fconf] window.fetch is not the kit wrapper after install");
+  }
 
   var ctl = {
     arm: function arm(mode, envelopeCode) {
