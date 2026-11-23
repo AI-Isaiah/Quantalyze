@@ -57,11 +57,15 @@
 -- in-flight jobs of one kind on one strategy). Seed rows only; this gate never CREATEs a
 -- table a migration or fixture owns (sql-gate-lint R5-R7).
 --
--- SETUP LIST. The union of test_fan_in_failure_cascade.sql's list (the latest
--- mark_compute_job_failed and the bridge it calls) and the claim pair's (fixtures 29 and 36
--- after 20260924230827, then 20260927120000, the claim RPC the worker calls), in dependency
--- order, ending with the migration the twins edit. Fixture 36 adds claim_token with
--- ADD COLUMN IF NOT EXISTS, so it is a no-op after 20260515114555.
+-- SETUP LIST. test_fan_in_failure_cascade.sql's list (the latest mark_compute_job_failed,
+-- mark_compute_job_done and the bridge they call) plus the claim pair's additions: fixture 29
+-- (compute_jobs.priority) and 20260927120000 (the claim RPC the worker calls) after
+-- 20260924230827, and fixture 36 (compute_jobs.claim_token) right after fixture 37, ending with
+-- the migration the twins edit. It is NOT the pure union: 20260515114555 (claim-token fencing)
+-- is deliberately EXCLUDED, because it defines a 3-argument claim_compute_jobs_with_priority
+-- beside the claim pair's 5-argument one, which makes the 3-positional-argument call this gate
+-- (and the claim pair's own gate) makes ambiguous (SQLSTATE 42725). Fixture 36 supplies the
+-- claim_token column instead, as the claim pair's gate does.
 --
 -- LANE SUBSTITUTION (recorded, not hidden). The pg-lane has no Supabase auth schema beyond
 -- the stand-ins and no PostgREST, so E8 proves the privilege model with SET ROLE, not with a
