@@ -2238,6 +2238,16 @@ def test_working_holder_status_set_matches_ts_and_sql() -> None:
         "revoked", "sign_in_failed", "error",
     }
 
+    # Phase 225 plan 04 (MT5D-08): swap_account_slot is the fourth twin. It evaluates the
+    # same rule inside the database on the rows it locks, with ONE tuple in its body.
+    swap_sql = (repo / "supabase/migrations/20261123180100_swap_account_slot.sql").read_text()
+    swap_tuples = re.findall(r"v_sync_status NOT IN \(([^)]*)\)", swap_sql)
+    assert len(swap_tuples) == 1, "exactly one D-18 status tuple in migration 20261123180100"
+    swap_set = set(re.findall(r"'([a-z_]+)'", swap_tuples[0]))
+    assert swap_set == set(NOT_WORKING_SYNC_STATUSES), (
+        "swap_account_slot's D-18 tuple has drifted from the Python set"
+    )
+
 
 @pytest.mark.asyncio
 async def test_duplicate_of_an_inactive_holder_counts_on_its_own() -> None:
