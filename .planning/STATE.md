@@ -3,13 +3,13 @@ gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
 status: planning
-last_updated: "2026-11-23T11:52:01.011Z"
+last_updated: "2026-11-23T13:14:40.000Z"
 last_activity: 2026-11-23
 progress:
-  total_phases: 0
+  total_phases: 21
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_plans: 20
+  completed_plans: 14
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-23)
 
-**Current focus:** v1.22 TRUTH — data you can trust, defining requirements (started 2026-11-23)
+**Current focus:** v1.22 TRUTH — data you can trust; roadmap created 2026-11-23 (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK (wave 0)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -171,19 +171,19 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 226 (MT5SOAK) — ready to plan; wave 0, beside the read-only Deribit diagnosis
 Plan: —
-Status: Defining requirements
-Last activity: 2026-11-23 — Milestone v1.22 started
+Status: Ready to plan
+Last activity: 2026-11-23 — v1.22 roadmap created: 21 phases (155.2, 157, 222, 223, 225, 226–241), 81/81 requirements mapped
 Progress: [░░░░░░░░░░] 0%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
 ## Current Focus
 
-**Next: research, then requirements and roadmap for v1.22 TRUTH — data you can trust** (started 2026-11-23; `/gsd-new-milestone` steps 9–10). Goal: every number, label and alert we show is correct, or it fails loudly. Scope is every open MEDIUM-and-higher `TODOS.md` entry, data integrity first; no composite work. Phase numbering continues after 225.
+**Next: Phase 226 MT5SOAK, wave 0 (`/gsd-autonomous --only 226`), with the read-only Deribit diagnosis beside it as a `/gsd-debug` session.** v1.22 TRUTH — data you can trust was roadmapped on 2026-11-23: 21 phases, 81/81 requirements mapped. Goal: every number, label and alert we show is correct, or it fails loudly. Order (founder F-1): data integrity first, 227 JOBLEDGER → 225 ONEACCOUNTONCE → 228 KEYANSWERS → 229 MT5DERIVE2 → 230 MT5NIGHTLY → 231 BYBITREADS ‖ 232 OKXTRADES ‖ 223 FLOWKINDS → 233 DERIBITTRUTH → 234 NOCAPITAL ‖ 235 HOLDINGSTRUTH → 236 FIGUREMATH. User-facing next: 237 FACTSHEETHONEST → 238 NEVERCOMPUTED ‖ 239 SURFACECACHE ‖ 240 CONNECTTRUTH ‖ 222 ALERTTRUTH. 241 DEMOCREDS is the founder's security exception. 155.2 and 157 run outside the order. Number-moving phases (225, 229, 234, 236, and 230 or 233 if their fix moves MT5 numbers) merge before 155.2 plan 12's recapture or after plan 14, never in between. No composite work (F-2). The order, seam owners and milestone-wide rules are in ROADMAP's v1.22 section. By founder ruling F-10 ("Yes, split into two milestones") the security, alerting and tooling work, Phases 221 and 224 included, is a later milestone and not tracked here.
 
-v1.18 MT5-VERIFY & founder confirmations closed 2026-11-23 (audit `passed`, 5/5 requirements, 16/16 phases); archive in `.planning/milestones/v1.18-*`. v1.22 already holds Phases 155.2, 157 and 221–225 (moved by founder rulings 2026-11-23) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04 with D-A..D-E; their text is in `milestones/v1.18-REQUIREMENTS.md` under "Carried to the next milestone". ⛔ MT5 stays unadvertised until 155.2 passes. v1.21 closed 2026-11-13; archive in `.planning/milestones/v1.21-*`. The v1.17 sequencing below is lineage.
+v1.18 MT5-VERIFY & founder confirmations closed 2026-11-23 (audit `passed`, 5/5 requirements, 16/16 phases); archive in `.planning/milestones/v1.18-*`. v1.22 holds the carried Phases 155.2, 157, 222, 223 and 225 (moved by founder rulings 2026-11-23; 221 and 224 moved on by F-10) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04 with D-A..D-E; their text is in `milestones/v1.18-REQUIREMENTS.md` under "Carried to the next milestone". ⛔ MT5 stays unadvertised until 155.2 passes. v1.21 closed 2026-11-13; archive in `.planning/milestones/v1.21-*`. The v1.17 sequencing below is lineage.
 
 **Next: `/gsd:plan-phase 147`.** v1.17 phase order 147 → 148 → 149 → 150 → 151 → 152 → 153 → 154 → 155.
 Load-bearing sequencing (real dependencies, do not reorder):
@@ -1816,6 +1816,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
+**Last Date:** 2026-11-23T13:14:40.000Z
+**Stopped At:** v1.22 roadmap created (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK
+**Resume File:** None
+
 **Last Date:** 2026-11-14T07:30:26.000Z
 **Stopped At:** v1.18 archived; next milestone not started (/gsd-new-milestone)
 **Resume File:** None
@@ -2092,4 +2096,4 @@ and by name if the `VAC04-ZERO-PATH-FAILS-CLOSED` marker is deleted.
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Plan and run Phase 226 MT5SOAK (`/gsd-autonomous --only 226`), and start the read-only Deribit diagnosis as a `/gsd-debug` session (wave 0)

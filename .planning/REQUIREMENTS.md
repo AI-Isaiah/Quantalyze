@@ -17,6 +17,7 @@
 - **F-7 `189-OPTIONREPLAY-NEXT-MILESTONE` and `164.8.4-REDACT-NO-POSITIVE-SCAN` stay in `TODOS.md`** ("Bleiben in todos"). They are not v1.22 scope.
 - **F-8 The `poll_positions` enqueue is live.** Measured on PROD 2026-11-23: `poll_positions` jobs ran on 21 days between 2026-10-24 and 2026-11-23, for one strategy only. Phase 224 must NOT retire it. The direction of `FANOUT-COHORT-SIBLING-POLL-01` (widen the cohort) is right. This overrides the wording of Phase 224's ROADMAP goal and of `TODOS.md` `L2925` for `poll_positions`.
 - **F-9 Deribit stale returns** (debug sweep 2026-11-23): one Deribit account's stored returns end 2026-10-26 while its inputs carry a 2026-11-09 flow and its derives report `done`. It gets a stale-returns requirement and a per-venue freshness invariant.
+- **F-10 Two milestones** ("Yes, split into two milestones", 2026-11-23). v1.22 TRUTH keeps the data-integrity and user-facing tiers: the carried Phases 155.2, 157, 222, 223 and 225, the groups MT5D, VREAD, DBOOK, FRESH, HOLD, NOCAP, HEAL, FIG, FACT, CACHE, CONN, RLIM and SOAK (SOAK is the independent MT5 oracle, so it stays as wave 0), and PROOF-01. ⭐ Exception: SECR-01 and SECR-02 (delete the two demo accounts, remove the committed demo credentials) stay in v1.22 because `158-OPS-03` is the only HIGH item. v1.23 HARDEN (security, alerting, tooling; planned, starts after v1.22) takes the carried Phases 221 and 224 and the groups SECR-03/04, DBACC, HELD, ALRT, SQLG and LANE, listed under "Planned for v1.23" below. PROOF-01 applies there too. F-1's tier order holds inside each milestone.
 
 **Carried with Phase 155.2 and still binding (verbatim from `milestones/v1.18-REQUIREMENTS.md`):**
 
@@ -36,7 +37,7 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Milestone-wide
 
-- [ ] **PROOF-01**: Every gate a v1.22 requirement relies on is proven able to fail. It goes RED on pre-fix code, or on a neutered copy, with the expected named arm as the first failure. The file is then restored from a byte backup (`cp` back, `cmp` against the backup; never `git checkout`, `restore` or `stash`) and goes GREEN again. The neuter edit, the command, the RED line and the GREEN line are recorded verbatim in the plan SUMMARY. A new SQL gate arm also carries `RED-UNDER:` / `RED-UNDER-M:` twins and lists its migration in `RED-UNDER-SETUP`. A loosened tolerance, re-pinned values, a new skip or ledger line, an edit to an applied migration, a mutation waiver or drift made blocking is never a close. This requirement belongs to no single phase: it is a success criterion of every v1.22 phase and is closed at the milestone audit.
+- [ ] **PROOF-01**: Every gate a v1.22 requirement relies on is proven able to fail. It goes RED on pre-fix code, or on a neutered copy, with the expected named arm as the first failure. The file is then restored from a byte backup (`cp` back, `cmp` against the backup; never `git checkout`, `restore` or `stash`) and goes GREEN again. The neuter edit, the command, the RED line and the GREEN line are recorded verbatim in the plan SUMMARY. A new SQL gate arm also carries `RED-UNDER:` / `RED-UNDER-M:` twins and lists its migration in `RED-UNDER-SETUP`. A loosened tolerance, re-pinned values, a new skip or ledger line, an edit to an applied migration, a mutation waiver or drift made blocking is never a close. This requirement belongs to no single phase: it is a success criterion of every v1.22 phase and is closed at the milestone audit. By F-10 it is also a success criterion of every v1.23 phase, and is closed again at that milestone's audit.
 
 ### Carried: MT5 verification (Phase 155.2, verbatim from `milestones/v1.18-REQUIREMENTS.md`)
 
@@ -143,10 +144,41 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [ ] **RLIM-01**: A few anonymous visitors from different IPs cannot exhaust the shared anonymous verify-strategy bucket, and no limit is keyed on the proxy's IP. A per-IP anonymous tier through the signed claim, or a raised shared tier, is a founder ruling at plan time. (covers: L4491)
 - [ ] **RLIM-02**: A signed-in user validating a CSV within the edge limit never gets an upstream 429, because the edge limit and the shared `/process-key` tenant tier agree. The limiter's docblock cites the current upstream cap. (covers: L4501)
 
-### Security: secrets hygiene (SECRETSHYGIENE)
+### Security: demo credentials (SECRETSHYGIENE; in v1.22 by founder exception, F-10)
 
 - [ ] **SECR-01**: The two demo accounts no longer exist on TEST or PROD, and the deletion is recorded with its date (F-3). (covers: 158-OPS-03, HIGH entry)
 - [ ] **SECR-02**: No tracked file contains either demo password literal. The absence guard checks a digest instead of the literal and is shown RED by planting a matching literal. Removing the text alone does not close the entry, and history is not rewritten. (covers: 158-OPS-03, HIGH entry)
+
+### CI and tooling: MT5 soak (MT5SOAK)
+
+- [ ] **SOAK-01**: The soak judges a BTC-unit account on floors in its own unit, not on USD floors. (covers: 164.6.6.2.3-SOAK-BTC-FLOORS)
+- [ ] **SOAK-02**: The soak's timed-day check rejects NaN and implausible returns, not only infinity, and goes RED on a 1e-3 nudge to a timed day. (covers: 164.6.6.2.3-SOAK-TIMED-DAYS-UNCHECKED)
+- [ ] **SOAK-03**: The soak checks day attribution against an independent per-day walk that imports no production helper, and goes RED when one deal is moved by one UTC day. (covers: 164.6.6.2.3-SOAK-DAY-ATTRIBUTION)
+
+### Carried phase 222 ALERTTRUTH
+
+- [ ] **ERRC-01**: No user-readable string in `analytics-service` or in the `computation_error_copy` arms says "contact support". Each names the contact form or a remedy that works, and csv-finalize's copy is in byte parity with the SQL arm, checked by reading the SQL arm. (covers: 212-CONTACT-SUPPORT-SURVIVORS)
+- [ ] **ERRC-02**: A total benchmark source failure shows wording distinct from a stale benchmark. (covers: 166.4.1-BENCHMARK-OUTAGE-LABEL)
+- [ ] **ERRC-03**: A failed follow-on analytics enqueue in `run_sync_trades_job` never leaves the strategy reading `complete` with no analytics. The exact behaviour is a founder ruling at plan time. (covers: SYNCTRADES-ENQUEUE-DONE)
+
+### Carried phase 223 FLOWKINDS (flow-source half only, F-2)
+
+- [ ] **FLOWK-02**: `run_sync_funding_job` and `okx_archive_job` each have a recorded, test-pinned decision to refuse a malformed funding row by name or to keep dropping it. The decision is taken with the founder wherever a published number changes. (covers: 186-OTHER-FUNDING-CALLERS-DROP, non-composite callers)
+- [ ] **FLOWK-03**: The per-key count of `daily_pnl_malformed_<venue>` flags on PROD is recorded read-only, and the founder's ruling on refusing a malformed realized row is recorded before any such refusal is switched on. (covers: 186-REALIZED-MALFORMED-COUNT)
+
+### Carried phase 225 ONEACCOUNTONCE
+
+- [ ] **ONCE-01**: Connecting a key, or saving a draft, whose account identity matches a key the same owner already holds is refused with a named reason, in the wizard and in the API, for both an exchange key and an MT5 login. (covers: none by id; founder decision 2026-11-23)
+- [ ] **ONCE-02**: The same account connected by two different users stays allowed and keeps its share link, and a strategy-linked key that also sits in an allocator book is unaffected. (covers: none by id; founder decision 2026-11-23)
+- [ ] **ONCE-03**: Every same-owner duplicate already stored on PROD is counted read-only and brought to the founder, and once the phase ships no strategy publishes another key's numbers under its own name. (covers: none by id; founder decision 2026-11-23)
+- [ ] **ONCE-04**: Two keys that share a login always carry a share link. (covers: none by id; founder decision 2026-11-23)
+
+## Planned for v1.23 HARDEN — security, alerting, tooling
+
+Moved out of v1.22 by founder ruling F-10 (2026-11-23, "Yes, split into two milestones"). Every requirement keeps its id and text. They are mapped to the v1.23 phases in ROADMAP's v1.23 section, and are re-read when v1.23 starts.
+
+### Security: secrets hygiene (SECRETSHYGIENE)
+
 - [ ] **SECR-03**: A full-history secret scan runs on a schedule. How historical findings are suppressed (commit-scoped fingerprints, or literals made obviously fake), and whether a red scheduled scan may block a redeploy, are decided at plan time. (covers: SECRETSCAN-FULLHISTORY-01)
 - [ ] **SECR-04**: `cron_sync_tick` and `ops_staleness_check` post the service key only to exact named hosts, never through a `.up.railway.app` suffix wildcard. The entry's gate-arm and tab-key guard gaps are closed. (covers: 167.1.2.2.2-CRON-TICK-RESIDUALS)
 
@@ -158,6 +190,12 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [ ] **DBACC-04**: An owner-surface read that lacks `api_key_id` fails to compile. (covers: 170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD)
 - [ ] **DBACC-05**: Each of the six routes outside the audit-log law writes an audit row, or carries a recorded founder exemption. The exact-set allowlist only shrinks. (covers: L2120)
 - [ ] **DBACC-06**: The `discovery-watchlist` RLS and auth assertions run in CI and can fail there. (covers: 158-OPS-03, MEDIUM entry)
+
+### Carried phase 221 SENTRYSCRUB2
+
+- [ ] **SCRB-01**: A direct `Sentry.captureException` of a plain object carrying PostgREST `details` and `hint` produces an envelope with neither, proven by a real-SDK envelope test. (covers: 209-SENTRY-DIRECT-CAPTURE-DETAILS)
+- [ ] **SCRB-02**: A `captureToSentry` call in a `"use client"` module produces an event that passes the same scrub as a server event, and no build ships a client `Sentry.init` without that scrub in its `beforeSend`. (covers: 167.2.1-CLIENT-SENTRY-NOOP)
+- [ ] **SCRB-03**: The auth callback's GoTrue error branch logs the `error_code` value, sliced short, and never logs `error_description`. (covers: 219-CALLBACK-VERIFY-ERROR-LOG)
 
 ### Observability: alert paging and readers (ALERTPAGE, ALERTREADERS)
 
@@ -190,29 +228,6 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [ ] **LANE-03**: The lint gate reports the same warnings with a cold cache and a warm one. (covers: LINT-CACHE-MASKS-WARNINGS)
 - [ ] **LANE-04**: Whether PROD's Postgres image crashes a backend on a function EXECUTE denial after `SET ROLE` is measured on that image version locally, never against PROD. The verdict is recorded, and if it crashes, the exposure is fixed. (covers: 164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH)
 
-### CI and tooling: MT5 soak (MT5SOAK)
-
-- [ ] **SOAK-01**: The soak judges a BTC-unit account on floors in its own unit, not on USD floors. (covers: 164.6.6.2.3-SOAK-BTC-FLOORS)
-- [ ] **SOAK-02**: The soak's timed-day check rejects NaN and implausible returns, not only infinity, and goes RED on a 1e-3 nudge to a timed day. (covers: 164.6.6.2.3-SOAK-TIMED-DAYS-UNCHECKED)
-- [ ] **SOAK-03**: The soak checks day attribution against an independent per-day walk that imports no production helper, and goes RED when one deal is moved by one UTC day. (covers: 164.6.6.2.3-SOAK-DAY-ATTRIBUTION)
-
-### Carried phase 221 SENTRYSCRUB2
-
-- [ ] **SCRB-01**: A direct `Sentry.captureException` of a plain object carrying PostgREST `details` and `hint` produces an envelope with neither, proven by a real-SDK envelope test. (covers: 209-SENTRY-DIRECT-CAPTURE-DETAILS)
-- [ ] **SCRB-02**: A `captureToSentry` call in a `"use client"` module produces an event that passes the same scrub as a server event, and no build ships a client `Sentry.init` without that scrub in its `beforeSend`. (covers: 167.2.1-CLIENT-SENTRY-NOOP)
-- [ ] **SCRB-03**: The auth callback's GoTrue error branch logs the `error_code` value, sliced short, and never logs `error_description`. (covers: 219-CALLBACK-VERIFY-ERROR-LOG)
-
-### Carried phase 222 ALERTTRUTH
-
-- [ ] **ERRC-01**: No user-readable string in `analytics-service` or in the `computation_error_copy` arms says "contact support". Each names the contact form or a remedy that works, and csv-finalize's copy is in byte parity with the SQL arm, checked by reading the SQL arm. (covers: 212-CONTACT-SUPPORT-SURVIVORS)
-- [ ] **ERRC-02**: A total benchmark source failure shows wording distinct from a stale benchmark. (covers: 166.4.1-BENCHMARK-OUTAGE-LABEL)
-- [ ] **ERRC-03**: A failed follow-on analytics enqueue in `run_sync_trades_job` never leaves the strategy reading `complete` with no analytics. The exact behaviour is a founder ruling at plan time. (covers: SYNCTRADES-ENQUEUE-DONE)
-
-### Carried phase 223 FLOWKINDS (flow-source half only, F-2)
-
-- [ ] **FLOWK-02**: `run_sync_funding_job` and `okx_archive_job` each have a recorded, test-pinned decision to refuse a malformed funding row by name or to keep dropping it. The decision is taken with the founder wherever a published number changes. (covers: 186-OTHER-FUNDING-CALLERS-DROP, non-composite callers)
-- [ ] **FLOWK-03**: The per-key count of `daily_pnl_malformed_<venue>` flags on PROD is recorded read-only, and the founder's ruling on refusing a malformed realized row is recorded before any such refusal is switched on. (covers: 186-REALIZED-MALFORMED-COUNT)
-
 ### Carried phase 224 DEADLEFTOVERS
 
 - [ ] **DEAD-01**: `get_admin_compute_jobs` no longer exists on TEST or PROD, and no caller, test or census names it. (covers: 169-DEAD-ADMIN-JOBS-RPC)
@@ -220,13 +235,6 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [ ] **DEAD-03**: `managerSideKeyIds`, `excludedManagerSide` and the `"legacy"` `equityCurveSource` value are deleted together with their tests. (covers: 176-INERT-LEFTOVERS)
 - [ ] **DEAD-04**: Every reconstruct cap, marker and orphaned crawl item is removed or given a live caller, and `test_the_d04_inert_helpers_stay` is retired or rewritten to match. (covers: 176-RECONSTRUCT-CAP-MARKER-INERT)
 - [ ] **DEAD-05**: `src/lib/database.types.ts` declares no function that the schema lacks, and the way it is kept current (a regeneration step with a freshness gate, or a recorded decision) is written down. (covers: 164.5-STALE-GENERATED-TYPES)
-
-### Carried phase 225 ONEACCOUNTONCE
-
-- [ ] **ONCE-01**: Connecting a key, or saving a draft, whose account identity matches a key the same owner already holds is refused with a named reason, in the wizard and in the API, for both an exchange key and an MT5 login. (covers: none by id; founder decision 2026-11-23)
-- [ ] **ONCE-02**: The same account connected by two different users stays allowed and keeps its share link, and a strategy-linked key that also sits in an allocator book is unaffected. (covers: none by id; founder decision 2026-11-23)
-- [ ] **ONCE-03**: Every same-owner duplicate already stored on PROD is counted read-only and brought to the founder, and once the phase ships no strategy publishes another key's numbers under its own name. (covers: none by id; founder decision 2026-11-23)
-- [ ] **ONCE-04**: Two keys that share a login always carry a share link. (covers: none by id; founder decision 2026-11-23)
 
 ## Future Requirements
 
@@ -273,118 +281,120 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | FCONF-02 | Phase 157 | Pending |
 | FCONF-03 | Phase 157 | Pending |
 | FCONF-04 | Phase 157 | Pending |
-| SCRB-01 | Phase 221 | Pending |
-| SCRB-02 | Phase 221 | Pending |
-| SCRB-03 | Phase 221 | Pending |
+| SCRB-01 | Phase 221 (v1.23) | Pending |
+| SCRB-02 | Phase 221 (v1.23) | Pending |
+| SCRB-03 | Phase 221 (v1.23) | Pending |
 | ERRC-01 | Phase 222 | Pending |
 | ERRC-02 | Phase 222 | Pending |
 | ERRC-03 | Phase 222 | Pending |
 | FLOWK-02 | Phase 223 | Pending |
 | FLOWK-03 | Phase 223 | Pending |
-| DEAD-01 | Phase 224 | Pending |
-| DEAD-02 | Phase 224 | Pending |
-| DEAD-03 | Phase 224 | Pending |
-| DEAD-04 | Phase 224 | Pending |
-| DEAD-05 | Phase 224 | Pending |
+| DEAD-01 | Phase 224 (v1.23) | Pending |
+| DEAD-02 | Phase 224 (v1.23) | Pending |
+| DEAD-03 | Phase 224 (v1.23) | Pending |
+| DEAD-04 | Phase 224 (v1.23) | Pending |
+| DEAD-05 | Phase 224 (v1.23) | Pending |
 | ONCE-01 | Phase 225 | Pending |
 | ONCE-02 | Phase 225 | Pending |
 | ONCE-03 | Phase 225 | Pending |
 | ONCE-04 | Phase 225 | Pending |
-| PROOF-01 | Every v1.22 phase (closed at the milestone audit) | Pending |
-| MT5D-01 | | Pending |
-| MT5D-02 | | Pending |
-| MT5D-03 | | Pending |
-| MT5D-04 | | Pending |
-| MT5D-05 | | Pending |
-| MT5D-06 | | Pending |
-| MT5D-07 | | Pending |
-| MT5D-08 | | Pending |
-| VREAD-01 | | Pending |
-| VREAD-02 | | Pending |
-| VREAD-03 | | Pending |
-| VREAD-04 | | Pending |
-| VREAD-05 | | Pending |
-| VREAD-06 | | Pending |
-| VREAD-07 | | Pending |
-| VREAD-08 | | Pending |
-| DBOOK-01 | | Pending |
-| DBOOK-02 | | Pending |
-| FRESH-01 | | Pending |
-| FRESH-02 | | Pending |
-| HOLD-01 | | Pending |
-| HOLD-02 | | Pending |
-| HOLD-03 | | Pending |
-| HOLD-04 | | Pending |
-| HOLD-05 | | Pending |
-| NOCAP-01 | | Pending |
-| NOCAP-02 | | Pending |
-| NOCAP-03 | | Pending |
-| NOCAP-04 | | Pending |
-| HEAL-01 | | Pending |
-| HEAL-02 | | Pending |
-| HEAL-03 | | Pending |
-| HEAL-04 | | Pending |
-| HEAL-05 | | Pending |
-| FIG-01 | | Pending |
-| FIG-02 | | Pending |
-| FIG-03 | | Pending |
-| FIG-04 | | Pending |
-| FIG-05 | | Pending |
-| FACT-01 | | Pending |
-| FACT-02 | | Pending |
-| FACT-03 | | Pending |
-| FACT-04 | | Pending |
-| FACT-05 | | Pending |
-| CACHE-01 | | Pending |
-| CACHE-02 | | Pending |
-| CACHE-03 | | Pending |
-| CACHE-04 | | Pending |
-| CONN-01 | | Pending |
-| CONN-02 | | Pending |
-| CONN-03 | | Pending |
-| CONN-04 | | Pending |
-| CONN-05 | | Pending |
-| CONN-06 | | Pending |
-| RLIM-01 | | Pending |
-| RLIM-02 | | Pending |
-| SECR-01 | | Pending |
-| SECR-02 | | Pending |
-| SECR-03 | | Pending |
-| SECR-04 | | Pending |
-| DBACC-01 | | Pending |
-| DBACC-02 | | Pending |
-| DBACC-03 | | Pending |
-| DBACC-04 | | Pending |
-| DBACC-05 | | Pending |
-| DBACC-06 | | Pending |
-| ALRT-01 | | Pending |
-| ALRT-02 | | Pending |
-| ALRT-03 | | Pending |
-| ALRT-04 | | Pending |
-| ALRT-05 | | Pending |
-| ALRT-06 | | Pending |
-| ALRT-07 | | Pending |
-| ALRT-08 | | Pending |
-| HELD-01 | | Pending |
-| HELD-02 | | Pending |
-| SQLG-01 | | Pending |
-| SQLG-02 | | Pending |
-| SQLG-03 | | Pending |
-| SQLG-04 | | Pending |
-| SQLG-05 | | Pending |
-| LANE-01 | | Pending |
-| LANE-02 | | Pending |
-| LANE-03 | | Pending |
-| LANE-04 | | Pending |
-| SOAK-01 | | Pending |
-| SOAK-02 | | Pending |
-| SOAK-03 | | Pending |
+| PROOF-01 | Every v1.22 phase, and every v1.23 phase by F-10 (closed at each milestone audit) | Pending |
+| MT5D-01 | Phase 227 | Pending |
+| MT5D-02 | Phase 230 | Pending |
+| MT5D-03 | Phase 230 | Pending |
+| MT5D-04 | Phase 229 | Pending |
+| MT5D-05 | Phase 229 | Pending |
+| MT5D-06 | Phase 229 | Pending |
+| MT5D-07 | Phase 229 | Pending |
+| MT5D-08 | Phase 225 | Pending |
+| VREAD-01 | Phase 231 | Pending |
+| VREAD-02 | Phase 231 | Pending |
+| VREAD-03 | Phase 231 | Pending |
+| VREAD-04 | Phase 231 | Pending |
+| VREAD-05 | Phase 231 | Pending |
+| VREAD-06 | Phase 232 | Pending |
+| VREAD-07 | Phase 232 | Pending |
+| VREAD-08 | Phase 232 | Pending |
+| DBOOK-01 | Phase 233 | Pending |
+| DBOOK-02 | Phase 233 | Pending |
+| FRESH-01 | Phase 233 | Pending |
+| FRESH-02 | Phase 233 | Pending |
+| HOLD-01 | Phase 235 | Pending |
+| HOLD-02 | Phase 235 | Pending |
+| HOLD-03 | Phase 229 | Pending |
+| HOLD-04 | Phase 235 | Pending |
+| HOLD-05 | Phase 235 | Pending |
+| NOCAP-01 | Phase 234 | Pending |
+| NOCAP-02 | Phase 234 | Pending |
+| NOCAP-03 | Phase 234 | Pending |
+| NOCAP-04 | Phase 234 | Pending |
+| HEAL-01 | Phase 227 | Pending |
+| HEAL-02 | Phase 227 | Pending |
+| HEAL-03 | Phase 227 | Pending |
+| HEAL-04 | Phase 227 | Pending |
+| HEAL-05 | Phase 227 | Pending |
+| FIG-01 | Phase 236 | Pending |
+| FIG-02 | Phase 236 | Pending |
+| FIG-03 | Phase 236 | Pending |
+| FIG-04 | Phase 236 | Pending |
+| FIG-05 | Phase 236 | Pending |
+| FACT-01 | Phase 237 | Pending |
+| FACT-02 | Phase 237 | Pending |
+| FACT-03 | Phase 238 | Pending |
+| FACT-04 | Phase 237 | Pending |
+| FACT-05 | Phase 238 | Pending |
+| CACHE-01 | Phase 237 | Pending |
+| CACHE-02 | Phase 239 | Pending |
+| CACHE-03 | Phase 237 | Pending |
+| CACHE-04 | Phase 239 | Pending |
+| CONN-01 | Phase 225 | Pending |
+| CONN-02 | Phase 228 | Pending |
+| CONN-03 | Phase 225 | Pending |
+| CONN-04 | Phase 228 | Pending |
+| CONN-05 | Phase 240 | Pending |
+| CONN-06 | Phase 240 | Pending |
+| RLIM-01 | Phase 240 | Pending |
+| RLIM-02 | Phase 240 | Pending |
+| SECR-01 | Phase 241 | Pending |
+| SECR-02 | Phase 241 | Pending |
+| SECR-03 | Phase 242 (v1.23) | Pending |
+| SECR-04 | Phase 242 (v1.23) | Pending |
+| DBACC-01 | Phase 243 (v1.23) | Pending |
+| DBACC-02 | Phase 243 (v1.23) | Pending |
+| DBACC-03 | Phase 243 (v1.23) | Pending |
+| DBACC-04 | Phase 244 (v1.23) | Pending |
+| DBACC-05 | Phase 244 (v1.23) | Pending |
+| DBACC-06 | Phase 244 (v1.23) | Pending |
+| ALRT-01 | Phase 245 (v1.23) | Pending |
+| ALRT-02 | Phase 245 (v1.23) | Pending |
+| ALRT-03 | Phase 245 (v1.23) | Pending |
+| ALRT-04 | Phase 245 (v1.23) | Pending |
+| ALRT-05 | Phase 246 (v1.23) | Pending |
+| ALRT-06 | Phase 246 (v1.23) | Pending |
+| ALRT-07 | Phase 246 (v1.23) | Pending |
+| ALRT-08 | Phase 246 (v1.23) | Pending |
+| HELD-01 | Phase 247 (v1.23) | Pending |
+| HELD-02 | Phase 247 (v1.23) | Pending |
+| SQLG-01 | Phase 248 (v1.23) | Pending |
+| SQLG-02 | Phase 248 (v1.23) | Pending |
+| SQLG-03 | Phase 248 (v1.23) | Pending |
+| SQLG-04 | Phase 248 (v1.23) | Pending |
+| SQLG-05 | Phase 248 (v1.23) | Pending |
+| LANE-01 | Phase 249 (v1.23) | Pending |
+| LANE-02 | Phase 249 (v1.23) | Pending |
+| LANE-03 | Phase 249 (v1.23) | Pending |
+| LANE-04 | Phase 249 (v1.23) | Pending |
+| SOAK-01 | Phase 226 | Pending |
+| SOAK-02 | Phase 226 | Pending |
+| SOAK-03 | Phase 226 | Pending |
 
 **Coverage:**
-- v1.22 requirements: 116 total. Carried: 10 (MT5 6, FCONF 4). Phases 221–225: 17 (FLOWK-01 dropped by founder 2026-11-23). Milestone-wide: 1. New topic groups: 88.
-- Mapped to phases: 28 (the carried ones and 221–225), plus PROOF-01 on every phase. Unmapped: 88, left for the roadmapper.
+- 116 requirements in all, across two milestones (F-10). FLOWK-01 was dropped by the founder on 2026-11-23 and is not counted.
+- **v1.22 TRUTH: 81.** Carried: 10 (MT5 6 on 155.2, FCONF 4 on 157). Phases 222, 223 and 225: 9 (ERRC 3, FLOWK 2, ONCE 4). New groups: 61 (MT5D 8, VREAD 8, DBOOK 2, FRESH 2, HOLD 5, NOCAP 4, HEAL 5, FIG 5, FACT 5, CACHE 4, CONN 6, RLIM 2, SOAK 3, SECR-01/02 2). Milestone-wide: 1 (PROOF-01). Mapped: 81/81, to 21 phases (155.2, 157, 222, 223, 225, 226–241).
+- **v1.23 HARDEN, planned: 35.** Carried Phases 221 and 224: 8 (SCRB 3, DEAD 5). New groups: 27 (SECR-03/04 2, DBACC 6, ALRT 8, HELD 2, SQLG 5, LANE 4). Mapped: 35/35, to 10 phases (221, 224, 242–249). PROOF-01 applies there too and is counted once, under v1.22.
+- Unmapped: 0. Every requirement maps to exactly one phase, and PROOF-01 is milestone-wide.
 - TODOS coverage: every open MEDIUM-and-higher entry in the 2026-11-23 triage (94 open, counting `158-OPS-03`'s HIGH and MEDIUM entries separately), plus the MEDIUM entries already owned by 221–223, maps to a requirement above, to a Future Requirement (MTWEDGE-01, LATENT-01, LATENT-02), or to a recorded exclusion (F-2 composite, F-7). None is unplaced. Basis: the triage's per-entry table, checked by id; `TODOS.md` at HEAD was not re-read. The LOW entries that Phase 224 owns are covered by DEAD-01..05 because the phase owns them by name.
 
 ---
 *Requirements defined: 2026-11-23*
-*Last updated: 2026-11-23, first draft for founder review*
+*Last updated: 2026-11-23, roadmap created: traceability filled, and the v1.23 requirements moved under "Planned for v1.23" by F-10*
