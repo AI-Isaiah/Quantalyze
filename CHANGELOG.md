@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.133.62.0] - 2026-11-23 — Phase 225 ONEACCOUNTONCE PR-1: the venue_server column, swap_account_slot, and the one-time same-owner duplicate delete
+
+This is the first of three PRs for Phase 225. It ships the SQL surface the later code PR builds on: two migrations, their gates, and the runbook for the one-time delete the founder confirmed. The delete already ran on PROD on 2026-11-23. No route or worker calls either new function yet; PR-2 wires them. Nineteen branch commits are grouped below.
+
+### Added
+- **`api_keys.venue_server`** (migration `20261123180000`). This is a nullable plaintext column for the MT5 broker server, per founder ruling Q2. A CHECK constraint refuses a blank value or one longer than 128 characters, where blank means space, tab, CR or LF only. Browser roles get no grant on it.
+- **`create_wizard_strategy`** gains a trailing `p_venue_server TEXT DEFAULT NULL` and now takes 13 parameters. The function was DROPped and re-CREATEd from its latest definition (20260814120000). It stores the server as `NULLIF(lower(btrim(x, E' \t\r\n')), '')`. EXECUTE stays service_role only, re-issued and verified from the catalogue. The only caller, the create-with-key route, uses named arguments and resolves through the default.
+- **`swap_account_slot(new, old_holder, login, server)`** (migration `20261123180100`) is a service_role-only SECURITY DEFINER function. It moves an exchange account's holder slot from a failing key to a working key of the same owner in one transaction, per founder ruling Q1: nothing is disconnected or deleted.
+  - It locks the pair and the old holder's dependents in one id-ordered `FOR UPDATE` pass, and judges both keys by the D-18 working rule, which is written once.
+  - It refuses with a stable token and changes nothing when:
+    - the keys have different owners, or a key is departed;
+    - the holder is working, or the new key is not;
+    - the login, server or exchange does not match;
+    - either key is already marked, or the new key already holds a login;
+    - the holder has composite dependents;
+    - the server is longer than 128 characters.
+  - The new key takes the caller's server, or the old holder's captured server when the caller passes NULL. The demoted holder's login and server are both cleared.
+- **SQL gates.** `test_swap_account_slot.sql` adds 24 arms. `test_api_keys_venue_identity_uniq.sql` gains the venue_server arms, including the whitespace arms. The three gates that pinned the 12-type signature now pin the 13-type one and apply the new migration on the lane. A fourth D-18 parity twin is pinned in the TS and Python tests.
+- **`docs/runbooks/oneaccountonce/`** holds the marker query, four census files and `delete.sql`. The founder ruled (Q5): "Delete all duplicate keys … Delete also all associated factsheet, data etc. One key can be used over several accounts." `delete.sql` deletes same-owner duplicate keys, their strategies and every dependent row:
+  - It runs in the owner's context, deletes strategies through RLS, and deletes keys through `delete_allocator_api_key(..., true)`.
+  - Checks A to H run before and after the writes, and any failure rolls back the whole run.
+  - `src/__tests__/oneaccountonce-delete-sql-exec.test.ts` executes it on a throwaway PG16 cluster, with 43 arms.
+
+### Changed
+- `scripts/mutation-floors.mjs`: `FILES_FLOOR` 85 → 86, `ARMS_FLOOR` 910 → 940. `COMPARED_FLOOR` 138 → 139, with a dated snapshot-only ratchet row for `swap_account_slot`. Every census test moved to the measured reading.
+
+### Fixed (review rounds before the first merge)
+- **Round 1** (code reviewer and silent-failure hunter: 10 MEDIUM, no CRITICAL or HIGH):
+  - Two concurrent swaps on sibling duplicates could deadlock. The lock set now covers the dependents, and the function carries `lock_timeout`.
+  - A NULL caller server erased the captured server.
+  - Six refusal branches had no arm.
+  - A "nothing written" fingerprint could not fail. It was removed, and the comments now say that rollback is what guarantees nothing is written.
+  - Trimming ignored tab and newline, and an over-long server raised a raw 23514.
+  - `delete.sql` check H had no positive control. It now has a `track_counts` guard and an api_keys counter assertion.
+  - Five abort branches in `delete.sql` had no exec arm.
+- **Round 2:** no MEDIUM or above open, apart from the booked pin gap below. migration-reviewer was clean in both rounds; rls-policy-auditor was clean.
+
+### Notes
+- **PROD delete record (2026-11-23, before this merge).** The census, re-run immediately before the delete, matched the confirmed manifest exactly: 13 keys over 5 owners (deribit 7, mt5 1, okx 5), all disconnected, and 2 strategies. After the run, same-owner duplicates were 0 and orphan holdings were 0. The three 155.2 protected keys were untouched, and one recompose job per owner was queued. `track_counts` was measured on, so check H was live. The 3 derived `key_inputs` rows were removed by those recompose jobs. Counts only; the ids stay out of the repo.
+- **155.2 hand-off.** The delete removed sealed MT5 key k2, so MT5 ordinals renumber (old k3 is now k2, old k10 is now k9). The 155.2 recapture must build a fresh keymap and labels.json.
+- **Expected red until the post-apply re-dump:** `baseline-content-drift` reports `DRIFT create_wizard_strategy/13` and `SNAPSHOT_MISSING swap_account_slot/4`. No allowlist row was added.
+- **Booked:** `[225-SWAP-LOCKSET-PIN]` (TODOS.md). The deadlock fix has no single-session arm that fails on revert.
+
 ## [0.133.61.6] - 2026-11-23 — Phase 231 BYBITREADS plan 02: the Bybit read probe (research first)
 
 The phase's ROADMAP says to measure the venue before changing any Bybit read, and this PR ships the tool that does it. It adds a reviewed, read-only, counts-only probe that the phase orchestrator runs once on the Railway backfill worker. The worker is the only place a key decrypts. It adds the probe, its tests and one shared test fake, with no change to any production read path. Two commits: the probe (squashed from 12 branch commits: 4 feature/test, 8 review fixes) and this release commit.

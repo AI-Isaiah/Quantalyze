@@ -232,6 +232,11 @@ founder can take.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[225-SWAP-LOCKSET-PIN]` The `swap_account_slot` lock-set fix has no arm that fails on revert** (logged 2026-11-23, Phase 225 ONEACCOUNTONCE PR-1 review round 2, MEDIUM, not user-facing; owner: the next phase that touches `swap_account_slot`)
+  - **What:** the WR-01 fix adds `OR account_shared_with_api_key_id = p_old_holder` to the id-ordered `FOR UPDATE` pass, so two swaps on sibling duplicates queue instead of deadlocking. The SQL lane runs one session, so reverting that clause brings back a raw 40P01 without any gate going red. The fix was proven with a two-session harness that is not in the repo.
+  - **Fix direction:** a static twinned arm that asserts the function source carries the dependent clause inside the lock query, or a two-session lane test.
+  - **Gate:** the new arm goes RED when the clause is removed.
+
 - [ ] **`[219-CALLBACK-VERIFY-ERROR-LOG]` The callback's GoTrue `error` / `error_code` branch redirects without logging the error code** (logged 2026-11-20, Phase 219 ACCOUNTEMAIL gap review, MEDIUM, observability, not user-facing; owner: the next touch of `src/app/auth/callback/route.ts`)
   - **What:** when GoTrue's `/verify` itself fails (expired, already used or scanner-consumed token) it redirects to `/auth/callback` with `error` / `error_code` and no code, token hash or message. Since the Phase 219 gap, a request whose accepted `next` carries the email-change marker lands on the Account tab for that case, and nothing is logged, so a run of failed verifies cannot be seen. The marker-path exchange failure already logs its code and status.
   - **Fix direction:** log the `error_code` value only, sliced to a short length, in that branch. Never log `error_description`, which GoTrue fills with free text.
