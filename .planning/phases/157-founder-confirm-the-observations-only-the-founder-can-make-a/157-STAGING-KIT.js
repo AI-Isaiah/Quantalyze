@@ -351,7 +351,8 @@
   // another world (for example an extension's isolated one) and wrapping fetch here would stage
   // nothing while a painted marker claimed otherwise. Do not wrap, say so on screen, and throw.
   if (typeof self.__next_f === "undefined") {
-    marker().textContent = "STAGING KIT NOT ACTIVE — wrong context";
+    // never overwrite a marker an in-world kit painted: that kit may be armed and live
+    if (!document.getElementById(MARKER_ID)) marker().textContent = "STAGING KIT NOT ACTIVE — wrong context";
     throw new Error("[fconf] not in the page's JS world (self.__next_f is undefined); fetch not wrapped");
   }
 
@@ -427,7 +428,8 @@
     var verdict;
     try {
       // the marker is the founder's only on-screen proof; put it back if the page removed it
-      if (!document.getElementById(MARKER_ID)) paint(state.mode, state.envelope);
+      var shown = document.getElementById(MARKER_ID);
+      if (!shown || shown.textContent !== markerText(state.mode, state.envelope)) paint(state.mode, state.envelope);
       href = new URL(hrefOf(input), location.href).href;
       method = methodOf(input, init);
       verdict = decide(method, href, state.mode, state.envelope);

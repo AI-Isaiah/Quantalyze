@@ -632,3 +632,24 @@ test("a policy refusal answers FCONF_REFUSED, distinct from a router error", asy
   assert.deepEqual(await res.json(), { code: "FCONF_REFUSED" });
   assert.equal([...env.fconf().refused].some((x) => x.routerError), false);
 });
+
+test("a wrong-world evaluation never overwrites the live marker, and the wrapper repaints a stale marker text", async () => {
+  const env = makeEnv();
+  env.fconf().arm("amber");
+  const live = env.marker().textContent;
+  assert.match(live, /FCONF-02/);
+  // simulate a second evaluation from another JS world: same DOM, no __next_f, no wrapped fetch
+  const vmmod = await import("node:vm");
+  const other = vmmod.createContext({
+    window: {}, self: {}, document: { createElement: () => ({ id: "", textContent: "", style: {} }),
+      body: { appendChild() {} }, getElementById: (id) => (id === "fconf-staging-marker" ? env.marker() : null) },
+    location: { origin: ORIGIN, href: `${ORIGIN}/strategies` }, URL, Request, Response, Headers,
+    console: { log() {}, warn() {}, error() {} },
+  });
+  assert.throws(() => vmmod.runInContext(KIT_SRC, other));
+  assert.equal(env.marker().textContent, live);
+  // a stale text is corrected on the next request
+  env.marker().textContent = "something else";
+  await env.call(APP("/api/strategies/wizard-draft"));
+  assert.equal(env.marker().textContent, live);
+});

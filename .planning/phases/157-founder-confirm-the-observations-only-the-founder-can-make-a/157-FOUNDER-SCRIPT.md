@@ -35,7 +35,7 @@ Tell me (a), (b), (c) or a combination. It picks the connect route in section 4.
 2. I arm `resume`. Confirm the marker reads `STAGED RESPONSES ACTIVE — FCONF-01`. Before your first click I read back `window.__fconf.mode` and the fetch identity check (`window.fetch.name` is `fconfFetch`) in the page's own context, and I tell you when both read right. Do not click before that.
 3. Click "Add a strategy". Expect `We saved your progress.` and `A draft from an earlier session is ready.`, with two buttons: `Resume draft` and `Start fresh`. Do not click Start fresh.
 4. Click `Resume draft`. Expect the draft's step: the sync preview with the heading `Computing your verified factsheet`, or the factsheet preview with `Use this key and continue`.
-5. I read back what the kit refused and passed. Nothing should be refused except page-chrome reads.
+5. I read back what the kit refused and passed. Nothing should be refused except page-chrome reads, the arm boundary entries and the key-permission read (`GET /api/keys/:id/permissions`, refused on purpose). On the preview that shows as an error under the key scopes badge. It is not a red gate.
 6. Record both readings: your earlier same-browser ruling ("the silent return is fine") and this new-tab banner reading. SC-1 is not ticked on my word.
 7. Optional stricter reading in a private window: run it ONLY with the kit pasted through DevTools and the `resume` marker visible. Without the marker, skip it, because an unstaged Resume can enqueue a real sync on the draft.
 
