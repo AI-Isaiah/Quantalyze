@@ -1,20 +1,16 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.18
-milestone_name: MT5-VERIFY & founder confirmations
-status: Awaiting next milestone
-stopped_at: v1.18 archived; next milestone not started (/gsd-new-milestone)
-last_updated: "2026-11-23T11:15:20.492Z"
+milestone: v1.22
+milestone_name: TRUTH — data you can trust
+status: planning
+last_updated: "2026-11-23T11:52:01.011Z"
 last_activity: 2026-11-23
-last_activity_desc: Milestone v1.18 completed and archived
-state_head: 75af7154216fe99418be11522e414c2165ef2aff
 progress:
-  total_phases: 16
-  completed_phases: 16
-  total_plans: 93
-  completed_plans: 93
-  percent: 100
-current_phase: null
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 ## ⭐ STATE lineage
@@ -31,7 +27,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-23)
 
-**Current focus:** Planning next milestone (v1.18 closed 2026-11-23)
+**Current focus:** v1.22 TRUTH — data you can trust, defining requirements (started 2026-11-23)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -175,17 +171,19 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: Milestone v1.18 complete
+Phase: Not started (defining requirements)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-11-23 — Milestone v1.18 completed and archived
-Progress: [██████████] 100%
+Status: Defining requirements
+Last activity: 2026-11-23 — Milestone v1.22 started
+Progress: [░░░░░░░░░░] 0%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
 ## Current Focus
 
-**Next: `/gsd-new-milestone`.** v1.18 MT5-VERIFY & founder confirmations closed 2026-11-23 (audit `passed`, 5/5 requirements, 16/16 phases); archive in `.planning/milestones/v1.18-*`. The next milestone already holds Phases 155.2, 157 and 221–225 (ROADMAP § Next milestone, moved by founder rulings 2026-11-23) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04 with D-A..D-E; their text is in `milestones/v1.18-REQUIREMENTS.md` under "Carried to the next milestone". ⛔ MT5 stays unadvertised until 155.2 passes. v1.21 closed 2026-11-13; archive in `.planning/milestones/v1.21-*`. The v1.17 sequencing below is lineage.
+**Next: research, then requirements and roadmap for v1.22 TRUTH — data you can trust** (started 2026-11-23; `/gsd-new-milestone` steps 9–10). Goal: every number, label and alert we show is correct, or it fails loudly. Scope is every open MEDIUM-and-higher `TODOS.md` entry, data integrity first; no composite work. Phase numbering continues after 225.
+
+v1.18 MT5-VERIFY & founder confirmations closed 2026-11-23 (audit `passed`, 5/5 requirements, 16/16 phases); archive in `.planning/milestones/v1.18-*`. v1.22 already holds Phases 155.2, 157 and 221–225 (moved by founder rulings 2026-11-23) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04 with D-A..D-E; their text is in `milestones/v1.18-REQUIREMENTS.md` under "Carried to the next milestone". ⛔ MT5 stays unadvertised until 155.2 passes. v1.21 closed 2026-11-13; archive in `.planning/milestones/v1.21-*`. The v1.17 sequencing below is lineage.
 
 **Next: `/gsd:plan-phase 147`.** v1.17 phase order 147 → 148 → 149 → 150 → 151 → 152 → 153 → 154 → 155.
 Load-bearing sequencing (real dependencies, do not reorder):

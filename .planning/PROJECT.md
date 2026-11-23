@@ -29,6 +29,46 @@ Allocators act on Bridge recommendations and see whether those suggestions
 actually worked — and can model the impact of composition changes before they
 make them.
 
+## Current Milestone: v1.22 TRUTH — data you can trust
+
+**Goal:** Every number, label and alert we show is correct, or it fails loudly.
+
+Started 2026-11-23. Phase numbering continues: the carried Phases 155.2, 157 and 221–225 keep their
+numbers and new phases start after 225. Scope is every open MEDIUM-and-higher `TODOS.md` entry,
+ordered data integrity first, then user-facing, then security, then the rest (founder 2026-11-23).
+The scope input and the per-group TODOS ids were triaged on 2026-11-23; the roadmapper builds the phases.
+
+**Target features:**
+- **Carried, live MT5 parity (155.2 LIVEPARITY)** — the founder's broker statements, the Gate B run and
+  verification prove our MT5 numbers against the broker's (MT5-07..10, MT5-15, MT5-GOAL-01, bound by
+  D-A..D-E). MT5 stays unadvertised until it passes.
+- **Carried, founder confirmations (157 FOUNDER-CONFIRM)** — the observations only the founder can make
+  (FCONF-01..04).
+- **Carried, booked phases 221–225** — Sentry events carry no PostgREST details (221, which also owns
+  `209-SENTRY-DIRECT-CAPTURE-DETAILS`), true error copy and benchmark labels (222), every derive and
+  compose path reads the same capital flow sources (223, flow-source half only), dead SQL and retired
+  job kinds removed (224), one exchange account connected once (225).
+- **Data integrity** — MT5 nightly derives succeed on the first attempt with the first failure recorded;
+  Bybit, OKX and Deribit reads cover every coin, settle type and window and never book a capital
+  correction as trading P&L; one exchange account counts once across Holdings, match scoring and the
+  dashboard; a no-capital key takes one named path; no strategy is stranded by a dropped or reset job;
+  the stored, factsheet and Scenario engines share one set of figure constants; a Deribit key whose
+  derive runs daily never leaves its return series weeks behind its flows and anchor.
+- **User-facing truth** — a withheld, re-running or never-computed factsheet says so on every surface;
+  cached UI state (OG card, composer range, BTC price, Discovery ranking) reflects the current truth;
+  connecting a key or a CSV gets an honest answer; anonymous rate limits match the buckets behind them.
+- **Security** — no credential live in public history or diagnostic channels (the two demo accounts
+  deleted and their password literals removed from the tree); anon and client roles read and lock only
+  what they must.
+- **Observability** — an outage page opens, credits Sentry, recovers and closes exactly once; every
+  alert reader sees every row and reports its own delivery failure; anon and landing Sentry captures
+  are held and throttled; the MT5 account-switch wedge is named from captured evidence (live-gated).
+- **CI and tooling** — census and gate pins fail when an axis drifts; every live-DB lane test executes;
+  the MT5 derive soak checks what it claims to check. Every new gate is shown RED before it counts.
+
+**Not in scope:** composite work of any kind; the latent Binance and sFOX groups and GLB-1 until their
+triggers fire; `TODOS.md` cleanup of fixed, stale and composite-only entries (records, not phases).
+
 ## ✅ Shipped: v1.18 MT5-VERIFY & founder confirmations (2026-08-14 → 2026-11-23; parked 2026-08-20 → 2026-11-13)
 
 **Closed 2026-11-23 with audit `passed`** (`.planning/milestones/v1.18-MILESTONE-AUDIT.md`): requirements **5/5**
@@ -304,15 +344,15 @@ options MTM smoothing.
 
 ### Active
 
-<!-- Carried out of v1.18 (closed 2026-11-23). The next milestone's requirements are defined at its start. -->
+<!-- Carried out of v1.18 (closed 2026-11-23) into v1.22 TRUTH. v1.22's new requirements are defined in REQUIREMENTS.md. -->
 
-- **Carried to the next milestone with Phase 155.2 LIVEPARITY (founder 2026-11-23):** MT5-07, MT5-08, MT5-09, MT5-10, MT5-15 and the umbrella MT5-GOAL-01, bound by founder decisions D-A..D-E. Text in `milestones/v1.18-REQUIREMENTS.md`.
-- **Carried to the next milestone with Phase 157 FOUNDER-CONFIRM (founder 2026-11-23):** FCONF-01..04. Text in `milestones/v1.18-REQUIREMENTS.md`.
-- Phases 221–225 (booked without requirement ids) also moved to the next milestone.
+- **Carried into v1.22 with Phase 155.2 LIVEPARITY (founder 2026-11-23):** MT5-07, MT5-08, MT5-09, MT5-10, MT5-15 and the umbrella MT5-GOAL-01, bound by founder decisions D-A..D-E. Text in `milestones/v1.18-REQUIREMENTS.md`.
+- **Carried into v1.22 with Phase 157 FOUNDER-CONFIRM (founder 2026-11-23):** FCONF-01..04. Text in `milestones/v1.18-REQUIREMENTS.md`.
+- Phases 221–225 (booked without requirement ids) are also in v1.22.
+- **Composer range as dates (founder 2026-11-13, "Book a fix")** — save the composer's selected range as dates so presets like 12M always end on the latest day, and re-pin "kept when the series grows" to mean the same dates are kept. In v1.22 (scope group SURFACECACHE); `TODOS.md` `201.1-COMPOSER-RANGE-AS-DATES`.
 
 The items below stay carried for a later milestone.
 
-- **Composer range as dates (founder 2026-11-13, "Book a fix")** — save the composer's selected range as dates so presets like 12M always end on the latest day, and re-pin "kept when the series grows" to mean the same dates are kept. Next milestone; `TODOS.md` `201.1-COMPOSER-RANGE-AS-DATES`.
 - **TERMS-01, TERMS-02** (deferred out of v1.21 by the fix-and-trim scope) — manager-entered fees, terms and thesis on the factsheet; net vs gross, base currency and "Data source" for every strategy.
 - **HONEST-07** — still deferred (no site at HEAD, no traceback); revisit only if the failure reappears.
 - The v1.21 audit's tech-debt list (`milestones/v1.21-MILESTONE-AUDIT.md`) and the 52 open `WINDOWS.md` entries.
@@ -340,6 +380,7 @@ The items below stay carried for a later milestone.
 - DEPS-01 as a phase (v1.20) — Phase 165 and its two inserts were retired 2026-09-27 by founder decision; dependabot PRs land one at a time as maintenance under the green rule, not as milestone scope.
 - Venue-specific go-live work (v1.20, founder 2026-11-03): Binance futures income (Phase 187) and the Deribit option-history replay (Phase 189) live in `TODOS.md`, not in a milestone. Binance, Deribit and sFOX gaps are not milestone scope until the founder re-books them.
 - CSP nonce migration, the D-09 composite `stitch_composite` re-run mechanism, and the FILL-arm recompute guarantee (v1.20) — each phase-scale on its own; deliberately not squeezed into a burndown, still in the backlog.
+- Composite work of any kind (v1.22, founder 2026-11-23, "Forget about composites") — composite-only `TODOS.md` entries are dropped and partial entries keep only their non-composite half.
 - Raising the hosted password floor (v1.20 SEC-01) — measured at 6 characters with no class rule and ACCEPTED by the founder 2026-08-26; revisit on paying clients, a custody/compliance requirement, or evidence of credential stuffing.
 
 ## Last Shipped Milestone: v1.6 Scenario Series-Space Purification (✅ shipped 2026-07-04, tag `v1.6` @ `f78f036b`)
@@ -439,6 +480,10 @@ layer. Full per-phase detail: `.planning/MILESTONES.md` + `milestones/v1.6-*`.
 | **v1.18: founder decisions D-A..D-E bind the MT5 parity verdict (founder 2026-11-13; D-E amended 2026-11-22)** | Pre-mark days are judged on closed P&L, the 1% is a return gap in points including open P&L from the first mark, broker statements are the historical oracle, one narrow tick-time clock read is admitted, and the weekend edge is a frozen terminal close. Stated in `milestones/v1.18-REQUIREMENTS.md`. | — Pending (155.2's Gate B run, next milestone) |
 | **v1.18: 155.2's remaining work, 157 and 221–225 move to the next milestone (founder 2026-11-23)** | "delay 157 into next milestone. Cannot do that now"; "Move them too (Recommended)"; "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification." v1.18 closes on what shipped instead of waiting on the statements. | ✓ Good (v1.18 closed 2026-11-23, audit passed) |
 | **v1.18 close: the pre-close artifact check done by hand (2026-11-23)** | `audit-open` still refuses on the archived 153 VERIFICATION status; the historical report is not edited. Checked by hand: no open UAT, debug sessions resolved, no quick tasks, threads or seeds. | ✓ Good (verified_closeout) |
+| **v1.22: no composite work (founder 2026-11-23, "Forget about composites")** | Composite-only `TODOS.md` entries are dropped; an entry with a composite half keeps only its non-composite half. Nothing in v1.22 builds, fixes or re-derives composites. | — Pending (v1.22) |
+| **v1.22: delete the unused demo accounts and remove their credential literals (founder 2026-11-23, `158-OPS-03`)** | The two demo-account passwords sit in the public repo and the accounts are unused, so the accounts go and the literals leave the tree rather than being rotated and kept. | — Pending (v1.22, security group) |
+| **v1.22: GLB-1 not triggered (founder 2026-11-23)** | The smoothed-MTM expiry-day item stays trigger-gated: `SMOOTHED_MTM_ENABLED` is off and fails closed, and the live Deribit options book does not count as the trigger firing. | — Pending (trigger-gated in `TODOS.md`) |
+| **v1.22: Phase 223 FLOWKINDS keeps its flow-source half only (founder 2026-11-23)** | Follows the composite ruling: the composite half and composite-only members (`186-COMPOSITE-MEMBER-READ-GAPS` among them) leave the phase. | — Pending (v1.22 Phase 223) |
 
 ## Evolution
 
@@ -460,9 +505,9 @@ This document evolves at phase transitions and milestone boundaries.
 ## Current State
 
 **v1.18 MT5-VERIFY & founder confirmations shipped and closed 2026-11-23** (audit `passed`, 5/5
-requirements, 16/16 phases `passed`). See the `## ✅ Shipped: v1.18` section above. The next milestone is not
-started; it already holds Phases 155.2, 157 and 221–225 and carries MT5-07..10, MT5-15, MT5-GOAL-01 and
-FCONF-01..04. MT5 stays unadvertised until 155.2 passes.
+requirements, 16/16 phases `passed`). See the `## ✅ Shipped: v1.18` section above. **v1.22 TRUTH — data you
+can trust started 2026-11-23** (see `## Current Milestone` above); it holds Phases 155.2, 157 and 221–225 and
+carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04. MT5 stays unadvertised until 155.2 passes.
 
 **v1.21 UX — trustworthy, navigable, lean shipped and closed 2026-11-13** (audit `tech_debt`, 32/32
 requirements, 18/18 phases `passed`). See the `## ✅ Shipped: v1.21` section above. The next milestone is not
@@ -539,4 +584,4 @@ the WCAG-AA floor stay green.
 </details>
 
 ---
-*Last updated: 2026-11-23 after the v1.18 milestone (previously 2026-11-18 after Phase 217). Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.*
+*Last updated: 2026-11-23 at the start of milestone v1.22 (previously 2026-11-23 after the v1.18 milestone). Older shipped-milestone sections here are historical; `MILESTONES.md` + `milestones/` are authoritative.*

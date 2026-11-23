@@ -1,93 +1,48 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.18 — MT5-VERIFY & founder confirmations",
+  "milestone": "v1.22 — TRUTH — data you can trust",
   "phases": [
     {
-      "number": "155",
-      "name": "PARITYHARNESS",
-      "status": "complete"
+      "number": "155.2",
+      "name": "LIVEPARITY",
+      "status": "pending"
     },
     {
-      "number": "155.1",
-      "name": "SERVERCLOCK",
-      "status": "complete"
+      "number": "157",
+      "name": "FOUNDER-CONFIRM",
+      "status": "pending"
     },
     {
-      "number": "207",
-      "name": "RETRYPROP",
-      "status": "complete"
+      "number": "221",
+      "name": "SENTRYSCRUB2",
+      "status": "pending"
     },
     {
-      "number": "208",
-      "name": "UIQUICK",
-      "status": "complete"
+      "number": "222",
+      "name": "ALERTTRUTH",
+      "status": "pending"
     },
     {
-      "number": "209",
-      "name": "SCRUBLEAKS",
-      "status": "complete"
+      "number": "223",
+      "name": "FLOWKINDS",
+      "status": "pending"
     },
     {
-      "number": "210",
-      "name": "PUBLICTRUTH",
-      "status": "complete"
+      "number": "224",
+      "name": "DEADLEFTOVERS",
+      "status": "pending"
     },
     {
-      "number": "211",
-      "name": "SYNCJOBS",
-      "status": "complete"
-    },
-    {
-      "number": "212",
-      "name": "WIZTRUTH",
-      "status": "complete"
-    },
-    {
-      "number": "213",
-      "name": "KEYFLOW",
-      "status": "complete"
-    },
-    {
-      "number": "214",
-      "name": "FRESHTRUTH",
-      "status": "complete"
-    },
-    {
-      "number": "215",
-      "name": "TESTREACH",
-      "status": "complete"
-    },
-    {
-      "number": "216",
-      "name": "CSVSTATUS",
-      "status": "complete"
-    },
-    {
-      "number": "217",
-      "name": "SERVERRULE",
-      "status": "complete"
-    },
-    {
-      "number": "218",
-      "name": "SELFHEAL",
-      "status": "complete"
-    },
-    {
-      "number": "219",
-      "name": "ACCOUNTEMAIL",
-      "status": "complete"
-    },
-    {
-      "number": "220",
-      "name": "EXTRACTOR",
-      "status": "complete"
+      "number": "225",
+      "name": "ONEACCOUNTONCE",
+      "status": "pending"
     }
   ],
   "next": {
-    "command": "/gsd-new-milestone",
-    "label": "Start a new milestone",
-    "reason": "All phases complete — start a new milestone"
+    "command": "/gsd-discuss-phase",
+    "label": "Discuss the first phase",
+    "reason": "Project initialized — plan your first phase"
   },
-  "updated_at": "2026-11-23T11:15:20.552Z"
+  "updated_at": "2026-11-23T11:52:01.024Z"
 }
