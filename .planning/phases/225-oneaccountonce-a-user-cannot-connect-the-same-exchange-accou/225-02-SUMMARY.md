@@ -77,11 +77,13 @@ Each neuter: `cp` backup of `delete.sql`, edit, `npx vitest run src/__tests__/on
 
 ## Associated derived data (founder decision)
 
-OPEN. 3 `key_inputs:<deleted key id>` rows remain in allocator_equity_derived. The founder's ruling said "delete also all associated ... data", but the confirmed manifest was the scope of this run, and these rows sit outside it. The coordinator is to put one question to the founder: delete them in a follow-up run, or leave them. The answer is to be recorded here verbatim; if the answer is delete, it is booked as an owned TODOS.md item in the same records change. This is an owned follow-up, not a silent leftover.
+CLOSED, 2026-11-23. The coordinator decided to delete them (option a) under the founder's Q5 ruling recorded in 225-CONTEXT.md, "Delete also all associated factsheet, data etc.", because these rows are derived data of the keys deleted under that ruling. No new founder question was needed.
+
+Follow-up run: the marker named PROD. Re-reading the rows right before the delete gave 0 `key_inputs:<deleted key id>` rows, not 3. The 5 derive_allocator_equity recompose jobs that delete.sql queued (one per owner) had all reached `done`, and the recompose rewrote each owner's derived rows without the deleted keys. Because the set differed, nothing was deleted by hand. Before: 3 rows (census right after delete.sql). After: 0 rows, removed by the product's own recompose. No TODOS.md item is owed.
 
 ## Hand-off to 155.2 plan 12
 
-Deleting sealed k2 renumbers the MT5 ordinals that `docs/runbooks/mt5-parity/capture-keymap.sql` assigns (every MT5 key, disconnected included, by created_at then id): old k3 becomes k2, old k10 becomes k9. The 155.2 plan 12 recapture must build a fresh keymap and `labels.json` from PROD and never reuse the sealed ordinal list. The orchestrator relayed this in its run report to the coordinator for the founder and for whoever runs 155.2 plan 12; that relay is recorded here, with the founder-facing relay pending through the coordinator.
+Deleting sealed k2 renumbers the MT5 ordinals that `docs/runbooks/mt5-parity/capture-keymap.sql` assigns (every MT5 key, disconnected included, by created_at then id): old k3 becomes k2, old k10 becomes k9. The 155.2 plan 12 recapture must build a fresh keymap and `labels.json` from PROD and never reuse the sealed ordinal list. The orchestrator relayed this in its run report to the coordinator for the founder and for whoever runs 155.2 plan 12; the coordinator acknowledged it on 2026-11-23 and carries the renumbering into 155.2's re-plan (fresh keymap and labels.json, never the sealed one).
 
 ## Deviations from Plan
 
