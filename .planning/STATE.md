@@ -2,13 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
-status: planning
-last_updated: "2026-11-23T13:14:40.000Z"
+current_phase: 227
+current_phase_name: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job
+status: executing
+stopped_at: "v1.22 roadmap created (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK"
+last_updated: "2026-11-23T18:36:34.896Z"
 last_activity: 2026-11-23
+last_activity_desc: "v1.22 roadmap created: 21 phases (155.2, 157, 222, 223, 225, 226–241), 81/81 requirements mapped"
+state_head: 1cb738e7a443d03bf4e4d98166f7cf1136d2b1ff
 progress:
   total_phases: 21
   completed_phases: 0
-  total_plans: 20
+  total_plans: 31
   completed_plans: 14
   percent: 0
 ---
@@ -171,9 +176,9 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 226 (MT5SOAK) — ready to plan; wave 0, beside the read-only Deribit diagnosis
+Phase: 227 (JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job) — READY TO EXECUTE
 Plan: —
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-11-23 — v1.22 roadmap created: 21 phases (155.2, 157, 222, 223, 225, 226–241), 81/81 requirements mapped
 Progress: [░░░░░░░░░░] 0%
 

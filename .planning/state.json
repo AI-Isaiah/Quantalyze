@@ -6,12 +6,12 @@
     {
       "number": "155.2",
       "name": "LIVEPARITY",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "157",
       "name": "FOUNDER-CONFIRM",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "222",
@@ -110,9 +110,9 @@
     }
   ],
   "next": {
-    "command": "/gsd-plan-phase 226",
-    "label": "Plan the first phase (226 MT5SOAK, wave 0)",
-    "reason": "v1.22 roadmap created 2026-11-23 — 21 phases, Phase 226 needs a plan"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 7 of 21 · 0% · executing"
   },
-  "updated_at": "2026-11-23T13:14:40.000Z"
+  "updated_at": "2026-11-23T18:36:35.002Z"
 }

@@ -333,16 +333,25 @@ Plans:
 **Plans:** 11 plans
 
 Plans:
+**Wave 1**
 - [ ] 227-01-PLAN.md — The per-attempt failure ledger: a real error keeps its cause through the re-claim (MT5D-01)
-- [ ] 227-02-PLAN.md — The watchdog reset and reclaim record their cause and bridge the strategy's status, so the curated sentence survives (MT5D-01, HEAL-04)
 - [ ] 227-03-PLAN.md — Token-fenced claim renewal RPC: a renewed waiting job survives the watchdog (HEAL-02, SQL half)
 - [ ] 227-04-PLAN.md — The readmit-ceiling exhaustion row, written by a SQL detector pinned to the PROD sweep predicate (HEAL-03, durable half)
 - [ ] 227-05-PLAN.md — The first-hop sweep: a dropped first `sync_trades` enqueue is re-enqueued once, or shown in a named state; runbook registration (HEAL-01)
 - [ ] 227-06-PLAN.md — The daily positions poll covers private strategies and stays live, measured fresh on PROD (HEAL-05)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 227-02-PLAN.md — The watchdog reset and reclaim record their cause and bridge the strategy's status, so the curated sentence survives (MT5D-01, HEAL-04)
 - [ ] 227-07-PLAN.md — A reaped orphan keeps its cause, through a trigger on the terminalizer's transition (MT5D-01)
 - [ ] 227-08-PLAN.md — Worker: the pre-dispatch claim fence, the heartbeat renewal and the lost-mark error record (HEAL-02, MT5D-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 227-09-PLAN.md — Worker: the readmit-ceiling page through ops_alert, stamped on delivery (HEAL-03, page half)
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 227-10-PLAN.md — Every phase migration applies on the local-stack lane, the corpus passes, and the censuses are measured (SC-6)
+
+**Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 227-11-PLAN.md — The migrations-schedule-nothing census, the operator runbook, the validation map and the ship records
 
 ### Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key
