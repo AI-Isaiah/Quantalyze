@@ -3855,7 +3855,7 @@ COMMENT ON FUNCTION "public"."create_strategy_share"("p_strategy_id" "uuid") IS 
 
 
 
-CREATE OR REPLACE FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid", "p_venue_account_id" "text" DEFAULT NULL::"text") RETURNS TABLE("strategy_id" "uuid", "api_key_id" "uuid")
+CREATE OR REPLACE FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid", "p_venue_account_id" "text" DEFAULT NULL::"text", "p_venue_server" "text" DEFAULT NULL::"text") RETURNS TABLE("strategy_id" "uuid", "api_key_id" "uuid")
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
     SET "lock_timeout" TO '3s'
@@ -3865,36 +3865,13 @@ DECLARE
   v_key_id UUID;
   v_strategy_id UUID;
 BEGIN
-  -- ⭐ FINAL GATE (Phase 156 Migration B). Migration A's `authenticated` arm is
-  -- DELETED. Only service_role may write a wizard draft.
-  --
-  -- Fail-closed wrapper carried from
-  -- `20260515113753_log_audit_event_service_hardened.sql:130-160`: a malformed
-  -- request.jwt.claims makes auth.role() RAISE rather than return NULL. NULL
-  -- then fails the IS DISTINCT FROM test and is REFUSED.
-  --
-  -- ⛔ THE WIDTH OF THAT PRECEDENT IS REJECTED. log_audit_event_service admits
-  -- `auth.role() IN ('authenticated','service_role')` at 20260515113753:148.
-  -- `authenticated` is THE EXACT CALLER THIS PHASE EXISTS TO LOCK OUT; admitting
-  -- it here would make this layer a permanent no-op, so that a future GRANT leak
-  -- would pass BOTH layers. Carry that file's auth.role() choice, its fail-closed
-  -- wrapper, its self-contained REVOKE/GRANT and its body canary. Reject its
-  -- width. (156-PATTERNS.md §1; Rule 7 — pick one, say why, never average.)
-  --
-  -- ⛔ TRAP B — WHY auth.uid() IS ABSENT RATHER THAN RELAXED. `156-MEASUREMENTS.md`
-  -- § A2 MEASURED auth.uid() IS NULL for a service_role client. So a "relaxed"
-  -- comparison kept for safety — `IF v_auth_uid IS NOT NULL AND v_auth_uid <>
-  -- p_user_id` — would be a PERMANENT SILENT NO-OP: the ownership check vanishes
-  -- with no error, no 42501, and no test failure. Deleting it is HONEST; keeping
-  -- a decorative one is the `_assert_owner` shape at 20260411144407:300-302 that
-  -- this phase must not reproduce. Post-verify (e) below aborts the apply if the
-  -- literal `auth.uid()` reappears in either body.
-  --
-  -- ⛔ TRAP C — NEVER current_user / session_user. Inside a SECURITY DEFINER body
-  -- current_user is the OWNER, so a gate written on it ALWAYS PASSES — the bug
-  -- that made `prevent_profile_role_change` a no-op (20260811210000:518-523,
-  -- 20260411103316:313-321). session_user is `authenticator` for every PostgREST
-  -- request. auth.role() reads the JWT claim, which is the thing we mean.
+  -- FINAL GATE (Phase 156 Migration B, carried unchanged). Only service_role may
+  -- write a wizard draft. The fail-closed wrapper makes a malformed
+  -- request.jwt.claims REFUSE rather than pass. There is NO auth.uid() here and its
+  -- absence is deliberate: auth.uid() IS NULL under service_role, so a retained
+  -- comparison would be a permanent silent no-op. Ownership is bound at the route.
+  -- Never current_user or session_user: inside a SECURITY DEFINER body the first is
+  -- the owner and always passes.
   BEGIN
     v_jwt_role := auth.role();
   EXCEPTION WHEN OTHERS THEN
@@ -3907,30 +3884,25 @@ BEGIN
       USING ERRCODE = 'insufficient_privilege';
   END IF;
 
-  -- auth.uid() is NULL under service_role, so p_user_id is the ONLY carrier of
-  -- the owning identity and a NULL would silently mint an ownerless draft.
-  -- Refuse it explicitly rather than let the FK or a later read decide.
+  -- p_user_id is the ONLY carrier of the owning identity under service_role, and a
+  -- NULL would silently mint an ownerless draft.
   IF p_user_id IS NULL THEN
     RAISE EXCEPTION 'create_wizard_strategy: p_user_id must not be NULL'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
-  -- F6 (H-0304/H-0311/H-0186): idempotency fence. Serialize concurrent calls
-  -- carrying the same wizard_session_id on a transaction-scoped advisory lock
-  -- (auto-released on commit/rollback; advisory locks are not subject to
-  -- lock_timeout), then return any draft already created for this
-  -- (user, session) instead of minting a duplicate strategies + api_keys pair.
+  -- F6 idempotency fence: serialise concurrent calls carrying the same
+  -- wizard_session_id on a transaction-scoped advisory lock, then return any
+  -- COMPLETE draft already created for this (user, session) instead of minting a
+  -- duplicate strategies + api_keys pair.
   PERFORM pg_advisory_xact_lock(
     hashtext('wizdraft:' || p_user_id::text || ':' || p_wizard_session_id::text)
   );
 
-  -- Only replay a COMPLETE draft (api_key_id present). If an orphaned draft
-  -- exists for this session with a NULL api_key_id (its api_keys row was deleted
-  -- out from under it via the ON DELETE SET NULL FK), do NOT hand back a NULL
-  -- key — fall through so the INSERT trips strategies_user_wizard_session_uniq
-  -- (23505 → the route's recoverable DRAFT_ALREADY_EXISTS 409) instead of
-  -- returning a NULL api_key_id the route would reject with a permanent 500
-  -- (red-team MEDIUM-1: route fence requires api_key_id; the two must agree).
+  -- Only replay a COMPLETE draft (api_key_id present). An orphaned draft whose
+  -- api_keys row was deleted (ON DELETE SET NULL) falls through, so the INSERT trips
+  -- strategies_user_wizard_session_uniq (23505, the route's recoverable
+  -- DRAFT_ALREADY_EXISTS 409) rather than returning a NULL key.
   SELECT s.id, s.api_key_id
     INTO v_strategy_id, v_key_id
     FROM strategies s
@@ -3944,47 +3916,33 @@ BEGIN
     RETURN;
   END IF;
 
-  -- 153.6 / PARITY-04: attested_venue is stamped HERE, inside the SECURITY
-  -- DEFINER body, which is the only kind of writer whose value survives the
-  -- api_keys_scrub_attested_venue trigger.
-  -- ⛔ p_exchange IS STILL CALLER-SUPPLIED AND STILL NOT VALIDATED HERE. Both
-  -- columns are written from that ONE parameter deliberately: the CHECK
-  -- api_keys_attested_venue_matches_exchange requires it, so this INSERT cannot
-  -- mint an attestation that disagrees with the routing label.
-  --
-  -- ⭐ CR-01 STATUS UNDER MIGRATION B: CLOSED for the browser, BOUNDED for us.
-  -- `authenticated` no longer holds EXECUTE (§3), so the direct-RPC path is shut
-  -- and the only callers are our two routes, which pass the venue the server
-  -- observed a successful read-only authentication at. The residual that REMAINS
-  -- is the service_role trust boundary itself — see header ⛔ (iii). Do not read
-  -- this as "the venue cannot be forged".
+  -- 153.6 / PARITY-04: attested_venue is stamped HERE, inside the SECURITY DEFINER
+  -- body, the only kind of writer whose value survives the
+  -- api_keys_scrub_attested_venue trigger. Both columns come from the ONE parameter
+  -- p_exchange so the CHECK api_keys_attested_venue_matches_exchange holds. p_exchange
+  -- is caller-supplied and not validated here: that residual is the service_role
+  -- trust boundary, not something this body can close.
   --
   -- 154 / WIZCONT-02: venue_account_id is stamped here for the same structural
-  -- reason. ⛔ It is NOT coupled to p_exchange and must not be: it identifies an
-  -- ACCOUNT WITHIN a venue, not the venue. It is NULL for every venue that
-  -- exposes no stable non-secret account id, which is every ccxt venue today,
-  -- and the partial index excludes those rows.
-  -- ⛔ Do not "fix" it by adding validation here — the value has no in-database
-  -- oracle to check against, and a plausible-looking check would hide the residual.
+  -- reason, NORMALISED as NULLIF(btrim(..., E' \t\r\n'), ''): without the btrim a
+  -- stray space makes the dedup miss, and without the NULLIF an unset field would
+  -- arrive as a non-NULL blank that api_keys_venue_account_id_nonblank refuses with a
+  -- 23514 the wizard route has no handler for. The explicit character set (space, tab,
+  -- carriage return, newline) makes a tab-only value blank too (225 / SF-M4).
   --
-  -- ⭐ NORMALISED AT THE STAMP SITE: btrim, then blank → NULL. (1) Without btrim,
-  -- ' 5551234' and '5551234' are DIFFERENT index keys, so a stray space from the
-  -- form makes the dedup MISS entirely. (2) Without the NULLIF, an unset field
-  -- arriving as '' would be stored as a non-NULL value the partial index governs,
-  -- colliding two GENUINELY DIFFERENT accounts — api_keys_venue_account_id_nonblank
-  -- would REFUSE that INSERT with 23514, which the wizard route has no handler
-  -- for. Keep this expression and the CHECK in agreement.
+  -- 225 / CONN-03: venue_server is stamped in the same INSERT, trimmed, lower-cased
+  -- and blank-to-NULL. An omitted parameter stores NULL (the wildcard).
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
     dek_encrypted, nonce, kek_version, is_active,
-    attested_venue, venue_account_id
+    attested_venue, venue_account_id, venue_server
   )
   VALUES (
     p_user_id, p_exchange, p_label,
     p_api_key_encrypted, p_api_secret_encrypted, p_passphrase_encrypted,
     p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1), TRUE,
-    p_exchange, NULLIF(btrim(p_venue_account_id), '')
+    p_exchange, NULLIF(btrim(p_venue_account_id, E' \t\r\n'), ''), NULLIF(lower(btrim(p_venue_server, E' \t\r\n')), '')
   )
   RETURNING id INTO v_key_id;
 
@@ -4005,10 +3963,10 @@ END;
 $$;
 
 
-ALTER FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid", "p_venue_account_id" "text") OWNER TO "postgres";
+ALTER FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid", "p_venue_account_id" "text", "p_venue_server" "text") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid", "p_venue_account_id" "text") IS 'Atomic, idempotent api_keys + strategies (source=wizard, status=draft) insert. SECURITY DEFINER — guard_wizard_draft_updates allows the write via the current_user shift, and both api_keys scrub triggers admit the owner. F6: a per-(user, wizard_session_id) advisory lock + select-existing fence dedups double-submits to one draft (audit H-0304/H-0311/H-0186); strategies_user_wizard_session_source_uniq is the backstop. 153.6/PARITY-04: stamps attested_venue from p_exchange (the coupling CHECK api_keys_attested_venue_matches_exchange requires the two to agree). 154/WIZCONT-02: stamps venue_account_id from p_venue_account_id, NORMALISED as NULLIF(btrim(...), '''') so a stray space cannot make the dedup miss and a blank field cannot become an identity. ⭐ 156/Migration B (20260814120000): SERVICE_ROLE ONLY — authenticated EXECUTE is REVOKED and the in-body gate is auth.role() IS DISTINCT FROM ''service_role''. There is NO auth.uid() check and its absence is deliberate: auth.uid() IS NULL under service_role, so a retained comparison would be a permanent silent no-op. Ownership is bound at the route (p_user_id is withAuth''s getUser()-verified user.id, ADR-0022). ⛔ p_venue_account_id is STILL NOT VALIDATED here — only the server can pass it now, but the value has no in-database oracle, so it remains "what the server passed", not "what the venue confirmed". ⛔ EXACTLY ONE OVERLOAD OF THIS FUNCTION MAY EXIST: PostgREST resolves rpc() by named parameters and answers PGRST203 if a second candidate appears, which breaks connect-a-key for every user. Add parameters by DROP + CREATE (WITH RE-ISSUED GRANTS — see the migration header, pg_default_acl re-grants anon and authenticated on DROP), never by CREATE OR REPLACE. See migrations 031, 126, 127, 20260602190000, 20260811210000, 20260812083206, 20260813150106.';
+COMMENT ON FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid", "p_venue_account_id" "text", "p_venue_server" "text") IS 'Atomic, idempotent api_keys + strategies (source=wizard, status=draft) insert. SECURITY DEFINER; guard_wizard_draft_updates allows the write via the current_user shift, and both api_keys scrub triggers admit the owner. F6: a per-(user, wizard_session_id) advisory lock + select-existing fence dedups double-submits to one draft; strategies_user_wizard_session_source_uniq is the backstop. 153.6/PARITY-04: stamps attested_venue from p_exchange. 154/WIZCONT-02: stamps venue_account_id from p_venue_account_id, NORMALISED so a stray space cannot make the dedup miss and a blank field cannot become an identity. 156/Migration B (20260814120000): SERVICE_ROLE ONLY; authenticated EXECUTE is REVOKED and the in-body gate is auth.role() IS DISTINCT FROM ''service_role''. There is NO auth.uid() check and its absence is deliberate. p_venue_account_id is STILL NOT VALIDATED here; the value has no in-database oracle. 225/CONN-03: the trailing p_venue_server TEXT DEFAULT NULL is stored trimmed and lower-cased in the same INSERT (NULL when omitted or blank, which every app fence reads as a wildcard), so a caller that omits it keeps working. EXACTLY ONE OVERLOAD OF THIS FUNCTION MAY EXIST: PostgREST resolves rpc() by named parameters and answers PGRST203 if a second candidate appears. Add parameters by DROP + CREATE WITH RE-ISSUED GRANTS (pg_default_acl re-grants anon and authenticated on DROP), never by CREATE OR REPLACE.';
 
 
 
@@ -11180,6 +11138,212 @@ COMMENT ON FUNCTION "public"."strategy_shares_enforce_monotonic_generation"() IS
 
 
 
+CREATE OR REPLACE FUNCTION "public"."swap_account_slot"("p_new_key" "uuid", "p_old_holder" "uuid", "p_venue_account_id" "text", "p_venue_server" "text" DEFAULT NULL::"text") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    SET "lock_timeout" TO '3s'
+    AS $$
+DECLARE
+  v_row            record;
+  v_is_active      boolean;
+  v_disconnected   timestamptz;
+  v_sync_status    text;
+  v_working        boolean;
+  v_login          text := btrim(p_venue_account_id, E' \t\r\n');
+  v_server         text := NULLIF(lower(btrim(p_venue_server, E' \t\r\n')), '');
+  v_found_new      boolean := false;
+  v_found_old      boolean := false;
+  v_new_owner      uuid;
+  v_old_owner      uuid;
+  v_new_exchange   text;
+  v_old_exchange   text;
+  v_new_disc       timestamptz;
+  v_old_disc       timestamptz;
+  v_new_working    boolean;
+  v_old_working    boolean;
+  v_new_login      text;
+  v_old_login      text;
+  v_old_server     text;
+  v_new_holder     uuid;
+  v_old_holder_of  uuid;
+BEGIN
+  -- 1. The call must name two different keys and a non-blank login.
+  IF p_new_key = p_old_holder OR v_login IS NULL OR v_login = '' THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The new key and the old holder must be two different keys and the login must not be blank.';
+  END IF;
+
+  IF char_length(v_server) > 128 THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The broker server is longer than 128 characters.';
+  END IF;
+
+  -- 2. Lock the two named rows AND every key marked against the old holder, in ONE
+  --    id-ordered pass, so two swaps (or a swap and a stamp) that touch any of these rows
+  --    queue on the same first row instead of deadlocking, and read the two named rows
+  --    into the local variables (a dependent row is locked and otherwise ignored here).
+  --    The working-ness expression is written ONCE, here (D-18, founder 2026-09-27):
+  --    active, connected, and a last sync that is NULL or none of the failing statuses.
+  --    The explicit NULL leg is required: a status test over NULL is NULL, IF treats NULL
+  --    as false, and a key that has never synced would be read as failing.
+  FOR v_row IN
+    SELECT id, user_id, exchange, venue_account_id, venue_server,
+           account_shared_with_api_key_id, is_active, disconnected_at, sync_status
+      FROM public.api_keys
+     WHERE id IN (p_new_key, p_old_holder)
+        OR account_shared_with_api_key_id = p_old_holder
+     ORDER BY id
+       FOR UPDATE
+  LOOP
+    v_is_active    := v_row.is_active;
+    v_disconnected := v_row.disconnected_at;
+    v_sync_status  := v_row.sync_status;
+    v_working      := false;
+    IF v_is_active AND v_disconnected IS NULL AND (v_sync_status IS NULL OR v_sync_status NOT IN ('revoked', 'sign_in_failed', 'error')) THEN
+      v_working := true;
+    END IF;
+
+    IF v_row.id = p_new_key THEN
+      v_found_new    := true;
+      v_new_owner    := v_row.user_id;
+      v_new_exchange := v_row.exchange;
+      v_new_disc     := v_disconnected;
+      v_new_working  := v_working;
+      v_new_login    := v_row.venue_account_id;
+      v_new_holder   := v_row.account_shared_with_api_key_id;
+    ELSIF v_row.id = p_old_holder THEN
+      v_found_old     := true;
+      v_old_owner     := v_row.user_id;
+      v_old_exchange  := v_row.exchange;
+      v_old_disc      := v_disconnected;
+      v_old_working   := v_working;
+      v_old_login     := v_row.venue_account_id;
+      v_old_server    := NULLIF(lower(btrim(v_row.venue_server, E' \t\r\n')), '');
+      v_old_holder_of := v_row.account_shared_with_api_key_id;
+    END IF;
+  END LOOP;
+
+  -- 3. Refusals, in a fixed order. Each one writes nothing.
+  IF NOT v_found_new OR NOT v_found_old THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_NOT_FOUND'
+      USING ERRCODE = 'P0002',
+            DETAIL  = 'One of the two named keys does not exist.';
+  END IF;
+
+  IF v_new_owner IS DISTINCT FROM v_old_owner THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_NOT_SAME_OWNER'
+      USING ERRCODE = '42501',
+            DETAIL  = 'The two keys must belong to the same user.';
+  END IF;
+
+  IF v_new_disc IS NOT NULL OR v_old_disc IS NOT NULL THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_NOT_LIVE'
+      USING ERRCODE = '55000',
+            DETAIL  = 'Both keys must be live (disconnected_at IS NULL).';
+  END IF;
+
+  IF v_new_exchange IS DISTINCT FROM v_old_exchange THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The two keys are on different exchanges.';
+  END IF;
+
+  IF v_old_login IS DISTINCT FROM v_login THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The old holder does not hold the account the caller named.';
+  END IF;
+
+  -- NULL on either side is the wildcard (Q2 / F-3): a server not captured yet matches any.
+  IF v_old_server IS NOT NULL AND v_server IS NOT NULL AND v_old_server <> v_server THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The old holder sits on a different broker server than the one named.';
+  END IF;
+
+  IF v_old_holder_of IS NOT NULL THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The old holder is itself marked as sharing another key''s account, so it holds no slot.';
+  END IF;
+
+  IF v_new_login IS NOT NULL THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The new key already holds an account of its own.';
+  END IF;
+
+  IF v_new_holder IS NOT NULL AND v_new_holder <> p_old_holder THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_IDENTITY_MISMATCH'
+      USING ERRCODE = '22023',
+            DETAIL  = 'The new key is marked against a different key than the old holder.';
+  END IF;
+
+  IF v_old_working THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_HOLDER_WORKING'
+      USING ERRCODE = '55000',
+            DETAIL  = 'The old holder is still working (D-18), so it keeps the account.';
+  END IF;
+
+  IF NOT v_new_working THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_NEW_KEY_NOT_WORKING'
+      USING ERRCODE = '55000',
+            DETAIL  = 'The new key is not working (D-18), so it cannot take the account.';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+      FROM public.api_keys d
+     WHERE d.account_shared_with_api_key_id = p_old_holder
+       AND d.account_share_kind = 'composite_member'
+  ) THEN
+    RAISE EXCEPTION 'ACCOUNT_SLOT_COMPOSITE_DEPENDENT'
+      USING ERRCODE = '23000',
+            DETAIL  = 'A composite depends on the old holder (out of scope, F-2), so the slot is not moved.';
+  END IF;
+
+  -- 4. Writes, in the order the marker trigger and the unique index require.
+  -- (a) A new key that was marked against the old holder is unmarked first.
+  IF v_new_holder IS NOT NULL THEN
+    UPDATE public.api_keys
+       SET account_shared_with_api_key_id = NULL,
+           account_share_kind             = NULL
+     WHERE id = p_new_key;
+  END IF;
+
+  -- (b) Every duplicate dependent of the old holder now points at the new key.
+  UPDATE public.api_keys
+     SET account_shared_with_api_key_id = p_new_key
+   WHERE account_shared_with_api_key_id = p_old_holder
+     AND account_share_kind = 'duplicate'
+     AND id <> p_new_key;
+
+  -- (c) The old holder gives up the login and the server and is marked, in ONE statement.
+  UPDATE public.api_keys
+     SET venue_account_id               = NULL,
+         venue_server                   = NULL,
+         account_shared_with_api_key_id = p_new_key,
+         account_share_kind             = 'duplicate'
+   WHERE id = p_old_holder;
+
+  -- (d) The new key takes the account. A NULL caller server never erases the known one.
+  UPDATE public.api_keys
+     SET venue_account_id = v_login,
+         venue_server     = COALESCE(v_server, v_old_server)
+   WHERE id = p_new_key;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."swap_account_slot"("p_new_key" "uuid", "p_old_holder" "uuid", "p_venue_account_id" "text", "p_venue_server" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."swap_account_slot"("p_new_key" "uuid", "p_old_holder" "uuid", "p_venue_account_id" "text", "p_venue_server" "text") IS 'Phase 225 ONEACCOUNTONCE (MT5D-08, Q1, D-25), migration 20261123180100: moves an account''s holder slot from a same-owner key that is NOT working (D-18) to a same-owner key that IS, in ONE transaction on the two rows and the old holder''s dependents locked FOR UPDATE in one id-ordered pass (function-level lock_timeout 3s): the new key is stamped with the login and the normalised server (the old holder''s captured server when the caller passes none), the old holder gives up its login and its server and is marked ''duplicate'' against the new key, and every ''duplicate'' dependent of the old holder is re-pointed at the new key. Nothing is disconnected or deleted. Returns void; the caller audits and enqueues the recompose. Refusals (message = token, static DETAIL, nothing written): ACCOUNT_SLOT_NOT_FOUND P0002; ACCOUNT_SLOT_NOT_SAME_OWNER 42501; ACCOUNT_SLOT_NOT_LIVE 55000; ACCOUNT_SLOT_IDENTITY_MISMATCH 22023; ACCOUNT_SLOT_HOLDER_WORKING 55000; ACCOUNT_SLOT_NEW_KEY_NOT_WORKING 55000; ACCOUNT_SLOT_COMPOSITE_DEPENDENT 23000 (a composite_member dependent is out of scope, F-2). Service-role only; callers are the connect routes and the analytics identity stamper.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."sync_profile_email_from_auth"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -13012,6 +13176,7 @@ CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     "account_balance_usdt_close_date" "date",
     "history_reconstructed_at" timestamp with time zone,
     "history_reconstruct_attempts" integer DEFAULT 0 NOT NULL,
+    "venue_server" "text",
     CONSTRAINT "api_keys_account_currency_code" CHECK ((("account_currency" IS NULL) OR ("account_currency" ~ '^[A-Z]{2,10}$'::"text"))),
     CONSTRAINT "api_keys_account_share_both_or_neither" CHECK ((("account_shared_with_api_key_id" IS NULL) = ("account_share_kind" IS NULL))),
     CONSTRAINT "api_keys_account_share_kind_valid" CHECK ((("account_share_kind" IS NULL) OR ("account_share_kind" = ANY (ARRAY['duplicate'::"text", 'composite_member'::"text"])))),
@@ -13021,7 +13186,9 @@ CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     CONSTRAINT "api_keys_history_inclusion_valid" CHECK ((("history_inclusion" IS NULL) OR ("history_inclusion" = ANY (ARRAY['include'::"text", 'exclude'::"text"])))),
     CONSTRAINT "api_keys_history_reconstruct_attempts_nonneg" CHECK (("history_reconstruct_attempts" >= 0)),
     CONSTRAINT "api_keys_sync_status_check" CHECK (("sync_status" = ANY (ARRAY['idle'::"text", 'syncing'::"text", 'computing'::"text", 'complete'::"text", 'complete_with_warnings'::"text", 'error'::"text", 'revoked'::"text", 'rate_limited'::"text", 'sign_in_failed'::"text"]))),
-    CONSTRAINT "api_keys_venue_account_id_nonblank" CHECK ((("venue_account_id" IS NULL) OR ("btrim"("venue_account_id") <> ''::"text")))
+    CONSTRAINT "api_keys_venue_account_id_nonblank" CHECK ((("venue_account_id" IS NULL) OR ("btrim"("venue_account_id") <> ''::"text"))),
+    CONSTRAINT "api_keys_venue_server_valid" CHECK ((("venue_server" IS NULL) OR (("btrim"("venue_server", ' 	
+'::"text") <> ''::"text") AND ("char_length"("venue_server") <= 128))))
 );
 
 
@@ -13101,6 +13268,10 @@ COMMENT ON COLUMN "public"."api_keys"."history_reconstructed_at" IS 'Phase 167.1
 
 
 COMMENT ON COLUMN "public"."api_keys"."history_reconstruct_attempts" IS 'Phase 167.1.2.1 D-04. How many times the daily fan-out has enqueued a reconstruct for this key. Incremented only by the fan-out SQL, in the same transaction as the enqueue (D-17), and capped at 5 by PR 2 (D-09). Not reset on reconnect (D-16). Written only under service_role; no client INSERT or UPDATE path exists. READABLE BY authenticated (column GRANT), scoped by the owner RLS on api_keys. anon has NO grant.';
+
+
+
+COMMENT ON COLUMN "public"."api_keys"."venue_server" IS 'Phase 225 ONEACCOUNTONCE (CONN-03, founder ruling Q2). The normalised broker server of an MT5 key (trimmed, lower-cased), stored beside the bare login in venue_account_id so the same login on two different brokers is two different accounts. PLAINTEXT by founder ruling: a broker server name is not a credential. NULL means "not captured yet" and every app fence treats NULL as a wildcard that matches any server; a blank or over-128-character value is refused by api_keys_venue_server_valid. MT5 only. NOT granted to anon or authenticated, and not part of the browser column allowlist.';
 
 
 
@@ -18106,8 +18277,8 @@ GRANT ALL ON FUNCTION "public"."create_strategy_share"("p_strategy_id" "uuid") T
 
 
 
-REVOKE ALL ON FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid", "p_venue_account_id" "text") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid", "p_venue_account_id" "text") TO "service_role";
+REVOKE ALL ON FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid", "p_venue_account_id" "text", "p_venue_server" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid", "p_venue_account_id" "text", "p_venue_server" "text") TO "service_role";
 
 
 
@@ -18629,6 +18800,11 @@ GRANT ALL ON FUNCTION "public"."strategy_analytics_stamp_computing_started"() TO
 GRANT ALL ON FUNCTION "public"."strategy_shares_enforce_monotonic_generation"() TO "anon";
 GRANT ALL ON FUNCTION "public"."strategy_shares_enforce_monotonic_generation"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."strategy_shares_enforce_monotonic_generation"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."swap_account_slot"("p_new_key" "uuid", "p_old_holder" "uuid", "p_venue_account_id" "text", "p_venue_server" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."swap_account_slot"("p_new_key" "uuid", "p_old_holder" "uuid", "p_venue_account_id" "text", "p_venue_server" "text") TO "service_role";
 
 
 
