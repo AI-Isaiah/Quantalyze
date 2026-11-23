@@ -330,15 +330,15 @@ Plans:
 4. A job reclaimed after a crash keeps its curated error sentence, and its strategy's analytics status follows the reclaim. The lane arm that re-stamps a different sentence under the same job id shows the reclaimed one surviving. (HEAL-04)
 5. The daily positions poll enqueues private strategies too, so they get position snapshots, and the `poll_positions` enqueue stays live. (HEAL-05)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. New SQL arms carry `RED-UNDER` twins and list their migration in `RED-UNDER-SETUP`. Raising retries or a watchdog threshold is not a close. Each migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding before merge, and runs in the one serial migration lane (they auto-apply to PROD).
-**Plans:** 11 plans
+**Plans:** 5/11 plans executed
 
 Plans:
 **Wave 1**
-- [ ] 227-01-PLAN.md — The per-attempt failure ledger: a real error keeps its cause through the re-claim (MT5D-01)
-- [ ] 227-03-PLAN.md — Token-fenced claim renewal RPC: a renewed waiting job survives the watchdog (HEAL-02, SQL half)
-- [ ] 227-04-PLAN.md — The readmit-ceiling exhaustion row, written by a SQL detector pinned to the PROD sweep predicate (HEAL-03, durable half)
-- [ ] 227-05-PLAN.md — The first-hop sweep: a dropped first `sync_trades` enqueue is re-enqueued once, or shown in a named state; runbook registration (HEAL-01)
-- [ ] 227-06-PLAN.md — The daily positions poll covers private strategies and stays live, measured fresh on PROD (HEAL-05)
+- [x] 227-01-PLAN.md — The per-attempt failure ledger: a real error keeps its cause through the re-claim (MT5D-01)
+- [x] 227-03-PLAN.md — Token-fenced claim renewal RPC: a renewed waiting job survives the watchdog (HEAL-02, SQL half)
+- [x] 227-04-PLAN.md — The readmit-ceiling exhaustion row, written by a SQL detector pinned to the PROD sweep predicate (HEAL-03, durable half)
+- [x] 227-05-PLAN.md — The first-hop sweep: a dropped first `sync_trades` enqueue is re-enqueued once, or shown in a named state; runbook registration (HEAL-01)
+- [x] 227-06-PLAN.md — The daily positions poll covers private strategies and stays live, measured fresh on PROD (HEAL-05)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 227-02-PLAN.md — The watchdog reset and reclaim record their cause and bridge the strategy's status, so the curated sentence survives (MT5D-01, HEAL-04)
@@ -649,7 +649,7 @@ Plans:
 | 223. FLOWKINDS | 0/? | Not started | - |
 | 225. ONEACCOUNTONCE | 0/? | Not started | - |
 | 226. MT5SOAK | 0/? | Not started | - |
-| 227. JOBLEDGER | 0/11 | Not started | - |
+| 227. JOBLEDGER | 5/11 | In Progress | - |
 | 228. KEYANSWERS | 0/? | Not started | - |
 | 229. MT5DERIVE2 | 0/? | Not started | - |
 | 230. MT5NIGHTLY | 0/? | Not started | - |
