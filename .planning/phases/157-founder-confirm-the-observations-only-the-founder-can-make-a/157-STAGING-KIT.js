@@ -29,6 +29,11 @@
 //   - under /auth/v1/: only POST /auth/v1/token (the session refresh) passes, the rest is refused;
 //   - anything else (cross-origin telemetry such as PostHog or Sentry): passed, and logged in
 //     __fconf.outside so it is visible.
+// Evidence logs: __fconf.hits (stubbed), .passed (sent on), .refused (599) and .outside (passed
+// telemetry writes). Each entry is { at: ISO time, mode, envelope, request: "METHOD scrubbed-path",
+// status: the status served (a passed entry holds "pending" until the real response lands, or
+// "network-error") }; ids stay scrubbed. arm() pushes { at, mode, envelope, boundary: true } into all
+// four arrays, so one arm's entries are told apart from the next arm's.
 // Before arm() the stub and pass tables are empty, so every /api/ and /rest/v1/ call is refused.
 // The kit never reads request bodies, request headers or any browser storage.
 // The only writes that reach the network are the session refresh and that outside telemetry.
@@ -362,6 +367,30 @@
   var refused = [];
   var outside = [];
 
+  function entry(request, status) {
+    return {
+      at: new Date().toISOString(),
+      mode: state.mode,
+      envelope: state.envelope,
+      request: request,
+      status: status,
+    };
+  }
+
+  // a passed or outside entry learns the status the native fetch actually served
+  function served(e, promise) {
+    return promise.then(
+      function (res) {
+        e.status = res.status;
+        return res;
+      },
+      function (err) {
+        e.status = "network-error";
+        throw err;
+      },
+    );
+  }
+
   function marker() {
     var el = document.getElementById(MARKER_ID);
     if (!el) {
@@ -394,7 +423,7 @@
       verdict = decide(method, href, state.mode, state.envelope);
     } catch (err) {
       // fail closed: a request the router could not classify never reaches the network
-      refused.push("UNCLASSIFIED (router threw)");
+      refused.push(entry("UNCLASSIFIED (router threw)", 599));
       return Promise.resolve(
         new Response('{"code":"FCONF_REFUSED"}', {
           status: 599,
@@ -403,11 +432,13 @@
       );
     }
     if (verdict.kind === "outside") {
-      if (verdict.write) outside.push(scrub(method, href));
-      return orig(input, init);
+      if (!verdict.write) return orig(input, init);
+      var oe = entry(scrub(method, href), "pending");
+      outside.push(oe);
+      return served(oe, orig(input, init));
     }
     if (verdict.kind === "stub") {
-      hits.push(scrub(method, href));
+      hits.push(entry(scrub(method, href), verdict.stub.status));
       if (verdict.stub.consumes) {
         state.envelope = null;
         paint();
@@ -415,10 +446,11 @@
       return Promise.resolve(respond(verdict.stub));
     }
     if (verdict.kind === "pass") {
-      passed.push(scrub(method, href));
-      return orig(input, init);
+      var pe = entry(scrub(method, href), "pending");
+      passed.push(pe);
+      return served(pe, orig(input, init));
     }
-    refused.push(scrub(method, href));
+    refused.push(entry(scrub(method, href), 599));
     return Promise.resolve(
       new Response('{"code":"FCONF_REFUSED"}', {
         status: 599,
@@ -448,6 +480,9 @@
       state.mode = mode;
       state.envelope = envelopeCode || null;
       paint();
+      [hits, passed, refused, outside].forEach(function (log) {
+        log.push({ at: new Date().toISOString(), mode: state.mode, envelope: state.envelope, boundary: true });
+      });
     },
     hits: hits,
     passed: passed,

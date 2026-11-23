@@ -92,6 +92,9 @@ function makeEnv({ nextF = true, ignoreFetchAssign = false } = {}) {
   };
 }
 
+// evidence-log entries without the arm boundaries, as the "METHOD path" strings
+const reqs = (log) => [...log].filter((e) => !e.boundary).map((e) => e.request);
+
 const post = (path) => new Request(APP(path), { method: "POST" });
 
 // ---- tracer cases: connect mode, fail closed, passthrough boundaries ----------------------------
@@ -121,7 +124,7 @@ test("(c) connect: a draft DELETE is refused with 599, logged with the id scrubb
   env.fconf().arm("connect");
   const res = await env.call(new Request(APP(`/api/strategies/draft/${ID}`), { method: "DELETE" }));
   assert.equal(res.status, 599);
-  assert.deepEqual([...env.fconf().refused], ["DELETE /api/strategies/draft/:id"]);
+  assert.deepEqual(reqs(env.fconf().refused), ["DELETE /api/strategies/draft/:id"]);
   assert.equal(env.spyCalls.length, 0);
 });
 
@@ -131,7 +134,7 @@ test("(d) only the auth token refresh reaches the native fetch exactly once; eve
   const res = await env.call("https://proj.supabase.example/auth/v1/token?grant_type=refresh_token", { method: "POST" });
   assert.equal(res.status, 200);
   assert.equal(env.spyCalls.length, 1);
-  assert.deepEqual([...env.fconf().passed], ["POST /auth/v1/token"]);
+  assert.deepEqual(reqs(env.fconf().passed), ["POST /auth/v1/token"]);
   for (const [method, path] of [["PUT", "/auth/v1/user"], ["POST", "/auth/v1/logout"], ["POST", "/auth/v1/signup"]]) {
     const refused = await env.call(`https://proj.supabase.example${path}`, { method });
     assert.equal(refused.status, 599, `${method} ${path}`);
@@ -145,8 +148,8 @@ test("(e) a cross-origin telemetry POST reaches the native fetch and is logged i
   const res = await env.call("https://telemetry.example.test/capture/", { method: "POST" });
   assert.equal(res.status, 200);
   assert.equal(env.spyCalls.length, 1);
-  assert.deepEqual([...env.fconf().outside], ["POST /capture"]);
-  assert.deepEqual([...env.fconf().refused], []);
+  assert.deepEqual(reqs(env.fconf().outside), ["POST /capture"]);
+  assert.deepEqual(reqs(env.fconf().refused), []);
 });
 
 test("an outside GET reaches the native fetch and is not logged in outside", async () => {
@@ -155,7 +158,7 @@ test("an outside GET reaches the native fetch and is not logged in outside", asy
   await env.call("https://telemetry.example.test/decide/", { method: "GET" });
   await env.call(APP("/strategies/new/wizard?_rsc=abc"));
   assert.equal(env.spyCalls.length, 2);
-  assert.deepEqual([...env.fconf().outside], []);
+  assert.deepEqual(reqs(env.fconf().outside), []);
 });
 
 test("every mode refuses a same-origin write outside /api/ and a backend write on functions, storage or graphql, never sent", async () => {
@@ -175,8 +178,8 @@ test("every mode refuses a same-origin write outside /api/ and a backend write o
       assert.equal((await env.call(url, { method })).status, 599, `${mode} ${method} ${url}`);
     }
     assert.equal(env.spyCalls.length, 0, mode);
-    assert.equal(env.fconf().refused.length, targets.length, mode);
-    assert.deepEqual([...env.fconf().outside], [], mode);
+    assert.equal(reqs(env.fconf().refused).length, targets.length, mode);
+    assert.deepEqual(reqs(env.fconf().outside), [], mode);
   }
 });
 
@@ -185,7 +188,7 @@ test("(f) before any arm, a same-origin /api/ GET is refused (fail closed with n
   const res = await env.call(APP("/api/anything/at/all"));
   assert.equal(res.status, 599);
   assert.equal(env.spyCalls.length, 0);
-  assert.deepEqual([...env.fconf().refused], ["GET /api/anything/at/all"]);
+  assert.deepEqual(reqs(env.fconf().refused), ["GET /api/anything/at/all"]);
 });
 
 test("(g) the marker text names connect mode after arm", () => {
@@ -322,7 +325,7 @@ test("submit: the armed envelope is one-shot, a second finalize is refused and n
   assert.equal(first.status, 500);
   const second = await env.call(post("/api/strategies/finalize-wizard"));
   assert.equal(second.status, 599);
-  assert.deepEqual([...env.fconf().refused], ["POST /api/strategies/finalize-wizard"]);
+  assert.deepEqual(reqs(env.fconf().refused), ["POST /api/strategies/finalize-wizard"]);
   assert.equal(env.spyCalls.length, 0);
 });
 
@@ -450,7 +453,7 @@ test("the key permission read is refused in every armed mode and never sent (it 
     const res = await env.call(APP(`/api/keys/${ID}/permissions`), { method: "GET", cache: "no-store" });
     assert.equal(res.status, 599, mode);
     assert.equal(env.spyCalls.length, 0, mode);
-    assert.deepEqual([...env.fconf().refused], ["GET /api/keys/:id/permissions"], mode);
+    assert.deepEqual(reqs(env.fconf().refused), ["GET /api/keys/:id/permissions"], mode);
   }
 });
 
@@ -464,7 +467,7 @@ test("resume: the resume-path reads pass through and nothing is stubbed but the 
   await env.call(`${REST}/discovery_categories?select=id%2Cname&order=sort_order`);
   await env.call(APP("/api/keys/feeds"), { cache: "no-store" });
   assert.equal(env.spyCalls.length, 6);
-  assert.deepEqual([...env.fconf().hits], []);
+  assert.deepEqual(reqs(env.fconf().hits), []);
 });
 
 test("every mode refuses a write on /rest/v1/ and an unknown non-GET on /api/, never sent", async () => {
@@ -502,6 +505,45 @@ test("marker text per mode, and the submit marker drops to not armed once the en
   assert.equal(text(), "STAGED RESPONSES ACTIVE — FCONF-03 (submit: not armed)");
 });
 
+test("every log entry carries an ISO time, the mode, the envelope and the served status, with ids scrubbed", async () => {
+  const env = makeEnv();
+  env.fconf().arm("submit", "DRAFT_FINALIZE_FAILED");
+  await env.call(post("/api/strategies/finalize-wizard"));
+  await env.call(APP(`/api/strategies/${ID}/sync-progress`));
+  await env.call(new Request(APP(`/api/strategies/draft/${ID}`), { method: "DELETE" }));
+  await env.call("https://telemetry.example.test/capture/", { method: "POST" });
+  const [stubbed] = [...env.fconf().hits].filter((e) => !e.boundary);
+  const [sent] = [...env.fconf().passed].filter((e) => !e.boundary);
+  const [refusedEntry] = [...env.fconf().refused].filter((e) => !e.boundary);
+  const [telemetry] = [...env.fconf().outside].filter((e) => !e.boundary);
+  for (const e of [stubbed, sent, refusedEntry, telemetry]) {
+    assert.equal(new Date(e.at).toISOString(), e.at);
+    assert.equal(e.mode, "submit");
+    assert.equal(JSON.stringify(e).includes(ID), false);
+  }
+  // the consumed envelope is still named on the entry that served it
+  assert.deepEqual([stubbed.request, stubbed.envelope, stubbed.status], ["POST /api/strategies/finalize-wizard", "DRAFT_FINALIZE_FAILED", 500]);
+  // a passed entry learns the status of the real response (the spy answers 200)
+  assert.deepEqual([sent.request, sent.status], ["GET /api/strategies/:id/sync-progress", 200]);
+  assert.deepEqual([refusedEntry.request, refusedEntry.status], ["DELETE /api/strategies/draft/:id", 599]);
+  assert.deepEqual([telemetry.request, telemetry.status], ["POST /capture", 200]);
+});
+
+test("arm pushes a boundary entry into hits, passed, refused and outside, so arms are told apart", async () => {
+  const env = makeEnv();
+  env.fconf().arm("connect");
+  await env.call(APP("/api/no/such/route"));
+  env.fconf().arm("submit", "DRAFT_LOOKUP_FAILED");
+  for (const name of ["hits", "passed", "refused", "outside"]) {
+    const boundaries = [...env.fconf()[name]].filter((e) => e.boundary);
+    assert.deepEqual(boundaries.map((e) => [e.mode, e.envelope]), [["connect", null], ["submit", "DRAFT_LOOKUP_FAILED"]], name);
+    assert.equal(new Date(boundaries[0].at).toISOString(), boundaries[0].at, name);
+  }
+  // the refused entry sits between the two boundaries and is stamped with the first arm's mode
+  const log = [...env.fconf().refused];
+  assert.deepEqual(log.map((e) => (e.boundary ? "boundary" : e.mode)), ["boundary", "connect", "boundary"]);
+});
+
 test("scrub keeps METHOD and path, replaces ids, and keeps only the select param on REST entries", () => {
   const { scrub } = makeEnv().router;
   assert.equal(scrub("delete", APP(`/api/strategies/draft/${ID}`)), "DELETE /api/strategies/draft/:id");
@@ -520,5 +562,5 @@ test("a request the router cannot classify is refused with 599 and never sent (c
   const res = await env.call(unclassifiable, { method: "POST" });
   assert.equal(res.status, 599);
   assert.equal(env.spyCalls.length, 0);
-  assert.ok(env.fconf().refused.some((line) => line.startsWith("UNCLASSIFIED")));
+  assert.ok(env.fconf().refused.some((e) => e.request === "UNCLASSIFIED (router threw)"));
 });
