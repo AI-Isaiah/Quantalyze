@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.133.61.2] - 2026-11-23 — records: the seven open debug sessions closed as resolved before v1.18 closes
+
+Records PR. It holds no source, test or migration change. The seven tracked GSD debug sessions that were still open (`awaiting_human_verify` or `diagnosed`) were each re-measured at `main` 57bc06f2c and are now `status: resolved`. Every one of them was fixed by a phase that already shipped, so the sweep needed no new fix and no PROD write. The PROD reads were read only, with the marker query first. The files stay in `.planning/debug/`, the same place as the other resolved sessions, because tests, services and scripts cite their paths.
+
+### Changed
+- **`derivecron-compose-divergence.md`.** The per-step self-check is in `allocator_equity_derive._assert_forward_agreement` (#984). Follow-up 1 shipped as the full-history opening-run rule (`FULL_HISTORY_VENUES`), and follow-up 2 shipped as D-15 `dropped_day_pnl`. PROD shows 235 `derive_allocator_equity` jobs `done` in 30 days, with no refusal since 2026-10-08.
+- **`derivecron-compose-refusal.md`.** All three fix directions shipped in DERIBITWEDGE:
+  - the cash-basis wedge no longer adds `options_session_upl` twice (#1000);
+  - section 5's `is_dust` has an absolute USD ceiling (#991);
+  - an emptied interval composes as zero capital (`EMPTIED_FRACTION`).
+- **`e2e-equitychart-detached-320.md`.** Fixed by 169.1.1 HYDRATIONTICKS (#925, verification passed). No `Math.pow(10` or `10 **` tick math is left in `src` outside tests. Main run 45146128310 `e2e-seeded`: 306 passed, 0 flaky.
+- **`gsd-state-progress-drift.md`.** Fixed by the 2026-10-15 reshape (#1049), which hygiene rules 6d, 6e and 7 guard. The current Progress table and STATE agree at 16 of 16. The remaining upstream `phase complete` behaviours are owned in CLAUDE.md and in `.planning/research/gsd-tools-upstream-bugs.md`.
+- **`layout-narrow-probe-stops.md`.** Its human-verify step was a CI reading. It was taken from main run 45146128310: the per-column stops ran, MYSTRATTABLE V1100 and SC6-DISCOVERY V360 report 0 problems, and the fix is on `main` in #1225.
+- **`mm2x-dust-guard-after-floor.md`.** Fixed by FLOWTIMING's full-history inception day (#1018). MM-2x on PROD carries no `dust_nav_guard`, and `negative_nav_guard` fell from 9 rows to 0. 5 USD-unit rows still carry `dust_nav_guard`. They were not measured and are not claimed as closed.
+- **`unstamped-venue-account-id.md`.** Its human-verify step was a PROD census. It was taken read only:
+  - `all.live_keys_unstamped_unmarked 0` and `mt5.live_keys_unstamped_unmarked 0`;
+  - one of the two pre-column MT5 keys is marked `duplicate`, with the other as holder and exactly one audit event, as the session predicted.
+
+### Notes
+- **`gsd-tools audit-open` could not be run as the gate.** It stops on an unrelated archived v1.17 verification whose status is `failed`, a value outside its closed set. It was not edited here.
+- **New observation, not a session and not diagnosed.** One Deribit account's stored returns end 2026-10-26, while a flow is dated 2026-11-09 and its daily derives end `done`. This contributes to `out_of_window_flow` on three allocator books. It was handed back to the orchestrator.
+
 ## [0.133.61.1] - 2026-11-23 — records: 155.2 and 157 phase records, phases 221–225 booked, 155.2's remaining work, 157 and 221–225 moved to the next milestone, TODOS re-confirmed against PROD
 
 Records PR. It combines four local records branches with the founder's milestone decisions of 2026-11-23. v1.18 now holds 155, 155.1 and 207–220. All of them are complete, so v1.18 has no open phase and is ready for `/gsd-audit-milestone` and then `/gsd-complete-milestone`. 155.2's remaining work, 157 and 221–225 wait in the next milestone. No source, test or migration change. The code of 155.2 gap plan 17 shipped in #1306 (v0.133.61.0).

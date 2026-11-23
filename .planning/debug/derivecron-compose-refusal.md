@@ -1,8 +1,8 @@
 ---
-status: diagnosed
+status: resolved
 trigger: "167.1.2.2-05 PROD re-rehearsal 2026-10-08: one derive_allocator_equity compose failed_final with 'non-positive reconstructed equity on 755 of 1200 day(s) — a flow dominates prior capital (refusing to fabricate a floor)'. Allocator: 2 Deribit + 2 MT5 keys, every key derive done. Plan 02 (pre PR #984) refused the same book with 'self-check diverged at day-index 1024 of 1199'."
 created: 2026-10-09
-updated: 2026-10-09
+updated: 2026-11-23
 mode: find_root_cause_only (no code changed, no PROD write)
 ---
 
@@ -116,3 +116,14 @@ files_involved:
   - analytics-service/services/native_nav.py: _assert_inception_reconciled is_dust allowance (INCEPTION_NATIVE_DUST_REL x throughput)
   - analytics-service/services/allocator_equity_derive.py: replay_key_equity positivity refusal (`not (e > 0.0)`)
 specialist_hint: python
+
+## Resolution note 2026-11-23 (debug sweep before closing milestone v1.18)
+
+verdict: RESOLVED. All three fix directions in this file shipped in Phase 167.1.2.2.1 DERIBITWEDGE.
+- **Writer root.** The cash-basis terminal is `native_upnl - options_session_upl + options_value`, so `options_session_upl` is no longer added twice (`analytics-service/services/deribit_ingest.py`, the terminal-wedge docstring and code near `native_options_session_upl`). Shipped in b6b8c39d5 (#1000). The fixture this file proposed (`options_session_upl: 0.2`) is in `analytics-service/tests/test_deribit_ingest.py`.
+- **Writer gate.** Section 5's `is_dust` now ANDs in an absolute USD ceiling (`analytics-service/services/native_nav.py`, the comment beside `INCEPTION_NATIVE_DUST_REL`, `is_dust = is_dust and abs(resid) * mark0 <= dust_cap_usd`). Shipped in 3458d8e7e (#991).
+- **Compose.** An emptied interval composes as zero capital: `EMPTIED_FRACTION` (D-01), `EMPTIED_NEGATIVE_FRACTION` and `EMPTIED_RESTART_FLOOR_USD` in `analytics-service/services/allocator_equity_derive.py`. A level clearly below zero still refuses. Regression file: `analytics-service/tests/test_allocator_equity_emptied_stretch.py`.
+- **PROD reading 2026-11-23** (marker named PRODUCTION; read only):
+  - `derive_allocator_equity` has 0 non-`done` jobs since 2026-10-08 and 235 `done` in the last 30 days.
+  - All 7 current `equity_curve` books composed on 2026-11-23. Three carry the `emptied_stretch` flag, which means drained intervals now compose instead of refusing.
+- **Not re-measured here.** Whether the specific pre-2024 inception residual of this key still blocks. No current book lists `inception_unreconciled` among its degrade reasons.

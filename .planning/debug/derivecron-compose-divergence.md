@@ -1,8 +1,8 @@
 ---
-status: awaiting_human_verify
+status: resolved
 trigger: "D-12: 1 of 8 derive_allocator_equity composes failed_final in the 2026-10-07 rehearsal with 'forward/backward self-check diverged at day-index 1024 of 1199 - a roll-loop-vs-identity code divergence'"
 created: 2026-10-07
-updated: 2026-10-07
+updated: 2026-11-23
 ---
 
 ## Current Focus
@@ -185,3 +185,18 @@ Two flow-bearing MT5 keys also sit outside the band: +12.4% (2 dropped flow days
   Exact for Deribit (§5 already holds). For MT5 the deal ledger carries per-day P&L. More plumbing: epilogue, payload shape, compose.
 - **C. Widen the band** to absorb a day's P&L. Not recommended: there is no principled width (0.36% for A, 2% for F), it hides the early-level error, and D-14 chose 1e-4 deliberately.
 - **D. Drop the funding day's P&L from the check only** (compare against `level(d0) - F(d0) - pnl(d0)` without the data). Not possible: the compose does not have pnl(d0). That is what B supplies.
+
+## Resolution note 2026-11-23 (debug sweep before closing milestone v1.18)
+
+verdict: RESOLVED. The fix is on main and the symptom has not come back on PROD. Both follow-ups were decided and shipped.
+- **Self-check fix on main.** `analytics-service/services/allocator_equity_derive.py` `_assert_forward_agreement` checks each step from the stored previous level (`float(vals[t - 1]) * (1.0 + r)`). It landed in squash commit 2a107759d (#984, DERIVECRON). The regression file `analytics-service/tests/test_allocator_equity_self_check.py` is on main.
+- **Follow-up 1 (pre-window inception deposit) is decided and shipped.** `FULL_HISTORY_VENUES = {deribit, mt5}` in the same module: on those venues the adjacent opening run of flows goes to the zero-start check (`inception_unreconciled` / `opening_flows_reconciled`), not to `OUT_OF_WINDOW_FLOW`.
+- **Follow-up 2 (dropped-day P&L) is decided and shipped.** D-15 `dropped_day_pnl` is stored by the derive and read by the replay (`read_dropped_day_pnl`, `analytics-service/tests/test_allocator_equity_dropped_day_pnl.py`).
+- **PROD reading 2026-11-23** (marker named PRODUCTION; read only):
+  - `compute_jobs` kind `derive_allocator_equity`: 235 `done` and 0 of any other status in the last 30 days.
+  - All-time non-`done` jobs: exactly two, the 2026-10-07 self-check refusal and the 2026-10-08 positivity refusal (see derivecron-compose-refusal.md).
+- **Per-key reading 2026-11-23 of the 3 books that still carry `out_of_window_flow`:**
+  - Every Deribit and MT5 key's first flow is the day before its first return day. Those keys go through the opening-run path, so they are not what trips the flag.
+  - The flag comes from two other sources:
+    - a Bybit pre-window flow in one book. That venue is not full-history, and Phase 202 plan 03 recorded it as correct behaviour.
+    - one Deribit account whose stored returns end 2026-10-26 while it has a flow dated 2026-11-09. Its daily `derive_broker_dailies` jobs are all `done` (90 in 30 days). This is a NEW observation outside this session's scope and is NOT diagnosed here. It is reported to the orchestrator.

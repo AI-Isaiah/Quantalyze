@@ -1,8 +1,8 @@
 ---
-status: diagnosed
+status: resolved
 trigger: "after 164.6.6.2 plan 14 (BTC dust floor 1e-7, D-24) shipped and deployed, a fresh MM-2x re-derive on PROD still sets data_quality_flags.dust_nav_guard = true; plan 14 VERIFICATION expected it absent"
 created: 2026-10-08T20:10:00Z
-updated: 2026-10-08T20:45:00Z
+updated: 2026-11-23
 goal: find_root_cause_only
 ---
 
@@ -78,3 +78,13 @@ root_cause: services/nav_twr.py:483-489 (chain_linked_twr). For a full-history l
 fix: (not applied; diagnose only) Recommended: treat day 0 of a full-history reconstruction as the inception day. When prev0 is None and |NAV_0 - pnl_0 - F_0| <= floors.residual_abs_tol (zero within the unit's reconciliation tolerance), emit NaN for day 0 and raise no guard flag (or, if the founder wants it visible, a non-warning annotation outside NAV_TWR_GUARD_KEYS). Scope it to full-history combiners (MT5 / ledger_complete) through an explicit keyword, so retention-windowed venues, whose day-0 base is real capital, keep today's behaviour. Separately: flow_dominated_guard on 2025-10-17 (a 1.0 deposit on a 0.1 base) also forces complete_with_warnings, so plan 14's "computation_status stays complete" is unreachable for this ledger until the founder decides whether an early top-up deposit is a warning.
 verification: n/a (diagnose only)
 files_changed: []
+
+## Resolution note 2026-11-23 (debug sweep before closing milestone v1.18)
+
+verdict: RESOLVED. Phase 164.6.6.2.3 FLOWTIMING shipped the recommended fix (squash commit c2549158b, #1018).
+- **Code.** `analytics-service/services/nav_twr.py` `chain_linked_twr` takes `full_history` and `inception_certified` (D-01/D-12). Day 0 of a full-history account whose base is within `floors.residual_abs_tol` of zero is the inception day: no return and no guard flag. `analytics-service/services/broker_dailies.py` passes `full_history=True` on the MT5 deal-ledger paths.
+- **PROD reading 2026-11-23** (marker named PRODUCTION; read only):
+  - MM-2x `strategy_analytics` computed 2026-11-23 01:44Z carries no `dust_nav_guard` and no `flow_dominated_guard`.
+  - Its flags are `csv_source, cumulative_method, headline_since, marks_covered_from, marks_since, native_unit, tiny_base_days, tiny_base_guard, twr_chain_broken`. The `tiny_base_*` and `twr_chain_broken` flags belong to later phases (188 TINYBASE and others), not to this session.
+  - Census: `negative_nav_guard` went from 9 rows on 2026-10-08 to 0 of 46 `csv_source` rows. That fits the day-0 sign-noise class being gone.
+- **Scope limit.** 5 rows still carry `dust_nav_guard`. All are USD-unit (no `native_unit`), and 2 are linked to Deribit keys. Whether they are genuine interior dust days was NOT measured. This note does not claim the wider class is closed, only MM-2x's day-0 case.

@@ -1,8 +1,8 @@
 ---
-status: awaiting_human_verify
+status: resolved
 trigger: "PR #1225 run 42527025928 job 128873174958 e2e-seeded: layout-narrow.spec.ts MYSTRATTABLE wide V1100 (CAGR/Sharpe probe did not run, W-02) and SC6-DISCOVERY unpinned V360/V375/V390/V768 (metric never fully visible and uncovered at scrollLeft 0/60/150/300/max)"
 created: 2026-11-09
-updated: 2026-11-09
+updated: 2026-11-23
 ---
 
 ## Current Focus
@@ -51,3 +51,12 @@ root_cause: fixed sampling stops in assertPinnedStackDoesNotCover (e2e/helpers/g
 fix: add, per metric column, the stop that puts the column's left edge at the pinned column's stuck right edge (old stops kept)
 verification: "harness (synthetic table at the CI-measured widths, real chromium): old helper reproduces the V1100 W-02 failure, new passes (stops +424/540/656); old inline probe misses CAGR/Sharpe at 326-442 px, new misses none; an overlay right of the pin turns both new probes red. tsc 0, lint 0 errors, vitest src/components/strategy 1406/1406. Seeded lane NOT run locally; CI e2e-seeded is the confirming run. Commit 0095510ce."
 files_changed: [e2e/helpers/geometry.ts, e2e/layout-narrow.spec.ts]
+
+## Resolution note 2026-11-23 (debug sweep before closing milestone v1.18)
+
+verdict: RESOLVED (the CI check was done by the agent, as this session's human-verify step asked). Its own Resolution names CI e2e-seeded as the confirming run.
+- **Fix on main.** Branch commit 0095510ce was squash-merged in 46ec99450 (#1225, Phase 197). `e2e/helpers/geometry.ts` `assertPinnedStackDoesNotCover` samples `[0, 60, 150, 300, max]` plus one stop per metric column.
+- **CI.** Main CI run 45146128310 (head 57bc06f2c, 2026-11-23) job `e2e-seeded` 137596297892, 306 passed, 0 flaky:
+  - `MYSTRATTABLE wide V1100 occlusion probes=24 stops=0/60/150/300/520/635/749/1745`, which includes the derived per-column stops;
+  - `SC6-DISCOVERY V360 unpinned check container=326 problems=0`;
+  - `SC6-DISCOVERY pinned V1100 ... problems=0`.
