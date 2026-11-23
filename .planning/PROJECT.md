@@ -33,10 +33,14 @@ make them.
 
 **Goal:** Every number, label and alert we show is correct, or it fails loudly.
 
-Started 2026-11-23. Phase numbering continues: the carried Phases 155.2, 157 and 221–225 keep their
-numbers and new phases start after 225. Scope is every open MEDIUM-and-higher `TODOS.md` entry,
-ordered data integrity first, then user-facing, then security, then the rest (founder 2026-11-23).
-The scope input and the per-group TODOS ids were triaged on 2026-11-23; the roadmapper builds the phases.
+Started 2026-11-23, roadmapped the same day: 21 phases, the carried 155.2, 157, 222, 223 and 225 and the
+new 226–241 (`.planning/ROADMAP.md`, v1.22 section; 81 requirements in `.planning/REQUIREMENTS.md`).
+Scope is the open MEDIUM-and-higher `TODOS.md` entries in the data-integrity and user-facing tiers, data
+integrity first (founder 2026-11-23). ⛔ **CORRECTED 2026-11-23 (founder ruling F-10, "Yes, split into two
+milestones"):** security, alerting and CI/tooling are NOT v1.22 scope, and neither are the carried Phases
+221 and 224; they moved to the planned v1.23 HARDEN below. The one exception is SECR-01/02 (Phase 241
+DEMOCREDS: delete the two demo accounts and remove their committed passwords), kept in v1.22 because
+`158-OPS-03` is the only HIGH item in scope.
 
 **Target features:**
 - **Carried, live MT5 parity (155.2 LIVEPARITY)** — the founder's broker statements, the Gate B run and
@@ -44,10 +48,9 @@ The scope input and the per-group TODOS ids were triaged on 2026-11-23; the road
   D-A..D-E). MT5 stays unadvertised until it passes.
 - **Carried, founder confirmations (157 FOUNDER-CONFIRM)** — the observations only the founder can make
   (FCONF-01..04).
-- **Carried, booked phases 221–225** — Sentry events carry no PostgREST details (221, which also owns
-  `209-SENTRY-DIRECT-CAPTURE-DETAILS`), true error copy and benchmark labels (222), every derive and
-  compose path reads the same capital flow sources (223, flow-source half only), dead SQL and retired
-  job kinds removed (224), one exchange account connected once (225).
+- **Carried, booked phases 222, 223, 225** — true error copy and benchmark labels (222), each funding
+  caller's malformed-row decision recorded and tested (223, flow-source half only), one exchange account
+  connected once (225). 221 and 224 moved to v1.23 HARDEN (F-10).
 - **Data integrity** — MT5 nightly derives succeed on the first attempt with the first failure recorded;
   Bybit, OKX and Deribit reads cover every coin, settle type and window and never book a capital
   correction as trading P&L; one exchange account counts once across Holdings, match scoring and the
@@ -57,17 +60,22 @@ The scope input and the per-group TODOS ids were triaged on 2026-11-23; the road
 - **User-facing truth** — a withheld, re-running or never-computed factsheet says so on every surface;
   cached UI state (OG card, composer range, BTC price, Discovery ranking) reflects the current truth;
   connecting a key or a CSV gets an honest answer; anonymous rate limits match the buckets behind them.
-- **Security** — no credential live in public history or diagnostic channels (the two demo accounts
-  deleted and their password literals removed from the tree); anon and client roles read and lock only
-  what they must.
-- **Observability** — an outage page opens, credits Sentry, recovers and closes exactly once; every
-  alert reader sees every row and reports its own delivery failure; anon and landing Sentry captures
-  are held and throttled; the MT5 account-switch wedge is named from captured evidence (live-gated).
-- **CI and tooling** — census and gate pins fail when an axis drifts; every live-DB lane test executes;
-  the MT5 derive soak checks what it claims to check. Every new gate is shown RED before it counts.
+- **The MT5 soak (226 MT5SOAK, wave 0)** — the derive soak checks what it claims to check, independently
+  of the code it checks. It stays in v1.22 as the independent MT5 oracle. Every new gate is shown RED
+  before it counts (PROOF-01).
+- **Security, by exception (241 DEMOCREDS)** — the two demo accounts deleted and their password literals
+  removed from the tree behind a guard that still bites (SECR-01/02, `158-OPS-03`, the only HIGH item).
 
-**Not in scope:** composite work of any kind; the latent Binance and sFOX groups and GLB-1 until their
+**Not in scope:** composite work of any kind; security beyond SECR-01/02, alerting and tooling (v1.23 HARDEN, F-10); the latent Binance and sFOX groups and GLB-1 until their
 triggers fire; `TODOS.md` cleanup of fixed, stale and composite-only entries (records, not phases).
+
+## Planned Next Milestone: v1.23 HARDEN — security, alerting, tooling
+
+Planned by founder ruling F-10 (2026-11-23); starts after v1.22 closes. It holds the carried Phases 221
+SENTRYSCRUB2 and 224 DEADLEFTOVERS and the new 242–249: secrets hygiene beyond the demo accounts
+(SECR-03/04), database access backstops, held and throttled Sentry captures, alert paging and alert
+readers, SQL gate censuses and live-DB test lanes. Its 35 requirements keep their ids under "Planned for
+v1.23" in `.planning/REQUIREMENTS.md`; the phases are in ROADMAP's v1.23 section.
 
 ## ✅ Shipped: v1.18 MT5-VERIFY & founder confirmations (2026-08-14 → 2026-11-23; parked 2026-08-20 → 2026-11-13)
 
@@ -483,6 +491,7 @@ layer. Full per-phase detail: `.planning/MILESTONES.md` + `milestones/v1.6-*`.
 | **v1.22: no composite work (founder 2026-11-23, "Forget about composites")** | Composite-only `TODOS.md` entries are dropped; an entry with a composite half keeps only its non-composite half. Nothing in v1.22 builds, fixes or re-derives composites. | — Pending (v1.22) |
 | **v1.22: delete the unused demo accounts and remove their credential literals (founder 2026-11-23, `158-OPS-03`)** | The two demo-account passwords sit in the public repo and the accounts are unused, so the accounts go and the literals leave the tree rather than being rotated and kept. | — Pending (v1.22, security group) |
 | **v1.22: GLB-1 not triggered (founder 2026-11-23)** | The smoothed-MTM expiry-day item stays trigger-gated: `SMOOTHED_MTM_ENABLED` is off and fails closed, and the live Deribit options book does not count as the trigger firing. | — Pending (trigger-gated in `TODOS.md`) |
+| **F-10: split into two milestones (founder 2026-11-23, "Yes, split into two milestones")** | v1.22 TRUTH keeps the data-integrity and user-facing tiers, the carried 155.2, 157, 222, 223 and 225, and the MT5 soak as wave 0; SECR-01/02 (demo accounts, `158-OPS-03`) stay by exception as the only HIGH item. Security, alerting and tooling, with the carried 221 and 224, become v1.23 HARDEN (Phases 242–249), planned to start after v1.22. | — Pending (v1.22, v1.23) |
 | **v1.22: Phase 223 FLOWKINDS keeps its flow-source half only (founder 2026-11-23)** | Follows the composite ruling: the composite half and composite-only members (`186-COMPOSITE-MEMBER-READ-GAPS` among them) leave the phase. | — Pending (v1.22 Phase 223) |
 
 ## Evolution
@@ -506,8 +515,8 @@ This document evolves at phase transitions and milestone boundaries.
 
 **v1.18 MT5-VERIFY & founder confirmations shipped and closed 2026-11-23** (audit `passed`, 5/5
 requirements, 16/16 phases `passed`). See the `## ✅ Shipped: v1.18` section above. **v1.22 TRUTH — data you
-can trust started 2026-11-23** (see `## Current Milestone` above); it holds Phases 155.2, 157 and 221–225 and
-carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04. MT5 stays unadvertised until 155.2 passes.
+can trust started 2026-11-23** (see `## Current Milestone` above); it holds Phases 155.2, 157, 222, 223, 225 and
+226–241 (221 and 224 moved to the planned v1.23 HARDEN by F-10) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04. MT5 stays unadvertised until 155.2 passes.
 
 **v1.21 UX — trustworthy, navigable, lean shipped and closed 2026-11-13** (audit `tech_debt`, 32/32
 requirements, 18/18 phases `passed`). See the `## ✅ Shipped: v1.21` section above. The next milestone is not

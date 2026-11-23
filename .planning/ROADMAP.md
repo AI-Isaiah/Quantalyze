@@ -5,7 +5,7 @@
 - ✅ **v1.21 UX — trustworthy, navigable, lean** — Phases 192–206 (shipped 2026-11-13)
 - ✅ **v1.20 Backlog Burndown** — Phases 158–191 (shipped 2026-11-06)
 - ✅ **v1.19 JOB/RATE** — Phases 143–146, 146.1, 146.2 (shipped 2026-08-20)
-- ✅ **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 207–220 (shipped 2026-11-23; 155.2's remaining work, 157 and 221–225 moved to the next milestone 2026-11-23)
+- ✅ **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 207–220 (shipped 2026-11-23; 155.2's remaining work, 157 and 221–225 moved to v1.22 2026-11-23, then 221 and 224 to v1.23 by F-10)
 - 🚧 **v1.22 TRUTH — data you can trust** — Phases 155.2, 157, 222, 223, 225, 226–241 (started 2026-11-23)
 - 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 221, 224, 242–249 (planned; starts after v1.22, founder 2026-11-23)
 - ✅ **v1.17 MT5 — ingested, wizardable, surfaced** — Phases 147–154, 156 (shipped 2026-08-14)
@@ -186,7 +186,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 **Plans:** 13/17 plans complete
 **UI hint**: no
 
-D-E amended 2026-11-22 (founder): the weekend edge is the Fri 2026-11-20 frozen close, read 2026-11-22 for all three accounts; for that edge only, the Gate B window runs past the 11-19 run day (see `milestones/v1.18-REQUIREMENTS.md` D-E; `REQUIREMENTS.md` was removed at the v1.18 close).
+D-E amended 2026-11-22 (founder): the weekend edge is the Fri 2026-11-20 frozen close, read 2026-11-22 for all three accounts; for that edge only, the Gate B window runs past the 11-19 run day (see `milestones/v1.18-REQUIREMENTS.md` D-E; `REQUIREMENTS.md` was removed at the v1.18 close). ⛔ CORRECTED 2026-11-23: `REQUIREMENTS.md` exists again for v1.22 TRUTH; it carries D-A..D-E again, D-E's 2026-11-22 amendment included, beside the archived copy in `milestones/v1.18-REQUIREMENTS.md`.
 
 **Freeze window (v1.22, roadmap 2026-11-23):** a change that moves MT5 numbers for MM2, MM3 or FX-AI_V merges before plan 12's recapture or after plan 14, never in between, because a merge in between voids plan 13's `computed_at` binding. It binds 225, 229, 234 and 236, and binds 230 and 233 if their fix moves these numbers. The research schedules plan 12's recapture after 225 and 229 deploy, so that their fixes (MM3 no longer publishing MM2's numbers, the `nav_twr.py` gaps) are inside the verdict. Plan 11 waits on the founder's broker statements.
 

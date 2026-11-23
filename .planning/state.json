@@ -14,11 +14,6 @@
       "status": "pending"
     },
     {
-      "number": "221",
-      "name": "SENTRYSCRUB2",
-      "status": "pending"
-    },
-    {
       "number": "222",
       "name": "ALERTTRUTH",
       "status": "pending"
@@ -29,20 +24,95 @@
       "status": "pending"
     },
     {
-      "number": "224",
-      "name": "DEADLEFTOVERS",
+      "number": "225",
+      "name": "ONEACCOUNTONCE",
       "status": "pending"
     },
     {
-      "number": "225",
-      "name": "ONEACCOUNTONCE",
+      "number": "226",
+      "name": "MT5SOAK",
+      "status": "pending"
+    },
+    {
+      "number": "227",
+      "name": "JOBLEDGER",
+      "status": "pending"
+    },
+    {
+      "number": "228",
+      "name": "KEYANSWERS",
+      "status": "pending"
+    },
+    {
+      "number": "229",
+      "name": "MT5DERIVE2",
+      "status": "pending"
+    },
+    {
+      "number": "230",
+      "name": "MT5NIGHTLY",
+      "status": "pending"
+    },
+    {
+      "number": "231",
+      "name": "BYBITREADS",
+      "status": "pending"
+    },
+    {
+      "number": "232",
+      "name": "OKXTRADES",
+      "status": "pending"
+    },
+    {
+      "number": "233",
+      "name": "DERIBITTRUTH",
+      "status": "pending"
+    },
+    {
+      "number": "234",
+      "name": "NOCAPITAL",
+      "status": "pending"
+    },
+    {
+      "number": "235",
+      "name": "HOLDINGSTRUTH",
+      "status": "pending"
+    },
+    {
+      "number": "236",
+      "name": "FIGUREMATH",
+      "status": "pending"
+    },
+    {
+      "number": "237",
+      "name": "FACTSHEETHONEST",
+      "status": "pending"
+    },
+    {
+      "number": "238",
+      "name": "NEVERCOMPUTED",
+      "status": "pending"
+    },
+    {
+      "number": "239",
+      "name": "SURFACECACHE",
+      "status": "pending"
+    },
+    {
+      "number": "240",
+      "name": "CONNECTTRUTH",
+      "status": "pending"
+    },
+    {
+      "number": "241",
+      "name": "DEMOCREDS",
       "status": "pending"
     }
   ],
   "next": {
-    "command": "/gsd-discuss-phase",
-    "label": "Discuss the first phase",
-    "reason": "Project initialized — plan your first phase"
+    "command": "/gsd-plan-phase 226",
+    "label": "Plan the first phase (226 MT5SOAK, wave 0)",
+    "reason": "v1.22 roadmap created 2026-11-23 — 21 phases, Phase 226 needs a plan"
   },
-  "updated_at": "2026-11-23T11:52:01.024Z"
+  "updated_at": "2026-11-23T13:14:40.000Z"
 }
