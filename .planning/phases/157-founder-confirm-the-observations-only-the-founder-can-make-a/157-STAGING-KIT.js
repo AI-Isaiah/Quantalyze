@@ -422,10 +422,23 @@
       method = methodOf(input, init);
       verdict = decide(method, href, state.mode, state.envelope);
     } catch (err) {
-      // fail closed: a request the router could not classify never reaches the network
-      refused.push(entry("UNCLASSIFIED (router threw)", 599));
+      // fail closed: a request the router could not classify never reaches the network. The cause goes
+      // to the console, the request (method and scrubbed href, best effort) to the refused log, and
+      // the body code differs from a policy refusal so the page and the log can tell them apart.
+      console.error("[fconf] router threw, request refused:", err && err.message);
+      var cm = "?";
+      try {
+        cm = methodOf(input, init);
+      } catch (e2) {}
+      var req = cm + " ?";
+      try {
+        if (href) req = scrub(cm, href);
+      } catch (e3) {}
+      var re = entry(req, 599);
+      re.routerError = true;
+      refused.push(re);
       return Promise.resolve(
-        new Response('{"code":"FCONF_REFUSED"}', {
+        new Response('{"code":"FCONF_ROUTER_ERROR"}', {
           status: 599,
           headers: { "Content-Type": JSON_CT },
         }),

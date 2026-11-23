@@ -42,6 +42,7 @@ const ID = ["a".repeat(8), "b".repeat(4), "c".repeat(4), "d".repeat(4), "e".repe
 // app router global). The fake window defines it unless a case passes { nextF: false }.
 function makeEnv({ nextF = true, ignoreFetchAssign = false } = {}) {
   const spyCalls = [];
+  const consoleErrors = [];
   const elements = new Map();
   const window = {
     fetch: async (input, init) => {
@@ -69,7 +70,7 @@ function makeEnv({ nextF = true, ignoreFetchAssign = false } = {}) {
     Request,
     Response,
     Headers,
-    console: { log() {}, warn() {}, error() {} },
+    console: { log() {}, warn() {}, error: (...args) => consoleErrors.push(args) },
     __FCONF_TEST__: true,
   });
   const load = () => vm.runInContext(KIT_SRC, context, { filename: "157-STAGING-KIT.js" });
@@ -81,6 +82,7 @@ function makeEnv({ nextF = true, ignoreFetchAssign = false } = {}) {
   }
   return {
     loadError,
+    consoleErrors,
     window,
     spyCalls,
     elements,
@@ -562,5 +564,30 @@ test("a request the router cannot classify is refused with 599 and never sent (c
   const res = await env.call(unclassifiable, { method: "POST" });
   assert.equal(res.status, 599);
   assert.equal(env.spyCalls.length, 0);
-  assert.ok(env.fconf().refused.some((e) => e.request === "UNCLASSIFIED (router threw)"));
+  // the body is distinct from a policy refusal, the cause reaches the console, and the log keeps the
+  // method (the href could not be read, so it is "?")
+  assert.deepEqual(await res.json(), { code: "FCONF_ROUTER_ERROR" });
+  assert.deepEqual(env.consoleErrors.map((c) => c.join(" ")), ["[fconf] router threw, request refused: cannot stringify"]);
+  const [e] = [...env.fconf().refused].filter((x) => !x.boundary);
+  assert.deepEqual([e.request, e.status, e.routerError], ["POST ?", 599, true]);
+});
+
+test("the catch arm keeps the scrubbed href when only the method could not be read", async () => {
+  const env = makeEnv();
+  env.fconf().arm("connect");
+  const badInit = { get method() { throw new Error("no method"); } };
+  const res = await env.call(APP(`/api/strategies/draft/${ID}`), badInit);
+  assert.equal(res.status, 599);
+  assert.deepEqual(await res.json(), { code: "FCONF_ROUTER_ERROR" });
+  assert.equal(env.spyCalls.length, 0);
+  const [e] = [...env.fconf().refused].filter((x) => !x.boundary);
+  assert.equal(e.request, "? /api/strategies/draft/:id");
+});
+
+test("a policy refusal answers FCONF_REFUSED, distinct from a router error", async () => {
+  const env = makeEnv();
+  env.fconf().arm("connect");
+  const res = await env.call(post("/api/no/such/route"));
+  assert.deepEqual(await res.json(), { code: "FCONF_REFUSED" });
+  assert.equal([...env.fconf().refused].some((x) => x.routerError), false);
 });
