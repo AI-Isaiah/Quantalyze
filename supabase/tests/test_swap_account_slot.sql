@@ -336,6 +336,40 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SWAP-server-wildcard): the new key stored server % — expected the passed server, trimmed and lower-case', v_server;
   END IF;
 
+  -- ----- SWAP-server-inherit. a NULL caller server never erases a captured one ----------
+  -- NULL is a wildcard (Q2), never a value that overwrites. The old holder carries a server
+  -- and the caller names none: the new key must end with the holder's server.
+  -- RED-UNDER: write the caller's server alone in the migration's new-key stamp (drop the
+  --            COALESCE with the old holder's server): the new key's server becomes NULL.
+  -- RED-UNDER-M: {"arm":"SWAP-server-inherit","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"venue_server     = COALESCE(v_server, v_old_server)","replace":"venue_server     = v_server","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-inherit', 'syn-srv-i', 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-inherit', NULL);
+  IF v_res IS DISTINCT FROM 'SUCCEEDED' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-server-inherit): a swap with a NULL caller server against a holder that has a server was refused or errored (%)', v_res;
+  END IF;
+  SELECT venue_server INTO v_server FROM api_keys WHERE id = k_n;
+  IF v_server IS DISTINCT FROM 'syn-srv-i' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-server-inherit): the new key stored server % — expected the old holder''s captured server ''syn-srv-i''. A NULL caller server erased a known one', v_server;
+  END IF;
+
+  -- ----- SWAP-demoted-server-clear. the demoted holder gives its server up with its login -
+  -- A server left on a row whose login is NULL is an identity fragment on a key that holds
+  -- no account.
+  -- RED-UNDER: drop the server clear from the migration's old-holder UPDATE (the column is
+  --            set to itself): the demoted holder keeps its server beside a NULL login.
+  -- RED-UNDER-M: {"arm":"SWAP-demoted-server-clear","apply":[{"kind":"edit","file":"supabase/migrations/20261123180100_swap_account_slot.sql","find":"venue_server                   = NULL,","replace":"venue_server                   = venue_server,","occurrences":1}]}
+  k_h := pg_temp.sw_key(uid_a, 'swap225-dsc', 'syn-srv-dsc', 'error');
+  k_n := pg_temp.sw_key(uid_a, NULL, NULL, NULL);
+  v_res := pg_temp.sw_try(k_n, k_h, 'swap225-dsc', 'syn-srv-dsc');
+  IF v_res IS DISTINCT FROM 'SUCCEEDED' THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-demoted-server-clear): the swap was refused or errored (%)', v_res;
+  END IF;
+  SELECT venue_server INTO v_server FROM api_keys WHERE id = k_h;
+  IF v_server IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (SWAP-demoted-server-clear): the demoted holder still carries server % beside a NULL login', v_server;
+  END IF;
+
   -- Explicit, in FK order, rather than relying on the profiles -> api_keys cascade.
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);

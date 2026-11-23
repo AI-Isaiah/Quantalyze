@@ -43,9 +43,12 @@
 --   (b) every 'duplicate' dependent of the old holder is re-pointed at the new key
 --       BEFORE the old holder is marked, or the trigger refuses
 --       ACCOUNT_SHARE_KEY_IS_A_HOLDER;
---   (c) the old holder gives up its login and is marked in ONE UPDATE, freeing the
---       index slot;
---   (d) only then is the new key stamped.
+--   (c) the old holder gives up its login AND its server and is marked in ONE UPDATE,
+--       freeing the index slot (a server left beside a NULL login is an identity
+--       fragment on a row that holds no account);
+--   (d) only then is the new key stamped. NULL is a wildcard in the caller's server and
+--       never erases a known one: when the caller passes none, the new key keeps the
+--       old holder's captured server (COALESCE).
 --
 -- ⛔ A 'composite_member' DEPENDENT REFUSES THE SWAP (ACCOUNT_SLOT_COMPOSITE_DEPENDENT).
 -- Composites are out of scope (F-2 / Q4). A failing holder inside a composite keeps its
@@ -259,23 +262,24 @@ BEGIN
      AND account_share_kind = 'duplicate'
      AND id <> p_new_key;
 
-  -- (c) The old holder gives up the login and is marked, in ONE statement.
+  -- (c) The old holder gives up the login and the server and is marked, in ONE statement.
   UPDATE public.api_keys
      SET venue_account_id               = NULL,
+         venue_server                   = NULL,
          account_shared_with_api_key_id = p_new_key,
          account_share_kind             = 'duplicate'
    WHERE id = p_old_holder;
 
-  -- (d) The new key takes the account.
+  -- (d) The new key takes the account. A NULL caller server never erases the known one.
   UPDATE public.api_keys
      SET venue_account_id = v_login,
-         venue_server     = v_server
+         venue_server     = COALESCE(v_server, v_old_server)
    WHERE id = p_new_key;
 END;
 $$;
 
 COMMENT ON FUNCTION public.swap_account_slot(uuid, uuid, text, text) IS
-  'Phase 225 ONEACCOUNTONCE (MT5D-08, Q1, D-25), migration 20261123180100: moves an account''s holder slot from a same-owner key that is NOT working (D-18) to a same-owner key that IS, in ONE transaction on the two rows and the old holder''s dependents locked FOR UPDATE in one id-ordered pass (function-level lock_timeout 3s): the new key is stamped with the login and the normalised server, the old holder gives up its login and is marked ''duplicate'' against the new key, and every ''duplicate'' dependent of the old holder is re-pointed at the new key. Nothing is disconnected or deleted. Returns void; the caller audits and enqueues the recompose. Refusals (message = token, static DETAIL, nothing written): ACCOUNT_SLOT_NOT_FOUND P0002; ACCOUNT_SLOT_NOT_SAME_OWNER 42501; ACCOUNT_SLOT_NOT_LIVE 55000; ACCOUNT_SLOT_IDENTITY_MISMATCH 22023; ACCOUNT_SLOT_HOLDER_WORKING 55000; ACCOUNT_SLOT_NEW_KEY_NOT_WORKING 55000; ACCOUNT_SLOT_COMPOSITE_DEPENDENT 23000 (a composite_member dependent is out of scope, F-2). Service-role only; callers are the connect routes and the analytics identity stamper.';
+  'Phase 225 ONEACCOUNTONCE (MT5D-08, Q1, D-25), migration 20261123180100: moves an account''s holder slot from a same-owner key that is NOT working (D-18) to a same-owner key that IS, in ONE transaction on the two rows and the old holder''s dependents locked FOR UPDATE in one id-ordered pass (function-level lock_timeout 3s): the new key is stamped with the login and the normalised server (the old holder''s captured server when the caller passes none), the old holder gives up its login and its server and is marked ''duplicate'' against the new key, and every ''duplicate'' dependent of the old holder is re-pointed at the new key. Nothing is disconnected or deleted. Returns void; the caller audits and enqueues the recompose. Refusals (message = token, static DETAIL, nothing written): ACCOUNT_SLOT_NOT_FOUND P0002; ACCOUNT_SLOT_NOT_SAME_OWNER 42501; ACCOUNT_SLOT_NOT_LIVE 55000; ACCOUNT_SLOT_IDENTITY_MISMATCH 22023; ACCOUNT_SLOT_HOLDER_WORKING 55000; ACCOUNT_SLOT_NEW_KEY_NOT_WORKING 55000; ACCOUNT_SLOT_COMPOSITE_DEPENDENT 23000 (a composite_member dependent is out of scope, F-2). Service-role only; callers are the connect routes and the analytics identity stamper.';
 
 REVOKE ALL ON FUNCTION public.swap_account_slot(uuid, uuid, text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.swap_account_slot(uuid, uuid, text, text) TO service_role;

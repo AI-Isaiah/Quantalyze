@@ -186,17 +186,18 @@ BEGIN
      AND account_share_kind = 'duplicate'
      AND id <> p_new_key;
 
-  -- (c) The old holder gives up the login and is marked, in ONE statement.
+  -- (c) The old holder gives up the login and the server and is marked, in ONE statement.
   UPDATE public.api_keys
      SET venue_account_id               = NULL,
+         venue_server                   = NULL,
          account_shared_with_api_key_id = p_new_key,
          account_share_kind             = 'duplicate'
    WHERE id = p_old_holder;
 
-  -- (d) The new key takes the account.
+  -- (d) The new key takes the account. A NULL caller server never erases the known one.
   UPDATE public.api_keys
      SET venue_account_id = v_login,
-         venue_server     = v_server
+         venue_server     = COALESCE(v_server, v_old_server)
    WHERE id = p_new_key;
 END;
 $$;
