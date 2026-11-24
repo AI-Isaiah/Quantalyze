@@ -25,6 +25,11 @@ import {
  * `VENUE_WIRE_CODE_TO_VERDICT` row (wire `MT5_TERMINAL_NOT_READY`, 424), a deliberate roster
  * decision (CONTEXT: a new wire code distinct from the busy one). Inserted in sorted
  * position in both arrays; the vacuity floors below did not move.
+ *
+ * +1 to the create-with-key array only at 2026-11-24 (Phase 225 plan 05, CONN-01):
+ * `VENUE_DRAFT_IN_PROGRESS`, the by-name refusal of an own-draft match, a deliberate
+ * roster decision (founder D-23). Composites are out (F-2 / Q4), so the add-key array is
+ * unchanged.
  */
 const FROZEN_CREATE_WITH_KEY_215: readonly string[] = [
   "DRAFT_ALREADY_EXISTS",
@@ -66,6 +71,7 @@ const FROZEN_CREATE_WITH_KEY_215: readonly string[] = [
   "SERVICE_UNREACHABLE",
   "UNKNOWN",
   "VENUE_ALREADY_CONNECTED",
+  "VENUE_DRAFT_IN_PROGRESS",
 ];
 
 const FROZEN_ADD_KEY_215: readonly string[] = [
@@ -160,6 +166,10 @@ describe("[215-07 SC-5] the two rosters stay separate sets", () => {
     expect(KNOWN_ADD_KEY_CODES.has("KEY_ORPHANED")).toBe(false);
     expect(KNOWN_ADD_KEY_CODES.has("COMPOSITE_MT5_UNSUPPORTED")).toBe(true);
     expect(KNOWN_CREATE_WITH_KEY_CODES.has("COMPOSITE_MT5_UNSUPPORTED")).toBe(false);
+    // 225-05 / CONN-01: the own-draft refusal is create-with-key only; composites
+    // are out of scope (F-2 / Q4), so add-key must not admit it.
+    expect(KNOWN_CREATE_WITH_KEY_CODES.has("VENUE_DRAFT_IN_PROGRESS")).toBe(true);
+    expect(KNOWN_ADD_KEY_CODES.has("VENUE_DRAFT_IN_PROGRESS")).toBe(false);
     expect([...KNOWN_CREATE_WITH_KEY_CODES].sort()).not.toEqual(
       [...KNOWN_ADD_KEY_CODES].sort(),
     );

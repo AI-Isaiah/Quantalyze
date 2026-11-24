@@ -45,13 +45,25 @@ keys on one broker account were invisible to the unique index and summed
 twice. MT5 is NOT in :data:`VENUES_WITH_ACCOUNT_ID`: that set names the ccxt
 venues whose validator responses carry an id, and other modules read it as
 such. sFOX stays unstamped (D-10).
+
+Phase 225 plan 12 (CONN-03, CONTEXT Q2). The poll also captures an MT5 key's
+BROKER SERVER from the same session (``Mt5Session.server``, no terminal call):
+it is stored, normalised, beside the login in ``api_keys.venue_server``. An
+unstamped key writes both in one update; an already-stamped key with no server
+is backfilled (outcome ``server_backfilled``) only when the session's login
+equals the stored login. Because a null-server holder no longer collides in the
+server-qualified identity index, an unstamped MT5 key's same-owner holder is
+looked up BEFORE the update. Neither the login nor the server is ever logged.
+Two OWNERS' keys on one login and server each stamp their own identity and
+neither is marked: the equal identity is the share link (ONCE-04).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
@@ -59,6 +71,7 @@ import ccxt
 import httpx
 from postgrest.exceptions import APIError
 
+from services.allocator_equity_derive import working_holder_predicate
 from services.db import _is_gateway_timeout, db_execute
 from services.redact import scrub_freeform_string
 from services.stitch_composite import MemberWindow, windows_overlap
@@ -68,12 +81,16 @@ __all__ = [
     "COMPOSITE_MEMBER_SHARED_ACCOUNT",
     "DUPLICATE_DETECTED_AUDIT_ACTION",
     "MAX_VENUE_ACCOUNT_ID_LENGTH",
+    "MAX_VENUE_SERVER_LENGTH",
     "StampOutcome",
     "UNSTAMPED_ESCALATION_DAYS",
     "VENUES_WITH_ACCOUNT_ID",
     "escalate_if_unchecked",
     "escalate_session_build_failure",
+    "normalise_venue_server",
+    "pick_same_account_holder",
     "read_venue_account_id",
+    "same_venue_server",
     "stamp_account_identity",
     "venue_account_id_from",
 ]
@@ -99,6 +116,78 @@ _STAMPED_VENUES: Final = VENUES_WITH_ACCOUNT_ID | {_MT5}
 # answers None, as for a venue that reports no id. zod measures a JS string's
 # ``.length``, in UTF-16 code units, so this does too. Change both together.
 MAX_VENUE_ACCOUNT_ID_LENGTH: Final = 128
+
+
+# Phase 225 plan 06 (CONN-03). The broker server of an MT5 key, stored beside the
+# login in ``api_keys.venue_server``. The cap of the CHECK
+# ``api_keys_venue_server_valid`` and of ``MAX_VENUE_SERVER_LENGTH`` in
+# src/lib/venue-identity.ts, which is this module's TypeScript twin. Unlike the
+# account id above, the database counts this one in CODE POINTS (``char_length``),
+# so ``len`` measures it here and the spread count does there.
+MAX_VENUE_SERVER_LENGTH: Final = 128
+
+# Space, tab, CR and LF: the SQL ``btrim(x, E' \t\r\n')`` of ``swap_account_slot``
+# and the CHECK, NOT ``str.strip()`` with no argument, which also strips a
+# vertical tab, a form feed and every Unicode space the database keeps.
+_SERVER_EDGE_WHITESPACE: Final = " \t\r\n"
+
+
+def normalise_venue_server(raw: object) -> str | None:
+    """Return the stored form of a broker server, or ``None``.
+
+    Trim space, tab, CR and LF from both ends, lower-case, and treat blank or
+    more than :data:`MAX_VENUE_SERVER_LENGTH` characters as ``None`` (the CHECK
+    would refuse it; ``None`` makes the key a wildcard instead). A value that is
+    not a ``str`` is ``None``: an ``int`` must never be ``str()``-ed into an
+    identity. TypeScript twin: ``normaliseVenueServer`` in
+    src/lib/venue-identity.ts; both replay
+    tests/fixtures/venue_server_identity.json.
+    """
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip(_SERVER_EDGE_WHITESPACE).lower()
+    if not text or len(text) > MAX_VENUE_SERVER_LENGTH:
+        return None
+    return text
+
+
+def same_venue_server(a: str | None, b: str | None) -> bool:
+    """Two servers are the same account when equal or when EITHER is ``None``.
+
+    A key not yet backfilled matches on login alone (CONTEXT Q2). TypeScript
+    twin: ``sameVenueServer``; fixture ``venue_server_identity.json``.
+    """
+    return a is None or b is None or a == b
+
+
+def pick_same_account_holder(
+    rows: Sequence[Mapping[str, Any]],
+    server: str | None,
+    *,
+    after_index_refusal: bool,
+) -> Mapping[str, Any] | None:
+    """Pick the live key a new key on the same login is "the same account as".
+
+    Tiers, first non-empty wins: (1) a row whose ``venue_server`` equals
+    ``server`` (``None`` equals ``None``), (2) a row where either side is
+    ``None``, (3) any row, only when ``after_index_refusal`` (the live
+    login-only unique index refused the write and the caller must still name the
+    key that refused it). Inside a tier the smallest ``id`` by plain string
+    comparison wins, so the pick never depends on row order. ``server`` must
+    already be normalised. TypeScript twin: ``pickSameAccountHolder``; fixture
+    ``venue_server_identity.json``.
+    """
+    tiers: list[Any] = [
+        lambda row: row.get("venue_server") == server,
+        lambda row: same_venue_server(row.get("venue_server"), server),
+    ]
+    if after_index_refusal:
+        tiers.append(lambda row: True)
+    for qualifies in tiers:
+        hits = [row for row in rows if qualifies(row)]
+        if hits:
+            return min(hits, key=lambda row: str(row["id"]))
+    return None
 
 
 def _utf16_length(text: str) -> int:
@@ -163,6 +252,10 @@ def venue_account_id_from(venue: str, raw: Mapping[str, Any]) -> str | None:
 #
 # ⛔ What this step may write: ``venue_account_id``,
 # ``account_shared_with_api_key_id`` and ``account_share_kind``. Nothing else.
+# Phase 225 plan 09 adds one more writer, and it is the database's, not this
+# module's: ``swap_account_slot`` (:func:`_swap_slot_and_audit`) moves the stamp
+# (``venue_account_id`` and ``venue_server``) from a failing holder to a working
+# key and marks the holder, in one transaction. This module sends no UPDATE for it.
 # It never touches ``sync_status``, ``sync_error``, ``disconnected_at`` or
 # ``is_active``, it never disconnects or deletes a key (D-01), and it never
 # raises into the poll (Pitfall 4): a stamp failure must not blame the user's
@@ -187,6 +280,8 @@ StampOutcome = Literal[
     "stamped",
     "marked_duplicate",
     "marked_composite_member",
+    "swapped_holder",
+    "server_backfilled",
     "no_id",
     "error",
 ]
@@ -243,29 +338,50 @@ def _first_row(res: object) -> dict[str, Any] | None:
     return None
 
 
+# The columns the holder pick and the D-18 working check read. ``is_active``,
+# ``sync_status`` and ``disconnected_at`` are required by
+# ``working_holder_predicate``, which treats a missing field as NOT working: a
+# holder row without them would read as failing and be swapped out.
+_HOLDER_COLUMNS: Final = (
+    "id, venue_server, is_active, sync_status, disconnected_at, "
+    "account_shared_with_api_key_id, account_share_kind"
+)
+
+
 async def _find_live_holder(
-    supabase: Any, key_row: Mapping[str, Any], account_id: str
-) -> dict[str, Any] | None:
+    supabase: Any,
+    key_row: Mapping[str, Any],
+    account_id: str,
+    server: str | None,
+    *,
+    after_index_refusal: bool,
+) -> Mapping[str, Any] | None:
     """The live key of the same owner that holds ``account_id`` on this venue.
 
-    Filtered by ``user_id`` so a holder can never be another tenant's key
-    (T-167.1.2-18); the database trigger refuses that too.
+    Returns the full holder row (:data:`_HOLDER_COLUMNS`), chosen by
+    :func:`pick_same_account_holder` so the broker-server tiers and the
+    smallest-id tie-break match the TypeScript connect routes. Filtered by
+    ``user_id`` so a holder can never be another tenant's key
+    (T-167.1.2-18, T-225-28); the database trigger and ``swap_account_slot``
+    refuse that too. ``server`` is the stamping key's normalised broker server.
     """
 
     def _q() -> object:
         return (
             supabase.table("api_keys")
-            .select("id")
+            .select(_HOLDER_COLUMNS)
             .eq("user_id", key_row["user_id"])
             .eq("exchange", key_row["exchange"])
             .eq("venue_account_id", account_id)
             .is_("disconnected_at", "null")
             .neq("id", key_row["id"])
-            .limit(1)
+            .order("id")
             .execute()
         )
 
-    return _first_row(await db_execute(_q))
+    data = getattr(await db_execute(_q), "data", None)
+    rows = [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+    return pick_same_account_holder(rows, server, after_index_refusal=after_index_refusal)
 
 
 # D-04 (167.1.2-CONTEXT, measured in code by the planner at 83eae5da5): two
@@ -411,32 +527,16 @@ def _write_marker_and_audit(
     if kind == _DUPLICATE:
         _audit_duplicate(key_row, holder_id)
     # Phase 183 WR-01: a curve composed before this marker landed may count the
-    # account twice, and nothing else enqueues a compose now that the reader no
-    # longer holds a marked duplicate back. Same call, same owner source as the
-    # per-key derive epilogue; best effort, because the marker has landed. A
-    # dropped enqueue is not retried (the next poll meets an unchanged marker),
-    # so the curve stays as composed until the nightly fan-out, which is the
-    # window, not a safety net. Logged at ERROR so it reaches Sentry.
-    try:
-        supabase.rpc(
-            "enqueue_compute_job",
-            {
-                "p_strategy_id": None,
-                "p_allocator_id": str(key_row["user_id"]),
-                "p_kind": "derive_allocator_equity",
-            },
-        ).execute()
-    except Exception as exc:  # noqa: BLE001 — the marker stands; the drop is logged
-        logger.error(
-            "account_identity: recompose enqueue after a new marker failed for "
-            "api_key %s: class=%s code=%s",
-            key_row.get("id"), type(exc).__name__, _error_code(exc),
-        )
+    # account twice; see _enqueue_recompose for the best-effort contract.
+    _enqueue_recompose(supabase, key_row, "a new marker")
     return True
 
 
 async def _mark_shared(
-    supabase: Any, key_row: Mapping[str, Any], holder_id: str
+    supabase: Any,
+    key_row: Mapping[str, Any],
+    holder_id: str,
+    kind: str | None = None,
 ) -> StampOutcome:
     """Write the marker on ``key_row``, naming ``holder_id`` and its kind.
 
@@ -447,9 +547,11 @@ async def _mark_shared(
     again writes and audits nothing. The write and its audit run as one thread
     task (:func:`_write_marker_and_audit`); a write that matched no row raises
     :class:`_MarkerNotWritten`, so the step never claims a marker it did not
-    write.
+    write. ``kind`` is passed by a caller that has already read it
+    (:func:`_settle_with_holder`); otherwise it is read here.
     """
-    kind = await _share_kind(supabase, str(key_row["id"]), holder_id)
+    if kind is None:
+        kind = await _share_kind(supabase, str(key_row["id"]), holder_id)
     outcome: StampOutcome = (
         "marked_composite_member"
         if kind == COMPOSITE_MEMBER_SHARED_ACCOUNT
@@ -469,6 +571,227 @@ async def _mark_shared(
     return outcome
 
 
+def _enqueue_recompose(supabase: Any, key_row: Mapping[str, Any], why: str) -> None:
+    """Ask for the owner's allocator recompose; logged, never raised.
+
+    Phase 183 WR-01. Same call and owner source as the per-key derive epilogue.
+    Best effort, because the write it follows has landed: a dropped enqueue is
+    not retried (the next poll meets an unchanged state), so the curve stays as
+    composed until the nightly fan-out. Logged at ERROR so it reaches Sentry.
+    """
+    try:
+        supabase.rpc(
+            "enqueue_compute_job",
+            {
+                "p_strategy_id": None,
+                "p_allocator_id": str(key_row["user_id"]),
+                "p_kind": "derive_allocator_equity",
+            },
+        ).execute()
+    except Exception as exc:  # noqa: BLE001 — the write stands; the drop is logged
+        logger.error(
+            "account_identity: recompose enqueue after %s failed for api_key %s: "
+            "class=%s code=%s",
+            why, key_row.get("id"), type(exc).__name__, _error_code(exc),
+        )
+
+
+# A refusal of ``swap_account_slot``: the message is the bare token, with a static
+# DETAIL that carries no login and no server. Only the matched token is ever logged.
+_SLOT_REFUSAL: Final = re.compile(r"ACCOUNT_SLOT_[A-Z_]+")
+
+# SF-M2: these three refusals mean the caller built a wrong request (a missing key,
+# another owner's key, an identity that does not match), which no later poll
+# repairs, so they log at ERROR. The other tokens are races the next poll clears
+# (a recovered holder, a dependent composite, a moved row) and stay at WARNING.
+_SLOT_CONTRACT_REFUSALS: Final = frozenset({
+    "ACCOUNT_SLOT_NOT_FOUND",
+    "ACCOUNT_SLOT_NOT_SAME_OWNER",
+    "ACCOUNT_SLOT_IDENTITY_MISMATCH",
+})
+
+
+def _slot_refusal_token(exc: BaseException) -> str | None:
+    """The ``ACCOUNT_SLOT_*`` token of a swap refusal, or ``None``.
+
+    Only a PostgREST ``APIError`` whose MESSAGE starts with the prefix counts, and
+    only the token itself is returned: nothing else of the message, and never the
+    DETAIL.
+    """
+    message = exc.message if isinstance(exc, APIError) else None
+    if not isinstance(message, str):
+        return None
+    match = _SLOT_REFUSAL.match(message)
+    return match.group(0) if match else None
+
+
+def _swap_slot_and_audit(
+    supabase: Any,
+    key_row: Mapping[str, Any],
+    holder: Mapping[str, Any],
+    account_id: str,
+    server: str | None,
+) -> str | None:
+    """Move the account slot to ``key_row`` and audit the demoted holder, as ONE
+    thread task.
+
+    Phase 225 plan 09 (D-25, MT5D-08, Q1). Same shape as
+    :func:`_write_marker_and_audit`, and for the same reason: the RPC runs in a
+    worker thread, ``asyncio.wait_for`` can cancel the coroutine awaiting it
+    without stopping the thread, so the swap commits anyway. A synchronous
+    callable cannot be split by a cancellation: once ``swap_account_slot`` has
+    moved the slot, the audit of the demoted holder and the recompose enqueue
+    follow in the same thread. Order: the swap, the audit, the enqueue.
+
+    ``swap_account_slot`` writes the stamp and the marker itself, in one
+    transaction, so no ``api_keys`` UPDATE happens here. ``p_venue_server`` is
+    sent only when known: NULL is a wildcard and never erases the captured one.
+    The demoted holder is the audited key, naming the stamped key as its holder,
+    as the connect routes' ``swapAccountSlot`` does.
+
+    Returns ``None`` when the slot moved, or the ``ACCOUNT_SLOT_*`` token when the
+    database REFUSED the swap (the holder recovered, the key is not working, a
+    composite depends on the holder, the rows moved). A refusal wrote nothing, so
+    the slot never moves on it and there is nothing to audit or recompose; the
+    caller falls back to the marker, which is today's stable state, and the next
+    poll re-decides. Any other error propagates: it is a failure of the step.
+    """
+    params: dict[str, Any] = {
+        "p_new_key": str(key_row["id"]),
+        "p_old_holder": str(holder["id"]),
+        "p_venue_account_id": account_id,
+    }
+    if server is not None:
+        params["p_venue_server"] = server
+    try:
+        supabase.rpc("swap_account_slot", params).execute()
+    except Exception as exc:  # noqa: BLE001 — only a named refusal is absorbed
+        token = _slot_refusal_token(exc)
+        if token is None:
+            raise
+        return token
+    _audit_duplicate(
+        {
+            "id": holder["id"],
+            "user_id": key_row["user_id"],
+            "exchange": key_row["exchange"],
+        },
+        str(key_row["id"]),
+    )
+    _enqueue_recompose(supabase, key_row, "a slot swap")
+    return None
+
+
+async def _settle_with_holder(
+    supabase: Any,
+    key_row: Mapping[str, Any],
+    holder: Mapping[str, Any],
+    account_id: str,
+    server: str | None,
+) -> StampOutcome:
+    """Decide what a refused stamp does about the holder that refused it.
+
+    D-25 / Q1 / D-18: a WORKING key meeting a holder that is NOT working takes
+    the slot (:func:`_swap_slot_and_audit`), so the account is read by a key that
+    works. Every other pair is marked exactly as before (:func:`_mark_shared`):
+    a working holder, a failing key (a key that is not working has no claim), and
+    a composite rotation (D-04 unchanged: two members of one composite with
+    disjoint windows are a key rotation, not a duplicate, so the pair is read
+    BEFORE any swap and stays ``composite_member``, with no duplicate audit).
+    A swap the database refuses falls back to the marker too: the slot never
+    moves on a refusal, the token is logged and nothing else (ERROR for a
+    contract refusal, WARNING for a race), and the next poll re-decides.
+    ``working_holder_predicate`` is imported, never copied: the TypeScript parity
+    test reads exactly one status tuple per file.
+    """
+    holder_id = str(holder["id"])
+    # WR-04: ``request_allocator_holdings_sync`` overwrites sync_status with
+    # 'syncing' before this poll, so a key whose last sync failed arrives as
+    # 'syncing' and the D-18 reader rule counts it as working. This stamp runs
+    # before the fetch, so nothing has proven the key yet: for the swap decision
+    # only, 'syncing' is not working. The reader rule itself is unchanged.
+    key_proven_working = (
+        working_holder_predicate(key_row) and key_row.get("sync_status") != "syncing"
+    )
+    if not (key_proven_working and not working_holder_predicate(holder)):
+        return await _mark_shared(supabase, key_row, holder_id)
+    kind = await _share_kind(supabase, str(key_row["id"]), holder_id)
+    if kind != _DUPLICATE:
+        return await _mark_shared(supabase, key_row, holder_id, kind)
+
+    def _q() -> str | None:
+        return _swap_slot_and_audit(supabase, key_row, holder, account_id, server)
+
+    refused = await db_execute(_q)
+    if refused is None:
+        return "swapped_holder"
+    logger.log(
+        logging.ERROR if refused in _SLOT_CONTRACT_REFUSALS else logging.WARNING,
+        "account_identity: api_key %s (venue %s) slot swap refused: %s — the key "
+        "is marked against its holder and the next poll re-decides",
+        key_row.get("id"), key_row.get("exchange"), refused,
+    )
+    return await _mark_shared(supabase, key_row, holder_id, kind)
+
+
+def _mt5_session_server(session: Any) -> str | None:
+    """The normalised broker server an MT5 poll session carries, or ``None``.
+
+    ``Mt5Session.server`` is the server the credentials were parsed with, so
+    reading it needs no terminal call. A blank, over-length or non-string value is
+    ``None``, which makes the key a wildcard on the server (CONTEXT Q2) instead of
+    writing a value the ``api_keys_venue_server_valid`` CHECK would refuse.
+    """
+    return normalise_venue_server(getattr(session, "server", None))
+
+
+async def _backfill_mt5_server(
+    supabase: Any, key_row: Mapping[str, Any], session: Any
+) -> StampOutcome:
+    """Give an already-stamped MT5 key the broker server its session carries.
+
+    Phase 225 plan 12 (Q2, CONN-03). A key stamped before ``venue_server`` existed
+    has the login and no server, and a null-server key matches any server, so the
+    column is filled from the poll that already holds the credentials. One guarded
+    update, no data-reading guard: it runs only while ``venue_server`` is still
+    null, so a concurrent writer (a connect, another poll) is never overwritten.
+
+    T-225-29: the server is taken from the session ONLY when the session's login
+    equals the stored login, so a session of another login can never stamp its
+    broker onto this key. A mismatch writes nothing and logs one WARNING naming
+    the cause; neither login nor server is in the line. A 23505 here is not
+    retried: it would mean two live same-login same-server keys, which census
+    gate A5 must have caught, so it propagates to the boundary's ERROR line.
+    """
+    stored_login = key_row.get("venue_account_id")
+    if _mt5_account_id(session) != stored_login:
+        logger.warning(
+            "account_identity: api_key %s (venue %s) server backfill skipped: the "
+            "poll session's login does not match the stored login (or carries "
+            "none), so its broker server is not used",
+            key_row.get("id"), key_row.get("exchange"),
+        )
+        return "skipped_already_stamped"
+    server = _mt5_session_server(session)
+    if server is None:
+        return "skipped_already_stamped"
+
+    def _q() -> object:
+        return (
+            supabase.table("api_keys")
+            .update({"venue_server": server})
+            .eq("id", key_row["id"])
+            .eq("venue_account_id", stored_login)
+            .is_("venue_server", "null")
+            .execute()
+        )
+
+    if _first_row(await db_execute(_q)) is None:
+        # Another writer filled the server, or the key left, first.
+        return "skipped_already_stamped"
+    return "server_backfilled"
+
+
 async def _stamp(
     supabase: Any, key_row: Mapping[str, Any], exchange: Any
 ) -> StampOutcome:
@@ -477,26 +800,56 @@ async def _stamp(
 
     A ccxt key's id comes from ONE venue call (:func:`read_venue_account_id`);
     an MT5 key's from the login text its poll session carries
-    (:func:`_mt5_account_id`, no terminal call). Both then share the one UPDATE
-    and, on a refusal by the identity index, the one holder look-up ->
-    :func:`_mark_shared` -> audit path. sFOX and any other venue are skipped
-    (``skipped_not_ccxt``, the token name kept for log continuity).
+    (:func:`_mt5_account_id`, no terminal call), and its broker server from the
+    same session (Phase 225 plan 12, :func:`_mt5_session_server`). Both then
+    share the one UPDATE and, on a refusal by the identity index, the one holder
+    look-up -> :func:`_settle_with_holder` path. sFOX and any other venue are
+    skipped (``skipped_not_ccxt``, the token name kept for log continuity).
+
+    An MT5 key's holder is looked up BEFORE its UPDATE (Q2): once the identity
+    index includes the server, a holder whose ``venue_server`` is still null no
+    longer collides with the stamp, so the index alone would let two live keys
+    carry one account. A ccxt key keeps the UPDATE-first order, because every
+    ccxt server is null and the index refuses those exactly.
     """
     venue = key_row["exchange"]
     if venue not in _STAMPED_VENUES:
         return "skipped_not_ccxt"
     if key_row.get("venue_account_id") is not None:
+        if venue == _MT5 and key_row.get("venue_server") is None:
+            return await _backfill_mt5_server(supabase, key_row, exchange)
         return "skipped_already_stamped"
 
+    server: str | None
     if venue == _MT5:
         # The login text the session was built with; no terminal call. From
         # here on MT5 shares the ccxt path: the same UPDATE, the same 23505 ->
         # holder -> marker -> one audit.
         account_id = _mt5_account_id(exchange)
+        server = _mt5_session_server(exchange)
     else:
         account_id = await read_venue_account_id(exchange, venue)
+        server = None
     if account_id is None:
         return "no_id"
+    if server is None:
+        # A key's stored server is read as before (null for every ccxt key).
+        server = normalise_venue_server(key_row.get("venue_server"))
+
+    if venue == _MT5:
+        holder = await _find_live_holder(
+            supabase, key_row, account_id, server, after_index_refusal=False
+        )
+        if holder is not None:
+            return await _settle_with_holder(supabase, key_row, holder, account_id, server)
+
+    stamp: dict[str, Any] = {
+        "venue_account_id": account_id,
+        "account_shared_with_api_key_id": None,
+        "account_share_kind": None,
+    }
+    if venue == _MT5 and server is not None:
+        stamp["venue_server"] = server
 
     def _q() -> object:
         # Clears any marker in the same write: a key that stamps has no live
@@ -504,11 +857,7 @@ async def _stamp(
         # longer shares one.
         return (
             supabase.table("api_keys")
-            .update({
-                "venue_account_id": account_id,
-                "account_shared_with_api_key_id": None,
-                "account_share_kind": None,
-            })
+            .update(stamp)
             .eq("id", key_row["id"])
             .is_("venue_account_id", "null")
             .execute()
@@ -518,12 +867,14 @@ async def _stamp(
         res = await db_execute(_q)
     except Exception as exc:  # noqa: BLE001 — classified below, re-raised otherwise
         if _error_code(exc) == _PG_UNIQUE_VIOLATION and _names_identity_index(exc):
-            holder = await _find_live_holder(supabase, key_row, account_id)
+            holder = await _find_live_holder(
+                supabase, key_row, account_id, server, after_index_refusal=True
+            )
             if holder is None:
                 # The holder left between the refusal and the look-up. The
                 # next poll stamps.
                 raise _HolderVanished() from exc
-            return await _mark_shared(supabase, key_row, str(holder["id"]))
+            return await _settle_with_holder(supabase, key_row, holder, account_id, server)
         raise
     if _first_row(res) is None:
         # Another writer stamped the key first.
@@ -759,7 +1110,21 @@ async def stamp_account_identity(
 ) -> StampOutcome:
     """Stamp ``key_row``'s venue account id, or mark it as sharing an account.
 
-    Returns an outcome token and NEVER raises (Pitfall 4). ``timeout_s`` bounds
+    Returns an outcome token and NEVER raises (Pitfall 4). ``swapped_holder``
+    (Phase 225 plan 09, D-25 / Q1) is a working key that took the account's slot
+    from a same-owner holder that is not working (D-18), through
+    ``swap_account_slot``; the demoted holder is marked ``duplicate`` and audited,
+    and the owner's allocator curve is recomposed. A swap the database refuses
+    (an ``ACCOUNT_SLOT_*`` token: the holder recovered, a composite depends on
+    it, the rows moved) is logged with the token only, at ERROR for a contract
+    refusal (SF-M2) and WARNING otherwise, and falls back to the marker, today's
+    stable state; the next poll re-decides. ``server_backfilled``
+    (Phase 225 plan 12, Q2 / CONN-03) is an already-stamped MT5 key that had no
+    broker server and now carries its session's, written only while the column is
+    still null and only when the session's login equals the stored login. An
+    unstamped MT5 key is checked for a same-owner holder BEFORE its update (a
+    null-server holder no longer collides in the server index); a ccxt key is
+    stamped first and checked after a refusal. ``timeout_s`` bounds
     the whole step so it cannot run the poll past its own handler timeout; a
     budget of zero or less skips the step (``skipped_no_budget``). Every failure,
     the venue call, the look-up, the write and a refusal by the database

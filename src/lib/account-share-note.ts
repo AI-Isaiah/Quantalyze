@@ -41,6 +41,14 @@
  *     strategy sums the pair.
  *   - WR-02 is kept (D-18 applied to the MARKED key): a marked key that is
  *     disconnected, inactive or failing shows its own status, not this note.
+ *     CORRECTED 2026-11-24 (Phase 225 OQ-1): WR-02 now covers DISCONNECTED keys
+ *     only. A LIVE marked key that is inactive or failing, beside a WORKING
+ *     holder, now names that holder with its own sentence ("... which holds that
+ *     account while this key is not working."), because Q1 demotes a failing
+ *     holder to exactly that state and the founder asked for it to be named on
+ *     its key card. The sentence is true because the derive counts the account
+ *     once through the working holder (D-18). With the holder absent or itself
+ *     not working the note still says nothing. The WR-02 line above is lineage.
  *   - SF-L1 is kept: a holder absent from the caller's key list cannot be
  *     judged working, so the note says nothing.
  *   - The Overview's rebuilding-panel line for two keys on one account is a
@@ -92,8 +100,10 @@ function holderLabel(holder: AccountShareNoteKey): string {
 
 /**
  * The duplicate sentence for `key`, or `null` when there is nothing to say:
- * the key is unmarked or marked `composite_member`, the key itself is not
- * working, its holder is not in `keysById`, or its holder is not working.
+ * the key is unmarked or marked `composite_member`, the key itself is
+ * disconnected, its holder is not in `keysById`, or its holder is not working.
+ * A live key that is itself not working gets the demoted-key sentence (Phase 225
+ * OQ-1).
  * `keysById` is the caller's own key list, keyed by id.
  */
 export function accountShareNote(
@@ -102,8 +112,15 @@ export function accountShareNote(
 ): string | null {
   const holderId = key.account_shared_with_api_key_id;
   if (key.account_share_kind !== "duplicate" || holderId === null) return null;
-  if (!isWorkingHolder(key)) return null;
+  // A disconnected key is parked on purpose and shows its own status (WR-02).
+  if (key.disconnected_at !== null) return null;
   const holder = keysById.get(holderId);
   if (holder === undefined || !isWorkingHolder(holder)) return null;
+  if (!isWorkingHolder(key)) {
+    // Phase 225 OQ-1: a live key that is itself not working, marked against a
+    // working holder, is what a failing holder becomes when a working key takes
+    // its account (Q1, D-25). It is named on its own card.
+    return `This key reads the same exchange account as ${holderLabel(holder)}, which holds that account while this key is not working. We count that account once.`;
+  }
   return `This key reads the same exchange account as ${holderLabel(holder)}. We count that account once.`;
 }

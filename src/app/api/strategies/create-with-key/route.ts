@@ -54,6 +54,16 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { keyRouteFailureHeaders } from "@/lib/api/seam-retry-after";
 import type { User } from "@supabase/supabase-js";
 import { venueLabel } from "@/lib/display-labels";
+// 225-07 (CONN-03, MT5D-08): the server-aware same-account read, the D-18
+// working-holder rule and the slot swap. See `resolveByVenueIdentity`.
+import { isWorkingHolder } from "@/lib/account-share-note";
+import {
+  normaliseConnectedVenueServer,
+  pickSameAccountHolder,
+  readLiveSameLoginKeys,
+  swapAccountSlot,
+  type PickMode,
+} from "@/lib/venue-identity";
 
 /**
  * POST /api/strategies/create-with-key — atomic wizard ConnectKeyStep
@@ -176,8 +186,32 @@ function pickPlaceholderCodename(): string {
  *                    one. Returned by `resolveByVenueIdentity` only (the reuse
  *                    arm's resolver never produces it). Refused with the
  *                    venue-neutral KEY_VENUE_ALREADY_CONNECTED.
- *   · `unresolved` — genuinely nothing to say: no live key, a read fault, or no
- *                    service-role credential. Fall through.
+ *   · `failing_holder` — 225-07 (Q1, D-18, D-25). The live key that holds the
+ *                    account is not working. It is decided BEFORE any strategy
+ *                    read: a validated new key takes the slot from it (see the
+ *                    member's own comment) whether or not it carries a strategy.
+ *                    OQ-2 (225-11): a demoted key that later recovers STAYS marked
+ *                    a duplicate of the working holder while that holder works.
+ *                    Nothing is disconnected, unpublished or re-pointed: the card
+ *                    sentence names the holder and the derive counts the account
+ *                    once, through the working holder (D-18). The only automatic
+ *                    move back is MT5D-08 itself (plan 09), and a demoted key that
+ *                    still carries its own strategy is the shape Q1 accepts.
+ *
+ *   · `unresolved` — genuinely nothing to say: no live key, a strategy-read
+ *                    fault, or no service-role credential. Fall through.
+ *
+ *   · `read_failed` — 225 PR-2 review SF-M1 / IN-11. The same-login `api_keys`
+ *                    read itself failed: NOT "nothing to say", because that read
+ *                    is what refuses a same-owner duplicate once the server-aware
+ *                    index ships. The pre- and post-validation fences answer a
+ *                    retryable 503 before any write.
+ *
+ * ⭐ PER OWNER, ONLY (225-11, ONCE-02, Q3). Every member is decided from keys the
+ * CALLER owns: `readLiveSameLoginKeys` filters on `user_id`, so another owner's
+ * key on the same account is never read, named or swapped, and the connect then
+ * stamps the identity, which is the cross-owner share link. No cross-owner marker
+ * exists.
  *
  * ⛔ `orphaned` AND `unresolved` USED TO BE ONE ANSWER, and collapsing them was
  * the SECOND instance of the defect this type was created to make
@@ -196,10 +230,40 @@ function pickPlaceholderCodename(): string {
  */
 type VenueIdentityResolution =
   | { kind: "unresolved" }
-  | { kind: "draft"; strategy_id: string; api_key_id: string }
+  | {
+      kind: "draft";
+      strategy_id: string;
+      api_key_id: string;
+      // 225-05 / CONN-01 — the draft's own name, for the refusal body. Null
+      // when it is not a non-blank string. Only `handleReuseExistingKey`'s
+      // idempotent arm and the venue fence's refusal read this member.
+      strategyName: string | null;
+      // 225 PR-2 review WR-02 — the draft's own `wizard_session_id`, so the
+      // POST-validation resolve can tell the caller's OWN same-session draft (a
+      // resubmit that raced past the session fence during a long validate) from
+      // another session's. Null when not a string. Read by that one site only.
+      wizardSessionId: string | null;
+    }
   | { kind: "connected"; strategyName: string | null }
   | { kind: "held" }
-  | { kind: "orphaned" };
+  | { kind: "orphaned" }
+  // 225-07 (Q1, D-18, D-25 / MT5D-08) — the picked live key on this account is
+  // NOT working (`isWorkingHolder` false: inactive, or sync_status revoked,
+  // sign_in_failed or error). A failing key never keeps the account slot, so the
+  // connect is not refused: it is validated, created WITHOUT an identity and
+  // then takes the slot through `swapAccountSlot`, which marks this key a
+  // duplicate of the new one. DECIDED FIRST, before any strategy read, because
+  // Q1 admits a working key even when the failing holder carries a strategy.
+  // Carries the holder id and nothing else: a refusal never needs it and no
+  // response body may echo it.
+  | { kind: "failing_holder"; holderId: string }
+  // 225 PR-2 review SF-M1 / IN-11 (orchestrator decision 2) — the same-login
+  // `api_keys` read itself FAILED, so nothing is known about whether the owner
+  // already holds this account. It is NOT `unresolved`: once the server-aware
+  // index ships a null-server holder no longer collides, so proceeding on a read
+  // fault could admit a second live same-owner key. The pre- and post-validation
+  // fences answer a retryable 503 before any write. Carries nothing.
+  | { kind: "read_failed" };
 
 const UNRESOLVED: VenueIdentityResolution = { kind: "unresolved" };
 
@@ -214,36 +278,91 @@ async function resolveByVenueIdentity(
   userId: string,
   exchangeNormalized: string,
   venueAccountId: string,
+  // 225-07 (CONN-03, Q2): the normalised broker server, or null. Rides with the
+  // login into the pick and is never logged or returned.
+  venueServer: string | null,
   secrets: readonly unknown[],
+  mode: PickMode,
 ): Promise<VenueIdentityResolution> {
   let liveKeyId: string | null = null;
 
   try {
     const admin = createAdminClient();
-    const { data: liveKey, error: liveKeyErr } = await admin
-      .from("api_keys")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("exchange", exchangeNormalized)
-      .eq("venue_account_id", venueAccountId)
-      .is("disconnected_at", null)
-      .maybeSingle();
+    // 225-07 — A LIST, NOT `.maybeSingle()`. Two live same-login keys on
+    // different servers are legal once the server-aware index ships, and
+    // `maybeSingle` errors on two rows. The owner, exchange, login and
+    // `disconnected_at IS NULL` filters live in `readLiveSameLoginKeys`, which
+    // makes the owner filter mandatory in its signature; the rest of the
+    // docblock above (tenant boundary, live-scoped predicate) applies to it.
+    const { rows, error: liveKeyErr } = await readLiveSameLoginKeys(admin, {
+      userId,
+      exchange: exchangeNormalized,
+      venueAccountId,
+    });
 
     if (liveKeyErr) {
-      // Same posture as the session fence's failed read (Rule 12): surface that
-      // the cheap pre-Railway short-circuit went dark, then fall through.
+      // FAIL CLOSED (225 PR-2 review SF-M1 / IN-11). This read is what refuses a
+      // same-owner duplicate once the server-aware index ships, so a read fault
+      // must not be read as "no holder". The callers answer a retryable 503
+      // before any write; the race arm, which runs only after the index refused
+      // the INSERT, keeps its refusal fall-through.
       // ⛔ The error is scrubbed WITH this request's secrets because a PostgREST
       // error can echo the filter values back — and one of those filter values
       // is the login. Per-request candidates are redacted regardless of length
       // (the MIN_REDACTABLE_SECRET_LENGTH floor applies to ENV candidates only),
       // so a 6-digit MT5 login is genuinely removed and not merely reported.
       console.error(
-        "[strategies/create-with-key] venue-identity fence SELECT failed; proceeding to RPC (DB index still dedups):",
+        "[strategies/create-with-key] venue-identity fence SELECT failed; refusing the submit (nothing was written):",
         scrubSeamError(liveKeyErr, secrets),
-        liveKeyErr.code,
+        typeof liveKeyErr === "object" && liveKeyErr !== null && "code" in liveKeyErr
+          ? (liveKeyErr as { code?: unknown }).code
+          : undefined,
       );
+      captureToSentry(liveKeyErr, {
+        tags: { surface: "strategies-create-with-key", step: "holder-read" },
+        secrets,
+      });
+      return { kind: "read_failed" };
     }
-    liveKeyId = typeof liveKey?.id === "string" ? liveKey.id : null;
+
+    // The server rule (Q2): an exact server first, then a null-server key; a
+    // same-login key on a different server is not this account at the fence.
+    const picked = pickSameAccountHolder(rows, venueServer, mode);
+    if (picked === null) return UNRESOLVED;
+    // D-18 / Q1: a holder that is not working never keeps the slot. Decided
+    // BEFORE any strategy read, so a failing holder carrying a strategy is
+    // still replaceable by a validated working key.
+    if (!isWorkingHolder(picked)) {
+      // 225 PR-2 round-3 decision 2 (WR-06) — PRE-ADMISSION: a composite member
+      // that depends on the failing holder makes `swap_account_slot` refuse
+      // (ACCOUNT_SLOT_COMPOSITE_DEPENDENT, F-2), every time. Say so now, before
+      // the validation, the encrypt and the insert, instead of rolling back a
+      // key that could never take the slot. `held` answers the venue-neutral
+      // KEY_VENUE_ALREADY_CONNECTED. The predicate is the swap's own. A fault in
+      // this read fails closed like the same-login read above.
+      const { data: dependent, error: dependentErr } = await admin
+        .from("api_keys")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("account_shared_with_api_key_id", picked.id)
+        .eq("account_share_kind", "composite_member")
+        .limit(1)
+        .maybeSingle();
+      if (dependentErr) {
+        console.error(
+          "[strategies/create-with-key] composite-dependent read failed; refusing the submit (nothing was written):",
+          scrubSeamError(dependentErr, secrets),
+        );
+        captureToSentry(dependentErr, {
+          tags: { surface: "strategies-create-with-key", step: "holder-read" },
+          secrets,
+        });
+        return { kind: "read_failed" };
+      }
+      if (dependent) return HELD;
+      return { kind: "failing_holder", holderId: picked.id };
+    }
+    liveKeyId = picked.id;
   } catch (adminErr) {
     // `createAdminClient()` THROWS when SUPABASE_SERVICE_ROLE_KEY is absent.
     // A missing credential must not 500 a connect that would otherwise succeed:
@@ -265,8 +384,17 @@ async function resolveByVenueIdentity(
     secrets,
     "venue-identity",
   );
+  // 225 PR-2 round-3 decision 3 (WR-07) — FAIL CLOSED PAST THIS POINT. A WORKING
+  // holder is picked, so what uses it decides the answer (the caller's own
+  // draft, a refusal, or none). A read fault on `strategies` or `strategy_keys`
+  // must not read as "unresolved": the post-validation fence would then send
+  // the INSERT on with the identity attached, and once the server-aware index
+  // ships, a tier-2 holder no longer refuses it. `read_failed` answers 503
+  // before any write. The race arm treats it like `unresolved`, as before.
+  if (byStrategy.kind === "unresolved") return { kind: "read_failed" };
   if (byStrategy.kind !== "orphaned") return byStrategy;
-  return resolveOtherKeyUse(supabase, userId, liveKeyId, secrets);
+  const otherUse = await resolveOtherKeyUse(supabase, userId, liveKeyId, secrets);
+  return otherUse.kind === "unresolved" ? { kind: "read_failed" } : otherUse;
 }
 
 /**
@@ -374,9 +502,13 @@ async function resolveStrategiesForKey(
   // `strategies.api_key_id` carries no UNIQUE, so if a row ever shares a key the
   // ORIGINAL is the one to continue with — and a fence that picked
   // non-deterministically would be untestable.
+  // 225-05 / CONN-01: `name` rides the SAME read (no new query) so the venue
+  // fence can name the draft it refuses on.
+  // 225 PR-2 review WR-02: `wizard_session_id` rides the SAME read (no new
+  // query) so the post-validation resolve can recognise the caller's own draft.
   const { data: draftRow, error: draftRowErr } = await supabase
     .from("strategies")
-    .select("id")
+    .select("id, name, wizard_session_id")
     .eq("user_id", userId)
     .eq("api_key_id", liveKeyId)
     .eq("source", "wizard")
@@ -401,7 +533,21 @@ async function resolveStrategiesForKey(
   }
 
   if (draftRow?.id) {
-    return { kind: "draft", strategy_id: draftRow.id, api_key_id: liveKeyId };
+    return {
+      kind: "draft",
+      strategy_id: draftRow.id,
+      api_key_id: liveKeyId,
+      // Same shape guard as the `connected` member below: a non-string, or a
+      // blank one, is "no name" rather than a stringified surprise in copy.
+      strategyName:
+        typeof draftRow.name === "string" && draftRow.name.trim().length > 0
+          ? draftRow.name.trim()
+          : null,
+      wizardSessionId:
+        typeof draftRow.wizard_session_id === "string"
+          ? draftRow.wizard_session_id
+          : null,
+    };
   }
 
   // ⭐ NO DRAFT IS NOT YET AN ANSWER. Two very different situations reach this
@@ -486,6 +632,41 @@ function venueAlreadyConnectedResponse(strategyName: string | null): NextRespons
 }
 
 /**
+ * 225-05 / CONN-01 (founder D-23, "Say so") — THE ONE REFUSAL BODY FOR "THIS
+ * ACCOUNT IS ALREADY IN ONE OF YOUR OWN UNFINISHED DRAFTS", built once for BOTH
+ * emitting arms (the MT5 pre-validation fence and the 23505 venue-identity race
+ * arm). Two copies of one body is how TWIN-8 happened.
+ *
+ * It replaced a silent `200 deduped` that handed the wizard the OTHER draft's
+ * ids and dropped the key the user had just typed, which the user could not
+ * explain. The new key is never stored on this path.
+ *
+ * ⛔ WHY NOT AN EXISTING CODE. `DRAFT_ALREADY_EXISTS` is the SAME-session
+ * collision, and its remedies (resume, start fresh) act on THIS wizard
+ * session's draft. The draft that holds the account is a DIFFERENT session's,
+ * so those remedies would act on the wrong row. `VENUE_ALREADY_CONNECTED` says
+ * the account is held by a connected strategy, which is false for a draft.
+ *
+ * ⛔ IT TAKES NO IDENTITY PARAMETER, so the login, the server and every id are
+ * structurally unable to leak through it (T-154-06-C / T-225-14). The only value
+ * it carries is the caller's OWN draft's name (owner-scoped read), and that is
+ * OMITTED, not nulled, when blank: the wizard then renders the unnamed
+ * sentence, never empty quotes. `code` FIRST, as a literal, the order the
+ * invariant scanner and the route's byte-pin read.
+ */
+function venueDraftInProgressResponse(draftName: string | null): NextResponse {
+  const name = typeof draftName === "string" ? draftName.trim() : "";
+  return NextResponse.json(
+    {
+      code: "VENUE_DRAFT_IN_PROGRESS",
+      error: "This account is already in one of your unfinished drafts.",
+      ...(name.length === 0 ? {} : { strategy_name: name }),
+    },
+    { status: 409, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
  * 212-03 / SC5 — the KEY_ORPHANED 409, held ONCE and called from both emitting
  * sites: the pre-validation fence (MT5, identity known before `validateKey`)
  * and the 23505 race arm (ccxt venues and any race, identity known only after
@@ -503,6 +684,52 @@ function keyOrphanedResponse(): NextResponse {
       error: "This key is already stored, but no strategy uses it.",
     },
     { status: 409, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
+ * 225-11 (TWIN-8 one-builder rule) — THE ONE `KEY_VENUE_ALREADY_CONNECTED` BODY,
+ * built once for ALL THREE arms that answer it: the post-validation `held` arm,
+ * and the race arm's `held` and `failing_holder` answers. It used to be written
+ * inline in the race arm (167.1.2 REVIEW WR-04) and plan 07 left `failing_holder`
+ * sharing that one literal; two or three copies of one body is how TWIN-8
+ * happened, so there is exactly one.
+ *
+ * The code is the venue-neutral refusal whose copy is true for a key held only
+ * through a composite (`held`), and for the interim case where the login-only
+ * index refused a connect beside a failing key on a DIFFERENT server. It is the
+ * same body `keys/validate-and-encrypt` answers.
+ *
+ * ⛔ IT TAKES NO PARAMETERS, WHICH IS THE STRUCTURAL REASON NO LOGIN, SERVER OR
+ * KEY ID CAN LEAK INTO IT (T-154-06-C). `code` FIRST, as a literal, the order the
+ * invariant scanner and the byte-pin in `route.test.ts` both read; the sentence
+ * is the pre-existing one, verbatim.
+ */
+function keyVenueAlreadyConnectedResponse(): NextResponse {
+  return NextResponse.json(
+    {
+      code: "KEY_VENUE_ALREADY_CONNECTED",
+      error:
+        "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+    },
+    { status: 409, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
+ * 225 PR-2 review SF-M1 / IN-11 — THE ONE "WE COULD NOT CHECK THIS ACCOUNT" BODY,
+ * answered by the pre- and post-validation fences when the same-login read
+ * failed. 503, retryable, and returned before any write. `UNKNOWN` is the
+ * recoverable catch-all the wizard already maps; no new code is minted. It takes
+ * no parameters, so no login, server or id can leak into it.
+ */
+function holderReadFailedResponse(): NextResponse {
+  return NextResponse.json(
+    {
+      code: "UNKNOWN",
+      error: "We could not check whether this account is already connected. Please try again.",
+    },
+    { status: 503, headers: NO_STORE_HEADERS },
   );
 }
 
@@ -1248,7 +1475,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
    * (the named schema field, never a spread) and rides the RPC as
    * `p_venue_account_id`, so a second live key on one ccxt account trips the
    * venue-identity index and resolves through the race arm in the 23505 block
-   * (own draft → deduped, connected strategy → VENUE_ALREADY_CONNECTED, orphan
+   * (own draft → VENUE_DRAFT_IN_PROGRESS since 225-05, connected strategy → VENUE_ALREADY_CONNECTED, orphan
    * → KEY_ORPHANED). sFOX has no known id and stays NULL (D-10).
    *
    * ⛔ ONE CAPTURE POINT, NOT A VENUE LITERAL SPRINKLED DOWNSTREAM. `isMt5` is
@@ -1267,36 +1494,51 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
    */
   let venueAccountId: string | null = isMt5 ? api_key.trim() : null;
 
+  // 225-07 (CONN-03, Q2) — the broker server rides WITH the login, captured at
+  // the same point: MT5's server is the `passphrase` slot (non-blank for MT5,
+  // the three-credential check above enforces it), normalised to the stored
+  // form (trim, lower-case, 128 cap, blank is null). Like the login it is never
+  // logged or returned, and it joins every per-request secrets array below
+  // because a PostgREST error can echo the normalised value back.
+  const venueServer: string | null = isMt5 ? normaliseConnectedVenueServer(passphrase) : null;
+
+  // 225-07 (Q1, D-25 / MT5D-08) — set when the account's live holder is NOT
+  // working: the new credentials are validated below, created with no identity,
+  // and then take the slot through `swapAccountSlot`.
+  let failingHolderId: string | null = null;
+
   if (venueAccountId) {
     const venueMatch = await resolveByVenueIdentity(
       supabase,
       user.id,
       exchangeNormalized,
       venueAccountId,
+      venueServer,
       // The login doubles as a credential SLOT even though the column value is
       // non-secret by definition — err toward scrubbing it out of telemetry.
-      [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId],
+      [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId, venueServer],
+      "fence",
     );
+    if (venueMatch.kind === "read_failed") return holderReadFailedResponse();
+    if (venueMatch.kind === "failing_holder") {
+      // Q1 — NOT a refusal. The holder is not working, so its slot is
+      // available to a key that proves itself: fall through to `validateKey`
+      // (the new credentials must be proven read-only BEFORE they take a slot,
+      // T-225-19). The post-validation resolve re-reads and sets the holder id
+      // used for the swap below (225-11), so this value is not trusted past
+      // validation.
+      failingHolderId = venueMatch.holderId;
+    }
     if (venueMatch.kind === "draft") {
-      // ⭐ `deduped` IS ADDITIVE AND APPEARS ON THIS ARM ONLY. The session-fence
-      // arm above stays byte-identical: the common case (a double-click) is
-      // already safe, already silent, and gets no new UI. This arm is the one
-      // the user cannot otherwise explain — they pressed Connect and did not
-      // get a new strategy — so it is the one that earns a line on screen.
+      // 225-05 / CONN-01 (D-23, "Say so") — REFUSE BY NAME. This account is in
+      // one of the caller's OWN unfinished drafts from a DIFFERENT wizard
+      // session (the same-session resume is answered by the fence above and is
+      // D-23's carve-out). It used to answer a silent `200 deduped` that
+      // dropped the key just typed; the user could not explain that, so it now
+      // says so. Short-circuits before `validateKey`/`encryptKey` like its
+      // siblings: zero writes, zero charged seam calls.
       // ⛔ The identity itself never crosses back (UI-SPEC / T-154-06-C).
-      // ⛔ CORRECTED 2026-11-14 (Phase 213 decision (a)): the session-fence arm
-      // above now ALSO answers `deduped: true` (decision (a): deduped whenever
-      // a route-owned arm returns an existing draft). The two sentences above
-      // are kept as lineage; they described the world before that decision.
-      return NextResponse.json(
-        {
-          ok: true,
-          strategy_id: venueMatch.strategy_id,
-          api_key_id: venueMatch.api_key_id,
-          deduped: true,
-        },
-        { headers: NO_STORE_HEADERS },
-      );
+      return venueDraftInProgressResponse(venueMatch.strategyName);
     }
     if (venueMatch.kind === "connected") {
       // 154.1 REVIEW CR — REFUSE, AND SAY WHY TRUTHFULLY. This account is held
@@ -1322,8 +1564,17 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // below records the 161-05 order this reverses.
       return keyOrphanedResponse();
     }
-    // 167.1.2 REVIEW WR-04: `held` falls through here and is answered by the
-    // race arm's own `held` branch.
+    // 225 PR-2 round-3 decision 2 (WR-06): `held` is answered here, before the
+    // validation, for the same reason as the arms above: it is a fact about the
+    // caller's OWN stored keys that no credential check can change. It is what a
+    // failing holder with a composite dependent resolves to (the swap would
+    // refuse it every time); a working holder held only through a composite
+    // resolves to it too.
+    if (venueMatch.kind === "held") {
+      return keyVenueAlreadyConnectedResponse();
+    }
+    // 167.1.2 REVIEW WR-04: `held` used to fall through here and be answered by
+    // the race arm's own `held` branch.
     // ⛔ CORRECTED 2026-11-14 (Phase 212 SC5) — THE `orphaned` ARM ABOVE REVERSES
     // THE 161-05 / WIZERR-03 ORDER RECORDED HERE; the original reasoning is kept
     // below as lineage.
@@ -1406,6 +1657,73 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       venueAccountId = validation.venue_account_id ?? null;
     }
 
+    // ⭐ 225-11 (ONCE-01 / D-01, Q1, D-25, CONN-03) — THE POST-VALIDATION RESOLVE,
+    // FOR EVERY VENUE WHOSE IDENTITY IS NOW KNOWN. One more resolver call, in
+    // "fence" mode, between the verdict and the write. It is the first time the
+    // fence can speak for a ccxt venue (its id exists only after validation) and
+    // it re-reads MT5 too, because that validation can take up to 120 s and the
+    // account's holder may have moved since the pre-validation read.
+    //
+    // ⛔ `held` IS REFUSED HERE and no longer left to the index. Once plan 10's
+    // server-aware index ships, a null-server holder and a server-stamped new key
+    // do not collide there, so the index could no longer be the backstop for a
+    // working holder (T-225-36).
+    //
+    // The LATEST read wins for the swap: `failingHolderId` is re-derived from
+    // this result, so a holder that recovered during validation refuses instead
+    // of being swapped, and one that vanished is simply not swapped (the key is
+    // then created WITH its identity, as on any free account).
+    // ⛔ ZERO WRITES on every refusal below: the RPC, the swap and every
+    // `api_keys` write are after this point, so a strategy-linked key that also
+    // feeds an allocator book keeps both uses (ONCE-02). The read is per owner by
+    // `readLiveSameLoginKeys`' mandatory `user_id` filter; another owner's key on
+    // the account is never read, so the connect succeeds and stamps the identity,
+    // which is the share link (Q3). No cross-owner marker exists.
+    if (venueAccountId !== null) {
+      const postMatch = await resolveByVenueIdentity(
+        supabase,
+        user.id,
+        exchangeNormalized,
+        venueAccountId,
+        venueServer,
+        [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId, venueServer],
+        "fence",
+      );
+      failingHolderId = postMatch.kind === "failing_holder" ? postMatch.holderId : null;
+      if (postMatch.kind === "read_failed") return holderReadFailedResponse();
+      if (postMatch.kind === "draft") {
+        // 225 PR-2 review WR-02 (orchestrator decision 3) — the session fence
+        // runs ONCE, before validation, so a same-session resubmit (reload, second
+        // tab, double submit) during a long validate passes it and then finds the
+        // FIRST request's committed draft here. That draft is the caller's own
+        // resume (D-23's carve-out), not "another unfinished draft": answer the
+        // session fence's deduped body, byte for byte in shape. Only another
+        // session's draft is refused by name.
+        if (postMatch.wizardSessionId === wizard_session_id) {
+          return NextResponse.json(
+            {
+              ok: true,
+              strategy_id: postMatch.strategy_id,
+              api_key_id: postMatch.api_key_id,
+              deduped: true,
+            },
+            { headers: NO_STORE_HEADERS },
+          );
+        }
+        return venueDraftInProgressResponse(postMatch.strategyName);
+      }
+      if (postMatch.kind === "connected") {
+        return venueAlreadyConnectedResponse(postMatch.strategyName);
+      }
+      if (postMatch.kind === "held") {
+        return keyVenueAlreadyConnectedResponse();
+      }
+      if (postMatch.kind === "orphaned") {
+        return keyOrphanedResponse();
+      }
+      // `failing_holder` → the admission below; `unresolved` → the normal RPC.
+    }
+
     // encryptKey() validates the response against EncryptKeyResponseSchema
     // (Zod) before returning — the fields below are already correctly typed
     // by the schema; no runtime casts needed (H-0308).
@@ -1453,7 +1771,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         {
           tags: { surface: "strategies-create-with-key", step: "encrypt-contract" },
           extra: { returned_keys: Object.keys(encrypted) },
-          secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+          secrets: [api_key, apiSecretNormalized, passphraseOrNull, venueServer],
         },
       );
       console.error(
@@ -1516,6 +1834,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           api_key,
           apiSecretNormalized,
           passphraseOrNull,
+          venueServer,
         ]),
       );
       return NextResponse.json(
@@ -1584,7 +1903,24 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // parameter's own `DEFAULT NULL` supplies the value — the additive
       // guarantee is then a property of the request, not of a serializer
       // dropping `undefined`.
-      ...(venueAccountId === null ? {} : { p_venue_account_id: venueAccountId }),
+      //
+      // 225-07 (CONN-03, MT5D-08) — TWO CASES, BOTH EXPLICIT:
+      //   · an ADMISSION (`failingHolderId` set): NEITHER identity parameter is
+      //     sent. `swap_account_slot` stamps the login and the server itself, in
+      //     the same transaction that demotes the failing holder, and it refuses
+      //     a new key that already carries an identity. Sending the login here
+      //     would trip the live unique index against the very holder being
+      //     replaced.
+      //   · otherwise the login rides as before and the normalised server
+      //     (`p_venue_server`, the 13th parameter) rides beside it when there is
+      //     one. OMITTED rather than null, like the login, so SQL stores NULL
+      //     (a wildcard for every app fence) and an older caller is unchanged.
+      ...(venueAccountId === null || failingHolderId !== null
+        ? {}
+        : {
+            p_venue_account_id: venueAccountId,
+            ...(venueServer === null ? {} : { p_venue_server: venueServer }),
+          }),
     });
 
     if (error) {
@@ -1602,6 +1938,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           apiSecretNormalized,
           passphraseOrNull,
           venueAccountId,
+          venueServer,
         ]),
         error.code,
       );
@@ -1631,19 +1968,25 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
                 user.id,
                 exchangeNormalized,
                 venueAccountId,
-                [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId],
+                venueServer,
+                [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId, venueServer],
+                // ⭐ 225-11 (CONN-03, Q2) — "after_index_refusal", NOT "fence". The
+                // index has just refused this write, so the arm must name the key
+                // that refused it, and the login-only index refuses on a login
+                // alone: tier 3 of the pick (any live same-login key, even on a
+                // different server) is what finds it. ⚠️ THE THIRD TIER ONLY
+                // MATTERS WHILE THE LOGIN-ONLY INDEX IS LIVE and is DEAD after
+                // plan 10 ships the server-aware index, which never refuses a
+                // different-server write; the post-validation resolve above is
+                // then the only path that refuses a working holder.
+                "after_index_refusal",
               )
             : UNRESOLVED;
           if (venueMatch.kind === "draft") {
-            return NextResponse.json(
-              {
-                ok: true,
-                strategy_id: venueMatch.strategy_id,
-                api_key_id: venueMatch.api_key_id,
-                deduped: true,
-              },
-              { headers: NO_STORE_HEADERS },
-            );
+            // 225-05 / CONN-01 — the SAME by-name refusal as the pre-RPC arm,
+            // through the SAME builder. The INSERT was refused by the index and
+            // rolled back, so "the new key was not saved" holds here too.
+            return venueDraftInProgressResponse(venueMatch.strategyName);
           }
           if (venueMatch.kind === "connected") {
             // 154.1 REVIEW CR — the SAME refusal as the pre-RPC arm, through the
@@ -1658,7 +2001,15 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // than on the pre-RPC one.
             return venueAlreadyConnectedResponse(venueMatch.strategyName);
           }
-          if (venueMatch.kind === "held") {
+          if (venueMatch.kind === "held" || venueMatch.kind === "failing_holder") {
+            // 225-07 — `failing_holder` can only reach this arm in a race (the
+            // pre-validation and post-validation arms admit it, and a key created
+            // WITHOUT identity cannot trip the index). The INSERT was refused and
+            // rolled back, so the same venue-neutral refusal is true for it.
+            // INTERIM RULE (CONN-03): while the login-only index is live, this is
+            // also where a failing key on a DIFFERENT server is met (tier 3 of
+            // the pick), because the index refuses the new key regardless of
+            // server and nothing here may swap across servers.
             // 167.1.2 REVIEW WR-04 (narrowed by REVIEW-R2 CR-01) — the live key
             // on this account has no strategy row but a composite uses it
             // (`strategy_keys`, read in `resolveOtherKeyUse`), so KEY_ORPHANED's
@@ -1666,15 +2017,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // is the venue-neutral refusal whose copy holds for it: another
             // connected key of yours already reads this account, and the new
             // key was not saved (the INSERT above was refused and rolled back).
-            // Same body `keys/validate-and-encrypt` answers.
-            return NextResponse.json(
-              {
-                code: "KEY_VENUE_ALREADY_CONNECTED",
-                error:
-                  "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
-              },
-              { status: 409, headers: NO_STORE_HEADERS },
-            );
+            // Same body `keys/validate-and-encrypt` answers, through the one
+            // builder (225-11) that the post-validation `held` arm also uses.
+            return keyVenueAlreadyConnectedResponse();
           }
           if (venueMatch.kind === "orphaned") {
             // 161-05 / WIZERR-03 — THE ORPHAN, DISCRIMINATED BEFORE THE PINNED
@@ -1744,6 +2089,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
               apiSecretNormalized,
               passphraseOrNull,
               venueAccountId,
+              venueServer,
             ],
           });
           return NextResponse.json(
@@ -1783,7 +2129,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       captureToSentry(error, {
         tags: { surface: "strategies-create-with-key", step: "draft-rpc-error" },
         extra: { pg_code: error.code },
-        secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+        secrets: [api_key, apiSecretNormalized, passphraseOrNull, venueServer],
       });
       return NextResponse.json(
         { code: "UNKNOWN", error: "Could not create draft strategy" },
@@ -1806,13 +2152,171 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             has_strategy_id: Boolean(row?.strategy_id),
             has_api_key_id: Boolean(row?.api_key_id),
           },
-          secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+          secrets: [api_key, apiSecretNormalized, passphraseOrNull, venueServer],
         },
       );
       return NextResponse.json(
         { code: "UNKNOWN", error: "RPC returned no rows" },
         { status: 500, headers: NO_STORE_HEADERS },
       );
+    }
+
+    /**
+     * ⭐ 225-07 (Q1, D-25 / MT5D-08) — THE ADMISSION: A FAILING HOLDER GIVES UP
+     * ITS SLOT TO THIS VALIDATED KEY.
+     *
+     * Reached only when the post-validation resolve (every venue since 225-11:
+     * MT5 and ccxt alike) found a live key on this account that is not working
+     * (`isWorkingHolder` false) and `validateKey` has proven THESE credentials
+     * read-only. The draft above was created with no
+     * identity; `swap_account_slot` now stamps the login and the server on it and
+     * marks the failing key a duplicate of it, in one transaction. Nothing is
+     * disconnected, unpublished or re-pointed. The swap itself re-checks D-18 on
+     * the new key (ACCOUNT_SLOT_NEW_KEY_NOT_WORKING), so an unproven key cannot
+     * take a slot even if this call were reached wrongly (T-225-19).
+     *
+     * ⭐ A REFUSED OR FAILED SWAP IS A REFUSAL, NOT A SUCCESS (225 PR-2 review
+     * WR-01 + SF-M3, orchestrator decision 1). The admitted key was inserted with
+     * NO identity, so the unique index cannot back-stop it: leaving it would
+     * leave a second live same-owner key (with its own draft) on one account
+     * while telling the user "connected" (concurrent admission, a composite
+     * dependent, a holder that recovered). So the route undoes what THIS request
+     * wrote, in code (no migration, no `p_swap_from_holder`): it deletes the key
+     * it just inserted and then the draft it just created, and answers
+     * `409 KEY_VENUE_ALREADY_CONNECTED`, the same builder as the `held` arm.
+     *   · The key is deleted FIRST and only `WHERE venue_account_id IS NULL`. The
+     *     RPC replays a same-session pair and cannot say whether it minted or
+     *     replayed it, so a key that is already stamped is one a swap landed on
+     *     (an earlier request of the same session, or a swap that landed and
+     *     then lost its answer). Deleting it would destroy a live, slot-holding
+     *     key, so zero rows deleted means nothing is undone. The FK is SET NULL,
+     *     so the draft survives the key delete and is removed second.
+     *   · Deleting rows THIS request created is not removing the user's data:
+     *     the "keep data" rule protects what the user already had.
+     *   · Logged with codes only. A delete that itself fails is a Sentry ERROR
+     *     and the response is still the 409.
+     * The swap failure itself is still logged at ERROR and sent to Sentry
+     * (Rule 12), scrubbed with this request's secrets, the login and server
+     * included.
+     */
+    if (failingHolderId !== null && venueAccountId !== null) {
+      // @audit-skip: the demotion audit (api_key.account_duplicate_detected) and
+      // the recompose enqueue land inside swapAccountSlot
+      // (src/lib/venue-identity.ts), the one place that calls the RPC.
+      const swap = await swapAccountSlot(rpcAdmin, {
+        userId: user.id,
+        exchange: exchangeNormalized,
+        newKeyId: row.api_key_id,
+        oldHolderId: failingHolderId,
+        venueAccountId,
+        venueServer,
+      });
+      if (!swap.ok) {
+        // Set only by the zero-row arm below when the re-read finds the key
+        // stamped: the swap landed, so the request continues to its success.
+        let swapLanded = false;
+        const swapSecrets = [
+          api_key,
+          apiSecretNormalized,
+          passphraseOrNull,
+          venueAccountId,
+          venueServer,
+        ];
+        console.error(
+          "[strategies/create-with-key] holder swap failed after the draft was created; rolling back this request's key and draft:",
+          scrubSeamError(swap.error, swapSecrets),
+        );
+        captureToSentry(swap.error, {
+          tags: { surface: "strategies-create-with-key", step: "holder-swap" },
+          extra: { exchange: exchangeNormalized },
+          secrets: swapSecrets,
+        });
+        // @audit-skip: compensating rollback of the key THIS request inserted
+        // (a wizard draft's key, not yet user-visible); the create it undoes is
+        // itself @audit-skip'd above and no user-visible state existed.
+        const { data: removedKeys, error: keyDeleteErr } = await rpcAdmin
+          .from("api_keys")
+          .delete()
+          .eq("id", row.api_key_id)
+          .eq("user_id", user.id)
+          .is("venue_account_id", null)
+          .select("id");
+        if (keyDeleteErr) {
+          console.error(
+            `[strategies/create-with-key] compensating delete of the new key failed: code=${keyDeleteErr.code}`,
+          );
+          captureToSentry(keyDeleteErr, {
+            tags: { surface: "strategies-create-with-key", step: "holder-swap-rollback" },
+            secrets: swapSecrets,
+          });
+        } else if ((removedKeys ?? []).length === 0) {
+          // 225 PR-2 round-3 decision 1 (SF2-N1 / IN-12) — ZERO ROWS DELETED
+          // MEANS THE KEY IS ALREADY STAMPED OR GONE. Re-read its
+          // `venue_account_id` before answering: stamped means a swap landed on
+          // it (a same-session replay that raced, or a swap that committed and
+          // lost its answer), the key holds the slot, and "not saved" would be
+          // false. That answers this request's normal success below. Anything
+          // else keeps the 409. Paged with its own step either way.
+          console.warn(
+            "[strategies/create-with-key] compensating delete removed no key (already stamped or gone); nothing of this request's was undone",
+          );
+          captureToSentry(swap.error, {
+            tags: { surface: "strategies-create-with-key", step: "holder-swap-rollback-noop" },
+            secrets: swapSecrets,
+          });
+          const { data: stampedKey, error: stampReadErr } = await rpcAdmin
+            .from("api_keys")
+            .select("venue_account_id")
+            .eq("id", row.api_key_id)
+            .eq("user_id", user.id)
+            .maybeSingle();
+          if (stampReadErr) {
+            console.error(
+              `[strategies/create-with-key] re-read of the admitted key after a no-op rollback failed: code=${stampReadErr.code}`,
+            );
+          } else if (stampedKey?.venue_account_id != null) {
+            swapLanded = true;
+          }
+        } else {
+          // @audit-skip: compensating rollback of the draft THIS request created
+          // (source wizard, status draft, not yet user-visible).
+          const { error: draftDeleteErr } = await rpcAdmin
+            .from("strategies")
+            .delete()
+            .eq("id", row.strategy_id)
+            .eq("user_id", user.id)
+            .eq("source", "wizard")
+            .eq("status", "draft");
+          if (draftDeleteErr) {
+            console.error(
+              `[strategies/create-with-key] compensating delete of the new draft failed: code=${draftDeleteErr.code}`,
+            );
+            captureToSentry(draftDeleteErr, {
+              tags: { surface: "strategies-create-with-key", step: "holder-swap-rollback" },
+              secrets: swapSecrets,
+            });
+          } else {
+            console.warn(
+              "[strategies/create-with-key] holder swap refused; this request's key and draft were rolled back",
+            );
+          }
+        }
+        // 225 PR-2 round-3 decision 2 (WR-06) — SPLIT BY KIND, NO NEW COPY. A
+        // refusal carries an `ACCOUNT_SLOT_` token (the same token
+        // `account_identity.py`'s `_SLOT_REFUSAL` reads): the answer is
+        // KEY_VENUE_ALREADY_CONNECTED, as before. A failure with no token (a
+        // lock timeout, a network fault) is transient and a plain retry can
+        // succeed, so it answers the retryable 503 UNKNOWN after the same
+        // rollback, which is `WHERE venue_account_id IS NULL` and so safe.
+        if (!swapLanded) {
+          const swapMessage = (swap.error as { message?: unknown } | null | undefined)?.message;
+          const isSlotRefusal =
+            typeof swapMessage === "string" && /ACCOUNT_SLOT_[A-Z_]+/.test(swapMessage);
+          return isSlotRefusal
+            ? keyVenueAlreadyConnectedResponse()
+            : holderReadFailedResponse();
+        }
+      }
     }
 
     // #597 — force-derive the asset class on the freshly-created draft row. The
@@ -1891,7 +2395,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // so a throw from here on can echo it.
     console.error(
       "[strategies/create-with-key] caught exception:",
-      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId]),
+      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId, venueServer]),
     );
 
     // Classify into a stable wizardErrors code so the client never sees the raw
@@ -1946,7 +2450,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       captureToSentry(err, {
         tags: { surface: "strategies-create-with-key", step: "unclassified-key-error" },
         extra: { exchange: exchangeNormalized },
-        secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+        secrets: [api_key, apiSecretNormalized, passphraseOrNull, venueServer],
       });
     }
 

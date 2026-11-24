@@ -237,6 +237,11 @@ founder can take.
   - **Fix direction:** a static twinned arm that asserts the function source carries the dependent clause inside the lock query, or a two-session lane test.
   - **Gate:** the new arm goes RED when the clause is removed.
 
+- [ ] **`[225-SWAPLANDED-NO-RECOMPOSE]` A slot swap that committed but lost its answer skips the recompose** (logged 2026-11-24, Phase 225 ONEACCOUNTONCE PR-2 review round 3, SFH N3-1 / IN-18, MEDIUM, data-integrity; survived the final review round; owner: to be routed by the coordinator)
+  - **What:** `swapAccountSlot` (`src/lib/venue-identity.ts`) enqueues `derive_allocator_equity` only after a clean RPC answer. When the RPC commits and the client still sees an error, the connect routes' zero-row rollback re-reads the key, finds it stamped and answers success (`swapLanded`) without that enqueue. The composed curve can then count the account under the demoted key until some later compose. For MT5 the broker-dailies derive enqueues one; for ccxt nothing confirmed does. The demotion audit row is also not written.
+  - **Fix direction:** on the `swapLanded` arm of `create-with-key` and `validate-and-encrypt`, enqueue the recompose (allocator-scoped in-flight dedup absorbs a double). Do not replay the audit row: the same-session replay race already audited once.
+  - **Gate:** a route test where the RPC errors, the delete removes zero rows and the re-read finds the key stamped asserts the enqueue; it goes RED when the enqueue is removed.
+
 - [ ] **`[219-CALLBACK-VERIFY-ERROR-LOG]` The callback's GoTrue `error` / `error_code` branch redirects without logging the error code** (logged 2026-11-20, Phase 219 ACCOUNTEMAIL gap review, MEDIUM, observability, not user-facing; owner: the next touch of `src/app/auth/callback/route.ts`)
   - **What:** when GoTrue's `/verify` itself fails (expired, already used or scanner-consumed token) it redirects to `/auth/callback` with `error` / `error_code` and no code, token hash or message. Since the Phase 219 gap, a request whose accepted `next` carries the email-change marker lands on the Account tab for that case, and nothing is logged, so a run of failed verifies cannot be seen. The marker-path exchange failure already logs its code and status.
   - **Fix direction:** log the `error_code` value only, sliced to a short length, in that branch. Never log `error_description`, which GoTrue fills with free text.
@@ -2785,12 +2790,8 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 
 ## Phase 167.1.2 (ACCOUNTTRUTH) — founder close-out decisions (logged 2026-10-11)
 
-- **[167.1.2-DRAFT-CLASH-SAYS-SO]** (owner: the next key-connect phase; D-23). A key whose exchange account matches the user's OWN unfinished draft answers 200 `deduped` and drops the new credential without a word. Done when the connect routes refuse with a message naming the existing draft (finish or delete it first), with a test that fails on today's silent dedupe.
-      ⭐ **Owned by Phase 225 ONEACCOUNTONCE, v1.22; REQUIREMENTS.md CONN-01; tagged 2026-11-23.**
 - **[167.1.2-ORPHAN-COPY-FIX]** (owner: the next key-connect phase; D-24). KEY_ORPHANED sends an allocator-role owner to email security instead of naming the key to Disconnect, and an owner whose only holder is an archived composite gets KEY_VENUE_ALREADY_CONNECTED while My Strategies offers "Finish setup". Done when every role is told which key to Disconnect and the archived case names the archived strategy.
       ⭐ **Owned by Phase 228 KEYANSWERS, v1.22; REQUIREMENTS.md CONN-04; tagged 2026-11-23.**
-- **[167.1.2-MT5-FAILING-HOLDER]** (owner: the next MT5 phase; D-25; was IN-R2-01). An MT5 key whose sign-in keeps failing can claim its account's holder slot. Done when a failing key never holds the slot and a working key on the same account takes it, with a test.
-      ⭐ **Owned by Phase 225 ONEACCOUNTONCE, v1.22; REQUIREMENTS.md MT5D-08; tagged 2026-11-23.**
 
 ## Phase 164.6.6.2.3 (FLOWTIMING) — routed items (logged 2026-10-11)
 

@@ -100,6 +100,16 @@ const {
     updates: [] as UpdateQuery[],
     /** When set, `createAdminClient()` THROWS this. */
     factoryError: null as Error | null,
+    /**
+     * Phase 225 plan 08 — the same-login read (`readLiveSameLoginKeys`) the
+     * backfill fence issues. Filtered by the user_id / exchange / venue_account_id
+     * filters the route sends, so dropping the owner filter fails a test.
+     */
+    sameLoginRows: [] as Array<Record<string, unknown>>,
+    /** When set, the same-login read resolves with this error. */
+    sameLoginError: null as unknown,
+    /** The filters of every same-login read. */
+    sameLoginReads: [] as Array<Record<string, unknown>>,
   },
   /**
    * MEDIUM (164.5.3 review) — the "source pins" vacuous-test replacement.
@@ -215,6 +225,39 @@ vi.mock("@/lib/supabase/admin", () => {
       return {
         from: (_table: string) => ({
           update: (payload: Record<string, unknown>) => makeBuilder(payload),
+          // Phase 225 plan 08 — `readLiveSameLoginKeys`'s chain, awaited.
+          select: (_cols?: string) => {
+            const filters: Record<string, unknown> = {};
+            const read = {
+              eq: (col: string, val: unknown) => {
+                filters[col] = val;
+                return read;
+              },
+              is: (col: string, val: unknown) => {
+                filters[`${col}:is`] = val;
+                return read;
+              },
+              order: (_col: string) => read,
+              then: (
+                resolve: (v: unknown) => unknown,
+                reject: (e: unknown) => unknown,
+              ) => {
+                ADMIN_STATE.sameLoginReads.push({ ...filters });
+                const result = ADMIN_STATE.sameLoginError
+                  ? { data: null, error: ADMIN_STATE.sameLoginError }
+                  : {
+                      data: ADMIN_STATE.sameLoginRows.filter((row) =>
+                        (["user_id", "exchange", "venue_account_id"] as const).every(
+                          (col) => !(col in filters) || row[col] === filters[col],
+                        ),
+                      ),
+                      error: null,
+                    };
+                return Promise.resolve(result).then(resolve, reject);
+              },
+            };
+            return read;
+          },
         }),
       };
     },
@@ -324,6 +367,9 @@ beforeEach(() => {
   ADMIN_STATE.resultQueue = [];
   ADMIN_STATE.updates = [];
   ADMIN_STATE.factoryError = null;
+  ADMIN_STATE.sameLoginRows = [];
+  ADMIN_STATE.sameLoginError = null;
+  ADMIN_STATE.sameLoginReads = [];
   USER_SCOPED_UPDATE_CALLS.length = 0;
   mockResilientFetch.mockReset();
   mockResilientFetch.mockResolvedValue(seamResponse(true, 200, SEAM_SUCCESS_BODY));
@@ -1095,6 +1141,107 @@ describe("PATCH /api/keys/[id]/rotate-secret — the venue-identity 23505 backst
       error: "internal error",
     });
     expect(ADMIN_STATE.updates).toHaveLength(1);
+  });
+});
+
+describe("PATCH /api/keys/[id]/rotate-secret — Phase 225 plan 08: the login backfill is fenced against a same-owner holder (CONN-03)", () => {
+  function sameLoginKey(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "dddddddd-0001-4000-8000-000000000001",
+      user_id: OWNER.id,
+      exchange: "mt5",
+      venue_account_id: SYNTHETIC_LOGIN,
+      venue_server: "metaquotes-demo",
+      is_active: true,
+      sync_status: null,
+      disconnected_at: null,
+      account_shared_with_api_key_id: null,
+      account_share_kind: null,
+      ...overrides,
+    };
+  }
+
+  it("does NOT backfill the login when another live key of the same owner already reads it on a stored server, and attempts the update once", async () => {
+    ADMIN_STATE.sameLoginRows = [sameLoginKey()];
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+
+    expect(res.status).toBe(200);
+    expect(ADMIN_STATE.updates).toHaveLength(1);
+    expect(ADMIN_STATE.updates[0].payload).not.toHaveProperty("venue_account_id");
+    // The password fix and the status clear still land.
+    expect(ADMIN_STATE.updates[0].payload).toMatchObject({
+      api_key_encrypted: SEAM_SUCCESS_BODY.api_key_encrypted,
+      sync_error: null,
+      sync_status: "idle",
+    });
+    expect(ADMIN_STATE.sameLoginReads).toHaveLength(1);
+    expect(ADMIN_STATE.sameLoginReads[0]).toMatchObject({
+      user_id: OWNER.id,
+      exchange: "mt5",
+      venue_account_id: SYNTHETIC_LOGIN,
+    });
+  });
+
+  it("backfills exactly as before when no same-owner key reads that login", async () => {
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+
+    expect(res.status).toBe(200);
+    expect(ADMIN_STATE.updates).toHaveLength(1);
+    expect(ADMIN_STATE.updates[0].payload).toHaveProperty("venue_account_id", SYNTHETIC_LOGIN);
+  });
+
+  it("ignores ANOTHER owner's key on that login: the backfill proceeds", async () => {
+    ADMIN_STATE.sameLoginRows = [sameLoginKey({ user_id: FOREIGN_USER_ID })];
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+
+    expect(res.status).toBe(200);
+    expect(ADMIN_STATE.updates[0].payload).toHaveProperty("venue_account_id", SYNTHETIC_LOGIN);
+  });
+
+  // 225 PR-2 review SF-M1 / IN-11 (orchestrator decision 2): INVERTED from "a
+  // read error keeps today's attempt-then-retry path". Once the server-aware
+  // index ships it no longer refuses a second holder, so this read is the only
+  // guard and a fault must fail closed, before the write.
+  it("a read error FAILS CLOSED: 503 before any UPDATE, captured to Sentry, with neither the login nor the secret in any sink", async () => {
+    ADMIN_STATE.sameLoginError = {
+      message: `permission denied for login ${SYNTHETIC_LOGIN} secret ${SYNTHETIC_NEW_SECRET}`,
+      code: "42501",
+    };
+    vi.mocked(captureToSentry).mockClear();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(JSON.parse(text).code).toBe("UNKNOWN");
+    expect(text).not.toContain(SYNTHETIC_LOGIN);
+    expect(text).not.toContain(SYNTHETIC_NEW_SECRET);
+    // Nothing was written: the password correction is retried as a whole.
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+    const [, options] = vi.mocked(captureToSentry).mock.calls[0];
+    expect(options.tags?.step).toBe("holder-read");
+    expect(options.secrets).toEqual(
+      expect.arrayContaining([SYNTHETIC_LOGIN, SYNTHETIC_NEW_SECRET]),
+    );
+    expect(consoleErr).toHaveBeenCalled();
+    const logged = JSON.stringify(consoleErr.mock.calls);
+    expect(logged).not.toContain(SYNTHETIC_LOGIN);
+    expect(logged).not.toContain(SYNTHETIC_NEW_SECRET);
+    consoleErr.mockRestore();
+  });
+
+  it("does not read at all when the row already has a login (nothing to backfill)", async () => {
+    READ_STATE.row = {
+      id: KEY_ID,
+      user_id: OWNER.id,
+      exchange: "mt5",
+      venue_account_id: "already-set-acct",
+    };
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+
+    expect(res.status).toBe(200);
+    expect(ADMIN_STATE.sameLoginReads).toEqual([]);
   });
 });
 
