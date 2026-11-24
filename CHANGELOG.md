@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.133.64.0] - 2026-11-24 — Phase 226 MT5SOAK: the MT5 soak checks what it claims, independently of the code it checks
+
+The MT5 derive soak (`analytics-service/scripts/mt5_soak.py`) is now an oracle that cannot agree with the derive by construction (PITFALLS Pitfall 12). It used to judge every account on USD floors, reject a timed day only for infinity, and never check which day a deal was booked on. It now judges a BTC-unit account on its own unit's floors, recomputes every timed day with its own D-17 cohort walk, and checks each deal's day against its own per-day walk that imports no production helper. One script and its tests changed; no migration, no service code, and no published number moves.
+
+### Added
+- **Unit-aware floors (SOAK-01).** `reconcile_parity` resolves the account unit once with `classify_account_currency`, and the unit's floors reach all five judging reads: the combiner call, the guard reading, the inception test, the level tolerance and the uPnL wedge gate. A blank, malformed or unsupported currency is INCONCLUSIVE (`observation: unit_unresolved`, `parity_ok` None, exit 1), never a silent USD fallback, and the raw broker text never enters the record. The record carries `account_unit`.
+- **An independent per-day walk and a day-attribution check (SOAK-03).** Soak-owned `_walk_*` functions read the raw deals (time, profit, commission, swap, fee, type, position) and do their own UTC bucketing. Their per-day P&L and flows are compared with the fold's day by day; a deal moved by one UTC day is a named `day_attribution_mismatch`. An AST test fails if any `_walk_*` function uses a production helper or contains any import, and its self-test carries two function-local evasions.
+- **Timed days are recomputed and compared exactly (SOAK-02).** The soak builds its own timed-day set from raw instants and positions (a day the fold and the walk time differently is named), recomputes each timed day with its own D-17 telescoping cohort walk, and compares the published return exactly. A 1e-3 nudge, NaN, infinity, 7.0 and -0.99 are each a named mismatch (`timed_return_off_cohort_walk`, `timed_day_not_finite`, `timed_day_not_nan`, `timed_day_not_walked`); a NaN passes only when the soak's own guard reading explains it.
+- **A minimum certified share and a soak-owned tiny-base reading (SOAK-02).** A run is green only when at least half of its certifiable days were certified (`_MIN_CHECKED_SHARE = 0.5`, recorded as `certified_share` and `min_certified_share`), so one checked day among two hundred is not green. `_walk_tiny_base_days` reads tiny-base days itself instead of trusting the derive's meta; a tiny-base day must be published NaN on every day class.
+- **Coverage of the published series.** Every ledger day the published series lacks is named (`ledger_day_not_published`), and a published day outside the ledger span is refused (`published_day_outside_ledger`), so a series cut at either end is not green.
+- **Drift pins** tie the soak-owned copies of production constants (deal type sets, position constants, the PNL-dominance ratio, the tiny-base fraction and window) back to production, so Phase 229 MT5DERIVE2's `nav_twr.py` edits turn the soak red on purpose and have to be judged.
+
+### Fixed (found by the phase's three review rounds, each fixed with a negative-control test)
+- Days that cannot test a trading return no longer count as certified or clear `vacuous`: deposit-only and withdrawal-only days, trading days whose P&L is zero (a commission-free open), and days whose deals net to float residue. They are still judged for value and counted in their own `flow_only` class.
+- A day whose level sits on a threshold within float noise of 0 or the dust floor (an honest $100 minimum deposit, a full withdrawal then a re-deposit) is `indeterminate`: it accepts NaN or the walk's value only, never another finite value, and counts in the share's denominator, so it cannot carry a run to green. Without this the soak gave false RED on those honest accounts. The band width is pinned at 1e-12.
+- The uPnL wedge gate no longer skips a sub-dust equity: the denominator is floored at the unit's dust, so a stop-out with a large balance is material. A non-finite equity or balance returns `observation: error`.
+
+### Tests
+- `analytics-service/tests/test_mt5_soak.py` goes from 31 to 158 tests: hand-derived walk and cohort cases, the reviewers' repros as negative controls, the AST independence test with self-tests, and the drift pins. Every gate arm was shown RED on a neutered copy of the soak, restored from a byte backup (`cmp` exit 0) and shown GREEN (PROOF-01, 14 arms plus every review-fix arm).
+- Full analytics suite on the phase branch: 1 failed, 15362 passed, 93 skipped. The one failure is the known `tests/test_xdist_group_is_real.py` case that needs pytest-xdist, which the local interpreter lacks and CI installs.
+
+### Removed
+- `TODOS.md` entries closed by this phase: `[164.6.6.2.3-SOAK-BTC-FLOORS]` (SOAK-01), `[164.6.6.2.3-SOAK-TIMED-DAYS-UNCHECKED]` (SOAK-02) and `[164.6.6.2.3-SOAK-DAY-ATTRIBUTION]` (SOAK-03). Two test comments that cited the second id now say it is closed.
+
+### Notes
+- **The first live soak after this merge is a fresh-oracle run.** The soak now checks things it never checked, so expect new named mismatches on a real account. Read each one before calling the soak broken (RESEARCH "What Pitfall 12 asks for").
+- **Phase 229 MT5DERIVE2 must merge after this phase**, so its `nav_twr.py` changes are judged by a soak built independently of them; the drift pins go red on its guard edits on purpose.
+- Known limits, recorded rather than fixed (LOW): `_MIN_CHECKED_SHARE = 0.5` rests on fixture shares, not a live soak record; the walk handles a fixed integer server offset only, while production uses a DST clock (older than this phase); two engineered knife edges outside the noise band (a withdrawal to exactly 5% of the peak, P&L exactly 10x the base) can still read red; the independence checker does not see `__import__` or `importlib`. The full list is in the phase's review disposition.
+- `scripts/` is outside CI's mypy strict surface; the script's mypy count did not grow (4 before and after) and ruff is clean.
+
 ## [0.133.63.3] - 2026-11-24 — records: Phase 225 ONEACCOUNTONCE PR-1 records, and the stale swap_account_slot ratchet row deleted
 
 This is a records PR. It changes no migration, workflow or runtime source. One commit.
