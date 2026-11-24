@@ -2130,13 +2130,29 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
      * the new key (ACCOUNT_SLOT_NEW_KEY_NOT_WORKING), so an unproven key cannot
      * take a slot even if this call were reached wrongly (T-225-19).
      *
-     * ⭐ A FAILED SWAP STILL ANSWERS SUCCESS, and that is the honest answer: the
-     * key and its draft exist and are valid. What is missing is only which key
-     * carries the account, and the daily poll's identity stamper retries exactly
-     * that (plan 09). Failing the connect here would discard a validated key
-     * over a bookkeeping step that heals itself, so no response field changes;
-     * it is logged at ERROR and sent to Sentry instead (Rule 12), scrubbed with
-     * this request's secrets, the login and the server included.
+     * ⭐ A REFUSED OR FAILED SWAP IS A REFUSAL, NOT A SUCCESS (225 PR-2 review
+     * WR-01 + SF-M3, orchestrator decision 1). The admitted key was inserted with
+     * NO identity, so the unique index cannot back-stop it: leaving it would
+     * leave a second live same-owner key (with its own draft) on one account
+     * while telling the user "connected" (concurrent admission, a composite
+     * dependent, a holder that recovered). So the route undoes what THIS request
+     * wrote, in code (no migration, no `p_swap_from_holder`): it deletes the key
+     * it just inserted and then the draft it just created, and answers
+     * `409 KEY_VENUE_ALREADY_CONNECTED`, the same builder as the `held` arm.
+     *   · The key is deleted FIRST and only `WHERE venue_account_id IS NULL`. The
+     *     RPC replays a same-session pair and cannot say whether it minted or
+     *     replayed it, so a key that is already stamped is one a swap landed on
+     *     (an earlier request of the same session, or a swap that landed and
+     *     then lost its answer). Deleting it would destroy a live, slot-holding
+     *     key, so zero rows deleted means nothing is undone. The FK is SET NULL,
+     *     so the draft survives the key delete and is removed second.
+     *   · Deleting rows THIS request created is not removing the user's data:
+     *     the "keep data" rule protects what the user already had.
+     *   · Logged with codes only. A delete that itself fails is a Sentry ERROR
+     *     and the response is still the 409.
+     * The swap failure itself is still logged at ERROR and sent to Sentry
+     * (Rule 12), scrubbed with this request's secrets, the login and server
+     * included.
      */
     if (failingHolderId !== null && venueAccountId !== null) {
       // @audit-skip: the demotion audit (api_key.account_duplicate_detected) and
@@ -2159,7 +2175,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           venueServer,
         ];
         console.error(
-          "[strategies/create-with-key] holder swap failed after the draft was created; answering success, the daily poll retries:",
+          "[strategies/create-with-key] holder swap failed after the draft was created; rolling back this request's key and draft:",
           scrubSeamError(swap.error, swapSecrets),
         );
         captureToSentry(swap.error, {
@@ -2167,6 +2183,53 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           extra: { exchange: exchangeNormalized },
           secrets: swapSecrets,
         });
+        // @audit-skip: compensating rollback of the key THIS request inserted
+        // (a wizard draft's key, not yet user-visible); the create it undoes is
+        // itself @audit-skip'd above and no user-visible state existed.
+        const { data: removedKeys, error: keyDeleteErr } = await rpcAdmin
+          .from("api_keys")
+          .delete()
+          .eq("id", row.api_key_id)
+          .eq("user_id", user.id)
+          .is("venue_account_id", null)
+          .select("id");
+        if (keyDeleteErr) {
+          console.error(
+            `[strategies/create-with-key] compensating delete of the new key failed: code=${keyDeleteErr.code}`,
+          );
+          captureToSentry(keyDeleteErr, {
+            tags: { surface: "strategies-create-with-key", step: "holder-swap-rollback" },
+            secrets: swapSecrets,
+          });
+        } else if ((removedKeys ?? []).length === 0) {
+          console.warn(
+            "[strategies/create-with-key] compensating delete removed no key (already stamped or gone); nothing of this request's was undone",
+          );
+        } else {
+          // @audit-skip: compensating rollback of the draft THIS request created
+          // (source wizard, status draft, not yet user-visible).
+          const { error: draftDeleteErr } = await rpcAdmin
+            .from("strategies")
+            .delete()
+            .eq("id", row.strategy_id)
+            .eq("user_id", user.id)
+            .eq("source", "wizard")
+            .eq("status", "draft");
+          if (draftDeleteErr) {
+            console.error(
+              `[strategies/create-with-key] compensating delete of the new draft failed: code=${draftDeleteErr.code}`,
+            );
+            captureToSentry(draftDeleteErr, {
+              tags: { surface: "strategies-create-with-key", step: "holder-swap-rollback" },
+              secrets: swapSecrets,
+            });
+          } else {
+            console.warn(
+              "[strategies/create-with-key] holder swap refused; this request's key and draft were rolled back",
+            );
+          }
+        }
+        return keyVenueAlreadyConnectedResponse();
       }
     }
 

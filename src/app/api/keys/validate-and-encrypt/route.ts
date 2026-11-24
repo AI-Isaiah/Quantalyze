@@ -936,8 +936,19 @@ async function legacyValidateAndEncryptHandler(args: {
 
     // Phase 225 (MT5D-08): take the slot from the failing holder. The demotion
     // audit and the recompose enqueue happen inside `swapAccountSlot`
-    // (src/lib/venue-identity.ts). A refused or failed swap never fails the add:
-    // the key is saved, and the daily poll's identity stamper retries it.
+    // (src/lib/venue-identity.ts).
+    // ⭐ A REFUSED OR FAILED SWAP IS A REFUSAL, NOT A SUCCESS (225 PR-2 review
+    // WR-01 + SF-M3, orchestrator decision 1). The key above was inserted with NO
+    // identity, so the unique index cannot back-stop it: leaving it would leave a
+    // second live same-owner key on one account while answering "saved". The
+    // route deletes the key THIS request inserted and answers
+    // `409 KEY_VENUE_ALREADY_CONNECTED`, the same builder as the working-holder
+    // refusal above. Deleting a row this request created is not removing the
+    // user's data. The delete runs only `WHERE venue_account_id IS NULL`: a key a
+    // swap did land on (one that landed and then lost its answer) holds the slot
+    // and must never be deleted, so zero rows deleted means nothing is undone.
+    // Logged with codes only; a delete that itself fails is a Sentry ERROR and the
+    // response is still the 409. No migration, no `p_swap_from_holder`.
     if (failingHolderId !== null && venueAccountId !== null) {
       // @audit-skip: the demotion audit and the recompose land inside swapAccountSlot (src/lib/venue-identity.ts).
       const swap = await swapAccountSlot(admin, {
@@ -951,7 +962,7 @@ async function legacyValidateAndEncryptHandler(args: {
       if (!swap.ok) {
         const swapSecrets = [api_key, api_secret, passphrase, venueAccountId, venueServer];
         console.error(
-          "[keys/validate-and-encrypt] holder swap failed; the key is saved and the daily poll retries it:",
+          "[keys/validate-and-encrypt] holder swap failed; rolling back this request's key:",
           { correlationId },
           scrubSeamError(swap.error, swapSecrets),
         );
@@ -964,6 +975,40 @@ async function legacyValidateAndEncryptHandler(args: {
           },
           secrets: swapSecrets,
         });
+        // @audit-skip: compensating rollback of the key THIS request inserted (the insert it undoes is itself @audit-skip'd above and no user-visible state existed).
+        const { data: removedKeys, error: keyDeleteErr } = await admin
+          .from("api_keys")
+          .delete()
+          .eq("id", inserted.id)
+          .eq("user_id", userId)
+          .is("venue_account_id", null)
+          .select("id");
+        if (keyDeleteErr) {
+          console.error(
+            `[keys/validate-and-encrypt] compensating delete of the new key failed: code=${keyDeleteErr.code}`,
+            { correlationId },
+          );
+          captureToSentry(keyDeleteErr, {
+            tags: {
+              route: "api/keys/validate-and-encrypt",
+              arm: "persist",
+              step: "holder-swap-rollback",
+              correlation_id: correlationId,
+            },
+            secrets: swapSecrets,
+          });
+        } else if ((removedKeys ?? []).length === 0) {
+          console.warn(
+            "[keys/validate-and-encrypt] compensating delete removed no key (already stamped or gone); nothing of this request's was undone",
+            { correlationId },
+          );
+        } else {
+          console.warn(
+            "[keys/validate-and-encrypt] holder swap refused; this request's key was rolled back",
+            { correlationId },
+          );
+        }
+        return keyVenueAlreadyConnectedResponse();
       }
     }
 
