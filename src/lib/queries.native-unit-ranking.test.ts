@@ -46,7 +46,7 @@ vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({ from: () => ({}) }),
 }));
 
-import { getPercentiles, shapeRowAnalytics } from "./queries";
+import { getOwnRowPercentiles, getPercentiles, shapeRowAnalytics } from "./queries";
 
 beforeEach(() => {
   strategiesResolver.data = null;
@@ -104,5 +104,32 @@ describe("Discovery percentiles — one population (CACHE-04)", () => {
     // The raw BTC figures are the highest of the six, so unconverted they top both metrics.
     expect(ranks["btc-1"].cagr).toBe(100);
     expect(ranks["btc-1"].cumulative_return).toBe(100);
+    // The discriminating pair: 5 of the six values are <= usd-5's, so one population gives 83.
+    // A USD-only cohort of five would give 100, so this fails when the BTC row is scored in
+    // its own group or dropped, not only when it is missing.
+    expect(ranks["usd-5"].cagr).toBe(83);
+    expect(ranks["usd-5"].cumulative_return).toBe(83);
+  });
+
+  it("an own BTC row is scored against the USD and BTC published rows together", async () => {
+    strategiesResolver.data = [
+      { id: "usd-1", strategy_analytics: analytics(0.1, 0.2) },
+      { id: "usd-2", strategy_analytics: analytics(0.2, 0.4) },
+      { id: "usd-3", strategy_analytics: analytics(0.3, 0.6) },
+      { id: "usd-4", strategy_analytics: analytics(0.4, 0.8) },
+      { id: "usd-5", strategy_analytics: analytics(0.5, 1.0) },
+      { id: "btc-1", strategy_analytics: analytics(0.9, 3.2, BTC) },
+    ];
+    // An unpublished BTC own row that sits mid-pack: three of the seven values (six published
+    // plus itself) are <= it, so one population gives 43. Scored among BTC rows alone (its own
+    // cohort) it would be 50 against btc-1, and scored against the USD rows only it would be 50.
+    const own = shapeRowAnalytics(analytics(0.25, 0.5, BTC) as never, "own-btc");
+
+    const result = await getOwnRowPercentiles([{ id: "own-btc", analytics: own }]);
+    expect(result).not.toBeNull();
+    expect(result!.ownMap["own-btc"].cagr).toBe(43);
+    expect(result!.ownMap["own-btc"].cumulative_return).toBe(43);
+    // The published map is the one population too: usd-5 is 5 of 6.
+    expect(result!.publishedMap["usd-5"].cagr).toBe(83);
   });
 });
