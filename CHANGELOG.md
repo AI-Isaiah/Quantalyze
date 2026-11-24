@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.133.66.0] - 2026-11-24 — Phase 225 ONEACCOUNTONCE PR-2: one account, one working key
+
+PR-2 of three for Phase 225. It ships plans 05 to 09, 11 and 12, plus three review rounds, and contains no migration. It is the code that uses PR-1's `venue_server` column and `swap_account_slot` function (#1315). PR-3 follows with migration B, which rebuilds the live unique index on login plus server.
+
+### Added
+- **VENUE_DRAFT_IN_PROGRESS (plan 05).** A key whose exchange account matches the user's own unfinished draft is now refused, and the message names the draft. Until now it answered 200 `deduped` and dropped the new credential without a word. The roster, copy table (size 104), naming sentence and wizard surface are pinned.
+- **The slot moves from a failing holder (plans 07, 08 and 09).** Suppose the same login is held by the owner's key that is failing (revoked, sign-in failed, error or disconnected). Then a wizard connect (`create-with-key`) or an allocator add (`validate-and-encrypt`) admits the new key and moves the holder slot to it through `swap_account_slot`.
+  - The demoted key is named on its card (`account-share-note`).
+  - A working same-owner holder is still refused, by name.
+  - The poll's stamper (`analytics-service/services/account_identity.py`) does the same swap. When a swap is refused, it falls back to the marker. The 167.1.2 no-self-heal pin flips.
+- **Shared helpers (plan 06).** One broker-server rule per runtime, pinned by one hand-typed fixture (`venue_server_identity.json`). A live same-login read and a `swapAccountSlot` helper (`src/lib/venue-identity.ts`), typed and registered.
+- **MT5 broker server capture (plans 07 and 12).** Connect writes the normalised server and scrubs it from every projection. The poll captures and backfills it for existing keys. The census runbook for gate A5 is `docs/runbooks/venue-server-backfill/`.
+
+### Changed
+- **Every venue is resolved after validation (plan 11).** There is one `KEY_VENUE_ALREADY_CONNECTED` builder and an interim race arm. ONCE-01 and ONCE-02 are pinned per owner. OQ-2 is stated in the resolver docblock.
+- **`rotate-secret` login backfill.** It is fenced, and fails closed on a read fault.
+
+### Fixed (review rounds 1 to 3, `225-REVIEW-PR2.md`)
+- **WR-01 and SF-M3.** A refused swap after a failing-holder admission is rolled back: the new key, then the draft. The answer is a 409.
+- **WR-06.** Swap failures are split by kind:
+  - an `ACCOUNT_SLOT_*` refusal answers 409;
+  - a transient fault answers a retryable 503;
+  - a failing holder with a composite dependent is refused before admission, and in the wizard before validation.
+- **SF2-N1 and IN-12.** When the rollback deletes nothing, the route re-reads the key. If the swap landed, it answers success. Otherwise it answers the refusal. Sentry receives `holder-swap-rollback-noop` either way.
+- **SF-M1, IN-11 and WR-07.** A failed same-login holder read fails closed with a retryable 503. So does a failed strategies or `strategy_keys` read after a working holder was picked.
+- **WR-02.** A same-session draft met after validation answers the session fence's deduped body.
+- **WR-03.** The connect routes strip the raw MT5 server the way Python's `str.strip()` does, before normalising.
+- **WR-04.** A syncing key is no longer treated as proven working for the slot swap.
+- **WR-05.** Gate A5's Census 2 is dropped, because the live unique index means it can never return a row.
+- **SF-M2.** The three contract slot refusals log at ERROR.
+- **WR-08.** The rollback test mocks tell `.is` from `.eq` and return rows only after `.select`, so they can fail.
+
+### Removed
+- **TODOS `[167.1.2-DRAFT-CLASH-SAYS-SO]`**, closed by VENUE_DRAFT_IN_PROGRESS (CONN-01).
+- **TODOS `[167.1.2-MT5-FAILING-HOLDER]`**, closed by the slot swap (MT5D-08).
+
+### Notes
+- **Booked `[225-SWAPLANDED-NO-RECOMPOSE]`,** the MEDIUM data-integrity item that survived the final review round. A swap that commits but loses its answer now answers success, but skips the recompose enqueue. For ccxt, nothing confirmed recomposes afterwards. The coordinator routes it.
+- **Known limit.** The SQL `swap_account_slot` still treats `syncing` as working. This affects direct callers only, and fixing it needs a migration, which is out of scope here.
+- **Recorded, not fixed (LOW and Info).** IN-01 and IN-03 to IN-24 are in `225-REVIEW-PR2.md`. Under Rule 7, IN-19's decision conflict resolves to round-3 decision 2: a transient fault answers 503 even when the rollback delete also fails.
+- **Verification run before the push:**
+  - tsc clean;
+  - 14 touched vitest files, 1651 tests;
+  - mypy strict, 142 files;
+  - the three touched pytest files, 390 tests.
+
 ## [0.133.65.2] - 2026-11-24 — records: Phase 231 BYBITREADS plans 01-05 phase records (plan 06 waits for 229)
 
 This is a records PR. It has no source, test, script, workflow or migration change. It carries Phase 231's `.planning` work for plans 01-05, whose code shipped in v0.133.61.6 (#1314, the probe) and v0.133.65.0 (#1321, plans 03-05).
