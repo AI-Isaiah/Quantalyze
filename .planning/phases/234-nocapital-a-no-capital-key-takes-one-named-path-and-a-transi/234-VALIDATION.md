@@ -80,3 +80,11 @@ All phase behaviors have automated verification.
 - [x] `nyquist_compliant: true` set in frontmatter
 
 **Approval:** pending
+
+---
+
+## Plan-time gate notes (orchestrator, 2026-11-25)
+
+- **Decision coverage gate (plan-phase 13a): proceeded with an override.** `check.decision-coverage-plan` returned `could-not-parse`. A smart-discuss CONTEXT.md carries no `D-NN` decision ids by design, and the parser treats the prior-phase references in it (166.3.1 `D-02`, `D-10`) as decision-shaped. Coverage was checked another way instead. The plan checker confirmed CONTEXT compliance for every locked decision, with 0 blockers and 0 warnings. Plan 01's source audit marks every row COVERED. The post-planning gap analysis shows 4/4 requirements covered. Verify-phase should re-check decision coverage by reading CONTEXT.md, not by relying on that parser.
+- The override is recorded here and not in STATE.md, because parallel phases share STATE.md's Current Position. The `state.planned-phase` handler overwrote another phase's position and truncated `stopped_at`, so its diff was reverted.
+- Plan-checker advisories (INFO, no revision): the DEC-02-B gate order is not pinned by a test that bites; the apply-loop `candidate_exception` count and plan 04's scope edges have no neuter arm of their own; the 155.2 freeze is an orchestrator push-time check (`155.2-12-SUMMARY.md` must be absent from origin/main); "payload flag" is satisfied by the counts field in `payload["inputs"]`.
