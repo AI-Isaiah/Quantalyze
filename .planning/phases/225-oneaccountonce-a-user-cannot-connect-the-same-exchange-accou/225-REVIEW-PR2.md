@@ -1,8 +1,11 @@
 ---
 phase: 225-oneaccountonce-a-user-cannot-connect-the-same-exchange-accou
-reviewed: 2026-11-24T12:42:05Z
+reviewed: 2026-11-24T14:00:36Z
+round: 2
+round_1_reviewed: 2026-11-24T12:42:05Z
 depth: standard
-files_reviewed: 27
+# Round 2 scope: the fixer diff 629260a5c..HEAD (non-planning). Round 1 covered 27 files.
+files_reviewed: 15
 files_reviewed_list:
   - analytics-service/services/account_identity.py
   - analytics-service/tests/fixtures/venue_server_identity.json
@@ -10,33 +13,24 @@ files_reviewed_list:
   - analytics-service/tests/test_venue_server_identity.py
   - docs/runbooks/venue-server-backfill/README.md
   - docs/runbooks/venue-server-backfill/census.sql
-  - src/__tests__/audit-coverage.test.ts
-  - src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.test.tsx
   - src/app/api/keys/[id]/rotate-secret/route.test.ts
   - src/app/api/keys/[id]/rotate-secret/route.ts
   - src/app/api/keys/validate-and-encrypt/route.test.ts
   - src/app/api/keys/validate-and-encrypt/route.ts
   - src/app/api/strategies/create-with-key/route.test.ts
   - src/app/api/strategies/create-with-key/route.ts
-  - src/components/exchanges/AllocatorExchangeManager.test.tsx
-  - src/components/strategy/ApiKeyManager.test.tsx
-  - src/lib/account-share-note.test.ts
-  - src/lib/account-share-note.ts
-  - src/lib/database.types.ts
   - src/lib/venue-identity.test.ts
   - src/lib/venue-identity.ts
   - src/lib/wizardErrors.invariant.test.ts
-  - src/lib/wizardErrors.roster-render.test.tsx
-  - src/lib/wizardErrors.test.ts
-  - src/lib/wizardErrors.ts
-  - src/lib/wizardKeyRosters.test.ts
-  - src/lib/wizardKeyRosters.ts
+# Counts are OPEN after round 2: round-1 WR-01..WR-05, SF-M1..SF-M3 and IN-11 are fixed,
+# IN-02 is superseded by IN-12. Open = WR-06..WR-08, IN-01, IN-03..IN-10, IN-12..IN-17.
+# Round 1 was critical 0, warning 5, info 11, total 16, necessity 1.
 findings:
   critical: 0
-  warning: 5
-  info: 11
-  total: 16
-  necessity: 1
+  warning: 3
+  info: 15
+  total: 18
+  necessity: 0
 status: issues_found
 ---
 
@@ -254,3 +248,156 @@ _Depth: standard_
    - The three contract tokens log at ERROR.
    - `sync_status='syncing'` is not treated as working for the swap decision only.
 6. **WR-05: drop Census 2** from `docs/runbooks/venue-server-backfill/census.sql` and its README pass table, because it cannot return a row.
+
+## Round 2 (2026-11-24)
+
+**Reviewed:** 2026-11-24T14:00:36Z, at HEAD `269ac4ff8` (branch `gsd/phase-225-oneaccountonce`)
+**Scope:** the fixer round, `git diff 629260a5c..HEAD -- . ':!.planning'`: 8 commits and 15 files. Each file was read in full around every hunk.
+**Depth:** standard, with cross-file traces where a finding needed them: the `swap_account_slot` SQL, the `create_wizard_strategy` replay, the FKs and triggers on `api_keys` and `strategies` in `supabase/schema/baseline.sql`, the `syncing` writers, the wizard copy table and how the wizard maps codes.
+**Tests:** run this round, at HEAD. 6 vitest files passed with 581 tests: the three route suites, `venue-identity`, `wizardErrors.invariant` and `audit-coverage`. 2 pytest files passed with 231 tests: `test_account_identity_stamper.py` and `test_venue_server_identity.py`. No neuter was run. "Can fail" below is judged by reading each assertion against what the fix would do without it.
+**Necessity:** not reassessed this round. `necessity-review.md` was not re-read. WR-05, the only necessity finding, is resolved.
+**Frontmatter:** the counts now show what is still OPEN after round 2. The round-1 figures are kept in this section.
+
+### Status of the round-1 findings and the binding decisions
+
+| Finding | Status | Evidence at HEAD |
+|---|---|---|
+| WR-01 + SF-M3 | **FIXED.** The residuals are WR-06, IN-12 and IN-13 below | `create-with-key/route.ts:2155-2233`, `validate-and-encrypt/route.ts:952-1011`. A swap that fails or is refused deletes this request's key, scoped by `id`, `user_id` and `venue_account_id IS NULL`. In create-with-key it then deletes the draft, scoped by `id`, `user_id`, `source='wizard'` and `status='draft'`. It answers `keyVenueAlreadyConnectedResponse()` (409), and 200 is no longer reachable on this path. A rollback delete that itself fails is logged with its code only and captured with the step `holder-swap-rollback`. |
+| WR-02 | **FIXED** | `create-with-key/route.ts:1649-1668`. The draft read selects `wizard_session_id` in the same query (`:475`). A same-session draft answers `{ok, strategy_id, api_key_id, deduped: true}` with `NO_STORE_HEADERS` and status 200. That is the session fence at `:1394-1407` byte for byte: same key order, headers and status, and the same values, because the draft's `api_key_id` is the live key (`:503`). The test has a positive case and a negative control (`route.test.ts`, the block `[WR-02]`), and it goes RED without the fix. |
+| WR-03 | **FIXED** | `src/lib/venue-identity.ts:51-83`. `PYTHON_EDGE_WHITESPACE` matches Python's `isspace()` set: 9-13, 0x1C-0x20, 0x85, 0xA0, 0x1680, 0x2000-0x200A, 0x2028, 0x2029, 0x202F, 0x205F and 0x3000, which is 29 code points. Both connect routes call `normaliseConnectedVenueServer` (`create-with-key/route.ts:1467`, `validate-and-encrypt/route.ts:786`). The fixture's `connect` cases go through the REAL `parse_mt5_credentials` and then `_mt5_session_server` in Python, and through the new function in TS. The U+0085 and U+FEFF cases tell this strip apart from JS `trim()`. Both route suites carry an NBSP case. No other TS writer stores a server: `swapAccountSlot` re-normalises an already-normal value. |
+| WR-04 | **FIXED** | `account_identity.py:713-716`. A `syncing` key is not counted as proven working for the swap decision, and the D-18 reader rule is unchanged. Checked for a regression: the only writer of `syncing` is `request_allocator_holdings_sync` (`20261103120000:148`, `baseline.sql:9629`). The scheduled `enqueue_poll_allocator_positions_for_all_keys` does not write it, so the daily poll still swaps. The new test goes RED without the fix. |
+| WR-05 | **FIXED** | Census 2 has been dropped. The old Census 3 is renumbered to 2, the README token step and pass table follow it, and no other source file cites the old numbering. |
+| SF-M1 / IN-11 | **FIXED for the same-login `api_keys` read in all three routes; PARTIAL in create-with-key, see WR-07** | `rotate-secret/route.ts:577-594`, `validate-and-encrypt/route.ts:811-833`, `create-with-key/route.ts:303-326` (the `read_failed` kind), `:1486` and `:1648`. Each answers 503 before any write and captures with the step `holder-read`. `readLiveSameLoginKeys` returns an error only for a PostgREST error or a throw (`venue-identity.ts`, `readLiveSameLoginKeys`). An EMPTY read returns `rows: []` with `error: null` and proceeds, so a legitimate connect is never blocked by an empty answer. In the race arm (`:1921`), `read_failed` falls through like `unresolved` did, as its comment says. |
+| SF-M2 | **FIXED.** LOW residual IN-14 | `account_identity.py:607-611`, `:728-733`. NOT_FOUND, NOT_SAME_OWNER and IDENTITY_MISMATCH log at ERROR, and the others stay at WARNING. Pinned both ways by the stamper tests. |
+| IN-01, IN-03 to IN-10 | Not in the decision set, unchanged, still LOW | — |
+| IN-02 | **SUPERSEDED by IN-12.** The same race now answers the user a 409 instead of only logging a spurious ERROR | — |
+
+### Regressions checked, with answers
+
+- **Can the rollback delete a row it did not create?**
+  - In validate-and-encrypt it cannot. The delete targets `inserted.id` only, which comes from this request's own INSERT.
+  - In create-with-key it can only in one shape. `row.api_key_id` can be a pair that `create_wizard_strategy` replayed (`20261123180000`, the select-existing fence). The `venue_account_id IS NULL` scope limits the delete to a key minted on a failing-holder admission whose swap has not landed.
+  - The one foreign row that matches is a concurrent same-session request's key, still in flight. That happens only when this request's swap fails, and the other request's swap uses the same arguments. Its swap then gets NOT_FOUND, its own delete removes nothing, and it also answers 409. The end state holds: nothing is left and the holder is untouched.
+  - PR-2 has not shipped, so no pre-fix leftover exists: no key admitted under the old answer-200 code whose swap failed.
+  - Verdict: no real data the user had is deleted. The cost of the zero-row arm is IN-12.
+- **Draft delete cascade.** Safe for a draft this request just created.
+  - No DELETE trigger exists on `strategies`. Every FK that references `strategies` is CASCADE or SET NULL except `allocation_events_strategy_id_fkey` (NO ACTION), and a fresh draft has no allocation events.
+  - Deleting the key first fires `strategies_api_key_id_fkey ON DELETE SET NULL`, which is an UPDATE. `guard_wizard_draft_updates` lets it through, because source and status are unchanged.
+  - `api_keys_published_composite_delete_guard` cannot match a fresh key.
+  - The ordering leaves an orphan only when the second delete fails, which is IN-13.
+- **Does 503 UNKNOWN mislead?** Mildly, and the remedy it gives is right. See IN-15.
+- **Does a fail-closed read block a legitimate connect when the read is merely empty?** No, as described above.
+- **Is the WR-02 body byte-equal to the session fence?** Yes, as described above.
+- **Tests that cannot fail.** The create-with-key rollback mock cannot catch two regressions that matter to data integrity. See WR-08.
+
+### Warnings (new in round 2)
+
+#### WR-06 (MEDIUM, user-facing): the rollback answers a 409 whose copy says the existing key "keeps working" and steers the user away from the fix, while on this path the holder is failing
+
+**File:** `src/app/api/strategies/create-with-key/route.ts:2232`, `src/app/api/keys/validate-and-encrypt/route.ts:1011`, and the copy at `src/lib/wizardErrors.ts:2928-2936` (`KEY_VENUE_ALREADY_CONNECTED`)
+
+**Issue:** This follows from binding decision 1, which says "the same builder as the held arm". That builder's wizard copy assumes a WORKING holder:
+
+- "another of your connected keys already reads [this account]";
+- "Use the key you already have";
+- "send the correlation id … before disconnecting anything — the existing key keeps working until you do."
+
+The rollback path is only reached beside a holder that was FAILING at the post-validation read. Of the three refusal causes from round 1:
+
+- (a) **A concurrent admission** (IDENTITY_MISMATCH): the holder is still failing, so the copy is false.
+- (b) **A composite dependent** (COMPOSITE_DEPENDENT): the holder is failing, so the copy is false. This cause is deterministic, so the affected user meets it on every attempt. Each attempt costs a validation of up to 120 s plus an encrypt, and sends a Sentry ERROR (`holder-swap`).
+- (c) **The holder recovered** (HOLDER_WORKING): the copy is true.
+
+A transient swap error goes down the same arm and gets the same copy. Examples are the function-level `lock_timeout` of 3 s (55P03) and a network fault. There, a plain retry would succeed.
+
+The real remedy for (a) and (b) is to disconnect the failing key and connect again. The copy tells the user to keep the failing key and not to disconnect anything. The reach is small: a rare population for (b), a narrow race for (a). Recorded for the orchestrator to decide, because the builder was chosen in the decision.
+
+**Fix (pick one, smallest first):**
+1. Branch on the refusal before answering. Read the `ACCOUNT_SLOT_*` token from `swap.error.message`, with the same regex as `_SLOT_REFUSAL` in `account_identity.py`.
+   - `HOLDER_WORKING` keeps `keyVenueAlreadyConnectedResponse()`.
+   - An error that is not `ACCOUNT_SLOT_*` answers the retryable `holderReadFailedResponse()`-style 503. The rollback has run, so nothing is left behind.
+   - `COMPOSITE_DEPENDENT` and `IDENTITY_MISMATCH` get a copy that names a failing key: either a new roster code, or a variant of the existing entry that drops "keeps working".
+2. If no new code is wanted, add the round-1 interim at least. Before admitting, refuse when the holder has a `composite_member` dependent, and downgrade the expected (b) capture from ERROR. This removes the deterministic case, but the copy stays false for (a).
+
+#### WR-07 (MEDIUM, latent until PR-3, then data integrity): in create-with-key, a strategies or `strategy_keys` read fault AFTER a working holder was picked still fails OPEN
+
+**File:** `src/app/api/strategies/create-with-key/route.ts:351-361` (the tail of `resolveByVenueIdentity`), with `resolveStrategiesForKey` `:490-496` and `:544-550`, `resolveOtherKeyUse` `:405-412`, and the post-validation fall-through `:1679`. The test that pins it is `route.test.ts:1988` ("the SECOND read faulting degrades the same way … still submits").
+
+**Issue:** Decision 2 says "create-with-key's equivalent fence read gets the same treatment". The fix gave the `api_keys` read the `read_failed` kind. But once that read has SUCCEEDED and `pickSameAccountHolder` has picked a WORKING holder, the code resolves what uses that holder: the draft read, the owner read and the `strategy_keys` read. A fault in any of them still returns `UNRESOLVED`.
+
+At the post-validation fence, `unresolved` goes to the normal RPC with `p_venue_account_id` and `p_venue_server` attached (`failingHolderId` is null). Today the login-only index refuses that INSERT, so the effect is invisible.
+
+After PR-3's server-aware index, a picked holder on tier 2 (holder server NULL, or the new key's server NULL) no longer collides. A strategies read that blips on RLS or PostgREST then admits a second live same-owner key on a WORKING holder's account. That is exactly the SF-M1 failure, one read later.
+
+The pre-validation fence has the same shape, but the post-validation fence re-reads, so the post-validation arm is the one that matters.
+
+**Fix:** in the tail of `resolveByVenueIdentity`, the holder is already known to be working. The fence then refuses on every use except the caller's own-session draft. So when `byStrategy.kind === "unresolved"`, or `resolveOtherKeyUse` answers `unresolved`, return `{ kind: "read_failed" }` instead of `UNRESOLVED`. The callers' existing `read_failed` arms then answer 503 before any write.
+
+`handleReuseExistingKey` calls `resolveStrategiesForKey` directly and is unaffected. The race arm treats `read_failed` like `unresolved`.
+
+Invert the test at `route.test.ts:1988` to expect 503 with no RPC, and add a post-validation twin.
+
+#### WR-08 (MEDIUM, test reliability of a data-integrity fix): the create-with-key rollback mock cannot fail on the two filters that make the rollback replay-safe
+
+**File:** `src/app/api/strategies/create-with-key/route.test.ts:360-386`, which is the `delete` chain in `makeWriteVerbs`. Also `src/app/api/keys/validate-and-encrypt/route.test.ts`, the `delete` builder in the persist harness.
+
+**Issue:** The rollback's safety rests on two calls: `.is("venue_account_id", null)` and `.select("id")`.
+
+- **`.eq` and `.is` are recorded the same way.** In the create-with-key mock, both write `filters[col] = val`. A regression to `.eq("venue_account_id", null)` stays green. In PostgREST that becomes `venue_account_id=eq.null`, which matches no row, so the rollback would silently delete nothing and leave the second live key: WR-01 back again, with every test green.
+- **`.select()` is a no-op.** The mock resolves `data: [{id}]` whether or not `select` was called. Drop `.select("id")` and the real `delete()` returns `data: null`. The route then reads that as "removed no key" (`:2203-2207`) and skips the draft delete, even though the key was deleted. The result is an orphan draft (`api_key_id` NULL), which wedges the session as IN-13 describes, while the test stays green.
+
+The validate-and-encrypt mock records `.is` apart from `.eq` (`"venue_account_id:is"`), but its `select` is a no-op too. There, a dropped `select` changes only a log line.
+
+**Fix:**
+- In the create-with-key mock, record `is` under a distinct key, as the validate-and-encrypt mock does (`filters[\`${col}:is\`] = val`), and update the expected filters.
+- In both mocks, return `data: null` unless `select` was called. Then the happy-path rollback test (key and draft both deleted) goes RED when `.select("id")` is dropped.
+- Neuter each filter once and confirm RED, per the repo's rule that data-integrity gates must be able to fail.
+
+### LOW and Info (new in round 2, brief, not for TODOS.md)
+
+- **IN-12 (LOW, user-facing, narrow):** the zero-row arm answers 409 "Your new key was not saved" when the key IS saved and holds the slot. The arm is at `create-with-key/route.ts:2203-2207` and then `:2232`, with the same shape in `validate-and-encrypt/route.ts:999-1011`. Zero rows deleted means the key is already stamped, so a swap landed on it. The cause is either a same-session replay that raced (`swap_account_slot` refuses the second swap with IDENTITY_MISMATCH, "The new key already holds an account of its own", SQL `:227-229`) or a swap that committed and then lost its answer. In create-with-key, the honest answer there is the deduped body of the session fence, which is decision 3's own rule. A retry heals it, because the session fence then dedups. This replaces IN-02.
+- **IN-13 (LOW):** the key is deleted first, so a draft delete that then fails leaves an orphan draft with `api_key_id` NULL. Every retry in that session then misses the session fence (`:1394` needs `api_key_id`), and `create_wizard_strategy` skips an orphan in its replay (`20261123180000`, "Only replay a COMPLETE draft"). The result is `DRAFT_ALREADY_EXISTS` until the session changes. Sentry pages it (`holder-swap-rollback`). The wedge can be recovered from, and it needs a second fault.
+- **IN-14 (LOW):** IDENTITY_MISMATCH is not purely a contract refusal. The SQL also raises it for a race: "The old holder does not hold the account the caller named" (SQL `:208-210`) when a concurrent TS connect has already swapped. That rare race now pages at ERROR, and the comment at `account_identity.py:603-606` ("which no later poll repairs") overstates it. `ACCOUNT_SLOT_NOT_LIVE` has no WARNING pin in the parametrised test at `test_account_identity_stamper.py:2510-2516`.
+- **IN-15 (LOW):** the wizard (`ConnectKeyStep.tsx`, which maps by `code`; H-0305) and `UpdateMt5SecretDialog.tsx` (`recogniseDashboardDialogCode`) both drop the 503 body's sentence. They render the generic `UNKNOWN` entry (`wizardErrors.ts:4598-4608`): "we cannot tell you … whether your last action took effect". The server does know: nothing was written. The remedy, "Try the last action again", is correct, so this is imprecise rather than harmful.
+- **IN-16 (LOW, decision-bound):** `rotate-secret/route.ts:577-594` now refuses a password correction on a holder-read fault. Saving the password without the login backfill (`shouldBackfillVenueAccountId = false`) writes no identity, so it cannot admit a duplicate, and would be the narrower fail-closed. Decision 2 named this route, so this is recorded only.
+- **IN-17 (Info):** the WR-02 comparison (`:1657`) compares strings, while the session fence compares `uuid` values in the database. An upper-case `wizard_session_id` from a client would pass the fence's equality and fail this one, and fall back to the named refusal. `isUuid` was not checked for case. The wizard's own generator was not traced this round.
+
+### Round 2 summary
+
+All the round-1 MEDIUMs are fixed as the orchestrator decided. Not one fix is merely cosmetic, and every new test goes RED without its fix, except where WR-08 says otherwise. Three new MEDIUMs remain:
+
+- **WR-06**, user-facing, low reach. It follows from the builder that decision 1 chose.
+- **WR-07**, latent until PR-3. SF-M1's fail-closed stops one read short.
+- **WR-08**, test reliability. The rollback mock cannot fail on its two load-bearing filters.
+
+There is no BLOCKER and no critical finding. Under the repo's review rule, only WR-06 is user-facing.
+
+_Round 2 reviewed: 2026-11-24T14:00:36Z_
+_Reviewer: Claude (gsd-code-reviewer)_
+_Depth: standard_
+
+## Silent-failure hunter round 2 + orchestrator decisions for round 3 (2026-11-24)
+
+The silent-failure hunter closed SF-M1, SF-M2 and SF-M3 in round 2. It raised one new finding:
+
+- **SF2-N1 (MEDIUM, user-facing; the same case as IN-12).** On the rollback path, a delete that removes zero rows answers 409 "not saved" and logs only at WARNING. That is wrong when the key is in fact live and has taken the slot, because the swap landed but its answer was lost.
+
+Round-3 decisions. The fixer implements exactly these.
+
+1. **SF2-N1 / IN-12: re-read before answering.**
+   - When the compensating delete removes zero rows, re-read the key's `venue_account_id`.
+   - If it is stamped, the swap landed. Answer the success body: create-with-key uses its normal success or deduped body, and validate-and-encrypt uses its normal success body.
+   - Otherwise answer 409 as now.
+   - Capture the zero-row case to Sentry with its own step tag, `holder-swap-rollback-noop`.
+2. **WR-06: split swap failures by kind.**
+   - A swap failure that carries no `ACCOUNT_SLOT_` token is transient: lock timeout, network or similar. Roll back (the delete is already guarded `IS NULL`, so it is safe), then answer the retryable `503 UNKNOWN`, not 409.
+   - Token refusals keep `409 KEY_VENUE_ALREADY_CONNECTED`.
+   - Add a pre-admission check: when the failing holder has a `composite_member` dependent, refuse with `409 KEY_VENUE_ALREADY_CONNECTED` before validation and insert. The swap would always refuse that case anyway.
+   - Change no copy.
+3. **WR-07: return `read_failed`.** In create-with-key `resolveByVenueIdentity`, a failed `strategies` or `strategy_keys` read after a holder has been picked returns `read_failed`, so the route answers 503. Invert the test that pins the old fall-through.
+4. **WR-08: make the route-test mocks able to fail.**
+   - The mocks must tell `.is(col, null)` apart from `.eq(col, null)`.
+   - A delete must return rows only when `.select(...)` was called.
+   - Prove it: neuter `.is` to `.eq` and the WR-01 rollback test goes RED; drop `.select("id")` and the orphan-draft test goes RED.
+
+The remaining items stay recorded and are not fixed, as LOW/Info: IN-13 to IN-17, and the WR-04 syncing log line.
