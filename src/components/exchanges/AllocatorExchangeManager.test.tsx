@@ -2769,17 +2769,35 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
     expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
   });
 
-  // 167.1.2 REVIEW WR-02: an inactive row still renders in the active list, and
-  // a marked key that is itself not working (D-18 applied to the marked key)
-  // counts for nothing, so the note says nothing on it.
-  it("shows nothing on a marked key that is itself inactive", () => {
+  // 167.1.2 REVIEW WR-02 (narrowed by Phase 225 OQ-1): a marked key that is
+  // disconnected shows its own status, not the note. A LIVE marked key that is
+  // itself not working names its working holder and says why (the test below).
+  it("shows nothing on a marked key that is itself disconnected", () => {
     render(
       <AllocatorExchangeManager
         hasHoldings={true}
-        initialKeys={[holderKey(), dupKey({ is_active: false })]}
+        initialKeys={[holderKey(), dupKey({ disconnected_at: "2026-09-21T00:00:00Z" })]}
       />,
     );
-    expect(within(dupRow()).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+  });
+
+  // Phase 225 OQ-1: Q1 demotes a failing holder to a live key marked a
+  // duplicate of the working key that took its slot, and the founder asked that
+  // it be "named on its key card".
+  it.each([
+    ["inactive", { is_active: false }],
+    ["sign_in_failed", { sync_status: "sign_in_failed" }],
+  ])("names the working holder on a marked key that is itself %s, and says why (Phase 225 OQ-1)", (_name, overrides) => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[holderKey(), dupKey(overrides)]}
+      />,
+    );
+    expect(within(dupRow()).getByText(
+      "This key reads the same exchange account as Binance — Primary Binance, which holds that account while this key is not working. We count that account once.",
+    )).toBeInTheDocument();
   });
 
   it.each([

@@ -97,6 +97,14 @@ vi.mock("@/lib/analytics-client", () => ({
   encryptKey: (...args: unknown[]) => encryptKeyMock(...args),
 }));
 
+// 225-07: `swapAccountSlot` audits the demoted key through `logAuditEventAsUser`
+// (which schedules through next's `after()`); this file asserts the call instead
+// of exercising the scheduler. Only that export is replaced.
+const auditMock = vi.fn();
+vi.mock("@/lib/audit", () => ({
+  logAuditEventAsUser: (...args: unknown[]) => auditMock(...args),
+}));
+
 const rpcMock = vi.fn();
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -174,15 +182,44 @@ const assetClassUpdateMock = vi.fn((..._args: unknown[]) => ({
 // `reuseKeyAdminLookupMock` idiom below), so a stateful fake can honour
 // `.is("disconnected_at", null)` by filtering rows. Every pre-existing case
 // ignores the argument and is unchanged.
+// 225-07 (CONN-03, Q1): the route now reads this as a LIST (a login can have two
+// live keys on different servers), so a seed may be a legacy `{ id }` (one
+// working, null-server, unmarked row: every pre-225 case keeps its meaning), an
+// array of rows, or null. See `thenable api_keys list read` in the builder.
+type SameLoginSeedRow = {
+  id: string;
+  venue_server?: string | null;
+  is_active?: boolean;
+  sync_status?: string | null;
+  disconnected_at?: string | null;
+  account_shared_with_api_key_id?: string | null;
+  account_share_kind?: string | null;
+};
 const venueKeyLookupMock = vi.fn(
   async (_filters?: CapturedFilters) =>
     ({ data: null, error: null }) as {
-      data: { id: string } | null;
+      data: SameLoginSeedRow | SameLoginSeedRow[] | null;
       error: { code?: string; message?: string } | null;
     },
 );
+
+/** Fill a seed to the full row `readLiveSameLoginKeys` selects. */
+function toSameLoginRow(seed: SameLoginSeedRow) {
+  return {
+    venue_server: null,
+    is_active: true,
+    sync_status: null,
+    disconnected_at: null,
+    account_shared_with_api_key_id: null,
+    account_share_kind: null,
+    ...seed,
+  };
+}
 const venueStrategyLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
-  data: { id: string } | null;
+  // 225-05 / CONN-01: the draft read now also selects `name`, which the route
+  // puts in the VENUE_DRAFT_IN_PROGRESS body. `unknown` so a test can seed a
+  // non-string to prove the shape guard.
+  data: { id: string; name?: unknown; wizard_session_id?: unknown } | null;
   error: { code?: string; message?: string } | null;
 });
 /**
@@ -226,6 +263,36 @@ type HolderReadResult = {
 };
 const keyMembershipLookupMock = vi.fn(
   async (): Promise<HolderReadResult> => ({ data: null, error: null }),
+);
+
+/**
+ * 225 PR-2 round 3 (SF2-N1 / IN-12) — the rollback's re-read of the admitted key's
+ * `venue_account_id` after a compensating delete removed no row. Routed in
+ * `makeSelectBuilder` on the admin client's `select("venue_account_id")`. It
+ * DEFAULTS TO "not stamped", so every pre-existing rollback case keeps its 409;
+ * a test seeds a stamped value to model a swap that landed and lost its answer.
+ */
+const stampedKeyReadMock = vi.fn(
+  async (): Promise<{
+    data: { venue_account_id: string | null } | null;
+    error: { code?: string; message?: string } | null;
+  }> => ({ data: { venue_account_id: null }, error: null }),
+);
+
+/**
+ * 225 PR-2 round 3 (WR-06) — the pre-admission read of a COMPOSITE DEPENDENT of
+ * a failing holder (`select("id")` filtered on `account_shared_with_api_key_id`
+ * and `account_share_kind`). Routed in `makeSelectBuilder` on the
+ * `account_share_kind` filter, which no other read carries. It DEFAULTS TO
+ * "no dependent", so every pre-existing admission keeps its swap.
+ */
+const compositeDependentReadMock = vi.fn(
+  async (
+    _filters: Record<string, unknown>,
+  ): Promise<{
+    data: { id: string } | null;
+    error: { code?: string; message?: string } | null;
+  }> => ({ data: null, error: null }),
 );
 
 /**
@@ -288,6 +355,18 @@ function recordWrite(
   writeAttempts.push({ client, table, op });
 }
 
+/**
+ * 225 PR-2 review WR-01 — the compensating rollback's deletes, with the filters
+ * each chain carried, and a per-table answer a test can set (default: one row
+ * removed). Reset with the other per-case state in the describe's `beforeEach`.
+ */
+const deleteCalls: Array<{
+  client: "admin" | "user-scoped";
+  table: string;
+  filters: CapturedFilters;
+}> = [];
+const deleteAnswers: Record<string, { data: unknown; error: unknown }> = {};
+
 /** Write verbs that must never be reachable on `api_keys` from this route. */
 function makeWriteVerbs(client: "admin" | "user-scoped", table: string) {
   const thenable = {
@@ -308,7 +387,45 @@ function makeWriteVerbs(client: "admin" | "user-scoped", table: string) {
     },
     delete: () => {
       recordWrite(client, table, "delete");
-      return thenable;
+      const filters: CapturedFilters = {};
+      deleteCalls.push({ client, table, filters });
+      // 225 PR-2 round 3 (WR-08): like PostgREST, a delete resolves rows ONLY
+      // when `.select(...)` was chained, and `.is(col, null)` is recorded apart
+      // from `.eq(col, null)` (which PostgREST sends as `col=eq.null` and
+      // matches nothing). Without both, dropping `.select("id")` or swapping
+      // `.is` for `.eq` left every test green.
+      let selected = false;
+      const chain = {
+        eq: (col: string, val: unknown) => {
+          filters[col] = val;
+          return chain;
+        },
+        is: (col: string, val: unknown) => {
+          filters[`${col}:is`] = val;
+          return chain;
+        },
+        select: () => {
+          selected = true;
+          return chain;
+        },
+        // A real delete is a network round trip. It resolves on a timer here
+        // because `captureToSentry` reaches Sentry through a lazy
+        // `import("@sentry/nextjs")`, and under vitest's module mock a SECOND
+        // dynamic import that starts before the first has settled is silently
+        // dropped (measured: two back-to-back captures yield one). The swap
+        // capture and the rollback-failure capture are separate calls on
+        // separate round trips in production.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        then: (resolve: any) =>
+          setTimeout(() => {
+            const answer = deleteAnswers[table] ?? {
+              data: [{ id: "deleted" }],
+              error: null,
+            };
+            resolve(selected ? answer : { ...answer, data: null });
+          }, 30),
+      };
+      return chain;
     },
   };
 }
@@ -403,6 +520,7 @@ const reuseKeyUserScopedLookupMock = vi.fn(
 function makeSelectBuilder(
   table: string,
   client: "admin" | "user-scoped" = "user-scoped",
+  columns?: string,
 ) {
   const filters: CapturedFilters = {};
   capturedSelects.push({ table, client, filters });
@@ -417,6 +535,25 @@ function makeSelectBuilder(
     },
     order: () => node,
     limit: () => node,
+    // 225-07 — thenable api_keys list read: the same-account read is awaited
+    // without `maybeSingle` and without an `id` filter (an `id` read is the
+    // reuse arm's, which still ends in `maybeSingle`). Any other awaited chain
+    // is a route read this double was not written for, so it rejects loudly.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    then: (resolve: any, reject: any) => {
+      if (table !== "api_keys" || "id" in filters) {
+        reject(new Error(`unexpected awaited select on ${table}`));
+        return;
+      }
+      Promise.resolve(venueKeyLookupMock(filters))
+        .then(({ data, error }) => ({
+          data: error
+            ? null
+            : (Array.isArray(data) ? data : data ? [data] : []).map(toSameLoginRow),
+          error,
+        }))
+        .then(resolve, reject);
+    },
     maybeSingle: () => {
       if (table === "strategy_keys") return keyMembershipLookupMock();
       if (table === "api_keys") {
@@ -427,6 +564,14 @@ function makeSelectBuilder(
         // the filter AND on the client is what keeps the two ownership layers
         // separately observable; collapsing them would make the layer-2
         // assertions answer layer 1's question.
+        // 225 PR-2 round 3 — the rollback's stamp re-read selects ONLY
+        // `venue_account_id`, which no other read of this route does.
+        if (client === "admin" && columns === "venue_account_id") {
+          return stampedKeyReadMock();
+        }
+        if ("account_share_kind" in filters) {
+          return compositeDependentReadMock(filters);
+        }
         if ("id" in filters) {
           return client === "admin"
             ? reuseKeyAdminLookupMock(filters)
@@ -525,7 +670,7 @@ vi.mock("@/lib/supabase/admin", () => ({
     return {
       rpc: (...args: unknown[]) => adminRpc(...args),
       from: (table: string) => ({
-        select: () => makeSelectBuilder(table, "admin"),
+        select: (cols?: string) => makeSelectBuilder(table, "admin", cols),
         update: () => {
           recordWrite("admin", table, "update");
           return { eq: () => ({ eq: async () => ({ error: null }) }) };
@@ -1603,6 +1748,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
   /** A DIFFERENT wizard session — the whole point: the token is gone. */
   const OTHER_SESSION_ID = "99999999-8888-4777-8666-555555555555";
   const MT5_LOGIN = "500123456";
+  /** 225-05 / CONN-01: the name of the OWN draft the refusal must carry. */
+  const EXISTING_DRAFT_NAME = "Atlas Basis Draft";
 
   const MT5_RECONNECT_BODY = {
     exchange: "mt5",
@@ -1618,6 +1765,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     adminClientThrows.value = false;
     capturedSelects.length = 0;
     sentryState.captured.length = 0;
+    deleteCalls.length = 0;
+    for (const table of Object.keys(deleteAnswers)) delete deleteAnswers[table];
     validateKeyMock.mockReset();
     encryptKeyMock.mockReset();
     rpcMock.mockReset();
@@ -1626,6 +1775,10 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     venueStrategyLookupMock.mockReset();
     venueOwnerLookupMock.mockReset();
     keyMembershipLookupMock.mockReset();
+    compositeDependentReadMock.mockReset();
+    compositeDependentReadMock.mockResolvedValue({ data: null, error: null });
+    stampedKeyReadMock.mockReset();
+    stampedKeyReadMock.mockResolvedValue({ data: { venue_account_id: null }, error: null });
     assetClassUpdateMock.mockClear();
 
     // No draft for THIS session — the token-less re-entry the fence must catch.
@@ -1667,29 +1820,74 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       error: null,
     });
     venueStrategyLookupMock.mockResolvedValue({
-      data: { id: EXISTING_STRATEGY_ID },
+      data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
       error: null,
     });
   }
 
-  it("THE BUG: same MT5 login + a DIFFERENT wizard_session_id resolves to the EXISTING row, not a second draft", async () => {
+  it("225-05 CONN-01: same MT5 login + a DIFFERENT wizard_session_id is REFUSED 409 VENUE_DRAFT_IN_PROGRESS naming the own draft, never a silent 200 deduped", async () => {
     seedExistingVenueRow();
 
     const POST = await importPost();
     const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-    expect(res.status).toBe(200);
-    // The ids are the SEEDED ones — the row that was already there.
-    expect(await res.json()).toEqual({
-      ok: true,
-      strategy_id: EXISTING_STRATEGY_ID,
-      api_key_id: EXISTING_KEY_ID,
-      deduped: true,
-    });
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    // `code` FIRST and the exact body: the draft's name rides, nothing else.
+    expect(text).toBe(
+      JSON.stringify({
+        code: "VENUE_DRAFT_IN_PROGRESS",
+        error: "This account is already in one of your unfinished drafts.",
+        strategy_name: EXISTING_DRAFT_NAME,
+      }),
+    );
+    // The silent answer is gone, and neither the other draft's ids, the login
+    // nor the user id crosses back.
+    expect(text).not.toContain("deduped");
+    expect(text).not.toContain(EXISTING_STRATEGY_ID);
+    expect(text).not.toContain(EXISTING_KEY_ID);
+    expect(text).not.toContain(MT5_LOGIN);
+    expect(text).not.toContain(MOCK_USER.id);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
-  it("FAILS TOWARD THE EXISTING ROW: the dedup path issues ZERO writes and never re-encrypts", async () => {
+  it("225-05 CONN-01: a BLANK, whitespace or non-string draft name OMITS strategy_name (the wizard renders the unnamed sentence)", async () => {
+    for (const name of ["", "   ", "\t\n", null, 42, undefined]) {
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe("VENUE_DRAFT_IN_PROGRESS");
+      expect(
+        "strategy_name" in body,
+        `a ${JSON.stringify(name)} name must be omitted, not nulled or blank`,
+      ).toBe(false);
+    }
+  });
+
+  it("225-05 CONN-01: the draft's name is trimmed on the wire and carried verbatim otherwise", async () => {
+    const name = 'Alpha "Beta" \u00e9 \u30c6\u30b9\u30c8';
+    venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+    venueStrategyLookupMock.mockResolvedValue({
+      data: { id: EXISTING_STRATEGY_ID, name: `  ${name}  ` },
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).strategy_name).toBe(name);
+  });
+
+  it("225-05 CONN-01: the by-name refusal issues ZERO writes and never validates or re-encrypts", async () => {
     // ⭐ THE INVARIANT THAT MATTERS MOST. The existing api_keys row carries
     // strategy_keys membership and synced history other strategies depend on,
     // so "resolving" the collision by overwriting it would orphan all of that.
@@ -1785,30 +1983,68 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
-  it("a fence READ FAULT falls through to the RPC and never 500s (the DB index still dedups)", async () => {
+  // 225 PR-2 review SF-M1 / IN-11 (orchestrator decision 2): INVERTED from "a
+  // fence READ FAULT falls through to the RPC and never 500s (the DB index still
+  // dedups)". Once the server-aware index ships it no longer refuses a write
+  // beside a null-server holder, so this read is the only guard: a fault answers
+  // a retryable 503 before validation, encryption and every write.
+  it("a fence READ FAULT FAILS CLOSED: 503 before validate, encrypt and the RPC, captured to Sentry, with neither login nor server in any sink", async () => {
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     venueKeyLookupMock.mockResolvedValue({
       data: null,
-      error: { code: "42501", message: "permission denied for table api_keys" },
+      error: {
+        code: "42501",
+        message: `permission denied reading login ${MT5_LOGIN} on MetaQuotes-Demo`,
+      },
     });
 
     const POST = await importPost();
     const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-    expect(res.status).toBe(200);
-    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(JSON.parse(text).code).toBe("UNKNOWN");
+    expect(text).not.toContain(MT5_LOGIN);
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(sentryState.captured).toHaveLength(1));
+    expect(sentryState.captured[0].options.tags?.step).toBe("holder-read");
+    const sink = JSON.stringify([sentryState.captured, consoleErr.mock.calls]);
+    expect(sink).not.toContain(MT5_LOGIN);
+    expect(sink.toLowerCase()).not.toContain("metaquotes-demo");
     expect(consoleErr).toHaveBeenCalled();
   });
 
-  it("the SECOND read faulting degrades the same way — a live key with an unreadable strategy still submits", async () => {
-    // The fence issues TWO reads and only the FIRST one's fault arm was pinned.
-    // This is the other one: `api_keys` answered a live row, then the
-    // user-scoped `strategies` resolve failed (an RLS blip, a PostgREST 503).
-    // The dangerous implementations are both plausible — 500 the submit, or
-    // treat the error-as-value's `data: null` as "no strategy" and hand back a
-    // half-resolved pair — so the assertions pin the honest third option: log,
-    // fall through, let the DB index be the backstop. `deduped` must be ABSENT,
-    // because nothing was actually resolved.
+  it("a POST-validation read fault FAILS CLOSED the same way: 503 before encrypt and the RPC (the pre-validation read was clean)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    venueKeyLookupMock
+      .mockResolvedValueOnce({ data: null, error: null })
+      .mockResolvedValue({
+        data: null,
+        error: { code: "42501", message: "permission denied for table api_keys" },
+      });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(503);
+    expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+    // Validation had run (it is what the post-validation read follows); nothing
+    // after it did.
+    expect(validateKeyMock).toHaveBeenCalledTimes(1);
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(sentryState.captured).toHaveLength(1));
+    expect(sentryState.captured[0].options.tags?.step).toBe("holder-read");
+  });
+
+  // 225 PR-2 round-3 decision 3 (WR-07): INVERTED from "a live key with an
+  // unreadable strategy still submits". A WORKING holder is picked, so what uses
+  // it decides the answer; a fault in that read must not be read as "nothing
+  // uses it", or once the server-aware index ships the second same-owner key is
+  // admitted beside a working holder (the SF-M1 failure, one read later).
+  it("the SECOND read faulting FAILS CLOSED: a live working key with an unreadable strategy answers 503 before validate, encrypt and the RPC", async () => {
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     venueKeyLookupMock.mockResolvedValue({
       data: { id: EXISTING_KEY_ID },
@@ -1822,15 +2058,55 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     const POST = await importPost();
     const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-    expect(res.status).toBe(200);
-    expect(rpcMock).toHaveBeenCalledTimes(1);
-    const json = await res.json();
-    expect(json.deduped).toBeUndefined();
-    expect(json.strategy_id).toBe(STRATEGY_ID);
-    expect(json.api_key_id).toBe(API_KEY_ID);
-    // Rule 12 — a dark fence that says nothing is indistinguishable from a
-    // fence that found nothing, and only one of those is a bug worth paging on.
+    expect(res.status).toBe(503);
+    expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    // Rule 12 — the fault is logged, never swallowed.
     expect(consoleErr).toHaveBeenCalled();
+  });
+
+  it("a POST-validation strategies read fault after a working holder FAILS CLOSED the same way: 503 before encrypt and the RPC (the pre-validation read was clean)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    venueKeyLookupMock
+      .mockResolvedValueOnce({ data: null, error: null })
+      .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+    venueStrategyLookupMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied for table strategies" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(503);
+    expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+    expect(validateKeyMock).toHaveBeenCalledTimes(1);
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("a strategy_keys read fault after a working holder with no strategy FAILS CLOSED: 503 before validate and the RPC", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    venueKeyLookupMock.mockResolvedValue({
+      data: { id: EXISTING_KEY_ID },
+      error: null,
+    });
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    keyMembershipLookupMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied for table strategy_keys" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(503);
+    expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
   });
 
   it("[156 / CONNECT-03] a MISSING service-role credential fails CLOSED on the MT5 path too — 503, nothing submitted", async () => {
@@ -2081,21 +2357,22 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(encryptKeyMock).not.toHaveBeenCalled();
     });
 
-    it("ANTI-REGRESSION: a real DRAFT on the same key still dedups — the fence was narrowed, not disabled", async () => {
+    it("ANTI-REGRESSION: a real DRAFT on the same key is still FOUND and refused by name — the fence was narrowed, not disabled", async () => {
       // The vacuity fence for the whole block above. If the filters were added
       // in a way that made the draft read match nothing, every assertion here
       // would still pass while WIZCONT-02 itself silently stopped working.
+      // 225-05 / CONN-01: the draft is still found; the answer changed from a
+      // silent 200 deduped to a 409 naming it.
       seedExistingVenueRow();
 
       const POST = await importPost();
       const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(409);
       expect(await res.json()).toEqual({
-        ok: true,
-        strategy_id: EXISTING_STRATEGY_ID,
-        api_key_id: EXISTING_KEY_ID,
-        deduped: true,
+        code: "VENUE_DRAFT_IN_PROGRESS",
+        error: "This account is already in one of your unfinished drafts.",
+        strategy_name: EXISTING_DRAFT_NAME,
       });
       // And the second read is never even issued: a resumable draft answers the
       // question outright.
@@ -2126,10 +2403,10 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(rpcMock).not.toHaveBeenCalled();
     });
 
-    it("the OWNER read faulting falls through to the RPC — a refusal is never invented from an error", async () => {
+    it("the OWNER read faulting FAILS CLOSED — a refusal is never invented from an error, and neither is a pass (WR-07)", async () => {
       // Rule 12 applied to the new read: an unreadable `strategies` table means
-      // we cannot tell an orphan from a finished owner, and refusing on that
-      // would 409 a submit that should have succeeded.
+      // we cannot tell an orphan from a finished owner. Round 3 (WR-07): the
+      // honest answer is a retryable 503 before any write, not a fall-through.
       const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
       venueKeyLookupMock.mockResolvedValue({
         data: { id: EXISTING_KEY_ID },
@@ -2144,9 +2421,10 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       const POST = await importPost();
       const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-      expect(res.status).toBe(200);
-      expect(rpcMock).toHaveBeenCalledTimes(1);
-      expect((await res.json()).deduped).toBeUndefined();
+      expect(res.status).toBe(503);
+      expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
       expect(consoleErr).toHaveBeenCalled();
     });
 
@@ -2166,7 +2444,10 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       });
       // The pre-RPC fence sees nothing (the row appeared during the request);
       // the re-read after the collision sees the finished owner.
+      // 225-11: BOTH fence reads (pre- and post-validation) see nothing, so the
+      // collision still reaches the race arm; the third read finds the holder.
       venueKeyLookupMock
+        .mockResolvedValueOnce({ data: null, error: null })
         .mockResolvedValueOnce({ data: null, error: null })
         .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
       venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
@@ -2190,7 +2471,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       vi.spyOn(console, "error").mockImplementation(() => {});
     });
 
-    it("venue-identity constraint + resolvable → 200 deduped with the EXISTING ids", async () => {
+    it("225-05 CONN-01: venue-identity constraint + an own DRAFT → 409 VENUE_DRAFT_IN_PROGRESS naming it, not a silent 200 deduped", async () => {
       // The race the app fence cannot win: the row appeared between the fence
       // read and the RPC. The DB caught it; we resolve toward the existing row.
       rpcMock.mockResolvedValue({
@@ -2201,24 +2482,62 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
             'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
         },
       });
+      // 225-11: BOTH fence reads (pre- and post-validation) see nothing, so the
+      // collision still reaches the race arm; the third read finds the holder.
       venueKeyLookupMock
+        .mockResolvedValueOnce({ data: null, error: null })
         .mockResolvedValueOnce({ data: null, error: null })
         .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
       venueStrategyLookupMock.mockResolvedValue({
-        data: { id: EXISTING_STRATEGY_ID },
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
         error: null,
       });
 
       const POST = await importPost();
       const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({
-        ok: true,
-        strategy_id: EXISTING_STRATEGY_ID,
-        api_key_id: EXISTING_KEY_ID,
-        deduped: true,
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        code: "VENUE_DRAFT_IN_PROGRESS",
+        error: "This account is already in one of your unfinished drafts.",
+        strategy_name: EXISTING_DRAFT_NAME,
       });
+      expect(text).not.toContain(EXISTING_STRATEGY_ID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(text).not.toContain(MOCK_USER.id);
+      // The INSERT was refused and rolled back by Postgres: nothing else wrote.
+      expect(assetClassUpdateMock).not.toHaveBeenCalled();
+    });
+
+    it("225-05 CONN-01: the race arm omits strategy_name for a blank draft name", async () => {
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+        },
+      });
+      // 225-11: BOTH fence reads (pre- and post-validation) see nothing, so the
+      // collision still reaches the race arm; the third read finds the holder.
+      venueKeyLookupMock
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "   " },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe("VENUE_DRAFT_IN_PROGRESS");
+      expect("strategy_name" in body).toBe(false);
     });
 
     it("venue-identity constraint + UNRESOLVABLE → the existing 409, not a new code", async () => {
@@ -2395,6 +2714,11 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       // emptiness the orphan answer is DERIVED from, so a fault here must fall
       // back to the incumbent behaviour rather than assert the conclusion the
       // failed read did not support.
+      // 225 PR-2 round 3 (WR-07): a fault in the pre- or post-validation fence now
+      // answers 503, so, as in the wizard-session control below, the first two
+      // `api_keys` reads see no key and the fault reaches the race arm's re-read.
+      venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
+      venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
       seedOrphanedKey();
       venueOwnerLookupMock.mockResolvedValue({
         data: null,
@@ -2413,6 +2737,10 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     it("NEGATIVE CONTROL — the DRAFT read faulting keeps the fence 409 byte-identical", async () => {
       // The earlier of the two reads. A fault here returns `unresolved` before
       // the owner read is ever issued, so the orphan branch must stay unreached.
+      // 225 PR-2 round 3 (WR-07): the fault must reach the race arm's re-read
+      // (the third `api_keys` read), since the two fences now answer 503.
+      venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
+      venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
       seedOrphanedKey();
       venueStrategyLookupMock.mockResolvedValue({
         data: null,
@@ -2444,6 +2772,9 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       // The FIRST `api_keys` read (the fence's) therefore sees no key, and the
       // orphan shape appears only for the race arm's re-read after the RPC
       // collided, the [154.1] race-arm fixture shape.
+      // 225-11: the post-validation read is a SECOND fence read, so it too sees
+      // no key; only the race arm's re-read (the third) finds the orphan.
+      venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
       venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
       seedOrphanedKey();
       rpcMock.mockResolvedValue({
@@ -2664,6 +2995,19 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       });
     });
 
+    /**
+     * 225-11 — THE RACE ARM MUST STAY REACHABLE. A ccxt identity is now resolved
+     * right after validation, so a holder that is already visible then is refused
+     * there and the index is never asked. These cases exist to pin the 23505 race
+     * arm, so the holder is invisible to that FIRST read and appears for the
+     * race arm's re-read, which is exactly the race the arm exists for.
+     */
+    function holderAppearsAtTheRace() {
+      venueKeyLookupMock
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+    }
+
     function collideOnVenueIdentity() {
       rpcMock.mockResolvedValue({
         data: null,
@@ -2683,29 +3027,41 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(res.status).toBe(200);
       const [, rpcArgs] = rpcMock.mock.calls[0];
       expect((rpcArgs as Record<string, unknown>).p_venue_account_id).toBe(OKX_UID);
-      // The ccxt id is only known AFTER validation, so there is no pre-RPC
-      // fence read for it: the index is the refusal, the race arm the answer.
-      expect(venueKeyLookupMock).not.toHaveBeenCalled();
+      // The ccxt id is only known AFTER validation, so there is no pre-validation
+      // fence read for it. 225-11: there is exactly ONE read, right after the
+      // verdict and before the write, keyed on the validator's id, and it found
+      // nothing, which is why the RPC ran.
+      expect(venueKeyLookupMock).toHaveBeenCalledTimes(1);
+      expect(venueKeyLookupMock.mock.calls[0][0]).toMatchObject({
+        exchange: "okx",
+        venue_account_id: OKX_UID,
+        user_id: MOCK_USER.id,
+      });
       expect(await res.text()).not.toContain(OKX_UID);
     });
 
-    it("an own DRAFT on the same account → 200 deduped with the EXISTING ids", async () => {
+    it("225-05 CONN-01: an own DRAFT on the same account → 409 VENUE_DRAFT_IN_PROGRESS naming it, not a silent 200 deduped", async () => {
       collideOnVenueIdentity();
-      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
-      venueStrategyLookupMock.mockResolvedValue({ data: { id: EXISTING_STRATEGY_ID }, error: null });
+      holderAppearsAtTheRace();
+      venueStrategyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Own OKX Draft" },
+        error: null,
+      });
 
       const POST = await importPost();
       const res = await POST(makeReq(OKX_RECONNECT_BODY));
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(409);
       const text = await res.text();
       expect(JSON.parse(text)).toEqual({
-        ok: true,
-        strategy_id: EXISTING_STRATEGY_ID,
-        api_key_id: EXISTING_KEY_ID,
-        deduped: true,
+        code: "VENUE_DRAFT_IN_PROGRESS",
+        error: "This account is already in one of your unfinished drafts.",
+        strategy_name: "Own OKX Draft",
       });
       expect(text).not.toContain(OKX_UID);
+      expect(text).not.toContain(EXISTING_STRATEGY_ID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      expect(text).not.toContain(MOCK_USER.id);
       // The re-read is keyed on the ccxt venue and the validator's id.
       const keyRead = capturedSelects.find((c) => c.table === "api_keys");
       expect(keyRead?.filters).toMatchObject({ exchange: "okx", venue_account_id: OKX_UID });
@@ -2713,7 +3069,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
 
     it("a CONNECTED strategy on the same account → 409 VENUE_ALREADY_CONNECTED", async () => {
       collideOnVenueIdentity();
-      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      holderAppearsAtTheRace();
       venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
       venueOwnerLookupMock.mockResolvedValue({
         data: { id: EXISTING_STRATEGY_ID, name: "Existing Strategy" },
@@ -2731,7 +3087,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
 
     it("an ORPHANED key on the same account → 409 KEY_ORPHANED", async () => {
       collideOnVenueIdentity();
-      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      holderAppearsAtTheRace();
 
       const POST = await importPost();
       const res = await POST(makeReq(OKX_RECONNECT_BODY));
@@ -2749,7 +3105,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       // fence read is never issued before validate, validate runs, the RPC runs
       // and trips the index, and only then does the race arm say KEY_ORPHANED.
       collideOnVenueIdentity();
-      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      holderAppearsAtTheRace();
 
       const POST = await importPost();
       const res = await POST(makeReq(OKX_RECONNECT_BODY));
@@ -2782,7 +3138,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
      */
     it("a live key with no strategy and no composite membership answers KEY_ORPHANED, and no poll-written table is read", async () => {
       collideOnVenueIdentity();
-      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      holderAppearsAtTheRace();
 
       const POST = await importPost();
       const res = await POST(makeReq(OKX_RECONNECT_BODY));
@@ -2807,7 +3163,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
      */
     it("a COMPOSITE-MEMBER key on the same account (strategy_keys) → 409 KEY_VENUE_ALREADY_CONNECTED, not KEY_ORPHANED", async () => {
       collideOnVenueIdentity();
-      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      holderAppearsAtTheRace();
       keyMembershipLookupMock.mockResolvedValue({
         data: { api_key_id: EXISTING_KEY_ID },
         error: null,
@@ -2844,7 +3200,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     // Moving either is now a deliberate edit to this case.
     it("a faulted strategy_keys read falls through to DRAFT_ALREADY_EXISTS and logs the fault", async () => {
       collideOnVenueIdentity();
-      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      holderAppearsAtTheRace();
       keyMembershipLookupMock.mockResolvedValue({
         data: null,
         error: { code: "PGRST301", message: "holder read failed" },
@@ -2871,7 +3227,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
 
     it("the RPC error line is scrubbed of the uid Postgres echoes in its DETAIL", async () => {
       collideOnVenueIdentity();
-      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      holderAppearsAtTheRace();
       const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const POST = await importPost();
@@ -2907,6 +3263,1059 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       const logged = JSON.stringify(consoleErr.mock.calls);
       expect(logged).toContain("caught exception");
       expect(logged).not.toContain(OKX_UID);
+    });
+  });
+
+  /**
+   * [225-07 / Q1, D-18, D-25, CONN-03] THE MT5 ADMISSION PATH AND THE SERVER.
+   *
+   * The resolver is a LIST read now and server-aware: an exact server first,
+   * then a null-server key, and a same-login key on a DIFFERENT server is not
+   * this account at the fence. A holder that is NOT working never keeps the slot:
+   * the new key is validated, created with no identity and takes the slot through
+   * `swap_account_slot`.
+   */
+  describe("[225-07] MT5 admission, the server rule and the swap", () => {
+    const SERVER_NORMALISED = "metaquotes-demo";
+
+    /** One RPC double that answers by NAME, so a swap and a create are distinct. */
+    function routeRpc(swapAnswer: { data: unknown; error: unknown } = { data: null, error: null }) {
+      rpcMock.mockImplementation(async (name: string) => {
+        if (name === "create_wizard_strategy") {
+          return {
+            data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+            error: null,
+          };
+        }
+        if (name === "swap_account_slot") return swapAnswer;
+        if (name === "enqueue_compute_job") return { data: null, error: null };
+        throw new Error(`unexpected rpc ${name}`);
+      });
+    }
+
+    function rpcCalls(name: string) {
+      return rpcMock.mock.calls.filter((c) => c[0] === name);
+    }
+
+    beforeEach(() => {
+      auditMock.mockReset();
+      routeRpc();
+    });
+
+    it("TRACER: a connect beside the owner's FAILING key is validated, created without identity, and takes the slot through the swap", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, sync_status: "sign_in_failed" }],
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        ok: true,
+        strategy_id: STRATEGY_ID,
+        api_key_id: API_KEY_ID,
+      });
+      // The new credentials were PROVEN before they took a slot (T-225-19).
+      expect(validateKeyMock).toHaveBeenCalledTimes(1);
+      // Decided first: the failing holder's strategies were never read.
+      expect(venueStrategyLookupMock).not.toHaveBeenCalled();
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+
+      // Created WITHOUT identity: the swap stamps it (and refuses a key that
+      // already has one).
+      const created = rpcCalls("create_wizard_strategy");
+      expect(created).toHaveLength(1);
+      expect(created[0][1]).not.toHaveProperty("p_venue_account_id");
+      expect(created[0][1]).not.toHaveProperty("p_venue_server");
+
+      // The swap's arguments are exactly these four.
+      const swaps = rpcCalls("swap_account_slot");
+      expect(swaps).toHaveLength(1);
+      expect(swaps[0][1]).toEqual({
+        p_new_key: API_KEY_ID,
+        p_old_holder: EXISTING_KEY_ID,
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: SERVER_NORMALISED,
+      });
+      // Validate, then create, then swap.
+      expect(validateKeyMock.mock.invocationCallOrder[0]).toBeLessThan(
+        rpcMock.mock.invocationCallOrder[0],
+      );
+      expect(rpcMock.mock.calls[0][0]).toBe("create_wizard_strategy");
+      expect(rpcMock.mock.calls[1][0]).toBe("swap_account_slot");
+      // The demotion is audited by the helper (venue and holder id only).
+      expect(auditMock).toHaveBeenCalledTimes(1);
+      // A swap that lands undoes nothing.
+      expect(deleteCalls).toEqual([]);
+
+      // Neither the login nor the server crosses back.
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(text.toLowerCase()).not.toContain(SERVER_NORMALISED);
+    });
+
+    it("an inactive holder (is_active false) is a failing holder too (D-18)", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, is_active: false }],
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(200);
+      expect(rpcCalls("swap_account_slot")).toHaveLength(1);
+    });
+
+    it("a WORKING same-login same-server key whose strategy is past draft is refused by name BEFORE validateKey, exactly as before (D-01)", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, venue_server: SERVER_NORMALISED }],
+        error: null,
+      });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(text.toLowerCase()).not.toContain(SERVER_NORMALISED);
+    });
+
+    it("a WORKING same-login key whose server is NULL matches at the fence for any server (the wildcard)", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, venue_server: null }],
+        error: null,
+      });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(409);
+      expect(JSON.parse(await res.text()).code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+    });
+
+    it("a same-login owner key on a DIFFERENT server is not this account: the fence admits and BOTH identity parameters ride", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, venue_server: "some-other-broker" }],
+        error: null,
+      });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(200);
+      // The other server's key was never classified.
+      expect(venueStrategyLookupMock).not.toHaveBeenCalled();
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+      const created = rpcCalls("create_wizard_strategy");
+      expect(created).toHaveLength(1);
+      expect(created[0][1]).toMatchObject({
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: SERVER_NORMALISED,
+      });
+      expect(rpcCalls("swap_account_slot")).toHaveLength(0);
+    });
+
+    it("the exact-server key wins over a null-server key when both are live (tier 1 before tier 2)", async () => {
+      // Exact-server row is FAILING, the null-server row works: the pick must
+      // take the exact one, so the connect is an admission, not a refusal.
+      venueKeyLookupMock.mockResolvedValue({
+        data: [
+          { id: "00000000-0000-4000-8000-000000000001", venue_server: null },
+          {
+            id: EXISTING_KEY_ID,
+            venue_server: SERVER_NORMALISED,
+            sync_status: "error",
+          },
+        ],
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(200);
+      expect(rpcCalls("swap_account_slot")[0][1]).toMatchObject({
+        p_old_holder: EXISTING_KEY_ID,
+      });
+    });
+
+    it("no holder: the normalised server rides beside the login (trim + lower-case)", async () => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({ ...MT5_RECONNECT_BODY, passphrase: "  Broker-Live " }),
+      );
+      expect(res.status).toBe(200);
+      const created = rpcCalls("create_wizard_strategy");
+      expect(created[0][1]).toMatchObject({
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: "broker-live",
+      });
+      expect(rpcCalls("swap_account_slot")).toHaveLength(0);
+    });
+
+    it("WR-03: a server pasted with no-break-space padding is stored as the value the Python poll captures (str.strip first)", async () => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({ ...MT5_RECONNECT_BODY, passphrase: "\u00a0Broker-Live\u00a0" }),
+      );
+      expect(res.status).toBe(200);
+      expect(rpcCalls("create_wizard_strategy")[0][1]).toMatchObject({
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: "broker-live",
+      });
+    });
+
+    it("a ccxt connect carries no p_venue_server", async () => {
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+      expect(res.status).toBe(200);
+      expect(rpcCalls("create_wizard_strategy")[0][1]).not.toHaveProperty(
+        "p_venue_server",
+      );
+    });
+
+    // WR-01 + SF-M3 (225 PR-2 review, orchestrator decision 1): INVERTED from "a
+    // swap that FAILS after the draft exists ... still answers success". The
+    // admitted key was created with no identity, so the unique index cannot catch
+    // it: a refused swap left a second live same-owner key and a draft while the
+    // user was told "connected". The route now undoes what this request wrote and
+    // refuses.
+    describe("[WR-01 / SF-M3] a refused or failed swap is rolled back and refused", () => {
+      const KEY_VENUE_ALREADY_CONNECTED_BODY =
+        '{"code":"KEY_VENUE_ALREADY_CONNECTED","error":"This exchange account is already connected on your account. Use the key you already have, or disconnect it first."}';
+
+      function refusedSwap() {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [{ id: EXISTING_KEY_ID, sync_status: "revoked" }],
+          error: null,
+        });
+        routeRpc({
+          data: null,
+          error: {
+            code: "P0001",
+            message: `ACCOUNT_SLOT_REFUSED for login ${MT5_LOGIN} on ${SERVER_NORMALISED}`,
+          },
+        });
+      }
+
+      it("deletes the key then the draft THIS request created, answers 409 KEY_VENUE_ALREADY_CONNECTED byte-exact before the asset-class write, and leaks neither login nor server", async () => {
+        refusedSwap();
+        const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+        const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        const text = await res.text();
+        expect(text).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        expect(text).not.toContain(MT5_LOGIN);
+        expect(text.toLowerCase()).not.toContain(SERVER_NORMALISED);
+
+        // The key FIRST, scoped to this request's key, this owner, and only while
+        // unstamped; then the draft, scoped as the draft route's own delete is.
+        expect(deleteCalls).toEqual([
+          {
+            client: "admin",
+            table: "api_keys",
+            filters: { id: API_KEY_ID, user_id: MOCK_USER.id, "venue_account_id:is": null },
+          },
+          {
+            client: "admin",
+            table: "strategies",
+            filters: {
+              id: STRATEGY_ID,
+              user_id: MOCK_USER.id,
+              source: "wizard",
+              status: "draft",
+            },
+          },
+        ]);
+        // Answered before the asset-class derive: nothing was left to derive for.
+        expect(assetClassUpdateMock).not.toHaveBeenCalled();
+        // No demotion audit for a swap that did not land.
+        expect(auditMock).not.toHaveBeenCalled();
+
+        const logged = JSON.stringify([consoleErr.mock.calls, consoleWarn.mock.calls]);
+        expect(logged).toContain("holder swap failed");
+        expect(logged).toContain("rolled back");
+        expect(logged).not.toContain(MT5_LOGIN);
+        expect(logged.toLowerCase()).not.toContain(SERVER_NORMALISED);
+
+        // The swap failure is still paged (Rule 12) and is the only capture: the
+        // rollback itself succeeded.
+        await vi.waitFor(() => expect(sentryState.captured.length).toBeGreaterThan(0));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual(["holder-swap"]);
+        const sent = JSON.stringify([
+          String((sentryState.captured[0].err as { message?: unknown })?.message),
+          sentryState.captured[0].options,
+        ]).toLowerCase();
+        expect(sent).not.toContain(MT5_LOGIN);
+        expect(sent).not.toContain(SERVER_NORMALISED);
+      });
+
+      it("a key delete that ITSELF fails is a Sentry ERROR (holder-swap-rollback), the draft is left alone, and the response is still the 409", async () => {
+        refusedSwap();
+        deleteAnswers.api_keys = {
+          data: null,
+          error: { code: "XX000", message: `could not delete login ${MT5_LOGIN}` },
+        };
+        const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys"]);
+        await vi.waitFor(() => expect(sentryState.captured).toHaveLength(2));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual([
+          "holder-swap",
+          "holder-swap-rollback",
+        ]);
+        const logged = JSON.stringify(consoleErr.mock.calls);
+        expect(logged).toContain("code=XX000");
+        expect(logged).not.toContain(MT5_LOGIN);
+      });
+
+      it("a draft delete that ITSELF fails is a Sentry ERROR (holder-swap-rollback) and the response is still the 409", async () => {
+        refusedSwap();
+        deleteAnswers.strategies = {
+          data: null,
+          error: { code: "XX001", message: "could not delete the draft" },
+        };
+        vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys", "strategies"]);
+        await vi.waitFor(() => expect(sentryState.captured).toHaveLength(2));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual([
+          "holder-swap",
+          "holder-swap-rollback",
+        ]);
+      });
+
+      // 225 PR-2 round-3 decision 2 (WR-06): a swap failure with NO ACCOUNT_SLOT_
+      // token (a lock timeout, a network fault) is transient. The rollback runs
+      // and the answer is the retryable 503 UNKNOWN, not the 409 whose copy says
+      // the existing key "keeps working". Token refusals keep the 409 (above).
+      it("a TRANSIENT swap failure (no ACCOUNT_SLOT_ token) rolls the key and draft back and answers a retryable 503 UNKNOWN, never the 409", async () => {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [{ id: EXISTING_KEY_ID, sync_status: "revoked" }],
+          error: null,
+        });
+        routeRpc({
+          data: null,
+          error: {
+            code: "55P03",
+            message: `canceling statement due to lock timeout for login ${MT5_LOGIN} on ${SERVER_NORMALISED}`,
+          },
+        });
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(503);
+        const text = await res.text();
+        expect(JSON.parse(text).code).toBe("UNKNOWN");
+        expect(text).not.toContain("KEY_VENUE_ALREADY_CONNECTED");
+        expect(text).not.toContain(MT5_LOGIN);
+        // The same rollback ran: the key first, then the draft.
+        expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys", "strategies"]);
+        expect(assetClassUpdateMock).not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(sentryState.captured.length).toBeGreaterThan(0));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual(["holder-swap"]);
+      });
+
+      it("a key delete that removes no row and whose re-read finds the key NOT stamped (gone, or the RPC replayed an earlier request's pair) leaves the DRAFT in place, answers 409 and pages holder-swap-rollback-noop", async () => {
+        refusedSwap();
+        deleteAnswers.api_keys = { data: [], error: null };
+        const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        // Deleting the draft here would destroy a pair this request did not mint.
+        expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys"]);
+        expect(JSON.stringify(consoleWarn.mock.calls)).toContain("removed no key");
+        // The re-read asked about THIS request's key, for this owner.
+        expect(stampedKeyReadMock).toHaveBeenCalledTimes(1);
+        const stampRead = capturedSelects.find(
+          (c) => c.client === "admin" && c.table === "api_keys" && c.filters.id === API_KEY_ID,
+        );
+        expect(stampRead?.filters).toMatchObject({ id: API_KEY_ID, user_id: MOCK_USER.id });
+        await vi.waitFor(() => expect(sentryState.captured).toHaveLength(2));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual([
+          "holder-swap",
+          "holder-swap-rollback-noop",
+        ]);
+      });
+
+      // 225 PR-2 round-3 decision 1 (SF2-N1 / IN-12): zero rows deleted with the key
+      // STAMPED means a swap landed on it (a same-session replay that raced, or a
+      // swap that committed and lost its answer). The key is live and holds the
+      // slot, so "not saved" would be false: answer the normal success body.
+      it("a key delete that removes no row and whose re-read finds the key STAMPED answers this request's normal success, deletes nothing more and pages holder-swap-rollback-noop", async () => {
+        refusedSwap();
+        deleteAnswers.api_keys = { data: [], error: null };
+        stampedKeyReadMock.mockResolvedValue({
+          data: { venue_account_id: MT5_LOGIN },
+          error: null,
+        });
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe(
+          JSON.stringify({ ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }),
+        );
+        // Nothing more is deleted: not the draft, not the stamped key.
+        expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys"]);
+        await vi.waitFor(() => expect(sentryState.captured).toHaveLength(2));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual([
+          "holder-swap",
+          "holder-swap-rollback-noop",
+        ]);
+      });
+
+      it("a re-read that itself FAILS keeps the 409 (we cannot tell that the swap landed) and still pages holder-swap-rollback-noop", async () => {
+        refusedSwap();
+        deleteAnswers.api_keys = { data: [], error: null };
+        stampedKeyReadMock.mockResolvedValue({
+          data: null,
+          error: { code: "XX002", message: `could not read login ${MT5_LOGIN}` },
+        });
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        const logged = JSON.stringify(consoleErr.mock.calls);
+        expect(logged).toContain("code=XX002");
+        expect(logged).not.toContain(MT5_LOGIN);
+        await vi.waitFor(() => expect(sentryState.captured).toHaveLength(2));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual([
+          "holder-swap",
+          "holder-swap-rollback-noop",
+        ]);
+      });
+    });
+  });
+
+  // 225 PR-2 round-3 decision 2 (WR-06): a failing holder that a composite_member
+  // depends on can never be swapped (ACCOUNT_SLOT_COMPOSITE_DEPENDENT). It is
+  // refused BEFORE the validation, the encrypt and the insert, with the same
+  // body as the held arm, instead of being admitted and rolled back.
+  describe("[WR-06] a failing holder with a composite dependent is refused before admission", () => {
+    const KEY_VENUE_ALREADY_CONNECTED_BODY =
+      '{"code":"KEY_VENUE_ALREADY_CONNECTED","error":"This exchange account is already connected on your account. Use the key you already have, or disconnect it first."}';
+
+    function failingHolder() {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, sync_status: "revoked" }],
+        error: null,
+      });
+    }
+
+    it("answers 409 KEY_VENUE_ALREADY_CONNECTED byte-exact with no validate, encrypt or RPC, and reads exactly this holder's composite dependents for this owner", async () => {
+      failingHolder();
+      compositeDependentReadMock.mockResolvedValue({
+        data: { id: "00000000-0000-4000-8000-0000000000c1" },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(text).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+      expect(compositeDependentReadMock).toHaveBeenCalledTimes(1);
+      expect(compositeDependentReadMock.mock.calls[0][0]).toEqual({
+        user_id: MOCK_USER.id,
+        account_shared_with_api_key_id: EXISTING_KEY_ID,
+        account_share_kind: "composite_member",
+      });
+    });
+
+    it("a failing holder with NO composite dependent is still admitted and swapped (negative control)", async () => {
+      failingHolder();
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      expect(compositeDependentReadMock).toHaveBeenCalled();
+      expect(
+        rpcMock.mock.calls.filter((c) => c[0] === "swap_account_slot"),
+      ).toHaveLength(1);
+    });
+
+    it("a FAULT in the dependents read fails closed: 503 UNKNOWN before validate, encrypt and any write, captured as holder-read", async () => {
+      failingHolder();
+      compositeDependentReadMock.mockResolvedValue({
+        data: null,
+        error: { code: "42501", message: `permission denied reading login ${MT5_LOGIN}` },
+      });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(503);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("UNKNOWN");
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(sentryState.captured).toHaveLength(1));
+      expect(sentryState.captured[0].options.tags?.step).toBe("holder-read");
+      const sink = JSON.stringify([sentryState.captured, consoleErr.mock.calls]);
+      expect(sink).not.toContain(MT5_LOGIN);
+    });
+  });
+
+  /**
+   * [225-11 / D-01, Q1, D-25, CONN-03, MT5D-08] THE POST-VALIDATION RESOLVE.
+   *
+   * Every venue whose identity is known is resolved once more AFTER `validateKey`
+   * and BEFORE the write. A ccxt identity only exists after validation, so this
+   * is the first time the fence can speak for okx; MT5 re-reads because its
+   * validation can take up to 120 s and the state may have moved.
+   */
+  describe("[225-11] post-validation resolve, one KEY_VENUE_ALREADY_CONNECTED builder, the interim race arm", () => {
+    const OKX_UID = "100000001";
+    const OKX_BODY = { ...VALID_BODY, wizard_session_id: OTHER_SESSION_ID };
+    const SERVER_NORMALISED = "metaquotes-demo";
+    /** Byte-exact: the one builder's body, `code` first. */
+    const KEY_VENUE_ALREADY_CONNECTED_BODY =
+      '{"code":"KEY_VENUE_ALREADY_CONNECTED","error":"This exchange account is already connected on your account. Use the key you already have, or disconnect it first."}';
+
+    function routeRpc(swapAnswer: { data: unknown; error: unknown } = { data: null, error: null }) {
+      rpcMock.mockImplementation(async (name: string) => {
+        if (name === "create_wizard_strategy") {
+          return {
+            data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+            error: null,
+          };
+        }
+        if (name === "swap_account_slot") return swapAnswer;
+        if (name === "enqueue_compute_job") return { data: null, error: null };
+        throw new Error(`unexpected rpc ${name}`);
+      });
+    }
+    function rpcCalls(name: string) {
+      return rpcMock.mock.calls.filter((c) => c[0] === name);
+    }
+    /** An index refusal on the account, the way Postgres words it. */
+    function indexRefusal() {
+      return {
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+        },
+      };
+    }
+
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      auditMock.mockReset();
+      writeAttempts.length = 0;
+      routeRpc();
+      validateKeyMock.mockResolvedValue({
+        valid: true,
+        read_only: true,
+        venue_account_id: OKX_UID,
+      });
+    });
+
+    describe("an okx connect whose validator id matches a WORKING key of the owner is refused by name BEFORE the write", () => {
+      it("held only by a composite → 409 KEY_VENUE_ALREADY_CONNECTED, byte-exact", async () => {
+        venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+        keyMembershipLookupMock.mockResolvedValue({
+          data: { api_key_id: EXISTING_KEY_ID },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq(OKX_BODY));
+        expect(res.status).toBe(409);
+        const text = await res.text();
+        expect(text).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        expect(text).not.toContain(OKX_UID);
+        expect(text).not.toContain(EXISTING_KEY_ID);
+        // Refused at the post-validation arm, not by the index: no RPC at all.
+        expect(rpcMock).not.toHaveBeenCalled();
+        expect(writeAttempts).toEqual([]);
+        // The fence read ran once (post-validation); the race arm never did.
+        expect(venueKeyLookupMock).toHaveBeenCalledTimes(1);
+      });
+
+      it("a strategy past draft → 409 VENUE_ALREADY_CONNECTED naming it", async () => {
+        venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+        venueOwnerLookupMock.mockResolvedValue({
+          data: { id: EXISTING_STRATEGY_ID, name: "Existing Strategy" },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq(OKX_BODY));
+        expect(res.status).toBe(409);
+        const body = JSON.parse(await res.text());
+        expect(body.code).toBe("VENUE_ALREADY_CONNECTED");
+        expect(body.strategy_name).toBe("Existing Strategy");
+        expect(rpcMock).not.toHaveBeenCalled();
+        expect(writeAttempts).toEqual([]);
+      });
+
+      it("an own draft → 409 VENUE_DRAFT_IN_PROGRESS naming it", async () => {
+        venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+        venueStrategyLookupMock.mockResolvedValue({
+          data: { id: EXISTING_STRATEGY_ID, name: "Own OKX Draft" },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq(OKX_BODY));
+        expect(res.status).toBe(409);
+        const body = JSON.parse(await res.text());
+        expect(body.code).toBe("VENUE_DRAFT_IN_PROGRESS");
+        expect(body.strategy_name).toBe("Own OKX Draft");
+        expect(rpcMock).not.toHaveBeenCalled();
+        expect(writeAttempts).toEqual([]);
+      });
+
+      it("nothing uses the key → 409 KEY_ORPHANED", async () => {
+        venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+        const POST = await importPost();
+        const res = await POST(makeReq(OKX_BODY));
+        expect(res.status).toBe(409);
+        expect(JSON.parse(await res.text()).code).toBe("KEY_ORPHANED");
+        expect(rpcMock).not.toHaveBeenCalled();
+        expect(writeAttempts).toEqual([]);
+      });
+    });
+
+    it("TRACER: an okx connect beside the owner's FAILING key is admitted without identity and takes the slot through the swap (MT5D-08, Q1, D-25)", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, sync_status: "sign_in_failed" }],
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_BODY));
+
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        ok: true,
+        strategy_id: STRATEGY_ID,
+        api_key_id: API_KEY_ID,
+      });
+      expect(validateKeyMock).toHaveBeenCalledTimes(1);
+      // Decided before any strategy read, as on the MT5 path.
+      expect(venueStrategyLookupMock).not.toHaveBeenCalled();
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+
+      const created = rpcCalls("create_wizard_strategy");
+      expect(created).toHaveLength(1);
+      expect(created[0][1]).not.toHaveProperty("p_venue_account_id");
+      expect(created[0][1]).not.toHaveProperty("p_venue_server");
+
+      const swaps = rpcCalls("swap_account_slot");
+      expect(swaps).toHaveLength(1);
+      // ccxt has no server: the swap carries the validator id and nothing else.
+      expect(swaps[0][1]).toEqual({
+        p_new_key: API_KEY_ID,
+        p_old_holder: EXISTING_KEY_ID,
+        p_venue_account_id: OKX_UID,
+      });
+      expect(rpcMock.mock.calls[0][0]).toBe("create_wizard_strategy");
+      expect(rpcMock.mock.calls[1][0]).toBe("swap_account_slot");
+      expect(auditMock).toHaveBeenCalledTimes(1);
+      expect(text).not.toContain(OKX_UID);
+    });
+
+    it("MT5: a holder that was failing before validation and is WORKING after it refuses the connect, with no write (the state moved during the 120 s validate)", async () => {
+      venueKeyLookupMock
+        .mockResolvedValueOnce({
+          data: [{ id: EXISTING_KEY_ID, sync_status: "sign_in_failed" }],
+          error: null,
+        })
+        .mockResolvedValue({ data: [{ id: EXISTING_KEY_ID }], error: null });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(validateKeyMock).toHaveBeenCalledTimes(1);
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(rpcMock).not.toHaveBeenCalled();
+      expect(writeAttempts).toEqual([]);
+      expect(text).not.toContain(MT5_LOGIN);
+    });
+
+    // 225 PR-2 review WR-02 (orchestrator decision 3). The session fence runs
+    // once, BEFORE validation. A same-session resubmit that raced past it (reload,
+    // second tab, double submit during a 120 s validate) meets the FIRST request's
+    // committed draft at the post-validation resolve. The fence read is empty and
+    // so is the pre-validation key read: only the POST-validation reads see it.
+    describe("[WR-02] a same-session draft met at the post-validation resolve", () => {
+      beforeEach(() => {
+        venueKeyLookupMock
+          .mockResolvedValueOnce({ data: null, error: null })
+          .mockResolvedValue({ data: [{ id: EXISTING_KEY_ID }], error: null });
+      });
+
+      it("answers the session fence's deduped body, with no encrypt and no write", async () => {
+        venueStrategyLookupMock.mockResolvedValue({
+          data: {
+            id: EXISTING_STRATEGY_ID,
+            name: EXISTING_DRAFT_NAME,
+            wizard_session_id: OTHER_SESSION_ID,
+          },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq({ ...MT5_RECONNECT_BODY, wizard_session_id: OTHER_SESSION_ID }));
+
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        expect(JSON.parse(text)).toEqual({
+          ok: true,
+          strategy_id: EXISTING_STRATEGY_ID,
+          api_key_id: EXISTING_KEY_ID,
+          deduped: true,
+        });
+        expect(text).not.toContain(EXISTING_DRAFT_NAME);
+        expect(text).not.toContain(MT5_LOGIN);
+        // Validation ran (the resolve follows it); nothing after it did.
+        expect(validateKeyMock).toHaveBeenCalledTimes(1);
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+        expect(writeAttempts).toEqual([]);
+      });
+
+      it("NEGATIVE CONTROL: another session's draft is still refused by name", async () => {
+        venueStrategyLookupMock.mockResolvedValue({
+          data: {
+            id: EXISTING_STRATEGY_ID,
+            name: EXISTING_DRAFT_NAME,
+            wizard_session_id: WIZARD_SESSION_ID,
+          },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq({ ...MT5_RECONNECT_BODY, wizard_session_id: OTHER_SESSION_ID }));
+
+        expect(res.status).toBe(409);
+        const body = JSON.parse(await res.text());
+        expect(body.code).toBe("VENUE_DRAFT_IN_PROGRESS");
+        expect(body.strategy_name).toBe(EXISTING_DRAFT_NAME);
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+      });
+    });
+
+    it("MT5: a failing holder that is GONE after validation is not swapped: the key is created WITH its identity", async () => {
+      venueKeyLookupMock
+        .mockResolvedValueOnce({
+          data: [{ id: EXISTING_KEY_ID, sync_status: "sign_in_failed" }],
+          error: null,
+        })
+        .mockResolvedValue({ data: null, error: null });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const created = rpcCalls("create_wizard_strategy");
+      expect(created[0][1]).toMatchObject({
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: SERVER_NORMALISED,
+      });
+      expect(rpcCalls("swap_account_slot")).toHaveLength(0);
+    });
+
+    describe("the race arm, in after_index_refusal mode while the login-only index is live (CONN-03 interim rule)", () => {
+      it("MT5, a same-login WORKING key on a DIFFERENT server: the fence admits, the old index refuses, and the arm names that key", async () => {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [{ id: EXISTING_KEY_ID, venue_server: "some-other-broker" }],
+          error: null,
+        });
+        venueOwnerLookupMock.mockResolvedValue({
+          data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+          error: null,
+        });
+        rpcMock.mockImplementation(async () => indexRefusal());
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        // Both fence reads (pre and post validation) ignore the other server's
+        // key; the index refuses; the third read picks it by tier 3.
+        expect(venueKeyLookupMock).toHaveBeenCalledTimes(3);
+        expect(rpcMock).toHaveBeenCalledTimes(1);
+        expect(res.status).toBe(409);
+        const text = await res.text();
+        expect(JSON.parse(text).code).toBe("VENUE_ALREADY_CONNECTED");
+        expect(text).not.toContain(MT5_LOGIN);
+        expect(text.toLowerCase()).not.toContain("some-other-broker");
+      });
+
+      it("MT5, a same-login FAILING key on a DIFFERENT server met by the index: 409 KEY_VENUE_ALREADY_CONNECTED, byte-exact, no swap", async () => {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [
+            { id: EXISTING_KEY_ID, venue_server: "some-other-broker", sync_status: "revoked" },
+          ],
+          error: null,
+        });
+        rpcMock.mockImplementation(async () => indexRefusal());
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        expect(rpcCalls("swap_account_slot")).toHaveLength(0);
+      });
+
+      it("a 23505 race arm meeting a FAILING holder → 409 KEY_VENUE_ALREADY_CONNECTED (plan 07's held branch, pinned)", async () => {
+        // The post-validation read sees nothing (the race), the index refuses,
+        // and by the time the arm re-reads the account its holder is failing.
+        venueKeyLookupMock
+          .mockResolvedValueOnce({ data: null, error: null })
+          .mockResolvedValue({
+            data: [{ id: EXISTING_KEY_ID, sync_status: "sign_in_failed" }],
+            error: null,
+          });
+        rpcMock.mockImplementation(async () => indexRefusal());
+        const POST = await importPost();
+        const res = await POST(makeReq(OKX_BODY));
+
+        expect(rpcMock).toHaveBeenCalledTimes(1);
+        expect(res.status).toBe(409);
+        const text = await res.text();
+        expect(text).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        expect(text).not.toContain(OKX_UID);
+        expect(text).not.toContain(EXISTING_KEY_ID);
+      });
+
+      it("a race that the post-validation read missed and the arm finds WORKING and held → the same builder's bytes", async () => {
+        venueKeyLookupMock
+          .mockResolvedValueOnce({ data: null, error: null })
+          .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+        keyMembershipLookupMock.mockResolvedValue({
+          data: { api_key_id: EXISTING_KEY_ID },
+          error: null,
+        });
+        rpcMock.mockImplementation(async () => indexRefusal());
+        const POST = await importPost();
+        const res = await POST(makeReq(OKX_BODY));
+        expect(res.status).toBe(409);
+        expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+      });
+    });
+  });
+
+  /**
+   * [225-11 / ONCE-01, ONCE-02, Q3] THE REFUSAL IS PER OWNER, FOR BOTH VENUE KINDS.
+   *
+   * One account per OWNER: a second connect of the same exchange account or MT5
+   * login by one owner is refused by name with zero writes (a strategy-linked key
+   * that also feeds an allocator book keeps both uses, because a refusal never
+   * touches the key). ANOTHER owner's key on the same account is never read,
+   * never named and never swapped: the connect succeeds and stamps the identity,
+   * which IS the share link. No cross-owner marker exists (Q3).
+   */
+  describe("[225-11] ONCE-01 and ONCE-02: one account per owner, and the cross-owner share still connects", () => {
+    const OKX_UID = "100000001";
+    const OKX_BODY = { ...VALID_BODY, wizard_session_id: OTHER_SESSION_ID };
+    const OTHER_OWNER_ID = "00000000-0000-0000-0000-bbbbbbbbbbbb";
+    const OTHER_OWNERS_KEY_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const SERVER_NORMALISED = "metaquotes-demo";
+
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      writeAttempts.length = 0;
+      rpcMock.mockImplementation(async (name: string) => {
+        if (name === "create_wizard_strategy") {
+          return {
+            data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+            error: null,
+          };
+        }
+        throw new Error(`unexpected rpc ${name}`);
+      });
+      validateKeyMock.mockResolvedValue({
+        valid: true,
+        read_only: true,
+        venue_account_id: OKX_UID,
+      });
+    });
+
+    type OwnedSeed = SameLoginSeedRow & { user_id: string };
+
+    /**
+     * A table double that honours the `user_id` filter the way Postgres does,
+     * and returns EVERY seeded row when the route sent none, so a dropped owner
+     * filter surfaces the other owner's key instead of hiding behind the mock.
+     */
+    function seedAccountRows(rows: OwnedSeed[]) {
+      venueKeyLookupMock.mockImplementation(async (filters) => {
+        const f = filters ?? {};
+        const visible = "user_id" in f ? rows.filter((r) => r.user_id === f.user_id) : rows;
+        return { data: visible, error: null };
+      });
+    }
+
+    function noWriteWasMade() {
+      expect(rpcMock, "no create_wizard_strategy, no swap_account_slot").not.toHaveBeenCalled();
+      expect(
+        writeAttempts.filter((w) => w.table === "api_keys"),
+        "no api_keys insert, update, upsert or delete",
+      ).toEqual([]);
+      expect(writeAttempts).toEqual([]);
+    }
+
+    it("1. an okx key matching a WORKING key of the SAME owner is refused 409 by name with zero writes", async () => {
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Own OKX Strategy" },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        code: "VENUE_ALREADY_CONNECTED",
+        error: "This account is already connected to an existing strategy.",
+        strategy_name: "Own OKX Strategy",
+      });
+      expect(text).not.toContain(OKX_UID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      noWriteWasMade();
+    });
+
+    it("2. an MT5 login matching a WORKING key of the SAME owner is refused the same way", async () => {
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(text).not.toContain(MT5_LOGIN);
+      noWriteWasMade();
+    });
+
+    it("3. the same okx account held by ANOTHER owner's strategy-linked key: the read is filtered to the caller, the connect answers 200 and the RPC carries the identity (the share link)", async () => {
+      seedAccountRows([{ id: OTHER_OWNERS_KEY_ID, user_id: OTHER_OWNER_ID }]);
+      // If the owner filter were dropped the other owner's key would be picked
+      // and, with this strategy behind it, the connect would be REFUSED.
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Someone Else's Strategy" },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_BODY));
+
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).not.toContain("Someone Else");
+      expect(text).not.toContain(OTHER_OWNERS_KEY_ID);
+      // Every api_keys read carried the CALLER's id, and none carried another.
+      const keyReads = capturedSelects.filter((c) => c.table === "api_keys");
+      expect(keyReads.length).toBeGreaterThan(0);
+      for (const read of keyReads) {
+        expect(read.filters.user_id).toBe(MOCK_USER.id);
+      }
+      // The other owner's key was never classified, so never read further.
+      expect(venueStrategyLookupMock).not.toHaveBeenCalled();
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+      expect(keyMembershipLookupMock).not.toHaveBeenCalled();
+      // The identity is stamped: the cross-owner share link.
+      const created = rpcMock.mock.calls.filter((c) => c[0] === "create_wizard_strategy");
+      expect(created).toHaveLength(1);
+      expect(created[0][1]).toMatchObject({ p_venue_account_id: OKX_UID });
+      expect(rpcMock.mock.calls.filter((c) => c[0] === "swap_account_slot")).toHaveLength(0);
+    });
+
+    it("4. the same MT5 login and server held by ANOTHER owner's strategy-linked key: as case 3, and the RPC also carries p_venue_server", async () => {
+      seedAccountRows([
+        { id: OTHER_OWNERS_KEY_ID, user_id: OTHER_OWNER_ID, venue_server: SERVER_NORMALISED },
+      ]);
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Someone Else's Strategy" },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const keyReads = capturedSelects.filter((c) => c.table === "api_keys");
+      expect(keyReads.length).toBeGreaterThan(0);
+      for (const read of keyReads) {
+        expect(read.filters.user_id).toBe(MOCK_USER.id);
+      }
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+      const created = rpcMock.mock.calls.filter((c) => c[0] === "create_wizard_strategy");
+      expect(created).toHaveLength(1);
+      expect(created[0][1]).toMatchObject({
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: SERVER_NORMALISED,
+      });
+      expect(rpcMock.mock.calls.filter((c) => c[0] === "swap_account_slot")).toHaveLength(0);
+    });
+
+    it("5. the resolver's read set is still api_keys, strategies and strategy_keys only: no allocator table enters it", async () => {
+      // A working holder with no strategy, so the resolver walks its whole
+      // path: the key list, both strategy reads, and the composite membership.
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_BODY));
+
+      expect(res.status).toBe(409);
+      expect(JSON.parse(await res.text()).code).toBe("KEY_ORPHANED");
+      const tablesRead = [...new Set(capturedSelects.map((c) => c.table))].sort();
+      expect(tablesRead).toEqual(["api_keys", "strategies", "strategy_keys"]);
+      noWriteWasMade();
     });
   });
 });

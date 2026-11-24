@@ -383,6 +383,10 @@ const MUTATING_RPC_NAMES: readonly string[] = [
   "sanitize_user",
   "send_intro_with_decision",
   "create_wizard_strategy",
+  // Phase 225 (MT5D-08): moves a failing holder's account slot to a working key of
+  // the same owner (supabase/migrations/20261123180100_swap_account_slot.sql). Reached
+  // only through swapAccountSlot in src/lib/venue-identity.ts, which audits the demoted key.
+  "swap_account_slot",
   // SEC-03 (Phase 163): the composite sibling of create_wizard_strategy —
   // column-for-column the same signature, called from
   // strategies/composite/add-key. Its ABSENCE here is what made the

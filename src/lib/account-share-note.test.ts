@@ -39,6 +39,10 @@ function key(overrides: Partial<AccountShareNoteKey> = {}): AccountShareNoteKey 
 const DUP_SENTENCE =
   "This key reads the same exchange account as OKX — Main. We count that account once.";
 
+// Phase 225 OQ-1: what a LIVE marked key that is itself not working says. Hand-typed.
+const DEMOTED_SENTENCE =
+  "This key reads the same exchange account as OKX — Main, which holds that account while this key is not working. We count that account once.";
+
 function noteFor(holder: AccountShareNoteKey): string | null {
   const dup = key({
     id: "dup-0002",
@@ -134,15 +138,47 @@ describe("accountShareNote — the note states a fact and asks for no remedy (Ph
     }
   });
 
+  it("says nothing on a marked key that is itself disconnected: it is parked on purpose and shows its own status", () => {
+    const dup = dupOf({ disconnected_at: "2026-09-20T00:00:00Z" });
+    expect(accountShareNote(dup, new Map([[holder.id, holder], [dup.id, dup]]))).toBeNull();
+  });
+
+  // Phase 225 OQ-1 (narrows WR-02): Q1 demotes a failing holder to exactly this state, a
+  // live key marked a duplicate of a working holder, and the founder asked that it be
+  // "named on its key card". The sentence is true because the derive counts the account
+  // once, through the working holder (D-18).
   it.each<[string, Partial<AccountShareNoteKey>]>([
-    ["disconnected", { disconnected_at: "2026-09-20T00:00:00Z" }],
     ["inactive", { is_active: false }],
     ["revoked", { sync_status: "revoked" }],
     ["sign_in_failed", { sync_status: "sign_in_failed" }],
     ["error", { sync_status: "error" }],
-  ])("says nothing on a marked key that is itself %s: it counts for nothing and its marker never clears", (_name, overrides) => {
+  ])("names the working holder on a live marked key that is itself %s, and says why (Phase 225 OQ-1)", (_name, overrides) => {
     const dup = dupOf(overrides);
-    expect(accountShareNote(dup, new Map([[holder.id, holder], [dup.id, dup]]))).toBeNull();
+    expect(accountShareNote(dup, new Map([[holder.id, holder], [dup.id, dup]]))).toBe(DEMOTED_SENTENCE);
+  });
+
+  it("the demoted-key sentence names no remedy (Phase 183 D-02 still holds)", () => {
+    const dup = dupOf({ sync_status: "error" });
+    const note = accountShareNote(dup, new Map([[holder.id, holder], [dup.id, dup]]));
+    expect(note).not.toBeNull();
+    expect(note).not.toMatch(/\b(disconnect|delete|remove)\b/i);
+    expect(note).not.toMatch(/one of them/i);
+  });
+
+  it.each<[string, Partial<AccountShareNoteKey>]>([
+    ["inactive", { is_active: false }],
+    ["revoked", { sync_status: "revoked" }],
+    ["sign_in_failed", { sync_status: "sign_in_failed" }],
+    ["error", { sync_status: "error" }],
+  ])("says nothing on a not-working marked key (%s) whose holder is ALSO not working: nothing is counted through it", (_name, overrides) => {
+    const failingHolder = key({ sync_status: "error" });
+    const dup = dupOf({ ...overrides, account_shared_with_api_key_id: failingHolder.id });
+    expect(accountShareNote(dup, new Map([[failingHolder.id, failingHolder], [dup.id, dup]]))).toBeNull();
+  });
+
+  it("says nothing on a not-working marked key whose holder is absent from the list", () => {
+    const dup = dupOf({ sync_status: "error" });
+    expect(accountShareNote(dup, new Map([[dup.id, dup]]))).toBeNull();
   });
 
   it("says nothing when the holder is not in the caller's key list (it cannot be judged working)", () => {

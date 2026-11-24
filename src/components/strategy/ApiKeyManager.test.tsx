@@ -3270,13 +3270,8 @@ describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
   // 167.1.2 REVIEW WR-02: this card lists EVERY key the read returns, the
   // disconnected ones included. A marked key that is disconnected is never
   // polled again, so its marker never clears; the note says nothing on it, as
-  // the key shows its own status. Same for a marked key that is inactive or
-  // failing (D-18 applied to the marked key itself).
-  it.each([
-    ["disconnected", { disconnected_at: "2026-09-21T00:00:00Z" }],
-    ["inactive", { is_active: false }],
-    ["revoked", { sync_status: "revoked" }],
-  ])("renders nothing on a marked key that is itself %s", async (_name, dupOverrides) => {
+  // the key shows its own status.
+  async function renderMarkedKey(dupOverrides: Record<string, unknown>) {
     selectResultMock.mockReturnValue({
       data: [
         row({}),
@@ -3293,8 +3288,27 @@ describe("ApiKeyManager — duplicate-account note (167.1.2 plan 04)", () => {
     await act(async () => {
       render(<ApiKeyManager strategyName="Synthetic strategy" strategyId="strat-1" currentKeyId={null} {...LIST_EVERY_KEY} />);
     });
-    const card = await screen.findByTestId("api-key-card-key-okx-dup");
+    return screen.findByTestId("api-key-card-key-okx-dup");
+  }
+
+  it("renders nothing on a marked key that is itself disconnected", async () => {
+    const card = await renderMarkedKey({ disconnected_at: "2026-09-21T00:00:00Z" });
     expect(within(card).queryByText(/reads the same exchange account/)).not.toBeInTheDocument();
+  });
+
+  // Phase 225 OQ-1 narrows WR-02: a LIVE marked key that is itself not working,
+  // beside a working holder, is what Q1 leaves a demoted holder as. Its card
+  // names the holder and says why.
+  it.each([
+    ["inactive", { is_active: false }],
+    ["revoked", { sync_status: "revoked" }],
+  ])("names the working holder on a live marked key that is itself %s (Phase 225 OQ-1)", async (_name, dupOverrides) => {
+    const card = await renderMarkedKey(dupOverrides);
+    expect(
+      within(card).getByText(
+        "This key reads the same exchange account as OKX — Main OKX, which holds that account while this key is not working. We count that account once.",
+      ),
+    ).toBeInTheDocument();
   });
 });
 

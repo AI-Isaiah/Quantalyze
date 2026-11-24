@@ -2354,8 +2354,13 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * receipt below is unchanged. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE
    * ("expected 103 to be 102") with the entry added and the pin unmoved, never counted,
    * and it moves in lockstep with the declaration in the SEAMUX-04 block.
+   * ⚠️ 103 → 104 (2026-11-24, Phase 225 plan 05, CONN-01): one arrival,
+   * `VENUE_DRAFT_IN_PROGRESS`. Its actions are `request_call` and `expand_log`,
+   * neither in `DESTRUCTIVE_ACTIONS`, so the destructive class is unchanged. The value
+   * was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 103 to be 104"), never
+   * counted, and it moves in lockstep with the declaration in the SEAMUX-04 block.
    */
-  const EXPECTED_TABLE_SIZE = 103;
+  const EXPECTED_TABLE_SIZE = 104;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -3172,8 +3177,14 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * was sent to your broker and nothing was stored", is OBSERVABLE: the owed gate refuses
    * before any client is built, so no login or write has happened. The value was READ OFF
    * THIS GUARD'S OWN FAILURE MESSAGE ("expected 103 to be 102"), never counted.
+   * ⚠️ 103 → 104 (2026-11-24, Phase 225 plan 05, CONN-01): one arrival,
+   * `VENUE_DRAFT_IN_PROGRESS`. It takes no `FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR`
+   * exemption: its one stored-state claim, "Your new key was not saved", is observable on
+   * both emitting arms (a return before any write, or an INSERT the index refused). The
+   * value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 103 to be 104"), never
+   * counted, and it moves in lockstep with the declaration in the TRAP-4 block.
    */
-  const EXPECTED_TABLE_SIZE = 103;
+  const EXPECTED_TABLE_SIZE = 104;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -5199,6 +5210,100 @@ describe("[154.1 / WIZCONT-02] VENUE_ALREADY_CONNECTED — the honest refusal", 
     expect(
       formatKeyError("DRAFT_ALREADY_EXISTS", { strategyName: "Helios Momentum" })
         .cause,
+    ).toBe(WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS.cause);
+  });
+});
+
+/**
+ * [225-05 / CONN-01] VENUE_DRAFT_IN_PROGRESS: the by-name refusal of a connect
+ * whose account is already in one of the caller's OWN unfinished drafts
+ * (founder D-23, "Say so"). The route half is pinned in
+ * `create-with-key/route.test.ts`; this is the COPY half.
+ *
+ * WHY THE REMEDY IS PINNED, NOT THE WORDING: `resume_draft` and `start_fresh`
+ * act on THIS wizard session's draft, and the conflicting draft is a different
+ * session's. `start_fresh` would open the delete dialog for the wrong row.
+ */
+describe("[225-05 / CONN-01] VENUE_DRAFT_IN_PROGRESS: names the draft and offers no wrong-row remedy", () => {
+  const CODE = "VENUE_DRAFT_IN_PROGRESS" as const;
+
+  it("is a table member with copy of its OWN, distinct from both neighbours", () => {
+    expect(Object.keys(WIZARD_ERROR_COPY)).toContain(CODE);
+    const copy = formatKeyError(CODE);
+    expect(copy.title).not.toBe(WIZARD_ERROR_COPY.UNKNOWN.title);
+    expect(copy.title).not.toBe(WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS.title);
+    expect(copy.title).not.toBe(WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED.title);
+    expect(copy.cause).not.toBe(WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS.cause);
+  });
+
+  it("tells the user to finish or delete the draft, and that the new key was not saved", () => {
+    const copy = WIZARD_ERROR_COPY[CODE];
+    const haystack = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    expect(haystack).toContain("finish that draft, or delete it");
+    expect(copy.cause).toContain("Your new key was not saved.");
+  });
+
+  it("authors a fixRequires slot for every bullet", () => {
+    const copy = WIZARD_ERROR_COPY[CODE];
+    expect(copy.fixRequires).toHaveLength(copy.fix.length);
+  });
+
+  it("offers NO Retry, NO resume_draft and NO start_fresh", () => {
+    const actions = WIZARD_ERROR_COPY[CODE].actions;
+    expect(actions).not.toContain("resume_draft");
+    expect(actions).not.toContain("start_fresh");
+    expect(
+      buildEnvelope(CODE, "corr-2255").recoverable,
+      "resubmitting the same account is refused identically, so a Retry could only fail again.",
+    ).toBe(false);
+    // The contrast keeps the assertion above discriminating.
+    expect(buildEnvelope("UNKNOWN", "corr-2255").recoverable).toBe(true);
+    expect(actions).toEqual(expect.arrayContaining(["request_call", "expand_log"]));
+  });
+
+  it("names the draft by exchange display name and trimmed name when given both", () => {
+    const named = formatKeyError(CODE, { strategyName: "  Helios Momentum  ", venue: "okx" });
+    expect(named.cause.startsWith('Your unfinished OKX draft "Helios Momentum" already uses this account. ')).toBe(true);
+    // The table sentence survives the prepend.
+    expect(named.cause).toContain(WIZARD_ERROR_COPY[CODE].cause);
+  });
+
+  it("names the draft without an exchange when the venue is absent or not in the closed set", () => {
+    for (const venue of [undefined, "kraken", "constructor", "__proto__"]) {
+      const named = formatKeyError(CODE, { strategyName: "Helios Momentum", venue });
+      expect(named.cause.startsWith('Your unfinished draft "Helios Momentum" already uses this account. ')).toBe(true);
+    }
+  });
+
+  it("a BLANK or missing name degrades to the table's unnamed cause, never empty quotes", () => {
+    for (const ctx of [
+      undefined,
+      {},
+      { venue: "okx" },
+      { strategyName: "", venue: "okx" },
+      { strategyName: "   ", venue: "okx" },
+      { strategyName: "\t\n", venue: "okx" },
+    ]) {
+      const got = formatKeyError(CODE, ctx);
+      expect(got.cause, `context ${JSON.stringify(ctx)} produced a naming sentence`).toBe(
+        WIZARD_ERROR_COPY[CODE].cause,
+      );
+      expect(got.cause).not.toContain('""');
+    }
+  });
+
+  it("a name with quotes and non-ASCII characters is carried verbatim (React escapes at render)", () => {
+    const name = 'Strat "Alpha" \u00e9\u00e8 \u2014 \u30c6\u30b9\u30c8 <b>x</b>';
+    const named = formatKeyError(CODE, { strategyName: name, venue: "bybit" });
+    expect(named.cause).toContain(`Bybit draft "${name}"`);
+  });
+
+  it("the naming arm is SCOPED to this code: a neighbour given the same context is untouched", () => {
+    expect(
+      formatKeyError("KEY_ORPHANED", { strategyName: "Helios Momentum", venue: "okx" }).cause,
+    ).toBe(WIZARD_ERROR_COPY.KEY_ORPHANED.cause);
+    expect(
+      formatKeyError("DRAFT_ALREADY_EXISTS", { strategyName: "Helios Momentum", venue: "okx" }).cause,
     ).toBe(WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS.cause);
   });
 });
