@@ -14,6 +14,7 @@ This release is analytics-service only: no migration, no UI and no published num
   - New `_store_funding_window` stores each window before the next is read: rows sorted ascending, upserted in 500-row slices, stopping at the first failing slice. What is stored is therefore always an unbroken run from the oldest row, and the existing cursor (newest stored timestamp minus 2 days) resumes the walk where it stopped.
   - Before this change, rows were upserted only after the whole walk. The one live Bybit key's first walk takes 379 s against a 180 s budget (231 probe), so every attempt timed out and stored nothing, and `funding_fees` was never filled.
   - There is no self-deadline. A walk still over budget fails as "Handler exceeded timeout" and is retried, so a timeout is never turned into a quiet DONE. A first walk needs about three attempts at best; otherwise the next 04:00 UTC cron resumes from what was stored.
+- **OKX archive rebuild: a non-USD realized flag stops it by name (Phase 232 hand-off).** `_check_live_realized_flags` raises `live_anchor_unusable live_realized=non_usd` on `daily_pnl_non_usd_okx`, the flag Phase 232 adds for a non-stable OKX bill. The token is named by its string until 232 lands.
 - `fetch_funding_bybit` takes a keyword-only `until_ms` end bound. New public `bybit_funding_windows` returns the same windows one full walk sends. The default call is unchanged.
 
 ### Notes
@@ -39,6 +40,7 @@ This release is analytics-service only: no migration, no UI and no published num
 - Three cursor and happy-path tests were updated on purpose, keeping their intent.
 - Each decision test was shown RED on a neutered copy and GREEN after a byte restore.
 - Full analytics suite: 15608 passed, coverage 94.79%. mypy strict is clean.
+
 ## [0.133.67.1] - 2026-11-24 — BASELINE: automated re-dump after the PROD apply of d04ef47c
 
 ### Changed
