@@ -231,6 +231,7 @@ _Depth: standard_
    - It then answers `409 KEY_VENUE_ALREADY_CONNECTED`, the same builder as the held arm. It does not answer 200.
    - The compensating delete is logged with codes only.
    - If the compensating delete itself fails, that is a Sentry ERROR, and the response is still 409.
+     ⛔ **SUPERSEDED 2026-11-24 (round-3 decision 2, IN-19, Rule 7; coordinator confirmed).** "Still 409" now holds only for an `ACCOUNT_SLOT_*` token refusal. A transient swap fault whose compensating delete also fails answers 503 `UNKNOWN`. The original sentence is kept as lineage.
    - Deleting a row created by the same failed request is allowed. The "keep data" rule protects the user's existing data, not a half-done write from that request.
    - An atomic SQL version (`p_swap_from_holder`) is NOT built now.
 2. **SF-M1 / IN-11: fail closed.** A failed same-login read in validate-and-encrypt and rotate-secret answers a retryable 503-class error before any write, captured to Sentry, instead of continuing. create-with-key's equivalent fence read gets the same treatment.
@@ -507,3 +508,5 @@ _Depth: standard_
 - **IN-19: round-2 decision 1 and round-3 decision 2 conflict. Under Rule 7, the more recent decision, round-3 decision 2, wins.** A transient swap failure answers 503 even when the compensating delete also failed. The leftover pair heals either way: through the session fence's deduped retry, or through the next poll's stamper swap. Round-2 decision 1's "still 409" now holds only for a token refusal. This is recorded and not fixed (LOW).
 - Recorded only, as LOW and Info: IN-20, IN-21, IN-22, IN-23 (bound by the decision) and IN-24. SFH N3-2 to N3-5 duplicate IN-22 and IN-23 or are hardening notes.
 - **PR-2 review is closed at round 3.** 0 MEDIUM+ remain open in the code. The one MEDIUM survivor is booked.
+
+- **Coordinator routing, 2026-11-24.** `[225-SWAPLANDED-NO-RECOMPOSE]` stays in Phase 225. On the phase branch, the `swapLanded` arm of both routes gets the `derive_allocator_equity` enqueue and the audit row, plus a test that goes RED when neutered. It ships in its own small PR with no migration, after #1324 and before PR-3, and deletes the TODOS entry. The coordinator also confirmed the IN-19 resolution, and round-2 decision 1 is flagged superseded at its source.
