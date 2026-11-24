@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
@@ -68,12 +68,16 @@ __all__ = [
     "COMPOSITE_MEMBER_SHARED_ACCOUNT",
     "DUPLICATE_DETECTED_AUDIT_ACTION",
     "MAX_VENUE_ACCOUNT_ID_LENGTH",
+    "MAX_VENUE_SERVER_LENGTH",
     "StampOutcome",
     "UNSTAMPED_ESCALATION_DAYS",
     "VENUES_WITH_ACCOUNT_ID",
     "escalate_if_unchecked",
     "escalate_session_build_failure",
+    "normalise_venue_server",
+    "pick_same_account_holder",
     "read_venue_account_id",
+    "same_venue_server",
     "stamp_account_identity",
     "venue_account_id_from",
 ]
@@ -99,6 +103,78 @@ _STAMPED_VENUES: Final = VENUES_WITH_ACCOUNT_ID | {_MT5}
 # answers None, as for a venue that reports no id. zod measures a JS string's
 # ``.length``, in UTF-16 code units, so this does too. Change both together.
 MAX_VENUE_ACCOUNT_ID_LENGTH: Final = 128
+
+
+# Phase 225 plan 06 (CONN-03). The broker server of an MT5 key, stored beside the
+# login in ``api_keys.venue_server``. The cap of the CHECK
+# ``api_keys_venue_server_valid`` and of ``MAX_VENUE_SERVER_LENGTH`` in
+# src/lib/venue-identity.ts, which is this module's TypeScript twin. Unlike the
+# account id above, the database counts this one in CODE POINTS (``char_length``),
+# so ``len`` measures it here and the spread count does there.
+MAX_VENUE_SERVER_LENGTH: Final = 128
+
+# Space, tab, CR and LF: the SQL ``btrim(x, E' \t\r\n')`` of ``swap_account_slot``
+# and the CHECK, NOT ``str.strip()`` with no argument, which also strips a
+# vertical tab, a form feed and every Unicode space the database keeps.
+_SERVER_EDGE_WHITESPACE: Final = " \t\r\n"
+
+
+def normalise_venue_server(raw: object) -> str | None:
+    """Return the stored form of a broker server, or ``None``.
+
+    Trim space, tab, CR and LF from both ends, lower-case, and treat blank or
+    more than :data:`MAX_VENUE_SERVER_LENGTH` characters as ``None`` (the CHECK
+    would refuse it; ``None`` makes the key a wildcard instead). A value that is
+    not a ``str`` is ``None``: an ``int`` must never be ``str()``-ed into an
+    identity. TypeScript twin: ``normaliseVenueServer`` in
+    src/lib/venue-identity.ts; both replay
+    tests/fixtures/venue_server_identity.json.
+    """
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip(_SERVER_EDGE_WHITESPACE).lower()
+    if not text or len(text) > MAX_VENUE_SERVER_LENGTH:
+        return None
+    return text
+
+
+def same_venue_server(a: str | None, b: str | None) -> bool:
+    """Two servers are the same account when equal or when EITHER is ``None``.
+
+    A key not yet backfilled matches on login alone (CONTEXT Q2). TypeScript
+    twin: ``sameVenueServer``; fixture ``venue_server_identity.json``.
+    """
+    return a is None or b is None or a == b
+
+
+def pick_same_account_holder(
+    rows: Sequence[Mapping[str, Any]],
+    server: str | None,
+    *,
+    after_index_refusal: bool,
+) -> Mapping[str, Any] | None:
+    """Pick the live key a new key on the same login is "the same account as".
+
+    Tiers, first non-empty wins: (1) a row whose ``venue_server`` equals
+    ``server`` (``None`` equals ``None``), (2) a row where either side is
+    ``None``, (3) any row, only when ``after_index_refusal`` (the live
+    login-only unique index refused the write and the caller must still name the
+    key that refused it). Inside a tier the smallest ``id`` by plain string
+    comparison wins, so the pick never depends on row order. ``server`` must
+    already be normalised. TypeScript twin: ``pickSameAccountHolder``; fixture
+    ``venue_server_identity.json``.
+    """
+    tiers: list[Any] = [
+        lambda row: row.get("venue_server") == server,
+        lambda row: same_venue_server(row.get("venue_server"), server),
+    ]
+    if after_index_refusal:
+        tiers.append(lambda row: True)
+    for qualifies in tiers:
+        hits = [row for row in rows if qualifies(row)]
+        if hits:
+            return min(hits, key=lambda row: str(row["id"]))
+    return None
 
 
 def _utf16_length(text: str) -> int:

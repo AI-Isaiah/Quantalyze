@@ -4337,6 +4337,15 @@ export type Database = {
         Args: { p_user_id: string }
         Returns: undefined
       }
+      swap_account_slot: {
+        Args: {
+          p_new_key: string
+          p_old_holder: string
+          p_venue_account_id: string
+          p_venue_server?: string
+        }
+        Returns: undefined
+      }
       sync_strategy_analytics_status: {
         Args: { p_strategy_id: string; p_trigger_job_id?: string }
         Returns: undefined

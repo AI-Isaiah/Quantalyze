@@ -1,0 +1,166 @@
+{
+  "_comment": "Phase 225 plan 06 (CONN-03, MT5D-08). The cross-runtime oracle for the broker-server identity rule. Read by src/lib/venue-identity.test.ts (normaliseVenueServer, sameVenueServer, pickSameAccountHolder) and analytics-service/tests/test_venue_server_identity.py (normalise_venue_server, same_venue_server, pick_same_account_holder). HAND-TYPED: every expectation below was worked out by hand from the rule, never produced by either implementation, and every id and server is synthetic. The rule. NORMALISE: trim only space, tab, CR and LF from both ends (the SQL btrim(x, E' \\t\\r\\n') of swap_account_slot and api_keys_venue_server_valid, so a vertical tab or a no-break space is NOT trimmed, in all three places), lower-case, blank becomes null, more than 128 characters after trimming becomes null, anything that is not a string becomes null. SAME: two servers are the same account when both are equal OR when EITHER is null (a key not yet backfilled matches on login alone). PICK: among the live keys of one login, tier 1 is a row whose server equals the new key's server (null equals null), tier 2 is a row where either side is null, tier 3 exists only in mode after_index_refusal (the old login-only index refused the write) and takes any row; the first non-empty tier wins and inside it the smallest id by plain string comparison, so the pick never depends on row order. ASCII letters only in the case-folded cases: JS toLowerCase, Python lower and SQL lower differ on a few non-ASCII code points. Do not add a case here without its expectation; both suites consume this file whole and assert every array is non-empty.",
+  "normalise": [
+    { "in": "srv-a", "out": "srv-a" },
+    { "in": "  Srv-A  ", "out": "srv-a" },
+    { "in": "\tSrv-A\t", "out": "srv-a" },
+    { "in": "\r\nSrv-A\r\n", "out": "srv-a" },
+    { "in": " \t\r\nMixed Case-Server \n", "out": "mixed case-server" },
+    { "in": "ICMarkets-Demo01", "out": "icmarkets-demo01" },
+    { "in": "", "out": null },
+    { "in": "   ", "out": null },
+    { "in": "\t\r\n ", "out": null },
+    { "in": "\u000bSrv", "out": "\u000bsrv" },
+    { "in": " Srv", "out": " srv" },
+    { "in": "\u000b", "out": "\u000b" },
+    {
+      "in": "Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01",
+      "out": "broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01"
+    },
+    {
+      "in": "  Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01\t",
+      "out": "broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01"
+    },
+    {
+      "in": "Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01X",
+      "out": null
+    },
+    { "in": null, "out": null },
+    { "in": 5, "out": null },
+    { "in": true, "out": null },
+    { "in": {}, "out": null },
+    { "in": ["srv-a"], "out": null }
+  ],
+  "same": [
+    { "a": null, "b": null, "same": true },
+    { "a": null, "b": "srv-a", "same": true },
+    { "a": "srv-a", "b": null, "same": true },
+    { "a": "srv-a", "b": "srv-a", "same": true },
+    { "a": "srv-a", "b": "srv-b", "same": false },
+    { "a": "srv-b", "b": "srv-a", "same": false }
+  ],
+  "pick": [
+    {
+      "name": "fence: an exact server beats a null-server row",
+      "rows": [
+        { "id": "k-001", "venue_server": null },
+        { "id": "k-002", "venue_server": "srv-a" }
+      ],
+      "server": "srv-a",
+      "mode": "fence",
+      "expect": "k-002"
+    },
+    {
+      "name": "fence: a different-server row is not picked",
+      "rows": [{ "id": "k-001", "venue_server": "srv-b" }],
+      "server": "srv-a",
+      "mode": "fence",
+      "expect": null
+    },
+    {
+      "name": "after_index_refusal: the same rows pick the different-server row",
+      "rows": [{ "id": "k-001", "venue_server": "srv-b" }],
+      "server": "srv-a",
+      "mode": "after_index_refusal",
+      "expect": "k-001"
+    },
+    {
+      "name": "fence: a null-server row is picked for any server",
+      "rows": [{ "id": "k-001", "venue_server": null }],
+      "server": "srv-a",
+      "mode": "fence",
+      "expect": "k-001"
+    },
+    {
+      "name": "fence: a null new server picks a server-stamped row",
+      "rows": [{ "id": "k-003", "venue_server": "srv-a" }],
+      "server": null,
+      "mode": "fence",
+      "expect": "k-003"
+    },
+    {
+      "name": "fence: a null new server prefers a null-server row (null equals null) over a stamped one",
+      "rows": [
+        { "id": "k-001", "venue_server": "srv-a" },
+        { "id": "k-002", "venue_server": null }
+      ],
+      "server": null,
+      "mode": "fence",
+      "expect": "k-002"
+    },
+    {
+      "name": "empty rows pick nothing in fence mode",
+      "rows": [],
+      "server": "srv-a",
+      "mode": "fence",
+      "expect": null
+    },
+    {
+      "name": "empty rows pick nothing after an index refusal",
+      "rows": [],
+      "server": "srv-a",
+      "mode": "after_index_refusal",
+      "expect": null
+    },
+    {
+      "name": "tier 1 tie: the smallest id wins, whatever the row order",
+      "rows": [
+        { "id": "k-006", "venue_server": "srv-a" },
+        { "id": "k-005", "venue_server": "srv-a" }
+      ],
+      "server": "srv-a",
+      "mode": "fence",
+      "expect": "k-005"
+    },
+    {
+      "name": "tier 2 tie: two null-server rows, the smallest id wins",
+      "rows": [
+        { "id": "k-008", "venue_server": null },
+        { "id": "k-007", "venue_server": null }
+      ],
+      "server": "srv-a",
+      "mode": "fence",
+      "expect": "k-007"
+    },
+    {
+      "name": "login-only tier tie: two different-server rows after a refusal, the smallest id wins",
+      "rows": [
+        { "id": "k-009", "venue_server": "srv-b" },
+        { "id": "k-004", "venue_server": "srv-c" }
+      ],
+      "server": "srv-a",
+      "mode": "after_index_refusal",
+      "expect": "k-004"
+    },
+    {
+      "name": "after_index_refusal still prefers an exact server over a different one",
+      "rows": [
+        { "id": "k-001", "venue_server": "srv-b" },
+        { "id": "k-002", "venue_server": "srv-a" }
+      ],
+      "server": "srv-a",
+      "mode": "after_index_refusal",
+      "expect": "k-002"
+    },
+    {
+      "name": "after_index_refusal still prefers a null-server row over a different one",
+      "rows": [
+        { "id": "k-001", "venue_server": "srv-b" },
+        { "id": "k-002", "venue_server": null }
+      ],
+      "server": "srv-a",
+      "mode": "after_index_refusal",
+      "expect": "k-002"
+    },
+    {
+      "name": "a higher-tier row beats a smaller id in a lower tier",
+      "rows": [
+        { "id": "k-001", "venue_server": null },
+        { "id": "k-009", "venue_server": "srv-a" }
+      ],
+      "server": "srv-a",
+      "mode": "fence",
+      "expect": "k-009"
+    }
+  ]
+}
