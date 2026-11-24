@@ -1676,3 +1676,55 @@ describe("the list's read failures, share note and empty states carry their regi
     expect(document.querySelector('[data-degrade-id="strategies.empty"]')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 238 plan 02 (FACT-05): a PUBLISHED row's share note. Its state is not read
+// where the note is made (167.2-REVIEW IN-04), so it comes from `failedFacts`, the one
+// read the page already makes for a Stale (no data yet) row; every other published
+// row says the state-free note. Sentences are typed out, never imported.
+// ---------------------------------------------------------------------------
+
+/** The share-note paragraph of a row, or null. */
+function shareNoteOf(name: string): HTMLElement | null {
+  return noteOf(name)?.querySelector<HTMLElement>('[data-testid="strategy-row-share-note"]') ?? null;
+}
+
+describe("NEVERCOMPUTED published: a published Stale (no data yet) row's note reads the state the page already read (238-02, FACT-05)", () => {
+  const PUBLIC_RUNNING =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
+  const PUBLIC_FINISHED_NOT_BUILT =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.";
+  const pubRow = (id: string, extra: Record<string, unknown> = {}) => ({
+    ...noDataRow(id),
+    status: "published",
+    ...extra,
+  });
+
+  it("jobs failed: the lead and the row's action sentence, from exactly one jobs read for the row", async () => {
+    asRole("manager");
+    state.strategies = [pubRow("s-pub")];
+    state.jobs["s-pub"] = [FAILED_JOB];
+    await renderPage();
+    const note = shareNoteOf("Strategy s-pub") as HTMLElement;
+    expect(note.textContent).toBe(
+      "Right now, this strategy's factsheet link shows that the factsheet is not available. Use the contact form to have it resolved.",
+    );
+    expect(note.querySelectorAll("a")).toHaveLength(1);
+    // No second read: IN-04 stands, the Health detail's read is the only one.
+    expect(state.rpcCalls.filter((id) => id === "s-pub")).toEqual(["s-pub"]);
+  });
+
+  it("jobs running: the unchanged public sentence", async () => {
+    state.strategies = [pubRow("s-pub")];
+    state.jobs["s-pub"] = [{ kind: "compute_analytics_from_csv", status: "running", created_at: new Date(Date.now() - 600_000).toISOString() }];
+    await renderPage();
+    expect(shareNoteOf("Strategy s-pub")!.textContent).toBe(PUBLIC_RUNNING);
+  });
+
+  it("jobs finished: the existing public finished-not-built line", async () => {
+    state.strategies = [pubRow("s-pub")];
+    state.jobs["s-pub"] = [{ kind: "compute_analytics_from_csv", status: "done", created_at: "2026-02-01T00:00:00.000Z" }];
+    await renderPage();
+    expect(shareNoteOf("Strategy s-pub")!.textContent).toBe(PUBLIC_FINISHED_NOT_BUILT);
+  });
+});

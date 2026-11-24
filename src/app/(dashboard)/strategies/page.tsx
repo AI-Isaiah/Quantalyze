@@ -48,6 +48,8 @@ import { extractAnalytics, formatDay } from "@/lib/utils";
 import type { Strategy } from "@/lib/types";
 import {
   KCS12_MINT_B_LEAD,
+  KCS12_PUBLIC_LEAD,
+  KCS12_PUBLIC_UNKNOWN,
   ownerRemedy,
   probeUnreadableShareNote,
   recipientShareNoteFor,
@@ -219,11 +221,16 @@ function jobDayOf(job: ComputeJobRow | null | undefined): string | null {
  * private-link lead plus the action the row's remedy names; it is resolved in
  * `noteFor`, where the row's shape and the viewer's role are known, so the action
  * always passes through `viewerRemedyAction` and never sends an allocator-only
- * viewer to a manager-guarded page (199 CD-11). Plan 238-02 adds a published variant.
+ * viewer to a manager-guarded page (199 CD-11). A `public-uncomputed` note is a
+ * published row's public-link note: its state is not read where the note is made
+ * (167.2-REVIEW IN-04), so `noteFor` takes it from `failedFacts` (the one read the
+ * page already makes for a Stale (no data yet) row) or, without one, says the
+ * state-free `KCS12_PUBLIC_UNKNOWN`.
  */
 type ShareNoteDescriptor =
   | { kind: "text"; text: string }
-  | { kind: "remedy"; state: ComputeState; compositeHistory: CompositeHistory };
+  | { kind: "remedy"; state: ComputeState; compositeHistory: CompositeHistory }
+  | { kind: "public-uncomputed" };
 
 const textNote = (text: string): ShareNoteDescriptor => ({ kind: "text", text });
 
@@ -770,15 +777,16 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
     s: NonNullable<typeof strategies>[number],
     mode: ReturnType<typeof shareAffordanceMode>,
   ): Promise<ArmFacts> => {
-    // 167.2-REVIEW IN-04: a published row's note is the public line whatever
-    // the arm (`recipientShareNote` / `recipientShareNoteFor` ignore it for
-    // "public-url"), so its jobs are not read: that was one RPC per row whose
-    // answer, and whose failure log, described a value nobody reads. The arm
-    // passed for it is the one that claims least; it is never rendered.
-    // 170.1 D-08: its `state` is null for the same reason, so a published row
-    // can never take the finished-not-built kind.
-    // Phase 199 plan 16: a published row that is Analytics failed reads its jobs
-    // for its detail's day, outside this function (`failedFactsOf`, below).
+    // 167.2-REVIEW IN-04: a published row's jobs are not read here. That was one
+    // RPC per row whose answer, and whose failure log, described a value nobody
+    // read. The arm passed for it is the one that claims least; it is never
+    // rendered, and its `state` is null, so this function never gives a published
+    // row the finished-not-built kind.
+    // Phase 238 FACT-05: a published row's note may now name a state, but not from
+    // here. `noteFor` takes it from `failedFacts`, which holds an entry only for a
+    // row whose Health is Analytics failed or Stale (no data yet) and which makes
+    // its own jobs read (`failedFactsOf`, below). A published row without an entry
+    // says the state-free `KCS12_PUBLIC_UNKNOWN`. No read is added.
     if (mode === "public-url") {
       return Promise.resolve({
         arm: "not_available",
@@ -807,8 +815,9 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   // Phase 238 FACT-05: an unpublished row whose arm is `not_available` with no
   // kind (state failed, stalled or never_started: nothing is running) never tells
   // the owner to wait. It returns a `remedy` descriptor, which `noteFor` renders as
-  // KCS12-MINT-B-LEAD plus the action the row's remedy names. Every other row, and
-  // every published row, keeps its string note.
+  // KCS12-MINT-B-LEAD plus the action the row's remedy names. A published row with
+  // no kind returns `public-uncomputed`, resolved in `noteFor` from `failedFacts`.
+  // Every other row keeps its string note.
   const uncomputedNote = async (
     s: NonNullable<typeof strategies>[number],
     mode: ReturnType<typeof shareAffordanceMode>,
@@ -822,6 +831,7 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
     if (mode === "mint-token" && arm === "not_available" && kind === null && state !== null) {
       return { kind: "remedy", state, compositeHistory };
     }
+    if (mode === "public-url" && kind === null) return { kind: "public-uncomputed" };
     return { kind: "text", text: recipientShareNoteFor(mode, arm, kind) };
   };
 
@@ -1303,6 +1313,47 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
           />
         </>
       );
+    } else if (shareNote?.kind === "public-uncomputed") {
+      // A published row's state comes only from the read the page already made for
+      // its Health detail (`failedFacts`); `armOf` returns `state: null` for it.
+      const facts = failedFacts.get(s.id);
+      const state = facts?.state ?? null;
+      // The three text notes keep the contact-form link every text note carries (AD-05).
+      let publicText: string | null = null;
+      if (!facts || state === null || state.state === "unreadable") {
+        publicText = KCS12_PUBLIC_UNKNOWN;
+      } else {
+        const arm = recipientArm(state);
+        if (arm === "in_progress") {
+          publicText = recipientShareNoteFor("public-url", arm, null);
+        } else if (state.state === "finished") {
+          publicText = recipientShareNoteFor(
+            "public-url",
+            arm,
+            unbuildableNoteKindOf("not_computed", { jobsFinished: true }),
+          );
+        } else {
+          const shape = shapeOf(s, facts.compositeHistory);
+          const remedy = ownerRemedy(state, shape, s.id);
+          shareNoteBody = (
+            <>
+              {KCS12_PUBLIC_LEAD}{" "}
+              <DegradeAction
+                id={viewerRemedyAction({ remedy, managerSurface: isManager, shape })}
+                strategyId={s.id}
+              />
+            </>
+          );
+        }
+      }
+      if (publicText !== null) {
+        shareNoteBody = (
+          <ContactPointerText
+            text={publicText}
+            href={contactHref({ topic: "support", strategy: s.id })}
+          />
+        );
+      }
     }
     const healthDetail = healthDetailFor(s);
     const showFeedback = Boolean(s.review_note) && s.status === "draft";

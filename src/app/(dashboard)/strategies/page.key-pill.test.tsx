@@ -795,6 +795,10 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
   const PUBLIC =
     "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
+  // Phase 238 FACT-05: a published row whose compute state was not read (Health
+  // Updating, so `failedFacts` holds no entry). Typed out, never imported.
+  const PUBLIC_UNKNOWN =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. If no computation is running, use the contact form to have it checked.";
   // Phase 167.2.1 (D-02) — typed out from 167.2.1-CONTEXT.md, never imported.
   // Reworded by 167.2.1-REVIEW CR-01 and IN-02 (2026-09-26): the reason is
   // stated from the stored results, in the active voice.
@@ -1348,6 +1352,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       expect(noteOf(container, "Strategy s-held")).toBeNull();
       expect(noteOf(container, "Strategy s-held-p")).toBeNull();
       expect(container.textContent).not.toContain(PUBLIC);
+      expect(container.textContent).not.toContain(PUBLIC_UNKNOWN);
     } finally {
       consoleWarn.mockRestore();
     }
@@ -1372,7 +1377,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       const container = await renderPage();
 
       expect(state.adminStrategyReads).toEqual(["s-first"]);
-      expect(noteOf(container, "Strategy s-first")).toBe(PUBLIC);
+      expect(noteOf(container, "Strategy s-first")).toBe(PUBLIC_UNKNOWN);
       // The embed said computing, so `not_computed` is the expected answer,
       // not a disagreement between two reads.
       expect(consoleWarn).not.toHaveBeenCalledWith(
@@ -1573,7 +1578,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_UNKNOWN);
   });
 
   it("IN03-CONVERTED (167.2-REVIEW IN-03): a row with no members is judged by its newer chain job, not an old stitch", async () => {
@@ -1614,7 +1619,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_UNKNOWN);
     // The read's answer was discarded, so a failure in it logged an error
     // about a value nobody reads.
     expect(state.rpcCalls).toEqual([]);
@@ -1789,7 +1794,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_UNKNOWN);
     expect(state.rpcCalls).toEqual([]);
   });
 
