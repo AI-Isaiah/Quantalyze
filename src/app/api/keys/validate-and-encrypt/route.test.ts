@@ -3343,6 +3343,27 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
       "holder-swap",
       "holder-swap-rollback-noop",
     ]);
+    // 225 N3-1: the swap that landed and lost its answer never ran
+    // swapAccountSlot's follow-up, so the route runs it: the demotion is audited
+    // and the allocator's equity is recomposed.
+    expect(auditSpy).toHaveBeenCalledTimes(1);
+    expect(auditSpy.mock.calls[0][2]).toMatchObject({
+      action: "api_key.account_duplicate_detected",
+      entity_id: HOLDER_ID,
+      metadata: { holder_api_key_id: "persisted-key-id" },
+    });
+    expect(
+      PERSIST_STATE.rpcCalls.filter((c) => c.name === "enqueue_compute_job"),
+    ).toEqual([
+      {
+        name: "enqueue_compute_job",
+        args: {
+          p_strategy_id: null,
+          p_allocator_id: TEST_USER.id,
+          p_kind: "derive_allocator_equity",
+        },
+      },
+    ]);
     consoleWarn.mockRestore();
   });
 
