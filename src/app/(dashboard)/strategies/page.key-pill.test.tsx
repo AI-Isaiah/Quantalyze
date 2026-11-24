@@ -792,7 +792,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   const MINT_B_RELOAD =
     "Right now, a private link to this strategy shows that its factsheet is not available. Reload this page to try again.";
   const UNREADABLE =
-    "Right now, a private link to this strategy shows that its factsheet is not available. If no computation is running, use the contact form to have it checked.";
+    "Right now, a private link to this strategy opens a page without its factsheet. If no computation is running, use the contact form to have it checked.";
   const PUBLIC =
     "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
   // Phase 238 FACT-05: a published row whose compute state was not read (Health

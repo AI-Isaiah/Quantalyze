@@ -932,7 +932,7 @@ const RETIRED_MINT_B =
 const MINT_B_LEAD =
   "Right now, a private link to this strategy shows that its factsheet is not available.";
 const MINT_UNREADABLE =
-  "Right now, a private link to this strategy shows that its factsheet is not available. If no computation is running, use the contact form to have it checked.";
+  "Right now, a private link to this strategy opens a page without its factsheet. If no computation is running, use the contact form to have it checked.";
 // 199-18 (UI-SPEC "Factsheet" row 3): the shipped KCS10 sentence, unchanged, then the one action a
 // visitor has (registered as factsheet.public-pending).
 const PUBLIC_SENTENCE =

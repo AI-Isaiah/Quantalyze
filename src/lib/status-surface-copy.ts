@@ -485,10 +485,13 @@ export const KCS12_PUBLIC_UNKNOWN =
  * 'unknown' note"): the private-link note for a row whose compute state was not
  * read (the jobs read failed). It replaces KCS12-UNREADABLE, whose "They appear
  * there once a computation succeeds" promised numbers about a state nobody
- * read. Same wording as KCS12-PUBLIC-UNKNOWN on the private-link lead.
+ * read. Its tail is KCS12-PUBLIC-UNKNOWN's. Its lead is not KCS12-MINT-B-LEAD,
+ * because the private link has two cards ("being prepared" while a computation
+ * runs, "not available" otherwise) and an unread state cannot tell which one
+ * the recipient sees; "opens a page without its factsheet" is true for both.
  */
 export const KCS12_MINT_B_UNKNOWN =
-  `${KCS12_MINT_B_LEAD} If no computation is running, use the contact form to have it checked.`;
+  "Right now, a private link to this strategy opens a page without its factsheet. If no computation is running, use the contact form to have it checked.";
 
 // Phase 238 (FACT-05): KCS12-MINT-B ("... not available yet. The numbers appear
 // there once a computation succeeds.") is RETIRED. `not_available` is reached

@@ -309,7 +309,7 @@ describe("S5 / S7 — KCS-12 share notes", () => {
 
   it("KCS12-MINT-B-UNKNOWN: private link, state unreadable (founder ruling 2026-11-24, replaces KCS12-UNREADABLE)", () => {
     expect(recipientShareNote("mint-token", "unreadable")).toBe(
-      "Right now, a private link to this strategy shows that its factsheet is not available. If no computation is running, use the contact form to have it checked.",
+      "Right now, a private link to this strategy opens a page without its factsheet. If no computation is running, use the contact form to have it checked.",
     );
   });
 
