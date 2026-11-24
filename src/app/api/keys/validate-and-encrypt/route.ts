@@ -960,6 +960,9 @@ async function legacyValidateAndEncryptHandler(args: {
         venueServer,
       });
       if (!swap.ok) {
+        // Set only by the zero-row arm below when the re-read finds the key
+        // stamped: the swap landed, so the request continues to its success.
+        let swapLanded = false;
         const swapSecrets = [api_key, api_secret, passphrase, venueAccountId, venueServer];
         console.error(
           "[keys/validate-and-encrypt] holder swap failed; rolling back this request's key:",
@@ -998,17 +1001,47 @@ async function legacyValidateAndEncryptHandler(args: {
             secrets: swapSecrets,
           });
         } else if ((removedKeys ?? []).length === 0) {
+          // 225 PR-2 round-3 decision 1 (SF2-N1 / IN-12) — ZERO ROWS DELETED
+          // MEANS THE KEY IS ALREADY STAMPED OR GONE. Re-read its
+          // `venue_account_id` before answering: stamped means a swap landed on
+          // it (it committed and lost its answer), the key holds the slot, and
+          // "not saved" would be false. That answers this request's normal
+          // success below. Anything else keeps the 409. Paged with its own step
+          // either way.
           console.warn(
             "[keys/validate-and-encrypt] compensating delete removed no key (already stamped or gone); nothing of this request's was undone",
             { correlationId },
           );
+          captureToSentry(swap.error, {
+            tags: {
+              route: "api/keys/validate-and-encrypt",
+              arm: "persist",
+              step: "holder-swap-rollback-noop",
+              correlation_id: correlationId,
+            },
+            secrets: swapSecrets,
+          });
+          const { data: stampedKey, error: stampReadErr } = await admin
+            .from("api_keys")
+            .select("venue_account_id")
+            .eq("id", inserted.id)
+            .eq("user_id", userId)
+            .maybeSingle();
+          if (stampReadErr) {
+            console.error(
+              `[keys/validate-and-encrypt] re-read of the admitted key after a no-op rollback failed: code=${stampReadErr.code}`,
+              { correlationId },
+            );
+          } else if (stampedKey?.venue_account_id != null) {
+            swapLanded = true;
+          }
         } else {
           console.warn(
             "[keys/validate-and-encrypt] holder swap refused; this request's key was rolled back",
             { correlationId },
           );
         }
-        return keyVenueAlreadyConnectedResponse();
+        if (!swapLanded) return keyVenueAlreadyConnectedResponse();
       }
     }
 

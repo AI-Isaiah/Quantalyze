@@ -2176,6 +2176,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         venueServer,
       });
       if (!swap.ok) {
+        // Set only by the zero-row arm below when the re-read finds the key
+        // stamped: the swap landed, so the request continues to its success.
+        let swapLanded = false;
         const swapSecrets = [
           api_key,
           apiSecretNormalized,
@@ -2211,9 +2214,33 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             secrets: swapSecrets,
           });
         } else if ((removedKeys ?? []).length === 0) {
+          // 225 PR-2 round-3 decision 1 (SF2-N1 / IN-12) — ZERO ROWS DELETED
+          // MEANS THE KEY IS ALREADY STAMPED OR GONE. Re-read its
+          // `venue_account_id` before answering: stamped means a swap landed on
+          // it (a same-session replay that raced, or a swap that committed and
+          // lost its answer), the key holds the slot, and "not saved" would be
+          // false. That answers this request's normal success below. Anything
+          // else keeps the 409. Paged with its own step either way.
           console.warn(
             "[strategies/create-with-key] compensating delete removed no key (already stamped or gone); nothing of this request's was undone",
           );
+          captureToSentry(swap.error, {
+            tags: { surface: "strategies-create-with-key", step: "holder-swap-rollback-noop" },
+            secrets: swapSecrets,
+          });
+          const { data: stampedKey, error: stampReadErr } = await rpcAdmin
+            .from("api_keys")
+            .select("venue_account_id")
+            .eq("id", row.api_key_id)
+            .eq("user_id", user.id)
+            .maybeSingle();
+          if (stampReadErr) {
+            console.error(
+              `[strategies/create-with-key] re-read of the admitted key after a no-op rollback failed: code=${stampReadErr.code}`,
+            );
+          } else if (stampedKey?.venue_account_id != null) {
+            swapLanded = true;
+          }
         } else {
           // @audit-skip: compensating rollback of the draft THIS request created
           // (source wizard, status draft, not yet user-visible).
@@ -2238,7 +2265,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             );
           }
         }
-        return keyVenueAlreadyConnectedResponse();
+        if (!swapLanded) return keyVenueAlreadyConnectedResponse();
       }
     }
 

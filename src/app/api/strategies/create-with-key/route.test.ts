@@ -266,6 +266,20 @@ const keyMembershipLookupMock = vi.fn(
 );
 
 /**
+ * 225 PR-2 round 3 (SF2-N1 / IN-12) — the rollback's re-read of the admitted key's
+ * `venue_account_id` after a compensating delete removed no row. Routed in
+ * `makeSelectBuilder` on the admin client's `select("venue_account_id")`. It
+ * DEFAULTS TO "not stamped", so every pre-existing rollback case keeps its 409;
+ * a test seeds a stamped value to model a swap that landed and lost its answer.
+ */
+const stampedKeyReadMock = vi.fn(
+  async (): Promise<{
+    data: { venue_account_id: string | null } | null;
+    error: { code?: string; message?: string } | null;
+  }> => ({ data: { venue_account_id: null }, error: null }),
+);
+
+/**
  * 164.2-04 / criterion 5 — the reuse arm's POST-23505 read of the draft it
  * actually collided with.
  *
@@ -490,6 +504,7 @@ const reuseKeyUserScopedLookupMock = vi.fn(
 function makeSelectBuilder(
   table: string,
   client: "admin" | "user-scoped" = "user-scoped",
+  columns?: string,
 ) {
   const filters: CapturedFilters = {};
   capturedSelects.push({ table, client, filters });
@@ -533,6 +548,11 @@ function makeSelectBuilder(
         // the filter AND on the client is what keeps the two ownership layers
         // separately observable; collapsing them would make the layer-2
         // assertions answer layer 1's question.
+        // 225 PR-2 round 3 — the rollback's stamp re-read selects ONLY
+        // `venue_account_id`, which no other read of this route does.
+        if (client === "admin" && columns === "venue_account_id") {
+          return stampedKeyReadMock();
+        }
         if ("id" in filters) {
           return client === "admin"
             ? reuseKeyAdminLookupMock(filters)
@@ -631,7 +651,7 @@ vi.mock("@/lib/supabase/admin", () => ({
     return {
       rpc: (...args: unknown[]) => adminRpc(...args),
       from: (table: string) => ({
-        select: () => makeSelectBuilder(table, "admin"),
+        select: (cols?: string) => makeSelectBuilder(table, "admin", cols),
         update: () => {
           recordWrite("admin", table, "update");
           return { eq: () => ({ eq: async () => ({ error: null }) }) };
@@ -1736,6 +1756,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     venueStrategyLookupMock.mockReset();
     venueOwnerLookupMock.mockReset();
     keyMembershipLookupMock.mockReset();
+    stampedKeyReadMock.mockReset();
+    stampedKeyReadMock.mockResolvedValue({ data: { venue_account_id: null }, error: null });
     assetClassUpdateMock.mockClear();
 
     // No draft for THIS session — the token-less re-entry the fence must catch.
@@ -3567,7 +3589,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
         ]);
       });
 
-      it("a key delete that removes no row (already stamped: the RPC replayed an earlier request's pair, or a swap landed) leaves the DRAFT in place and still answers 409", async () => {
+      it("a key delete that removes no row and whose re-read finds the key NOT stamped (gone, or the RPC replayed an earlier request's pair) leaves the DRAFT in place, answers 409 and pages holder-swap-rollback-noop", async () => {
         refusedSwap();
         deleteAnswers.api_keys = { data: [], error: null };
         const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -3577,11 +3599,76 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
         const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
         expect(res.status).toBe(409);
+        expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
         // Deleting the draft here would destroy a pair this request did not mint.
         expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys"]);
         expect(JSON.stringify(consoleWarn.mock.calls)).toContain("removed no key");
-        await vi.waitFor(() => expect(sentryState.captured.length).toBeGreaterThan(0));
-        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual(["holder-swap"]);
+        // The re-read asked about THIS request's key, for this owner.
+        expect(stampedKeyReadMock).toHaveBeenCalledTimes(1);
+        const stampRead = capturedSelects.find(
+          (c) => c.client === "admin" && c.table === "api_keys" && c.filters.id === API_KEY_ID,
+        );
+        expect(stampRead?.filters).toMatchObject({ id: API_KEY_ID, user_id: MOCK_USER.id });
+        await vi.waitFor(() => expect(sentryState.captured).toHaveLength(2));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual([
+          "holder-swap",
+          "holder-swap-rollback-noop",
+        ]);
+      });
+
+      // 225 PR-2 round-3 decision 1 (SF2-N1 / IN-12): zero rows deleted with the key
+      // STAMPED means a swap landed on it (a same-session replay that raced, or a
+      // swap that committed and lost its answer). The key is live and holds the
+      // slot, so "not saved" would be false: answer the normal success body.
+      it("a key delete that removes no row and whose re-read finds the key STAMPED answers this request's normal success, deletes nothing more and pages holder-swap-rollback-noop", async () => {
+        refusedSwap();
+        deleteAnswers.api_keys = { data: [], error: null };
+        stampedKeyReadMock.mockResolvedValue({
+          data: { venue_account_id: MT5_LOGIN },
+          error: null,
+        });
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe(
+          JSON.stringify({ ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }),
+        );
+        // Nothing more is deleted: not the draft, not the stamped key.
+        expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys"]);
+        await vi.waitFor(() => expect(sentryState.captured).toHaveLength(2));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual([
+          "holder-swap",
+          "holder-swap-rollback-noop",
+        ]);
+      });
+
+      it("a re-read that itself FAILS keeps the 409 (we cannot tell that the swap landed) and still pages holder-swap-rollback-noop", async () => {
+        refusedSwap();
+        deleteAnswers.api_keys = { data: [], error: null };
+        stampedKeyReadMock.mockResolvedValue({
+          data: null,
+          error: { code: "XX002", message: `could not read login ${MT5_LOGIN}` },
+        });
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        const logged = JSON.stringify(consoleErr.mock.calls);
+        expect(logged).toContain("code=XX002");
+        expect(logged).not.toContain(MT5_LOGIN);
+        await vi.waitFor(() => expect(sentryState.captured).toHaveLength(2));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual([
+          "holder-swap",
+          "holder-swap-rollback-noop",
+        ]);
       });
     });
   });

@@ -102,6 +102,14 @@ const {
     deletes: [] as { table: string; filters: Record<string, unknown> }[],
     /** The `{ data, error }` a delete resolves to (null = one row removed). */
     deleteResult: null as { data: unknown; error: unknown } | null,
+    /**
+     * 225 PR-2 round 3 (SF2-N1 / IN-12) — the rollback's re-read of the admitted
+     * key's `venue_account_id` (`select("venue_account_id")....maybeSingle()`).
+     * null = not stamped.
+     */
+    stampResult: null as { data: unknown; error: unknown } | null,
+    /** The filters of every such re-read. */
+    stampReads: [] as Record<string, unknown>[],
   },
 }));
 
@@ -151,6 +159,10 @@ vi.mock("@/lib/supabase/admin", () => ({
               return builder;
             },
             order: (_col: string) => builder,
+            maybeSingle: async () => {
+              PERSIST_STATE.stampReads.push({ __table: table, __cols: _cols, ...filters });
+              return PERSIST_STATE.stampResult ?? { data: { venue_account_id: null }, error: null };
+            },
             then: (
               resolve: (v: unknown) => unknown,
               reject: (e: unknown) => unknown,
@@ -2991,6 +3003,8 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     PERSIST_STATE.rpcResult = null;
     PERSIST_STATE.deletes.length = 0;
     PERSIST_STATE.deleteResult = null;
+    PERSIST_STATE.stampResult = null;
+    PERSIST_STATE.stampReads.length = 0;
     process.env.MT5_ENABLED = "true";
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
@@ -3267,7 +3281,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     consoleErr.mockRestore();
   });
 
-  it("a compensating delete that removes no row (the key was already stamped by a swap that landed) deletes nothing more and still answers 409", async () => {
+  it("a compensating delete that removes no row and whose re-read finds the key NOT stamped still answers 409 and pages holder-swap-rollback-noop", async () => {
     refusedSwap();
     PERSIST_STATE.deleteResult = { data: [], error: null };
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -3276,10 +3290,64 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const res = await POST(mt5Add());
 
     expect(res.status).toBe(409);
+    expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
     expect(PERSIST_STATE.deletes).toHaveLength(1);
     expect(JSON.stringify(consoleWarn.mock.calls)).toContain("removed no key");
-    // Not a rollback failure: nothing was paged beyond the swap itself.
-    expect(captureSpy).toHaveBeenCalledTimes(1);
+    // The re-read asked about THIS request's key, for this owner.
+    expect(PERSIST_STATE.stampReads).toEqual([
+      { __table: "api_keys", __cols: "venue_account_id", id: "persisted-key-id", user_id: TEST_USER.id },
+    ]);
+    expect(captureSpy.mock.calls.map((c) => c[1].tags.step)).toEqual([
+      "holder-swap",
+      "holder-swap-rollback-noop",
+    ]);
     consoleWarn.mockRestore();
+  });
+
+  // 225 PR-2 round-3 decision 1 (SF2-N1 / IN-12): zero rows deleted with the key
+  // STAMPED means a swap landed on it and lost its answer. The key is live and
+  // holds the slot, so "not saved" would be false: answer the normal success.
+  it("a compensating delete that removes no row and whose re-read finds the key STAMPED answers the normal success body and pages holder-swap-rollback-noop", async () => {
+    refusedSwap();
+    PERSIST_STATE.deleteResult = { data: [], error: null };
+    PERSIST_STATE.stampResult = { data: { venue_account_id: LOGIN }, error: null };
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(
+      JSON.stringify({ api_key_id: "persisted-key-id", valid: true, read_only: true }),
+    );
+    expect(PERSIST_STATE.deletes).toHaveLength(1);
+    expect(captureSpy.mock.calls.map((c) => c[1].tags.step)).toEqual([
+      "holder-swap",
+      "holder-swap-rollback-noop",
+    ]);
+    consoleWarn.mockRestore();
+  });
+
+  it("a re-read that itself FAILS keeps the 409 and still pages holder-swap-rollback-noop", async () => {
+    refusedSwap();
+    PERSIST_STATE.deleteResult = { data: [], error: null };
+    PERSIST_STATE.stampResult = {
+      data: null,
+      error: { message: `could not read login ${LOGIN}`, code: "XX002" },
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+    const logged = JSON.stringify(consoleErr.mock.calls);
+    expect(logged).toContain("code=XX002");
+    expect(logged).not.toContain(LOGIN);
+    expect(captureSpy.mock.calls.map((c) => c[1].tags.step)).toEqual([
+      "holder-swap",
+      "holder-swap-rollback-noop",
+    ]);
   });
 });
