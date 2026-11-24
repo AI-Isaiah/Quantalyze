@@ -80,6 +80,21 @@ const {
     insertResult: null as { data: unknown; error: unknown } | null,
     /** When set, `createAdminClient()` THROWS this — the missing-service-key arm. */
     adminFactoryError: null as Error | null,
+    /**
+     * Phase 225 plan 08 — the same-login read (`readLiveSameLoginKeys`). Rows
+     * are returned filtered by the `user_id` / `exchange` / `venue_account_id`
+     * filters the route sends; a route that DROPS the `user_id` filter gets
+     * every owner's rows back, which is how the cross-owner tests can fail.
+     */
+    sameLoginRows: [] as Record<string, unknown>[],
+    /** When set, the same-login read resolves with this error. */
+    sameLoginError: null as unknown,
+    /** The filters of every same-login read the route issued. */
+    sameLoginReads: [] as Record<string, unknown>[],
+    /** Every `admin.rpc(name, args)` the route issued, in order. */
+    rpcCalls: [] as { name: string; args: Record<string, unknown> }[],
+    /** The `{ data, error }` every rpc resolves to (null = success). */
+    rpcResult: null as { data: unknown; error: unknown } | null,
   },
 }));
 
@@ -110,7 +125,45 @@ vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => {
     if (PERSIST_STATE.adminFactoryError) throw PERSIST_STATE.adminFactoryError;
     return {
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        PERSIST_STATE.rpcCalls.push({ name, args });
+        return PERSIST_STATE.rpcResult ?? { data: null, error: null };
+      },
       from: (table: string) => ({
+        // Phase 225 plan 08 — `readLiveSameLoginKeys`'s chain:
+        // select().eq().eq().eq().is().order(), awaited as a thenable.
+        select: (_cols?: string) => {
+          const filters: Record<string, unknown> = {};
+          const builder = {
+            eq: (col: string, val: unknown) => {
+              filters[col] = val;
+              return builder;
+            },
+            is: (col: string, val: unknown) => {
+              filters[`${col}:is`] = val;
+              return builder;
+            },
+            order: (_col: string) => builder,
+            then: (
+              resolve: (v: unknown) => unknown,
+              reject: (e: unknown) => unknown,
+            ) => {
+              PERSIST_STATE.sameLoginReads.push({ __table: table, ...filters });
+              const result = PERSIST_STATE.sameLoginError
+                ? { data: null, error: PERSIST_STATE.sameLoginError }
+                : {
+                    data: PERSIST_STATE.sameLoginRows.filter((row) =>
+                      (["user_id", "exchange", "venue_account_id"] as const).every(
+                        (col) => !(col in filters) || row[col] === filters[col],
+                      ),
+                    ),
+                    error: null,
+                  };
+              return Promise.resolve(result).then(resolve, reject);
+            },
+          };
+          return builder;
+        },
         insert: (payload: Record<string, unknown>) => {
           PERSIST_STATE.inserts.push({ ...payload, __table: table });
           return {
@@ -196,6 +249,12 @@ vi.mock("@/lib/analytics-client", () => {
 // internal detail still reaches Sentry now that err.message is no longer echoed.
 const captureSpy = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureSpy }));
+
+// Phase 225 plan 08 — `swapAccountSlot` audits the demotion through this; the
+// audit's own rpc is not what these tests measure, and a real emit would put an
+// extra rpc beside the swap in `PERSIST_STATE.rpcCalls`.
+const { auditSpy } = vi.hoisted(() => ({ auditSpy: vi.fn() }));
+vi.mock("@/lib/audit", () => ({ logAuditEventAsUser: auditSpy }));
 
 vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => null,
@@ -1389,6 +1448,11 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     PERSIST_STATE.inserts.length = 0;
     PERSIST_STATE.insertResult = null;
     PERSIST_STATE.adminFactoryError = null;
+    PERSIST_STATE.sameLoginRows = [];
+    PERSIST_STATE.sameLoginError = null;
+    PERSIST_STATE.sameLoginReads.length = 0;
+    PERSIST_STATE.rpcCalls.length = 0;
+    PERSIST_STATE.rpcResult = null;
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
       api_key_encrypted: "ct-blob",
@@ -2824,5 +2888,261 @@ describe("[209 SC4] a malformed, null or non-object JSON body answers the coded 
         expect(args.map((a) => String(a)).join(" ")).not.toContain("SECRET-SEN");
       }
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 225 ONEACCOUNTONCE plan 08 (ONCE-01, MT5D-08, CONN-03, ONCE-02): the
+// allocator Exchanges page's add seam enforces the same per-owner, server-aware
+// rule the wizard does. Synthetic ids only.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 225 plan 08)", () => {
+  const LOGIN = "5001234";
+  const SERVER_RAW = "MetaQuotes-Demo";
+  const SERVER_NORMALISED = "metaquotes-demo";
+  const OKX_UID = "100000001";
+  const OTHER_OWNER = "00000000-0000-0000-0000-bbbbbbbbbbbb";
+  const HOLDER_ID = "00000000-0000-0000-0000-00000000a001";
+
+  function holderRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: HOLDER_ID,
+      user_id: TEST_USER.id,
+      exchange: "mt5",
+      venue_account_id: LOGIN,
+      venue_server: SERVER_NORMALISED,
+      is_active: true,
+      sync_status: null,
+      disconnected_at: null,
+      account_shared_with_api_key_id: null,
+      account_share_kind: null,
+      ...overrides,
+    };
+  }
+
+  function mt5Add(overrides: Record<string, unknown> = {}) {
+    return makeReq({ ...MT5_BODY, persist: true, label: "Broker", ...overrides });
+  }
+
+  function okxAdd(overrides: Record<string, unknown> = {}) {
+    return makeReq({ ...VALID_BODY, exchange: "okx", persist: true, label: "My OKX key", ...overrides });
+  }
+
+  const REFUSAL = {
+    code: "KEY_VENUE_ALREADY_CONNECTED",
+    error:
+      "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    PERSIST_STATE.inserts.length = 0;
+    PERSIST_STATE.insertResult = null;
+    PERSIST_STATE.adminFactoryError = null;
+    PERSIST_STATE.sameLoginRows = [];
+    PERSIST_STATE.sameLoginError = null;
+    PERSIST_STATE.sameLoginReads.length = 0;
+    PERSIST_STATE.rpcCalls.length = 0;
+    PERSIST_STATE.rpcResult = null;
+    process.env.MT5_ENABLED = "true";
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.MT5_ENABLED;
+    PERSIST_STATE.sameLoginRows = [];
+    PERSIST_STATE.sameLoginError = null;
+    PERSIST_STATE.rpcResult = null;
+  });
+
+  // ── TRACER (Q1, D-25, MT5D-08) ────────────────────────────────────────────
+  it("an MT5 add beside the owner's FAILING key on that login inserts without identity and takes the slot through swap_account_slot", async () => {
+    PERSIST_STATE.sameLoginRows = [holderRow({ sync_status: "error" })];
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ api_key_id: "persisted-key-id", valid: true, read_only: true });
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    // The new key carries NO identity at insert: the swap stamps it atomically,
+    // so the unique index never sees two holders (the failing one still has it).
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBeNull();
+    expect(PERSIST_STATE.inserts[0].venue_server).toBeNull();
+
+    const swaps = PERSIST_STATE.rpcCalls.filter((c) => c.name === "swap_account_slot");
+    expect(swaps).toEqual([
+      {
+        name: "swap_account_slot",
+        args: {
+          p_new_key: "persisted-key-id",
+          p_old_holder: HOLDER_ID,
+          p_venue_account_id: LOGIN,
+          p_venue_server: SERVER_NORMALISED,
+        },
+      },
+    ]);
+
+    // Neither the login nor the broker server reaches a body or a console line.
+    const everything = JSON.stringify([body, consoleErr.mock.calls]);
+    expect(everything).not.toContain(LOGIN);
+    expect(everything).not.toContain(SERVER_RAW);
+    expect(everything).not.toContain(SERVER_NORMALISED);
+    consoleErr.mockRestore();
+  });
+
+  // ── D-01 / ONCE-01: a WORKING same-owner holder is refused by name, pre-insert ──
+  it("an okx add whose account a WORKING key of the same owner holds is refused 409 KEY_VENUE_ALREADY_CONNECTED with zero inserts and zero rpc calls", async () => {
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true, venue_account_id: OKX_UID });
+    PERSIST_STATE.sameLoginRows = [
+      holderRow({ exchange: "okx", venue_account_id: OKX_UID, venue_server: null }),
+    ];
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("./route");
+    const res = await POST(okxAdd());
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toEqual(REFUSAL);
+    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    expect(JSON.stringify([body, consoleErr.mock.calls])).not.toContain(OKX_UID);
+    consoleErr.mockRestore();
+  });
+
+  it("an MT5 add whose login+server a WORKING key of the same owner holds is refused 409 with zero inserts and zero rpc calls", async () => {
+    PERSIST_STATE.sameLoginRows = [holderRow()];
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(REFUSAL);
+    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+  });
+
+  it("an MT5 add beside a same-login owner key with a NULL server is refused (null is the wildcard, Q2)", async () => {
+    PERSIST_STATE.sameLoginRows = [holderRow({ venue_server: null })];
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(409);
+    expect(PERSIST_STATE.inserts).toEqual([]);
+  });
+
+  it("an MT5 add beside a same-login owner key on a DIFFERENT server is inserted (the fence admits it)", async () => {
+    PERSIST_STATE.sameLoginRows = [holderRow({ venue_server: "another-broker-live" })];
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(LOGIN);
+    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+  });
+
+  // ── Q2 / CONN-03: the server on the insert ─────────────────────────────────
+  it("an MT5 add with no holder writes the trimmed login and the NORMALISED server", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add({ api_key: "  5001234  ", passphrase: "  MetaQuotes-Demo  " }));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(LOGIN);
+    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
+  });
+
+  it("an okx add carries venue_server null", async () => {
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true, venue_account_id: OKX_UID });
+    const { POST } = await import("./route");
+    const res = await POST(okxAdd());
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(OKX_UID);
+    expect(PERSIST_STATE.inserts[0].venue_server).toBeNull();
+  });
+
+  // ── Q3 / ONCE-02: never across owners ──────────────────────────────────────
+  it("the same okx account held only by ANOTHER owner's key is inserted with the identity stamped, and the read carried the caller's user_id", async () => {
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true, venue_account_id: OKX_UID });
+    PERSIST_STATE.sameLoginRows = [
+      holderRow({ user_id: OTHER_OWNER, exchange: "okx", venue_account_id: OKX_UID, venue_server: null }),
+    ];
+    const { POST } = await import("./route");
+    const res = await POST(okxAdd());
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.sameLoginReads).toHaveLength(1);
+    expect(PERSIST_STATE.sameLoginReads[0].user_id).toBe(TEST_USER.id);
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(OKX_UID);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+  });
+
+  it("the same MT5 login and server held only by ANOTHER owner's FAILING key is inserted with the identity stamped and no swap", async () => {
+    PERSIST_STATE.sameLoginRows = [holderRow({ user_id: OTHER_OWNER, sync_status: "error" })];
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(LOGIN);
+    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+  });
+
+  // ── the dark fence ─────────────────────────────────────────────────────────
+  it("a same-login read that errors still inserts, and the logged line contains neither the login nor the server", async () => {
+    PERSIST_STATE.sameLoginError = {
+      message: `permission denied reading login ${LOGIN} on ${SERVER_RAW}`,
+      code: "42501",
+    };
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(LOGIN);
+    expect(consoleErr).toHaveBeenCalled();
+    const logged = JSON.stringify(consoleErr.mock.calls);
+    expect(logged).not.toContain(LOGIN);
+    expect(logged).not.toContain(SERVER_RAW);
+    expect(logged).not.toContain(SERVER_NORMALISED);
+    consoleErr.mockRestore();
+  });
+
+  // ── D-25: a failed swap is loud and never a failed add ─────────────────────
+  it("a failed holder swap is logged at ERROR with a holder-swap Sentry step, and the key is still saved", async () => {
+    PERSIST_STATE.sameLoginRows = [holderRow({ sync_status: "sign_in_failed" })];
+    PERSIST_STATE.rpcResult = {
+      data: null,
+      error: { message: `ACCOUNT_SLOT_HOLDER_WORKING for ${LOGIN} on ${SERVER_RAW}`, code: "55000" },
+    };
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ api_key_id: "persisted-key-id", valid: true, read_only: true });
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    expect(captureSpy.mock.calls[0][1].tags.step).toBe("holder-swap");
+    const logged = JSON.stringify(consoleErr.mock.calls);
+    expect(logged).toContain("holder swap failed");
+    expect(logged).not.toContain(LOGIN);
+    expect(logged).not.toContain(SERVER_RAW);
+    consoleErr.mockRestore();
   });
 });
