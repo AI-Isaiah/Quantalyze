@@ -225,8 +225,9 @@ def daily_pnl_read_verdict(flags: Mapping[str, Any]) -> DailyPnlReadVerdict:
     ``daily_pnl_malformed_*`` (a row the walk dropped because it could not be read) is NOT a
     reason, by founder decision D-12 (2026-11-04): a malformed row is stamped as a data-quality
     flag and the key keeps publishing, because refusing would remove a key from the book every day
-    for as long as the row stays in the walk, and no one has counted the keys that carry one
-    (TODOS ``[186-REALIZED-MALFORMED-COUNT]``). All three readers therefore ignore the flag. The derive
+    for as long as the row stays in the walk. Counted read-only on 2026-11-24 (Phase 223, FLOWK-03):
+    0 flags on every measured key and strategy (two Bybit key rows computed before Phase 186 are not
+    measured), and the founder ruled "Keep flagging" the same day. All three readers therefore ignore the flag. The derive
     persists it from the buffer it drains: strategy mode on ``strategy_analytics.data_quality_flags``,
     key mode on the key's ``key_inputs`` record.
     """

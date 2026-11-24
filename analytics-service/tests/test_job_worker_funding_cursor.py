@@ -8,7 +8,7 @@ captured — the ***61a0 / Momentum Sphinx case) and (2) permanently skipped any
 bucket that settled between the trade tick and the funding cron.
 
 These tests pin both the pure cursor arithmetic AND the call-site wiring: the
-``since`` handed to ``fetch_funding_bybit`` must come from
+``since`` handed to ``fetch_funding_bybit`` for the FIRST window must come from
 ``max(funding_fees.timestamp) - overlap``, NOT from ``last_sync_at``. Neutering
 the cursor lookup (reverting to ``last_sync_at``) fails
 ``test_since_derived_from_funding_cursor_not_last_sync_at`` because the two
@@ -16,6 +16,7 @@ timestamps are set to deliberately different values.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -96,26 +97,42 @@ class TestRunSyncFundingJobCursorWiring:
             result = await run_sync_funding_job(job)
 
         assert result.outcome == DispatchOutcome.DONE
-        mock_fetch.assert_awaited_once()
-        # fetch_funding_bybit(exchange, strategy_id, since_ms)
-        assert mock_fetch.await_args.args[2] == expected_since
+        # Phase 223 C27: the Bybit arm walks 7-day windows, so the call-site
+        # assertion reads the FIRST window. Old: assert_awaited_once() and
+        # args[2] of the only call. New: args[2] of the first call.
+        assert mock_fetch.await_count >= 1
+        first_window_since = mock_fetch.await_args_list[0].args[2]
+        # fetch_funding_bybit(exchange, strategy_id, since_ms, until_ms=...)
+        assert first_window_since == expected_since
         # And that value is NOT what last_sync_at would have produced.
-        assert mock_fetch.await_args.args[2] != parse_since_ms(newer_last_sync)
+        assert first_window_since != parse_since_ms(newer_last_sync)
 
     @pytest.mark.asyncio
-    async def test_empty_funding_table_passes_none_for_backfill(self) -> None:
-        """No stored funding rows -> since_ms None -> fetch_funding_bybit gets
-        None (the 365-day backfill path), regardless of last_sync_at being set."""
+    async def test_empty_funding_table_walks_the_365_day_backfill(self) -> None:
+        """No stored funding rows -> the 365-day backfill walk (53 contiguous
+        7-day windows ending now), regardless of last_sync_at being set.
+
+        Phase 223 C27: renamed from test_empty_funding_table_passes_none_for_backfill.
+        Old: fetch_funding_bybit got since_ms None once. New: the handler
+        resolves the 365-day start itself and passes it window by window; the
+        intent (the backfill fires despite last_sync_at) is unchanged."""
         ctx = _ctx_with_funding_cursor(max_ts=None, last_sync_at="2026-07-01T00:00:00+00:00")
         mock_fetch = AsyncMock(return_value=[])
         job = {"id": "j2", "kind": "sync_funding", "strategy_id": "strat-1"}
 
+        before_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         with patch(
             "services.job_worker._exchange_preflight", new=AsyncMock(return_value=ctx)
         ), patch(
             "services.funding_fetch.fetch_funding_bybit", new=mock_fetch
         ):
             await run_sync_funding_job(job)
+        after_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-        mock_fetch.assert_awaited_once()
-        assert mock_fetch.await_args.args[2] is None
+        assert mock_fetch.await_count == 53
+        calls = mock_fetch.await_args_list
+        year_ms = 365 * 24 * 60 * 60 * 1000
+        assert abs(calls[0].args[2] - (before_ms - year_ms)) <= 5_000
+        for prev, nxt in zip(calls, calls[1:]):
+            assert nxt.args[2] == prev.kwargs["until_ms"] + 1
+        assert abs(calls[-1].kwargs["until_ms"] - after_ms) <= 5_000

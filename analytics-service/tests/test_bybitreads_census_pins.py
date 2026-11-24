@@ -10,6 +10,8 @@ the census routes to another owner rather than fixes here:
 * C19 is a coin-denominated inverse funding amount summed at face value. When a currency
   conversion lands, the owner flips ``test_census_c19_*`` deliberately; it is not a regression.
 * C27 is the first Bybit funding walk being longer than the ``sync_funding`` handler budget.
+  Phase 223 fixed it (the handler now stores each 7-day window before reading the next, so the
+  budget stops a walk without losing it); this pin still holds because the fetcher's default walk is unchanged.
 """
 from __future__ import annotations
 
@@ -138,7 +140,8 @@ async def test_census_c27_a_first_bybit_funding_walk_is_at_least_106_requests_un
     2 x 53 = 106 sequential requests before any page beyond the first, under the 180-second
     `sync_funding` handler budget. PROD shows 30 `failed_final` "Handler exceeded timeout" in 30
     days and the probe measured the first walk at 379 s over 1438 calls on the one live key. This
-    pins the two numbers whose product is the defect; the fix is owned outside this phase."""
+    pins the two numbers whose product is the defect. Phase 223 fixed C27 in the handler;
+    the fetcher's default walk this pin measures is unchanged."""
     from services.funding_fetch import fetch_funding_bybit
     from services.job_worker import TIMEOUT_PER_KIND
 

@@ -50,6 +50,7 @@ from services.exchange_pagination import (
     PageResult,
     PaginationCeilingExceeded,
     ProviderPaginationContract,
+    _windows,
     walk_paginated,
 )
 from services.redact import scrub_freeform_string
@@ -655,6 +656,7 @@ async def fetch_funding_bybit(
     since_ms: int | None,
     *,
     on_malformed: Literal["drop", "raise"] = "drop",
+    until_ms: int | None = None,
 ) -> list[FundingFeeRow]:
     """Fetch signed funding fees from Bybit v5/account/transaction-log.
 
@@ -680,10 +682,19 @@ async def fetch_funding_bybit(
     stuck-cursor guard (``stuck_cursor_is_stop=False`` -> a stuck cursor
     exhausts to the ceiling rather than stopping), preserving the exact
     pre-B18 behaviour.
+
+    Phase 223 C27: ``until_ms`` is the inclusive end of the walk (default: the
+    fetch-time clock). With ``since_ms=None`` the 365-day lookback is measured
+    back from ``until_ms``. An empty or inverted range (``until_ms`` at or
+    before the start) sends no request and returns [].
     """
     dropped = [0]  # boxed for the closure
 
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = (
+        until_ms
+        if until_ms is not None
+        else int(datetime.now(timezone.utc).timestamp() * 1000)
+    )
 
     async def _fetch_page(req: PageRequest) -> PageResult[FundingFeeRow]:
         params: dict[str, str] = {
@@ -861,6 +872,29 @@ async def fetch_funding_bybit(
         "bybit funding_fetch: %d rows for strategy %s", len(rows), strategy_id
     )
     return rows
+
+
+def bybit_funding_windows(
+    since_ms: int | None, now_ms: int
+) -> list[tuple[int, int]]:
+    """The exact (start, end) epoch-ms pairs one full Bybit funding walk uses.
+
+    Oldest first, UTC. The start is ``since_ms``, or ``now_ms`` minus
+    ``BYBIT_FUNDING_DEFAULT_LOOKBACK_DAYS`` days when None. The pairs come from
+    the same ``_windows`` seam ``fetch_funding_bybit`` walks (next start =
+    previous end + 1 ms, each span at most 7 days), so a per-window read is
+    byte-equal to the single walk it replaces (Phase 223 C27).
+    """
+    start = (
+        since_ms
+        if since_ms is not None
+        else now_ms - BYBIT_FUNDING_DEFAULT_LOOKBACK_DAYS * 86_400_000
+    )
+    return [
+        (w_start, w_end)
+        for w_start, w_end in _windows(start, now_ms, 7)
+        if w_start is not None and w_end is not None
+    ]
 
 
 # ---------------------------------------------------------------------------
