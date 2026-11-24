@@ -190,8 +190,22 @@ function pickPlaceholderCodename(): string {
  *                    account is not working. It is decided BEFORE any strategy
  *                    read: a validated new key takes the slot from it (see the
  *                    member's own comment) whether or not it carries a strategy.
+ *                    OQ-2 (225-11): a demoted key that later recovers STAYS marked
+ *                    a duplicate of the working holder while that holder works.
+ *                    Nothing is disconnected, unpublished or re-pointed: the card
+ *                    sentence names the holder and the derive counts the account
+ *                    once, through the working holder (D-18). The only automatic
+ *                    move back is MT5D-08 itself (plan 09), and a demoted key that
+ *                    still carries its own strategy is the shape Q1 accepts.
+ *
  *   · `unresolved` — genuinely nothing to say: no live key, a read fault, or no
  *                    service-role credential. Fall through.
+ *
+ * ⭐ PER OWNER, ONLY (225-11, ONCE-02, Q3). Every member is decided from keys the
+ * CALLER owns: `readLiveSameLoginKeys` filters on `user_id`, so another owner's
+ * key on the same account is never read, named or swapped, and the connect then
+ * stamps the identity, which is the cross-owner share link. No cross-owner marker
+ * exists.
  *
  * ⛔ `orphaned` AND `unresolved` USED TO BE ONE ANSWER, and collapsing them was
  * the SECOND instance of the defect this type was created to make

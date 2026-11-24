@@ -3615,6 +3615,177 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       });
     });
   });
+
+  /**
+   * [225-11 / ONCE-01, ONCE-02, Q3] THE REFUSAL IS PER OWNER, FOR BOTH VENUE KINDS.
+   *
+   * One account per OWNER: a second connect of the same exchange account or MT5
+   * login by one owner is refused by name with zero writes (a strategy-linked key
+   * that also feeds an allocator book keeps both uses, because a refusal never
+   * touches the key). ANOTHER owner's key on the same account is never read,
+   * never named and never swapped: the connect succeeds and stamps the identity,
+   * which IS the share link. No cross-owner marker exists (Q3).
+   */
+  describe("[225-11] ONCE-01 and ONCE-02: one account per owner, and the cross-owner share still connects", () => {
+    const OKX_UID = "100000001";
+    const OKX_BODY = { ...VALID_BODY, wizard_session_id: OTHER_SESSION_ID };
+    const OTHER_OWNER_ID = "00000000-0000-0000-0000-bbbbbbbbbbbb";
+    const OTHER_OWNERS_KEY_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const SERVER_NORMALISED = "metaquotes-demo";
+
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      writeAttempts.length = 0;
+      rpcMock.mockImplementation(async (name: string) => {
+        if (name === "create_wizard_strategy") {
+          return {
+            data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+            error: null,
+          };
+        }
+        throw new Error(`unexpected rpc ${name}`);
+      });
+      validateKeyMock.mockResolvedValue({
+        valid: true,
+        read_only: true,
+        venue_account_id: OKX_UID,
+      });
+    });
+
+    type OwnedSeed = SameLoginSeedRow & { user_id: string };
+
+    /**
+     * A table double that honours the `user_id` filter the way Postgres does,
+     * and returns EVERY seeded row when the route sent none, so a dropped owner
+     * filter surfaces the other owner's key instead of hiding behind the mock.
+     */
+    function seedAccountRows(rows: OwnedSeed[]) {
+      venueKeyLookupMock.mockImplementation(async (filters) => {
+        const f = filters ?? {};
+        const visible = "user_id" in f ? rows.filter((r) => r.user_id === f.user_id) : rows;
+        return { data: visible, error: null };
+      });
+    }
+
+    function noWriteWasMade() {
+      expect(rpcMock, "no create_wizard_strategy, no swap_account_slot").not.toHaveBeenCalled();
+      expect(
+        writeAttempts.filter((w) => w.table === "api_keys"),
+        "no api_keys insert, update, upsert or delete",
+      ).toEqual([]);
+      expect(writeAttempts).toEqual([]);
+    }
+
+    it("1. an okx key matching a WORKING key of the SAME owner is refused 409 by name with zero writes", async () => {
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Own OKX Strategy" },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        code: "VENUE_ALREADY_CONNECTED",
+        error: "This account is already connected to an existing strategy.",
+        strategy_name: "Own OKX Strategy",
+      });
+      expect(text).not.toContain(OKX_UID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      noWriteWasMade();
+    });
+
+    it("2. an MT5 login matching a WORKING key of the SAME owner is refused the same way", async () => {
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(text).not.toContain(MT5_LOGIN);
+      noWriteWasMade();
+    });
+
+    it("3. the same okx account held by ANOTHER owner's strategy-linked key: the read is filtered to the caller, the connect answers 200 and the RPC carries the identity (the share link)", async () => {
+      seedAccountRows([{ id: OTHER_OWNERS_KEY_ID, user_id: OTHER_OWNER_ID }]);
+      // If the owner filter were dropped the other owner's key would be picked
+      // and, with this strategy behind it, the connect would be REFUSED.
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Someone Else's Strategy" },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_BODY));
+
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).not.toContain("Someone Else");
+      expect(text).not.toContain(OTHER_OWNERS_KEY_ID);
+      // Every api_keys read carried the CALLER's id, and none carried another.
+      const keyReads = capturedSelects.filter((c) => c.table === "api_keys");
+      expect(keyReads.length).toBeGreaterThan(0);
+      for (const read of keyReads) {
+        expect(read.filters.user_id).toBe(MOCK_USER.id);
+      }
+      // The other owner's key was never classified, so never read further.
+      expect(venueStrategyLookupMock).not.toHaveBeenCalled();
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+      expect(keyMembershipLookupMock).not.toHaveBeenCalled();
+      // The identity is stamped: the cross-owner share link.
+      const created = rpcMock.mock.calls.filter((c) => c[0] === "create_wizard_strategy");
+      expect(created).toHaveLength(1);
+      expect(created[0][1]).toMatchObject({ p_venue_account_id: OKX_UID });
+      expect(rpcMock.mock.calls.filter((c) => c[0] === "swap_account_slot")).toHaveLength(0);
+    });
+
+    it("4. the same MT5 login and server held by ANOTHER owner's strategy-linked key: as case 3, and the RPC also carries p_venue_server", async () => {
+      seedAccountRows([
+        { id: OTHER_OWNERS_KEY_ID, user_id: OTHER_OWNER_ID, venue_server: SERVER_NORMALISED },
+      ]);
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Someone Else's Strategy" },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const keyReads = capturedSelects.filter((c) => c.table === "api_keys");
+      expect(keyReads.length).toBeGreaterThan(0);
+      for (const read of keyReads) {
+        expect(read.filters.user_id).toBe(MOCK_USER.id);
+      }
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+      const created = rpcMock.mock.calls.filter((c) => c[0] === "create_wizard_strategy");
+      expect(created).toHaveLength(1);
+      expect(created[0][1]).toMatchObject({
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: SERVER_NORMALISED,
+      });
+      expect(rpcMock.mock.calls.filter((c) => c[0] === "swap_account_slot")).toHaveLength(0);
+    });
+
+    it("5. the resolver's read set is still api_keys, strategies and strategy_keys only: no allocator table enters it", async () => {
+      // A working holder with no strategy, so the resolver walks its whole
+      // path: the key list, both strategy reads, and the composite membership.
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_BODY));
+
+      expect(res.status).toBe(409);
+      expect(JSON.parse(await res.text()).code).toBe("KEY_ORPHANED");
+      const tablesRead = [...new Set(capturedSelects.map((c) => c.table))].sort();
+      expect(tablesRead).toEqual(["api_keys", "strategies", "strategy_keys"]);
+      noWriteWasMade();
+    });
+  });
 });
 
 /**
