@@ -173,6 +173,8 @@ const STATE = {
   rpcMissing: false,
   /** The owner's `profiles.role` (WR-01): the default is the manager the older cases assume. */
   profileRole: "manager" as string | null,
+  /** The error the owner's `profiles` read answers with, if any (R2-01). */
+  profileError: null as unknown,
   /** The head-count answer of `strategy_keys` on the request client. */
   memberCountResult: { count: 0 as number | null, error: null as unknown },
   observed: {
@@ -181,6 +183,8 @@ const STATE = {
     requestTables: [] as string[],
     /** Tables named by `.from()` on the service-role client, in call order. */
     adminTables: [] as string[],
+    /** The `.eq(column, value)` arguments of the request client's `profiles` reads. */
+    profileEqCalls: [] as Array<[string, unknown]>,
   },
 };
 
@@ -206,7 +210,10 @@ function mockRequestClient() {
       let sawOr = false;
       const chain = {
         select: () => chain,
-        eq: () => chain,
+        eq: (column: string, value: unknown) => {
+          if (table === "profiles") STATE.observed.profileEqCalls.push([column, value]);
+          return chain;
+        },
         or: () => {
           sawOr = true;
           return chain;
@@ -221,7 +228,9 @@ function mockRequestClient() {
             table === "strategy_verifications"
               ? { data: null, error: null }
               : table === "profiles"
-                ? { data: STATE.profileRole ? { role: STATE.profileRole } : null, error: null }
+                ? STATE.profileError
+                  ? { data: null, error: STATE.profileError }
+                  : { data: STATE.profileRole ? { role: STATE.profileRole } : null, error: null }
               : sawOr
                 ? { data: STATE.ownerRow, error: null }
                 : { data: STATE.publishedRow, error: null },
@@ -361,10 +370,12 @@ beforeEach(() => {
   STATE.rpcResult = { data: [], error: null };
   STATE.rpcMissing = false;
   STATE.profileRole = "manager";
+  STATE.profileError = null;
   STATE.memberCountResult = { count: 0, error: null };
   STATE.observed.rpcCalls = [];
   STATE.observed.requestTables = [];
   STATE.observed.adminTables = [];
+  STATE.observed.profileEqCalls = [];
 
   getUserSpy.mockImplementation(async () => ({
     data: { user: STATE.sessionUser },
@@ -1060,6 +1071,61 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(remedyLine!.textContent).toBe(CONTACT_CHECK);
     expect(container.querySelector('a[href*="/edit"]')).toBeNull();
     expect(container.querySelector('a[href*="/strategies/new/wizard"]')).toBeNull();
+  });
+
+  it("SHARE-NOTE-ROLE-READ-FAILED: the owner's role read errors -> read as not-a-manager (the Exchanges action, no edit link), logged and sent to Sentry, and the read asked for the owner's own row", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // A manager row would be returned if the error were ignored; the error must win.
+      STATE.profileRole = "manager";
+      STATE.profileError = { code: "500", message: "profiles down" };
+      // The real row carries `user_id` (the fixture default omits it), which the role read keys on.
+      givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID, user_id: OWNER_UID });
+      givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+      STATE.memberCountResult = { count: 0, error: null };
+
+      const { container, remedyLine } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(last.textContent).toBe(`${MINT_B_LEAD} ${EXCHANGES_KEY}`);
+      expect(remedyLine!.textContent).toBe(EXCHANGES_KEY);
+      expect(last.querySelector('a[href="/profile?tab=exchanges"]')).not.toBeNull();
+      // Scoped to the note and the line: with `user_id` on the row the panel
+      // renders its own "Edit strategy" button, which is not the remedy.
+      expect(last.querySelector('a[href*="/edit"]')).toBeNull();
+      expect(remedyLine!.querySelector('a[href*="/edit"]')).toBeNull();
+
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining("owner role read failed"),
+        STATE.profileError,
+      );
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+        STATE.profileError,
+        expect.objectContaining({
+          tags: expect.objectContaining({ stage: "owner-role" }),
+        }),
+      );
+      // The read is the owner's own profile row, never another user's.
+      expect(STATE.observed.profileEqCalls.length).toBeGreaterThan(0);
+      for (const call of STATE.observed.profileEqCalls) expect(call).toEqual(["id", OWNER_UID]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("SHARE-NOTE-ROLE-ROW-MISSING: no profile row and no error -> read as not-a-manager (the contact form, no CSV wizard link)", async () => {
+    STATE.profileRole = null;
+    givenOwnerPendingDraft({ source: "csv", api_key_id: null });
+    givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${CONTACT_CHECK}`);
+    expect(remedyLine!.textContent).toBe(CONTACT_CHECK);
+    expect(last.querySelector(`a[href="${CONTACT_HREF}"]`)).not.toBeNull();
+    expect(container.querySelector('a[href*="/strategies/new/wizard"]')).toBeNull();
+    expect(container.querySelector('a[href*="/edit"]')).toBeNull();
   });
 
   it("SHARE-NOTE-BOTH: a `both` owner keeps the manager action, the edit link", async () => {
