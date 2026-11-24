@@ -817,7 +817,6 @@ def compose_allocator_equity(
     per_key_equity: dict[str, KeyEquity] = {}
     # 234 NOCAP-03: one count per owner key and route, written into ``payload["inputs"]`` below.
     no_capital_refused: Counter[str] = Counter()
-    fell_back_refused = 0
     fell_back_blocking: set[DegradeReason] = set()
     # WR-02 / F4: a candidate is a KEY. A key replayed in segments (``k#hole0 ... k``) is offered
     # and taken back as one: ``owner`` is the key a unit belongs to, so any of its units that is
@@ -842,7 +841,6 @@ def compose_allocator_equity(
         except NavReconstructionError:
             if owner not in no_capital_exit:
                 raise
-            fell_back_refused += 1
             no_capital_refused["replay_refused"] += 1
             fell_back.append(owner)
             continue
@@ -850,6 +848,7 @@ def compose_allocator_equity(
             key_equity.equity is None or not _is_trustworthy(key_equity.degrade_reasons)
         ):
             fell_back_blocking |= key_equity.degrade_reasons
+            no_capital_refused["blocking_reason"] += 1
             fell_back.append(owner)
             continue
         per_key_equity[k] = key_equity
@@ -885,8 +884,8 @@ def compose_allocator_equity(
             "is untrustworthy",
             len(fell_back),
             DegradeReason.DROPPED_KEY.value,
-            fell_back_refused,
-            len(fell_back) - fell_back_refused,
+            no_capital_refused["replay_refused"],
+            no_capital_refused["blocking_reason"],
             ",".join(sorted(r.value for r in fell_back_blocking)) or "none",
         )
     for k in anchored_keys:

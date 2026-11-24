@@ -81,6 +81,8 @@ def test_no_capital_exit_a_healthy_candidate_still_composes_and_is_named() -> No
         {"api_key_id": "B", "reason": "nonpositive", "day": DAYS[2]}
     ]
     assert _curve(payload)[DAYS[0]] == pytest.approx(100_600.0, abs=1e-9)
+    # 234 NOCAP-03: a candidate that exits is not a fallback, so the control stores no field.
+    assert "no_capital_exit_refused" not in payload["inputs"]
 
 
 def test_no_capital_exit_a_refusing_candidate_falls_back_to_dropped_key() -> None:
@@ -101,6 +103,10 @@ def test_no_capital_exit_a_refusing_candidate_falls_back_to_dropped_key() -> Non
     assert "no_capital_key_exited" not in payload["flags"]
     assert "no_capital_exited_keys" not in payload
     assert _curve(payload) == {day: pytest.approx(A_LEVEL, abs=1e-9) for day in DAYS}
+    # 234 NOCAP-03: the compose names the route, counts only, and never as a degrade reason or flag.
+    assert payload["inputs"]["no_capital_exit_refused"] == {"replay_refused": 1}
+    assert "no_capital_exit_refused" not in payload["degrade_reasons"]
+    assert "no_capital_exit_refused" not in payload["flags"]
 
 
 def test_no_capital_exit_a_blocking_candidate_falls_back_to_dropped_key() -> None:
@@ -117,6 +123,7 @@ def test_no_capital_exit_a_blocking_candidate_falls_back_to_dropped_key() -> Non
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert _curve(payload) == {day: pytest.approx(A_LEVEL, abs=1e-9) for day in DAYS}
+    assert payload["inputs"]["no_capital_exit_refused"] == {"blocking_reason": 1}
 
 
 def test_no_capital_exit_fallback_does_not_widen_to_other_keys() -> None:
@@ -245,9 +252,11 @@ def test_hole_candidate_whose_last_segment_blocks_falls_back_as_a_whole_key() ->
     every day, not 100600.0 on days 1 and 2), and the payload is today's payload."""
     kwargs = _hole_candidate_book(last_terminal=(DAYS[4], 600.0))
     payload = _compose(dict(kwargs))
+    popped, field = _pop_refusal_field(payload)
 
     assert _curve(payload) == {day: pytest.approx(A_LEVEL, abs=1e-9) for day in DAYS}
-    assert _without_clock(payload) == _without_clock(_compose(_today(kwargs)))
+    assert _without_clock(popped) == _without_clock(_compose(_today(kwargs)))
+    assert field == {"blocking_reason": 1}
     assert "dropped_key" in payload["degrade_reasons"]
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload

@@ -4001,6 +4001,8 @@ async def test_no_capital_exit_deribit_dust_key_composes_through_its_terminal_an
     assert payload["no_capital_exited_keys"] == [
         {"api_key_id": "key-B", "reason": "dust", "day": _BTC_DAYS[2]}
     ]
+    # 234 NOCAP-03: a clean exit is not a fallback, so the run writes no refusal counts.
+    assert "no_capital_exit_refused" not in payload["inputs"]
 
 
 @pytest.mark.asyncio
@@ -4017,6 +4019,8 @@ async def test_no_capital_exit_a_dust_token_over_a_funded_terminal_stays_dropped
     assert "dropped_key" in payload["degrade_reasons"]
     assert "no_capital_key_exited" not in payload["flags"]
     assert "no_capital_exited_keys" not in payload
+    # 234 NOCAP-03: the A2 refusal is named at selection, once for the one key.
+    assert _nc_refused(payload) == {"funded_terminal": 1}
 
 
 @pytest.mark.asyncio
@@ -4037,6 +4041,7 @@ async def test_no_capital_exit_a2_a_terminal_exactly_at_the_dust_floor_exits() -
     assert payload["no_capital_exited_keys"] == [
         {"api_key_id": "key-B", "reason": "dust", "day": _BTC_DAYS[2]}
     ]
+    assert "no_capital_exit_refused" not in payload["inputs"]
 
 
 @pytest.mark.asyncio
@@ -4052,6 +4057,7 @@ async def test_no_capital_exit_a2_a_terminal_one_cent_over_the_dust_floor_stays_
     assert "dropped_key" in payload["degrade_reasons"]
     assert "no_capital_key_exited" not in payload["flags"]
     assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"funded_terminal": 1}
 
 
 def test_no_capital_fixture_terminals_are_dust_under_the_current_floor() -> None:
@@ -4276,6 +4282,7 @@ async def test_no_capital_exit_a3_deribit_dust_deposit_after_last_return() -> No
     assert payload["no_capital_exited_keys"] == [
         {"api_key_id": "key-B", "reason": "dust", "day": d[2]}
     ]
+    assert "no_capital_exit_refused" not in payload["inputs"]
 
 
 @pytest.mark.asyncio
@@ -4356,6 +4363,9 @@ async def test_no_capital_exit_read_failures_stay_dropped(token: str | None) -> 
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    # 234 NOCAP-03 (RESEARCH Pitfall 3): a failed read is not a no-capital fallback, so it is
+    # never counted. The key is dropped for the read failure, not because of the rule.
+    assert "no_capital_exit_refused" not in payload["inputs"]
 
 
 @pytest.mark.asyncio
@@ -4373,6 +4383,7 @@ async def test_no_capital_exit_no_stored_terminal_stays_dropped() -> None:
     assert "dropped_key" in payload["degrade_reasons"]
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"no_stored_terminal": 1}
 
 
 @pytest.mark.asyncio
@@ -4451,6 +4462,7 @@ async def test_no_capital_exit_anything_dated_after_the_terminal_day_stays_dropp
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4474,6 +4486,7 @@ async def test_no_capital_exit_anything_dated_after_the_terminal_day_stays_dropp
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4500,6 +4513,7 @@ async def test_no_capital_exit_margin_call_then_liquidation_stays_dropped() -> N
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4521,6 +4535,7 @@ async def test_no_capital_exit_a_deposit_after_the_terminal_day_stays_blocked() 
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4544,6 +4559,7 @@ async def test_no_capital_exit_a_flow_day_without_a_stored_pnl_stays_dropped() -
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4569,6 +4585,7 @@ async def test_no_capital_exit_an_empty_window_after_the_last_return_stays_dropp
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4633,6 +4650,7 @@ async def test_no_capital_exit_inception_residual_stays_dropped() -> None:
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"blocking_reason": 1}
 
 
 @pytest.mark.asyncio
@@ -4649,6 +4667,7 @@ async def test_no_capital_exit_a3_never_pads_a_writer_basis_over_a_real_return()
     assert "key_inputs_mismatch" not in payload["degrade_reasons"]
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"blocking_reason": 1}
 
 
 # --- job level: a candidate must never cost the book its stored row (166.3.1 plan 09, Task 3) ---
@@ -4707,6 +4726,9 @@ async def test_no_capital_exit_compose_refusal_reverts_the_candidates_and_keeps_
     assert "dropped_key" in payload["degrade_reasons"]
     assert "no_anchor" in payload["degrade_reasons"]
     assert "no_capital_exited_keys" not in payload
+    # 234 NOCAP-03: the first compose's own counts left with its payload; the stored-input compose
+    # has no candidate, so the one count on the row is the job's revert, one per candidate in play.
+    assert _nc_refused(payload) == {"compose_reverted": 1}
 
     first, second = calls
     assert first["no_capital_exit_by_key"] == {"key-B": ("dust", _BTC_DAYS[2])}
@@ -4860,6 +4882,98 @@ async def test_no_capital_exit_refused_counts_a_replay_refusal_in_the_row_and_on
     _assert_refusal_recorded(fake, _NOCAP_ALLOC, "compose_empty_blocked")
     (_, row, _), = _refusal_upserts(fake)
     assert row["payload"]["inputs"]["no_capital_exit_refused"] == {"replay_refused": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_refused_counts_each_key_once_on_its_own_route() -> None:
+    """NOCAP-03 cardinality. One book with three no-capital keys that each keep ``dropped_key`` by
+    a DIFFERENT route stores exactly one count per route and nothing else: key-F's live read says
+    empty over a funded 60000.0 terminal (A2), key-G has returns and a token but no stored terminal,
+    and key-H's terminal is on day 3 with a 50000.0 flow on day 5 (D-10). A count that doubled (a key
+    counted at selection AND again in the apply loop or the compose) would show here."""
+    d = _BTC_DAYS
+    no_terminal = _nc_payload("dust", "mt5", 0.0, d[2])
+    del no_terminal["realized_terminal_usd"]
+    del no_terminal["realized_terminal_day"]
+    book = _nc_assemble([
+        _nc_candidate("key-F", "mt5", d[:3], _nc_payload("dust", "mt5", 60_000.0, d[2])),
+        _nc_candidate("key-G", "mt5", d[:3], no_terminal),
+        _nc_candidate(
+            "key-H", "mt5", d[:3],
+            _nc_payload("dust", "mt5", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
+        ),
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert _nc_refused(payload) == {
+        "consumes_more_than_dust": 1, "funded_terminal": 1, "no_stored_terminal": 1,
+    }
+    assert list(_nc_refused(payload) or {}) == sorted(_nc_refused(payload) or {})
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+
+
+def test_no_capital_refusal_reasons_are_the_seven_plan_01_tokens() -> None:
+    """NOCAP-03 closed set. The set is pinned whole so a token cannot be added or renamed without
+    its writer and its test moving with it (each plan of phase 234 adds its tokens together with
+    their writers and updates this pin in the same task). It is deliberately NOT a ``DegradeReason``
+    or a ``DeriveRefusal`` member: ``test_derive_refusal_rows`` pins both for three runtimes."""
+    from services.allocator_equity_derive import (
+        NO_CAPITAL_REFUSAL_REASONS,
+        DegradeReason,
+        DeriveRefusal,
+    )
+
+    assert NO_CAPITAL_REFUSAL_REASONS == frozenset({
+        "funded_terminal", "no_stored_terminal", "consumes_more_than_dust", "replay_refused",
+        "blocking_reason", "segment_terminals_missing", "compose_reverted",
+    })
+    assert not NO_CAPITAL_REFUSAL_REASONS & {m.value for m in DegradeReason}
+    assert not NO_CAPITAL_REFUSAL_REASONS & {m.value for m in DeriveRefusal}
+
+
+def test_no_capital_refusal_field_is_a_closed_counts_only_validator() -> None:
+    """NOCAP-03 / T-234-02. The one place a token or a count is checked: an unknown token, a bool, a
+    non-integer and a negative count are refused (a stored payload must never carry a bogus count
+    or an unknown name), a zero count is dropped, and the keys come out sorted."""
+    from services.allocator_equity_derive import no_capital_refusal_field
+
+    assert no_capital_refusal_field({}) == {}
+    out = no_capital_refusal_field({"replay_refused": 2, "blocking_reason": 1, "funded_terminal": 0})
+    assert out == {"blocking_reason": 1, "replay_refused": 2}
+    assert list(out) == ["blocking_reason", "replay_refused"]
+    for bad in ({"not_a_route": 1}, {"replay_refused": True}, {"replay_refused": 1.5},
+                {"replay_refused": -1}):
+        with pytest.raises(ValueError):
+            no_capital_refusal_field(bad)  # type: ignore[arg-type]
+    # an unknown token is never echoed (it may have been read from storage)
+    with pytest.raises(ValueError) as excinfo:
+        no_capital_refusal_field({"KEY-ID-SECRET": 1})
+    assert "KEY-ID-SECRET" not in str(excinfo.value)
+
+
+def test_refusal_payload_carries_the_counts_only_when_there_are_some() -> None:
+    """NOCAP-03. ``refusal_payload`` without the keyword, with None and with ``{}`` are the same
+    dict (the shared three-runtime fixture row is untouched); with counts the sorted field sits in
+    ``inputs`` and nowhere else."""
+    from services.allocator_equity_derive import refusal_payload
+
+    base = refusal_payload("compose_empty_blocked", composed_at="t")
+    assert refusal_payload("compose_empty_blocked", composed_at="t", no_capital_exit_refused=None) == base
+    assert refusal_payload("compose_empty_blocked", composed_at="t", no_capital_exit_refused={}) == base
+    assert "no_capital_exit_refused" not in base["inputs"]
+
+    with_counts = refusal_payload(
+        "compose_empty_blocked", composed_at="t",
+        no_capital_exit_refused={"replay_refused": 1, "blocking_reason": 2},
+    )
+    assert with_counts["inputs"]["no_capital_exit_refused"] == {"blocking_reason": 2, "replay_refused": 1}
+    assert list(with_counts["inputs"]["no_capital_exit_refused"]) == ["blocking_reason", "replay_refused"]
+    assert {k: v for k, v in with_counts.items() if k != "inputs"} == {
+        k: v for k, v in base.items() if k != "inputs"
+    }
+    assert with_counts["degrade_reasons"] == base["degrade_reasons"]
 
 
 # ---------------------------------------------------------------------------

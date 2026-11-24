@@ -17540,15 +17540,22 @@ async def run_derive_allocator_equity_job(
                 and _nc_reason in _NO_CAPITAL_ANCHOR_REASONS
                 and api_key_id in last_return_day
                 and api_key_id not in departed_end_by_key
-                and _nc_terminal is not None
+            ):
+                # 234 NOCAP-03: a key that gets this far would be a candidate but for the writer's
+                # terminal, so each way it stays on ``dropped_key`` is counted by name, once. A
+                # read-failure token never reaches here (it is not evidence of an empty account),
+                # so it is never counted as a no-capital fallback.
+                if _nc_terminal is None:
+                    no_capital_refusals["no_stored_terminal"] += 1
                 # A2: the writer must agree the account is small. Its last level is at or below
                 # the dust floor (which sits above the emptied band, so a level inside that band
                 # qualifies too). A live read that says empty over a funded terminal is a
                 # transient zero or a mis-priced balance until proven otherwise: the key keeps
                 # today's ``dropped_key`` rather than exiting while the book reads trustworthy.
-                and _nc_terminal[1] <= DUST_NAV_FLOOR
-            ):
-                no_capital_candidates[api_key_id] = (str(_nc_reason), _nc_terminal)
+                elif _nc_terminal[1] > DUST_NAV_FLOOR:
+                    no_capital_refusals["funded_terminal"] += 1
+                else:
+                    no_capital_candidates[api_key_id] = (str(_nc_reason), _nc_terminal)
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
 
@@ -17752,7 +17759,6 @@ async def run_derive_allocator_equity_job(
             dict(departed_end_by_key),
             {},
         )
-    no_capital_refused = 0
     for _k in sorted(no_capital_candidates):
         _nc_token, (_nc_p, _nc_p_level) = no_capital_candidates[_k]
         _nc_last = last_return_day[_k]
@@ -17783,7 +17789,7 @@ async def run_derive_allocator_equity_job(
             _nc_flow_by_day,
             _nc_pnl_by_day,
         ):
-            no_capital_refused += 1
+            no_capital_refusals["consumes_more_than_dust"] += 1
             continue
         if _nc_p > _nc_last:
             _nc_end = _nc_last
@@ -17822,12 +17828,12 @@ async def run_derive_allocator_equity_job(
             else:
                 del writer_basis_by_key[_k]
 
-    if no_capital_refused:
+    if no_capital_refusals["consumes_more_than_dust"]:
         # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
         logger.warning(
             "derive_allocator_equity: %d no-capital key(s) of allocator %s keep "
             "dropped_key: the exit would consume or drop more than dust (D-10)",
-            no_capital_refused,
+            no_capital_refusals["consumes_more_than_dust"],
             allocator_id,
         )
 
@@ -18213,6 +18219,9 @@ async def run_derive_allocator_equity_job(
         # unpadded writer basis), which is today's result, and carry on to the upsert. If that
         # refuses too, the refusal is not the rule's and the permanent path runs unchanged.
         # Counts and the refusal class only (no key id, no day, no USD).
+        # 234 NOCAP-03: the first compose's own counts leave with its payload; the stored-input
+        # compose below has no candidate to count. Each candidate in play is named once here.
+        no_capital_refusals["compose_reverted"] += len(no_capital_exit_by_key)
         logger.warning(
             "derive_allocator_equity: compose refused (%s) with %d no-capital candidate(s) in "
             "play for allocator %s — re-composing once with them reverted to %s",
