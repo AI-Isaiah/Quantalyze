@@ -1737,6 +1737,67 @@ describe("NEVERCOMPUTED published: a published Stale (no data yet) row's note re
     await renderPage();
     expect(shareNoteOf("Strategy s-pub")!.textContent).toBe(PUBLIC_FINISHED_NOT_BUILT);
   });
+
+  // 238 fix round 1 (WR-02): the lead plus the viewer-mapped shape action, typed out whole.
+  const PUBLIC_LEAD =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available.";
+  const PUBLIC_UNKNOWN =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. If no computation is running, use the contact form to have it checked.";
+
+  it("a transient failure on a single-key row, as a manager: the lead plus Resync on the edit page, with its one edit link", async () => {
+    asRole("manager");
+    state.strategies = [pubRow("s-pub", { api_key_id: "key-1" })];
+    state.jobs["s-pub"] = [{ ...FAILED_JOB, error_kind: "transient" }];
+    await renderPage();
+    const note = shareNoteOf("Strategy s-pub") as HTMLElement;
+    expect(note.textContent).toBe(
+      `${PUBLIC_LEAD} Start a new computation with Resync on this strategy's edit page. Use the contact form if it does not complete.`,
+    );
+    expect(note.querySelectorAll('a[href="/strategies/s-pub/edit"]')).toHaveLength(1);
+  });
+
+  it("the same row as an allocator-only viewer: the lead plus the Exchanges page, and no link to the manager-guarded edit page", async () => {
+    asRole("allocator");
+    state.strategies = [pubRow("s-pub", { api_key_id: "key-1" })];
+    state.jobs["s-pub"] = [{ ...FAILED_JOB, error_kind: "transient" }];
+    const { container } = render(await renderToElement());
+    const note = shareNoteOf("Strategy s-pub") as HTMLElement;
+    expect(note.textContent).toBe(`${PUBLIC_LEAD} Check its key on the Exchanges page.`);
+    expect(note.querySelector('a[href^="/profile?tab=exchanges"]')).not.toBeNull();
+    expect(container.querySelector('a[href*="/edit"]')).toBeNull();
+    expect(container.querySelector('a[href*="/strategies/new"]')).toBeNull();
+  });
+
+  it("a never_started row with no key, as a manager: the lead plus Link a key on the edit page", async () => {
+    asRole("manager");
+    state.strategies = [pubRow("s-pub")];
+    await renderPage();
+    const note = shareNoteOf("Strategy s-pub") as HTMLElement;
+    expect(note.textContent).toBe(
+      `${PUBLIC_LEAD} Link a key with Change key… on this strategy's edit page (add one on your Profile API keys tab first if you have none) to start a new computation. Use the contact form if it does not complete.`,
+    );
+    expect(note.querySelectorAll('a[href="/strategies/s-pub/edit"]')).toHaveLength(1);
+  });
+
+  it("a never_started row with no key, as an allocator-only viewer: the lead plus the contact form, no edit link", async () => {
+    asRole("allocator");
+    state.strategies = [pubRow("s-pub")];
+    const { container } = render(await renderToElement());
+    expect(shareNoteOf("Strategy s-pub")!.textContent).toBe(
+      `${PUBLIC_LEAD} Use the contact form to have it checked.`,
+    );
+    expect(container.querySelector('a[href*="/edit"]')).toBeNull();
+  });
+
+  it("a jobs read that failed: the state-free note, exactly, and no shape action guessed", async () => {
+    asRole("manager");
+    state.strategies = [pubRow("s-pub", { api_key_id: "key-1" })];
+    state.rpcError = true;
+    await renderPage();
+    const note = shareNoteOf("Strategy s-pub") as HTMLElement;
+    expect(note.textContent).toBe(PUBLIC_UNKNOWN);
+    expect(note.querySelector('a[href*="/edit"]')).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
