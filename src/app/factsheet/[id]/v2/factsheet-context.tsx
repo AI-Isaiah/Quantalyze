@@ -38,6 +38,12 @@ interface XRangeContextValue {
   xRange: readonly [number, number];
   setXRange: (next: readonly [number, number]) => void;
   resetXRange: () => void;
+  /**
+   * Phase 239 (CACHE-02): select the last `months` calendar months ending on the latest day.
+   * Held as a preset, so it rolls when a newer day arrives; a later setXRange or resetXRange
+   * replaces it.
+   */
+  setPresetRange: (months: number) => void;
 }
 
 interface ComparatorContextValue {
@@ -491,9 +497,12 @@ export function useXRange(): XRangeContextValue {
     ],
   );
 
+  // Phase 239 (CACHE-02): one click, low volume, so the write is eager like resetXRange.
+  const setPresetRange = useCallback((months: number) => setStored({ kind: "preset", months }), [setStored]);
+
   return useMemo<XRangeContextValue>(
-    () => ({ xRange, setXRange, resetXRange }),
-    [xRange, setXRange, resetXRange],
+    () => ({ xRange, setXRange, resetXRange, setPresetRange }),
+    [xRange, setXRange, resetXRange, setPresetRange],
   );
 }
 

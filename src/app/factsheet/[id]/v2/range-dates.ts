@@ -8,15 +8,25 @@
  * two DATES and resolving them against the active axis each render keeps the exact days
  * the user picked, whichever end the series grows at.
  *
+ * A preset (the composer's 3M/6M/12M) is held as its month count instead, and resolves to
+ * the last N calendar months ending on the latest axis day, so it rolls when a newer day
+ * arrives (founder Q4 "Presets roll, manual stays", Q5 "12 calendar months").
+ *
  * Pure module: no React, no client directive. Dates are ISO "YYYY-MM-DD" strings, whose
  * lexicographic order equals their chronological order (the `src/lib/dateday.ts` header
  * states this), so the lookups below compare the raw strings.
  */
+import { subtractMonths } from "@/lib/dateday";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import type { Basis } from "./basis-context";
 
-/** The range the user set, held as dates. `start` and `end` are ISO days on the axis it was set on. */
-export type StoredRange = { kind: "manual"; start: string; end: string };
+/**
+ * The range the user set. A manual range is held as dates (ISO days on the axis it was set
+ * on); a preset is held as a month count and rolls with the latest day.
+ */
+export type StoredRange =
+  | { kind: "manual"; start: string; end: string }
+  | { kind: "preset"; months: number };
 
 /** First index whose date is on or after `day`; `axis.length` when there is none. */
 export function lowerBound(axis: readonly string[], day: string): number {
@@ -46,6 +56,9 @@ export function upperBound(axis: readonly string[], day: string): number {
  * Resolve a stored range to `[startIdx, endIdx]` on `axis`.
  *
  * - No stored range, or an empty axis: `fullRange`, by reference.
+ * - Preset of N months: from the first axis day on or after (latest axis day minus N
+ *   calendar months, inclusive) to the last index. A series shorter than N months resolves
+ *   to `[0, last]`; a latest day that is not an ISO day gives `fullRange`.
  * - Manual range, STRICT off-axis rule: a start before the axis's first day, or an end
  *   after its last day, gives `fullRange`. This mirrors the old index fallback (a user
  *   range pointing past the end of a SHRUNK axis fell back to the current full range,
@@ -63,7 +76,13 @@ export function resolveStoredRange(
   fullRange: readonly [number, number],
 ): readonly [number, number] {
   if (stored === null || axis.length === 0) return fullRange;
-  if (stored.start < axis[0] || stored.end > axis[axis.length - 1]) return fullRange;
+  const last = axis.length - 1;
+  if (stored.kind === "preset") {
+    const boundary = subtractMonths(axis[last], stored.months);
+    if (boundary === null) return fullRange;
+    return [lowerBound(axis, boundary), last];
+  }
+  if (stored.start < axis[0] || stored.end > axis[last]) return fullRange;
   const s = lowerBound(axis, stored.start);
   const e = upperBound(axis, stored.end) - 1;
   if (s > e) return fullRange;
