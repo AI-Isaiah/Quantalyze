@@ -9,7 +9,12 @@
 - `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-24` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.67.0 → 0.133.67.1.
 - The gates on the composed tree, verbatim: `baseline-currency: carried=336 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 144 — MATCH 141, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
 
+### Removed
+- The five Phase 227 `snapshot-only` NAME_SET_RATCHET rows in `scripts/dump-sql-functions.ts` (`record_compute_job_attempt_error`, `renew_compute_job_claims`, `record_reconcile_readmit_exhaustions`, `first_hop_enqueue_sweep`, `record_orphan_reaped_attempt`). With the functions now in the dump, the snapshot gate reported each `ratchet-stale`. It now reads `SQL function snapshot is current (142 functions)`.
+- This clears main's `sql-gate-lint` red from #1325 (the declared baseline-content-drift findings), and the `frontend` aggregator red that rolls it up.
+
 ### Notes
+- What the eight carried migrations add: the Phase 227 JOBLEDGER attempt-failure ledger, the claim renewal, the readmit exhaustion record, the first-hop sweep, the private positions-poll cohort, the orphan-reaped trigger and the `sanitize_user` ledger purge. See the 0.133.67.0 entry. The first-hop sweep was registered on PROD after the apply (`docs/runbooks/jobledger-go-live.md`).
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45429669614` succeeded, and this entry was composed by the `redump-pr` job. Run `45429669614` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
 
