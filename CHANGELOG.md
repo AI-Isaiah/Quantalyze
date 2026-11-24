@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.133.71.0] - 2026-11-24 — Phase 238 NEVERCOMPUTED PR-1: a strategy that failed, stalled or never started names what to do next, never tells its owner to wait
+
+This is PR-1 of Phase 238 (FACT-05). It changes copy and test files only: no migration, no analytics-service change, no new jobs read. PR-2 (FACT-03, the nullable `strategy_analytics.computed_at` migration and its reader census, plans 238-04 to 238-09) is planned and gated: it waits for Phase 233 DERIBITTRUTH to merge and for the coordinator to free the one serial migration lane. Nothing from PR-2 is in this release.
+
+### Changed
+- **`/strategies`, unpublished rows: the private-link share note names the remedy.** A row whose private link shows "not available", with compute state `failed`, `stalled` or `never_started` and no unbuildable kind, now reads the new lead `KCS12_MINT_B_LEAD` ("Right now, a private link to this strategy shows that its factsheet is not available."), a space, then the action its remedy names. Examples: re-sync from the edit page, link a key, check the key on the Exchanges page, or use the contact form. Until now these rows read the KCS12-MINT-B sentence "… not available yet. The numbers appear there once a computation succeeds.", which told the owner to wait while nothing was running.
+  - The action always goes through `viewerRemedyAction`, never raw `ownerRemedy`, so an allocator-only viewer is never sent to the manager-guarded edit page or CSV wizard (199 CD-11).
+  - The action comes from the row's one existing jobs read, so the note and the row's Health detail always name the same action. When the shape cannot be read, the note asks for a reload and carries no link.
+  - `in_progress`, every unbuildable note and every probe-unreadable note are unchanged byte for byte.
+- **An unread compute state gets a neutral note, never a promise that numbers are coming** (founder ruling 2026-11-24, "Neutral 'unknown' note").
+  - When the jobs read fails, the private-link note was KCS12-UNREADABLE: "… shows a placeholder page instead of the numbers. They appear there once a computation succeeds." That promised numbers about a state nobody had read.
+  - It is now the new `KCS12_MINT_B_UNKNOWN`: "Right now, a private link to this strategy opens a page without its factsheet. If no computation is running, use the contact form to have it checked."
+  - The tail is the published row's KCS12-PUBLIC-UNKNOWN tail.
+  - The lead deliberately differs: the private share page shows "being prepared" while a computation runs and "not available" otherwise, and an unread state cannot tell which. "Opens a page without its factsheet" is true for both. This lead comes from the ruling's reviewer pass (MEDIUM).
+  - It reaches every caller of the private-link `unreadable` arm: the `/strategies` unpublished row, the owner pending factsheet page's fallback and the string API.
+- **`/strategies`, published rows: the public-link note reads the state the page already reads.** It uses the existing `failedFacts` read, and adds no jobs RPC.
+  - A failed, stalled or never-started published row reads `KCS12_PUBLIC_LEAD` plus the same viewer-mapped action.
+  - A running state keeps the in-progress words, and a finished state keeps the finished-not-built line.
+  - A row with no state entry, or one whose jobs read failed, reads `KCS12_PUBLIC_UNKNOWN`. It makes no promise that numbers are coming.
+- **Owner pending factsheet page (`/factsheet/[id]`): the panel's share note names the same action as the KCS-09 remedy line below it**, instead of the retired wait sentence. `OwnerUnpublishedPanel`'s `shareNote` now takes a node.
+- **KCS12-MINT-B is retired from the string API** (`recipientShareNote` / `MINT_TOKEN_NOTES` in `src/lib/status-surface-copy.ts`). `not_available` now reads the lead plus "Use the contact form to have it checked."
+  - `recipientShareNote` is now arm-aware for a public URL: `in_progress` keeps the KCS12-PUBLIC words, `not_available` reads the public lead plus contact-check, and `unreadable` reads KCS12-PUBLIC-UNKNOWN.
+  - `DegradeLine.tsx`'s file-local `Action` is now the exported `DegradeAction`, so both pages render the action from one place.
+
+### Fixed
+- **An allocator-only owner on their own pending factsheet page is no longer linked to manager-guarded routes** (review WR-01, fix round 1).
+  - The owner lane now reads the viewer's `profiles.role`, through the request client and only when a remedy line exists. Both the share note and the KCS-09 remedy line take their action through `viewerRemedyAction`.
+  - Before, the remedy line could link an allocator-only owner (who can own wizard drafts, CD-10) to `/strategies/{id}/edit` or the CSV wizard, both manager-only. This predates the phase, and the new note would have doubled it.
+  - Manager and `both` owners render exactly as before.
+  - A failed role read logs, goes to Sentry (stage `owner-role`) and falls back to not-a-manager. Every action that fallback can pick opens for every role.
+
+### Removed
+- **TODOS entry `[170.1-STRATEGIES-NOTE-WAIT-WORDING]`**, deleted outright. Its owner, Phase 238, closes it here: each of the three states gets a note naming what the owner can do, with a `page.key-pill.test.tsx` case per state, and the `it.each` over those states is re-pointed, not deleted. No pointer to the id remains outside the planning records.
+
+### Tests
+- **`page.key-pill.test.tsx`:**
+  - a `NEVERCOMPUTED` block covers failed, stalled and never_started, asserting the full sentence, the link count and href, and four forbidden wait phrases;
+  - every former MINT_B site and the `D-08 R-1 VARIANT` it.each are re-pointed;
+  - the retired sentence is kept only as a negative constant.
+- **`page.merged.test.tsx`:**
+  - a role-by-action matrix (13 cases, manager/both, allocator-only, shape-unknown reload);
+  - Health-detail parity on 3 fixtures;
+  - published failed, running and finished cases;
+  - from fix round 1: published transient as manager and as allocator-only, published never_started for both roles, and a published row with a failed jobs read reading `KCS12_PUBLIC_UNKNOWN` exactly.
+- **`page.owner-compute-state.test.tsx`:**
+  - `SHARE-NOTE-B` is re-pointed;
+  - allocator-only single, unlinked and CSV owners, and a `both` owner, are pinned;
+  - from fix round 2: a failed role read and a missing profile row both read as not-a-manager, and the read asks for the owner's own row.
+- **`status-surface-copy.test.ts`:**
+  - a `NEVERCOMPUTED grep invariant` checks that no string-API input yields the retired sentence;
+  - a walk covers every composed note (all 9 actions in `ANALYTICS_FAILED_ACTIONS`);
+  - `DISTINCT_FLOOR` is raised from 50 to the measured 73.
+- The KCS12-UNREADABLE pins are re-pointed to `KCS12_MINT_B_UNKNOWN`: the /strategies RPC-error, RPC-throw, unreadable-variant and window-full cases, the owner page's `SHARE-NOTE-UNREADABLE`, and the string-API case. The RPC-error case also asserts that neither "once a computation succeeds" nor "placeholder page" appears.
+- **Every new or re-pointed gate was shown RED on a neutered copy, then GREEN after a `cp` byte restore checked by `cmp`.** That is 15 neuters across the three plans and two fix rounds, for example raw `ownerRemedyAction` in place of `viewerRemedyAction`, a forced `managerSurface: true`, and a role-read error read as manager.
+
+### Notes
+- **Review:** two rounds of gsd-code-reviewer and silent-failure-hunter.
+  - Round 1 found two MEDIUMs: WR-01 (fixed above) and WR-02 (the published path's role mapping was untested, now pinned).
+  - Round 1's silent-failure-hunter also found the unread-state wait promise. It was pinned by the UI-SPEC and answered by the founder ruling above.
+  - Round 2 found one MEDIUM: the role-read failure arm was untested, now pinned.
+  - The ruling change had its own reviewer pass.
+  - No HIGH or CRITICAL finding. LOW and INFO findings are recorded in the phase REVIEW only.
+- **Deviation from the approved UI-SPEC §1.1 row 5, recorded:** that row kept KCS12-UNREADABLE for an unread state. The founder ruling above replaces it.
+- **Deviation from the approved UI-SPEC §1.7, recorded:** §1.7 said the owner page needed no viewer mapping. Review WR-01 showed an allocator-only owner exists, so the mapping was added to both the note and the remedy line. The note still names the remedy line's action.
+- **Known limit, recorded rather than fixed:** the 390px wrap of the longest composed notes is not measured by any test.
+
 ## [0.133.70.0] - 2026-11-24 — Phase 232 OKXTRADES: an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades
 
 Analytics service only (`analytics-service/services/exchange.py`, `services/job_worker.py`, `services/trade_resume.py`, `routers/cron.py`) plus two dated runbook corrections. No migration, no RPC change, no frontend change. Covers VREAD-06, VREAD-07 and VREAD-08. Built from 15 phase commits (four plans of three commits each, the plan-02 merge `0cdf250c5`, and two review fixes), each mapped below by hash.

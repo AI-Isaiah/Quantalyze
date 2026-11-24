@@ -1,9 +1,13 @@
 import { describe, it, expect } from "vitest";
 import type { ComputeState } from "./compute-state";
+import { ACTION_SENTENCES, ANALYTICS_FAILED_ACTIONS } from "./degrade-warnings";
 import {
   ANALYTICS_UPDATING_LINE,
   EXCHANGE_LIST,
   KCS10_PUBLIC_SENTENCE,
+  KCS12_MINT_B_LEAD,
+  KCS12_PUBLIC_LEAD,
+  KCS12_PUBLIC_UNKNOWN,
   KEY_STATUS_UNREADABLE_NOTE,
   KEY_STORAGE_LINK,
   KEY_STORAGE_SENTENCE,
@@ -275,24 +279,53 @@ describe("S5 / S7 — KCS-12 share notes", () => {
     );
   });
 
-  it("KCS12-MINT-B: private link, not available", () => {
+  // Phase 238 (FACT-05): KCS12-MINT-B ("... not available yet. The numbers appear
+  // there once a computation succeeds.") is RETIRED. The string API still answers
+  // the arm, and its answer is true in every state and for every role: the lead
+  // plus the contact form. A page that knows the state composes lead + action.
+  it("KCS12-MINT-B-LEAD: the private-link lead, pinned character for character", () => {
+    expect(KCS12_MINT_B_LEAD).toBe(
+      "Right now, a private link to this strategy shows that its factsheet is not available.",
+    );
+  });
+
+  it("KCS12-PUBLIC-LEAD: the public-link lead, pinned character for character", () => {
+    expect(KCS12_PUBLIC_LEAD).toBe(
+      "Right now, this strategy's factsheet link shows that the factsheet is not available.",
+    );
+  });
+
+  it("KCS12-PUBLIC-UNKNOWN: the public-link note for a state that was not read, pinned character for character", () => {
+    expect(KCS12_PUBLIC_UNKNOWN).toBe(
+      "Right now, this strategy's factsheet link shows that the factsheet is not available. If no computation is running, use the contact form to have it checked.",
+    );
+  });
+
+  it("KCS12-MINT-B retired: the private link's not_available answer is the lead plus the contact-check remedy", () => {
     expect(recipientShareNote("mint-token", "not_available")).toBe(
-      "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.",
+      "Right now, a private link to this strategy shows that its factsheet is not available. Use the contact form to have it checked.",
     );
   });
 
-  it("KCS12-UNREADABLE: private link, state unreadable", () => {
+  it("KCS12-MINT-B-UNKNOWN: private link, state unreadable (founder ruling 2026-11-24, replaces KCS12-UNREADABLE)", () => {
     expect(recipientShareNote("mint-token", "unreadable")).toBe(
-      "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.",
+      "Right now, a private link to this strategy opens a page without its factsheet. If no computation is running, use the contact form to have it checked.",
     );
   });
 
-  it("KCS12-PUBLIC: public URL, any arm", () => {
-    for (const arm of ["in_progress", "not_available", "unreadable"] as const) {
-      expect(recipientShareNote("public-url", arm)).toBe(
-        "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.",
-      );
-    }
+  it("KCS12-PUBLIC: public URL, in progress only, keeps its words", () => {
+    expect(recipientShareNote("public-url", "in_progress")).toBe(
+      "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.",
+    );
+  });
+
+  it("KCS12-PUBLIC arms: not_available is the public lead plus the contact-check remedy, unreadable is KCS12-PUBLIC-UNKNOWN", () => {
+    expect(recipientShareNote("public-url", "not_available")).toBe(
+      "Right now, this strategy's factsheet link shows that the factsheet is not available. Use the contact form to have it checked.",
+    );
+    expect(recipientShareNote("public-url", "unreadable")).toBe(
+      "Right now, this strategy's factsheet link shows that the factsheet is not available. If no computation is running, use the contact form to have it checked.",
+    );
   });
 });
 
@@ -471,6 +504,16 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
         }
       }
     }
+    // Phase 238: the same holds for the kind-less not_available arm of both modes
+    // and for the public unreadable arm. Those rows are not computing either.
+    for (const mode of ["mint-token", "public-url"] as const) {
+      expect(recipientShareNoteFor(mode, "not_available", null)).not.toContain(
+        "once a computation succeeds",
+      );
+    }
+    expect(recipientShareNoteFor("public-url", "unreadable", null)).not.toContain(
+      "once a computation succeeds",
+    );
   });
 
   it("unbuildableNoteKindOf maps every probe reason, and only the build-time refusals to a kind", () => {
@@ -749,6 +792,74 @@ describe("Phase 164.6.6.3.5 DOMAINONE — no status surface names an address", (
   });
 });
 
+// Phase 238 (FACT-05). KCS12-MINT-B is retired, so no input to the share-note family may
+// return it, and no note a kind-less not_available or unread public row can render may
+// promise a change or tell the reader to wait. The composed notes are what the pages
+// build: a lead, one space, then an action sentence. `ANALYTICS_FAILED_ACTIONS` is every
+// id `ownerRemedyAction` can return plus the allocator-only viewer's Exchanges action, so
+// it is every action either page can put after a lead.
+const RETIRED_MINT_B =
+  "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.";
+const NEVERCOMPUTED_FORBIDDEN = ["yet", "once a computation succeeds", "appear there", "wait"] as const;
+const COMPOSED_LEADS = [KCS12_MINT_B_LEAD, KCS12_PUBLIC_LEAD] as const;
+const composedNotes = (): string[] =>
+  COMPOSED_LEADS.flatMap((lead) =>
+    ANALYTICS_FAILED_ACTIONS.map((id) => `${lead} ${ACTION_SENTENCES[id].sentence}`),
+  );
+
+describe("NEVERCOMPUTED grep invariant (Phase 238 FACT-05): a never-computed row is never told to wait", () => {
+  const MODES = ["mint-token", "public-url"] as const;
+  const ARMS = ["in_progress", "not_available", "unreadable"] as const;
+  const KINDS = ["too_short", "cannot_build", "analytics_failed", "finished_not_built"] as const;
+
+  const answers: Array<[string, string]> = [
+    ...MODES.flatMap((mode) => [
+      [`${mode} not_available`, recipientShareNote(mode, "not_available")] as [string, string],
+      [`${mode} not_available (for, null)`, recipientShareNoteFor(mode, "not_available", null)] as [string, string],
+    ]),
+    ["public-url unreadable", recipientShareNote("public-url", "unreadable")],
+    ["KCS12-PUBLIC-UNKNOWN", KCS12_PUBLIC_UNKNOWN],
+    ["KCS12-MINT-B-LEAD", KCS12_MINT_B_LEAD],
+    ["KCS12-PUBLIC-LEAD", KCS12_PUBLIC_LEAD],
+    ...composedNotes().map((note, i) => [`composed note ${i}`, note] as [string, string]),
+  ];
+
+  it.each(answers)("%s carries none of the wait phrases", (_name, text) => {
+    for (const phrase of NEVERCOMPUTED_FORBIDDEN) {
+      expect(text.toLowerCase(), `"${phrase}" in: ${text}`).not.toContain(phrase);
+    }
+  });
+
+  it("the composed notes are 2 leads x every action the pages can put after one, and none says no computation is running", () => {
+    const notes = composedNotes();
+    expect(notes).toHaveLength(COMPOSED_LEADS.length * ANALYTICS_FAILED_ACTIONS.length);
+    expect(new Set(notes).size).toBe(notes.length);
+    for (const note of notes) expect(note).not.toContain("no computation is running");
+  });
+
+  it("no input to the share-note family returns the retired KCS12-MINT-B sentence", () => {
+    for (const mode of MODES) {
+      for (const arm of ARMS) {
+        expect(recipientShareNote(mode, arm)).not.toBe(RETIRED_MINT_B);
+        for (const kind of [null, ...KINDS] as const) {
+          expect(recipientShareNoteFor(mode, arm, kind)).not.toBe(RETIRED_MINT_B);
+        }
+      }
+    }
+  });
+
+  it("KCS12-PUBLIC keeps the old words only for the public-url in_progress arm", () => {
+    const PUBLIC_OLD =
+      "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
+    for (const mode of MODES) {
+      for (const arm of ARMS) {
+        const isPublicInProgress = mode === "public-url" && arm === "in_progress";
+        expect(recipientShareNote(mode, arm) === PUBLIC_OLD).toBe(isPublicInProgress);
+      }
+    }
+  });
+});
+
 describe("170.1 D-09 — grep invariant: no rendered status-surface string carries a passive or timing phrase", () => {
   // UI-SPEC "Grep invariant after the phase": none of status-surface-copy.ts's
   // RENDERED strings contains these. The module's tables are private on
@@ -759,10 +870,14 @@ describe("170.1 D-09 — grep invariant: no rendered status-surface string carri
   // `untrustedKeyCaption` is excluded: it echoes exchange display names, it is
   // not authored copy.
   const FORBIDDEN = ["could not be", "Try again in a moment", "Try again later", "Large accounts"] as const;
-  // Measured at write time (see the 170.1-05 SUMMARY); equals the design count
-  // of 17 state lines + 8 remedies + 4 arm notes + 12 unbuildable notes + 2
-  // probe notes + 7 exported constant strings. Never lower it to fit.
-  const DISTINCT_FLOOR = 50;
+  // Re-measured by Phase 238 (238-03), RAISED from 50 to 73. The 170.1 floor of 50 was its
+  // design count: 17 state lines + 8 remedies + 4 arm notes + 12 unbuildable notes + 2 probe
+  // notes + 7 exported constant strings. Phase 238 retired KCS12-MINT-B (the arm note is now
+  // the lead plus the contact-check remedy), made KCS12-PUBLIC arm-aware, and added the two
+  // leads, KCS12-PUBLIC-UNKNOWN and the composed lead-plus-action notes (2 leads x the 9
+  // actions in `ANALYTICS_FAILED_ACTIONS`, two of which equal a string-API answer and so add
+  // no distinct string). The walk's measured distinct-string count is 73. Never lower it to fit.
+  const DISTINCT_FLOOR = 73;
 
   const MODES = ["mint-token", "public-url"] as const;
   const ARMS = ["in_progress", "not_available", "unreadable"] as const;
@@ -818,6 +933,10 @@ describe("170.1 D-09 — grep invariant: no rendered status-surface string carri
       KEY_STORAGE_SENTENCE,
       LISTING_COST_SENTENCE,
       EXCHANGE_LIST,
+      KCS12_MINT_B_LEAD,
+      KCS12_PUBLIC_LEAD,
+      KCS12_PUBLIC_UNKNOWN,
+      ...composedNotes(),
     ]) {
       out.add(text);
     }

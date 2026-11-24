@@ -775,12 +775,30 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   // anywhere in between goes red.
   const MINT_A =
     "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.";
-  const MINT_B =
+  // KCS12-MINT-B, RETIRED by Phase 238 FACT-05: its "yet" and its "once a
+  // computation succeeds" promise a change while nothing is running. Kept only for
+  // the negative assertions below, so a regression that renders it goes RED.
+  const RETIRED_MINT_B =
     "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.";
+  // Phase 238 FACT-05 (UI-SPEC Copywriting Contract), typed out character for
+  // character, never imported: the unpublished note for a row whose link shows
+  // "not available" while nothing is running names the row's action.
+  const MINT_B_RESYNC_EDIT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Start a new computation with Resync on this strategy's edit page. Use the contact form if it does not complete.";
+  const MINT_B_LINK_KEY_EDIT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Link a key with Change key… on this strategy's edit page (add one on your Profile API keys tab first if you have none) to start a new computation. Use the contact form if it does not complete.";
+  const MINT_B_CONTACT_RESOLVE =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Use the contact form to have it resolved.";
+  const MINT_B_RELOAD =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Reload this page to try again.";
   const UNREADABLE =
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
+    "Right now, a private link to this strategy opens a page without its factsheet. If no computation is running, use the contact form to have it checked.";
   const PUBLIC =
     "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
+  // Phase 238 FACT-05: a published row whose compute state was not read (Health
+  // Updating, so `failedFacts` holds no entry). Typed out, never imported.
+  const PUBLIC_UNKNOWN =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. If no computation is running, use the contact form to have it checked.";
   // Phase 167.2.1 (D-02) — typed out from 167.2.1-CONTEXT.md, never imported.
   // Reworded by 167.2.1-REVIEW CR-01 and IN-02 (2026-09-26): the reason is
   // stated from the stored results, in the active voice.
@@ -1286,7 +1304,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     try {
       const container = await renderPage();
 
-      expect(noteOf(container, "Strategy c-1")).toBe(MINT_B);
+      expect(noteOf(container, "Strategy c-1")).toBe(MINT_B_CONTACT_RESOLVE);
       // 167.2.1-REVIEW-SFH M-5: the race is logged, so its rate is
       // measurable, and never captured.
       expect(consoleWarn).toHaveBeenCalledWith(
@@ -1334,6 +1352,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       expect(noteOf(container, "Strategy s-held")).toBeNull();
       expect(noteOf(container, "Strategy s-held-p")).toBeNull();
       expect(container.textContent).not.toContain(PUBLIC);
+      expect(container.textContent).not.toContain(PUBLIC_UNKNOWN);
     } finally {
       consoleWarn.mockRestore();
     }
@@ -1358,7 +1377,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       const container = await renderPage();
 
       expect(state.adminStrategyReads).toEqual(["s-first"]);
-      expect(noteOf(container, "Strategy s-first")).toBe(PUBLIC);
+      expect(noteOf(container, "Strategy s-first")).toBe(PUBLIC_UNKNOWN);
       // The embed said computing, so `not_computed` is the expected answer,
       // not a disagreement between two reads.
       expect(consoleWarn).not.toHaveBeenCalledWith(
@@ -1414,7 +1433,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(noteOf(container, "Strategy s-1")).not.toBe(MINT_A);
   });
 
-  it("MINT-B: an unpublished row whose stitch failed permanently says the private link shows it not available", async () => {
+  it("MINT-B: an unpublished row whose stitch failed permanently says the private link shows it not available and names the contact form", async () => {
     state.strategies = [row("c-1", { status: "draft", strategy_analytics: [{ computation_status: "pending" }] })];
     state.jobs = {
       "c-1": [
@@ -1429,13 +1448,13 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy c-1")).toBe(MINT_B);
+    expect(noteOf(container, "Strategy c-1")).toBe(MINT_B_CONTACT_RESOLVE);
   });
 
   // 164.6.6.3.3 D-08 / B24: a `failed` analytics row takes the uncomputed
   // branch (never probed). Its note says analytics are not available, in the
   // recipient's own terms, and names no status, job or error.
-  it("B24 ANALYTICS-FAILED private link: a draft row whose analytics failed (stitch failed, arm not_available) takes the analytics-failed note, not MINT-B", async () => {
+  it("B24 ANALYTICS-FAILED private link: a draft row whose analytics failed (stitch failed, arm not_available) takes the analytics-failed note, not the MINT-B remedy note", async () => {
     state.strategies = [row("c-1", { status: "draft", strategy_analytics: [{ computation_status: "failed" }] })];
     state.jobs = {
       "c-1": [
@@ -1495,8 +1514,8 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-comp")).toBe(MINT_B);
-    expect(noteOf(container, "Strategy s-pend")).toBe(MINT_B);
+    expect(noteOf(container, "Strategy s-comp")).toBe(MINT_B_CONTACT_RESOLVE);
+    expect(noteOf(container, "Strategy s-pend")).toBe(MINT_B_CONTACT_RESOLVE);
   });
 
   it("B24 PROBE-NOT-COMPUTED race: the embed says complete but the builder's read says failed -> the analytics-failed note", async () => {
@@ -1521,13 +1540,17 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     }
   });
 
-  it("UNREADABLE: an RPC error renders KCS12-UNREADABLE and is logged, never an in-progress claim", async () => {
+  it("UNREADABLE: an RPC error renders KCS12-MINT-B-UNKNOWN (founder ruling 2026-11-24, neutral unknown note) and is logged, never an in-progress claim and never a promise that numbers are coming", async () => {
     state.strategies = [row("s-1", { status: "draft", strategy_analytics: null })];
     state.jobsError = { message: "synthetic rpc failure" };
 
     const container = await renderPage();
 
     expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+    // Founder ruling 2026-11-24: an unread state makes no wait promise, and the
+    // note's one action, the contact form, is a link open to every role.
+    expect(noteOf(container, "Strategy s-1")).not.toContain("once a computation succeeds");
+    expect(noteOf(container, "Strategy s-1")).not.toContain("placeholder page");
     expect(consoleError).toHaveBeenCalledWith(
       "[strategies/page] compute-state read failed",
       expect.objectContaining({ id: "s-1", message: "synthetic rpc failure" }),
@@ -1538,7 +1561,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     });
   });
 
-  it("UNREADABLE: an RPC that throws renders KCS12-UNREADABLE and is logged", async () => {
+  it("UNREADABLE: an RPC that throws renders KCS12-MINT-B-UNKNOWN and is logged", async () => {
     state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "pending" } })];
     state.jobsThrow = true;
 
@@ -1559,7 +1582,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_UNKNOWN);
   });
 
   it("IN03-CONVERTED (167.2-REVIEW IN-03): a row with no members is judged by its newer chain job, not an old stitch", async () => {
@@ -1589,7 +1612,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-1")).toBe(MINT_B);
+    expect(noteOf(container, "Strategy s-1")).toBe(MINT_B_RELOAD);
   });
 
   it("PUBLIC-NO-READ (167.2-REVIEW IN-04): a published row's note is the public-URL line whatever the arm, so its jobs are never read", async () => {
@@ -1600,7 +1623,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_UNKNOWN);
     // The read's answer was discarded, so a failure in it logged an error
     // about a value nobody reads.
     expect(state.rpcCalls).toEqual([]);
@@ -1710,7 +1733,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
           ],
         };
       },
-      expected: () => MINT_B,
+      expected: () => MINT_B_RELOAD,
     },
     {
       variant: "failed",
@@ -1726,14 +1749,14 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
           ],
         };
       },
-      expected: () => MINT_B,
+      expected: () => MINT_B_CONTACT_RESOLVE,
     },
     {
       variant: "never_started",
       setup: () => {
         state.jobs = { "s-1": [] };
       },
-      expected: () => MINT_B,
+      expected: () => MINT_B_LINK_KEY_EDIT,
     },
     {
       variant: "unreadable",
@@ -1754,6 +1777,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
       const note = noteOf(container, "Strategy s-1");
       expect(note).toBe(expected());
+      expect(note).not.toBe(RETIRED_MINT_B);
       expect(note).not.toBe(FINISHED_NOT_BUILT);
       expect(note).not.toContain("The last computation finished");
     },
@@ -1774,7 +1798,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_UNKNOWN);
     expect(state.rpcCalls).toEqual([]);
   });
 
@@ -1853,10 +1877,10 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     expect(state.rpcCalls.map((c) => (c.args as { p_limit: number }).p_limit)).toEqual([100, 1000]);
     // Exhaustive at 1000 with no chain job: never started, not "unreadable".
-    expect(noteOf(container, "Strategy s-1")).toBe(MINT_B);
+    expect(noteOf(container, "Strategy s-1")).toBe(MINT_B_LINK_KEY_EDIT);
   });
 
-  it("WINDOW-FULL (167.2-REVIEW-SFH M-5): a window still full at the cap renders KCS12-UNREADABLE and is logged and captured as its own case", async () => {
+  it("WINDOW-FULL (167.2-REVIEW-SFH M-5): a window still full at the cap renders KCS12-MINT-B-UNKNOWN and is logged and captured as its own case", async () => {
     state.strategies = [row("s-1", { status: "draft", strategy_analytics: null })];
     state.jobs = { "s-1": cron(1000) };
 
@@ -1869,6 +1893,89 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     );
     expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
       tags: { route: "strategies/page", stage: "compute-state-window-full" },
+    });
+  });
+
+  // ── Phase 238 FACT-05 (NEVERCOMPUTED): a row that never computed, failed or
+  // stalled never tells its owner to wait. The note names the action the row's
+  // remedy names (founder ruling "FACT-05: the note wording", (a) Reuse the
+  // remedy), one case per state. Each asserts the whole sentence, the exact link
+  // count and href, and the four phrases that promise a wait.
+  describe("NEVERCOMPUTED: an unpublished row whose link shows 'not available' names its action", () => {
+    const FORBIDDEN = ["yet", "once a computation succeeds", "appear there", "no computation is running"];
+    const expectNoWait = (note: string | null) => {
+      for (const phrase of FORBIDDEN) expect(note).not.toContain(phrase);
+    };
+    const linksOf = (container: HTMLElement, name: string) =>
+      [...shareNoteOf(container, name)!.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+
+    it("failed (permanent): the contact form, the one link on `contact form`", async () => {
+      state.strategies = [
+        row("n-fail", { status: "draft", strategy_analytics: { computation_status: "pending" } }),
+      ];
+      state.jobs = {
+        "n-fail": [
+          {
+            kind: "stitch_composite",
+            status: "failed_final",
+            error_kind: "permanent",
+            created_at: "2026-02-01T00:00:00.000Z",
+          },
+        ],
+      };
+
+      const container = await renderPage();
+
+      const note = noteOf(container, "Strategy n-fail");
+      expect(note).toBe(MINT_B_CONTACT_RESOLVE);
+      expect(linksOf(container, "Strategy n-fail")).toEqual(["/contact?topic=support&strategy=n-fail"]);
+      expect(shareNoteOf(container, "Strategy n-fail")!.querySelector("a")!.textContent).toBe("contact form");
+      expectNoWait(note);
+    });
+
+    it("stalled (single key, a stitch heartbeat gone quiet): Resync on the edit page, the one link on `edit page`", async () => {
+      // Stall is stitch-only (`isStitchStalled`): a running stitch whose heartbeat
+      // (claimed_at, no member_progress_at) is older than STALL_THRESHOLD_MS. A
+      // linked key makes the shape `single` whatever the stitch history.
+      state.strategies = [
+        row("n-stall", {
+          status: "draft",
+          api_key_id: "k-n-stall",
+          strategy_analytics: { computation_status: "pending" },
+        }),
+      ];
+      state.jobs = {
+        "n-stall": [
+          {
+            kind: "stitch_composite",
+            status: "running",
+            created_at: isoMinutesAgo(60),
+            claimed_at: isoMinutesAgo(60),
+          },
+        ],
+      };
+
+      const container = await renderPage();
+
+      const note = noteOf(container, "Strategy n-stall");
+      expect(note).toBe(MINT_B_RESYNC_EDIT);
+      expect(linksOf(container, "Strategy n-stall")).toEqual(["/strategies/n-stall/edit"]);
+      expect(shareNoteOf(container, "Strategy n-stall")!.querySelector("a")!.textContent).toBe("edit page");
+      expectNoWait(note);
+    });
+
+    it("never_started (no key, no members, no jobs): Change key on the edit page, one edit link", async () => {
+      state.strategies = [
+        row("n-new", { status: "draft", strategy_analytics: { computation_status: "pending" } }),
+      ];
+      state.jobs = { "n-new": [] };
+
+      const container = await renderPage();
+
+      const note = noteOf(container, "Strategy n-new");
+      expect(note).toBe(MINT_B_LINK_KEY_EDIT);
+      expect(linksOf(container, "Strategy n-new")).toEqual(["/strategies/n-new/edit"]);
+      expectNoWait(note);
     });
   });
 });

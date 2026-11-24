@@ -38,10 +38,12 @@ import {
   selectFactsheetJob,
   type ComputeState,
 } from "@/lib/compute-state";
-import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { DegradeAction, DegradeLine } from "@/components/degrade/DegradeLine";
 import {
   degradeSegments,
+  ownerRemedyAction,
   ownerStateKind,
+  viewerRemedyAction,
   type DegradeId,
   type OwnerStateKind,
 } from "@/lib/degrade-warnings";
@@ -50,6 +52,7 @@ import {
   readOwnerCompositeHistory,
 } from "@/lib/compute-jobs-read";
 import {
+  KCS12_MINT_B_LEAD,
   lastAttemptDay,
   ownerRemedy,
   ownerStateLine,
@@ -870,6 +873,35 @@ export default async function FactsheetV2Page({
     const ownerRemedyLine =
       ownerStatus &&
       ownerRemedy(ownerStatus.state, ownerStatus.shape, signature.id, ownerBuildFacts);
+    // Phase 238 (WR-01): the owner is not always a manager. An allocator-only
+    // user owns wizard drafts (CD-10), and the edit page and the CSV wizard are
+    // manager-guarded, so the share note and the KCS-09 remedy line map their
+    // action through `viewerRemedyAction`, as /strategies does. The role is read
+    // only on the owner lane; a read that fails reads as not-a-manager, so the
+    // owner is never sent to a route that bounces them.
+    let ownerManagerSurface = false;
+    if (lane === "owner" && ownerRemedyLine) {
+      const { data: ownerProfile, error: ownerProfileError } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", signature.user_id)
+        .maybeSingle();
+      if (ownerProfileError) {
+        console.error("[factsheet/v2/page] owner role read failed:", ownerProfileError);
+        captureToSentry(ownerProfileError, {
+          tags: { route: "factsheet/v2/page", stage: "owner-role" },
+        });
+      }
+      ownerManagerSurface = ownerProfile?.role === "manager" || ownerProfile?.role === "both";
+    }
+    const ownerRemedyViewerAction =
+      ownerStatus && ownerRemedyLine
+        ? viewerRemedyAction({
+            remedy: ownerRemedyLine,
+            managerSurface: ownerManagerSurface,
+            shape: ownerStatus.shape,
+          })
+        : null;
     // Phase 164.6.6.3.5 (AD-05): the remedy's "contact form" phrase links the
     // support topic with this strategy's id. Same tab: this page holds no
     // unsaved state.
@@ -926,15 +958,37 @@ export default async function FactsheetV2Page({
             // build could not read the row, what a recipient sees is not
             // known, so the note says the check failed rather than claiming a
             // placeholder, exactly as /strategies does for a failed probe.
+            //
+            // Phase 238 (FACT-05): for the kind-less not_available arm (the
+            // jobs failed, stalled, finished or never started, and the build
+            // gave no reason of its own) the note is the lead plus the SAME
+            // action the KCS-09 remedy line below renders. It maps the SAME
+            // `ownerRemedyLine` object, so the two cannot differ, and it
+            // never tells the owner to wait for a computation that is not
+            // coming. Both lines take their action through `viewerRemedyAction`
+            // (WR-01): an allocator-only owner is never linked to the
+            // manager-guarded edit page or CSV wizard.
             shareNote={
               ownerStatus
                 ? ownerBuildability?.unreadable
                   ? probeUnreadableShareNote("mint-token")
-                  : recipientShareNoteFor(
-                      "mint-token",
-                      recipientArm(ownerStatus.state),
-                      ownerBuildability?.kind ?? null,
-                    )
+                  : recipientArm(ownerStatus.state) === "not_available" &&
+                      (ownerBuildability?.kind ?? null) === null &&
+                      ownerRemedyViewerAction
+                    ? (
+                        <>
+                          {KCS12_MINT_B_LEAD}{" "}
+                          <DegradeAction
+                            id={ownerRemedyViewerAction}
+                            strategyId={signature.id}
+                          />
+                        </>
+                      )
+                    : recipientShareNoteFor(
+                        "mint-token",
+                        recipientArm(ownerStatus.state),
+                        ownerBuildability?.kind ?? null,
+                      )
                 : undefined
             }
           />
@@ -962,16 +1016,22 @@ export default async function FactsheetV2Page({
               {ownerLine.text}
             </p>
             <p className="mt-3 text-fixed-12 text-text-muted">
-              <ContactPointerText text={ownerRemedyLine.before} href={supportContactHref} />
-              {ownerRemedyLine.link && (
-                <Link
-                  href={ownerRemedyLine.link.href}
-                  className="text-accent underline underline-offset-4"
-                >
-                  {ownerRemedyLine.link.text}
-                </Link>
+              {ownerRemedyViewerAction !== ownerRemedyAction(ownerRemedyLine) ? (
+                <DegradeAction id={ownerRemedyViewerAction!} strategyId={signature.id} />
+              ) : (
+                <>
+                  <ContactPointerText text={ownerRemedyLine.before} href={supportContactHref} />
+                  {ownerRemedyLine.link && (
+                    <Link
+                      href={ownerRemedyLine.link.href}
+                      className="text-accent underline underline-offset-4"
+                    >
+                      {ownerRemedyLine.link.text}
+                    </Link>
+                  )}
+                  <ContactPointerText text={ownerRemedyLine.after} href={supportContactHref} />
+                </>
               )}
-              <ContactPointerText text={ownerRemedyLine.after} href={supportContactHref} />
             </p>
           </section>
         ) : (
