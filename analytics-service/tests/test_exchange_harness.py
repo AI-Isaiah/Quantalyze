@@ -80,6 +80,37 @@ def _make_okx_exchange() -> MagicMock:
     return exchange
 
 
+# Phase 232 VREAD-07: the OKX bills read walks day-aligned windows and refuses a bill the venue served
+# outside the window it asked for, so a canned page that ignores ``begin``/``end`` no longer models the
+# venue. These tests pin "now" and serve bills through ``_WindowedBills``.
+OKX_NOW_MS = 1795176000000  # 2026-11-20T12:00:00Z
+OKX_DAY_MS = 86_400_000
+OKX_D0_MS = 1794268800000  # 2026-11-10T00:00:00Z, a UTC-day boundary inside the live reach
+OKX_REACH_START_MS = 1787097600000  # 2026-08-19T00:00:00Z: OKX_NOW_MS minus 93 days, floored to the UTC day
+
+
+class _WindowedBills:
+    """A canned OKX bills endpoint that honours ``begin``/``end``/``instType`` and, for numeric
+    ``billId`` values, serves newest first and pages by ``after`` (as the venue does)."""
+
+    def __init__(self, bills):
+        self.bills = list(bills)
+        self.calls = []
+
+    async def __call__(self, params):
+        self.calls.append(dict(params))
+        rows = [b for b in self.bills if b.get("instType") == params.get("instType", b.get("instType"))]
+        if "begin" in params:
+            rows = [b for b in rows if int(b["ts"]) >= int(params["begin"])]
+        if "end" in params:
+            rows = [b for b in rows if int(b["ts"]) <= int(params["end"])]
+        if rows and all(str(b["billId"]).isdigit() for b in rows):
+            rows.sort(key=lambda b: int(b["billId"]), reverse=True)
+            if params.get("after"):
+                rows = [b for b in rows if int(b["billId"]) < int(params["after"])]
+        return {"data": rows[:100]}
+
+
 def _make_binance_exchange() -> MagicMock:
     """Create a MagicMock that quacks like a Binance CCXT exchange."""
     exchange = MagicMock(spec=ccxt.binance)
@@ -107,13 +138,19 @@ def _make_bybit_exchange() -> MagicMock:
 class TestOKXFetchDailyPnl:
     """Tests for the OKX branch of fetch_daily_pnl."""
 
+    @pytest.fixture(autouse=True)
+    def _pinned_okx_clock(self, monkeypatch):
+        import services.exchange as ex
+
+        monkeypatch.setattr(ex, "_now_ms", lambda: OKX_NOW_MS)
+
     @pytest.mark.asyncio
     async def test_basic_bill_aggregation(self):
         """Bills on the same day aggregate their pnl + fee into a single daily entry."""
         exchange = _make_okx_exchange()
-        day1 = _ts(2024, 3, 15, 10)
-        day1_later = _ts(2024, 3, 15, 14)
-        day2 = _ts(2024, 3, 16, 9)
+        day1 = OKX_D0_MS + 10 * 3_600_000  # 2026-11-10T10:00Z
+        day1_later = OKX_D0_MS + 14 * 3_600_000
+        day2 = OKX_D0_MS + OKX_DAY_MS + 9 * 3_600_000  # 2026-11-11T09:00Z
 
         bills = [
             _okx_bill("1", "50.0", "-2.0", day1),
@@ -121,28 +158,19 @@ class TestOKXFetchDailyPnl:
             _okx_bill("3", "-10.0", "-1.0", day2),
         ]
 
-        # Return all bills on the first call for SWAP, empty for other types
-        call_count = {"n": 0}
+        # Both endpoints serve the bills inside the window asked for (dedup joins the straddle).
+        exchange.private_get_account_bills = _WindowedBills(bills)
+        exchange.private_get_account_bills_archive = _WindowedBills(bills)
 
-        async def mock_bills(params):
-            call_count["n"] += 1
-            if params.get("instType") == "SWAP" and call_count["n"] == 1:
-                return {"data": bills}
-            return {"data": []}
-
-        exchange.private_get_account_bills = AsyncMock(side_effect=mock_bills)
-
-        # since_ms within 90 days skips archive
-        since_ms = int((datetime.now(timezone.utc) - timedelta(days=30)).timestamp() * 1000)
-        result = await fetch_daily_pnl(exchange, since_ms)
+        result = await fetch_daily_pnl(exchange, OKX_D0_MS)
 
         assert len(result) == 2
         # Day 1: (50 + -2) + (30 + -1.5) = 76.5
-        day1_entry = next(r for r in result if "2024-03-15" in r["timestamp"])
+        day1_entry = next(r for r in result if "2026-11-10" in r["timestamp"])
         assert day1_entry["price"] == pytest.approx(76.5)
         assert day1_entry["side"] == "buy"  # positive PnL
         # Day 2: (-10 + -1) = -11
-        day2_entry = next(r for r in result if "2024-03-16" in r["timestamp"])
+        day2_entry = next(r for r in result if "2026-11-11" in r["timestamp"])
         assert day2_entry["price"] == pytest.approx(11.0)  # abs value
         assert day2_entry["side"] == "sell"  # negative PnL
 
@@ -151,8 +179,9 @@ class TestOKXFetchDailyPnl:
         """The since_ms filter (as 'begin' param) is forwarded to both recent and archive APIs."""
         exchange = _make_okx_exchange()
 
-        # Use a since_ms older than 90 days so archive is also called
-        since_ms = int((datetime.now(timezone.utc) - timedelta(days=120)).timestamp() * 1000)
+        # A since_ms older than the 93-day reach: the walk starts at the reach, so both endpoints
+        # are called (the oldest windows are archive-only, the newest are live).
+        since_ms = OKX_NOW_MS - 120 * OKX_DAY_MS
 
         recent_params_seen = []
         archive_params_seen = []
@@ -170,11 +199,12 @@ class TestOKXFetchDailyPnl:
 
         await fetch_daily_pnl(exchange, since_ms)
 
-        # Both recent and archive should receive begin=since_ms for all inst types
-        for params in recent_params_seen:
-            assert params["begin"] == str(since_ms)
-        for params in archive_params_seen:
-            assert params["begin"] == str(since_ms)
+        # Every request on both endpoints carries a day-aligned window: begin = window start minus
+        # 1 ms, end = window end (Phase 232: the since_ms filter is applied per window, not as one begin).
+        for params in recent_params_seen + archive_params_seen:
+            assert params["begin"].isdigit() and params["end"].isdigit()
+            assert (int(params["begin"]) + 1) % OKX_DAY_MS == 0
+        assert archive_params_seen[0]["begin"] == str(OKX_REACH_START_MS - 1)
         # Should have called for each of the 4 instrument types
         inst_types_recent = {p["instType"] for p in recent_params_seen}
         inst_types_archive = {p["instType"] for p in archive_params_seen}
@@ -185,29 +215,14 @@ class TestOKXFetchDailyPnl:
     async def test_bill_id_deduplication(self):
         """Bills appearing in both recent and archive are deduplicated by billId."""
         exchange = _make_okx_exchange()
-        ts = _ts(2024, 1, 10, 12)
+        # 2026-11-14T12:00Z: inside the straddling window [2026-11-10, 2026-11-17), so both endpoints serve it.
+        ts = OKX_D0_MS + 4 * OKX_DAY_MS + 12 * 3_600_000
         shared_bill = _okx_bill("DUPE-001", "100.0", "-5.0", ts)
 
-        call_count = {"recent": 0, "archive": 0}
+        exchange.private_get_account_bills = _WindowedBills([shared_bill])
+        exchange.private_get_account_bills_archive = _WindowedBills([shared_bill])
 
-        async def mock_recent(params):
-            call_count["recent"] += 1
-            if params.get("instType") == "SWAP" and call_count["recent"] == 1:
-                return {"data": [shared_bill]}
-            return {"data": []}
-
-        async def mock_archive(params):
-            call_count["archive"] += 1
-            if params.get("instType") == "SWAP" and call_count["archive"] == 1:
-                return {"data": [shared_bill]}  # same bill
-            return {"data": []}
-
-        exchange.private_get_account_bills = AsyncMock(side_effect=mock_recent)
-        exchange.private_get_account_bills_archive = AsyncMock(side_effect=mock_archive)
-
-        # since_ms old enough to trigger archive
-        since_ms = int((datetime.now(timezone.utc) - timedelta(days=120)).timestamp() * 1000)
-        result = await fetch_daily_pnl(exchange, since_ms)
+        result = await fetch_daily_pnl(exchange, OKX_D0_MS)
 
         # Should be exactly 1 entry, not 2
         assert len(result) == 1
@@ -215,13 +230,14 @@ class TestOKXFetchDailyPnl:
 
     @pytest.mark.asyncio
     async def test_90_day_gate_skips_archive(self):
-        """When since_ms is within 90 days, archive API should NOT be called."""
+        """FLIPPED (Phase 232, ruling Q6): the 90-day gate is gone. A window older than the live
+        endpoint's 7 days is read from the archive, so a 30-day since_ms now reads it."""
         exchange = _make_okx_exchange()
 
-        since_ms = int((datetime.now(timezone.utc) - timedelta(days=30)).timestamp() * 1000)
+        since_ms = OKX_NOW_MS - 30 * OKX_DAY_MS
         await fetch_daily_pnl(exchange, since_ms)
 
-        exchange.private_get_account_bills_archive.assert_not_awaited()
+        exchange.private_get_account_bills_archive.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_90_day_gate_fetches_archive_when_old(self):
@@ -246,26 +262,16 @@ class TestOKXFetchDailyPnl:
     async def test_pagination(self):
         """OKX pagination: pages until data is exhausted (< 100 results)."""
         exchange = _make_okx_exchange()
-        ts_base = _ts(2024, 6, 1, 10)
+        ts_base = OKX_D0_MS + 3_600_000  # 2026-11-10T01:00Z
 
-        page1 = [_okx_bill(str(i), "10.0", "-0.5", ts_base + i * 1000) for i in range(100)]
-        page2 = [_okx_bill(str(i + 100), "5.0", "-0.3", ts_base + (i + 100) * 1000) for i in range(30)]
+        # Ids rise with ts and the endpoint serves newest first, so 130 bills are two pages.
+        bills = [_okx_bill(str(i), "10.0", "-0.5", ts_base + i * 1000) for i in range(100)]
+        bills += [_okx_bill(str(i + 100), "5.0", "-0.3", ts_base + (i + 100) * 1000) for i in range(30)]
 
-        call_count = {"n": 0}
+        exchange.private_get_account_bills = _WindowedBills(bills)
+        exchange.private_get_account_bills_archive = _WindowedBills(bills)
 
-        async def mock_paginated(params):
-            call_count["n"] += 1
-            if params.get("instType") == "SWAP":
-                if not params.get("after"):
-                    return {"data": page1}
-                else:
-                    return {"data": page2}
-            return {"data": []}
-
-        exchange.private_get_account_bills = AsyncMock(side_effect=mock_paginated)
-
-        since_ms = int((datetime.now(timezone.utc) - timedelta(days=10)).timestamp() * 1000)
-        result = await fetch_daily_pnl(exchange, since_ms)
+        result = await fetch_daily_pnl(exchange, OKX_D0_MS)
 
         # All 130 bills on the same day aggregate to 1 entry
         assert len(result) == 1
@@ -277,17 +283,13 @@ class TestOKXFetchDailyPnl:
     async def test_output_format(self):
         """Each daily PnL entry has the expected schema."""
         exchange = _make_okx_exchange()
-        ts = _ts(2024, 5, 20, 8)
+        ts = OKX_D0_MS + 8 * 3_600_000  # 2026-11-10T08:00Z
+        bills = [_okx_bill("1", "25.0", "-1.0", ts)]
 
-        async def mock_bills(params):
-            if params.get("instType") == "SWAP":
-                return {"data": [_okx_bill("1", "25.0", "-1.0", ts)]}
-            return {"data": []}
+        exchange.private_get_account_bills = _WindowedBills(bills)
+        exchange.private_get_account_bills_archive = _WindowedBills(bills)
 
-        exchange.private_get_account_bills = AsyncMock(side_effect=mock_bills)
-
-        since_ms = int((datetime.now(timezone.utc) - timedelta(days=5)).timestamp() * 1000)
-        result = await fetch_daily_pnl(exchange, since_ms)
+        result = await fetch_daily_pnl(exchange, OKX_D0_MS)
 
         assert len(result) == 1
         entry = result[0]
@@ -297,26 +299,22 @@ class TestOKXFetchDailyPnl:
         assert entry["fee"] == 0
         assert entry["fee_currency"] == "USDT"
         assert entry["quantity"] == 1
-        assert "2024-05-20" in entry["timestamp"]
+        assert "2026-11-10" in entry["timestamp"]
 
     @pytest.mark.asyncio
     async def test_multiple_instrument_types(self):
         """Bills from different instrument types (SWAP, SPOT, etc.) all contribute to daily totals."""
         exchange = _make_okx_exchange()
-        ts = _ts(2024, 4, 10, 12)
+        ts = OKX_D0_MS + 12 * 3_600_000  # 2026-11-10T12:00Z
+        bills = [
+            _okx_bill("S1", "40.0", "-2.0", ts, "SWAP"),
+            _okx_bill("SP1", "10.0", "-0.5", ts, "SPOT"),
+        ]
 
-        async def mock_bills(params):
-            inst = params.get("instType")
-            if inst == "SWAP":
-                return {"data": [_okx_bill("S1", "40.0", "-2.0", ts, "SWAP")]}
-            elif inst == "SPOT":
-                return {"data": [_okx_bill("SP1", "10.0", "-0.5", ts, "SPOT")]}
-            return {"data": []}
+        exchange.private_get_account_bills = _WindowedBills(bills)
+        exchange.private_get_account_bills_archive = _WindowedBills(bills)
 
-        exchange.private_get_account_bills = AsyncMock(side_effect=mock_bills)
-
-        since_ms = int((datetime.now(timezone.utc) - timedelta(days=5)).timestamp() * 1000)
-        result = await fetch_daily_pnl(exchange, since_ms)
+        result = await fetch_daily_pnl(exchange, OKX_D0_MS)
 
         assert len(result) == 1
         # (40 + -2) + (10 + -0.5) = 47.5
@@ -591,9 +589,12 @@ class TestPageCapsStampTheTruncationFlag:
                 return {"data": []}
             counter["n"] += 1
             base = counter["n"] * 1000
+            # Phase 232: the walk refuses a bill outside the window it asked for, so the rows sit
+            # inside THE requested window (just after its start); ``ts_ms`` is the fallback.
+            row_ts = int(params["begin"]) + 1_000 if "begin" in params else ts_ms
             return {
                 "data": [
-                    _okx_bill(f"{prefix}{base + i}", "1.0", "0.0", ts_ms)
+                    _okx_bill(f"{prefix}{base + i}", "1.0", "0.0", row_ts)
                     for i in range(100)
                 ]
             }
@@ -664,7 +665,9 @@ class TestPageCapsStampTheTruncationFlag:
         flags = ex.get_and_clear_last_dq_flags()
         assert flags.get("daily_pnl_deadline_okx") is True
         assert "daily_pnl_truncated_okx" not in flags
-        assert rows, "the rows read before the deadline are kept (SC-6: never fabricated, never dropped)"
+        # Phase 232: a walk stopped by the deadline returns whole windows only, a contiguous oldest
+        # prefix. The deadline passed inside the first window that holds bills, so none is returned.
+        assert rows == [], "the in-progress window is dropped whole, never returned half read"
 
     @pytest.mark.asyncio
     async def test_okx_archive_page_cap_stamps_the_flag(self):
@@ -686,34 +689,33 @@ class TestPageCapsStampTheTruncationFlag:
         )
 
     @pytest.mark.asyncio
-    async def test_okx_archive_that_ends_on_a_short_page_is_not_truncated(self):
+    async def test_okx_archive_that_ends_on_a_short_page_is_not_truncated(self, monkeypatch):
         """The control: a final page below 100 rows ends the walk before the cap,
-        and a clean fetch carries no truncation flag."""
-        from services.exchange import get_and_clear_last_dq_flags
+        and a clean fetch carries no truncation flag. Phase 232: 9,901 SWAP bills sit in ONE archive
+        window (the first, 2026-08-19..26) served by the venue-faithful fake, 99 full pages and a
+        short one, so the cap of 100 is not exceeded."""
+        import services.exchange as ex
+        from tests._okx_bills import OkxBillsArchive, okx_bill
 
-        get_and_clear_last_dq_flags()
+        monkeypatch.setattr(ex, "_now_ms", lambda: OKX_NOW_MS)
+        ex.get_and_clear_last_dq_flags()
         exchange = _make_okx_exchange()
-        calls = {"n": 0}
-
-        async def _archive(params):
-            if params.get("instType") != "SWAP":
-                return {"data": []}
-            calls["n"] += 1
-            if calls["n"] < 100:
-                return {
-                    "data": [
-                        _okx_bill(f"c{calls['n']}-{i}", "1.0", "0.0", _ts(2024, 3, 15, 10))
-                        for i in range(100)
-                    ]
-                }
-            return {"data": [_okx_bill("last", "1.0", "0.0", _ts(2024, 3, 15, 10))]}
-
-        exchange.private_get_account_bills_archive = AsyncMock(side_effect=_archive)
+        bills = [
+            okx_bill(5_000_000 + i, OKX_REACH_START_MS + 3_600_000 + i * 1000, "USDT", "0", "1",
+                     pnl="1", fee="0", inst_type="SWAP")
+            for i in range(9901)
+        ]
+        archive = OkxBillsArchive(bills)
+        exchange.private_get_account_bills_archive = archive
 
         await fetch_daily_pnl(exchange, None)
 
-        assert calls["n"] == 100, "99 full pages then a short one: the cap is not exceeded"
-        flags = get_and_clear_last_dq_flags()
+        first_window_swap = [
+            c for c in archive.calls
+            if c["instType"] == "SWAP" and c["begin"] == str(OKX_REACH_START_MS - 1)
+        ]
+        assert len(first_window_swap) == 100, "99 full pages then a short one: the cap is not exceeded"
+        flags = ex.get_and_clear_last_dq_flags()
         assert "daily_pnl_truncated_okx" not in flags, flags
 
     @pytest.mark.asyncio
@@ -827,7 +829,8 @@ class TestPageCapsStampTheTruncationFlag:
         flags = ex.get_and_clear_last_dq_flags()
         assert flags.get("daily_pnl_deadline_okx") is True
         assert "daily_pnl_truncated_okx" not in flags
-        assert rows
+        # Phase 232: the in-progress window is dropped whole (a contiguous oldest prefix).
+        assert rows == []
 
     @pytest.mark.asyncio
     async def test_history_that_is_an_exact_multiple_at_the_cap_still_reports_truncated(
@@ -852,7 +855,7 @@ class TestPageCapsStampTheTruncationFlag:
                 return {"data": []}
             return {
                 "data": [
-                    _okx_bill(f"m{served['n']}-{i}", "1.0", "0.0", _ts(2024, 3, 15, 10))
+                    _okx_bill(f"m{served['n']}-{i}", "1.0", "0.0", int(params["begin"]) + 1_000)
                     for i in range(100)
                 ]
             }
@@ -922,7 +925,12 @@ class TestPageCapsStampTheTruncationFlag:
 
         def _swap_only(data):
             async def _page(params):
-                return {"data": data if params.get("instType") == "SWAP" else []}
+                if params.get("instType") != "SWAP":
+                    return {"data": []}
+                # Phase 232: a bill with a digit ts is served inside the window asked for (the walk
+                # refuses one outside it); a non-digit ts stays as it is and reaches the malformed path.
+                in_window = str(int(params["begin"]) + 1_000)
+                return {"data": [{**r, "ts": in_window} if r["ts"].isdigit() else r for r in data]}
 
             return _page
 
@@ -1015,10 +1023,11 @@ class TestPageCapsStampTheTruncationFlag:
             if served["n"] == 1:
                 return {
                     "data": [
-                        _okx_bill(f"p{i}", "1.0", "0.0", _ts(2024, 3, 15, 10)) for i in range(100)
+                        # Phase 232: inside the window the walk asked for (it refuses a bill outside it).
+                        _okx_bill(f"p{i}", "1.0", "0.0", int(params["begin"]) + 1_000) for i in range(100)
                     ]
                 }
-            return {"data": [_okx_bill("tail", "1.0", "0.0", _ts(2024, 3, 15, 10))]}
+            return {"data": [_okx_bill("tail", "1.0", "0.0", int(params["begin"]) + 1_000)]}
 
         exchange.private_get_account_bills = AsyncMock(side_effect=_two_pages)
         monkeypatch.setattr(ex, "_monotonic", lambda: 0.0 if served["n"] < 1 else 1e12)
@@ -1026,7 +1035,10 @@ class TestPageCapsStampTheTruncationFlag:
 
         await ex.fetch_all_trades(exchange, since_ms=since_ms)
 
-        assert served["n"] == 2, "the second page must be requested: no deadline was asked for"
+        # Phase 232: a 10-day since_ms is two windows. The first reads its two pages (a full one,
+        # then the short tail), the second its short tail page: no deadline was asked for, so
+        # every page of every window is requested.
+        assert served["n"] == 3, "the second page must be requested: no deadline was asked for"
         assert "daily_pnl_truncated_okx" not in ex.get_and_clear_last_dq_flags()
 
     @pytest.mark.asyncio

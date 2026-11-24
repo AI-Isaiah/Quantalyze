@@ -127,6 +127,7 @@ from services.exchange import (
     parse_since_ms,
 )
 from services.exchange_pagination import PaginationCeilingExceeded
+from services.ingestion._timestamps import coerce_to_aware_utc
 from services.positions import (
     BYBIT_LIST_NOT_ENDED_REASON,
     BybitPositionReadRefused,
@@ -134,7 +135,10 @@ from services.positions import (
     persist_position_snapshots,
 )
 from services.sfox_client import SfoxClient  # type annotations only
-from services.trade_resume import load_strategy_high_waters
+from services.trade_resume import (
+    load_strategy_fill_high_water,
+    load_strategy_high_waters,
+)
 from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
 # Phase 151: moved to services/mt5_concurrency.py (leaf) so allocator_positions.py
 # can share the ONE terminal registry without an import cycle; re-imported here so
@@ -2123,6 +2127,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     daily_since_ms: int | None = None
 
     raw_fills: list[dict[str, Any]] = []
+    # Phase 232 VREAD-08 bootstrap anchor: the ISO form of the fills-read seed
+    # when the cursor column was NULL at read time and the run had a non-NULL
+    # seed. The epilogue writes it only when the fills read failed (see there).
+    fills_anchor_iso: str | None = None
     # Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_all_trades`` /
     # ``fetch_daily_pnl`` can write DQ flags into the per-task buffer
     # (historically ``bybit_daily_pnl_includes_funding`` pre-C-0319;
@@ -2223,15 +2231,40 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             # is NULL it falls back to the stored daily high-water, never to
             # `last_sync_at` (the `None` first argument removes that fallback).
             # A failed high-water read left `daily_since_ms` None, so a NULL
-            # cursor then means full reach (decision 3). TODOS
-            # 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD stays OPEN: this read
-            # still trusts its cursor and nobody has traced the writer that
-            # put it ahead.
-            fills_since_ms = parse_since_ms(
+            # cursor then means full reach (decision 3).
+            #
+            # Phase 232 VREAD-08 (ruling Q1): the cursor is NOT trusted alone.
+            # A cursor ahead of the newest stored fill means the days between
+            # were never fetched, so the seed is the EARLIER of the cursor and
+            # that fill's exact timestamp; with no stored fill (or a failed
+            # fills read) it is the earlier of the cursor and the daily seed.
+            # The over-fetch is absorbed by the (strategy_id, exchange,
+            # exchange_fill_id) unique index. A NULL or unparsable cursor keeps
+            # the daily seed, issues no fills read, and remembers that seed
+            # (`fills_anchor_iso`) so a refusal of this very read can anchor
+            # the cursor at the read start in the epilogue.
+            _fills_cursor_ms = parse_since_ms(
                 None, preferred=ctx.key_row.get("last_fetched_trade_timestamp")
             )
-            if fills_since_ms is None:
+            if _fills_cursor_ms is None:
                 fills_since_ms = daily_since_ms
+                if daily_since_ms is not None:
+                    fills_anchor_iso = datetime.fromtimestamp(
+                        daily_since_ms / 1000, tz=timezone.utc
+                    ).isoformat()
+            else:
+                _fill_hw_iso, _fill_hw_err = await db_execute(
+                    lambda: load_strategy_fill_high_water(ctx.supabase, strategy_id)
+                )
+                _fill_hw_ms = parse_since_ms(_fill_hw_iso)
+                _seed_bound_ms = (
+                    _fill_hw_ms if _fill_hw_ms is not None else daily_since_ms
+                )
+                fills_since_ms = (
+                    None
+                    if _seed_bound_ms is None
+                    else min(_fills_cursor_ms, _seed_bound_ms)
+                )
             try:
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=fills_since_ms
@@ -2651,31 +2684,71 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     strategy_id, flag_exc,
                 )
 
-    # Checkpoint cursor after any successful fetch (empty or not). Survives
-    # downstream analytics/reconstruction failure. Best-effort — a missed
-    # stamp just means re-fetching one window next run.
+    # Checkpoint the fills cursor to what was STORED, never to the clock.
+    # Survives downstream analytics/reconstruction failure. Best-effort — a
+    # missed stamp just means re-fetching one window next run.
     #
-    # G12.A.7: only advance the granular fetched-cursor if Phase 2 fully
-    # succeeded (or wasn't run). A partial-batch failure leaves the cursor
-    # untouched so the next run re-fetches the lost fills. Empty fetches
-    # (`raw_fills == []`) and feature-flag-disabled paths still advance —
-    # `phase2_complete` defaults False but `raw_fills` is also False so
-    # the gate falls through.
-    #
-    # red-team/C-1 (NEW-C12-02 follow-up): when Phase-1 failed AND Phase-2
-    # succeeded, last_sync_at is correctly held back (NEW-C12-02). Gate: do NOT
-    # advance the fetched cursor when Phase-1 failed.
-    #
-    # Since Phase 211 (LASTSYNC-SEED decision 4) the Phase-1 daily-P&L read
-    # seeds from the stored daily high-water, which does not advance when
-    # Phase-1 failed to persist, so the unpersisted window is re-read
-    # regardless of this cursor. Holding the fills cursor back on a Phase-1
-    # failure now only re-fetches FILLS on the next run, which the
-    # exchange_fill_id dedup (unique index) absorbs. Lineage, 2026-11-14: the
-    # C-1 gate was written when `parse_since_ms` preferred this cursor for the
-    # Phase-1 fetch, where advancing it would have skipped the PnL window for
-    # good. The gate stays; its reason narrowed.
-    advance_fetched_cursor = (not raw_fills) or (phase2_complete and not phase1_failed)
+    # Phase 232 VREAD-08: `last_fetched_trade_timestamp` is a stored-through
+    # mark. When the gate below holds, the stamp is the newest `timestamp`
+    # among the fills this run PERSISTED. Otherwise the param is NULL and the
+    # RPC leaves the column untouched. Before Phase 232 an empty fill list
+    # advanced the cursor to wall-clock now, which covered a raised fetch, an
+    # empty read, the MT5 arm and every run with USE_RAW_TRADE_INGESTION off,
+    # and put the column ahead of the newest stored fill (the 231
+    # `dependency-232` record, WR-03). The gate holds only when:
+    #   * raw fills exist AND every batch persisted (`phase2_complete`);
+    #   * Phase 2 did not fail (`phase2_failed`: a raised fetch or a partial
+    #     persist, G12.A.7: the next run re-fetches the lost fills);
+    #   * Phase 1 did not fail (red-team/C-1: the fills cursor is held back
+    #     with last_sync_at; since Phase 211 the daily read seeds from the
+    #     stored daily high-water, so this now only re-fetches FILLS, which the
+    #     exchange_fill_id dedup absorbs);
+    #   * no `sync_truncated_*` flag is true (Phase 232 ruling Q7: a truncated
+    #     read stored an incomplete window, so its newest fill is not a
+    #     stored-through mark) and `binance_partial_symbols` is not set (a
+    #     symbol whose fills read failed left an unread span behind the newest
+    #     fill of the symbols that succeeded; review 232 CR-02 / SFH-01);
+    #   * every fill timestamp parses (a fill that cannot be dated holds the
+    #     cursor; never a partial maximum).
+    _fills_incomplete = any(
+        (key.startswith("sync_truncated_") or key == "binance_partial_symbols")
+        and value
+        for key, value in exchange_dq_flags.items()
+    )
+    advance_fetched_cursor = (
+        bool(raw_fills)
+        and phase2_complete
+        and not phase2_failed
+        and not phase1_failed
+        and not _fills_incomplete
+    )
+    _p_last_fetched: str | None = None
+    if advance_fetched_cursor:
+        try:
+            _p_last_fetched = max(
+                coerce_to_aware_utc(fill["timestamp"], "sync_trades")
+                for fill in raw_fills
+            ).isoformat()
+        except (KeyError, ValueError, TypeError, OverflowError, OSError) as exc:
+            # A fill without a usable timestamp: hold the cursor. The log names
+            # the strategy and the exception class only, never fill content.
+            logger.warning(
+                "sync_trades Phase 2: holding fetched-cursor for strategy %s — "
+                "a persisted fill has no usable timestamp (%s)",
+                strategy_id, type(exc).__name__,
+            )
+            _p_last_fetched = None
+    elif (phase2_failed or _fills_incomplete) and fills_anchor_iso is not None:
+        # Phase 232 VREAD-08 bootstrap anchor (ruling Q1): the cursor column was
+        # NULL at read time and this run's fills read began at `fills_anchor_iso`
+        # but did not store its span (a raised fetch OR a partial persist: both
+        # leave an unstored span under phase2_fill_ingestion_failed; a truncated
+        # or partial-symbol read returns fills yet leaves an unread span, and
+        # holding a NULL column protects nothing: review 232 CR-01). Anchor the
+        # column at the read start so the next clean run re-reads that span
+        # before the self-heal clears the flag. It never points past where the
+        # read began, and the RPC writes it only into a NULL or earlier column.
+        _p_last_fetched = fills_anchor_iso
 
     # NEW-C12-05 (CL12): fenced epilogue write. The two cursor checkpoints
     # (last_fetched_trade_timestamp, last_sync_at) and the balance snapshot are
@@ -2691,10 +2764,11 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     #
     # Gating is unchanged from the pre-RPC two-write form; a NULL param means
     # "leave this column untouched", mirroring the old conditional builds:
-    #   • last_fetched_trade_timestamp advances only when advance_fetched_cursor
-    #     (G12.A.7 / red-team C-1: held back when Phase-1 failed). Since Phase
-    #     211 it seeds the Phase-2 fills read ONLY (`fills_since_ms`); the
-    #     Phase-1 daily-P&L read seeds from the stored high-water instead.
+    #   • last_fetched_trade_timestamp is written only with the stored-through
+    #     stamp when advance_fetched_cursor holds (Phase 232 VREAD-08; held
+    #     back on a Phase-1 or Phase-2 failure, G12.A.7 / red-team C-1). Since
+    #     Phase 211 it seeds the Phase-2 fills read ONLY (`fills_since_ms`);
+    #     the Phase-1 daily-P&L read seeds from the stored high-water instead.
     #   • last_sync_at advances only when Phase-1 persisted rows (NEW-C12-02:
     #     advancing past an unpersisted window loses the daily-PnL permanently).
     #   • account_balance_usdt is written whenever present (no ordering).
@@ -2706,12 +2780,11 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # swallow-with-warning is safe and avoids a retry storm on a persistent
     # api_keys write fault. Not silent: the warning is surfaced loudly.
     _now_iso = datetime.now(timezone.utc).isoformat()
-    _p_last_fetched = _now_iso if advance_fetched_cursor else None
     _p_last_sync = _now_iso if not phase1_failed else None
 
     if _p_last_fetched is None and _p_last_sync is None and account_balance is None:
-        # silent-failure/F-04: nothing to write (fetched cursor held, Phase-1
-        # failed, no balance). Log the deliberate skip so operators can
+        # silent-failure/F-04: nothing to write (no stored-through fills stamp,
+        # Phase-1 failed, no balance). Log the deliberate skip so operators can
         # distinguish it from a write-path regression that drops the update.
         logger.info(
             "sync_trades: advance_sync_cursor skipped — no columns to write "
@@ -4206,7 +4279,7 @@ async def _clear_nav_mark_refusal(
 #: carried flat. The ``kind`` column has no CHECK, so this family needs no migration.
 READ_INCOMPLETE_KIND_PREFIX: Final[str] = "read_incomplete:"
 
-#: The closed set of reasons a key's read is refused by name: the four ``fetch_daily_pnl`` reasons
+#: The closed set of reasons a key's read is refused by name: the five ``fetch_daily_pnl`` reasons
 #: (``services.exchange.daily_pnl_read_verdict``), the three funding reasons and the Bybit Unified
 #: flow read (plan 186-10; the exception CLASS NAME rides beside it). A token outside the
 #: set is never written, so a venue message cannot reach the row.
@@ -4214,6 +4287,7 @@ READ_INCOMPLETE_TOKENS: Final[frozenset[str]] = frozenset(
     {
         "daily_pnl_fetch_error",
         "daily_pnl_truncated_okx",
+        "daily_pnl_non_usd_okx",
         "daily_pnl_truncated_bybit",
         "daily_pnl_binance_income_fallback",
         "read_deadline",
@@ -4231,6 +4305,7 @@ READ_INCOMPLETE_TOKENS: Final[frozenset[str]] = frozenset(
 _DAILY_PNL_REFUSAL_ORDER: Final[tuple[str, ...]] = (
     "daily_pnl_fetch_error",
     "daily_pnl_truncated_okx",
+    "daily_pnl_non_usd_okx",
     "daily_pnl_truncated_bybit",
     "daily_pnl_binance_income_fallback",
     "read_deadline",

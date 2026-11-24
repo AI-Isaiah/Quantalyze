@@ -2140,6 +2140,19 @@ class TestRealizedReadRefusedByName:
         _assert_nothing_written_but_the_marker(seen)
 
     @pytest.mark.asyncio
+    async def test_okx_non_usd_refuses_the_key_permanently_and_writes_only_the_marker(self) -> None:
+        # Phase 232 VREAD-06: one non-USD bill fails the same way on every attempt, so the first
+        # attempt is already permanent (never in _TRANSIENT_REFUSAL_TOKENS).
+        seen = await _refused_key_derive("okx", {"daily_pnl_non_usd_okx": True})
+        result = seen["result"]
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        assert result.error_kind == "permanent"  # type: ignore[attr-defined]
+        assert "daily_pnl_non_usd_okx" in result.error_message  # type: ignore[attr-defined]
+        markers = _read_incomplete_rows(seen["capture"])  # type: ignore[arg-type]
+        assert [m["payload"]["token"] for m in markers] == ["daily_pnl_non_usd_okx"]
+        _assert_nothing_written_but_the_marker(seen)
+
+    @pytest.mark.asyncio
     async def test_bybit_truncation_is_refused_permanently(self) -> None:
         seen = await _refused_key_derive("bybit", {"daily_pnl_truncated_bybit": True})
         result = seen["result"]
@@ -2585,6 +2598,7 @@ class TestReadIncompleteMarkerHelpers:
             {
                 "daily_pnl_fetch_error",
                 "daily_pnl_truncated_okx",
+                "daily_pnl_non_usd_okx",
                 "daily_pnl_truncated_bybit",
                 "daily_pnl_binance_income_fallback",
                 "read_deadline",

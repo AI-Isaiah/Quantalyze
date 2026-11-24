@@ -2594,14 +2594,20 @@ async def test_bybit_parity_with_fetch_daily_pnl(monkeypatch: pytest.MonkeyPatch
     assert probe_total == pytest.approx(12.8, abs=1e-9)
 
 
-async def test_okx_parity_with_fetch_daily_pnl_and_fetch_funding_okx() -> None:
+async def test_okx_parity_with_fetch_daily_pnl_and_fetch_funding_okx(monkeypatch: pytest.MonkeyPatch) -> None:
     """The probe's OKX sum must equal the chain's own: the same bills go through the real
     ``fetch_daily_pnl`` (trading, per-instType query filters, type 8 dropped) and the real
     ``fetch_funding_okx`` (type 8, ``pnl``), and through ``okx_window_terms``; the read day's totals
     agree. Without it the probe is pinned only to hand-written literals, so a later edit to the
     chain's instType loop or funding type leaves the probe printing a stale quantity."""
+    import services.exchange as exchange_mod
     from services.exchange import fetch_daily_pnl
     from services.funding_fetch import fetch_funding_okx
+
+    # Phase 232: ``fetch_daily_pnl`` starts its OKX walk at the 93-day reach from "now", so a fixture
+    # dated 2026-10-27 stopped being read once the calendar passed about 2027-01-28. Pin "now" two
+    # days after the read day: the chain reads the same window whatever the calendar says.
+    monkeypatch.setattr(exchange_mod, "_now_ms", lambda: _B_MS + 2 * 24 * _HOUR_MS)
 
     def funding(bill_id: int, hour: int, pnl: str, inst_id: str) -> dict[str, str]:
         return {

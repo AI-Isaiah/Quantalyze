@@ -1200,7 +1200,13 @@ class TestAdvanceSyncCursorFence:
         assert params["p_job_id"] == "job-fence-on"
         # Phase-1 succeeded + balance fetched → both cursors + balance written.
         assert params["p_last_sync_at"] is not None
-        assert params["p_last_fetched_ts"] is not None
+        # VREAD-08 (Phase 232): ingestion is OFF here, so no fill was persisted
+        # and the fills cursor is left untouched (NULL param). Before Phase 232
+        # this stamped wall-clock now, which put the column ahead of stored data.
+        assert params["p_last_fetched_ts"] is None, (
+            "no fill was persisted, so the fills cursor must be left untouched "
+            "(VREAD-08); before Phase 232 it stamped wall-clock now"
+        )
         assert params["p_account_balance"] == 10000.0
         # Owned write → no orphan signal.
         assert not any(

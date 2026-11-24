@@ -670,6 +670,10 @@ node "$TS_SP/form.mjs" enqueue-calibrate RUN=20261020T1100 > "$TS_SP/s2.sql" && 
   gaps: 03-31 sits in the carried-forward `legacy_ranges` and 09-30 on live-derived days (D-01, D-12), so Q1
   is not requested. A classification stop's census (`non_usd_ccy`, `unknown_subtype_nonzero`) carries the
   four count keys only.
+  ⛔ **CORRECTED 2026-11-24 (Phase 232 plan 03; the sentence naming `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`
+  above is kept as lineage).** That entry is closed. The live `fetch_daily_pnl` aggregation counts a stable
+  coin at 1.0 and refuses any other currency by name: it stamps `daily_pnl_non_usd_okx`, returns no rows,
+  and the cron treats the flag as a degraded read. The `calibrate` census stays valid as a measurement.
 - `reconcile`: for `realized` and `funding`, `ok` true, `days_over_cent` 0, `max_abs_diff` and
   `window_total_diff` within one cent, `misses` empty, and `reconcile.window` naming the overlap days
   actually compared; it ends at the last whole covered UTC day, 2026-09-29 for Q3 without Q4 (D-15).
@@ -1103,6 +1107,14 @@ if the key was absent before the apply, an empty `reconstructed_ranges` array in
   currency at face value; the `calibrate` census is its measurement) and
   `[167.1.2.2.2-OKX-PERSISTENT-TRUNCATION]` (the live page cap; the reconciliation's archive-only day
   inside live reach is its detector) stay open in `TODOS.md`. This runbook fixes neither.
+  ⛔ **CORRECTED 2026-11-24 (Phase 232 plans 02, 03 and 04; the sentence above is kept as lineage).**
+  Both entries are closed by Phase 232, so "stay open" no longer holds. `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`
+  by plan 03 (stable coins at 1.0, any other currency refused by `daily_pnl_non_usd_okx`).
+  `[167.1.2.2.2-OKX-PERSISTENT-TRUNCATION]` by plans 02 and 04: the live read walks day-aligned 7-day
+  windows oldest first with the page cap per window, and the cron stores the whole-day prefix a read
+  deadline leaves (`daily_pnl_deadline_okx`), holds every cursor, and resumes from the stored high-water.
+  The reconciliation's archive-only-day detector stays valid as a measurement. This runbook itself still
+  fixes neither.
 - **Running the recompute.** Step 5 books and reads it; the Wave 5 consolidated recompute runs it.
 - **A page when the job fails.** No human is paged. A stuck or failed job is seen only by reading
   `job-result`; the compute-jobs admin table shows the same row.
