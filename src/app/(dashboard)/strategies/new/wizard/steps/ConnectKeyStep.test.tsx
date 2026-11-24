@@ -2317,6 +2317,97 @@ describe("[154.1 / WIZCONT-02] ConnectKeyStep — an already-connected account r
 });
 
 /**
+ * [225-05 / CONN-01] ConnectKeyStep: a key whose account is already in one of the
+ * user's OWN unfinished drafts (a different wizard session) is refused BY NAME.
+ *
+ * It used to answer a silent `200 deduped` that dropped the new key. The roster
+ * is the hazard again: if `VENUE_DRAFT_IN_PROGRESS` were missing from
+ * `KNOWN_CREATE_WITH_KEY_CODES` the step would render UNKNOWN beside a Retry
+ * that is refused identically every time, so this asserts the RENDERED code and
+ * sentence, and that no control acts on the wrong row.
+ */
+describe("[225-05 / CONN-01] ConnectKeyStep: an own-draft account refuses by name", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function renderRefusal(strategyName?: string) {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "VENUE_DRAFT_IN_PROGRESS",
+          error: "This account is already in one of your unfinished drafts.",
+          ...(strategyName === undefined ? {} : { strategy_name: strategyName }),
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    return screen.findByTestId("error-envelope");
+  }
+
+  it("renders its OWN title and the draft's name in the cause, never the UNKNOWN dead end", async () => {
+    const envelope = await renderRefusal("Atlas Basis Draft");
+
+    expect(
+      envelope,
+      "the roster rejected the route's honest code: the user reads the UNKNOWN " +
+        "copy plus a Retry that cannot work.",
+    ).toHaveAttribute("data-error-code", "VENUE_DRAFT_IN_PROGRESS");
+    // Hand-typed, never imported: the sentences the user actually reads.
+    expect(envelope).toHaveTextContent(
+      "This exchange account is already in one of your unfinished drafts.",
+    );
+    expect(envelope).toHaveTextContent(
+      /Your unfinished .+ draft "Atlas Basis Draft" already uses this account\./,
+    );
+    expect(envelope).toHaveTextContent("Your new key was not saved.");
+    expect(envelope).toHaveTextContent("Finish that draft, or delete it");
+    expect(envelope).not.toHaveTextContent("Try the last action again.");
+  });
+
+  it("offers the contact and log controls and NO Retry, Resume or Start-fresh control", async () => {
+    const envelope = await renderRefusal("Atlas Basis Draft");
+
+    // The contact path is the third fix bullet; the log control is the
+    // Diagnostics disclosure with its copy button.
+    expect(envelope).toHaveTextContent("contact form");
+    expect(envelope).toHaveTextContent("Diagnostics");
+    expect(screen.getByRole("button", { name: /copy diagnostics/i })).toBeTruthy();
+    expect(screen.queryByLabelText("Retry")).toBeNull();
+    // Those two act on THIS session's draft; the conflicting draft is another
+    // session's, so offering them would act on the wrong row.
+    expect(screen.queryByRole("button", { name: /resume/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /start fresh/i })).toBeNull();
+  });
+
+  it("a blank or missing name renders the unnamed sentence, never empty quotes", async () => {
+    const envelope = await renderRefusal();
+
+    expect(envelope).not.toHaveTextContent("Your unfinished");
+    expect(envelope.textContent ?? "").not.toContain('""');
+    // The explanation still renders in full: an absent name withholds a fact.
+    expect(envelope).toHaveTextContent("one account backs one strategy at a time");
+  });
+
+  it("the funnel sees the specific code, not UNKNOWN", async () => {
+    await renderRefusal("Atlas Basis Draft");
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    )![1] as { code: string; step: string };
+    expect(payload.code).toBe("VENUE_DRAFT_IN_PROGRESS");
+    expect(payload.step).toBe("connect_key");
+  });
+});
+
+/**
  * ═══════════════════════════════════════════════════════════════════════════
  * [162-06 review / B-2] THE PRESELECT REFUSAL MAY ONLY NAME CONTROLS THAT ARE
  * ON THE PRESELECT SCREEN.

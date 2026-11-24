@@ -427,7 +427,7 @@ function mustRenderAs(wireCode: string): string {
 const STATUS_BY_FAMILY: readonly [RegExp, number][] = [
   [/^(RATE_LIMITED|KEY_RATE_LIMIT|CSV_RATE_LIMIT)$/, 429],
   [
-    /^(DRAFT_ALREADY_EXISTS|DRAFT_SESSION_COLLISION|VENUE_ALREADY_CONNECTED|KEY_ORPHANED|KEY_REUSE_UNAVAILABLE|STALE_CLIENT|CSV_SESSION_REUSED)$/,
+    /^(DRAFT_ALREADY_EXISTS|DRAFT_SESSION_COLLISION|VENUE_ALREADY_CONNECTED|VENUE_DRAFT_IN_PROGRESS|KEY_ORPHANED|KEY_REUSE_UNAVAILABLE|STALE_CLIENT|CSV_SESSION_REUSED)$/,
     409,
   ],
   [/^(SEAM_MISCONFIGURED|CIRCUIT_OPEN|SERVICE_UNAVAILABLE_RETRY)$/, 503],
@@ -1036,6 +1036,8 @@ export function recogniseSeamErrorCode() { return "NOT_A_PAIR"; }
         '// A quoted code in PROSE must not enter: code: "COMMENT_ONLY"',
         'return refuse(409, { message: m, code: "CSV_SESSION_REUSED" });',
         'return NextResponse.json({ code: "KEY_ORPHANED", error: e }, { status: 409 });',
+        // 225-05 / CONN-01: the builder shape the new own-draft refusal emits.
+        'return NextResponse.json({ code: "VENUE_DRAFT_IN_PROGRESS", error: e, ...(n === null ? {} : { strategy_name: n }) }, { status: 409 });',
         'return json({ code: "draft_state_invalid" });',
       ].join("\n"),
       "ts",
@@ -1045,11 +1047,12 @@ export function recogniseSeamErrorCode() { return "NOT_A_PAIR"; }
     // source (c) uses this scanner and not that one.
     expect(found).toContain("CSV_SESSION_REUSED");
     expect(found).toContain("KEY_ORPHANED");
+    expect(found).toContain("VENUE_DRAFT_IN_PROGRESS");
     // Exclusion 1: comment prose. Exclusion 2: a lowercase code stays VISIBLE
     // as a defect rather than being legalised into the population.
     expect(found).not.toContain("COMMENT_ONLY");
     expect(found).not.toContain("draft_state_invalid");
-    expect(found).toHaveLength(2);
+    expect(found).toHaveLength(3);
   });
 
   it("the alias table and every roster derived NON-EMPTY from the real sources", () => {
