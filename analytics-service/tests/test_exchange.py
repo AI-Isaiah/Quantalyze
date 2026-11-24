@@ -3683,9 +3683,9 @@ class TestFetchDailyPnlOkxFailLoud:
         valid_ts = str(int(datetime.now(timezone.utc).timestamp() * 1000))
         recent_resp = {
             "data": [
-                {"ts": valid_ts, "pnl": "1.0", "fee": "0", "billId": "B1", "billType": "8"},
-                {"ts": "2026-01-01T00:00:00Z", "pnl": "2.0", "fee": "0", "billId": "B2", "billType": "8"},
-                {"ts": "", "pnl": "3.0", "fee": "0", "billId": "B3", "billType": "8"},
+                {"ts": valid_ts, "pnl": "1.0", "fee": "0", "ccy": "USDT", "billId": "B1", "billType": "8"},
+                {"ts": "2026-01-01T00:00:00Z", "pnl": "2.0", "fee": "0", "ccy": "USDT", "billId": "B2", "billType": "8"},
+                {"ts": "", "pnl": "3.0", "fee": "0", "ccy": "USDT", "billId": "B3", "billType": "8"},
             ]
         }
         archive_resp = {"data": []}
@@ -3705,8 +3705,16 @@ class TestFetchDailyPnlOkxFailLoud:
 
         # since_ms recent (no archive needed)
         since_ms = int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp() * 1000)
+        from services.exchange import get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
         with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
             await fetch_daily_pnl(mock_exchange, since_ms=since_ms)
+        # Phase 232: a non-digit ts is not refused by the window walk; it still reaches the
+        # malformed path (and the read is not a fetch error).
+        _flags = get_and_clear_last_dq_flags()
+        assert _flags.get("daily_pnl_malformed_okx") is True
+        assert "daily_pnl_fetch_error" not in _flags
 
         dropped = [
             r for r in caplog.records
@@ -4381,7 +4389,15 @@ class TestClusterIOkxFundingBillFilter:
 
         async def _bills(params):
             call_state["n"] += 1
-            return page if call_state["n"] == 1 else empty
+            if call_state["n"] != 1:
+                return empty
+            # Phase 232: the walk refuses a bill outside the window it asked for, so the two bills
+            # carry a ts inside the first window the live endpoint is asked for (and a ccy, as
+            # every real OKX bill does).
+            in_window = str(int(params["begin"]) + 1_000)
+            return {
+                "data": [{**bill, "ts": in_window, "ccy": "USDT"} for bill in page["data"]]
+            }
 
         mock_exchange.private_get_account_bills = _bills
         mock_exchange.private_get_account_bills_archive = AsyncMock(

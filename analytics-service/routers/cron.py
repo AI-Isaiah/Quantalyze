@@ -79,6 +79,17 @@ def _invalidate_validation_cache(key_id: str) -> None:
 
 # Per-key timeout in seconds
 KEY_SYNC_TIMEOUT = 60
+#: Phase 232 VREAD-07: the OKX window walk's wall-clock budget inside one key's
+#: `KEY_SYNC_TIMEOUT`. Past it the walk stops at a window boundary and returns the contiguous
+#: oldest prefix of whole UTC days it read (flag `daily_pnl_deadline_okx`), which the tick
+#: stores while holding every cursor, so a first window longer than one tick completes across
+#: ticks instead of running into the 60 s cancel that stores nothing. The remaining 25 s is
+#: left for the balance read, the per-strategy RPCs, the marker writes and the enqueues. A
+#: full 93-day reach is about 60 requests, 24 s at the archive's documented rate, so the
+#: deadline admits a full reach on a fast venue. `[ASSUMED]` split, unmeasured and reversible:
+#: tune it from the first PROD ticks that report `fetch_partial_prefix`. OKX ONLY: Bybit's
+#: `daily_pnl_deadline_bybit` marks a partial window, not a prefix, so every other venue gets None.
+OKX_CRON_READ_DEADLINE_S: float = 35.0
 # Max concurrent keys per batch
 BATCH_SIZE = 5
 # Delay between batches for the same exchange (seconds)
@@ -481,6 +492,12 @@ _FETCH_ERROR_FLAG = "daily_pnl_fetch_error"
 #: flag stays distinct from the fetch-error flag on purpose: the admin health
 #: card reads it by name, and the reason in the envelope names the real cause.
 _FETCH_INCOME_FALLBACK_FLAG = "daily_pnl_binance_income_fallback"
+#: Phase 232 VREAD-06: `fetch_daily_pnl` stamps this and returns `[]` when an OKX
+#: bill with a nonzero amount is in a currency that is not a stable coin. It is
+#: neither the fetch-error flag nor a truncation prefix, so unnamed here an empty
+#: list with this flag would read as an idle tick and advance the cursor past a
+#: history that was never read.
+_FETCH_NON_USD_FLAG = "daily_pnl_non_usd_okx"
 #: PR-B round 1 (SFH-H2 / ME-02): `fetch_daily_pnl` stamps
 #: `daily_pnl_truncated_<venue>` when a page cap ended a walk before the venue
 #: ran out of rows. Matched by PREFIX so a venue added to the fetcher is covered
@@ -493,6 +510,25 @@ _FETCH_TRUNCATED_PREFIX = "daily_pnl_truncated_"
 #: pattern below refuses anything that is not a plain identifier.
 _FETCH_ERROR_CLASS_FLAG = "daily_pnl_fetch_error_class"
 _ERROR_CLASS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+#: Phase 232 VREAD-07: `fetch_daily_pnl`'s OKX walk stamps this when its read deadline passed. The
+#: rows it returned are whole UTC days of the windows read before the deadline, a contiguous OLDEST
+#: prefix of the span asked for: complete up to their newest day and silent beyond it.
+_FETCH_PREFIX_FLAG = "daily_pnl_deadline_okx"
+
+
+def _fetch_prefix_only(flags: dict[str, Any]) -> bool:
+    """True when the drained flags say the read stopped at its deadline.
+
+    The walk's contract (plan 232-02): on a deadline the in-progress window is dropped and the
+    walk stops, so the returned rows are whole UTC days of the earlier windows, a contiguous oldest
+    prefix. Such rows are safe to store (a re-read of any of those days is idempotent in
+    `sync_trades`) and the stored high-water they move forward is where the next tick resumes.
+    The caller must still let a degradation flag win over this one: a prefix beside a truncation,
+    a fetch error or a non-USD refusal is not trustworthy.
+    """
+    return bool(flags.get(_FETCH_PREFIX_FLAG))
 
 
 def _fetch_degradation(flags: dict[str, Any]) -> tuple[list[str], str | None]:
@@ -508,6 +544,8 @@ def _fetch_degradation(flags: dict[str, Any]) -> tuple[list[str], str | None]:
         reasons.append(_FETCH_ERROR_FLAG)
     if flags.get(_FETCH_INCOME_FALLBACK_FLAG):
         reasons.append(_FETCH_INCOME_FALLBACK_FLAG)
+    if flags.get(_FETCH_NON_USD_FLAG):
+        reasons.append(_FETCH_NON_USD_FLAG)
     # ⛔ A TRUNCATED WINDOW IS NOT A COMPLETE ONE. Venues page newest-first, so a
     # cap drops the OLDEST days of the window, which are the gap days a resumed
     # tick exists to recover; treating the surviving rows as the whole window
@@ -1033,7 +1071,13 @@ async def _sync_single_key(
                     clamp_report=strategy_cursor_window_clamped,
                 )
             )
-            trades = await fetch_all_trades(exchange, since_ms=since_ms)
+            trades = await fetch_all_trades(
+                exchange,
+                since_ms=since_ms,
+                read_deadline_s=(
+                    OKX_CRON_READ_DEADLINE_S if exchange_name == "okx" else None
+                ),
+            )
             # ⛔ DRAIN THE DQ FLAGS IMMEDIATELY AFTER THE AWAIT — the buffer is
             #    a per-task ContextVar and a later call on the same task would
             #    otherwise read stale flags. `services/job_worker.py` drains at
@@ -1052,6 +1096,10 @@ async def _sync_single_key(
                 fetch_dq_flags
             )
             fetch_degraded = bool(fetch_degraded_reasons)
+            # Phase 232 VREAD-07: a deadline PREFIX is stored but moves no cursor.
+            # Degraded wins: a deadline flag beside a truncation, fetch-error or
+            # non-USD flag is a degraded read, nothing stored.
+            fetch_prefix_only = _fetch_prefix_only(fetch_dq_flags) and not fetch_degraded
             account_balance = await fetch_usdt_balance(exchange)
         finally:
             await aclose_exchange(exchange)
@@ -1204,8 +1252,15 @@ async def _sync_single_key(
         # key cursor is no longer a strategy resume source (D-12), but it is what
         # "Key checked" shows and the 04:00 poll's sibling reader, so it must not
         # claim a fetch that did not happen.
+        #
+        # Phase 232 VREAD-07: a deadline PREFIX never advances it either. The rows
+        # were stored (`trades and ... not fetch_degraded` above), so
+        # `synced_count > 0` would advance `last_sync_at` past the unread suffix,
+        # and an EMPTY prefix would read as an idle tick.
         should_advance_cursor = (
-            ((not trades) or synced_count > 0) and not fetch_degraded
+            ((not trades) or synced_count > 0)
+            and not fetch_degraded
+            and not fetch_prefix_only
         )
 
         # 164.5.1.4 SYNCCURSOR / WR-01 — ONE instant for BOTH cursor writes.
@@ -1247,6 +1302,16 @@ async def _sync_single_key(
                     ", ".join(fetch_degraded_reasons),
                     fetch_error_class,
                     len(trades),
+                )
+            elif fetch_prefix_only:
+                logger.warning(
+                    "cron_sync: key %s read only a deadline prefix (%s) — %d "
+                    "row(s) stored, last_sync_at and every strategy marker "
+                    "held, and the next tick resumes from the stored "
+                    "high-water",
+                    key_id,
+                    _FETCH_PREFIX_FLAG,
+                    sum(per_strategy_stored.values()),
                 )
             elif not strategy_ids:
                 logger.warning(
@@ -1330,8 +1395,12 @@ async def _sync_single_key(
         # (`strategy_advances`) is deliberately untouched: this changes which
         # strategies are ENQUEUED, never which markers ADVANCE.
         # `dict.fromkeys` keeps `strategy_ids` order and drops duplicates.
+        # Phase 232 VREAD-07: a prefix tick enqueues nothing either; the derive
+        # runs on the tick that completes the read.
         recompute_strategy_ids = (
-            [] if fetch_degraded else list(dict.fromkeys(strategy_ids))
+            []
+            if (fetch_degraded or fetch_prefix_only)
+            else list(dict.fromkeys(strategy_ids))
         )
         recompute_enqueue_errors: dict[str, str] = {}
         # Funding-inclusive CSV route (derive_broker_dailies ->
@@ -1424,7 +1493,13 @@ async def _sync_single_key(
             #    accepted behaviour, and the whole point of the marker is to
             #    SURVIVE that advance. A marker that clears itself on the same
             #    evidence would be no marker at all.
-            strategy_advances = (not fetch_degraded) and (
+            #
+            # Phase 232 VREAD-07: `(not fetch_prefix_only)` is the same refusal for
+            # a deadline prefix. The prefix rows stored (`per_strategy_stored > 0`)
+            # and an empty prefix satisfies `(not trades)`; either would advance the
+            # marker past the unread suffix. An empty list is idle only when no
+            # deadline flag is set.
+            strategy_advances = (not fetch_degraded) and (not fetch_prefix_only) and (
                 (not trades)
                 or (
                     per_strategy_stored.get(sid, 0) > 0
@@ -1793,6 +1868,8 @@ async def _sync_single_key(
             result["error"] = "fetch_degraded: " + ",".join(fetch_degraded_reasons) + (
                 f" ({fetch_error_class})" if fetch_error_class else ""
             )
+        if fetch_prefix_only:
+            result["fetch_partial_prefix"] = True
         if strategy_errors:
             result["strategy_errors"] = strategy_errors
             # When every strategy failed, surface a top-level error too

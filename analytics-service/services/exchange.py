@@ -5,6 +5,7 @@ import os
 import random
 import re
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,7 @@ from services.exchange_pagination import (
 )
 from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
+from services.price_rule import is_stable_value
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics")
@@ -146,6 +148,18 @@ def get_and_clear_last_dq_flags() -> dict[str, Any]:
 # ``daily_pnl_truncated_*`` flag a cap hit has always set.
 OKX_BILLS_PAGE_CAP: int = 100
 OKX_ARCHIVE_PAGE_CAP: int = 100
+#: Phase 232 VREAD-07: the OKX bills read walks UTC-day-aligned windows of this many days, oldest
+#: first, and the two caps above are per (window, instType, endpoint). Sizing: a 7-day window at
+#: the unchanged cap holds up to 10,000 bills per instType, 1,428 a day, at least 28 times the
+#: heaviest measured day (RESEARCH). A window past the cap still refuses by name.
+OKX_BILLS_WINDOW_DAYS: int = 7
+#: How far back the OKX walk starts when it has no (or an older) start. Longer than any calendar
+#: three months (92 days at most), the archive's documented reach, so a cron tick never spends its
+#: deadline on windows that can only be empty.
+OKX_BILLS_REACH_DAYS: int = 93
+#: ``/account/bills`` documents the last 7 days. A window that ends after the live floor (the UTC
+#: day of now minus this many days minus one) reads it, one that starts before it reads the archive.
+OKX_LIVE_BILLS_DAYS: int = 7
 #: Per 7-day window, at ``BYBIT_CLOSED_PNL_LIMIT`` rows a page. The 186-04 probe measured 44 pages
 #: (about 4,400 closes) in the one PROD Bybit key's busiest week, so the first value, 50, left 12%
 #: headroom, and one busier week would have refused that key every day for a year (the walk is a
@@ -192,11 +206,23 @@ DAILY_PNL_READ_DEADLINE_S: float = 397.0
 _monotonic: Callable[[], float] = time.monotonic
 
 
+def _wall_clock_ms() -> int:
+    """Wall-clock epoch milliseconds."""
+    return int(time.time() * 1000)
+
+
+#: Indirection so a test pins "now" for the OKX window walk (no fixture straddles UTC midnight).
+_now_ms: Callable[[], int] = _wall_clock_ms
+
+
 #: ccxt exception class names ``fetch_daily_pnl`` records for a venue rate limit.
 DAILY_PNL_RATE_LIMIT_CLASSES: Final[frozenset[str]] = frozenset(
     {"RateLimitExceeded", "DDoSProtection"}
 )
 _DAILY_PNL_ERROR_CLASS_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+#: Phase 232 VREAD-06: a currency code the OKX non-USD census may name in its one WARNING log line;
+#: anything else is logged as ``malformed`` (a venue string never reaches a flag or a log verbatim).
+_OKX_CCY_CODE_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9]{1,16}$")
 
 
 class DailyPnlReadVerdict(NamedTuple):
@@ -236,6 +262,8 @@ def daily_pnl_read_verdict(flags: Mapping[str, Any]) -> DailyPnlReadVerdict:
         reasons.append("daily_pnl_fetch_error")
     if flags.get("daily_pnl_binance_income_fallback"):
         reasons.append("daily_pnl_binance_income_fallback")
+    if flags.get("daily_pnl_non_usd_okx"):
+        reasons.append("daily_pnl_non_usd_okx")
     reasons.extend(
         key
         for key, value in flags.items()
@@ -696,6 +724,28 @@ class BybitTradeWindowIncomplete(RuntimeError):
             "page_cap", "cursor_stuck", "start_too_old", "malformed_reply", "unreadable_fill"
         ],
     ) -> None:
+        self.reason = reason
+        super().__init__(self._TEXTS[reason])
+
+
+class OkxBillsWindowIncomplete(RuntimeError):
+    """The OKX bills walk caught the venue not honouring the window it asked for, so it returns none.
+
+    ``reason`` is closed: ``out_of_window`` (a row whose ``ts`` lies outside the requested
+    ``begin``/``end``, so the venue ignored a bound) or ``order_drift`` (numeric ``billId`` values
+    not strictly descending, or a page that does not continue below the cursor it was sent, so a
+    short page would end a window early and the tail would be missing).
+
+    The text is static per reason, with no digit and no venue text: only the class name reaches
+    ``daily_pnl_fetch_error_class``.
+    """
+
+    _TEXTS: Final[dict[str, str]] = {
+        "out_of_window": "OKX bills read refused: the venue served a bill outside the requested window",
+        "order_drift": "OKX bills read refused: the venue's pages are not in newest-first order",
+    }
+
+    def __init__(self, reason: Literal["out_of_window", "order_drift"]) -> None:
         self.reason = reason
         super().__init__(self._TEXTS[reason])
 
@@ -1584,6 +1634,97 @@ async def _okx_bills_fetch_with_backoff(
     raise RuntimeError("unreachable: _okx_bills_fetch_with_backoff")
 
 
+def _okx_utc_date(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+async def _okx_bills_window_read(
+    exchange: ccxt.Exchange,
+    method_name: str,
+    inst_type: str,
+    start_ms: int,
+    end_ms: int,
+    page_cap: int,
+    read_deadline: float,
+) -> tuple[list[dict[str, Any]], Literal["complete", "cap", "deadline"]]:
+    """Read one window ``[start_ms, end_ms)`` of one instType from one OKX bills endpoint.
+
+    Pages newest-first by ``after`` (the last ``billId`` of the previous page) up to ``page_cap``.
+    Every request carries ``begin`` = start minus 1 ms and ``end`` = end, so the venue's bound
+    inclusivity (undocumented) cannot lose an edge bill; the 1 ms edge rows outside ``[start, end)``
+    are dropped silently, they belong to the neighbouring window. Any other row with a digit ``ts``
+    outside ``[start - 1, end]`` means the venue ignored a bound: ``OkxBillsWindowIncomplete``
+    (``out_of_window``). Numeric ``billId`` values must be strictly descending within a page and a
+    page's first must be below the cursor it was sent, else ``order_drift``. A row with a non-digit
+    ``ts`` or a non-numeric ``billId`` passes through unchanged (the aggregator names it).
+
+    Returns the rows kept and an outcome: ``complete`` (an empty or short page ended the window),
+    ``cap`` (a full page on the last allowed page) or ``deadline`` (the read deadline passed before a
+    request). The caller drops the rows of a window that is not ``complete``.
+    """
+    label = ("archive " if method_name.endswith("_archive") else "") + inst_type
+    kept: list[dict[str, Any]] = []
+    after_id = ""
+    for page in range(page_cap):
+        if _monotonic() >= read_deadline:
+            return kept, "deadline"
+        params: dict[str, str] = {
+            "instType": inst_type,
+            "limit": "100",
+            "begin": str(start_ms - 1),
+            "end": str(end_ms),
+        }
+        if after_id:
+            params["after"] = after_id
+        try:
+            reply = await _okx_bills_fetch_with_backoff(
+                exchange, method_name, params, label=label, page=page,
+            )
+        except Exception as e:
+            # NEW-C13-04 / NEW-C13-10: re-raise so the partial series is rejected; scrub first.
+            logger.error(
+                "OKX bills fetch failed for %s page %d: exc_class=%s scrubbed=%s — "
+                "re-raising (partial daily_pnl rejected)",
+                label, page, type(e).__name__, scrub_freeform_string(str(e)),
+            )
+            raise
+        data = reply.get("data", [])
+        if not data:
+            return kept, "complete"
+        previous_id: int | None = None
+        cursor_id = int(after_id) if after_id.isdigit() else None
+        for row in data:
+            bill_id = str(row.get("billId", ""))
+            if bill_id.isdigit():
+                numeric_id = int(bill_id)
+                bound = previous_id if previous_id is not None else cursor_id
+                if bound is not None and numeric_id >= bound:
+                    logger.warning(
+                        "OKX bills %s: page order is not newest-first (window %s..%s) — refusing the read",
+                        label, _okx_utc_date(start_ms), _okx_utc_date(end_ms),
+                    )
+                    raise OkxBillsWindowIncomplete("order_drift")
+                previous_id = numeric_id
+            ts_raw = row.get("ts", "")
+            if isinstance(ts_raw, str) and ts_raw.isdigit():
+                ts = int(ts_raw)
+                if ts < start_ms - 1 or ts > end_ms:
+                    logger.warning(
+                        "OKX bills %s: a bill lies outside the requested window %s..%s — refusing the read",
+                        label, _okx_utc_date(start_ms), _okx_utc_date(end_ms),
+                    )
+                    raise OkxBillsWindowIncomplete("out_of_window")
+                if ts < start_ms or ts >= end_ms:
+                    continue  # the 1 ms overlap edge: the neighbouring window owns this bill
+            kept.append(row)
+        after_id = str(data[-1].get("billId", ""))
+        if len(data) < 100:
+            return kept, "complete"
+        if page == page_cap - 1:
+            return kept, "cap"
+    return kept, "complete"
+
+
 async def fetch_daily_pnl(
     exchange: ccxt.Exchange,
     since_ms: int | None = None,
@@ -1598,7 +1739,13 @@ async def fetch_daily_pnl(
 
     ``read_deadline_s`` (Phase 186, opt-in, default off): a wall-clock budget for the walk. Only a
     caller that drains the DQ flags afterwards may pass it, because a walk that stops at the
-    deadline reports it only through ``daily_pnl_truncated_*``.
+    deadline reports it only through a ``daily_pnl_*`` flag.
+
+    OKX (Phase 232 VREAD-07): the walk reads UTC-day-aligned windows of ``OKX_BILLS_WINDOW_DAYS``
+    days, oldest first. At the deadline it stamps ``daily_pnl_deadline_okx`` and returns whole UTC
+    days of the windows read before it, a contiguous oldest prefix; a window past the page cap
+    stamps ``daily_pnl_truncated_okx`` and the walk stops with the same kind of prefix. A caller
+    re-reading from the newest returned day completes the range.
     """
     # Audit-2026-05-07 C-0319 (Bybit cutover) / maintainability — same
     # entry-seam reset as ``fetch_raw_trades``. The Bybit branch used to
@@ -1620,153 +1767,85 @@ async def fetch_daily_pnl(
     try:
         if exchange.id == "okx":
             # OKX: fetch account bills (P&L history) across all instrument
-            # types, paginated for full history.
+            # types. Phase 232 VREAD-07: a WINDOW-MAJOR walk. UTC-day-aligned windows
+            # of OKX_BILLS_WINDOW_DAYS days are read OLDEST first, every request
+            # carrying ``begin`` and ``end``, so the page cap is per (window, instType,
+            # endpoint) and not spent on the newest bills of the whole range. A
+            # window's bills join the result only when every instType and endpoint of
+            # that window finished: on a deadline or a cap breach the in-progress
+            # window is dropped and the walk STOPS, so the result is a contiguous
+            # oldest prefix of whole UTC days.
             all_bills: list[dict[str, Any]] = []
 
-            # Phase 186 D-06: one deadline for the whole walk. Past it no further
-            # request is issued and ``daily_pnl_deadline_okx`` is stamped (not the cap flag).
-            _okx_deadline_hit = False
-            for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
-                if _okx_deadline_hit:
-                    break
-                after_id = ""
-                type_count = 0
-                _okx_bills_cap_hit = False
-
-                for page in range(OKX_BILLS_PAGE_CAP):
-                    if _monotonic() >= _read_deadline:
-                        _okx_deadline_hit = True
-                        break
-                    params: dict[str, str] = {"instType": inst_type, "limit": "100"}
-                    if since_ms:
-                        params["begin"] = str(since_ms)
-                    if after_id:
-                        params["after"] = after_id
-
-                    try:
-                        bills = await _okx_bills_fetch_with_backoff(
-                            exchange,
-                            "private_get_account_bills",
-                            params,
-                            label=inst_type,
-                            page=page,
-                        )
-                        data = bills.get("data", [])
-                        if not data:
-                            break
-                        all_bills.extend(data)
-                        type_count += len(data)
-                        after_id = data[-1].get("billId", "")
-                        if len(data) < 100:
-                            break
-                        # NEW-C13-05: detect page-cap exhaustion
-                        if page == OKX_BILLS_PAGE_CAP - 1:
-                            _okx_bills_cap_hit = True
-                    except Exception as e:
-                        # NEW-C13-04: re-raise so the worker retries and the
-                        # partial series is not silently treated as complete.
-                        # Pre-fix: warn+break returned a truncated series as
-                        # canonical daily PnL, feeding wrong Sharpe/equity.
-                        # NEW-C13-10: scrub before logging.
-                        logger.error(
-                            "OKX bills fetch failed for %s page %d: exc_class=%s scrubbed=%s — "
-                            "re-raising (partial daily_pnl rejected)",
-                            inst_type, page, type(e).__name__, scrub_freeform_string(str(e)),
-                        )
-                        raise
-
-                if type_count > 0:
-                    logger.info("OKX %s: fetched %d bills", inst_type, type_count)
-                if _okx_bills_cap_hit:
-                    # NEW-C13-05: page cap exhausted — history is truncated.
-                    logger.warning(
-                        "OKX %s: bills page cap (%d) hit — daily_pnl "
-                        "may be truncated for this inst_type",
-                        inst_type, OKX_BILLS_PAGE_CAP,
+            _okx_day_ms = 86_400_000
+            _okx_now_ms = _now_ms()
+            _okx_window_ms = OKX_BILLS_WINDOW_DAYS * _okx_day_ms
+            _okx_reach_ms = _okx_now_ms - OKX_BILLS_REACH_DAYS * _okx_day_ms
+            _okx_start_raw = _okx_reach_ms
+            if since_ms:
+                if since_ms >= _okx_reach_ms:
+                    _okx_start_raw = since_ms
+                else:
+                    logger.info(
+                        "OKX: since_ms is %d days older than the %d-day bills reach; "
+                        "the walk starts at the reach",
+                        (_okx_reach_ms - since_ms) // _okx_day_ms, OKX_BILLS_REACH_DAYS,
                     )
-                    _record_dq_flag("daily_pnl_truncated_okx", True)
-            if _okx_deadline_hit:
-                logger.warning(
-                    "OKX: read deadline (%.0fs) passed — daily_pnl truncated "
-                    "after %d bills",
-                    read_deadline_s, len(all_bills),
-                )
-                _record_dq_flag("daily_pnl_deadline_okx", True)
+            _okx_window_start = _okx_start_raw - _okx_start_raw % _okx_day_ms
+            # /account/bills serves the last 7 days; an older instant is read from the archive.
+            _okx_live_floor_ms = (
+                _okx_now_ms - _okx_now_ms % _okx_day_ms
+                - (OKX_LIVE_BILLS_DAYS - 1) * _okx_day_ms
+            )
 
-            # Fetch bills-archive for older history (>3 months)
-            # Only fetch archive if we need data older than 90 days
-            archive_bills: list[dict[str, Any]] = []
-            three_months_ago_ms = int((datetime.now(timezone.utc) - timedelta(days=90)).timestamp() * 1000)
-            should_fetch_archive = since_ms is None or since_ms < three_months_ago_ms
-            if not should_fetch_archive:
-                logger.info("OKX: skipping archive API (since_ms is within 3 months)")
-            else:
-                logger.info("OKX: fetching archive API for older history...")
-                _okx_archive_deadline_hit = False
+            while _okx_window_start < _okx_now_ms:
+                _okx_window_end = min(_okx_window_start + _okx_window_ms, _okx_now_ms)
+                _okx_window_bills: list[dict[str, Any]] = []
+                _okx_outcome: Literal["complete", "cap", "deadline"] = "complete"
+                _okx_stop_inst = ""
                 for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
-                    if _okx_archive_deadline_hit:
-                        break
-                    after_id = ""
-                    type_count = 0
-                    _okx_archive_cap_hit = False
-                    for page in range(OKX_ARCHIVE_PAGE_CAP):
-                        if _monotonic() >= _read_deadline:
-                            _okx_archive_deadline_hit = True
+                    _okx_routes: list[tuple[str, int]] = []
+                    if _okx_window_end > _okx_live_floor_ms:
+                        _okx_routes.append(("private_get_account_bills", OKX_BILLS_PAGE_CAP))
+                    if _okx_window_start < _okx_live_floor_ms:
+                        _okx_routes.append(
+                            ("private_get_account_bills_archive", OKX_ARCHIVE_PAGE_CAP)
+                        )
+                    for _okx_method, _okx_cap in _okx_routes:
+                        _okx_rows, _okx_outcome = await _okx_bills_window_read(
+                            exchange, _okx_method, inst_type,
+                            _okx_window_start, _okx_window_end, _okx_cap, _read_deadline,
+                        )
+                        _okx_window_bills.extend(_okx_rows)
+                        if _okx_outcome != "complete":
                             break
-                        params = {"instType": inst_type, "limit": "100"}
-                        if since_ms:
-                            params["begin"] = str(since_ms)
-                        if after_id:
-                            params["after"] = after_id
-                        try:
-                            bills = await _okx_bills_fetch_with_backoff(
-                                exchange,
-                                "private_get_account_bills_archive",
-                                params,
-                                label=f"archive {inst_type}",
-                                page=page,
-                            )
-                            data = bills.get("data", [])
-                            if not data:
-                                break
-                            archive_bills.extend(data)
-                            type_count += len(data)
-                            after_id = data[-1].get("billId", "")
-                            if len(data) < 100:
-                                break
-                            # 167.1.2.2.2 PR-B round 1 (ME-02): the archive walk
-                            # had a silent cap. OKX pages newest-first, so a
-                            # capped walk drops the OLDEST days of the window.
-                            if page == OKX_ARCHIVE_PAGE_CAP - 1:
-                                _okx_archive_cap_hit = True
-                        except Exception as e:
-                            # NEW-C13-04: same rationale as the bills path.
-                            # NEW-C13-10: scrub before logging.
-                            logger.error(
-                                "OKX archive bills fetch failed for %s: exc_class=%s scrubbed=%s — "
-                                "re-raising (partial daily_pnl rejected)",
-                                inst_type, type(e).__name__, scrub_freeform_string(str(e)),
-                            )
-                            raise
-                    if type_count > 0:
-                        logger.info("OKX archive %s: fetched %d bills", inst_type, type_count)
-                    if _okx_archive_cap_hit:
+                    if _okx_outcome != "complete":
+                        _okx_stop_inst = inst_type
+                        break
+                if _okx_outcome != "complete":
+                    _okx_window_label = (
+                        f"{_okx_utc_date(_okx_window_start)}..{_okx_utc_date(_okx_window_end)}"
+                    )
+                    if _okx_outcome == "deadline":
                         logger.warning(
-                            "OKX archive %s: page cap (%d) hit — daily_pnl "
-                            "may be truncated for this inst_type",
-                            inst_type, OKX_ARCHIVE_PAGE_CAP,
+                            "OKX: read deadline (%.0fs) passed in window %s (%s) — "
+                            "returning the %d bills of the earlier whole windows only",
+                            read_deadline_s, _okx_window_label, _okx_stop_inst, len(all_bills),
+                        )
+                        _record_dq_flag("daily_pnl_deadline_okx", True)
+                    else:
+                        logger.warning(
+                            "OKX: bills page cap hit in window %s (%s) — the window is "
+                            "dropped and the walk stops; daily_pnl is truncated",
+                            _okx_window_label, _okx_stop_inst,
                         )
                         _record_dq_flag("daily_pnl_truncated_okx", True)
-                if _okx_archive_deadline_hit:
-                    logger.warning(
-                        "OKX archive: read deadline (%.0fs) passed — daily_pnl "
-                        "truncated after %d archive bills",
-                        read_deadline_s, len(archive_bills),
-                    )
-                    _record_dq_flag("daily_pnl_deadline_okx", True)
+                    break
+                all_bills.extend(_okx_window_bills)
+                _okx_window_start = _okx_window_end
 
-            # Merge recent + archive and deduplicate by billId
-            merged_bills = all_bills + archive_bills
+            # Deduplicate by billId (a straddling window reads both endpoints).
+            merged_bills = all_bills
             seen_ids: set[str] = set()
             unique_bills: list[dict[str, Any]] = []
             for bill in merged_bills:
@@ -1780,9 +1859,8 @@ async def fetch_daily_pnl(
             all_bills = unique_bills
 
             logger.info(
-                "OKX total: %d bills (%d recent + %d archive, %d after dedup)",
-                len(all_bills), len(merged_bills) - len(archive_bills),
-                len(archive_bills), len(all_bills)
+                "OKX total: %d bills (%d after dedup)",
+                len(merged_bills), len(all_bills),
             )
 
             # Aggregate bills into daily PnL
@@ -1798,6 +1876,7 @@ async def fetch_daily_pnl(
             # filter cutover (Sprint 5.6) by dropping type=='8' here.
             _OKX_FUNDING_BILL_TYPE = "8"
             _okx_funding_bills_dropped = 0
+            _okx_non_usd_census: Counter[str] = Counter()
             for bill in all_bills:
                 bill_type = str(bill.get("type", "")).strip()
                 if bill_type == _OKX_FUNDING_BILL_TYPE:
@@ -1817,6 +1896,19 @@ async def fetch_daily_pnl(
                     _record_dq_flag("daily_pnl_malformed_okx", True)
                     continue
                 pnl_val = _pnl_raw + _fee_raw
+                # Phase 232 VREAD-06: a nonzero amount in a currency that is not a stable
+                # coin is never summed into USDT daily P&L at face value; a blank or missing
+                # ``ccy`` counts as not stable. A zero amount contributes 0 at any rate. The
+                # check sits after the type-8 drop and after the finite parse on purpose: a
+                # funding bill in BTC never refuses, and a non-finite amount keeps the
+                # malformed path above (a data-quality flag, not a refusal, D-12).
+                _ccy = str(bill.get("ccy") or "")
+                if pnl_val != 0.0 and not is_stable_value(_ccy):
+                    _okx_non_usd_census[
+                        _ccy if _OKX_CCY_CODE_RE.match(_ccy)
+                        else ("blank" if not _ccy else "malformed")
+                    ] += 1
+                    continue
                 ts_raw = bill.get("ts", "")
                 if ts_raw and ts_raw.isdigit():
                     dt = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
@@ -1835,6 +1927,19 @@ async def fetch_daily_pnl(
                         ts_raw, bill.get("billId"), bill.get("billType"),
                     )
                     _record_dq_flag("daily_pnl_malformed_okx", True)
+
+            if _okx_non_usd_census:
+                # Phase 232 VREAD-06: one non-USD bill refuses EVERY day of the read (the same
+                # history fails the same way on the next tick: a permanent class). The flag
+                # value is the boolean True; the venue's currency codes go to this log line
+                # only, by count, after the regex above (T-232-09).
+                _record_dq_flag("daily_pnl_non_usd_okx", True)
+                logger.warning(
+                    "OKX daily P&L refused: bills in a currency that is not a stable coin "
+                    "(census=%s, bills=%d)",
+                    dict(_okx_non_usd_census), sum(_okx_non_usd_census.values()),
+                )
+                return []
 
             logger.info(
                 "OKX: %d bills aggregated to %d daily PnL entries "

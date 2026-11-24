@@ -3008,19 +3008,6 @@ reads an unpublished row's value. (5) plan 05's red-first test on a `computing` 
 
 ## Phase 167.1.2.2.2 (TRADESYNC) — routed items (logged 2026-10-10)
 
-- **[167.1.2.2.2-OKX-PERSISTENT-TRUNCATION]** (logged 2026-10-11, PR-B fix round SFH-H2; owner: Phase 167.1.2.2.2.1 OKXHISTORY). A truncated window is now degraded: nothing stored, no stamp, key `error`. An OKX first window above the page cap (10k bills per inst type over ~157 days) therefore truncates on every tick and reports `error` daily instead of leaving a silent hole. Done when the OKX fetch is chunked or windowed so a large first window completes.
-  ⭐ **2026-10-15 (Phase 167.1.2.2.2.1 plan 10, RESEARCH Section 11): measured, not fixed, stays open.** The live
-  walk is 100 pages of 100 per instrument type (`OKX_BILLS_PAGE_CAP = 100`); a capped walk drops the oldest days
-  and records `daily_pnl_truncated_okx`. Evidence today: the 2026-10-12 rehearsal tick reported no `partial`,
-  `fetch_degraded`, `results_truncated` or key `error`; the stored `data_quality_flags` of ordinals 1, 2 and 4
-  carry no `daily_pnl_truncated_okx` key; ordinal 4's stored series is flat 2026-06-08 to 2026-08-01; the
-  heaviest stored account holds a few thousand fills over several months, far from 10,000 bills per instrument
-  type in 90 days. Reading: the first live row of 2026-08-02 for ordinals 1 and 2 is consistent with a flat
-  account, not with the page cap. NOT proven until the Q3 archive file shows no activity in 2026-07-17 to
-  2026-08-01. The OKXHISTORY reconciliation is the detector (`info.archive_only_in_live_reach` in the job result:
-  archive activity on a day inside live reach with no live row). **Trigger (narrowed 2026-10-15):** an OKX
-  derive sets `daily_pnl_truncated_okx` or the OKXHISTORY reconciliation reports an archive-only day inside live reach.
-      ⭐ **Owned by Phase 232 OKXTRADES, v1.22; REQUIREMENTS.md VREAD-07; tagged 2026-11-23.**
 - **[167.1.2.2.2-BINANCE-INCOME-PAGINATION]** (logged 2026-10-11, PR-B fix round; owner: the next phase that ships a Binance strategy key). The Binance income call uses `limit=1000` with no pagination and no truncation flag, so a capped Binance window is still invisible. No Binance key on PROD today. Done when it paginates or stamps `daily_pnl_truncated_binance`.
 - **[167.1.2.2.2-INCOME-FALLBACK-PRODUCER-PIN]** (logged 2026-10-11, PR-B review round 3 R3-ME-01, MEDIUM, confidence 5; owner: the next phase that ships a Binance strategy key). The cron reads `daily_pnl_binance_income_fallback` through its own string constant in `routers/cron.py`, and the fetcher writes it as a separate literal in `services/exchange.py`. The round-3 tests hand the flag to the cron through a patched buffer, so a rename on the fetcher side would silently reopen R2-ME-01 (Binance spot fills stored over daily P&L). Done when one test runs the real `fetch_daily_pnl` with the income call failing and the spot call succeeding and asserts `_fetch_degradation` names the flag, or when both sides import one constant. Dormant until a Binance strategy key exists on PROD. Also correct the comment beside the cron constant: nothing in the tree reads the flag by name for an admin health card.
 
@@ -3071,24 +3058,6 @@ trailing writes are visible by rows). If it cancels, the timeout budget gets a m
 asynchronous.
 ⛔ **Not a close:** the arithmetic that a filtered tick fits in 180 seconds, or a rehearsal that finished
 inside the timeout (it never exercised cancellation).
-
-### 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD — `api_keys.last_fetched_trade_timestamp` reads ahead of the data it claims to cover (booked 2026-10-10, Phase 167.1.2.2.2 research section 3) (owned by Phase 232 OKXTRADES, v1.22; REQUIREMENTS.md VREAD-08; tagged 2026-11-23)
-
-**Why it is open.** On 2026-10-09 the column read 44.7 days old for one strategy's key while that
-strategy's newest stored trade was 50.7 days old, i.e. the cursor sat 6 days ahead of the stored data. A
-mark that is ahead of storage tells the next reader to skip days it never stored. Phase 167.1.2.2.2 does
-not use it as a resume point for exactly that reason (the cron resumes from the stored high-water), but
-the queued `sync_trades` job passes it as its preferred seed, so that job would skip those 6 days. Which
-writer put it ahead was not traced; it was measured on one strategy only.
-
-**Owner:** unrouted; review at the next milestone audit. (Its sibling `167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED` was closed by Phase 211 SYNCJOBS on 2026-11-14: the queued `sync_trades` job now seeds its daily read from the stored high-water, but its fills read still prefers this column.)
-**Trigger:** the same edit as that entry, or a second strategy read more than 1 day ahead of its stored
-data.
-**Gate (what closes it):** the writer is identified and either keeps the column a stored-through mark or
-the queued job stops trusting it, with a test that fails first on a key whose cursor is ahead of its
-newest stored trade; and the same read, repeated, finds 0 strategies ahead.
-⛔ **Not a close:** the cron ignoring the column, which hides the defect from the daily path and does not
-repair it.
 
 ## Phase 170.7 (MYSTRATTABLE) — routed items (logged 2026-10-11)
 
@@ -3383,32 +3352,6 @@ message (but not the `code` tag). The landing helper has the same shape.
 `failAnonRead` and in the landing helper.
 **Owner / Trigger:** fixed together with 170.6.1.1-LANDING-CAPTURE-THROTTLE; or the first Sentry event seen
 without its `code` tag.
-
-## Phase 167.1.2.2.2.1 (OKXHISTORY) — routed items (logged 2026-10-15)
-
-- **[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]** (logged 2026-10-15, OKXHISTORY discuss; founder instruction
-  to book it). `fetch_daily_pnl` in `analytics-service/services/exchange.py` (OKX branch) sums
-  `pnl + fee` per UTC day across every bill regardless of `ccy`, with no currency conversion. A bill in
-  BTC (a coin-margined position, a fee charged in the base coin) is added to USDT P&L at face value, so the
-  daily P&L, the NAV roll-back and every metric built on it would be wrong for any account with a non-USDT
-  bill. Exposure is UNMEASURED for the live strategies. **Owner:** Phase 167.1.2.2.2.1 OKXHISTORY research
-  measures whether the in-scope account's bills (live and archive) are all USDT; if they are not, it is a
-  planning input of that phase, and the fix owner is routed by founder decision. **Trigger:** the first
-  OKX bill with `ccy` other than USDT in any strategy's window, or OKXHISTORY research finding one.
-  **Done when** a non-USDT bill is converted at a stated rate or fails loud, with a test that goes RED on
-  today's code.
-  ⭐ **2026-10-15 (Phase 167.1.2.2.2.1 plan 10): the calibrate census is the measurement step; stays open.** Stored
-  OKX rows are all SWAP and USDT (406 OKX-format raw fills, all SWAP, fee currency USDT; 568 funding rows, all
-  USDT), which covers fills and funding only. Bill classes stored nowhere (SPOT, MARGIN, FUTURES, OPTION,
-  transfers, interest, rebates) are unmeasured. The `calibrate` job over the 2026 Q2 and Q3 files settles it for
-  the in-scope account: its `census.by_ccy` is the currency count (runbook `docs/runbooks/okxhistory-go-live.md`,
-  Step 2). A non-USD row is the stop class `non_usd_ccy` and a founder STOP; the fix owner is routed by founder
-  decision then.
-  ⭐ **2026-10-26 (Phase 167.1.2.2.2.1 close-out): measured for the ARCHIVE, stays open.** Calibrate run 5 (label
-  `20261022T2325`) ingested 1606 archive bills for the in-scope account and all 1606 are USDT, so `non_usd_ccy` did not
-  fire. The trigger (a non-USDT bill in any strategy's window) is not met and the live `fetch_daily_pnl` path is
-  still unconverted and unmeasured for bill classes outside the archive window.
-      ⭐ **Owned by Phase 232 OKXTRADES, v1.22; REQUIREMENTS.md VREAD-06; tagged 2026-11-23.**
 
 ## Phase 164.9.3.1 (FANINGRAPH) — routed items (logged 2026-10-15)
 

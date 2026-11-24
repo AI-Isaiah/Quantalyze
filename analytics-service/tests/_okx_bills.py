@@ -31,6 +31,12 @@ Phase 184 WALLETOFFSET addition, additive and default-off like the ones above:
 
 - ``okx_bill`` takes ``pnl`` and ``fee``; a bill carries each key only when the value is given,
   so the bills the P&L probe sums can be built without touching any earlier caller.
+
+Phase 232 OKXTRADES addition, additive and default-off like the ones above:
+
+- ``OkxBillsArchive`` takes ``reach_floor_ms``: when set, a row whose ``ts`` is below it is never
+  served, whatever ``begin`` says. It models ``GET /api/v5/account/bills``, which reaches back only
+  seven days, so a walk that routes a window by age is tested against the shorter endpoint.
 """
 from __future__ import annotations
 
@@ -238,6 +244,10 @@ class OkxBillsArchive:
     Phase 179: a ``type`` or ``instType`` parameter keeps only the rows whose field equals it,
     and ``hide_type`` models a venue whose unfiltered query omits some types: a hidden type is
     served only to a query that names it with ``type=``.
+
+    Phase 232: ``reach_floor_ms`` (default ``None``, off) drops every row with ``ts`` below it
+    before any other filter, the way the live ``/account/bills`` endpoint has no data past its
+    seven-day reach.
     """
 
     def __init__(
@@ -249,8 +259,10 @@ class OkxBillsArchive:
         oldest_first: bool = False,
         oldest_first_with_begin: bool = False,
         hide_type: frozenset[str] = frozenset(),
+        reach_floor_ms: int | None = None,
     ) -> None:
         self.hide_type = hide_type
+        self.reach_floor_ms = reach_floor_ms
         self.ignore_after = ignore_after
         self.empty_after_cursor = empty_after_cursor
         self.oldest_first = oldest_first
@@ -264,6 +276,8 @@ class OkxBillsArchive:
         if self.effect is not None:
             raise self.effect
         rows = self.rows
+        if self.reach_floor_ms is not None:
+            rows = [r for r in rows if int(r["ts"]) >= self.reach_floor_ms]
         if "begin" in params:
             rows = [r for r in rows if int(r["ts"]) >= int(params["begin"])]
         if "end" in params:
