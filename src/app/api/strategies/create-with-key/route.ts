@@ -357,8 +357,17 @@ async function resolveByVenueIdentity(
     secrets,
     "venue-identity",
   );
+  // 225 PR-2 round-3 decision 3 (WR-07) — FAIL CLOSED PAST THIS POINT. A WORKING
+  // holder is picked, so what uses it decides the answer (the caller's own
+  // draft, a refusal, or none). A read fault on `strategies` or `strategy_keys`
+  // must not read as "unresolved": the post-validation fence would then send
+  // the INSERT on with the identity attached, and once the server-aware index
+  // ships, a tier-2 holder no longer refuses it. `read_failed` answers 503
+  // before any write. The race arm treats it like `unresolved`, as before.
+  if (byStrategy.kind === "unresolved") return { kind: "read_failed" };
   if (byStrategy.kind !== "orphaned") return byStrategy;
-  return resolveOtherKeyUse(supabase, userId, liveKeyId, secrets);
+  const otherUse = await resolveOtherKeyUse(supabase, userId, liveKeyId, secrets);
+  return otherUse.kind === "unresolved" ? { kind: "read_failed" } : otherUse;
 }
 
 /**

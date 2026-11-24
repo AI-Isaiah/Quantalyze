@@ -1996,15 +1996,12 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     expect(sentryState.captured[0].options.tags?.step).toBe("holder-read");
   });
 
-  it("the SECOND read faulting degrades the same way — a live key with an unreadable strategy still submits", async () => {
-    // The fence issues TWO reads and only the FIRST one's fault arm was pinned.
-    // This is the other one: `api_keys` answered a live row, then the
-    // user-scoped `strategies` resolve failed (an RLS blip, a PostgREST 503).
-    // The dangerous implementations are both plausible — 500 the submit, or
-    // treat the error-as-value's `data: null` as "no strategy" and hand back a
-    // half-resolved pair — so the assertions pin the honest third option: log,
-    // fall through, let the DB index be the backstop. `deduped` must be ABSENT,
-    // because nothing was actually resolved.
+  // 225 PR-2 round-3 decision 3 (WR-07): INVERTED from "a live key with an
+  // unreadable strategy still submits". A WORKING holder is picked, so what uses
+  // it decides the answer; a fault in that read must not be read as "nothing
+  // uses it", or once the server-aware index ships the second same-owner key is
+  // admitted beside a working holder (the SF-M1 failure, one read later).
+  it("the SECOND read faulting FAILS CLOSED: a live working key with an unreadable strategy answers 503 before validate, encrypt and the RPC", async () => {
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     venueKeyLookupMock.mockResolvedValue({
       data: { id: EXISTING_KEY_ID },
@@ -2018,15 +2015,55 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     const POST = await importPost();
     const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-    expect(res.status).toBe(200);
-    expect(rpcMock).toHaveBeenCalledTimes(1);
-    const json = await res.json();
-    expect(json.deduped).toBeUndefined();
-    expect(json.strategy_id).toBe(STRATEGY_ID);
-    expect(json.api_key_id).toBe(API_KEY_ID);
-    // Rule 12 — a dark fence that says nothing is indistinguishable from a
-    // fence that found nothing, and only one of those is a bug worth paging on.
+    expect(res.status).toBe(503);
+    expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    // Rule 12 — the fault is logged, never swallowed.
     expect(consoleErr).toHaveBeenCalled();
+  });
+
+  it("a POST-validation strategies read fault after a working holder FAILS CLOSED the same way: 503 before encrypt and the RPC (the pre-validation read was clean)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    venueKeyLookupMock
+      .mockResolvedValueOnce({ data: null, error: null })
+      .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+    venueStrategyLookupMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied for table strategies" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(503);
+    expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+    expect(validateKeyMock).toHaveBeenCalledTimes(1);
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("a strategy_keys read fault after a working holder with no strategy FAILS CLOSED: 503 before validate and the RPC", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    venueKeyLookupMock.mockResolvedValue({
+      data: { id: EXISTING_KEY_ID },
+      error: null,
+    });
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    keyMembershipLookupMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied for table strategy_keys" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(503);
+    expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
   });
 
   it("[156 / CONNECT-03] a MISSING service-role credential fails CLOSED on the MT5 path too — 503, nothing submitted", async () => {
@@ -2323,10 +2360,10 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(rpcMock).not.toHaveBeenCalled();
     });
 
-    it("the OWNER read faulting falls through to the RPC — a refusal is never invented from an error", async () => {
+    it("the OWNER read faulting FAILS CLOSED — a refusal is never invented from an error, and neither is a pass (WR-07)", async () => {
       // Rule 12 applied to the new read: an unreadable `strategies` table means
-      // we cannot tell an orphan from a finished owner, and refusing on that
-      // would 409 a submit that should have succeeded.
+      // we cannot tell an orphan from a finished owner. Round 3 (WR-07): the
+      // honest answer is a retryable 503 before any write, not a fall-through.
       const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
       venueKeyLookupMock.mockResolvedValue({
         data: { id: EXISTING_KEY_ID },
@@ -2341,9 +2378,10 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       const POST = await importPost();
       const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-      expect(res.status).toBe(200);
-      expect(rpcMock).toHaveBeenCalledTimes(1);
-      expect((await res.json()).deduped).toBeUndefined();
+      expect(res.status).toBe(503);
+      expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
       expect(consoleErr).toHaveBeenCalled();
     });
 
@@ -2633,6 +2671,11 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       // emptiness the orphan answer is DERIVED from, so a fault here must fall
       // back to the incumbent behaviour rather than assert the conclusion the
       // failed read did not support.
+      // 225 PR-2 round 3 (WR-07): a fault in the pre- or post-validation fence now
+      // answers 503, so, as in the wizard-session control below, the first two
+      // `api_keys` reads see no key and the fault reaches the race arm's re-read.
+      venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
+      venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
       seedOrphanedKey();
       venueOwnerLookupMock.mockResolvedValue({
         data: null,
@@ -2651,6 +2694,10 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     it("NEGATIVE CONTROL — the DRAFT read faulting keeps the fence 409 byte-identical", async () => {
       // The earlier of the two reads. A fault here returns `unresolved` before
       // the owner read is ever issued, so the orphan branch must stay unreached.
+      // 225 PR-2 round 3 (WR-07): the fault must reach the race arm's re-read
+      // (the third `api_keys` read), since the two fences now answer 503.
+      venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
+      venueKeyLookupMock.mockResolvedValueOnce({ data: null, error: null });
       seedOrphanedKey();
       venueStrategyLookupMock.mockResolvedValue({
         data: null,
