@@ -1395,8 +1395,13 @@ export function OwnerUnpublishedPanel({
    * link sees right now, rendered as the panel's last child. Only the owner
    * pending page passes it; absent, no element renders, so every other mount
    * is byte-identical.
+   *
+   * Phase 238 (FACT-05): a string keeps the `ContactPointerText` path (its
+   * "contact form" phrase links the support topic with this strategy's id). A
+   * node, built on the server (the lead plus the action's own renderer), is
+   * rendered as is inside the same `p`.
    */
-  shareNote?: string;
+  shareNote?: string | ReactNode;
 }) {
   const [shareLive, setShareLiveState] = React.useState(hasActiveShare);
   // One setter for both children: the panel's own state and the host stay on the
@@ -1431,10 +1436,14 @@ export function OwnerUnpublishedPanel({
       </OwnerUnpublishedNotice>
       {shareNote && (
         <p className="mt-2 text-fixed-12 text-text-muted">
-          <ContactPointerText
-            text={shareNote}
-            href={contactHref({ topic: "support", strategy: strategyId })}
-          />
+          {typeof shareNote === "string" ? (
+            <ContactPointerText
+              text={shareNote}
+              href={contactHref({ topic: "support", strategy: strategyId })}
+            />
+          ) : (
+            shareNote
+          )}
         </p>
       )}
     </div>

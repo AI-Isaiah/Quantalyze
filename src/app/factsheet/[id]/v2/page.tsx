@@ -38,9 +38,10 @@ import {
   selectFactsheetJob,
   type ComputeState,
 } from "@/lib/compute-state";
-import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { DegradeAction, DegradeLine } from "@/components/degrade/DegradeLine";
 import {
   degradeSegments,
+  ownerRemedyAction,
   ownerStateKind,
   type DegradeId,
   type OwnerStateKind,
@@ -50,6 +51,7 @@ import {
   readOwnerCompositeHistory,
 } from "@/lib/compute-jobs-read";
 import {
+  KCS12_MINT_B_LEAD,
   lastAttemptDay,
   ownerRemedy,
   ownerStateLine,
@@ -926,15 +928,36 @@ export default async function FactsheetV2Page({
             // build could not read the row, what a recipient sees is not
             // known, so the note says the check failed rather than claiming a
             // placeholder, exactly as /strategies does for a failed probe.
+            //
+            // Phase 238 (FACT-05): for the kind-less not_available arm (the
+            // jobs failed, stalled, finished or never started, and the build
+            // gave no reason of its own) the note is the lead plus the SAME
+            // action the KCS-09 remedy line below renders. It maps the SAME
+            // `ownerRemedyLine` object, so the two cannot differ, and it
+            // never tells the owner to wait for a computation that is not
+            // coming. The owner lane needs no viewer mapping: it is the
+            // owner's own page (UI-SPEC 1.7).
             shareNote={
               ownerStatus
                 ? ownerBuildability?.unreadable
                   ? probeUnreadableShareNote("mint-token")
-                  : recipientShareNoteFor(
-                      "mint-token",
-                      recipientArm(ownerStatus.state),
-                      ownerBuildability?.kind ?? null,
-                    )
+                  : recipientArm(ownerStatus.state) === "not_available" &&
+                      (ownerBuildability?.kind ?? null) === null &&
+                      ownerRemedyLine
+                    ? (
+                        <>
+                          {KCS12_MINT_B_LEAD}{" "}
+                          <DegradeAction
+                            id={ownerRemedyAction(ownerRemedyLine)}
+                            strategyId={signature.id}
+                          />
+                        </>
+                      )
+                    : recipientShareNoteFor(
+                        "mint-token",
+                        recipientArm(ownerStatus.state),
+                        ownerBuildability?.kind ?? null,
+                      )
                 : undefined
             }
           />

@@ -906,8 +906,14 @@ describe("KCS-09 — an unreadable read never claims progress", () => {
 // Locked copy, typed as literals (UI-SPEC § B / § KCS-12 and § KCS-10).
 const MINT_A =
   "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.";
-const MINT_B =
+// Phase 238 (FACT-05): KCS12-MINT-B is RETIRED. The pending page no longer renders it for any
+// input; it is kept typed out only so a negative can name it.
+const RETIRED_MINT_B =
   "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.";
+// Phase 238 (FACT-05): the owner pending page's note for a kind-less not_available arm is
+// KCS12-MINT-B-LEAD, one space, then the same action sentence the KCS-09 remedy line ends on.
+const MINT_B_LEAD =
+  "Right now, a private link to this strategy shows that its factsheet is not available.";
 const MINT_UNREADABLE =
   "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
 // 199-18 (UI-SPEC "Factsheet" row 3): the shipped KCS10 sentence, unchanged, then the one action a
@@ -953,15 +959,56 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(last.className).toBe(SHARE_NOTE_CLASS);
   });
 
-  it("SHARE-NOTE-B: a failed job -> the panel's last child is KCS12-MINT-B", async () => {
+  it("SHARE-NOTE-B: a permanently failed job -> the panel's last child is KCS12-MINT-B-LEAD plus the remedy line's own action", async () => {
     givenOwnerPendingDraft();
     givenJobs(TRIGGER_ROWS);
 
-    const { container } = await renderOwnerPending();
+    const { container, remedyLine } = await renderOwnerPending();
     const last = panelOf(container).lastElementChild as HTMLElement;
 
-    expect(last.textContent).toBe(MINT_B);
+    expect(last.textContent).toBe(
+      "Right now, a private link to this strategy shows that its factsheet is not available. Use the contact form to have it resolved.",
+    );
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${CONTACT_PERMANENT}`);
     expect(last.className).toBe(SHARE_NOTE_CLASS);
+    expect(last.textContent).not.toBe(RETIRED_MINT_B);
+    // The contact pointer is the note's one link, carrying the strategy id.
+    const pointers = last.querySelectorAll("a");
+    expect(pointers).toHaveLength(1);
+    expect(pointers[0].textContent).toBe("contact form");
+    expect(pointers[0].getAttribute("href")).toBe(CONTACT_HREF);
+    // Parity: the page's own remedy line ends on the same action.
+    expect(remedyLine!.textContent!.endsWith(CONTACT_PERMANENT)).toBe(true);
+    expect(last.textContent!.endsWith(remedyLine!.textContent!)).toBe(true);
+  });
+
+  it("SHARE-NOTE-B-SINGLE: a transient failure on a single-key strategy -> the lead plus Resync on the edit page, the same action as the remedy line", async () => {
+    givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID });
+    givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${SHAPE_SINGLE}`);
+    expect(last.className).toBe(SHARE_NOTE_CLASS);
+    expect(remedyLine!.textContent).toBe(SHAPE_SINGLE);
+    const hrefs = Array.from(last.querySelectorAll("a")).map((a) => a.getAttribute("href"));
+    expect(hrefs.filter((h) => h === EDIT_HREF)).toHaveLength(1);
+    expect(last.textContent).not.toMatch(/\byet\b|once a computation succeeds|appear there|wait/);
+  });
+
+  it("SHARE-NOTE-B-NEVER-STARTED: no computation on record, no key -> the lead plus the unlinked remedy's action", async () => {
+    givenOwnerPendingDraft({ source: "api", api_key_id: null });
+    givenJobs([]);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(remedyLine!.textContent).toBe(SHAPE_UNLINKED);
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${SHAPE_UNLINKED}`);
+    expect(last.textContent).not.toContain(RETIRED_MINT_B);
   });
 
   it("SHARE-NOTE-UNREADABLE: an unreadable read -> the panel's last child is KCS12-UNREADABLE", async () => {
@@ -1000,7 +1047,7 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(shareBtn, "the panel must render its share control").toBeDefined();
     expect(note.contains(shareBtn!)).toBe(true);
     expect(panel.querySelector("p.mt-2")).toBeNull();
-    for (const note of [MINT_A, MINT_B, MINT_UNREADABLE]) {
+    for (const note of [MINT_A, RETIRED_MINT_B, MINT_B_LEAD, MINT_UNREADABLE]) {
       expect(container.textContent).not.toContain(note);
     }
 
@@ -1273,7 +1320,7 @@ describe("164.6.6.3.3 D-08 — a finished job whose analytics failed", () => {
 
   // 170.1 D-08 / R-1 — RE-POINTED. This case used to pin "a computing row keeps
   // KCS09-FINISHED and its generic note", where the banner was the arm-derived
-  // KCS12-MINT-B ("not available yet ... once a computation succeeds"). For a
+  // the retired KCS12-MINT-B ("not available yet ... once a computation succeeds"). For a
   // job that FINISHED without a built factsheet that wait never ends, and the
   // body's state line and remedy already said "have it checked". The banner now
   // gives the same instruction. Strings typed by hand from the UI-SPEC row.
