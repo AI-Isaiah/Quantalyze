@@ -240,6 +240,10 @@ const state = vi.hoisted(() => ({
   rpcCalls: [] as string[],
   /** 199-16: the compute-jobs RPC fails. */
   rpcError: false,
+  /** 238-02: the `strategy_keys` composite members the page reads (default none). */
+  members: [] as Array<{ strategy_id: string; api_key_id: string; seq: number }>,
+  /** 238-02: the `strategy_keys` member read fails. */
+  membersError: false,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -281,7 +285,11 @@ vi.mock("@/lib/supabase/server", () => ({
             ? { data: state.intros, error: null }
             : table === "api_keys" && state.keysError
               ? { data: null, error: { message: "keys read failed" } }
-              : { data: table === "api_keys" ? state.keys : [], error: null };
+              : table === "strategy_keys"
+                ? state.membersError
+                  ? { data: null, error: { message: "members read failed" } }
+                  : { data: state.members, error: null }
+                : { data: table === "api_keys" ? state.keys : [], error: null };
       const builder = {
         select: () => builder,
         eq: (col: string, val: unknown) => {
@@ -358,6 +366,8 @@ beforeEach(() => {
   state.jobs = {};
   state.rpcCalls = [];
   state.rpcError = false;
+  state.members = [];
+  state.membersError = false;
   for (const spy of Object.values(queries)) spy.mockReset();
   queries.getOwnRowPercentiles.mockImplementation(
     async (rows: readonly { id: string }[]) =>
@@ -1726,5 +1736,161 @@ describe("NEVERCOMPUTED published: a published Stale (no data yet) row's note re
     state.jobs["s-pub"] = [{ kind: "compute_analytics_from_csv", status: "done", created_at: "2026-02-01T00:00:00.000Z" }];
     await renderPage();
     expect(shareNoteOf("Strategy s-pub")!.textContent).toBe(PUBLIC_FINISHED_NOT_BUILT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 238 plan 02 Task 2 (FACT-05, UI-SPEC 1.3 and Test Contracts 3 and 4): the
+// private-link note's action for every shape and viewer, and its parity with the
+// Health detail. Every sentence is typed out from the UI-SPEC Copywriting Contract.
+// ---------------------------------------------------------------------------
+
+const MINT_B_LEAD = "Right now, a private link to this strategy shows that its factsheet is not available.";
+const A_RESYNC_EDIT =
+  "Start a new computation with Resync on this strategy's edit page. Use the contact form if it does not complete.";
+const A_LINK_KEY_EDIT =
+  "Link a key with Change key… on this strategy's edit page (add one on your Profile API keys tab first if you have none) to start a new computation. Use the contact form if it does not complete.";
+const A_COMPOSITE_CONTACT =
+  "A composite strategy has no self-serve re-run. Use the contact form to start a new computation.";
+const A_CSV_FIXED =
+  "A CSV strategy's data is fixed at upload. To publish a corrected series, upload a new CSV strategy, or use the contact form.";
+const A_CONTACT_RESOLVE = "Use the contact form to have it resolved.";
+const A_CONTACT_CHECK = "Use the contact form to have it checked.";
+const A_EXCHANGES_KEY = "Check its key on the Exchanges page.";
+const A_RELOAD = "Reload this page to try again.";
+
+const TRANSIENT_JOB = { ...FAILED_JOB, error_kind: "transient" };
+/** A composite's own job kind: the stitch is what a composite row's state is read from. */
+const STITCH_FAILED = {
+  kind: "stitch_composite",
+  status: "failed_final",
+  error_kind: "transient",
+  claimed_at: "2026-11-02T10:00:00Z",
+  created_at: "2026-11-02T09:00:00Z",
+};
+
+describe("NEVERCOMPUTED role matrix: the private-link note's action, by shape, state and viewer (238-02, UI-SPEC 1.3)", () => {
+  type Case = {
+    label: string;
+    role: "manager" | "both" | "allocator";
+    row: Record<string, unknown>;
+    jobs?: unknown[];
+    members?: boolean;
+    membersError?: boolean;
+    tail: string;
+    /** The one link the action carries (a CSS selector inside the note), or null for none. */
+    link: string | null;
+  };
+  const edit = (id: string) => `a[href="/strategies/${id}/edit"]`;
+  const contact = (id: string) => `a[href*="/contact"][href*="${id}"]`;
+  const EXCHANGES = 'a[href^="/profile?tab=exchanges"]';
+  const CSV = 'a[href="/strategies/new/wizard?source=csv"]';
+  const keyed = (id: string) => noDataRow(id, { api_key_id: "key-1" });
+  const composite = (id: string) => noDataRow(id);
+
+  const cases: Case[] = [
+    ...(["manager", "both"] as const).flatMap((role): Case[] => [
+      { label: "single, transient failure: RESYNC-EDIT", role, row: keyed("s-1"), jobs: [TRANSIENT_JOB], tail: A_RESYNC_EDIT, link: edit("s-1") },
+      { label: "unlinked, never started: LINK-KEY-EDIT", role, row: noDataRow("s-1"), tail: A_LINK_KEY_EDIT, link: edit("s-1") },
+      { label: "composite, transient failure: COMPOSITE-CONTACT", role, row: composite("s-1"), jobs: [STITCH_FAILED], members: true, tail: A_COMPOSITE_CONTACT, link: contact("s-1") },
+      { label: "csv, never started: CSV-FIXED", role, row: noDataRow("s-1", { source: "csv" }), tail: A_CSV_FIXED, link: CSV },
+      { label: "csv, failed: CSV-FIXED", role, row: noDataRow("s-1", { source: "csv" }), jobs: [TRANSIENT_JOB], tail: A_CSV_FIXED, link: CSV },
+      { label: "single, permanent failure: CONTACT-RESOLVE", role, row: keyed("s-1"), jobs: [FAILED_JOB], tail: A_CONTACT_RESOLVE, link: contact("s-1") },
+      { label: "member read failed (shape unknown): RELOAD", role, row: noDataRow("s-1"), membersError: true, tail: A_RELOAD, link: null },
+    ]),
+    { label: "single, transient failure: EXCHANGES-KEY", role: "allocator", row: keyed("s-1"), jobs: [TRANSIENT_JOB], tail: A_EXCHANGES_KEY, link: EXCHANGES },
+    { label: "composite, transient failure: EXCHANGES-KEY", role: "allocator", row: composite("s-1"), jobs: [STITCH_FAILED], members: true, tail: A_EXCHANGES_KEY, link: EXCHANGES },
+    { label: "unlinked, never started: CONTACT-CHECK", role: "allocator", row: noDataRow("s-1"), tail: A_CONTACT_CHECK, link: contact("s-1") },
+    { label: "csv, never started: CONTACT-CHECK", role: "allocator", row: noDataRow("s-1", { source: "csv" }), tail: A_CONTACT_CHECK, link: contact("s-1") },
+    { label: "single, permanent failure: CONTACT-RESOLVE (not a shape remedy, so unchanged)", role: "allocator", row: keyed("s-1"), jobs: [FAILED_JOB], tail: A_CONTACT_RESOLVE, link: contact("s-1") },
+    { label: "member read failed (shape unknown): RELOAD", role: "allocator", row: noDataRow("s-1"), membersError: true, tail: A_RELOAD, link: null },
+  ];
+
+  it.each(cases)("$role, $label", async (c) => {
+    asRole(c.role);
+    state.strategies = [c.row];
+    if (c.jobs) state.jobs["s-1"] = c.jobs;
+    if (c.members) state.members = [{ strategy_id: "s-1", api_key_id: "key-m1", seq: 1 }];
+    if (c.membersError) state.membersError = true;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { container } = render(await renderToElement());
+      const note = shareNoteOf("Strategy s-1") as HTMLElement;
+      expect(note.textContent).toBe(`${MINT_B_LEAD} ${c.tail}`);
+      const links = [...note.querySelectorAll("a")];
+      if (c.link === null) {
+        expect(links).toHaveLength(0);
+      } else {
+        expect(links).toHaveLength(1);
+        expect(note.querySelector(c.link)).not.toBeNull();
+      }
+      if (c.role === "allocator") {
+        // CD-11: the manager-guarded edit page and CSV wizard are never an allocator-only
+        // viewer's destination, in the note or anywhere on the page.
+        expect(container.querySelector('a[href*="/edit"]')).toBeNull();
+        expect(container.querySelector('a[href*="/strategies/new"]')).toBeNull();
+      }
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+});
+
+describe("NEVERCOMPUTED parity: the Health detail and the note end on the same action sentence (238-02, UI-SPEC Test Contract 4)", () => {
+  const PREFIX = "No figures yet, and no computation is running. ";
+  type Fixture = { label: string; row: Record<string, unknown>; jobs?: unknown[] };
+  const fixtures: Fixture[] = [
+    { label: "single key, transient failure", row: noDataRow("s-1", { api_key_id: "key-1" }), jobs: [TRANSIENT_JOB] },
+    { label: "unlinked, never started", row: noDataRow("s-1") },
+    {
+      // The shape of this row depends on its jobs: no key and no members, but a stitch on
+      // record, so the history makes it `unknown` (a bare `unlinked` without it).
+      label: "no key, no members, a stitch on record (shape depends on the composite history)",
+      row: noDataRow("s-1"),
+      jobs: [
+        { kind: "process_key_long", status: "running", created_at: new Date(Date.now() - 300_000).toISOString() },
+        { kind: "stitch_composite", status: "failed_final", created_at: "2026-01-01T00:00:00.000Z" },
+      ],
+    },
+  ];
+
+  it.each(fixtures)("$label", async (f) => {
+    asRole("manager");
+    state.strategies = [f.row];
+    if (f.jobs) state.jobs["s-1"] = f.jobs;
+    await renderPage();
+    const detail = detailOf("Strategy s-1", "strategies.stale-no-data") as HTMLElement;
+    const note = shareNoteOf("Strategy s-1") as HTMLElement;
+    expect(detail).not.toBeNull();
+    expect(note).not.toBeNull();
+    // Both lines render, the note after the detail, neither shortened or hidden.
+    expect(detail.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const detailAction = (detail.textContent ?? "").slice(PREFIX.length);
+    const noteAction = (note.textContent ?? "").slice(MINT_B_LEAD.length + 1);
+    expect(detail.textContent!.startsWith(PREFIX)).toBe(true);
+    expect(note.textContent!.startsWith(`${MINT_B_LEAD} `)).toBe(true);
+    expect(noteAction).not.toBe("");
+    expect(noteAction).toBe(detailAction);
+  });
+});
+
+describe("NEVERCOMPUTED role matrix: two notes typed out whole, so the lead and the action cannot drift together (238-02)", () => {
+  it("an allocator-only viewer of a key-fed strategy reads the Exchanges page, as one sentence", async () => {
+    asRole("allocator");
+    state.strategies = [noDataRow("s-1", { api_key_id: "key-1" })];
+    state.jobs["s-1"] = [TRANSIENT_JOB];
+    await renderPage();
+    expect(shareNoteOf("Strategy s-1")!.textContent).toBe(
+      "Right now, a private link to this strategy shows that its factsheet is not available. Check its key on the Exchanges page.",
+    );
+  });
+
+  it("a manager of a CSV strategy reads that its data is fixed at upload, as one sentence", async () => {
+    asRole("manager");
+    state.strategies = [noDataRow("s-1", { source: "csv" })];
+    await renderPage();
+    expect(shareNoteOf("Strategy s-1")!.textContent).toBe(
+      "Right now, a private link to this strategy shows that its factsheet is not available. A CSV strategy's data is fixed at upload. To publish a corrected series, upload a new CSV strategy, or use the contact form.",
+    );
   });
 });
