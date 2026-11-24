@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.133.68.1] - 2026-11-24 — records: Phase 227 JOBLEDGER phase records, HEAL-01 go-live evidence and the cron manifest re-capture
+
+This is a records PR. It has no source, test, workflow or migration change. The one non-planning file is `scripts/prod-prober/cron-manifest.json`, the re-capture that `docs/runbooks/jobledger-go-live.md` Step 2 requires.
+
+### Added
+- **Phase directory** `.planning/phases/227-jobledger-.../`. It holds:
+  - CONTEXT, DISCUSSION-LOG, RESEARCH (with the PROD census), PATTERNS and VALIDATION;
+  - eleven PLANs and eleven SUMMARYs;
+  - REVIEW (three rounds, the last clean) and SECURITY (`threats_open: 0`);
+  - VERIFICATION.
+
+### Changed
+- **`scripts/prod-prober/cron-manifest.json`** is re-captured after `first_hop_enqueue_sweep` was registered on PROD, hourly at minute 55. The only job change is that one new row. `--preflight-repoint` matches 19 rows.
+- **`227-VERIFICATION.md`** is now `status: passed`. Its post-merge closure section records:
+  - the PR CI proofs from #1325;
+  - the HEAL-01 go-live evidence: the P0 marker, P1 to P5, the Step 1b `cron.job` row verbatim, and the manifest diff;
+  - the first tick at 16:55 UTC: succeeded, 0 observed, 0 re-enqueued, 0 named.
+- **`REQUIREMENTS.md`:** MT5D-01 and HEAL-01 to HEAL-05 are complete, as a checkbox and in the traceability table.
+- **`ROADMAP.md` Phase 227:**
+  - the 11-plan list in five waves;
+  - the overview bullet is ticked;
+  - the Progress row reads Complete (shipped v0.133.67.0, #1325).
+- **`STATE.md`:** Phase 227 complete, and progress is re-derived as 2 of 21 phases. The parallel-phase Current Position (Phase 231 BYBITREADS in progress) is kept.
+
+### Removed
+- **TODOS entry "(D-05) The wizard/API first-hop enqueue drop is NOT covered" (HEAL-01).** Its owner, Phase 227, shipped the first-hop sweep, and the sweep is now live on PROD.
+
+### Notes
+- **Handler edits restored by hand.** `phase complete` had advanced STATE to Phase 155.2, which moved to the next milestone, and had reduced the Progress-row prose to a bare "Complete". Both were restored.
+- **Recorded low residuals, no action taken.** These are in `227-SECURITY.md`:
+  - R-01: the ledger has no retention window. It is to be set with Phase 230.
+  - R-02: strategy-keyed and key-keyed ledger rows are erased but not exported.
+  - R-03: an attempt in flight at erasure time can write one ledger row after the purge.
+
 ## [0.133.68.0] - 2026-11-24 — Phase 223 FLOWKINDS: each funding caller treats a malformed row by a recorded, tested decision, and the Bybit funding sync fills its table
 
 This release is analytics-service only: no migration, no UI and no published number moves. It covers FLOWK-02 and FLOWK-03, and fixes Phase 231 census row C27 (the census row is owned by Phase 231 and is not edited here). It follows three founder rulings of 2026-11-24.
