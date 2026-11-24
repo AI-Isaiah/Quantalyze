@@ -3066,6 +3066,27 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
 
     Pre-flight: same as sync_trades (strategy + api_key load, circuit
     breaker, decrypt, exchange create). On 429, stamps last_429_at.
+
+    Bybit (Phase 223 C27, founder ruling 3): the walk is one 7-day window at a
+    time, oldest first, and each window is stored before the next is read. The
+    cursor above is the newest stored row, so a walk that stores nothing until
+    it ends loses every attempt to the handler budget (the census measured a
+    first walk of 379 s against 180 s, with 0 rows ever stored). A walk the
+    budget cuts still fails the job as a timeout, and each attempt keeps what
+    it stored, so the next attempt resumes from the stored cursor.
+
+    Malformed funding rows (Phase 223 FLOWK-02, decided 2026-11-24): every
+    venue arm keeps the default ``on_malformed="drop"``. The fetcher drops the
+    row, logs a WARNING with the venue and the count, and the walk still ends
+    DONE with the well-formed rows stored. Reason: no published number reads
+    ``funding_fees``. Its readers at HEAD on 2026-11-24 are
+    ``position_reconstruction.reconstruct_positions`` (no non-test caller), the
+    GDPR export, ``sanitize_user`` and ``scripts/bybit_reconcile.py``. A refusal
+    would also starve the table: a refused walk stores nothing, the cursor never
+    moves, and the job would refuse daily. Revisit when a published reader of
+    ``funding_fees`` appears. The composite member funding read is out of scope
+    (founder ruling F-2). Pinned per venue by
+    ``TestSyncFundingMalformedRowDecision``.
     """
     ctx = await _exchange_preflight(job, "run_sync_funding_job")
     if isinstance(ctx, DispatchResult):
@@ -3099,6 +3120,7 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
         fetch_funding_binance,
         fetch_funding_okx,
         fetch_funding_bybit,
+        bybit_funding_windows,
         upsert_funding_rows,
     )
 
@@ -3108,7 +3130,26 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
         elif exchange_name == "okx":
             rows = await fetch_funding_okx(ctx.exchange, strategy_id, since_ms)
         elif exchange_name == "bybit":
-            rows = await fetch_funding_bybit(ctx.exchange, strategy_id, since_ms)
+            # C27: oldest window first, stored before the next is read.
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            windows = bybit_funding_windows(since_ms, now_ms)
+            stored_rows = 0
+            for w_start, w_end in windows:
+                window_rows = await fetch_funding_bybit(
+                    ctx.exchange, strategy_id, w_start, until_ms=w_end
+                )
+                failed = await _store_funding_window(
+                    ctx.supabase, strategy_id, window_rows
+                )
+                if failed is not None:
+                    return failed
+                stored_rows += len(window_rows)
+            logger.info(
+                "sync_funding: stored %d bybit funding rows in %d window(s) "
+                "for strategy %s",
+                stored_rows, len(windows), strategy_id,
+            )
+            return DispatchResult(outcome=DispatchOutcome.DONE)
         else:
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
@@ -3158,6 +3199,51 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
         result["inserted"], strategy_id,
     )
     return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
+async def _store_funding_window(
+    supabase: Any, strategy_id: str, rows: list[Any]
+) -> DispatchResult | None:
+    """Store one Bybit funding window; None on success, FAILED transient on error.
+
+    Phase 223 C27. The funding cursor is the newest stored timestamp minus two
+    days, so the walk must never store a newer row while an older row of the
+    same walk is unstored: that hole would sit behind the cursor and never be
+    re-read. Hence the ascending sort (stable, ties keep fetch order; the rows
+    are not rebuilt), 500-row slices, and a return at the first slice that
+    reports an error, before the next slice starts. ``upsert_funding_rows``
+    itself continues past a failed batch (shared with the backfill script), so
+    it is called once per slice and left unchanged.
+    """
+    if not rows:
+        return None
+
+    from services.funding_fetch import FUNDING_UPSERT_BATCH_SIZE, upsert_funding_rows
+
+    ordered = sorted(rows, key=lambda r: r["timestamp"])
+    for i in range(0, len(ordered), FUNDING_UPSERT_BATCH_SIZE):
+        result = await upsert_funding_rows(
+            supabase, ordered[i : i + FUNDING_UPSERT_BATCH_SIZE]
+        )
+        upsert_errors = result.get("errors") or []
+        if upsert_errors:
+            # H-1115: same log signature and FAILED transient shape as the
+            # single-upsert path above.
+            for err in upsert_errors:
+                logger.error(
+                    "sync_funding: upsert_funding_rows batch failed for "
+                    "strategy %s: %s",
+                    strategy_id, err,
+                )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_kind="transient",
+                error_message=(
+                    f"sync_funding: {len(upsert_errors)} upsert "
+                    f"batch(es) failed: {upsert_errors[:3]}"
+                ),
+            )
+    return None
 
 
 async def _resolve_ccxt_flow_price_index(

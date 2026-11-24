@@ -140,8 +140,10 @@ def test_a_deadline_hit_is_a_reason_of_its_own_and_not_a_truncation() -> None:
 def test_a_dropped_malformed_row_is_not_a_reason_the_key_keeps_publishing(flag: str) -> None:
     """Founder decision D-12 (2026-11-04), reversing review SFH-5. A malformed realized row is
     stamped as a data-quality flag but is not a refusal: it is the row's content, so a refusal would
-    recur on every daily derive for as long as the row stays in the walk (TODOS
-    ``[186-REALIZED-MALFORMED-COUNT]`` books the production count before refusing is reconsidered)."""
+    recur on every daily derive for as long as the row stays in the walk. The PROD count read on
+    2026-11-24 found 0 flags on every measured key and strategy (two Bybit key rows computed before
+    Phase 186 are not measured), and on 2026-11-24 the founder ruled "Keep flagging" (Phase 223
+    ruling 2, FLOWK-03), so this test stays the guard against a realized-row refusal being switched on."""
     verdict = daily_pnl_read_verdict({flag: True})
     assert verdict.reasons == ()
     assert verdict.rate_limited is False

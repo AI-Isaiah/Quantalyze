@@ -2359,3 +2359,118 @@ class TestOnMalformedRaise:
         import inspect
 
         assert "on_malformed" not in inspect.signature(fetch_funding).parameters
+
+
+class TestBybitUntilMs:
+    """Phase 223 C27 (fetcher half): the funding handler stores one 7-day
+    window before it reads the next (census C27), so the fetcher must be able
+    to read exactly one window, both categories, when asked. ``until_ms`` is
+    the inclusive end of the walk; omitting it keeps today's fetch-time end.
+    """
+
+    _DAY_MS = 86_400_000
+
+    @staticmethod
+    def _recording_exchange() -> tuple[AsyncMock, list[dict]]:
+        calls: list[dict] = []
+
+        async def _capture(params: dict) -> dict:
+            calls.append(dict(params))
+            return {"result": {"list": [], "nextPageCursor": ""}}
+
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_account_transaction_log = AsyncMock(side_effect=_capture)
+        return ex, calls
+
+    @pytest.mark.asyncio
+    async def test_until_ms_bounds_every_request_and_reads_linear_then_inverse_in_one_window(
+        self,
+    ) -> None:
+        """A call over one handler window sends exactly two requests, linear
+        then inverse (C27: both categories per window, before that window's
+        upsert), each carrying the given start and end. Pre-change the
+        keyword does not exist and the end is the fetch-time clock."""
+        import time as _time
+
+        since = int(_time.time() * 1000) - 3 * self._DAY_MS
+        until = since + 2 * self._DAY_MS
+        ex, calls = self._recording_exchange()
+
+        rows = await fetch_funding_bybit(ex, STRATEGY_ID, since, until_ms=until)
+
+        assert rows == []
+        assert [c["category"] for c in calls] == ["linear", "inverse"]
+        for c in calls:
+            assert c["startTime"] == str(since)
+            assert c["endTime"] == str(until)
+
+    @pytest.mark.asyncio
+    async def test_until_ms_equal_to_since_sends_no_request(self) -> None:
+        """An empty range must not invent a request: a handler window that
+        starts at its own end has nothing to read."""
+        since = 1_700_000_000_000
+        ex, calls = self._recording_exchange()
+
+        rows = await fetch_funding_bybit(ex, STRATEGY_ID, since, until_ms=since)
+
+        assert rows == []
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_until_ms_with_no_since_looks_back_365_days_from_until(
+        self,
+    ) -> None:
+        """The empty-table backfill keeps its 365-day reach, measured from the
+        bound and not from the clock."""
+        until = 1_700_000_000_000
+        ex, calls = self._recording_exchange()
+
+        await fetch_funding_bybit(ex, STRATEGY_ID, None, until_ms=until)
+
+        linear = [c for c in calls if c["category"] == "linear"]
+        assert len(linear) == 53
+        assert linear[0]["startTime"] == str(until - 365 * self._DAY_MS)
+        assert linear[-1]["endTime"] == str(until)
+
+    @pytest.mark.asyncio
+    async def test_bybit_funding_windows_equals_the_windows_one_walk_sends(
+        self,
+    ) -> None:
+        """The seam (next start = previous end + 1 ms) must be ONE definition:
+        the handler reads window by window from the helper, and that must be
+        byte-equal to the single walk it replaces."""
+        from services.funding_fetch import bybit_funding_windows
+
+        since = 1_700_000_000_000
+        until = since + 30 * self._DAY_MS
+        ex, calls = self._recording_exchange()
+
+        await fetch_funding_bybit(ex, STRATEGY_ID, since, until_ms=until)
+
+        walked = [
+            (int(c["startTime"]), int(c["endTime"]))
+            for c in calls
+            if c["category"] == "linear"
+        ]
+        windows = bybit_funding_windows(since, until)
+        assert windows == walked
+        assert len(windows) == 5
+        assert all(isinstance(s, int) and isinstance(e, int) for s, e in windows)
+
+    def test_bybit_funding_windows_for_an_empty_table_is_53_contiguous_windows(
+        self,
+    ) -> None:
+        """No since means the 365-day backfill: 53 windows, oldest first, no
+        gap and no overlap, none wider than Bybit's 7-day request cap."""
+        from services.funding_fetch import bybit_funding_windows
+
+        until = 1_700_000_000_000
+        windows = bybit_funding_windows(None, until)
+
+        assert len(windows) == 53
+        assert windows[0][0] == until - 365 * self._DAY_MS
+        assert windows[-1][1] == until
+        for (_, prev_end), (nxt_start, _) in zip(windows, windows[1:]):
+            assert nxt_start == prev_end + 1
+        assert all(e - s <= 7 * self._DAY_MS for s, e in windows)

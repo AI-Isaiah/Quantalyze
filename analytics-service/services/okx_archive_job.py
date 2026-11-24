@@ -91,7 +91,7 @@ from services.exchange import (
     get_and_clear_last_dq_flags,
 )
 from services.external_flows import ExternalFlow
-from services.funding_fetch import fetch_funding_okx
+from services.funding_fetch import FundingRowsMalformed, fetch_funding_okx
 from services.job_worker import (
     _BROKER_CRAWL_TIMEOUT_S,
     DispatchOutcome,
@@ -1650,7 +1650,9 @@ def _check_live_realized_flags(flags: Mapping[str, Any]) -> None:
       CLASS only, never its text, which can carry a signed URL): a failed crawl is not a
       quiet account, and an empty series must not reach the reconciliation;
     * a page-cap truncation means the OLDEST live days are missing, the very days the
-      reconciliation and the NAV roll lean on: the live realized series is unusable."""
+      reconciliation and the NAV roll lean on: the live realized series is unusable;
+    * a non-stable OKX bill (``daily_pnl_non_usd_okx``, Phase 232's refusal flag) cannot be
+      valued in USD by the realized read: the live realized series is unusable too."""
     if flags.get("daily_pnl_fetch_error"):
         name = flags.get("daily_pnl_fetch_error_class")
         if name in _RATE_LIMIT_CLASSES:
@@ -1659,6 +1661,8 @@ def _check_live_realized_flags(flags: Mapping[str, Any]) -> None:
         raise _Stop("live_fetch_failed", f"class={label}")
     if flags.get("daily_pnl_truncated_okx"):
         raise _Stop("live_anchor_unusable", "live_realized=truncated")
+    if flags.get("daily_pnl_non_usd_okx"):
+        raise _Stop("live_anchor_unusable", "live_realized=non_usd")
 
 
 async def _live_reference(
@@ -1669,7 +1673,11 @@ async def _live_reference(
     valued by the same flow valuer. Each crawl is bounded by ``_BROKER_CRAWL_TIMEOUT_S`` AND by
     what is left of the claim's budget (WR-06); running out is the named transient
     ``claim_budget_exceeded`` naming the step (a retry resumes statelessly). A venue rate limit
-    is deferred by the handler."""
+    is deferred by the handler.
+
+    The live funding read refuses a malformed row by name (ruling 1, 2026-11-24:
+    ``live_anchor_unusable`` with detail ``live_funding=malformed``): a short live funding read
+    would move the rolled NAV anchor on live-only days, which the reconciliation does not cover."""
     equity, balance_error, open_unrealized, upnl_unreadable = await _within(
         budget, fetch_account_equity_and_upnl_usd(exchange, "okx"),
         step="live_equity", cap=_BROKER_CRAWL_TIMEOUT_S,
@@ -1681,10 +1689,15 @@ async def _live_reference(
     # F2 / WR-03: the fetch swallows every error and returns what it has; the only trace is
     # the per-task DQ buffer. Read it NOW, before any other crawl can reset it.
     _check_live_realized_flags(get_and_clear_last_dq_flags())
-    funding = await _within(
-        budget, fetch_funding_okx(exchange, api_key_id, None),
-        step="live_funding", cap=_BROKER_CRAWL_TIMEOUT_S,
-    )
+    try:
+        funding = await _within(
+            budget, fetch_funding_okx(exchange, api_key_id, None, on_malformed="raise"),
+            step="live_funding", cap=_BROKER_CRAWL_TIMEOUT_S,
+        )
+    except FundingRowsMalformed:
+        # Ruling 1 (founder, 2026-11-24): a row the fetcher dropped is a short read, so refuse by
+        # name. (Message dropped: it carries a count, and the detail is a fixed literal.)
+        raise _Stop("live_anchor_unusable", "live_funding=malformed") from None
     now_utc = _utc_now()
     now_ms = int(now_utc.timestamp() * 1000)
     floor = flow_retention_floor("okx", now_utc)
