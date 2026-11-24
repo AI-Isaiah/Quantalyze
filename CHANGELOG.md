@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.133.65.2] - 2026-11-24 — records: Phase 231 BYBITREADS plans 01-05 phase records (plan 06 waits for 229)
+
+This is a records PR. It has no source, test, script, workflow or migration change. It carries Phase 231's `.planning` work for plans 01-05, whose code shipped in v0.133.61.6 (#1314, the probe) and v0.133.65.0 (#1321, plans 03-05).
+
+### Added
+- **Phase directory** `.planning/phases/231-bybitreads-.../`. It holds:
+  - CONTEXT (with the orchestrator rulings OQ1-OQ7 and the plan 05 checkpoint block), DISCUSSION-LOG, RESEARCH, PATTERNS, VALIDATION and COVERAGE;
+  - six PLANs and five SUMMARYs (01-05);
+  - CENSUS, 29 rows: C01-C29 with C15a and C15b, each decided and pinned, with routed rows for C27, C28 and C29;
+  - FOUNDER-VREAD05;
+  - PROBE-RESULT, the PROD run of 2026-11-23, with verify RUN_OK;
+  - REVIEW (the probe tooling, two rounds) and REVIEW-W2 (plans 03-05, three rounds plus the ccxt 4.5.89 CI fix).
+
+### Changed
+- **`ROADMAP.md` Phase 231:**
+  - the plan list, 5 of 6 plans executed in four waves, with wave 4 blocked on Phase 229;
+  - the plan 05 checkpoint line;
+  - the Progress row, which now reads "In progress".
+- **`REQUIREMENTS.md`:** VREAD-02, VREAD-03, VREAD-04 and VREAD-05 are complete, as a checkbox and in the traceability table. VREAD-01 stays Pending until plan 06 runs after Phase 229.
+- **`STATE.md` `## Current Position`:** Phase 231 in progress, plan 5 of 6.
+
+### Notes
+- **No `phase complete`.** Plan 06 is open, and the overview bullet for 231 stays unchecked.
+- **VREAD-05 date is inferred.** It is recorded as 2026-10-24, an upper bound taken from PROD's derive record. The founder answered "Allow-listed worker IP" and gave no date, and may correct it.
+- **Routed items for the phase report:**
+  - Phase 232 VREAD-08 / 222 must stop `advance_fetched_cursor` from advancing after a refused trade read. Raw trade ingestion stays off until it does.
+  - C27: the daily `sync_funding` timeout.
+  - C28: Bybit options are not read.
+  - C29: the seven-day reach for onboarding and resync.
+  - The timing of a first strategy sync on a busy key.
+  - The shape of a real Bybit Funding execution row is still unmeasured.
+
 ## [0.133.65.1] - 2026-11-24 — records: Phase 226 MT5SOAK phase records (verification passed, threats_open 0)
 
 This is a records PR. It changes no source, test, script, workflow or migration. One commit.

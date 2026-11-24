@@ -441,16 +441,29 @@ Plans:
 **Depends on:** nothing hard. It runs in the venue-reads wave beside 232 and 223, with plan write scopes listed by symbol (`exchange.py`, `positions.py`, `bybit_unified_flows.py`). The anchor feeds `key_inputs.anchor_usd` (S1 to S2), so if 229 is still open, the anchor plan waits for it.
 - Research first: the census, a counts-only trade-window probe, and the on-chain deposit probe.
 - Founder action: VREAD-05.
+- 2026-11-23, plan 05 checkpoint. VREAD-05 is answered: "Allow-listed worker IP" (founder). Its date has an upper bound of 2026-10-24, derived from the derive record (31 of 31 done since that date, 0 IP errors). VREAD-04 is undecided (0 on-chain rows), so `replace` stays.
 **Success Criteria** (what must be TRUE):
 1. A census of every Bybit read path by coin, settle type, window and flow source is recorded in the phase, and every row is fixed or decided with a test built from a real payload shape.
 2. The derive anchor and the current-equity read sum the same stable coins through one shared constant. The holdings poll returns USDC-settled and inverse positions with their uPnL. (VREAD-01, VREAD-02)
 3. A strategy trade sync starting more than seven days back returns every execution in the requested window, or refuses by name. An on-chain deposit is counted exactly once, with replace or union decided on probe evidence or recorded as undecided. (VREAD-03, VREAD-04)
 4. The founder has allow-listed the owner's static egress IP, recorded with its date, and that key's daily derive no longer errors for that reason. (VREAD-05)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Mocks mirror recorded real payloads, not our parser's field names.
-**Plans:** 0 plans
+**Plans:** 5/6 plans executed
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 231-01-PLAN.md — the 27-row Bybit read census and the VREAD-05 founder doc
+- [x] 231-02-PLAN.md — the read-only counts-only probe, shipped v0.133.61.6 (#1314), run once on the backfill worker 2026-11-23
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 231-03-PLAN.md — VREAD-02: the holdings poll reads linear USDT, linear USDC and inverse, inverse in USD at the mark
+- [x] 231-04-PLAN.md — VREAD-03: the strategy trade read walks seven-day windows with both bounds, or refuses by name
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 231-05-PLAN.md — VREAD-04 verdict undecided (replace stays), census closure, VREAD-05 founder record and derive check
+
+**Wave 4** *(blocked on Phase 229 merged)*
+- [ ] 231-06-PLAN.md — VREAD-01: the derive anchor sums the current-equity read's stable coins through one shared rule
 
 ### Phase 232: OKXTRADES — an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades
 
@@ -684,7 +697,7 @@ Plans:
 | 228. KEYANSWERS | 0/? | Not started | - |
 | 229. MT5DERIVE2 | 0/? | Not started | - |
 | 230. MT5NIGHTLY | 0/? | Not started | - |
-| 231. BYBITREADS | 0/? | Not started | - |
+| 231. BYBITREADS | 5/6 | In progress (plans 01-05 shipped v0.133.61.6 #1314 and v0.133.65.0 #1321; plan 06 waits for 229) | - |
 | 232. OKXTRADES | 0/? | Not started | - |
 | 233. DERIBITTRUTH | 0/? | Not started | - |
 | 234. NOCAPITAL | 0/? | Not started | - |

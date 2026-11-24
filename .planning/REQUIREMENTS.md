@@ -69,10 +69,10 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 ### Data integrity: venue reads (BYBITREADS, OKXTRADES)
 
 - [ ] **VREAD-01**: The Bybit derive anchor sums the same set of stable coins as the current-equity read, through one shared coin-set constant. (covers: 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR)
-- [ ] **VREAD-02**: The Bybit holdings poll includes USDC-settled and inverse positions and their uPnL, not only USDT-linear ones. (covers: 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY)
-- [ ] **VREAD-03**: A Bybit strategy trade sync whose start is older than seven days returns every execution in the requested window, or refuses by name. (covers: 167.2.1.1.2.1-STRATEGY-BYBIT-7DAY)
-- [ ] **VREAD-04**: A Bybit on-chain deposit is counted exactly once. Replace or union is decided on probe evidence, and recorded as undecided if the probe cannot tell the two apart. (covers: 186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED)
-- [ ] **VREAD-05**: The Bybit owner's static egress IP is allow-listed (a founder action, recorded with its date), and that key's daily derive no longer errors for that reason. (covers: 167.1.2.2-BYBIT-STATIC-EGRESS)
+- [x] **VREAD-02**: The Bybit holdings poll includes USDC-settled and inverse positions and their uPnL, not only USDT-linear ones. (covers: 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY)
+- [x] **VREAD-03**: A Bybit strategy trade sync whose start is older than seven days returns every execution in the requested window, or refuses by name. (covers: 167.2.1.1.2.1-STRATEGY-BYBIT-7DAY)
+- [x] **VREAD-04**: A Bybit on-chain deposit is counted exactly once. Replace or union is decided on probe evidence, and recorded as undecided if the probe cannot tell the two apart. (covers: 186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED)
+- [x] **VREAD-05**: The Bybit owner's static egress IP is allow-listed (a founder action, recorded with its date), and that key's daily derive no longer errors for that reason. (covers: 167.1.2.2-BYBIT-STATIC-EGRESS)
 - [ ] **VREAD-06**: An OKX daily P&L bill in a currency other than USDT is converted at a stated rate or refused by name. It is never summed at face value. (covers: 167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY)
 - [ ] **VREAD-07**: An OKX first window longer than the page cap completes across ticks instead of truncating every day. Raising `OKX_BILLS_PAGE_CAP` is not a close. If an earlier phase already closed this, the closing evidence is recorded instead. (covers: 167.1.2.2.2-OKX-PERSISTENT-TRUNCATION)
 - [ ] **VREAD-08**: `api_keys.last_fetched_trade_timestamp` never reads ahead of the newest stored trade, and a key found ahead has its skipped days re-read. (covers: 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD)
@@ -308,10 +308,10 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | MT5D-07 | Phase 229 | Pending |
 | MT5D-08 | Phase 225 | Pending |
 | VREAD-01 | Phase 231 | Pending |
-| VREAD-02 | Phase 231 | Pending |
-| VREAD-03 | Phase 231 | Pending |
-| VREAD-04 | Phase 231 | Pending |
-| VREAD-05 | Phase 231 | Pending |
+| VREAD-02 | Phase 231 | Complete |
+| VREAD-03 | Phase 231 | Complete |
+| VREAD-04 | Phase 231 | Complete |
+| VREAD-05 | Phase 231 | Complete |
 | VREAD-06 | Phase 232 | Pending |
 | VREAD-07 | Phase 232 | Pending |
 | VREAD-08 | Phase 232 | Pending |
