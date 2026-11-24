@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
@@ -59,6 +60,7 @@ import ccxt
 import httpx
 from postgrest.exceptions import APIError
 
+from services.allocator_equity_derive import working_holder_predicate
 from services.db import _is_gateway_timeout, db_execute
 from services.redact import scrub_freeform_string
 from services.stitch_composite import MemberWindow, windows_overlap
@@ -239,6 +241,10 @@ def venue_account_id_from(venue: str, raw: Mapping[str, Any]) -> str | None:
 #
 # ⛔ What this step may write: ``venue_account_id``,
 # ``account_shared_with_api_key_id`` and ``account_share_kind``. Nothing else.
+# Phase 225 plan 09 adds one more writer, and it is the database's, not this
+# module's: ``swap_account_slot`` (:func:`_swap_slot_and_audit`) moves the stamp
+# (``venue_account_id`` and ``venue_server``) from a failing holder to a working
+# key and marks the holder, in one transaction. This module sends no UPDATE for it.
 # It never touches ``sync_status``, ``sync_error``, ``disconnected_at`` or
 # ``is_active``, it never disconnects or deletes a key (D-01), and it never
 # raises into the poll (Pitfall 4): a stamp failure must not blame the user's
@@ -263,6 +269,7 @@ StampOutcome = Literal[
     "stamped",
     "marked_duplicate",
     "marked_composite_member",
+    "swapped_holder",
     "no_id",
     "error",
 ]
@@ -319,29 +326,50 @@ def _first_row(res: object) -> dict[str, Any] | None:
     return None
 
 
+# The columns the holder pick and the D-18 working check read. ``is_active``,
+# ``sync_status`` and ``disconnected_at`` are required by
+# ``working_holder_predicate``, which treats a missing field as NOT working: a
+# holder row without them would read as failing and be swapped out.
+_HOLDER_COLUMNS: Final = (
+    "id, venue_server, is_active, sync_status, disconnected_at, "
+    "account_shared_with_api_key_id, account_share_kind"
+)
+
+
 async def _find_live_holder(
-    supabase: Any, key_row: Mapping[str, Any], account_id: str
-) -> dict[str, Any] | None:
+    supabase: Any,
+    key_row: Mapping[str, Any],
+    account_id: str,
+    server: str | None,
+    *,
+    after_index_refusal: bool,
+) -> Mapping[str, Any] | None:
     """The live key of the same owner that holds ``account_id`` on this venue.
 
-    Filtered by ``user_id`` so a holder can never be another tenant's key
-    (T-167.1.2-18); the database trigger refuses that too.
+    Returns the full holder row (:data:`_HOLDER_COLUMNS`), chosen by
+    :func:`pick_same_account_holder` so the broker-server tiers and the
+    smallest-id tie-break match the TypeScript connect routes. Filtered by
+    ``user_id`` so a holder can never be another tenant's key
+    (T-167.1.2-18, T-225-28); the database trigger and ``swap_account_slot``
+    refuse that too. ``server`` is the stamping key's normalised broker server.
     """
 
     def _q() -> object:
         return (
             supabase.table("api_keys")
-            .select("id")
+            .select(_HOLDER_COLUMNS)
             .eq("user_id", key_row["user_id"])
             .eq("exchange", key_row["exchange"])
             .eq("venue_account_id", account_id)
             .is_("disconnected_at", "null")
             .neq("id", key_row["id"])
-            .limit(1)
+            .order("id")
             .execute()
         )
 
-    return _first_row(await db_execute(_q))
+    data = getattr(await db_execute(_q), "data", None)
+    rows = [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+    return pick_same_account_holder(rows, server, after_index_refusal=after_index_refusal)
 
 
 # D-04 (167.1.2-CONTEXT, measured in code by the planner at 83eae5da5): two
@@ -487,32 +515,16 @@ def _write_marker_and_audit(
     if kind == _DUPLICATE:
         _audit_duplicate(key_row, holder_id)
     # Phase 183 WR-01: a curve composed before this marker landed may count the
-    # account twice, and nothing else enqueues a compose now that the reader no
-    # longer holds a marked duplicate back. Same call, same owner source as the
-    # per-key derive epilogue; best effort, because the marker has landed. A
-    # dropped enqueue is not retried (the next poll meets an unchanged marker),
-    # so the curve stays as composed until the nightly fan-out, which is the
-    # window, not a safety net. Logged at ERROR so it reaches Sentry.
-    try:
-        supabase.rpc(
-            "enqueue_compute_job",
-            {
-                "p_strategy_id": None,
-                "p_allocator_id": str(key_row["user_id"]),
-                "p_kind": "derive_allocator_equity",
-            },
-        ).execute()
-    except Exception as exc:  # noqa: BLE001 — the marker stands; the drop is logged
-        logger.error(
-            "account_identity: recompose enqueue after a new marker failed for "
-            "api_key %s: class=%s code=%s",
-            key_row.get("id"), type(exc).__name__, _error_code(exc),
-        )
+    # account twice; see _enqueue_recompose for the best-effort contract.
+    _enqueue_recompose(supabase, key_row, "a new marker")
     return True
 
 
 async def _mark_shared(
-    supabase: Any, key_row: Mapping[str, Any], holder_id: str
+    supabase: Any,
+    key_row: Mapping[str, Any],
+    holder_id: str,
+    kind: str | None = None,
 ) -> StampOutcome:
     """Write the marker on ``key_row``, naming ``holder_id`` and its kind.
 
@@ -523,9 +535,11 @@ async def _mark_shared(
     again writes and audits nothing. The write and its audit run as one thread
     task (:func:`_write_marker_and_audit`); a write that matched no row raises
     :class:`_MarkerNotWritten`, so the step never claims a marker it did not
-    write.
+    write. ``kind`` is passed by a caller that has already read it
+    (:func:`_settle_with_holder`); otherwise it is read here.
     """
-    kind = await _share_kind(supabase, str(key_row["id"]), holder_id)
+    if kind is None:
+        kind = await _share_kind(supabase, str(key_row["id"]), holder_id)
     outcome: StampOutcome = (
         "marked_composite_member"
         if kind == COMPOSITE_MEMBER_SHARED_ACCOUNT
@@ -543,6 +557,149 @@ async def _mark_shared(
     if not await db_execute(_q):
         raise _MarkerNotWritten()
     return outcome
+
+
+def _enqueue_recompose(supabase: Any, key_row: Mapping[str, Any], why: str) -> None:
+    """Ask for the owner's allocator recompose; logged, never raised.
+
+    Phase 183 WR-01. Same call and owner source as the per-key derive epilogue.
+    Best effort, because the write it follows has landed: a dropped enqueue is
+    not retried (the next poll meets an unchanged state), so the curve stays as
+    composed until the nightly fan-out. Logged at ERROR so it reaches Sentry.
+    """
+    try:
+        supabase.rpc(
+            "enqueue_compute_job",
+            {
+                "p_strategy_id": None,
+                "p_allocator_id": str(key_row["user_id"]),
+                "p_kind": "derive_allocator_equity",
+            },
+        ).execute()
+    except Exception as exc:  # noqa: BLE001 — the write stands; the drop is logged
+        logger.error(
+            "account_identity: recompose enqueue after %s failed for api_key %s: "
+            "class=%s code=%s",
+            why, key_row.get("id"), type(exc).__name__, _error_code(exc),
+        )
+
+
+# A refusal of ``swap_account_slot``: the message is the bare token, with a static
+# DETAIL that carries no login and no server. Only the matched token is ever logged.
+_SLOT_REFUSAL: Final = re.compile(r"ACCOUNT_SLOT_[A-Z_]+")
+
+
+def _slot_refusal_token(exc: BaseException) -> str | None:
+    """The ``ACCOUNT_SLOT_*`` token of a swap refusal, or ``None``.
+
+    Only a PostgREST ``APIError`` whose MESSAGE starts with the prefix counts, and
+    only the token itself is returned: nothing else of the message, and never the
+    DETAIL.
+    """
+    message = exc.message if isinstance(exc, APIError) else None
+    if not isinstance(message, str):
+        return None
+    match = _SLOT_REFUSAL.match(message)
+    return match.group(0) if match else None
+
+
+def _swap_slot_and_audit(
+    supabase: Any,
+    key_row: Mapping[str, Any],
+    holder: Mapping[str, Any],
+    account_id: str,
+    server: str | None,
+) -> str | None:
+    """Move the account slot to ``key_row`` and audit the demoted holder, as ONE
+    thread task.
+
+    Phase 225 plan 09 (D-25, MT5D-08, Q1). Same shape as
+    :func:`_write_marker_and_audit`, and for the same reason: the RPC runs in a
+    worker thread, ``asyncio.wait_for`` can cancel the coroutine awaiting it
+    without stopping the thread, so the swap commits anyway. A synchronous
+    callable cannot be split by a cancellation: once ``swap_account_slot`` has
+    moved the slot, the audit of the demoted holder and the recompose enqueue
+    follow in the same thread. Order: the swap, the audit, the enqueue.
+
+    ``swap_account_slot`` writes the stamp and the marker itself, in one
+    transaction, so no ``api_keys`` UPDATE happens here. ``p_venue_server`` is
+    sent only when known: NULL is a wildcard and never erases the captured one.
+    The demoted holder is the audited key, naming the stamped key as its holder,
+    as the connect routes' ``swapAccountSlot`` does.
+
+    Returns ``None`` when the slot moved, or the ``ACCOUNT_SLOT_*`` token when the
+    database REFUSED the swap (the holder recovered, the key is not working, a
+    composite depends on the holder, the rows moved). A refusal wrote nothing, so
+    the slot never moves on it and there is nothing to audit or recompose; the
+    caller falls back to the marker, which is today's stable state, and the next
+    poll re-decides. Any other error propagates: it is a failure of the step.
+    """
+    params: dict[str, Any] = {
+        "p_new_key": str(key_row["id"]),
+        "p_old_holder": str(holder["id"]),
+        "p_venue_account_id": account_id,
+    }
+    if server is not None:
+        params["p_venue_server"] = server
+    try:
+        supabase.rpc("swap_account_slot", params).execute()
+    except Exception as exc:  # noqa: BLE001 — only a named refusal is absorbed
+        token = _slot_refusal_token(exc)
+        if token is None:
+            raise
+        return token
+    _audit_duplicate(
+        {
+            "id": holder["id"],
+            "user_id": key_row["user_id"],
+            "exchange": key_row["exchange"],
+        },
+        str(key_row["id"]),
+    )
+    _enqueue_recompose(supabase, key_row, "a slot swap")
+    return None
+
+
+async def _settle_with_holder(
+    supabase: Any,
+    key_row: Mapping[str, Any],
+    holder: Mapping[str, Any],
+    account_id: str,
+    server: str | None,
+) -> StampOutcome:
+    """Decide what a refused stamp does about the holder that refused it.
+
+    D-25 / Q1 / D-18: a WORKING key meeting a holder that is NOT working takes
+    the slot (:func:`_swap_slot_and_audit`), so the account is read by a key that
+    works. Every other pair is marked exactly as before (:func:`_mark_shared`):
+    a working holder, a failing key (a key that is not working has no claim), and
+    a composite rotation (D-04 unchanged: two members of one composite with
+    disjoint windows are a key rotation, not a duplicate, so the pair is read
+    BEFORE any swap and stays ``composite_member``, with no duplicate audit).
+    A swap the database refuses falls back to the marker too: the slot never
+    moves on a refusal, the token is logged at WARNING and nothing else, and the
+    next poll re-decides. ``working_holder_predicate`` is imported, never copied:
+    the TypeScript parity test reads exactly one status tuple per file.
+    """
+    holder_id = str(holder["id"])
+    if not (working_holder_predicate(key_row) and not working_holder_predicate(holder)):
+        return await _mark_shared(supabase, key_row, holder_id)
+    kind = await _share_kind(supabase, str(key_row["id"]), holder_id)
+    if kind != _DUPLICATE:
+        return await _mark_shared(supabase, key_row, holder_id, kind)
+
+    def _q() -> str | None:
+        return _swap_slot_and_audit(supabase, key_row, holder, account_id, server)
+
+    refused = await db_execute(_q)
+    if refused is None:
+        return "swapped_holder"
+    logger.warning(
+        "account_identity: api_key %s (venue %s) slot swap refused: %s — the key "
+        "is marked against its holder and the next poll re-decides",
+        key_row.get("id"), key_row.get("exchange"), refused,
+    )
+    return await _mark_shared(supabase, key_row, holder_id, kind)
 
 
 async def _stamp(
@@ -594,12 +751,15 @@ async def _stamp(
         res = await db_execute(_q)
     except Exception as exc:  # noqa: BLE001 — classified below, re-raised otherwise
         if _error_code(exc) == _PG_UNIQUE_VIOLATION and _names_identity_index(exc):
-            holder = await _find_live_holder(supabase, key_row, account_id)
+            server = normalise_venue_server(key_row.get("venue_server"))
+            holder = await _find_live_holder(
+                supabase, key_row, account_id, server, after_index_refusal=True
+            )
             if holder is None:
                 # The holder left between the refusal and the look-up. The
                 # next poll stamps.
                 raise _HolderVanished() from exc
-            return await _mark_shared(supabase, key_row, str(holder["id"]))
+            return await _settle_with_holder(supabase, key_row, holder, account_id, server)
         raise
     if _first_row(res) is None:
         # Another writer stamped the key first.
@@ -835,7 +995,14 @@ async def stamp_account_identity(
 ) -> StampOutcome:
     """Stamp ``key_row``'s venue account id, or mark it as sharing an account.
 
-    Returns an outcome token and NEVER raises (Pitfall 4). ``timeout_s`` bounds
+    Returns an outcome token and NEVER raises (Pitfall 4). ``swapped_holder``
+    (Phase 225 plan 09, D-25 / Q1) is a working key that took the account's slot
+    from a same-owner holder that is not working (D-18), through
+    ``swap_account_slot``; the demoted holder is marked ``duplicate`` and audited,
+    and the owner's allocator curve is recomposed. A swap the database refuses
+    (an ``ACCOUNT_SLOT_*`` token: the holder recovered, a composite depends on
+    it, the rows moved) is logged at WARNING with the token only and falls back to
+    the marker, today's stable state; the next poll re-decides. ``timeout_s`` bounds
     the whole step so it cannot run the poll past its own handler timeout; a
     budget of zero or less skips the step (``skipped_no_budget``). Every failure,
     the venue call, the look-up, the write and a refusal by the database

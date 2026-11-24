@@ -55,6 +55,7 @@ class _Call:
     op: str  # "select" | "update"
     payload: dict[str, Any] | None
     filters: list[tuple[str, str, Any]] = field(default_factory=list)
+    cols: str | None = None
 
 
 class _Query:
@@ -62,8 +63,9 @@ class _Query:
         self._sb = sb
         self._call = _Call(table=table, op="select", payload=None)
 
-    def select(self, _cols: str) -> _Query:
+    def select(self, cols: str) -> _Query:
         self._call.op = "select"
+        self._call.cols = cols
         return self
 
     def update(self, payload: dict[str, Any]) -> _Query:
@@ -109,6 +111,9 @@ class FakeSupabase:
         self._responder = responder
         self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
         self.rpc_error: BaseException | None = None
+        # Phase 225 plan 09: raised by swap_account_slot ONLY, so the recompose
+        # enqueue that follows a fallback marker is not collateral damage.
+        self.swap_error: BaseException | None = None
 
     def table(self, name: str) -> _Query:
         return _Query(self, name)
@@ -116,7 +121,9 @@ class FakeSupabase:
     def rpc(self, name: str, params: dict[str, Any]) -> MagicMock:
         self.rpc_calls.append((name, dict(params)))
         out = MagicMock()
-        if self.rpc_error is not None:
+        if name == "swap_account_slot" and self.swap_error is not None:
+            out.execute.side_effect = self.swap_error
+        elif self.rpc_error is not None:
             out.execute.side_effect = self.rpc_error
         return out
 
@@ -179,7 +186,30 @@ def _key_row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
-def _collision_responder(holder_id: str | None = HOLDER_ID) -> Callable[[_Call], Any]:
+def _holder_row(holder_id: str = HOLDER_ID, **overrides: Any) -> dict[str, Any]:
+    """A same-owner holder as the look-up now returns it: the FULL row.
+
+    Phase 225 plan 09. ``working_holder_predicate`` treats a missing field as NOT
+    working, so a holder row of ``{"id": ...}`` only would read as failing and be
+    swapped out. The default is a WORKING, unmarked, server-less holder, which
+    keeps every pre-existing collision case meaning what it always meant.
+    """
+    row: dict[str, Any] = {
+        "id": holder_id,
+        "venue_server": None,
+        "is_active": True,
+        "sync_status": "complete",
+        "disconnected_at": None,
+        "account_shared_with_api_key_id": None,
+        "account_share_kind": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _collision_responder(
+    holder_id: str | None = HOLDER_ID, **holder_overrides: Any
+) -> Callable[[_Call], Any]:
     """The stamp UPDATE hits the index; the holder look-up finds ``holder_id``."""
 
     def _r(call: _Call) -> Any:
@@ -188,7 +218,9 @@ def _collision_responder(holder_id: str | None = HOLDER_ID) -> Callable[[_Call],
         ).get("venue_account_id") is not None:
             return _unique_violation()
         if call.table == "api_keys" and call.op == "select":
-            return MagicMock(data=[{"id": holder_id}] if holder_id else [])
+            return MagicMock(
+                data=[_holder_row(holder_id, **holder_overrides)] if holder_id else []
+            )
         return None
 
     return _r
@@ -481,6 +513,20 @@ def _composite_responder(members: list[dict[str, Any]]) -> Callable[[_Call], Any
     def _r(call: _Call) -> Any:
         if call.table == "strategy_keys" and call.op == "select":
             return MagicMock(data=members)
+        return base(call)
+
+    return _r
+
+
+def _composite_responder_for(
+    members: list[dict[str, Any]] | None = None, **holder_overrides: Any
+) -> Callable[[_Call], Any]:
+    """:func:`_composite_responder` with the holder row overridden (Phase 225)."""
+    base = _collision_responder(**holder_overrides)
+
+    def _r(call: _Call) -> Any:
+        if call.table == "strategy_keys" and call.op == "select":
+            return MagicMock(data=members or [])
         return base(call)
 
     return _r
@@ -917,21 +963,29 @@ async def test_a_marked_key_self_heals_once_its_holder_is_disconnected(audit_moc
     audit_mock.assert_not_called()
 
 
-async def test_a_revoked_holder_does_not_self_heal_its_duplicate(audit_mock: MagicMock) -> None:
-    # A revoked key is still LIVE for api_keys_user_exchange_venue_account_uniq
-    # (disconnected_at IS NULL), so K's stamp keeps hitting the index and K
-    # stays marked. What keeps that account counted is the READER rule in the
-    # account_share_kind COMMENT (count through the holder only while it is
-    # working), not the stamper. Pinned so nobody "fixes" it here by
-    # un-marking K behind the owner's back.
-    sb = FakeSupabase(_composite_responder([]))
+async def test_a_working_duplicate_takes_the_slot_from_its_revoked_holder(
+    audit_mock: MagicMock,
+) -> None:
+    # SUPERSEDED PIN, 2026-11-24 (Phase 225 plan 09). Phase 167.1.2 pinned
+    # "a revoked holder does not self-heal its duplicate": a revoked key is
+    # still LIVE for api_keys_user_exchange_venue_account_uniq, so K's stamp kept
+    # hitting the index and K stayed marked, with the READER rule (count through
+    # the holder only while it is working) as the only thing keeping the account
+    # counted. Two founder decisions retire that pin: D-25 (founder 2026-10-11,
+    # "Fix") and Q1 (founder 2026-11-23, "Admit working key"). A WORKING key
+    # meeting a holder that is not working now TAKES the slot, through
+    # swap_account_slot, so the account is held by a key that works. Nothing is
+    # disconnected or deleted: the revoked key keeps its row, marked 'duplicate'.
+    sb = FakeSupabase(_collision_responder(sync_status="revoked"))
     row = _key_row(account_shared_with_api_key_id=HOLDER_ID, account_share_kind="duplicate")
 
     outcome = await _stamp(sb, row, _okx_exchange())
 
-    assert outcome == "marked_duplicate"
-    assert len(sb.updates()) == 1  # the refused stamp; the marker is unchanged
-    audit_mock.assert_not_called()
+    assert outcome == "swapped_holder"
+    assert [(n, p["p_new_key"], p["p_old_holder"]) for n, p in sb.rpc_calls
+            if n == "swap_account_slot"] == [("swap_account_slot", KEY_ID, HOLDER_ID)]
+    audit_mock.assert_called_once()
+    assert audit_mock.call_args.kwargs["entity_id"] == HOLDER_ID
 
 
 # ---------------------------------------------------------------------------
@@ -1456,7 +1510,7 @@ def _mt5_collision_responder() -> Callable[[_Call], Any]:
         ).get("venue_account_id") is not None:
             return _mt5_unique_violation()
         if call.table == "api_keys" and call.op == "select":
-            return MagicMock(data=[{"id": HOLDER_ID}])
+            return MagicMock(data=[_holder_row()])
         return None
 
     return _r
@@ -2098,3 +2152,182 @@ async def test_a_slow_mt5_poll_still_stamps_its_key(monkeypatch: pytest.MonkeyPa
 
     assert result.outcome == jw.DispatchOutcome.DONE
     assert _MT5_STAMP in sb.updates()
+
+
+# ---------------------------------------------------------------------------
+# Phase 225 plan 09 (D-25, MT5D-08, Q1) — a working key takes the slot from a
+# failing holder
+# ---------------------------------------------------------------------------
+#
+# The connect routes fence a NEW key; they never see a pair that already exists.
+# The daily poll's stamper does: a key whose stamp the identity index refuses
+# meets the live key that holds the account. When that holder is NOT working
+# (D-18) and this key IS, the account moves to the key that works through the one
+# database function ``swap_account_slot``, so a failing key beside a working one
+# for the same account ends with the working key holding the slot whichever of
+# the two was stamped first. Nothing is disconnected or deleted.
+
+FAILING_STATUS = "sign_in_failed"
+
+
+async def test_a_working_key_takes_the_slot_from_the_owners_failing_holder(
+    audit_mock: MagicMock,
+) -> None:
+    sb = FakeSupabase(_collision_responder(sync_status=FAILING_STATUS))
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "swapped_holder"
+    # Exactly one swap, naming the stamped key, the holder and the account.
+    swaps = [(n, p) for n, p in sb.rpc_calls if n == "swap_account_slot"]
+    assert swaps == [(
+        "swap_account_slot",
+        {"p_new_key": KEY_ID, "p_old_holder": HOLDER_ID, "p_venue_account_id": ACCOUNT_ID},
+    )]
+    # The holder read is one owner's: a holder of another owner is never read
+    # (T-225-28), and it carries every field the D-18 predicate needs.
+    (look,) = [c for c in sb.calls if c.table == "api_keys" and c.op == "select"]
+    assert ("eq", "user_id", OWNER_ID) in look.filters
+    assert look.cols is not None
+    for col in ("is_active", "sync_status", "disconnected_at", "venue_server"):
+        assert col in look.cols
+    # The demoted key is the audited one, naming the stamped key as its holder.
+    audit_mock.assert_called_once()
+    kwargs = audit_mock.call_args.kwargs
+    assert kwargs["action"] == ai.DUPLICATE_DETECTED_AUDIT_ACTION
+    assert kwargs["entity_id"] == HOLDER_ID
+    assert kwargs["user_id"] == OWNER_ID
+    assert kwargs["metadata"] == {"venue": "okx", "holder_api_key_id": KEY_ID}
+    # One recompose, after the swap.
+    assert [n for n, _p in sb.rpc_calls] == ["swap_account_slot", "enqueue_compute_job"]
+    assert sb.rpc_calls[1] == _RECOMPOSE
+    # The RPC writes the marker: the stamper itself writes no share kind.
+    assert [u for u in sb.updates() if u.get("account_share_kind") is not None] == []
+
+
+# --- Task 2 — a refused swap leaves today's stable state ---------------------
+
+
+def _refusal(token: str) -> APIError:
+    # The RPC's refusal is the bare token as the MESSAGE, with a static DETAIL.
+    # The DETAIL here carries the synthetic account id so a leak into the log shows.
+    return APIError({
+        "code": "55000",
+        "message": token,
+        "details": f"refused for ({ACCOUNT_ID}).",
+        "hint": None,
+    })
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "ACCOUNT_SLOT_HOLDER_WORKING",
+        "ACCOUNT_SLOT_COMPOSITE_DEPENDENT",
+        "ACCOUNT_SLOT_NEW_KEY_NOT_WORKING",
+        "ACCOUNT_SLOT_IDENTITY_MISMATCH",
+    ],
+)
+async def test_a_refused_swap_marks_the_key_as_today_and_logs_only_the_token(
+    token: str, audit_mock: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # a failing holder, so the swap is attempted; the database then refuses it
+    sb = FakeSupabase(_composite_responder_for(sync_status=FAILING_STATUS))
+    sb.swap_error = _refusal(token)
+    caplog.set_level("DEBUG")
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    # Today's stable state: marked against the holder, nothing else moved.
+    assert outcome == "marked_duplicate"
+    assert sb.updates()[-1] == {
+        "account_shared_with_api_key_id": HOLDER_ID,
+        "account_share_kind": "duplicate",
+    }
+    _assert_write_set_is_identity_only(sb)
+    (rec,) = [r for r in caplog.records if "slot swap refused" in r.getMessage()]
+    assert rec.levelname == "WARNING"
+    assert token in rec.getMessage()
+    # Nothing identifying: not the account id, which the refusal's DETAIL carries.
+    assert ACCOUNT_ID not in caplog.text
+    # The stamp did not fail: no ERROR line from the boundary.
+    assert [r for r in caplog.records if r.levelname == "ERROR"] == []
+    # The audit that fires is the marker's own, for the key marked, not the swap's.
+    audit_mock.assert_called_once()
+    assert audit_mock.call_args.kwargs["entity_id"] == KEY_ID
+
+
+async def test_a_swap_error_that_is_not_a_refusal_is_not_swallowed(
+    audit_mock: MagicMock,
+) -> None:
+    # Only the ACCOUNT_SLOT_ tokens are "the database said no". Anything else (a
+    # lock timeout, a transport error) is a failure of the step, as before.
+    sb = FakeSupabase(_composite_responder_for(sync_status=FAILING_STATUS))
+    sb.swap_error = _api_error("55P03", "canceling statement due to lock timeout")
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "error"
+    audit_mock.assert_not_called()
+    assert sb.updates()[-1].get("account_share_kind") is None  # no fallback marker
+
+
+async def test_a_working_holder_marks_the_key_with_no_swap(audit_mock: MagicMock) -> None:
+    sb = FakeSupabase(_composite_responder([]))
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "marked_duplicate"
+    assert [n for n, _p in sb.rpc_calls if n == "swap_account_slot"] == []
+
+
+async def test_a_failing_key_never_takes_a_slot_from_a_failing_holder(
+    audit_mock: MagicMock,
+) -> None:
+    # D-18 on the KEY: a key that is not working has no claim on the account.
+    sb = FakeSupabase(_composite_responder_for(sync_status=FAILING_STATUS))
+
+    outcome = await _stamp(sb, _key_row(sync_status="revoked"), _okx_exchange())
+
+    assert outcome == "marked_duplicate"
+    assert [n for n, _p in sb.rpc_calls if n == "swap_account_slot"] == []
+
+
+@pytest.mark.parametrize("key_sync_status", ["complete", "revoked"])
+async def test_a_composite_rotation_beside_a_failing_holder_stays_composite_member(
+    key_sync_status: str, audit_mock: MagicMock
+) -> None:
+    # D-04 is unchanged. The pair are two members of ONE composite with disjoint
+    # windows: a key rotation, not a duplicate, so the slot is not taken and no
+    # duplicate is audited, whether or not the stamping key is itself working.
+    sb = FakeSupabase(_composite_responder_for(
+        sync_status=FAILING_STATUS,
+        members=[
+            _member(HOLDER_ID, STRATEGY_A, "2026-01-01", "2026-06-01", 0),
+            _member(KEY_ID, STRATEGY_A, "2026-06-01", None, 1),
+        ],
+    ))
+
+    outcome = await _stamp(sb, _key_row(sync_status=key_sync_status), _okx_exchange())
+
+    assert outcome == "marked_composite_member"
+    assert [n for n, _p in sb.rpc_calls if n == "swap_account_slot"] == []
+    assert sb.updates()[-1] == {
+        "account_shared_with_api_key_id": HOLDER_ID,
+        "account_share_kind": "composite_member",
+    }
+    audit_mock.assert_not_called()
+
+
+async def test_the_server_of_the_stamping_key_reaches_the_swap(
+    audit_mock: MagicMock,
+) -> None:
+    # An MT5 key's captured broker server travels to the RPC, normalised; the
+    # RPC keeps the old holder's server when none is sent.
+    sb = FakeSupabase(_composite_responder_for(sync_status=FAILING_STATUS, venue_server="srv-a"))
+
+    outcome = await _stamp(sb, _key_row(venue_server="  SRV-A "), _okx_exchange())
+
+    assert outcome == "swapped_holder"
+    (swap,) = [p for n, p in sb.rpc_calls if n == "swap_account_slot"]
+    assert swap["p_venue_server"] == "srv-a"
