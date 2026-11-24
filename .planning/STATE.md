@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
-current_phase: 226
-current_phase_name: MT5SOAK
+current_phase: 227
+current_phase_name: JOBLEDGER
 status: executing
-stopped_at: Phase 226 complete, shipped as #1319
-last_updated: "2026-11-23T23:09:16.355Z"
+stopped_at: Phase 227 complete, shipped as #1325 (HEAL-01 sweep registered on PROD)
+last_updated: "2026-11-24T17:48:57.707Z"
 last_activity: 2026-11-24
-last_activity_desc: Phase 226 MT5SOAK complete (verification passed, threats_open 0)
-state_head: d9111e935d16a9af74af1663b7ebabe7ccc9cf4c
+last_activity_desc: Phase 227 JOBLEDGER complete (verification passed, threats_open 0)
+state_head: 3dd2a6d8e4e3ce68b4d834c06ebbaf675f2d4842
 progress:
   total_phases: 21
-  completed_phases: 1
-  total_plans: 50
-  completed_plans: 36
-  percent: 5
+  completed_phases: 2
+  total_plans: 67
+  completed_plans: 52
+  percent: 10
 ---
 
 ## ⭐ STATE lineage
@@ -179,8 +179,8 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: 231 (BYBITREADS) — IN PROGRESS (plans 01-05 shipped: v0.133.61.6 #1314, v0.133.65.0 #1321; plan 06 waits for Phase 229)
 Plan: 5 of 6
 Status: In progress; plan 06 (VREAD-01) blocked on Phase 229; other v1.22 phases run in parallel
-Last activity: 2026-11-24 — Phase 231 BYBITREADS plans 03-05 shipped (v0.133.65.0, #1321); VREAD-02..05 complete
-Progress: [█░░░░░░░░░] 5%
+Last activity: 2026-11-24 — Phase 227 JOBLEDGER complete (v0.133.67.0, #1325; HEAL-01 sweep live on PROD)
+Progress: [█░░░░░░░░░] 10%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1835,7 +1835,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-23T18:28:35.274Z
-**Stopped At:** Phase 226 complete, shipped as #1319
+**Stopped At:** Phase 227 complete, shipped as #1325
 **Resume File:** None
 
 **Last Date:** 2026-11-14T07:30:26.000Z

@@ -162,7 +162,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [ ] **Phase 223: FLOWKINDS — each funding caller treats a malformed row by a recorded, tested decision, and the malformed count is on record first** - Flow-source half only (F-2, no composites): the funding callers' malformed-row decisions and the PROD malformed count; FLOWK-01 dropped
 - [ ] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23; also the seam S4 owner: server-qualified MT5 identity, the draft-clash answer, the failing-holder rule
 - [x] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit (completed 2026-11-24)
-- [ ] **Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job** - Seam S3 owner: per-attempt failure record, first-hop drop, batch-mate reset, readmit ceiling signal, reclaim provenance, private strategies polled; migrations
+- [x] **Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job** - Seam S3 owner: per-attempt failure record, first-hop drop, batch-mate reset, readmit ceiling signal, reclaim provenance, private strategies polled; migrations (completed 2026-11-24)
 - [ ] **Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key** - Sibling of 225 on seam S4, right after it: the rotated MT5 password reconnect and the KEY_ORPHANED copy for allocators
 - [ ] **Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently** - nav_twr.py empty-cohort refund, day-0 P&L and the D-15 band, basis-silent keys, writer-basis values; moves MT5 numbers (155.2 freeze)
 - [ ] **Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason** - Data-gated on the JOBLEDGER records: the second-attempt cause fixed at its root, seven clean nights, the clock-switch replay
@@ -368,7 +368,7 @@ Plans:
 4. A job reclaimed after a crash keeps its curated error sentence, and its strategy's analytics status follows the reclaim. The lane arm that re-stamps a different sentence under the same job id shows the reclaimed one surviving. (HEAL-04)
 5. The daily positions poll enqueues private strategies too, so they get position snapshots, and the `poll_positions` enqueue stays live. (HEAL-05)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. New SQL arms carry `RED-UNDER` twins and list their migration in `RED-UNDER-SETUP`. Raising retries or a watchdog threshold is not a close. Each migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding before merge, and runs in the one serial migration lane (they auto-apply to PROD).
-**Plans:** 11/11 plans executed
+**Plans:** 11/11 plans complete
 
 Plans:
 **Wave 1**
@@ -712,7 +712,7 @@ Plans:
 | 223. FLOWKINDS | 0/? | Not started | - |
 | 225. ONEACCOUNTONCE | 4/12 | In progress (PR-1 shipped as #1315) | - |
 | 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
-| 227. JOBLEDGER | 11/11 | In Progress | - |
+| 227. JOBLEDGER | 11/11 | Complete (shipped v0.133.67.0, #1325; HEAL-01 sweep registered on PROD) | 2026-11-24 |
 | 228. KEYANSWERS | 0/? | Not started | - |
 | 229. MT5DERIVE2 | 0/? | Not started | - |
 | 230. MT5NIGHTLY | 0/? | Not started | - |
