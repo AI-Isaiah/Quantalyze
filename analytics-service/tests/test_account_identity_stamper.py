@@ -2606,6 +2606,22 @@ async def test_a_failing_key_never_takes_a_slot_from_a_failing_holder(
     assert [n for n, _p in sb.rpc_calls if n == "swap_account_slot"] == []
 
 
+async def test_a_syncing_key_never_takes_a_slot_from_a_failing_holder(
+    audit_mock: MagicMock,
+) -> None:
+    # WR-04: a user "Sync now" sets sync_status to 'syncing' on a key whose last
+    # sync failed, and this stamp runs before the fetch. 'syncing' proves nothing,
+    # so the key is marked against the holder and the slot does not flip between
+    # two failing keys. (A syncing HOLDER still reads as working, as the reader
+    # rule says, so it is never displaced either.)
+    sb = FakeSupabase(_composite_responder_for(sync_status=FAILING_STATUS))
+
+    outcome = await _stamp(sb, _key_row(sync_status="syncing"), _okx_exchange())
+
+    assert outcome == "marked_duplicate"
+    assert [n for n, _p in sb.rpc_calls if n == "swap_account_slot"] == []
+
+
 @pytest.mark.parametrize("key_sync_status", ["complete", "revoked"])
 async def test_a_composite_rotation_beside_a_failing_holder_stays_composite_member(
     key_sync_status: str, audit_mock: MagicMock

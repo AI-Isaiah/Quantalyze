@@ -705,7 +705,15 @@ async def _settle_with_holder(
     test reads exactly one status tuple per file.
     """
     holder_id = str(holder["id"])
-    if not (working_holder_predicate(key_row) and not working_holder_predicate(holder)):
+    # WR-04: ``request_allocator_holdings_sync`` overwrites sync_status with
+    # 'syncing' before this poll, so a key whose last sync failed arrives as
+    # 'syncing' and the D-18 reader rule counts it as working. This stamp runs
+    # before the fetch, so nothing has proven the key yet: for the swap decision
+    # only, 'syncing' is not working. The reader rule itself is unchanged.
+    key_proven_working = (
+        working_holder_predicate(key_row) and key_row.get("sync_status") != "syncing"
+    )
+    if not (key_proven_working and not working_holder_predicate(holder)):
         return await _mark_shared(supabase, key_row, holder_id)
     kind = await _share_kind(supabase, str(key_row["id"]), holder_id)
     if kind != _DUPLICATE:
