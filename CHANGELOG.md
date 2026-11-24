@@ -9,6 +9,9 @@
 - `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-24` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.67.0 → 0.133.67.1.
 - The gates on the composed tree, verbatim: `baseline-currency: carried=336 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 144 — MATCH 141, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
 
+### Fixed
+- **`scripts/baseline-redump.mjs --self-test` died with `spawnSync git ENOBUFS` on this dump.** Its scratch-repo git helper used Node's default 1 MiB `maxBuffer`. This dump is the first baseline over 1 MiB (1050573 bytes, against 1008964 before). The helper now uses the same 256 MiB buffer as the script's own `git()` helper. Measured: `baseline-redump self-test OK: 226 assertion(s)`, and `baseline-redump-wiring.test.ts` passes 17/17.
+
 ### Removed
 - The five Phase 227 `snapshot-only` NAME_SET_RATCHET rows in `scripts/dump-sql-functions.ts` (`record_compute_job_attempt_error`, `renew_compute_job_claims`, `record_reconcile_readmit_exhaustions`, `first_hop_enqueue_sweep`, `record_orphan_reaped_attempt`). With the functions now in the dump, the snapshot gate reported each `ratchet-stale`. It now reads `SQL function snapshot is current (142 functions)`.
 - This clears main's `sql-gate-lint` red from #1325 (the declared baseline-content-drift findings), and the `frontend` aggregator red that rolls it up.
