@@ -2513,7 +2513,6 @@ def _refusal(token: str) -> APIError:
         "ACCOUNT_SLOT_HOLDER_WORKING",
         "ACCOUNT_SLOT_COMPOSITE_DEPENDENT",
         "ACCOUNT_SLOT_NEW_KEY_NOT_WORKING",
-        "ACCOUNT_SLOT_IDENTITY_MISMATCH",
     ],
 )
 async def test_a_refused_swap_marks_the_key_as_today_and_logs_only_the_token(
@@ -2543,6 +2542,32 @@ async def test_a_refused_swap_marks_the_key_as_today_and_logs_only_the_token(
     # The audit that fires is the marker's own, for the key marked, not the swap's.
     audit_mock.assert_called_once()
     assert audit_mock.call_args.kwargs["entity_id"] == KEY_ID
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "ACCOUNT_SLOT_IDENTITY_MISMATCH",
+        "ACCOUNT_SLOT_NOT_FOUND",
+        "ACCOUNT_SLOT_NOT_SAME_OWNER",
+    ],
+)
+async def test_a_contract_refusal_reaches_error_and_still_falls_back_to_the_marker(
+    token: str, audit_mock: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # SF-M2: a wrong request is not a race the next poll clears, so it must reach
+    # Sentry at ERROR. The stamp itself still ends in today's stable state.
+    sb = FakeSupabase(_composite_responder_for(sync_status=FAILING_STATUS))
+    sb.swap_error = _refusal(token)
+    caplog.set_level("DEBUG")
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "marked_duplicate"
+    (rec,) = [r for r in caplog.records if "slot swap refused" in r.getMessage()]
+    assert rec.levelname == "ERROR"
+    assert token in rec.getMessage()
+    assert ACCOUNT_ID not in caplog.text
 
 
 async def test_a_swap_error_that_is_not_a_refusal_is_not_swallowed(
