@@ -4873,14 +4873,6 @@ It runs the marker query first and reports counts only.
 
 ## Phase 167.2.1.1 (UPNLVENUES) — routed items (logged 2026-10-22)
 
-### 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR — the Bybit derive anchor reads the USDT coin only while the reconstruct anchor and the holdings poll read every coin (booked 2026-10-22, 167.2.1.1 plan 01 decision PD-E, DATA INTEGRITY) (owned by Phase 231 BYBITREADS, v1.22; REQUIREMENTS.md VREAD-01; tagged 2026-11-23)
-
-**Reading.** The derive anchor (`fetch_usdt_balance_with_status`) reads only the USDT coin. The reconstruct anchor and the holdings poll sum every stable coin. For an account holding a non-USDT coin the three paths disagree by that coin's balance. Pinned by `test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin`. Exposure is unmeasured until the D-01 live read.
-
-**Owner / Trigger:** founder routing. Trigger: the D-01 probe reports `non_usdt_coins_present` true for any key. Closed when the derive anchor covers every coin as the reconstruct does, or the restriction is decided and documented, with the pinning test flipped.
-
-2026-11-02 (Phase 176 LEGACYRETIRE): unaffected. `_fetch_current_equity` survives for the Binance mark, so `test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin` still compares the derive anchor with it. **Stays open.**
-
 ### 167.2.1.1-BINANCE-FUTURES-WALLET-UNREAD — Binance is read with ccxt's default spot type, so a futures account's collateral never reaches any path (booked 2026-10-22, 167.2.1.1 plan 02 decision PD-D, DATA INTEGRITY)
 
 **Still open (narrowed 2026-11-02 by Phase 176).** Binance is read with ccxt's default spot type, so a futures account's collateral never reaches the derive anchor or the holdings spot rows, while `fetch_positions()` returns USD-M futures positions. If Binance is ever read with a futures type, `total` already includes uPnL. No Binance key existed at the 2026-10-22 census. **Trigger:** the first active Binance key, or `test_binance_tripwire_repo_reads_the_spot_wallet_only` going red. **Closed when:** the futures wallet is read and the skip set and the derive wedge change together, with real-parser tests.

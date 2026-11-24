@@ -5914,11 +5914,14 @@ async def test_bybit_binance_wedge_zero() -> None:
     guard). The dispatch never reads a upl field for these venues."""
     from services.exchange import fetch_account_equity_and_upnl_usd
 
+    # VREAD-01 (Phase 231): Bybit reads its anchor through the stable-wallet helper, Binance
+    # through the USDT helper; each iteration patches the helper its venue actually calls.
+    helper_for = {
+        "bybit": "services.exchange.fetch_bybit_stable_wallet_with_status",
+        "binance": "services.exchange.fetch_usdt_balance_with_status",
+    }
     for venue in ("bybit", "binance"):
-        with patch(
-            "services.exchange.fetch_usdt_balance_with_status",
-            new=AsyncMock(return_value=(123456.0, False)),
-        ):
+        with patch(helper_for[venue], new=AsyncMock(return_value=(123456.0, False))):
             eq, err, upl, unreadable = await fetch_account_equity_and_upnl_usd(
                 AsyncMock(), venue
             )
@@ -5927,6 +5930,162 @@ async def test_bybit_binance_wedge_zero() -> None:
         assert upl == 0.0, f"{venue} wedge must be structurally 0.0"
         # Realized-basis venues have NO wedge field to read → never unreadable.
         assert unreadable is False, f"{venue} has no wedge field, not unreadable"
+
+
+# --- VREAD-01 (Phase 231): the Bybit stable-wallet anchor -------------------------------
+
+# Each arm: (id, what ``fetch_balance`` answers or raises, expected (anchor, balance_error),
+# a text the log must carry or None). Expected figures are typed here, never computed.
+_BYBIT_STABLE_ARMS: list[Any] = [
+    ("empty-total", {"total": {}}, (None, False), None),
+    ("no-stable-coin", {"total": {"BTC": 0.5}}, (None, False), None),
+    ("every-stable-at-zero", {"total": {"USDT": 0, "USDC": 0.0}}, (None, False), None),
+    ("stable-at-zero-adds-nothing", {"total": {"USDT": 1000.0, "USDC": 0}}, (1000.0, False), None),
+    ("smallest-positive-counts", {"total": {"USDT": 0, "USDC": 0.000001}}, (0.000001, False), None),
+    ("negative-stable-subtracted", {"total": {"USDT": 1000.0, "USDC": -50.0}}, (950.0, False), None),
+    ("net-negative-stable-sum-is-none", {"total": {"USDT": -50.0, "USDC": 20.0}}, (None, False), None),
+    (
+        "none-quantity-beside-readable-is-unreadable",
+        {"total": {"USDT": 1000.0, "USDC": None}},
+        (None, True),
+        "coins=USDC",
+    ),
+    ("none-beside-zero", {"total": {"USDT": None, "USDC": 0}}, (None, True), "coins=USDT"),
+    ("none-non-stable-ignored", {"total": {"USDT": 1000.0, "BTC": None}}, (1000.0, False), None),
+    (
+        "every-stable-none-is-unreadable",
+        {"total": {"USDT": None, "USDC": None, "BTC": 0.5}},
+        (None, True),
+        "coins=USDT,USDC",
+    ),
+    ("garbled-non-stable-ignored", {"total": {"USDT": 1000.0, "BTC": "garbled"}}, (1000.0, False), None),
+    (
+        "malformed-stable",
+        {"total": {"USDT": 1000.0, "USDC": "garbled"}},
+        (None, True),
+        "stable quantity for USDC is unreadable",
+    ),
+    (
+        "non-finite-stable",
+        {"total": {"USDT": 1000.0, "USDC": float("nan")}},
+        (None, True),
+        "stable quantity for USDC is unreadable",
+    ),
+    ("total-not-a-mapping", {"total": ["USDT"]}, (None, True), "exc_class=TypeError"),
+    ("total-key-absent", {"info": {}}, (None, True), "exc_class=TypeError"),
+    (
+        "fetch-balance-fails",
+        ccxt_async.NetworkError("GET https://api.bybit.com/v5/account/wallet-balance?signature=deadbeef"),
+        (None, True),
+        "exc_class=NetworkError",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "balance,expected,log_needle",
+    [pytest.param(b, e, n, id=i) for i, b, e, n in _BYBIT_STABLE_ARMS],
+)
+async def test_bybit_stable_wallet_arms(
+    balance: Any, expected: tuple[float | None, bool], log_needle: str | None, caplog: Any
+) -> None:
+    """Every edge of the anchor helper: failure and malformed shapes are ``(None, True)`` with a
+    class-only, scrubbed log (a request signature never reaches it); empty, no stable coin and
+    all-zero are ``(None, False)``; zero adds nothing, the smallest positive counts, a negative
+    (spot borrow) is subtracted, a non-stable coin is never parsed. An absent ``total`` key and
+    any stable coin at ``None`` (beside a readable one or not) are ``(None, True)``; a non-stable
+    ``None`` is ignored. The malformed-quantity log names the
+    coin code and never the raw value."""
+    import logging
+
+    from services.exchange import fetch_bybit_stable_wallet_with_status
+
+    ex = MagicMock()
+    if isinstance(balance, BaseException):
+        ex.fetch_balance = AsyncMock(side_effect=balance)
+    else:
+        ex.fetch_balance = AsyncMock(return_value=balance)
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        got = await fetch_bybit_stable_wallet_with_status(ex)
+
+    assert got == expected, f"expected {expected}, got {got}"
+    assert "deadbeef" not in caplog.text, "a request signature reached the log"
+    assert "garbled" not in caplog.text, "a raw quantity reached the log"
+    if log_needle is None:
+        assert caplog.records == [], f"a clean read must not log: {caplog.text}"
+    else:
+        assert log_needle in caplog.text, f"the log must name the class: {caplog.text!r}"
+
+
+async def _parsed_bybit_balance(coins: list[dict[str, str]]) -> dict[str, Any]:
+    from tests.test_upnl_venues import bybit_wallet_balance, real_bybit_parse_balance
+
+    return await real_bybit_parse_balance(bybit_wallet_balance("UNIFIED", coins))
+
+
+@pytest.mark.asyncio
+async def test_bybit_borrowed_stable_coin_is_subtracted_through_the_real_parse() -> None:
+    """MD-01: a borrowed stable coin (USDT walletBalance -50, borrowAmount 50) beside 200 USDC is
+    a 150 net stable wallet, the arithmetic of Bybit's own totalWalletBalance. Skipping the
+    negative would state 200 and inflate the capital base past the liability. Built through
+    ccxt's real ``bybit.parse_balance``, which passes the negative straight into ``total``."""
+    from services.exchange import fetch_bybit_stable_wallet_with_status
+    from tests.test_upnl_venues import bybit_coin
+
+    borrowed = {**bybit_coin("USDT", "-50", "0"), "borrowAmount": "50"}
+    parsed = await _parsed_bybit_balance([borrowed, bybit_coin("USDC", "200", "0")])
+    assert parsed["total"]["USDT"] == -50.0, "the parse must carry the negative into total"
+    ex = MagicMock()
+    ex.fetch_balance = AsyncMock(return_value=parsed)
+
+    assert await fetch_bybit_stable_wallet_with_status(ex) == (150.0, False)
+
+
+@pytest.mark.asyncio
+async def test_bybit_two_tuple_and_four_tuple_anchor_agree() -> None:
+    """RESEARCH F7: both entry points end in the same Bybit helper, so on a mixed stable balance
+    (real ccxt parse) they cannot return different equity or a different error flag."""
+    from services.exchange import (
+        fetch_account_equity_and_upnl_usd,
+        fetch_account_equity_usd,
+    )
+    from tests.test_upnl_venues import bybit_coin
+
+    parsed = await _parsed_bybit_balance(
+        [bybit_coin("USDT", "1000", "250.5"), bybit_coin("USDC", "200", "0")]
+    )
+
+    def venue() -> MagicMock:
+        ex = MagicMock()
+        ex.fetch_balance = AsyncMock(return_value=parsed)
+        return ex
+
+    two_equity, two_err = await fetch_account_equity_usd(venue(), "bybit")
+    four_equity, four_err, wedge, unreadable = await fetch_account_equity_and_upnl_usd(venue(), "bybit")
+
+    # 1000 USDT + 200 USDC wallet balances; the 250.5 uPnL is not in a walletBalance.
+    assert two_equity == 1200.0 and four_equity == 1200.0
+    assert (two_err, four_err) == (False, False)
+    assert wedge == 0.0 and unreadable is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_usdt_balance_stays_usdt_on_a_mixed_stable_bybit_balance() -> None:
+    """Census C05, ruling OQ1 Option A: ``fetch_usdt_balance`` feeds ``api_keys.account_balance_usdt``
+    and strategy capital, columns named and valued in USDT. A Bybit balance of USDT 1000 plus USDC
+    200 still reads 1000.0 there; only the derive anchor widened (VREAD-01)."""
+    from services.exchange import fetch_usdt_balance
+    from tests.test_upnl_venues import bybit_coin
+
+    parsed = await _parsed_bybit_balance(
+        [bybit_coin("USDT", "1000", "0"), bybit_coin("USDC", "200", "0")]
+    )
+    ex = MagicMock()
+    ex.fetch_balance = AsyncMock(return_value=parsed)
+
+    assert await fetch_usdt_balance(ex) == 1000.0
 
 
 @pytest.mark.asyncio

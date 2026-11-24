@@ -923,6 +923,32 @@ async def test_the_dry_run_sequence_reaches_the_verdict_the_derive_stores(
         assert _key_inputs(capture)["nav_mark_refusal"] == token
 
 
+@pytest.mark.asyncio
+async def test_a_stable_mixed_bybit_account_is_markable_while_binance_keeps_the_usdt_basis() -> None:
+    """VREAD-01 / RESEARCH F5: a Bybit account holding USDT 1000 and USDC 200 used to be refused
+    daily as ``wallet_basis_mismatch`` (anchor 1000 against a mark wallet of 1200). The anchor now
+    sums every stable coin, so it is admitted; Binance's anchor is still the USDT coin alone, so the
+    same wallet is still refused there. A BTC wallet (the ``mixed-basis`` case above) stays refused
+    on both: non-stable collateral is outside the anchor by decision."""
+    wallet = {"USDT": 1000.0, "USDC": 200.0}
+
+    bybit_dry = await _dry_run_one_key(_bybit(wallet=wallet), "bybit")
+    assert not isinstance(bybit_dry, str), f"a USDT + USDC Bybit account must be markable, got {bybit_dry!r}"
+    # 1000 USDT + 200 USDC wallet + 25.0 open profit = 1225.0 (the markable case's 1025.0 plus 200)
+    assert bybit_dry.nav_usd == 1225.0
+
+    db = FakeDb()
+    result, _capture, _combine = await _derive(
+        db, _bybit(wallet=wallet), venue="bybit",
+        extra_patches=[patch("services.exchange.fetch_account_equity_and_upnl_usd", new=_REAL_WALLET_READ)],
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    assert db.marks[(KEY, CLOSED_DAY)]["nav_usd"] == 1225.0
+
+    binance_dry = await _dry_run_one_key(_binance(wallet=wallet), "binance")
+    assert binance_dry == "wallet_basis_mismatch"
+
+
 # --------------------------------------------------------------------------------------
 # Review WR-06 / D-10: a Binance coin with no ticker is sized from its newest priced holdings row
 # --------------------------------------------------------------------------------------

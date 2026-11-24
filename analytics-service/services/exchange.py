@@ -1,6 +1,7 @@
 import asyncio
 import ccxt.async_support as ccxt
 import logging
+import math
 import os
 import random
 import re
@@ -3390,6 +3391,88 @@ async def fetch_usdt_balance_with_status(
     return None, False
 
 
+async def fetch_bybit_stable_wallet_with_status(
+    exchange: ccxt.Exchange,
+) -> tuple[float | None, bool]:
+    """VREAD-01 — the Bybit derive anchor: the wallet balance of EVERY stable
+    coin, summed, with ``fetch_usdt_balance_with_status``'s three-state contract.
+
+    Bybit's ccxt ``total`` is each coin's ``walletBalance`` (ccxt 4.5.89
+    ``bybit.parse_balance``), so the sum carries no open-position unrealized PnL,
+    the same realized basis as before. Stable membership is decided per coin at
+    call time by ``price_rule.is_stable_value`` (STABLECOINS plus
+    STABLECOIN_SPLIT_SUFFIXES), the rule ``equity_reconstruction._price_wallet_totals``
+    applies to the mark's wallet, so the anchor and the mark cannot disagree on
+    which coins count. A non-stable coin (BTC, ETH, ...) is never parsed and never
+    added: pricing it needs a ticker, and its absence from the anchor is the
+    decided, reported scope of VREAD-01.
+
+    Returns ``(balance, balance_error)``:
+
+        * ``(float, False)`` — successful read, positive stable-coin sum.
+        * ``(None, False)`` — successful read, no stable coin, every stable
+          coin at 0, or a signed stable sum at or below 0. Not an error.
+        * ``(None, True)`` — ``fetch_balance`` failed, ``total`` is absent or not
+          a mapping, a stable coin's quantity is malformed (not a finite
+          number), or ANY stable coin's quantity is ``None`` (even beside a
+          readable one: the sum would be partial, so the read is unreadable;
+          the coin codes, never values, are named in a WARNING). A negative
+          stable balance (a spot borrow) is subtracted, never skipped: the sum
+          is signed, as Bybit's own ``totalWalletBalance`` is.
+
+    ``fetch_usdt_balance_with_status`` is left untouched on purpose: its callers
+    write ``api_keys.account_balance_usdt`` and strategy capital, which stay
+    USDT-only (Phase 231 ruling OQ1 Option A).
+    """
+    try:
+        balance = await exchange.fetch_balance()
+    except Exception as e:
+        # Same scrub as fetch_usdt_balance_with_status (NEW-C13-10): a signed
+        # request error can embed the HMAC signature in str(e).
+        logger.warning(
+            "Could not fetch account balance: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
+        )
+        return None, True
+    try:
+        totals = balance.get("total")
+        if not isinstance(totals, Mapping):
+            raise TypeError("balance total is not a mapping")
+        stable_qtys: list[float] = []
+        none_coins: list[str] = []
+        for coin, qty in totals.items():
+            if not is_stable_value(str(coin)):
+                continue
+            if qty is None:
+                none_coins.append(str(coin))
+                continue
+            try:
+                q = float(qty)
+            except (TypeError, ValueError):
+                raise ValueError(f"stable quantity for {coin} is unreadable") from None
+            if not math.isfinite(q):
+                raise ValueError(f"stable quantity for {coin} is unreadable")
+            stable_qtys.append(q)  # signed: a borrowed stable coin reduces the wallet
+        # fsum is exact, so the anchor is identical for any order of coins.
+        stable_sum = math.fsum(stable_qtys)
+    except (TypeError, ValueError, AttributeError) as e:
+        logger.error(
+            "Malformed balance response shape: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
+        )
+        return None, True
+    if none_coins:
+        # A None stable quantity makes the sum partial whether or not another
+        # stable coin parses, so the read is unreadable, never a smaller anchor.
+        logger.warning(
+            "Stable coin quantity is None, read unreadable: coins=%s", ",".join(none_coins),
+        )
+        return None, True
+    if stable_sum > 0:
+        return stable_sum, False
+    return None, False
+
+
 def _okx_upl_or_zero(raw_upl: Any) -> tuple[float, bool]:
     """Coerce OKX ``upl`` (account-level open unrealized PnL, USD) to a float.
 
@@ -3477,11 +3560,13 @@ async def fetch_account_equity_usd(
 ) -> tuple[float | None, bool]:
     """Account-equity anchor in USD for the initial-capital anchor, dispatched
     by venue. OKX includes open-position unrealized PnL (raw ``totalEq``);
-    Bybit and Binance return the realized-basis USDT wallet figure.
+    Bybit returns the realized-basis wallet sum of every stable coin
+    (``fetch_bybit_stable_wallet_with_status``, VREAD-01) and Binance the
+    realized-basis USDT wallet figure.
 
     OKX is read via the raw ``totalEq`` endpoint (``fetch_okx_total_equity_usd``)
     because ccxt's unified ``fetch_balance()`` crashes on OKX in ccxt 4.5.x.
-    Other venues use ``fetch_usdt_balance_with_status``. Bybit's ccxt ``total``
+    Binance uses ``fetch_usdt_balance_with_status``. Bybit's ccxt ``total``
     is the coin ``walletBalance`` (ccxt 4.5.88 ``bybit.parse_balance``) and
     Binance's default spot ``total`` is free + locked (ccxt 4.5.88
     ``binance.parse_balance_custom``, spot), so neither includes open-position
@@ -3494,6 +3579,8 @@ async def fetch_account_equity_usd(
     if venue == "okx":
         eq = await fetch_okx_total_equity_usd(exchange)
         return eq, eq is None
+    if venue == "bybit":
+        return await fetch_bybit_stable_wallet_with_status(exchange)
     return await fetch_usdt_balance_with_status(exchange)
 
 
@@ -3514,7 +3601,10 @@ async def fetch_account_equity_and_upnl_usd(
       partial/schema-drifted response is LOUD, not a silent 0 that embeds MTM.
     * **Bybit / Binance** — the anchor is realized-basis ``walletBalance``
       (ccxt 4.5.88 ``bybit.parse_balance``: ``total`` is the coin ``walletBalance``;
-      ``binance.parse_balance_custom``, spot: ``total`` is free + locked): the wedge is
+      ``binance.parse_balance_custom``, spot: ``total`` is free + locked). Bybit's
+      anchor sums every stable coin's wallet balance
+      (``fetch_bybit_stable_wallet_with_status``, VREAD-01); Binance's is the USDT
+      coin alone. The wedge is
       STRUCTURALLY 0.0 by construction, so a downstream subtract can never
       double-count (Q2 / Pitfall 2). Returning a non-zero wedge here is the
       double-count bug — it is hard-coded 0.0, NOT a read field, so it is never
@@ -3535,6 +3625,9 @@ async def fetch_account_equity_and_upnl_usd(
             (upl if eq is not None else 0.0),
             (upl_unreadable if eq is not None else False),
         )
+    if venue == "bybit":
+        equity, balance_error = await fetch_bybit_stable_wallet_with_status(exchange)
+        return equity, balance_error, 0.0, False
     equity, balance_error = await fetch_usdt_balance_with_status(exchange)
     return equity, balance_error, 0.0, False
 
