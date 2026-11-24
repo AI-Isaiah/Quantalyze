@@ -118,6 +118,7 @@ const SHAPE_COMPOSITE =
   "A composite strategy has no self-serve re-run. Use the contact form to start a new computation.";
 const SHAPE_CSV =
   "A CSV strategy's data is fixed at upload. To publish a corrected series, upload a new CSV strategy, or use the contact form.";
+const EXCHANGES_KEY = "Check its key on the Exchanges page.";
 const EDIT_HREF = `/strategies/${STRATEGY_ID}/edit`;
 // Phase 164.6.6.3.5 DOMAINONE (AD-05): the pointer phrase links the contact
 // form, same tab, carrying the strategy id. Hand-typed, never built by contactHref.
@@ -170,6 +171,8 @@ const STATE = {
   rpcResult: { data: [] as unknown, error: null as unknown },
   /** When true the request client carries NO `rpc` member (a throw). */
   rpcMissing: false,
+  /** The owner's `profiles.role` (WR-01): the default is the manager the older cases assume. */
+  profileRole: "manager" as string | null,
   /** The head-count answer of `strategy_keys` on the request client. */
   memberCountResult: { count: 0 as number | null, error: null as unknown },
   observed: {
@@ -217,6 +220,8 @@ function mockRequestClient() {
           Promise.resolve(
             table === "strategy_verifications"
               ? { data: null, error: null }
+              : table === "profiles"
+                ? { data: STATE.profileRole ? { role: STATE.profileRole } : null, error: null }
               : sawOr
                 ? { data: STATE.ownerRow, error: null }
                 : { data: STATE.publishedRow, error: null },
@@ -355,6 +360,7 @@ beforeEach(() => {
   STATE.adminError = null;
   STATE.rpcResult = { data: [], error: null };
   STATE.rpcMissing = false;
+  STATE.profileRole = "manager";
   STATE.memberCountResult = { count: 0, error: null };
   STATE.observed.rpcCalls = [];
   STATE.observed.requestTables = [];
@@ -1009,6 +1015,65 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(remedyLine!.textContent).toBe(SHAPE_UNLINKED);
     expect(last.textContent).toBe(`${MINT_B_LEAD} ${SHAPE_UNLINKED}`);
     expect(last.textContent).not.toContain(RETIRED_MINT_B);
+  });
+
+  it("SHARE-NOTE-ALLOCATOR-SINGLE: an allocator-only owner, a transient failure on a key-fed strategy -> the note and the remedy line both name the Exchanges action, and no link reaches the manager-guarded edit page", async () => {
+    STATE.profileRole = "allocator";
+    givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID });
+    givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${EXCHANGES_KEY}`);
+    expect(remedyLine!.textContent).toBe(EXCHANGES_KEY);
+    expect(last.textContent!.endsWith(remedyLine!.textContent!)).toBe(true);
+    expect(last.querySelector('a[href="/profile?tab=exchanges"]')).not.toBeNull();
+    expect(container.querySelector('a[href*="/edit"]')).toBeNull();
+    expect(container.querySelector('a[href*="/strategies/new/wizard"]')).toBeNull();
+  });
+
+  it("SHARE-NOTE-ALLOCATOR-UNLINKED: an allocator-only owner, never_started with no key -> the contact form, and no edit link renders", async () => {
+    STATE.profileRole = "allocator";
+    givenOwnerPendingDraft({ source: "api", api_key_id: null });
+    givenJobs([]);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${CONTACT_CHECK}`);
+    expect(remedyLine!.textContent).toBe(CONTACT_CHECK);
+    expect(container.querySelector('a[href*="/edit"]')).toBeNull();
+  });
+
+  it("SHARE-NOTE-ALLOCATOR-CSV: an allocator-only owner, a failed job on a CSV strategy -> the contact form, and no link reaches the CSV wizard", async () => {
+    STATE.profileRole = "allocator";
+    givenOwnerPendingDraft({ source: "csv", api_key_id: null });
+    givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${CONTACT_CHECK}`);
+    expect(remedyLine!.textContent).toBe(CONTACT_CHECK);
+    expect(container.querySelector('a[href*="/edit"]')).toBeNull();
+    expect(container.querySelector('a[href*="/strategies/new/wizard"]')).toBeNull();
+  });
+
+  it("SHARE-NOTE-BOTH: a `both` owner keeps the manager action, the edit link", async () => {
+    STATE.profileRole = "both";
+    givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID });
+    givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${SHAPE_SINGLE}`);
+    expect(remedyLine!.textContent).toBe(SHAPE_SINGLE);
+    expect(last.querySelector(`a[href="${EDIT_HREF}"]`)).not.toBeNull();
   });
 
   it("SHARE-NOTE-UNREADABLE: an unreadable read -> the panel's last child is KCS12-UNREADABLE", async () => {
