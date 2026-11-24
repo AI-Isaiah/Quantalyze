@@ -214,6 +214,16 @@ def _without_clock(payload: dict[str, Any]) -> dict[str, Any]:
     return {**payload, "inputs": {**payload["inputs"], "composed_at": None}}
 
 
+def _pop_refusal_field(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int] | None]:
+    """The payload without ``inputs.no_capital_exit_refused``, and that field (None when absent).
+    234 NOCAP-04: a refused candidate leaves a payload equal to the no-candidate payload EXCEPT for
+    the NOCAP-03 counts field, the one stated exception to equality (NOCAP-03 is the more recent
+    and the more specific requirement)."""
+    inputs = dict(payload["inputs"])
+    field = inputs.pop("no_capital_exit_refused", None)
+    return {**payload, "inputs": inputs}, field
+
+
 def test_hole_candidate_healthy_control_composes_in_segments_and_is_named() -> None:
     """The control for the two fallbacks below: with a clean last segment the candidate is composed
     in segments (B#hole0 contributes 600.0 on days 1 and 2, B 600.0 on day 4), so the fallback
@@ -255,9 +265,11 @@ def test_hole_candidate_whose_earlier_segment_refuses_falls_back_instead_of_fail
         first_flows=[ExternalFlow(utc_day_iso=DAYS[1], usd_signed=-1_050.0)],
     )
     payload = _compose(dict(kwargs))
+    popped, field = _pop_refusal_field(payload)
 
     assert _curve(payload) == {day: pytest.approx(A_LEVEL, abs=1e-9) for day in DAYS}
-    assert _without_clock(payload) == _without_clock(_compose(_today(kwargs)))
+    assert _without_clock(popped) == _without_clock(_compose(_today(kwargs)))
+    assert field == {"replay_refused": 1}
     assert "dropped_key" in payload["degrade_reasons"]
     assert payload["is_trustworthy"] is False
 

@@ -50,6 +50,7 @@ import logging
 import math
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
@@ -16770,6 +16771,7 @@ async def run_derive_allocator_equity_job(
         blocking_degrade_tokens,
         eligible_key_predicate,
         identity_pending_venues,
+        no_capital_refusal_field,
         read_dropped_day_pnl,
         read_realized_terminal,
         read_returns_stamp,
@@ -16792,7 +16794,10 @@ async def run_derive_allocator_equity_job(
     supabase = get_supabase()
 
     async def _persist_refusal(
-        token: str, *, extra_reasons: Sequence[str] = ()
+        token: str,
+        *,
+        extra_reasons: Sequence[str] = (),
+        no_capital_exit_refused: Mapping[str, int] | None = None,
     ) -> None:
         # 167.1.2.1.1 SC-1 (D-04): a refusal REPLACES the (allocator_id,
         # 'equity_curve') row with a version-2 payload that names why, in ONE atomic
@@ -16808,6 +16813,7 @@ async def run_derive_allocator_equity_job(
                 token,
                 composed_at=datetime.now(timezone.utc).isoformat(),
                 extra_reasons=extra_reasons,
+                no_capital_exit_refused=no_capital_exit_refused,
             ),
             "computed_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -17333,6 +17339,10 @@ async def run_derive_allocator_equity_job(
     # 166.3.1 plan 09: the keys that qualify for that rule, mapped to ``(token, (terminal day,
     # terminal level))`` as stored. Filled in the loop below, applied after the stitch.
     no_capital_candidates: dict[str, tuple[str, tuple[str, float]]] = {}
+    # 234 NOCAP-03: how many would-be no-capital keys this run kept on ``dropped_key``, by closed
+    # route token (``NO_CAPITAL_REFUSAL_REASONS``), one count per key. Merged with the compose's own
+    # counts into ``payload["inputs"]["no_capital_exit_refused"]`` after the compose.
+    no_capital_refusals: Counter[str] = Counter()
     # 164.6.6.2.1 D-09 (mechanism I2): the interior days a missing close left out of a BTC key's
     # USD series, and the realized USD level on the last priced day before each such hole. The
     # compose replays the key in segments split there and rolls each back from its own level.
@@ -18243,6 +18253,17 @@ async def run_derive_allocator_equity_job(
         payload["inputs"]["writer_basis_missing_members"] = absent_members
         payload["inputs"]["writer_basis_stitched_members"] = absent_stitched_members
 
+    # 234 NOCAP-03: one benign counts-only field names every route a no-capital key took to
+    # ``dropped_key`` this run: the compose's own (replay refused, blocking reason, ...) merged with
+    # the routes only the job sees (selection, the D-10 bound, the compose revert). It never enters
+    # ``degrade_reasons`` or ``flags``. Absent when nothing fell back, so a healthy payload is
+    # unchanged.
+    no_capital_refused_counts = Counter(payload["inputs"].get("no_capital_exit_refused") or {})
+    no_capital_refused_counts.update(no_capital_refusals)
+    no_capital_refused_field = no_capital_refusal_field(no_capital_refused_counts)
+    if no_capital_refused_field:
+        payload["inputs"]["no_capital_exit_refused"] = no_capital_refused_field
+
     # ── 5. B2 root cause: an EMPTY curve is NOT a renderable series. A
     #      zero-anchored-keys / zero-weight-mass compose (every prod allocator
     #      today) returns curve=[] — is_trustworthy may be True (benign honest-empty
@@ -18277,11 +18298,15 @@ async def run_derive_allocator_equity_job(
                 for k, a in anchors_by_key.items()
             )
         ):
-            await _persist_refusal(DeriveRefusal.COMPOSE_EMPTY.value)
+            await _persist_refusal(
+                DeriveRefusal.COMPOSE_EMPTY.value,
+                no_capital_exit_refused=no_capital_refused_field or None,
+            )
         else:
             await _persist_refusal(
                 DeriveRefusal.COMPOSE_EMPTY_BLOCKED.value,
                 extra_reasons=_blocking,
+                no_capital_exit_refused=no_capital_refused_field or None,
             )
         logger.info(
             "derive_allocator_equity: empty compose for allocator %s "

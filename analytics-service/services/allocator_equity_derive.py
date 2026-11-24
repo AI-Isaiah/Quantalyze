@@ -240,11 +240,58 @@ class DeriveRefusal(str, Enum):
     COMPOSE_REFUSED = "compose_refused"
 
 
+# 234 NOCAP-03: the CLOSED set of routes by which a no-capital key takes ``dropped_key``, the
+# keys of ``payload["inputs"]["no_capital_exit_refused"]``. It is neither a ``DegradeReason`` nor a
+# ``DeriveRefusal``: those describe a book's trust and a refused book, and
+# ``tests/fixtures/derive_refusal_rows.json`` pins both for three runtimes. A route here is a
+# per-run count that never changes ``is_trustworthy`` (``dropped_key`` already blocks).
+NO_CAPITAL_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        # selection (A2): the live read says empty over a stored terminal above the dust floor
+        "funded_terminal",
+        # selection: the key has returns and a no-capital token but no stored terminal
+        "no_stored_terminal",
+        # apply loop (D-10): the exit would consume or drop more than dust
+        "consumes_more_than_dust",
+        # compose: the replay of the candidate raised (``NavReconstructionError``)
+        "replay_refused",
+        # compose: the replay of the candidate returned a blocking reason
+        "blocking_reason",
+        # compose: an interior hole of the candidate lacks its stored segment terminals
+        "segment_terminals_missing",
+        # job: a whole-compose refusal reverted every candidate to its stored inputs
+        "compose_reverted",
+    }
+)
+
+
+def no_capital_refusal_field(counts: Mapping[str, int]) -> dict[str, int]:
+    """234 NOCAP-03: the one place a no-capital refusal token or count is checked.
+
+    Returns a NEW dict with sorted keys and positive integer counts, dropping zeros. Raises
+    ``ValueError`` for a token outside ``NO_CAPITAL_REFUSAL_REASONS``, for a count that is a
+    ``bool`` or not an ``int``, and for a negative count. A message never echoes the offending
+    token (it may have been read from storage): it names the class of the fault only."""
+    out: dict[str, int] = {}
+    for token in sorted(counts):
+        n = counts[token]
+        if token not in NO_CAPITAL_REFUSAL_REASONS:
+            raise ValueError("unknown no-capital refusal token")
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise ValueError("no-capital refusal count is not an integer")
+        if n < 0:
+            raise ValueError("no-capital refusal count is negative")
+        if n:
+            out[token] = n
+    return out
+
+
 def refusal_payload(
     token: str,
     *,
     composed_at: str,
     extra_reasons: Sequence[str] = (),
+    no_capital_exit_refused: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """167.1.2.1.1 SC-1 (D-04): the ``equity_curve`` row payload for a derive REFUSAL.
 
@@ -266,7 +313,7 @@ def refusal_payload(
     def _value(raw: Any) -> str:
         return raw.value if isinstance(raw, Enum) else str(raw)
 
-    return {
+    payload: dict[str, Any] = {
         "curve": [],
         "returns": [],
         "version": 2,
@@ -277,6 +324,13 @@ def refusal_payload(
         "scalars": {"mwr": None, "dietz": None, "computable": False},
         "inputs": {"n_keys": 0, "anchor_asof": None, "composed_at": composed_at},
     }
+    if no_capital_exit_refused:
+        # 234 NOCAP-03: a refusal written after a no-capital fallback names the routes, counts
+        # only. Absent when there were none, so the default call is byte-identical to before.
+        field = no_capital_refusal_field(no_capital_exit_refused)
+        if field:
+            payload["inputs"]["no_capital_exit_refused"] = field
+    return payload
 
 
 # Backwards-compatible aliases (the enum members ARE these strings).

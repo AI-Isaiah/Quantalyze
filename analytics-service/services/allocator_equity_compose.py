@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import math
 from bisect import bisect_right
+from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from datetime import date, datetime, timezone
 from typing import Any, NamedTuple
@@ -50,6 +51,7 @@ from services.allocator_equity_derive import (
     blend_concurrent_returns,
     build_allocator_ledger,
     mwr_and_dietz_from_ledger,
+    no_capital_refusal_field,
     replay_key_equity,
     segment_coverage,
 )
@@ -813,6 +815,8 @@ def compose_allocator_equity(
     # key keeps raising. The set of candidates actually composed is ``no_capital_exit``.
     no_capital_exit = dict(no_capital_exit_by_key or {})
     per_key_equity: dict[str, KeyEquity] = {}
+    # 234 NOCAP-03: one count per owner key and route, written into ``payload["inputs"]`` below.
+    no_capital_refused: Counter[str] = Counter()
     fell_back_refused = 0
     fell_back_blocking: set[DegradeReason] = set()
     # WR-02 / F4: a candidate is a KEY. A key replayed in segments (``k#hole0 ... k``) is offered
@@ -839,6 +843,7 @@ def compose_allocator_equity(
             if owner not in no_capital_exit:
                 raise
             fell_back_refused += 1
+            no_capital_refused["replay_refused"] += 1
             fell_back.append(owner)
             continue
         if owner in no_capital_exit and (
@@ -1159,6 +1164,13 @@ def compose_allocator_equity(
             "composed_at": datetime.now(timezone.utc).isoformat(),
         },
     }
+    if no_capital_refused:
+        # 234 NOCAP-03: benign counts of the no-capital candidates this compose took back out, by
+        # route. Closed tokens and integers only (``no_capital_refusal_field`` checks both); it
+        # never enters ``reasons`` or ``flag_tokens``, so ``is_trustworthy`` is untouched.
+        payload["inputs"]["no_capital_exit_refused"] = no_capital_refusal_field(
+            no_capital_refused
+        )
     if unpriced_native:
         # Additive, present only when a key was left out (an older reader never sees it).
         payload["unpriced_native_keys"] = unpriced_native

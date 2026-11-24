@@ -4091,13 +4091,15 @@ def _nc_candidate(
 
 
 def _nc_assemble(
-    candidates: list[dict[str, Any]], *, a_days: list[str] | None = None
+    candidates: list[dict[str, Any]], *, a_days: list[str] | None = None, with_a: bool = True
 ) -> dict[str, list[dict]]:
+    """``with_a=False`` leaves key-A out entirely (no api key, no returns, no key_inputs row), so
+    the candidates are the book's only keys (234 NOCAP-03: a sole key that falls back)."""
     a_days = a_days or _BTC_DAYS
     api_keys = [
         {"id": "key-A", "user_id": _NOCAP_ALLOC, "is_active": True, "exchange": "binance",
          "sync_status": "connected", "disconnected_at": None}
-    ] + [
+    ] * with_a + [
         {"id": c["id"], "user_id": _NOCAP_ALLOC, "is_active": True, "exchange": c["exchange"],
          "sync_status": "connected", "disconnected_at": None}
         for c in candidates
@@ -4105,7 +4107,7 @@ def _nc_assemble(
     csv = [
         {"api_key_id": "key-A", "allocator_id": _NOCAP_ALLOC, "date": day, "daily_return": 0.0}
         for day in a_days
-    ]
+    ] * with_a
     for c in candidates:
         csv += [
             {"api_key_id": c["id"], "allocator_id": _NOCAP_ALLOC, "date": day,
@@ -4116,7 +4118,7 @@ def _nc_assemble(
         {"allocator_id": _NOCAP_ALLOC, "kind": "key_inputs:key-A",
          "payload": {"flows": [], "anchor_usd": 100_000.0, "venue": "binance",
                      "realized_terminal_usd": 100_000.0, "realized_terminal_day": a_days[-1]}}
-    ] + [
+    ] * with_a + [
         {"allocator_id": _NOCAP_ALLOC, "kind": f"key_inputs:{c['id']}", "payload": c["payload"]}
         for c in candidates
     ]
@@ -4798,6 +4800,66 @@ async def test_no_capital_exit_two_candidates_each_leave_on_their_own_day() -> N
         {"api_key_id": "key-B", "reason": "dust", "day": d[2]},
         {"api_key_id": "key-D", "reason": "dust", "day": d[4]},
     ]
+    assert "no_capital_exit_refused" not in payload["inputs"]
+
+
+# --- 234 NOCAP-03: every route a no-capital key takes to dropped_key is counted by name ----------
+
+
+def _nc_refused(payload: dict) -> dict[str, int] | None:
+    """The NOCAP-03 field of a stored payload, or None when the run wrote none."""
+    return payload["inputs"].get("no_capital_exit_refused")
+
+
+def _nc_replay_refused_book(*, with_a: bool = True) -> dict[str, list[dict]]:
+    """A Deribit candidate whose replay REFUSES. No writer basis; flat returns on days 1 to 3, a
+    -1050.0 withdrawal on day 3 and a stored terminal of -50.0 on day 3. The terminal is under the
+    dust floor (A2 passes) and P == L (D-10 passes), but -50.0 is further below zero than
+    EMPTIED_NEGATIVE_FRACTION of the 1000.0 level before the withdrawal, so the replay raises.
+    Hand derivation: L1 = L0 = (-50.0 + 1050.0) / 1 = 1000.0."""
+    d = _BTC_DAYS
+    return _nc_assemble(
+        [
+            _nc_candidate(
+                "key-B", "deribit", d[:3],
+                _nc_payload("nonpositive", "deribit", -50.0, d[2], flows={d[2]: -1_050.0}),
+            )
+        ],
+        with_a=with_a,
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_refused_counts_a_replay_refusal_in_the_row_and_on_the_refusal_record() -> None:
+    """NOCAP-03 tracer. Today a candidate the compose takes back out leaves a log line and nothing
+    else, so a regression in the no-capital rule looks like an ordinary ``dropped_key`` book. The
+    stored row now carries ``inputs.no_capital_exit_refused`` naming the route, counts only. Arm (a):
+    beside key-A the row stores ``{"replay_refused": 1}``, the field is NOT a degrade reason or a
+    flag (it must never move ``is_trustworthy``), and A's curve is intact. Arm (b): when the
+    candidate is the book's ONLY key the compose is empty and blocked, and the
+    ``compose_empty_blocked`` refusal record carries the same counts."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    payload = await _compose_no_capital_book(_nc_replay_refused_book())
+    assert _nc_refused(payload) == {"replay_refused": 1}
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_anchor" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_exit_refused" not in payload["degrade_reasons"]
+    assert "no_capital_exit_refused" not in payload["flags"]
+    assert _nc_curve(payload) == {d: pytest.approx(100_000.0, abs=1e-9) for d in _BTC_DAYS}
+
+    fake = _FakeSupabase(_nc_replay_refused_book(with_a=False))
+    job = {"id": "j-nocap-sole", "kind": "derive_allocator_equity", "allocator_id": _NOCAP_ALLOC}
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    _assert_refusal_recorded(fake, _NOCAP_ALLOC, "compose_empty_blocked")
+    (_, row, _), = _refusal_upserts(fake)
+    assert row["payload"]["inputs"]["no_capital_exit_refused"] == {"replay_refused": 1}
 
 
 # ---------------------------------------------------------------------------
