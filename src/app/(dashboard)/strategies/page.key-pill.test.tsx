@@ -775,7 +775,10 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   // anywhere in between goes red.
   const MINT_A =
     "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.";
-  const MINT_B =
+  // KCS12-MINT-B, RETIRED by Phase 238 FACT-05: its "yet" and its "once a
+  // computation succeeds" promise a change while nothing is running. Kept only for
+  // the negative assertions below, so a regression that renders it goes RED.
+  const RETIRED_MINT_B =
     "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.";
   // Phase 238 FACT-05 (UI-SPEC Copywriting Contract), typed out character for
   // character, never imported: the unpublished note for a row whose link shows
@@ -1297,7 +1300,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     try {
       const container = await renderPage();
 
-      expect(noteOf(container, "Strategy c-1")).toBe(MINT_B);
+      expect(noteOf(container, "Strategy c-1")).toBe(MINT_B_CONTACT_RESOLVE);
       // 167.2.1-REVIEW-SFH M-5: the race is logged, so its rate is
       // measurable, and never captured.
       expect(consoleWarn).toHaveBeenCalledWith(
@@ -1425,7 +1428,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(noteOf(container, "Strategy s-1")).not.toBe(MINT_A);
   });
 
-  it("MINT-B: an unpublished row whose stitch failed permanently says the private link shows it not available", async () => {
+  it("MINT-B: an unpublished row whose stitch failed permanently says the private link shows it not available and names the contact form", async () => {
     state.strategies = [row("c-1", { status: "draft", strategy_analytics: [{ computation_status: "pending" }] })];
     state.jobs = {
       "c-1": [
@@ -1440,13 +1443,13 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy c-1")).toBe(MINT_B);
+    expect(noteOf(container, "Strategy c-1")).toBe(MINT_B_CONTACT_RESOLVE);
   });
 
   // 164.6.6.3.3 D-08 / B24: a `failed` analytics row takes the uncomputed
   // branch (never probed). Its note says analytics are not available, in the
   // recipient's own terms, and names no status, job or error.
-  it("B24 ANALYTICS-FAILED private link: a draft row whose analytics failed (stitch failed, arm not_available) takes the analytics-failed note, not MINT-B", async () => {
+  it("B24 ANALYTICS-FAILED private link: a draft row whose analytics failed (stitch failed, arm not_available) takes the analytics-failed note, not the MINT-B remedy note", async () => {
     state.strategies = [row("c-1", { status: "draft", strategy_analytics: [{ computation_status: "failed" }] })];
     state.jobs = {
       "c-1": [
@@ -1506,8 +1509,8 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-comp")).toBe(MINT_B);
-    expect(noteOf(container, "Strategy s-pend")).toBe(MINT_B);
+    expect(noteOf(container, "Strategy s-comp")).toBe(MINT_B_CONTACT_RESOLVE);
+    expect(noteOf(container, "Strategy s-pend")).toBe(MINT_B_CONTACT_RESOLVE);
   });
 
   it("B24 PROBE-NOT-COMPUTED race: the embed says complete but the builder's read says failed -> the analytics-failed note", async () => {
@@ -1600,7 +1603,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     const container = await renderPage();
 
-    expect(noteOf(container, "Strategy s-1")).toBe(MINT_B);
+    expect(noteOf(container, "Strategy s-1")).toBe(MINT_B_RELOAD);
   });
 
   it("PUBLIC-NO-READ (167.2-REVIEW IN-04): a published row's note is the public-URL line whatever the arm, so its jobs are never read", async () => {
@@ -1721,7 +1724,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
           ],
         };
       },
-      expected: () => MINT_B,
+      expected: () => MINT_B_RELOAD,
     },
     {
       variant: "failed",
@@ -1737,14 +1740,14 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
           ],
         };
       },
-      expected: () => MINT_B,
+      expected: () => MINT_B_CONTACT_RESOLVE,
     },
     {
       variant: "never_started",
       setup: () => {
         state.jobs = { "s-1": [] };
       },
-      expected: () => MINT_B,
+      expected: () => MINT_B_LINK_KEY_EDIT,
     },
     {
       variant: "unreadable",
@@ -1765,6 +1768,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
       const note = noteOf(container, "Strategy s-1");
       expect(note).toBe(expected());
+      expect(note).not.toBe(RETIRED_MINT_B);
       expect(note).not.toBe(FINISHED_NOT_BUILT);
       expect(note).not.toContain("The last computation finished");
     },
@@ -1864,7 +1868,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
     expect(state.rpcCalls.map((c) => (c.args as { p_limit: number }).p_limit)).toEqual([100, 1000]);
     // Exhaustive at 1000 with no chain job: never started, not "unreadable".
-    expect(noteOf(container, "Strategy s-1")).toBe(MINT_B);
+    expect(noteOf(container, "Strategy s-1")).toBe(MINT_B_LINK_KEY_EDIT);
   });
 
   it("WINDOW-FULL (167.2-REVIEW-SFH M-5): a window still full at the cap renders KCS12-UNREADABLE and is logged and captured as its own case", async () => {
