@@ -36,9 +36,11 @@ import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
  *     / peer) stay absent by construction (ingestSource "csv"); `hideHeader` (the
  *     composer owns the title) is passed; `hideFooter={false}` SHOWS the footer (USER OVERRIDE).
  *   - Q3 (period control): the 3M/6M/12M/ALL SegmentedControl is kept and drives
- *     the shared `xRange` via `setXRange` over the scenario date axis (NOT the
- *     legacy `sliceByPeriod`). It lives in the body's `topSlot` so it stays a
- *     provider descendant and `useXRange` resolves.
+ *     the shared `xRange` (NOT the legacy `sliceByPeriod`). A preset is the last N
+ *     calendar months ending on the latest day, resolved by the provider, so it rolls
+ *     when new data arrives (Phase 239, founder Q4 "Presets roll, manual stays" and Q5
+ *     "12 calendar months"). It lives in the body's `topSlot` so it stays a provider
+ *     descendant and `useXRange` resolves.
  *   - persist=false (T-38-03-01): this mount never rewrites the allocator's
  *     dashboard URL nor writes, reads or purges a `factsheet-v2:` localStorage
  *     blob. The factsheet never passes persist; only this mount does.
@@ -58,11 +60,11 @@ import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
 const SCENARIO_PERIODS = ["3M", "6M", "12M", "ALL"] as const;
 type ScenarioPeriod = (typeof SCENARIO_PERIODS)[number];
 
-/** Approximate trading-day span for each fixed period (252 trading days/year). */
-const PERIOD_TRADING_DAYS: Record<Exclude<ScenarioPeriod, "ALL">, number> = {
-  "3M": 63,
-  "6M": 126,
-  "12M": 252,
+/** Calendar months each fixed period covers, ending on the latest day (Phase 239, founder Q5). */
+const PERIOD_MONTHS: Record<Exclude<ScenarioPeriod, "ALL">, number> = {
+  "3M": 3,
+  "6M": 6,
+  "12M": 12,
 };
 
 export interface ScenarioFactsheetChartProps {
@@ -135,24 +137,23 @@ export interface ScenarioFactsheetChartProps {
 }
 
 /**
- * Period SegmentedControl (Q3). Lives INSIDE the provider so it can call
- * `setXRange` to drive the shared window. Translates a fixed-period click into
- * an index window over the scenario date axis (most-recent N trading days);
- * "ALL" resets to the full range. The provider's `setXRange` clamps to
- * MIN_VISIBLE_SAMPLES, so a too-short series degrades safely.
+ * Period SegmentedControl (Q3). Lives INSIDE the provider so it can drive the
+ * shared window. A fixed-period click selects the last N calendar months ending on
+ * the latest day through `setPresetRange`; the provider resolves it on every render,
+ * so the window rolls when a newer day arrives and keeps ending on the latest day
+ * when earlier days arrive (Phase 239, founder Q4 "Presets roll, manual stays" and Q5
+ * "12 calendar months"). A series shorter than N months shows its full history.
+ * "ALL" resets to the full range.
  */
 function PeriodControl({ axisLength }: { axisLength: number }) {
-  const { setXRange, resetXRange } = useXRange();
+  const { setPresetRange, resetXRange } = useXRange();
 
   const selectPeriod = (period: ScenarioPeriod) => {
     if (period === "ALL" || axisLength <= 1) {
       resetXRange();
       return;
     }
-    const days = PERIOD_TRADING_DAYS[period];
-    const endIdx = axisLength - 1;
-    const startIdx = Math.max(0, endIdx - days);
-    setXRange([startIdx, endIdx]);
+    setPresetRange(PERIOD_MONTHS[period]);
   };
 
   return (

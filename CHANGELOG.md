@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.133.72.0] - 2026-11-24 — Phase 239 SURFACECACHE: the composer range and the Discovery ranking reflect the current truth
+
+Frontend only (`src/app/factsheet/[id]/v2/`, the composer's `ScenarioFactsheetChart.tsx`, `src/lib/dateday.ts`). No migration, no API change, no visual change. Covers CACHE-02 and CACHE-04. Built from 9 phase commits (three plans and three review fixes), each mapped below by hash.
+
+### Changed
+- **The factsheet range is held as dates (CACHE-02).** `FactsheetProvider` holds the user's range as two ISO days instead of axis indices, and `useXRange` resolves them on every render against the axis the consumer draws (new `range-dates.ts`: `StoredRange`, `resolveStoredRange`, `lowerBound`, `upperBound`, `basisAxisDates`). A range the user set keeps its exact days when the series grows at the front or at the back. A manual range that falls off a shrunk axis, or whose two days fall between the same two axis points, still falls back to the full range. (`b49d531db`)
+- **The range resolves on the active basis axis.** `BasisProvider` publishes the active basis through a new `ActiveBasisContext`, so a mark-to-market or smoothed axis (which can be longer than cash and dated differently) resolves its own dates. `basisAxisDates` must stay equal to Layer 1 of `useBasisSeriesView`; a test pins the two by value. (`b49d531db`)
+- **The composer's 3M/6M/12M are rolling calendar months (CACHE-02, founder Q4 "Presets roll, manual stays", Q5 "12 calendar months").** A preset is held as its month count through a new `setPresetRange` and resolves to the last N calendar months ending on the latest day, so it rolls when a newer day arrives and still ends on the latest day when earlier days arrive. A series shorter than N months shows its full history. `PERIOD_MONTHS` replaces the 63/126/252 trading-day record; a later pan, zoom or reset replaces the preset. New `subtractMonths` in `src/lib/dateday.ts` (UTC, clamps to the target month's last day; `null` for an invalid day or month count). The tabs' markup, labels and ARIA are unchanged. (`8f2c1d895`)
+
+### Fixed
+- **SFH-M2: the default range fills a longer basis axis.** The fallback (no range set, an off-axis or inverted range) was the provider's cash-sized full range, so on an MTM or smoothed axis longer than cash it dropped the most recent days while reading as full history. It is now the full range of the axis being resolved; under cash nothing changes. The provider's unused `fullRange` went with it. (`6f8999a24`)
+- **WR-02: a range short of the view's end is a selection.** `resolveRangeScope` counted a range as full history when it ended at or past the cash axis end, a rule whose only reason was the cash-sized default range. On a longer axis a sub-window then read "Full history" with whole-record figures. A range is now full only when it ends at the view's last index; under cash and a shorter axis nothing changes. `cashLen` stays in the signature, unused. The Phase 169.1 D-27/W3 pin was replaced to match. (`8164efe41`)
+
+### Notes
+- **CACHE-04 is closed by founder ruling (2026-11-24), with no production change.** A BTC-unit strategy's returns are its pure performance on a different collateral, so Discovery ranks BTC-unit and USD returns together, with no BTC price conversion and no separate group; the "in BTC" chip stays. Founder: "Dont include BTC Price conversion. Just compare pure Performance". `queries.ts` and `StrategyTable.tsx` are untouched; the ruling is pinned by tests (below).
+- Review: three rounds (gsd-code-reviewer and silent-failure-hunter). WR-01, SFH-M2 and WR-02 were fixed; SFH-M1 (a manual range resets on a basis switch) was dismissed because `FactsheetView` resets the range on every basis and unit toggle, before and after this phase. Every LOW and INFO is recorded in the phase review only. Among them: a cash-to-longer basis switch can show "Selected range" with windowed figures for one render before settling to full history.
+
+### Tests
+- New `range-dates.test.ts`, `basis-context.active-axis.test.tsx`, `ScenarioFactsheetChart.period-presets.test.tsx`; `factsheet-context.provider.test.tsx` grows the series at the front and the back and pins the preset replacement; `dateday.test.ts` pins the month-end rule. (`200bd4233`, `662f40bcd`)
+- New `queries.native-unit-ranking.test.ts` (a BTC-unit row's figures reach the list unconverted; it is scored in one population with the USD rows) and `StrategyTable.native-unit-ranking.test.tsx` (raw-CAGR order, `#n`, the in BTC chip). (`681762d89`, `9bf55b26f`)
+- WR-01: the percentile arm now asserts a USD row's score that differs between one shared population and a USD-only one (83 vs 100), and a new `getOwnRowPercentiles` arm does the same for an own BTC row (43 vs 50), so a per-unit cohort can no longer pass. (`3886a2ed1`)
+- `basis-context.active-axis.test.tsx` pins the longer-axis fallback; `basis-context.window.test.tsx` pins `[0, cashLen-1]` on a longer axis as a selection. (`6f8999a24`, `8164efe41`)
+- Every gate was proven able to fail (PROOF-01): RED on pre-fix code or a neutered byte copy with its named arm, restored with `cp`, `cmp` clean, then GREEN. The records are in the plan SUMMARYs and the phase review.
+
+### Removed
+- `TODOS.md` entries `201.1-COMPOSER-RANGE-AS-DATES` (closed by CACHE-02: the range is held as dates, a 12M preset ends on the latest day after front growth, and the growth pins assert the same dates are kept) and `164.6.6.2.1-DISCOVERY-RANKING-HONESTY` (closed by the founder ruling of 2026-11-24 above, BTC-unit and USD ranked together as pure performance) are deleted, whole, as closed by this ship.
+
 ## [0.133.71.0] - 2026-11-24 — Phase 238 NEVERCOMPUTED PR-1: a strategy that failed, stalled or never started names what to do next, never tells its owner to wait
 
 This is PR-1 of Phase 238 (FACT-05). It changes copy and test files only: no migration, no analytics-service change, no new jobs read. PR-2 (FACT-03, the nullable `strategy_analytics.computed_at` migration and its reader census, plans 238-04 to 238-09) is planned and gated: it waits for Phase 233 DERIBITTRUTH to merge and for the coordinator to free the one serial migration lane. Nothing from PR-2 is in this release.

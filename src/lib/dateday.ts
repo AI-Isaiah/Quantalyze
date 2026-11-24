@@ -96,6 +96,25 @@ export function utcEpoch(day: IsoDay): number {
   return Date.UTC(y, m - 1, d);
 }
 
+/**
+ * The calendar day `months` months before `day`, in UTC (Phase 239, CACHE-02: the composer's
+ * 3M/6M/12M presets are calendar months). A day-of-month the target month does not have
+ * clamps to that month's last day, so 31 March minus one month is 28 (or 29) February, never
+ * a rolled-over 2 or 3 March. Returns `null` for an invalid day or for `months` that is not a
+ * non-negative integer.
+ */
+export function subtractMonths(day: string, months: number): IsoDay | null {
+  const parsed = parseIsoDay(day);
+  if (parsed === null || !Number.isInteger(months) || months < 0) return null;
+  const [y, m, d] = parsed.split("-").map(Number);
+  // First day of the target month, then that month's day count (day 0 of the next month).
+  const first = new Date(Date.UTC(y, m - 1 - months, 1));
+  const ty = first.getUTCFullYear();
+  const tm = first.getUTCMonth();
+  const daysInMonth = new Date(Date.UTC(ty, tm + 1, 0)).getUTCDate();
+  return `${ty}-${pad2(tm + 1)}-${pad2(Math.min(d, daysInMonth))}` as IsoDay;
+}
+
 /** Today as a LOCAL calendar day. */
 export function today(): IsoDay {
   return isoDayFromDate(new Date());

@@ -89,11 +89,11 @@ function datesView(n: number, start = START): FactsheetPayload {
 }
 
 describe("resolveRangeScope — full history vs a selected range (D-27, W3)", () => {
-  it("[0, cashLen-1] is full under cash, under a longer MTM axis and under a shorter one", () => {
+  it("[0, viewLen-1] is full under cash, under a longer MTM axis and under a shorter one", () => {
     const cashLen = 300;
     for (const viewLen of [300, 360, 240]) {
       const view = datesView(viewLen);
-      const s = resolveRangeScope([0, cashLen - 1], cashLen, view);
+      const s = resolveRangeScope([0, viewLen - 1], cashLen, view);
       expect(s.kind, `viewLen ${viewLen}`).toBe("full");
       // A full scope names the VIEW's first and last dates (W3), never the
       // date at the cash-sized reset index.
@@ -101,6 +101,16 @@ describe("resolveRangeScope — full history vs a selected range (D-27, W3)", ()
       expect(s.end).toBe(view.dates[viewLen - 1]);
       expect(s.n).toBe(viewLen);
     }
+  });
+
+  it("on a longer axis, a range from day 0 ending at the cash end but short of the view's end is selected (WR-02)", () => {
+    // Phase 239 made the default/reset range the full range of the ACTIVE axis, so the cash
+    // length is no longer a full-history boundary: [0, cashLen-1] on a 360-day axis shows
+    // 300 of 360 days and must not read "Full history" with whole-record figures.
+    const cashLen = 300;
+    const view = datesView(360);
+    const s = resolveRangeScope([0, cashLen - 1], cashLen, view);
+    expect(s).toMatchObject({ kind: "selected", start: view.dates[0], end: view.dates[cashLen - 1], n: cashLen, startIdx: 0, endIdx: cashLen - 1 });
   });
 
   it("[0, viewLen-1] is full", () => {

@@ -305,16 +305,6 @@ founder can take.
 - **[166.3.1-SYNC-PANEL-UNSTAMPED-FAILURES]** (logged 2026-10-13, NAVBREACH secure-phase T-25; plan 03 was to book it and is deferred; owner: a future phase touching analytics failure writers). Eight failure paths write `strategy_analytics` `failed` with no `computation_error_job_id`, so a failed-to-failed Retry on the key-card Sync panel gets no evidence (c) and waits for the ~120 s cap: the sync-trades `_mark_analytics_failed`, the stuck-computing reaper, bridge-generic `failed_final`s, a stamped writer that is not the latest failure, the `upsert_or_drop_provenance` degrade, `_unrecoverable_reissue_payload`, `run_csv_strategy_analytics` with `job_id=None`, and the TS pre-enqueue writers. The list with reasons is in the plan 07 SUMMARY. UX cost only, not integrity. Done when each path either stamps an id or the panel has another evidence signal for it, with a fast-fail test per class.
 - **[CI-LIVE-DB-LANE-GATEWAY-502]** (logged 2026-10-15, main CI run 38711968694 on the #1042 merge; owner: the next phase touching `scripts/local-stack/run.sh` or the live-DB lane). `frontend-live-db-lane` failed once: the claim RPC call in `compute-jobs-audit-2026-05-07-g10b.test.ts` (arm "P12-harm: a parented child is not claimable before its parent is done") received "An invalid response was received from the upstream server" from the runner-private local stack's gateway, so the execution ledger flagged one NEW failing arm. The same arm passed on the PR's own run and on main's next push; the lane passed 22 of the last 23 executed runs. Not a fan-in logic failure. Done when a second occurrence is either absent over the next 50 lane runs (close), or, if it recurs, the gateway or PostgREST log for that window names the cause and it is fixed at the source (never a retry around the arm).
 
-### 201.1-COMPOSER-RANGE-AS-DATES — the composer saves its selected range as dates, so 12M always ends on the latest day (booked 2026-11-13, Phase 201.1 review, founder decision at the v1.21 close, user-facing) (owned by Phase 239 SURFACECACHE, v1.22; REQUIREMENTS.md CACHE-02; tagged 2026-11-23)
-
-**Reading (Phase 201.1, 2026-11-12).** The scenario composer keeps the user's selected range as indices into the date axis (`userRange` in `factsheet-context.tsx`, kept while `userRange[1] <= maxIdx`). When the axis grows at the FRONT, because an earlier day is added, the same indices point at different days, so a 12M pick drifts off the latest day. 201.1 fixed the opening-range defect and the shrunk-axis case (WR-01, `56ae54095`) and booked this one, because storing dates conflicts with the pinned "kept when the series grows" contract. Recorded in `201.1-VERIFICATION.md` (Notes, item 4) and the v1.21 milestone audit.
-
-**Decision (founder, 2026-11-13, "Book a fix"):** "save the composer's selected range as dates, so presets like 12M always end on the latest day, and re-pin the 'kept when the series grows' contract to mean the same dates are kept." It belongs to the NEXT milestone and did not block the v1.21 close.
-
-**Owner:** the next milestone (book it as a phase with `/gsd-phase` when that milestone's roadmap is written).
-
-**Trigger / closed when.** The next milestone's roadmap, or the next phase that touches `factsheet-context.tsx` or the composer range presets. Closed when the selected range is stored as dates, a 12M preset still ends on the latest day after the axis grows at the front (a test that goes RED on today's index storage), and the "kept when the series grows" pins assert that the same dates are kept.
-
 ### 196-V2-PANELS-REVIVAL-01 — revive the Trades & positions and Exposure & benchmark greeks panels dropped with /strategy/[id]/v2 (booked 2026-11-09, Phase 196 D-06, founder decision 2026-11-08)
 
 **Why it is open.** The two panels rendered only inside `StrategyV2Shell` on `/strategy/[id]/v2`, which Phase 196 retired (D-03). The founder chose "drop now, book a phase" (D-06), so they were deleted with the shell, their tests and their library helpers. The factsheet carries none of what they showed:
@@ -2872,21 +2862,6 @@ form containing one.
 ⛔ **Not a close:** a reviewer's reading that the forms are SELECT-only.
 
 ## Phase 164.6.6.2.1 (BTCUSDVIEW) — routed items (logged 2026-10-09)
-
-### 164.6.6.2.1-DISCOVERY-RANKING-HONESTY — Discovery ranks a BTC strategy's returns beside USD strategies' returns (booked 2026-10-09, Phase 164.6.6.2.1 D-14) (owned by Phase 239 SURFACECACHE, v1.22; REQUIREMENTS.md CACHE-04; tagged 2026-11-23)
-
-**Why it is open.** Phase 164.6.6.2.1 labels a native-unit strategy on `StrategyTable` with an
-"in BTC" chip (D-05, D-12), but the Discovery ranking, its sort order and its percentile badges
-still compare a BTC return with USD returns as if they were one unit. The chip says what the
-number is; the rank still treats it as comparable. Out of scope for 164.6.6.2.1 by decision D-14.
-
-**Owner:** unrouted; the founder routes it at the next Discovery or ranking phase.
-**Trigger:** the first published native-unit strategy (PROD had 0 published on 2026-10-09), or
-the next phase touching the Discovery ranking, whichever comes first.
-**Gate (what closes it):** a native-unit strategy is ranked on a like-for-like basis (its USD
-series, or a separate unit bucket), by a decision recorded in that phase's CONTEXT, with a test
-that fails first on today's mixed ranking.
-⛔ **Not a close:** the chip alone.
 
 ### 164.6.6.2.1-STITCH-DEPARTED-HOLE-SPLIT — a departed or stitch-source BTC key with an interior price hole is replayed unsplit (booked 2026-10-10, Phase 164.6.6.2.1 review WR-01)
 
