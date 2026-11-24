@@ -174,6 +174,9 @@ vi.mock("@/lib/supabase/admin", () => ({
         delete: () => {
           const filters: Record<string, unknown> = {};
           PERSIST_STATE.deletes.push({ table, filters });
+          // WR-08: like PostgREST, a delete resolves rows ONLY when `.select(...)`
+          // was chained.
+          let selected = false;
           const builder = {
             eq: (col: string, val: unknown) => {
               filters[col] = val;
@@ -183,17 +186,23 @@ vi.mock("@/lib/supabase/admin", () => ({
               filters[`${col}:is`] = val;
               return builder;
             },
-            select: (_cols?: string) => builder,
+            select: (_cols?: string) => {
+              selected = true;
+              return builder;
+            },
             then: (
               resolve: (v: unknown) => unknown,
               reject: (e: unknown) => unknown,
-            ) =>
-              Promise.resolve(
-                PERSIST_STATE.deleteResult ?? {
-                  data: [{ id: "persisted-key-id" }],
-                  error: null,
-                },
-              ).then(resolve, reject),
+            ) => {
+              const answer = PERSIST_STATE.deleteResult ?? {
+                data: [{ id: "persisted-key-id" }],
+                error: null,
+              };
+              return Promise.resolve(selected ? answer : { ...answer, data: null }).then(
+                resolve,
+                reject,
+              );
+            },
           };
           return builder;
         },

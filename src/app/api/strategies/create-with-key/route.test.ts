@@ -359,16 +359,25 @@ function makeWriteVerbs(client: "admin" | "user-scoped", table: string) {
       recordWrite(client, table, "delete");
       const filters: CapturedFilters = {};
       deleteCalls.push({ client, table, filters });
+      // 225 PR-2 round 3 (WR-08): like PostgREST, a delete resolves rows ONLY
+      // when `.select(...)` was chained, and `.is(col, null)` is recorded apart
+      // from `.eq(col, null)` (which PostgREST sends as `col=eq.null` and
+      // matches nothing). Without both, dropping `.select("id")` or swapping
+      // `.is` for `.eq` left every test green.
+      let selected = false;
       const chain = {
         eq: (col: string, val: unknown) => {
           filters[col] = val;
           return chain;
         },
         is: (col: string, val: unknown) => {
-          filters[col] = val;
+          filters[`${col}:is`] = val;
           return chain;
         },
-        select: () => chain,
+        select: () => {
+          selected = true;
+          return chain;
+        },
         // A real delete is a network round trip. It resolves on a timer here
         // because `captureToSentry` reaches Sentry through a lazy
         // `import("@sentry/nextjs")`, and under vitest's module mock a SECOND
@@ -378,11 +387,13 @@ function makeWriteVerbs(client: "admin" | "user-scoped", table: string) {
         // separate round trips in production.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         then: (resolve: any) =>
-          setTimeout(
-            () =>
-              resolve(deleteAnswers[table] ?? { data: [{ id: "deleted" }], error: null }),
-            30,
-          ),
+          setTimeout(() => {
+            const answer = deleteAnswers[table] ?? {
+              data: [{ id: "deleted" }],
+              error: null,
+            };
+            resolve(selected ? answer : { ...answer, data: null });
+          }, 30),
       };
       return chain;
     },
@@ -3428,7 +3439,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
           {
             client: "admin",
             table: "api_keys",
-            filters: { id: API_KEY_ID, user_id: MOCK_USER.id, venue_account_id: null },
+            filters: { id: API_KEY_ID, user_id: MOCK_USER.id, "venue_account_id:is": null },
           },
           {
             client: "admin",
