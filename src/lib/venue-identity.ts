@@ -1,3 +1,6 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { logAuditEventAsUser } from "@/lib/audit";
+
 /**
  * Phase 225 ONEACCOUNTONCE, plan 06 (CONN-03, MT5D-08): the one broker-server
  * vocabulary the connect routes use, written once for TypeScript and pinned
@@ -93,4 +96,120 @@ export function pickSameAccountHolder<
     if (hit !== null) return hit;
   }
   return null;
+}
+
+export type SameLoginKeyRow = {
+  id: string;
+  venue_server: string | null;
+  is_active: boolean;
+  sync_status: string | null;
+  disconnected_at: string | null;
+  account_shared_with_api_key_id: string | null;
+  account_share_kind: string | null;
+};
+
+/**
+ * The live keys of one owner on one login. The `userId` filter is the tenant
+ * boundary (the admin client crosses RLS by design), so it is mandatory in the
+ * signature and no row of another owner can come back. Returns the read error
+ * instead of throwing, and never logs it: the caller scrubs it with its own
+ * request secrets.
+ */
+export async function readLiveSameLoginKeys(
+  admin: SupabaseClient,
+  args: { userId: string; exchange: string; venueAccountId: string },
+): Promise<{ rows: SameLoginKeyRow[]; error: unknown }> {
+  try {
+    const { data, error } = await admin
+      .from("api_keys")
+      .select(
+        "id, venue_server, is_active, sync_status, disconnected_at, account_shared_with_api_key_id, account_share_kind",
+      )
+      .eq("user_id", args.userId)
+      .eq("exchange", args.exchange)
+      .eq("venue_account_id", args.venueAccountId)
+      .is("disconnected_at", null)
+      .order("id");
+    if (error) return { rows: [], error };
+    return { rows: (data ?? []) as SameLoginKeyRow[], error: null };
+  } catch (error) {
+    return { rows: [], error };
+  }
+}
+
+function errorCode(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  return "unknown";
+}
+
+/**
+ * Move a failing holder's slot to a working key of the same owner through
+ * `public.swap_account_slot` (MT5D-08, Q1): one transaction stamps the new key
+ * and marks the old holder a duplicate of it. Nothing is disconnected.
+ *
+ * On success the demoted key is audited as a duplicate (venue and the new
+ * holder's key id only: never a login, a server or a user id, T-167.1.2-17) and
+ * a recompose is queued. Neither follow-up can undo a swap that landed: an audit
+ * is fire-and-forget and an enqueue failure is logged and still answers ok.
+ * The RPC error is returned, never logged: it can carry the login.
+ *
+ * The server is normalised here as well, so an over-length or blank value
+ * reaches the RPC as "no server" and never as a refusal token or a raw 23514.
+ */
+export async function swapAccountSlot(
+  admin: SupabaseClient,
+  args: {
+    userId: string;
+    exchange: string;
+    newKeyId: string;
+    oldHolderId: string;
+    venueAccountId: string;
+    venueServer: string | null;
+  },
+): Promise<{ ok: true } | { ok: false; error: unknown }> {
+  const server = normaliseVenueServer(args.venueServer);
+  const rpcArgs: Record<string, string> = {
+    p_new_key: args.newKeyId,
+    p_old_holder: args.oldHolderId,
+    p_venue_account_id: args.venueAccountId,
+  };
+  if (server !== null) rpcArgs.p_venue_server = server;
+
+  try {
+    const { error } = await admin.rpc("swap_account_slot", rpcArgs);
+    if (error) return { ok: false, error };
+  } catch (error) {
+    return { ok: false, error };
+  }
+
+  logAuditEventAsUser(admin, args.userId, {
+    action: "api_key.account_duplicate_detected",
+    entity_type: "api_key",
+    entity_id: args.oldHolderId,
+    metadata: { venue: args.exchange, holder_api_key_id: args.newKeyId },
+  });
+
+  // The curve composed before the swap may count the account under the wrong
+  // key, and nothing else enqueues a compose for it. Best effort: the swap has
+  // landed, so a failure is logged (class and code only) and never undoes it.
+  try {
+    const { error } = await admin.rpc("enqueue_compute_job", {
+      p_strategy_id: null,
+      p_allocator_id: args.userId,
+      p_kind: "derive_allocator_equity",
+    });
+    if (error) {
+      console.error(
+        `[venue-identity] recompose enqueue after a slot swap failed for api_key ${args.oldHolderId}: code=${errorCode(error)}`,
+      );
+    }
+  } catch (error) {
+    console.error(
+      `[venue-identity] recompose enqueue after a slot swap threw for api_key ${args.oldHolderId}: code=${errorCode(error)}`,
+    );
+  }
+  return { ok: true };
 }

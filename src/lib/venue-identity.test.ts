@@ -7,12 +7,19 @@
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const auditMock = vi.hoisted(() => ({ logAuditEventAsUser: vi.fn() }));
+vi.mock("@/lib/audit", () => auditMock);
+
 import {
   MAX_VENUE_SERVER_LENGTH,
   normaliseVenueServer,
   pickSameAccountHolder,
+  readLiveSameLoginKeys,
   sameVenueServer,
+  swapAccountSlot,
 } from "./venue-identity";
 
 type PickCase = {
@@ -70,5 +77,200 @@ describe("pickSameAccountHolder (the fixture's cases)", () => {
 
   it.each(spec.pick)("$name (rows reversed)", ({ rows, server, mode, expect: want }) => {
     expect(pickSameAccountHolder([...rows].reverse(), server, mode)?.id ?? null).toBe(want);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readLiveSameLoginKeys and swapAccountSlot, against a recorded-call admin mock.
+// ---------------------------------------------------------------------------
+
+type Call = [method: string, ...args: unknown[]];
+
+/** An admin client whose query chain records every call and resolves to `result`. */
+function readAdmin(result: { data: unknown; error: unknown }) {
+  const calls: Call[] = [];
+  const chain: Record<string, unknown> = {};
+  for (const method of ["select", "eq", "is", "order"]) {
+    chain[method] = (...args: unknown[]) => {
+      calls.push([method, ...args]);
+      return method === "order" ? Promise.resolve(result) : chain;
+    };
+  }
+  const admin = {
+    from: (table: string) => {
+      calls.push(["from", table]);
+      return chain;
+    },
+  } as unknown as SupabaseClient;
+  return { admin, calls };
+}
+
+/** An admin client whose rpc answers per function name and records each call. */
+function rpcAdmin(
+  answers: Record<string, { error: unknown } | (() => never)>,
+) {
+  const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
+  const admin = {
+    rpc: (fn: string, args: Record<string, unknown>) => {
+      rpcCalls.push({ fn, args });
+      const answer = answers[fn];
+      if (typeof answer === "function") return answer();
+      return Promise.resolve({ data: null, ...(answer ?? { error: null }) });
+    },
+  } as unknown as SupabaseClient;
+  return { admin, rpcCalls };
+}
+
+const OWNER = "owner-0001";
+const NEW_KEY = "key-new";
+const OLD_HOLDER = "key-old";
+const SWAP_ARGS = {
+  userId: OWNER,
+  exchange: "mt5",
+  newKeyId: NEW_KEY,
+  oldHolderId: OLD_HOLDER,
+  venueAccountId: "123456",
+  venueServer: "srv-a" as string | null,
+};
+
+afterEach(() => {
+  auditMock.logAuditEventAsUser.mockReset();
+  vi.restoreAllMocks();
+});
+
+describe("readLiveSameLoginKeys", () => {
+  const args = { userId: OWNER, exchange: "mt5", venueAccountId: "123456" };
+
+  it("filters on owner, exchange, login and liveness, selects exactly the seven columns, orders by id", async () => {
+    const { admin, calls } = readAdmin({ data: [], error: null });
+    await readLiveSameLoginKeys(admin, args);
+    expect(calls).toEqual([
+      ["from", "api_keys"],
+      [
+        "select",
+        "id, venue_server, is_active, sync_status, disconnected_at, account_shared_with_api_key_id, account_share_kind",
+      ],
+      ["eq", "user_id", OWNER],
+      ["eq", "exchange", "mt5"],
+      ["eq", "venue_account_id", "123456"],
+      ["is", "disconnected_at", null],
+      ["order", "id"],
+    ]);
+  });
+
+  it("returns the rows it read", async () => {
+    const row = {
+      id: "k-001",
+      venue_server: "srv-a",
+      is_active: true,
+      sync_status: null,
+      disconnected_at: null,
+      account_shared_with_api_key_id: null,
+      account_share_kind: null,
+    };
+    const { admin } = readAdmin({ data: [row], error: null });
+    expect(await readLiveSameLoginKeys(admin, args)).toEqual({ rows: [row], error: null });
+  });
+
+  it("returns the read error instead of throwing, with no rows", async () => {
+    const boom = { code: "57014", message: "carries a login 123456" };
+    const { admin } = readAdmin({ data: null, error: boom });
+    expect(await readLiveSameLoginKeys(admin, args)).toEqual({ rows: [], error: boom });
+  });
+
+  it("does not log the error (the caller scrubs it with its own secrets)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { admin } = readAdmin({ data: null, error: { code: "x", message: "123456" } });
+    await readLiveSameLoginKeys(admin, args);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("swapAccountSlot", () => {
+  it("calls swap_account_slot with the login and the server explicitly", async () => {
+    const { admin, rpcCalls } = rpcAdmin({});
+    const res = await swapAccountSlot(admin, SWAP_ARGS);
+    expect(res).toEqual({ ok: true });
+    expect(rpcCalls[0]).toEqual({
+      fn: "swap_account_slot",
+      args: {
+        p_new_key: NEW_KEY,
+        p_old_holder: OLD_HOLDER,
+        p_venue_account_id: "123456",
+        p_venue_server: "srv-a",
+      },
+    });
+  });
+
+  it("leaves p_venue_server out when the server is null, so the RPC keeps the holder's", async () => {
+    const { admin, rpcCalls } = rpcAdmin({});
+    await swapAccountSlot(admin, { ...SWAP_ARGS, venueServer: null });
+    expect(rpcCalls[0].args).not.toHaveProperty("p_venue_server");
+  });
+
+  it("sends a blank or over-length server as no server, never as a refusal", async () => {
+    const { admin, rpcCalls } = rpcAdmin({});
+    await swapAccountSlot(admin, { ...SWAP_ARGS, venueServer: "  \t " });
+    await swapAccountSlot(admin, { ...SWAP_ARGS, venueServer: "x".repeat(129) });
+    expect(rpcCalls.filter((c) => c.fn === "swap_account_slot").every((c) => !("p_venue_server" in c.args))).toBe(true);
+  });
+
+  it("audits the DEMOTED key with the venue and the new holder's id only, then asks for a recompose", async () => {
+    const { admin, rpcCalls } = rpcAdmin({});
+    await swapAccountSlot(admin, SWAP_ARGS);
+    expect(auditMock.logAuditEventAsUser).toHaveBeenCalledTimes(1);
+    expect(auditMock.logAuditEventAsUser).toHaveBeenCalledWith(admin, OWNER, {
+      action: "api_key.account_duplicate_detected",
+      entity_type: "api_key",
+      entity_id: OLD_HOLDER,
+      metadata: { venue: "mt5", holder_api_key_id: NEW_KEY },
+    });
+    expect(rpcCalls[1]).toEqual({
+      fn: "enqueue_compute_job",
+      args: { p_strategy_id: null, p_allocator_id: OWNER, p_kind: "derive_allocator_equity" },
+    });
+  });
+
+  it("returns { ok: false, error } on an RPC error and neither audits nor enqueues", async () => {
+    const refusal = { code: "55000", message: "ACCOUNT_SLOT_HOLDER_WORKING" };
+    const { admin, rpcCalls } = rpcAdmin({ swap_account_slot: { error: refusal } });
+    expect(await swapAccountSlot(admin, SWAP_ARGS)).toEqual({ ok: false, error: refusal });
+    expect(auditMock.logAuditEventAsUser).not.toHaveBeenCalled();
+    expect(rpcCalls.map((c) => c.fn)).toEqual(["swap_account_slot"]);
+  });
+
+  it("returns { ok: false } when the RPC call throws, without auditing", async () => {
+    const boom = new Error("fetch failed");
+    const { admin } = rpcAdmin({
+      swap_account_slot: () => {
+        throw boom;
+      },
+    });
+    expect(await swapAccountSlot(admin, SWAP_ARGS)).toEqual({ ok: false, error: boom });
+    expect(auditMock.logAuditEventAsUser).not.toHaveBeenCalled();
+  });
+
+  it("logs an enqueue error and still returns ok: the swap has landed", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { admin } = rpcAdmin({
+      enqueue_compute_job: { error: { code: "XX000", message: "login 123456 leaked" } },
+    });
+    expect(await swapAccountSlot(admin, SWAP_ARGS)).toEqual({ ok: true });
+    expect(spy).toHaveBeenCalledTimes(1);
+    const logged = String(spy.mock.calls[0].join(" "));
+    expect(logged).toContain(OLD_HOLDER);
+    expect(logged).not.toContain("123456");
+    expect(logged).not.toContain("srv-a");
+  });
+
+  it("logs a thrown enqueue and still returns ok", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { admin } = rpcAdmin({
+      enqueue_compute_job: () => {
+        throw new Error("fetch failed for 123456");
+      },
+    });
+    expect(await swapAccountSlot(admin, SWAP_ARGS)).toEqual({ ok: true });
+    expect(String(spy.mock.calls[0].join(" "))).not.toContain("123456");
   });
 });
