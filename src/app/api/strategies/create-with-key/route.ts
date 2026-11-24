@@ -333,6 +333,33 @@ async function resolveByVenueIdentity(
     // BEFORE any strategy read, so a failing holder carrying a strategy is
     // still replaceable by a validated working key.
     if (!isWorkingHolder(picked)) {
+      // 225 PR-2 round-3 decision 2 (WR-06) — PRE-ADMISSION: a composite member
+      // that depends on the failing holder makes `swap_account_slot` refuse
+      // (ACCOUNT_SLOT_COMPOSITE_DEPENDENT, F-2), every time. Say so now, before
+      // the validation, the encrypt and the insert, instead of rolling back a
+      // key that could never take the slot. `held` answers the venue-neutral
+      // KEY_VENUE_ALREADY_CONNECTED. The predicate is the swap's own. A fault in
+      // this read fails closed like the same-login read above.
+      const { data: dependent, error: dependentErr } = await admin
+        .from("api_keys")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("account_shared_with_api_key_id", picked.id)
+        .eq("account_share_kind", "composite_member")
+        .limit(1)
+        .maybeSingle();
+      if (dependentErr) {
+        console.error(
+          "[strategies/create-with-key] composite-dependent read failed; refusing the submit (nothing was written):",
+          scrubSeamError(dependentErr, secrets),
+        );
+        captureToSentry(dependentErr, {
+          tags: { surface: "strategies-create-with-key", step: "holder-read" },
+          secrets,
+        });
+        return { kind: "read_failed" };
+      }
+      if (dependent) return HELD;
       return { kind: "failing_holder", holderId: picked.id };
     }
     liveKeyId = picked.id;
@@ -1537,8 +1564,17 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // below records the 161-05 order this reverses.
       return keyOrphanedResponse();
     }
-    // 167.1.2 REVIEW WR-04: `held` falls through here and is answered by the
-    // race arm's own `held` branch.
+    // 225 PR-2 round-3 decision 2 (WR-06): `held` is answered here, before the
+    // validation, for the same reason as the arms above: it is a fact about the
+    // caller's OWN stored keys that no credential check can change. It is what a
+    // failing holder with a composite dependent resolves to (the swap would
+    // refuse it every time); a working holder held only through a composite
+    // resolves to it too.
+    if (venueMatch.kind === "held") {
+      return keyVenueAlreadyConnectedResponse();
+    }
+    // 167.1.2 REVIEW WR-04: `held` used to fall through here and be answered by
+    // the race arm's own `held` branch.
     // ⛔ CORRECTED 2026-11-14 (Phase 212 SC5) — THE `orphaned` ARM ABOVE REVERSES
     // THE 161-05 / WIZERR-03 ORDER RECORDED HERE; the original reasoning is kept
     // below as lineage.
@@ -2265,7 +2301,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             );
           }
         }
-        if (!swapLanded) return keyVenueAlreadyConnectedResponse();
+        // 225 PR-2 round-3 decision 2 (WR-06) — SPLIT BY KIND, NO NEW COPY. A
+        // refusal carries an `ACCOUNT_SLOT_` token (the same token
+        // `account_identity.py`'s `_SLOT_REFUSAL` reads): the answer is
+        // KEY_VENUE_ALREADY_CONNECTED, as before. A failure with no token (a
+        // lock timeout, a network fault) is transient and a plain retry can
+        // succeed, so it answers the retryable 503 UNKNOWN after the same
+        // rollback, which is `WHERE venue_account_id IS NULL` and so safe.
+        if (!swapLanded) {
+          const swapMessage = (swap.error as { message?: unknown } | null | undefined)?.message;
+          const isSlotRefusal =
+            typeof swapMessage === "string" && /ACCOUNT_SLOT_[A-Z_]+/.test(swapMessage);
+          return isSlotRefusal
+            ? keyVenueAlreadyConnectedResponse()
+            : holderReadFailedResponse();
+        }
       }
     }
 

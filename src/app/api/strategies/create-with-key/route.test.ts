@@ -280,6 +280,22 @@ const stampedKeyReadMock = vi.fn(
 );
 
 /**
+ * 225 PR-2 round 3 (WR-06) — the pre-admission read of a COMPOSITE DEPENDENT of
+ * a failing holder (`select("id")` filtered on `account_shared_with_api_key_id`
+ * and `account_share_kind`). Routed in `makeSelectBuilder` on the
+ * `account_share_kind` filter, which no other read carries. It DEFAULTS TO
+ * "no dependent", so every pre-existing admission keeps its swap.
+ */
+const compositeDependentReadMock = vi.fn(
+  async (
+    _filters: Record<string, unknown>,
+  ): Promise<{
+    data: { id: string } | null;
+    error: { code?: string; message?: string } | null;
+  }> => ({ data: null, error: null }),
+);
+
+/**
  * 164.2-04 / criterion 5 — the reuse arm's POST-23505 read of the draft it
  * actually collided with.
  *
@@ -552,6 +568,9 @@ function makeSelectBuilder(
         // `venue_account_id`, which no other read of this route does.
         if (client === "admin" && columns === "venue_account_id") {
           return stampedKeyReadMock();
+        }
+        if ("account_share_kind" in filters) {
+          return compositeDependentReadMock(filters);
         }
         if ("id" in filters) {
           return client === "admin"
@@ -1756,6 +1775,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     venueStrategyLookupMock.mockReset();
     venueOwnerLookupMock.mockReset();
     keyMembershipLookupMock.mockReset();
+    compositeDependentReadMock.mockReset();
+    compositeDependentReadMock.mockResolvedValue({ data: null, error: null });
     stampedKeyReadMock.mockReset();
     stampedKeyReadMock.mockResolvedValue({ data: { venue_account_id: null }, error: null });
     assetClassUpdateMock.mockClear();
@@ -3589,6 +3610,40 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
         ]);
       });
 
+      // 225 PR-2 round-3 decision 2 (WR-06): a swap failure with NO ACCOUNT_SLOT_
+      // token (a lock timeout, a network fault) is transient. The rollback runs
+      // and the answer is the retryable 503 UNKNOWN, not the 409 whose copy says
+      // the existing key "keeps working". Token refusals keep the 409 (above).
+      it("a TRANSIENT swap failure (no ACCOUNT_SLOT_ token) rolls the key and draft back and answers a retryable 503 UNKNOWN, never the 409", async () => {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [{ id: EXISTING_KEY_ID, sync_status: "revoked" }],
+          error: null,
+        });
+        routeRpc({
+          data: null,
+          error: {
+            code: "55P03",
+            message: `canceling statement due to lock timeout for login ${MT5_LOGIN} on ${SERVER_NORMALISED}`,
+          },
+        });
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(503);
+        const text = await res.text();
+        expect(JSON.parse(text).code).toBe("UNKNOWN");
+        expect(text).not.toContain("KEY_VENUE_ALREADY_CONNECTED");
+        expect(text).not.toContain(MT5_LOGIN);
+        // The same rollback ran: the key first, then the draft.
+        expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys", "strategies"]);
+        expect(assetClassUpdateMock).not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(sentryState.captured.length).toBeGreaterThan(0));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual(["holder-swap"]);
+      });
+
       it("a key delete that removes no row and whose re-read finds the key NOT stamped (gone, or the RPC replayed an earlier request's pair) leaves the DRAFT in place, answers 409 and pages holder-swap-rollback-noop", async () => {
         refusedSwap();
         deleteAnswers.api_keys = { data: [], error: null };
@@ -3670,6 +3725,84 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
           "holder-swap-rollback-noop",
         ]);
       });
+    });
+  });
+
+  // 225 PR-2 round-3 decision 2 (WR-06): a failing holder that a composite_member
+  // depends on can never be swapped (ACCOUNT_SLOT_COMPOSITE_DEPENDENT). It is
+  // refused BEFORE the validation, the encrypt and the insert, with the same
+  // body as the held arm, instead of being admitted and rolled back.
+  describe("[WR-06] a failing holder with a composite dependent is refused before admission", () => {
+    const KEY_VENUE_ALREADY_CONNECTED_BODY =
+      '{"code":"KEY_VENUE_ALREADY_CONNECTED","error":"This exchange account is already connected on your account. Use the key you already have, or disconnect it first."}';
+
+    function failingHolder() {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, sync_status: "revoked" }],
+        error: null,
+      });
+    }
+
+    it("answers 409 KEY_VENUE_ALREADY_CONNECTED byte-exact with no validate, encrypt or RPC, and reads exactly this holder's composite dependents for this owner", async () => {
+      failingHolder();
+      compositeDependentReadMock.mockResolvedValue({
+        data: { id: "00000000-0000-4000-8000-0000000000c1" },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(text).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+      expect(compositeDependentReadMock).toHaveBeenCalledTimes(1);
+      expect(compositeDependentReadMock.mock.calls[0][0]).toEqual({
+        user_id: MOCK_USER.id,
+        account_shared_with_api_key_id: EXISTING_KEY_ID,
+        account_share_kind: "composite_member",
+      });
+    });
+
+    it("a failing holder with NO composite dependent is still admitted and swapped (negative control)", async () => {
+      failingHolder();
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      expect(compositeDependentReadMock).toHaveBeenCalled();
+      expect(
+        rpcMock.mock.calls.filter((c) => c[0] === "swap_account_slot"),
+      ).toHaveLength(1);
+    });
+
+    it("a FAULT in the dependents read fails closed: 503 UNKNOWN before validate, encrypt and any write, captured as holder-read", async () => {
+      failingHolder();
+      compositeDependentReadMock.mockResolvedValue({
+        data: null,
+        error: { code: "42501", message: `permission denied reading login ${MT5_LOGIN}` },
+      });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(503);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("UNKNOWN");
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(sentryState.captured).toHaveLength(1));
+      expect(sentryState.captured[0].options.tags?.step).toBe("holder-read");
+      const sink = JSON.stringify([sentryState.captured, consoleErr.mock.calls]);
+      expect(sink).not.toContain(MT5_LOGIN);
     });
   });
 

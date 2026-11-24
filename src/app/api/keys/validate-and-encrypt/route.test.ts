@@ -110,6 +110,14 @@ const {
     stampResult: null as { data: unknown; error: unknown } | null,
     /** The filters of every such re-read. */
     stampReads: [] as Record<string, unknown>[],
+    /**
+     * 225 PR-2 round 3 (WR-06) — the pre-admission read of a composite dependent
+     * of a failing holder (`select("id")` filtered on `account_share_kind`).
+     * null = no dependent.
+     */
+    dependentResult: null as { data: unknown; error: unknown } | null,
+    /** The filters of every such read. */
+    dependentReads: [] as Record<string, unknown>[],
   },
 }));
 
@@ -159,7 +167,15 @@ vi.mock("@/lib/supabase/admin", () => ({
               return builder;
             },
             order: (_col: string) => builder,
+            limit: (_n: number) => builder,
             maybeSingle: async () => {
+              // The composite-dependent read is the only one filtered on
+              // `account_share_kind`; the other `maybeSingle` is the rollback's
+              // stamp re-read.
+              if ("account_share_kind" in filters) {
+                PERSIST_STATE.dependentReads.push({ __table: table, ...filters });
+                return PERSIST_STATE.dependentResult ?? { data: null, error: null };
+              }
               PERSIST_STATE.stampReads.push({ __table: table, __cols: _cols, ...filters });
               return PERSIST_STATE.stampResult ?? { data: { venue_account_id: null }, error: null };
             },
@@ -3005,6 +3021,8 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     PERSIST_STATE.deleteResult = null;
     PERSIST_STATE.stampResult = null;
     PERSIST_STATE.stampReads.length = 0;
+    PERSIST_STATE.dependentResult = null;
+    PERSIST_STATE.dependentReads.length = 0;
     process.env.MT5_ENABLED = "true";
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
@@ -3349,5 +3367,95 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
       "holder-swap",
       "holder-swap-rollback-noop",
     ]);
+  });
+  // ── WR-06 (225 PR-2 round-3 decision 2) ────────────────────────────────────
+  // A swap failure with NO ACCOUNT_SLOT_ token (a lock timeout, a network fault)
+  // is transient: the rollback runs and the answer is the retryable 503 UNKNOWN,
+  // not the 409 whose copy says the existing key "keeps working". Token refusals
+  // keep the 409 (above).
+  it("a TRANSIENT swap failure (no ACCOUNT_SLOT_ token) rolls the key back and answers a retryable 503 UNKNOWN, never the 409", async () => {
+    PERSIST_STATE.sameLoginRows = [holderRow({ sync_status: "sign_in_failed" })];
+    PERSIST_STATE.rpcResult = {
+      data: null,
+      error: {
+        message: `canceling statement due to lock timeout for ${LOGIN} on ${SERVER_RAW}`,
+        code: "55P03",
+      },
+    };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(JSON.parse(text).code).toBe("UNKNOWN");
+    expect(text).not.toContain("KEY_VENUE_ALREADY_CONNECTED");
+    expect(text).not.toContain(LOGIN);
+    // The same rollback ran, scoped to this request's own unstamped key.
+    expect(PERSIST_STATE.deletes).toEqual([
+      {
+        table: "api_keys",
+        filters: { id: "persisted-key-id", user_id: TEST_USER.id, "venue_account_id:is": null },
+      },
+    ]);
+    expect(captureSpy.mock.calls.map((c) => c[1].tags.step)).toEqual(["holder-swap"]);
+  });
+
+  describe("a failing holder with a composite dependent is refused before the insert", () => {
+    it("answers 409 KEY_VENUE_ALREADY_CONNECTED byte-exact with no insert and no swap, and reads exactly this holder's composite dependents for this owner", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow({ sync_status: "sign_in_failed" })];
+      PERSIST_STATE.dependentResult = { data: { id: "dependent-key-id" }, error: null };
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+      expect(PERSIST_STATE.inserts).toEqual([]);
+      expect(PERSIST_STATE.rpcCalls).toEqual([]);
+      expect(PERSIST_STATE.deletes).toEqual([]);
+      expect(PERSIST_STATE.dependentReads).toEqual([
+        {
+          __table: "api_keys",
+          user_id: TEST_USER.id,
+          account_shared_with_api_key_id: holderRow().id,
+          account_share_kind: "composite_member",
+        },
+      ]);
+    });
+
+    it("a failing holder with NO composite dependent is still admitted and swapped (negative control)", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow({ sync_status: "sign_in_failed" })];
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+
+      expect(res.status).toBe(200);
+      expect(PERSIST_STATE.dependentReads).toHaveLength(1);
+      expect(PERSIST_STATE.rpcCalls.map((c) => c.name)).toContain("swap_account_slot");
+    });
+
+    it("a FAULT in the dependents read fails closed: 503 UNKNOWN before any insert, captured as holder-read, no login or server in any sink", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow({ sync_status: "sign_in_failed" })];
+      PERSIST_STATE.dependentResult = {
+        data: null,
+        error: { message: `permission denied reading login ${LOGIN} on ${SERVER_RAW}`, code: "42501" },
+      };
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+
+      expect(res.status).toBe(503);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("UNKNOWN");
+      expect(text).not.toContain(LOGIN);
+      expect(PERSIST_STATE.inserts).toEqual([]);
+      expect(PERSIST_STATE.rpcCalls).toEqual([]);
+      expect(captureSpy).toHaveBeenCalledTimes(1);
+      expect(captureSpy.mock.calls[0][1].tags.step).toBe("holder-read");
+      const logged = JSON.stringify(consoleErr.mock.calls);
+      expect(logged).not.toContain(LOGIN);
+      expect(logged).not.toContain(SERVER_RAW);
+      consoleErr.mockRestore();
+    });
   });
 });
