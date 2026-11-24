@@ -122,7 +122,8 @@ BYBIT_CCXT_COMPLETE = [
         "entryPrice": 60000.0,
         "markPrice": 61000.0,
         "unrealizedPnl": 100.0,
-        "info": {},
+        # ccxt's ``info`` is the raw v5 row, whose ``size`` the Bybit arm now requires.
+        "info": {"size": "0.1", "positionValue": "6000"},
     },
 ]
 
@@ -226,6 +227,39 @@ class TestFetchPositionsOKX:
         assert sides == {"long", "short"}
 
 
+# Phase 231 (VREAD-02): the Bybit read asks for three categories per poll, so a mock
+# that answers every call with one list triples the rows. This exchange dispatches on
+# the request like the venue does: ccxt's ``fetch_positions(None, params)`` by
+# ``settleCoin`` / ``subType``, the raw V5 call by ``category`` / ``settleCoin``.
+EMPTY_V5_PAGE = {"retCode": 0, "result": {"list": [], "nextPageCursor": ""}}
+
+
+def _bybit_label(params: dict, *, raw: bool) -> str:
+    if (params.get("category") == "inverse") if raw else (params.get("subType") == "inverse"):
+        return "inverse"
+    return "linear_usdc" if params.get("settleCoin") == "USDC" else "linear_usdt"
+
+
+def _bybit_exchange(ccxt_rows: dict | None = None, raw_pages: dict | None = None) -> AsyncMock:
+    """An AsyncMock Bybit; ``ccxt_rows`` / ``raw_pages`` map a category label
+    (``linear_usdt``, ``linear_usdc``, ``inverse``) to what that category answers.
+    Unnamed categories answer empty. Calls are recorded by the mocks."""
+    import copy
+
+    ex = AsyncMock()
+    ex.id = "bybit"
+
+    async def fetch_positions(symbols=None, params=None):
+        return copy.deepcopy((ccxt_rows or {}).get(_bybit_label(params or {}, raw=False), []))
+
+    async def raw_list(params):
+        return copy.deepcopy((raw_pages or {}).get(_bybit_label(params, raw=True), EMPTY_V5_PAGE))
+
+    ex.fetch_positions = AsyncMock(side_effect=fetch_positions)
+    ex.private_get_v5_position_list = AsyncMock(side_effect=raw_list)
+    return ex
+
+
 # ---------------------------------------------------------------------------
 # Test: Bybit CCXT happy path
 # ---------------------------------------------------------------------------
@@ -236,9 +270,9 @@ class TestFetchPositionsBybitHappy:
     async def test_bybit_ccxt_complete(self) -> None:
         from services.positions import fetch_positions
 
-        mock_exchange = AsyncMock()
-        mock_exchange.id = "bybit"
-        mock_exchange.fetch_positions.return_value = BYBIT_CCXT_COMPLETE
+        # 231 flip: was ``fetch_positions.return_value = BYBIT_CCXT_COMPLETE`` and one
+        # row. One list for every call would now return three copies of the row.
+        mock_exchange = _bybit_exchange(ccxt_rows={"linear_usdt": BYBIT_CCXT_COMPLETE})
 
         result = await fetch_positions("bybit", mock_exchange)
 
@@ -251,6 +285,18 @@ class TestFetchPositionsBybitHappy:
         assert pos["mark_price"] == 61000.0
         assert pos["unrealized_pnl"] == 100.0
         assert pos["exchange"] == "bybit"
+        # One ccxt request per category, in order.
+        assert [c.args[1] for c in mock_exchange.fetch_positions.await_args_list] == [
+            {"settleCoin": "USDT"},
+            {"settleCoin": "USDC"},
+            {"subType": "inverse"},
+        ]
+        # The two empty categories are re-read on the raw path (a flat account costs
+        # three ccxt plus three raw calls); the complete USDT category is not.
+        assert [
+            (c.args[0]["category"], c.args[0].get("settleCoin"))
+            for c in mock_exchange.private_get_v5_position_list.await_args_list
+        ] == [("linear", "USDC"), ("inverse", None)]
 
 
 # ---------------------------------------------------------------------------
@@ -263,10 +309,13 @@ class TestFetchPositionsBybitFallback:
     async def test_bybit_fallback_to_v5(self) -> None:
         from services.positions import fetch_positions
 
-        mock_exchange = AsyncMock()
-        mock_exchange.id = "bybit"
-        mock_exchange.fetch_positions.return_value = BYBIT_CCXT_INCOMPLETE
-        mock_exchange.private_get_v5_position_list.return_value = BYBIT_V5_RAW_RESPONSE
+        # 231 flip: was one ``fetch_positions.return_value`` and one raw page for
+        # every call. The incomplete USDT category takes the raw page; the empty USDC
+        # and inverse categories answer an empty raw page.
+        mock_exchange = _bybit_exchange(
+            ccxt_rows={"linear_usdt": BYBIT_CCXT_INCOMPLETE},
+            raw_pages={"linear_usdt": BYBIT_V5_RAW_RESPONSE},
+        )
 
         result = await fetch_positions("bybit", mock_exchange)
 
@@ -278,8 +327,18 @@ class TestFetchPositionsBybitFallback:
         assert pos["mark_price"] == 61000.0
         assert pos["unrealized_pnl"] == 100.0
         assert pos["entry_price"] == 60000.0
-        # Verify the fallback was actually invoked
-        mock_exchange.private_get_v5_position_list.assert_awaited_once()
+        # Verify the fallback was actually invoked, once per category (was
+        # ``assert_awaited_once``: the fan-out is three reads, one per category).
+        assert [
+            (c.args[0]["category"], c.args[0].get("settleCoin"))
+            for c in mock_exchange.private_get_v5_position_list.await_args_list
+        ] == [("linear", "USDT"), ("linear", "USDC"), ("inverse", None)]
+        # Without ``limit`` Bybit answers its default page of 20: every raw request
+        # carries it now.
+        assert all(
+            c.args[0]["limit"] == "200"
+            for c in mock_exchange.private_get_v5_position_list.await_args_list
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -717,7 +776,8 @@ class TestFetchPositionsDeribit:
         and asserting _normalize_ccxt_positions propagates instead of swallowing."""
         import services.positions as positions_mod
 
-        def _boom(pos, exchange_name):
+        def _boom(pos, exchange_name, **_kwargs):
+            # 231: the batch normalizer forwards ``bybit_category`` by keyword.
             raise ValueError("malformed okx position")
 
         original = positions_mod._normalize_ccxt_position
@@ -808,16 +868,20 @@ class TestBybitV5ReportedPnl:
         the only source that can say "reported zero" -> 0.0, not None."""
         from services.positions import fetch_positions
 
-        mock_exchange = AsyncMock()
-        mock_exchange.id = "bybit"
-        mock_exchange.fetch_positions.return_value = BYBIT_CCXT_INCOMPLETE
-        mock_exchange.private_get_v5_position_list.return_value = self._response(
-            {"unrealisedPnl": "0"}
+        # 231 flip: the raw page is the USDT category's; the other two answer empty.
+        mock_exchange = _bybit_exchange(
+            ccxt_rows={"linear_usdt": BYBIT_CCXT_INCOMPLETE},
+            raw_pages={"linear_usdt": self._response({"unrealisedPnl": "0"})},
         )
 
         result = await fetch_positions("bybit", mock_exchange)
 
-        mock_exchange.private_get_v5_position_list.assert_awaited_once()
+        # One raw read per category (was ``assert_awaited_once``), each with ``limit``.
+        assert mock_exchange.private_get_v5_position_list.await_count == 3
+        assert all(
+            c.args[0]["limit"] == "200"
+            for c in mock_exchange.private_get_v5_position_list.await_args_list
+        )
         assert len(result) == 1
         assert result[0]["unrealized_pnl"] == 0.0
         assert result[0]["unrealized_pnl"] is not None
@@ -917,3 +981,697 @@ class TestDeribitReportedPnl:
         assert len(result) == 1
         assert result[0]["unrealized_pnl"] == expected
         assert (result[0]["unrealized_pnl"] is None) == (expected is None)
+
+
+# ---------------------------------------------------------------------------
+# Test: Bybit reads three position categories (Phase 231 BYBITREADS, VREAD-02)
+# ---------------------------------------------------------------------------
+#
+# Every position below goes through ccxt's REAL ``bybit.fetch_positions`` and
+# ``parse_position`` on markets built from the recorded instruments-info replies, and
+# a book that answers like Bybit's position list (``tests/_bybit_real_markets.py``).
+# No mock returns the same list for every call, which is how three category reads
+# would have shipped unseen. Row values are Bybit-documented v5 shapes with the
+# arithmetic typed beside every expected number, never produced by the code under test.
+
+from tests._bybit_real_markets import (  # noqa: E402
+    install_position_book,
+    linear_symbols,
+    real_bybit_with_markets,
+)
+
+
+def _v5_row(symbol: str, **fields: str) -> dict:
+    """A v5 position-list row (unified account shape). Defaults: Buy 0.05 at 58000,
+    mark 60000, uPnL 100 = (60000 - 58000) x 0.05, positionValue 3000 = 0.05 x 60000."""
+    row = {
+        "symbol": symbol,
+        "side": "Buy",
+        "size": "0.05",
+        "positionValue": "3000",
+        "avgPrice": "58000",
+        "markPrice": "60000",
+        "unrealisedPnl": "100",
+        "positionIdx": 0,
+        "liqPrice": "",
+        "bustPrice": "",
+    }
+    row.update(fields)
+    return row
+
+
+async def _holdings_exchange(rows: list[dict]):
+    """A real ccxt Bybit with offline markets, the book, and a one-coin USDT balance."""
+    ex = await real_bybit_with_markets()
+    book = install_position_book(ex, rows)
+    payload = {
+        "retCode": 0,
+        "retMsg": "OK",
+        "result": {
+            "list": [
+                {
+                    "accountType": "UNIFIED",
+                    "coin": [
+                        {
+                            "coin": "USDT",
+                            "walletBalance": "1000",
+                            "equity": "1000",
+                            "unrealisedPnl": "0",
+                            "availableToWithdraw": "",
+                            "totalPositionIM": "0",
+                            "totalOrderIM": "0",
+                            "borrowAmount": "0",
+                            "spotBorrow": "0",
+                            "accruedInterest": "0",
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+    ex.fetch_balance = AsyncMock(return_value=ex.parse_balance(payload))
+    return ex, book
+
+
+class TestBybitPositionCategories:
+    """VREAD-02: linear USDT, linear USDC and inverse, with the symbol, unit,
+    page-limit and cursor defects fixed in the same change."""
+
+    async def test_tracer_usdc_perp_reaches_holdings_as_btcperp_with_its_upnl(self) -> None:
+        from services.allocator_positions import fetch_allocator_holdings
+
+        ex, _book = await _holdings_exchange(
+            [_v5_row("BTCUSDT"), _v5_row("BTCPERP")]
+        )
+        try:
+            rows, warning = await fetch_allocator_holdings("bybit", ex)
+        finally:
+            await ex.close()
+
+        assert warning is None
+        deriv = {r["symbol"]: r for r in rows if r["holding_type"] == "derivative"}
+        # BTCUSDCC is what the plain symbol strip made of ccxt's BTC/USDC:USDC.
+        assert set(deriv) == {"BTCUSDT", "BTCPERP"}, f"derivative rows: {sorted(deriv)}"
+        # (60000 - 58000) x 0.05 = 100.0, USDC counted as USD (the stable rule).
+        assert deriv["BTCPERP"]["unrealized_pnl_usd"] == 100.0
+        assert deriv["BTCPERP"]["value_usd"] == 3000.0
+        assert deriv["BTCPERP"]["side"] == "long"
+
+    async def test_every_category_is_requested_once_on_the_ccxt_path(self) -> None:
+        from services.positions import fetch_positions
+
+        ex, book = await _holdings_exchange(
+            [
+                _v5_row("BTCUSDT"),
+                _v5_row("BTCPERP"),
+                _v5_row("BTCUSD", size="100", positionValue="0.00166667", avgPrice="57495", unrealisedPnl="0.00007"),
+            ]
+        )
+        try:
+            await fetch_positions("bybit", ex)
+        finally:
+            await ex.close()
+
+        # Exactly the three requests, in order, as ccxt 4.5.x sends them (limit 200).
+        assert [c["params"] for c in book.calls if c["entry"] == "ccxt"] == [
+            {"settleCoin": "USDT", "limit": 200, "category": "linear"},
+            {"settleCoin": "USDC", "limit": 200, "category": "linear"},
+            {"category": "inverse", "limit": 200},
+        ]
+        # Every category answered complete rows, so none was re-read on the raw path.
+        assert [c for c in book.calls if c["entry"] == "raw"] == []
+
+    # -- Task 2: inverse rows in USD, the raw cursor path, named refusals ------
+
+    # Inverse BTCUSD (coin-margined): ``size`` is USD contracts, ``positionValue`` and
+    # ``unrealisedPnl`` are in BTC. positionValue 0.00166667 BTC = 100 / 60000, and at
+    # the payload's mark of 60000 USD per BTC:
+    #   size_usd       = 0.00166667 x 60000 = 100.0002
+    #   unrealized_pnl = 0.00007    x 60000 = 4.2
+    INVERSE_ROW_FIELDS = {
+        "size": "100",
+        "positionValue": "0.00166667",
+        "avgPrice": "57495",
+        "markPrice": "60000",
+        "unrealisedPnl": "0.00007",
+    }
+
+    @staticmethod
+    def _inverse_row(**overrides: str | None) -> dict:
+        row = _v5_row("BTCUSD", **{**TestBybitPositionCategories.INVERSE_ROW_FIELDS})
+        for key, value in overrides.items():
+            if value is None:
+                row.pop(key, None)
+            else:
+                row[key] = value
+        return row
+
+    @staticmethod
+    async def _fetch(rows: list[dict]) -> list[dict]:
+        from services.positions import fetch_positions
+
+        ex, _book = await _holdings_exchange(rows)
+        try:
+            return await fetch_positions("bybit", ex)
+        finally:
+            await ex.close()
+
+    @staticmethod
+    def _raw_inverse(row: dict) -> list[dict]:
+        from services.positions import _parse_bybit_v5_positions
+
+        return _parse_bybit_v5_positions(
+            {"retCode": 0, "result": {"list": [row], "nextPageCursor": ""}}, category="inverse"
+        )
+
+    @pytest.mark.parametrize("path", ["ccxt", "raw"])
+    async def test_inverse_position_size_and_upnl_are_usd_at_the_payload_mark(self, path: str) -> None:
+        rows = (
+            await self._fetch([self._inverse_row()])
+            if path == "ccxt"
+            else self._raw_inverse(self._inverse_row())
+        )
+        assert len(rows) == 1
+        pos = rows[0]
+        assert pos["symbol"] == "BTCUSD"
+        assert pos["side"] == "long"
+        assert pos["size_base"] == pytest.approx(0.00166667)  # BTC, the payload's positionValue
+        assert pos["size_usd"] == pytest.approx(100.0002, rel=1e-9)  # 0.00166667 x 60000
+        assert pos["unrealized_pnl"] == pytest.approx(4.2, rel=1e-9)  # 0.00007 x 60000
+        assert pos["mark_price"] == 60000.0
+        assert pos["entry_price"] == 57495.0
+        assert pos["exchange"] == "bybit"
+
+    @pytest.mark.parametrize("path", ["ccxt", "raw"])
+    async def test_inverse_symbol_is_the_raw_id_without_a_colon(self, path: str) -> None:
+        rows = (
+            await self._fetch([self._inverse_row()])
+            if path == "ccxt"
+            else self._raw_inverse(self._inverse_row())
+        )
+        # ccxt's symbol is BTC/USD:BTC: the plain strip left BTCUSD:BTC, whose colon
+        # fails the holdings reference alphabet.
+        assert [r["symbol"] for r in rows] == ["BTCUSD"]
+        assert ":" not in rows[0]["symbol"]
+
+    @pytest.mark.parametrize(
+        "path, mark",
+        [
+            # Through real ccxt: an absent or blank mark makes ccxt's own markPrice
+            # None, so the category takes the raw path and refuses there; "0" and
+            # "-1" parse to numbers, so ccxt ships the row and the Bybit arm refuses.
+            # ("nan" and "inf" never reach the arm through ccxt: its Precise division
+            # raises first, which the arm-level rows below cover.)
+            ("ccxt", None),
+            ("ccxt", ""),
+            ("ccxt", "0"),
+            ("ccxt", "-1"),
+            ("arm", None),
+            ("arm", ""),
+            ("arm", "0"),
+            ("arm", "-1"),
+            ("arm", "nan"),
+            ("arm", "inf"),
+            ("raw", None),
+            ("raw", ""),
+            ("raw", "0"),
+            ("raw", "-1"),
+            ("raw", "nan"),
+            ("raw", "inf"),
+        ],
+    )
+    async def test_an_inverse_row_without_a_usable_mark_refuses_by_name(
+        self, path: str, mark: str | None
+    ) -> None:
+        from services.positions import BybitPositionReadRefused, _normalize_ccxt_position
+
+        row = self._inverse_row(markPrice=mark)
+        with pytest.raises(BybitPositionReadRefused) as caught:
+            if path == "ccxt":
+                await self._fetch([row])
+            elif path == "raw":
+                self._raw_inverse(row)
+            else:
+                # A ccxt-shaped dict whose own markPrice is fine but whose raw `info`
+                # carries the bad mark: the arm reads the payload's mark, not ccxt's.
+                _normalize_ccxt_position(
+                    {
+                        "symbol": "BTC/USD:BTC",
+                        "side": "long",
+                        "contracts": 100.0,
+                        "contractSize": 1.0,
+                        "notional": 0.00166667,
+                        "entryPrice": 57495.0,
+                        "markPrice": 60000.0,
+                        "unrealizedPnl": 7e-05,
+                        "info": row,
+                    },
+                    "bybit",
+                    bybit_category="inverse",
+                )
+        # The text can reach logs and stored copy: static, no venue text, no digit.
+        assert not any(ch.isdigit() for ch in str(caught.value)), str(caught.value)
+
+    async def test_raw_fallback_reads_a_string_mark_for_an_inverse_row(self) -> None:
+        # ``unrealisedPnl`` "0": ccxt nulls an exact zero, so the category is read on
+        # the raw path, where markPrice is the STRING "60000". ``usable_price`` rejects
+        # a numeric string, so the mark must be converted first or every raw inverse
+        # row would refuse.
+        rows = await self._fetch([self._inverse_row(unrealisedPnl="0")])
+        assert len(rows) == 1
+        assert rows[0]["size_usd"] == pytest.approx(100.0002, rel=1e-9)
+        assert rows[0]["unrealized_pnl"] == 0.0  # a reported zero, not None
+        assert rows[0]["mark_price"] == 60000.0
+
+    @pytest.mark.parametrize("page_limit", [None, 10], ids=["default-200", "limit-10"])
+    async def test_raw_fallback_sends_limit_and_follows_the_cursor_past_twenty_one_positions(
+        self, monkeypatch: pytest.MonkeyPatch, page_limit: int | None
+    ) -> None:
+        import services.positions as positions_mod
+        from services.positions import fetch_positions
+
+        if page_limit is not None:
+            monkeypatch.setattr(positions_mod, "BYBIT_POSITION_PAGE_LIMIT", page_limit)
+        # 21 USDT-linear positions, each with unrealisedPnl "0": ccxt nulls an exact
+        # zero, so the category is read on the raw path. Bybit's default page is 20.
+        symbols = linear_symbols("USDT", 21)
+        ex, book = await _holdings_exchange([_v5_row(s, unrealisedPnl="0") for s in symbols])
+        try:
+            result = await fetch_positions("bybit", ex)
+        finally:
+            await ex.close()
+
+        assert sorted(r["symbol"] for r in result) == sorted(symbols), (
+            f"first missing symbol: {sorted(set(symbols) - {r['symbol'] for r in result})[:1]}"
+        )
+        sent = book.calls_for("raw", category="linear", settleCoin="USDT")
+        if page_limit is None:
+            assert sent == [{"category": "linear", "settleCoin": "USDT", "limit": "200"}]
+        else:
+            assert sent == [
+                {"category": "linear", "settleCoin": "USDT", "limit": "10"},
+                {"category": "linear", "settleCoin": "USDT", "limit": "10", "cursor": "c10"},
+                {"category": "linear", "settleCoin": "USDT", "limit": "10", "cursor": "c20"},
+            ]
+
+    async def test_a_full_ccxt_page_routes_the_category_to_the_raw_cursor_read(self) -> None:
+        from services.positions import fetch_positions
+
+        # 205 USDT-linear positions with a real uPnL: ccxt sends limit 200 and answers
+        # a full page that cannot be told from a truncated one.
+        symbols = linear_symbols("USDT", 205)
+        ex, book = await _holdings_exchange([_v5_row(s) for s in symbols])
+        try:
+            result = await fetch_positions("bybit", ex)
+        finally:
+            await ex.close()
+
+        assert len(result) == 205
+        assert sorted(r["symbol"] for r in result) == sorted(symbols)
+        assert len(book.calls_for("ccxt", category="linear", settleCoin="USDT")) == 1
+        assert book.calls_for("raw", category="linear", settleCoin="USDT") == [
+            {"category": "linear", "settleCoin": "USDT", "limit": "200"},
+            {"category": "linear", "settleCoin": "USDT", "limit": "200", "cursor": "c200"},
+        ]
+
+    async def test_raw_page_cap_and_stuck_cursor_refuse_by_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import services.positions as positions_mod
+        from services.positions import BybitPositionReadRefused, fetch_positions
+
+        monkeypatch.setattr(positions_mod, "BYBIT_POSITION_PAGE_LIMIT", 5)
+        monkeypatch.setattr(positions_mod, "BYBIT_POSITION_RAW_PAGE_CAP", 3)
+
+        # Boundary: 15 positions are exactly three pages of 5, so a cap of 3 is enough.
+        ex, _book = await _holdings_exchange(
+            [_v5_row(s, unrealisedPnl="0") for s in linear_symbols("USDT", 15)]
+        )
+        try:
+            assert len(await fetch_positions("bybit", ex)) == 15
+        finally:
+            await ex.close()
+
+        # 21 positions need five pages: a list still live after the cap refuses.
+        ex, _book = await _holdings_exchange(
+            [_v5_row(s, unrealisedPnl="0") for s in linear_symbols("USDT", 21)]
+        )
+        try:
+            with pytest.raises(BybitPositionReadRefused) as capped:
+                await fetch_positions("bybit", ex)
+        finally:
+            await ex.close()
+        assert not any(ch.isdigit() for ch in str(capped.value)), str(capped.value)
+
+        # A page that carries rows and answers the cursor it was sent refuses.
+        def page(cursor: str) -> dict:
+            return {
+                "retCode": 0,
+                "result": {"list": [_v5_row("BTCUSDT")], "nextPageCursor": cursor},
+            }
+
+        stuck = _bybit_exchange(ccxt_rows={})
+        stuck.private_get_v5_position_list = AsyncMock(side_effect=[page("abc"), page("abc"), page("abc")])
+        with pytest.raises(BybitPositionReadRefused) as repeated:
+            await fetch_positions("bybit", stuck)
+        assert not any(ch.isdigit() for ch in str(repeated.value)), str(repeated.value)
+        assert stuck.private_get_v5_position_list.await_count == 2  # refused on the repeat
+
+    async def test_a_failed_category_read_propagates_and_ships_no_rows(self) -> None:
+        import ccxt
+
+        from services.allocator_positions import (
+            DERIVATIVE_FETCH_FAILED_NOTE,
+            _venue_display,
+            fetch_allocator_holdings,
+        )
+        from services.positions import fetch_positions
+
+        rows = [_v5_row("BTCUSDT"), _v5_row("BTCPERP")]
+
+        # A refused inverse category: the USDT and USDC rows already read do not ship.
+        ex = await real_bybit_with_markets()
+        install_position_book(ex, rows, refuse=frozenset({"inverse"}))
+        try:
+            with pytest.raises(ccxt.PermissionDenied):
+                await fetch_positions("bybit", ex)
+        finally:
+            await ex.close()
+
+        # A retryable failure of the last category keeps the holdings poll's existing
+        # named handling: spot rows survive, derivative rows are none, and the warning
+        # is the fixed copy. Never a book with the USDT and USDC rows but no inverse.
+        ex, book = await _holdings_exchange(rows)
+        delegate = ex.privateGetV5PositionList.side_effect
+
+        async def inverse_network_error(params: dict) -> dict:
+            if params.get("category") == "inverse":
+                raise ccxt.NetworkError("bybit GET /v5/position/list network down")
+            return await delegate(params)
+
+        ex.privateGetV5PositionList = AsyncMock(side_effect=inverse_network_error)
+        try:
+            held, warning = await fetch_allocator_holdings("bybit", ex)
+        finally:
+            await ex.close()
+        assert [r for r in held if r["holding_type"] == "derivative"] == []
+        assert warning == DERIVATIVE_FETCH_FAILED_NOTE.format(venue=_venue_display("bybit"))
+
+    async def test_usdt_rows_keep_their_stored_symbol(self) -> None:
+        # Stored ``allocator_holdings`` and ``position_snapshots`` rows are keyed by
+        # these symbols, so the fix must not re-derive them. The expected literals
+        # were read off the code at the commit before this phase's change (a USDT perp
+        # and a dated USDT future through ccxt, which writes the date as YYMMDD).
+        rows = await self._fetch([_v5_row("BTCUSDT"), _v5_row("BTCUSDT-25SEP26")])
+        assert [r["symbol"] for r in rows] == ["BTCUSDT", "BTCUSDT-260925"]
+        # The raw path has always kept the venue's own id, dated form included.
+        from services.positions import _parse_bybit_v5_positions
+
+        raw = _parse_bybit_v5_positions(
+            {"result": {"list": [_v5_row("BTCUSDT"), _v5_row("BTCUSDT-25SEP26")]}}
+        )
+        assert [r["symbol"] for r in raw] == ["BTCUSDT", "BTCUSDT-25SEP26"]
+
+    # -- Task 3: census C12, the second caller of fetch_positions ---------------
+
+    async def test_poll_positions_job_persists_the_usdc_row_with_the_corrected_symbol(self) -> None:
+        """``run_poll_positions_job`` writes ``position_snapshots`` from the same
+        ``fetch_positions``, so a USDC perp must reach the snapshot as BTCPERP with the
+        USD figures, not as the garbled BTCUSDCC."""
+        from types import SimpleNamespace
+
+        from services.job_worker import run_poll_positions_job
+
+        ex, _book = await _holdings_exchange([_v5_row("BTCPERP")])
+        ctx = SimpleNamespace(
+            supabase=MagicMock(),
+            strategy_row={"id": "strategy-1"},
+            key_row={"exchange": "bybit"},
+            exchange=ex,
+        )
+        captured: list[list[dict]] = []
+
+        async def capture(_client, snapshots, strategy_id, snapshot_date) -> int:
+            assert strategy_id == "strategy-1"
+            captured.append(snapshots)
+            return len(snapshots)
+
+        try:
+            with patch(
+                "services.job_worker._exchange_preflight", AsyncMock(return_value=ctx)
+            ), patch(
+                "services.job_worker.persist_position_snapshots", side_effect=capture
+            ), patch("services.job_worker.aclose_exchange", AsyncMock()):
+                await run_poll_positions_job({"strategy_id": "strategy-1"})
+        finally:
+            await ex.close()
+
+        assert len(captured) == 1 and len(captured[0]) == 1, captured
+        snap = captured[0][0]
+        assert snap["symbol"] == "BTCPERP"
+        assert snap["side"] == "long"
+        assert snap["size_usd"] == 3000.0  # 0.05 x 60000
+        assert snap["unrealized_pnl"] == 100.0  # (60000 - 58000) x 0.05
+        assert snap["exchange"] == "bybit"
+
+    # -- Review W2 WR-01 / SF-3: an answer with no list is not an empty book -----------------
+    # Round 1 fixed this in the probe only. Here a reply with no ``result`` or no ``list`` read
+    # as a flat category, so the holdings poll stored a book with no derivative rows and the
+    # derivative leg of AUM read 0; a blank ``size`` read as a flat position.
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            pytest.param({"retCode": 0}, id="no-result"),
+            pytest.param({"retCode": 0, "result": {"nextPageCursor": ""}}, id="no-list"),
+            pytest.param({"retCode": 0, "result": {"list": None}}, id="list-null"),
+            pytest.param({"retCode": 0, "result": []}, id="result-not-an-object"),
+        ],
+    )
+    async def test_a_reply_without_a_position_list_refuses_by_name(self, reply: dict) -> None:
+        from services.positions import (
+            BybitPositionReadRefused,
+            _parse_bybit_v5_positions,
+            fetch_positions,
+        )
+
+        with pytest.raises(BybitPositionReadRefused) as parsed:
+            _parse_bybit_v5_positions(reply)
+
+        # The poll: ccxt answers nothing, so the category is read on the raw path.
+        ex = _bybit_exchange(ccxt_rows={}, raw_pages={"linear_usdt": reply})
+        with pytest.raises(BybitPositionReadRefused) as polled:
+            await fetch_positions("bybit", ex)
+
+        for caught in (parsed.value, polled.value):
+            assert not any(ch.isdigit() for ch in str(caught)), str(caught)
+        assert str(parsed.value) == str(polled.value)
+
+    @pytest.mark.parametrize("size", ["", "   ", None], ids=["blank", "spaces", "absent"])
+    async def test_a_row_with_no_readable_size_refuses_instead_of_reading_flat(
+        self, size: str | None
+    ) -> None:
+        from services.positions import (
+            BybitPositionReadRefused,
+            _parse_bybit_v5_positions,
+            fetch_positions,
+        )
+
+        row = _v5_row("BTCUSDT")
+        if size is None:
+            row.pop("size")
+        else:
+            row["size"] = size
+        page = {"retCode": 0, "result": {"list": [row], "nextPageCursor": ""}}
+
+        with pytest.raises(BybitPositionReadRefused) as parsed:
+            _parse_bybit_v5_positions(page)
+        ex = _bybit_exchange(ccxt_rows={}, raw_pages={"linear_usdt": page})
+        with pytest.raises(BybitPositionReadRefused):
+            await fetch_positions("bybit", ex)
+        assert not any(ch.isdigit() for ch in str(parsed.value)), str(parsed.value)
+
+        # A REPORTED zero is still a flat position, not a refusal.
+        flat = {"retCode": 0, "result": {"list": [{**row, "size": "0"}], "nextPageCursor": ""}}
+        assert _parse_bybit_v5_positions(flat) == []
+
+    # -- Review W2 SF-1: an inverse row's coin value and uPnL are refused, never shipped as 0/NaN --
+
+    @pytest.mark.parametrize(
+        "path, field, value",
+        [
+            ("ccxt", "positionValue", None),
+            ("ccxt", "positionValue", ""),
+            ("arm", "positionValue", None),
+            ("arm", "positionValue", ""),
+            ("arm", "positionValue", "   "),
+            ("arm", "positionValue", "nan"),
+            ("arm", "positionValue", "inf"),
+            ("arm", "positionValue", "-0.001"),
+            ("arm", "unrealisedPnl", "nan"),
+            ("arm", "unrealisedPnl", "inf"),
+            ("raw", "positionValue", None),
+            ("raw", "positionValue", ""),
+            ("raw", "positionValue", "nan"),
+            ("raw", "positionValue", "-0.001"),
+            ("raw", "unrealisedPnl", "nan"),
+        ],
+    )
+    async def test_an_inverse_row_without_a_usable_value_or_upnl_refuses_by_name(
+        self, path: str, field: str, value: str | None
+    ) -> None:
+        from services.positions import BybitPositionReadRefused, _normalize_ccxt_position
+
+        row = self._inverse_row(**{field: value})
+        with pytest.raises(BybitPositionReadRefused) as caught:
+            if path == "ccxt":
+                await self._fetch([row])
+            elif path == "raw":
+                self._raw_inverse(row)
+            else:
+                _normalize_ccxt_position(
+                    {
+                        "symbol": "BTC/USD:BTC",
+                        "side": "long",
+                        "contracts": 100.0,
+                        "contractSize": 1.0,
+                        "notional": 0.00166667,
+                        "entryPrice": 57495.0,
+                        "markPrice": 60000.0,
+                        "unrealizedPnl": 7e-05,
+                        "info": row,
+                    },
+                    "bybit",
+                    bybit_category="inverse",
+                )
+        assert not any(ch.isdigit() for ch in str(caught.value)), str(caught.value)
+
+    async def test_an_inverse_row_with_a_zero_value_or_an_absent_upnl_is_still_read(self) -> None:
+        # A REPORTED zero value is a zero, and an absent uPnL stays None (the venue reported none).
+        rows = self._raw_inverse(self._inverse_row(positionValue="0", unrealisedPnl=None))
+        assert len(rows) == 1
+        assert rows[0]["size_usd"] == 0.0
+        assert rows[0]["unrealized_pnl"] is None
+
+    # -- Review W2 WR-02 / census C28: Bybit options are not read, and a test says so ---------
+
+    async def test_census_c28_the_poll_never_requests_bybit_options(self) -> None:
+        """Census row C28 decides that Bybit option positions (``category=option``) are not read
+        in this phase. If a later change adds an option read it must flip this test and the row
+        deliberately, together with a normalizer for the option row (a premium, not a notional)."""
+        from services.positions import fetch_positions
+
+        # One zero-pnl row (ccxt nulls it, so USDT goes raw) and two empty categories (also raw):
+        # both entry points are exercised for every category the poll reads.
+        ex, book = await _holdings_exchange([_v5_row("BTCUSDT", unrealisedPnl="0")])
+        try:
+            await fetch_positions("bybit", ex)
+        finally:
+            await ex.close()
+
+        entries = {c["entry"] for c in book.calls}
+        assert entries == {"ccxt", "raw"}, entries
+        categories = {c["params"].get("category") for c in book.calls}
+        assert categories == {"linear", "inverse"}, (
+            f"the poll asked for categories {sorted(map(str, categories))}; census row C28 decides "
+            "that category=option is not read"
+        )
+        assert book.calls_for("ccxt", category="option") == []
+        assert book.calls_for("raw", category="option") == []
+
+    # -- Review W2 WR-01b: the ccxt path reads a blank size as zero contracts, i.e. flat -------
+
+    # (A whitespace-only size never reaches the arm: ccxt's own parse raises ValueError first.)
+    @pytest.mark.parametrize("size", ["", None], ids=["blank", "absent"])
+    async def test_a_ccxt_row_with_no_readable_size_refuses_instead_of_reading_flat(
+        self, size: str | None
+    ) -> None:
+        from services.positions import BybitPositionReadRefused
+
+        row = _v5_row("BTCUSDT")
+        if size is None:
+            row.pop("size")
+        else:
+            row["size"] = size
+        # Through real ccxt: its own ``contracts`` is None, and the row used to be dropped as flat.
+        with pytest.raises(BybitPositionReadRefused) as caught:
+            await self._fetch([row])
+        assert not any(ch.isdigit() for ch in str(caught.value)), str(caught.value)
+
+        # A REPORTED zero is still a flat position, not a refusal.
+        assert await self._fetch([{**row, "size": "0"}]) == []
+
+    # -- Review W2 round 2, R2-5: a linear open position's value and mark are never defaulted ----
+
+    @staticmethod
+    def _linear_row(**overrides: str | None) -> dict:
+        row = _v5_row("BTCUSDT")
+        for key, value in overrides.items():
+            if value is None:
+                row.pop(key, None)
+            else:
+                row[key] = value
+        return row
+
+    @pytest.mark.parametrize("field", ["positionValue", "markPrice"])
+    @pytest.mark.parametrize("value", [None, "", "   "], ids=["absent", "blank", "spaces"])
+    async def test_a_linear_row_without_a_value_or_mark_refuses_by_name(
+        self, field: str, value: str | None
+    ) -> None:
+        from services.positions import BybitPositionReadRefused, _parse_bybit_v5_positions
+
+        row = self._linear_row(**{field: value})
+        with pytest.raises(BybitPositionReadRefused) as caught:
+            _parse_bybit_v5_positions(
+                {"retCode": 0, "result": {"list": [row], "nextPageCursor": ""}}
+            )
+        assert not any(ch.isdigit() for ch in str(caught.value)), str(caught.value)
+
+        # A flat row (a reported zero size) is not an open position: no value is needed.
+        flat = {**row, "size": "0"}
+        assert _parse_bybit_v5_positions(
+            {"retCode": 0, "result": {"list": [flat], "nextPageCursor": ""}}
+        ) == []
+
+    @pytest.mark.parametrize("field", ["positionValue", "markPrice"])
+    @pytest.mark.parametrize("value", [None, ""], ids=["absent", "blank"])
+    async def test_a_ccxt_linear_row_without_a_value_or_mark_refuses_by_name(
+        self, field: str, value: str | None
+    ) -> None:
+        # Through real ccxt: an absent value makes ccxt's notional None and the row ships on the
+        # ccxt path, where it used to read 0; an absent mark routes the category to the raw path.
+        from services.positions import BybitPositionReadRefused
+
+        with pytest.raises(BybitPositionReadRefused):
+            await self._fetch([self._linear_row(**{field: value})])
+
+    @pytest.mark.parametrize("category", ["linear_usdt", "inverse"])
+    async def test_a_non_finite_size_refuses_by_name(self, category: str) -> None:
+        from services.positions import (
+            BybitPositionReadRefused,
+            _normalize_ccxt_position,
+            _parse_bybit_v5_positions,
+        )
+
+        row = self._inverse_row(size="nan") if category == "inverse" else self._linear_row(size="nan")
+        with pytest.raises(BybitPositionReadRefused):
+            _parse_bybit_v5_positions(
+                {"retCode": 0, "result": {"list": [row], "nextPageCursor": ""}}, category=category
+            )
+        # The ccxt arm, with a ccxt dict whose own contracts are not finite.
+        with pytest.raises(BybitPositionReadRefused):
+            _normalize_ccxt_position(
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "long",
+                    "contracts": float("nan"),
+                    "contractSize": 1.0,
+                    "notional": 3000.0,
+                    "entryPrice": 58000.0,
+                    "markPrice": 60000.0,
+                    "unrealizedPnl": 100.0,
+                    "info": {"size": "nan"},
+                },
+                "bybit",
+                bybit_category=category,
+            )

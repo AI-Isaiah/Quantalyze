@@ -71,8 +71,15 @@ class BybitAdapter:
             None,
         )
         try:
+            # A start-less read keeps its pre-Phase-231 seven-day reach. This one adapter serves
+            # the inline teaser, csv and internal_report flows (60 s seam budget, which a 365-day
+            # walk of 53 windows or more does not fit) AND the queued long_fetch onboard and
+            # resync, which cannot be told apart here and also stay at seven days (census C29:
+            # VREAD-03 is not met on that path, by decision).
             raw = await exchange_service._fetch_raw_trades_bybit(
-                ex, since_ms=creds_or_file.get("since_ms")
+                ex,
+                since_ms=creds_or_file.get("since_ms"),
+                default_lookback_days=7,
             )
             return [_normalize_trade(r, "bybit") for r in raw]
         finally:

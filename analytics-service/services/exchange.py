@@ -15,6 +15,12 @@ from supabase import Client
 
 from services.account_identity import VENUES_WITH_ACCOUNT_ID, venue_account_id_from
 from services.closed_sets import is_trade_side
+from services.exchange_pagination import (
+    PageRequest,
+    PageResult,
+    ProviderPaginationContract,
+    walk_paginated,
+)
 from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
 from services.redact import scrub_freeform_string
@@ -146,6 +152,28 @@ OKX_ARCHIVE_PAGE_CAP: int = 100
 #: rolling 365 days). 200 pages is 20,000 rows a window, about 100 s only in a window that busy
 #: (0.5 s a page); ``DAILY_PNL_READ_DEADLINE_S`` still bounds the whole walk (D-06).
 BYBIT_PNL_PAGE_CAP: int = 200
+#: Phase 231 VREAD-03: the Bybit execution read walks seven-day windows (``startTime`` and
+#: ``endTime`` on every request, the venue answers a start-only request with seven days) and each
+#: window is paged by cursor. Per window, at ``BYBIT_EXECUTION_PAGE_SIZE`` rows a page.
+#: Sizing (ruling OQ7): the 2026-11-23 probe's trade sweep did not finish, so it gave no page-cap
+#: input (``trade-cap-input: field-absent``) and the rule's floor applies, 200. The sweep's own
+#: maximum, 121 pages in one window of the one measured PROD key, is a LOWER bound (the sweep was
+#: incomplete), and 200 is above it without being proven sufficient. A window still live after the
+#: cap raises ``BybitTradeWindowIncomplete`` by name; it is never returned short.
+BYBIT_EXECUTION_WINDOW_PAGE_CAP: int = 200
+#: Bybit V5 ``/v5/execution/list`` documents a maximum page size of 100.
+BYBIT_EXECUTION_PAGE_SIZE: int = 100
+#: A first sync (no start, RESEARCH F3) walks this many days back (ruling OQ2): 53 windows.
+BYBIT_EXECUTION_DEFAULT_LOOKBACK_DAYS: int = 365
+#: The ``execType`` values that are fills the reader stores as trades: an unreadable row of one of
+#: these refuses the read. Any other typed row (Funding, Settle, Delivery, ...) is not a fill, and
+#: a row with no ``execType`` has no type to judge by, so both keep the logged skip.
+BYBIT_FILL_EXEC_TYPES: Final[frozenset[str]] = frozenset(
+    {"Trade", "BustTrade", "AdlTrade", "BlockTrade"}
+)
+#: The venue keeps two years of executions and rejects an older start (retCode 10001). A start
+#: older than this is refused before any request, never clamped.
+BYBIT_EXECUTION_HISTORY_DAYS: int = 730
 #: Bybit V5 ``/v5/position/closed-pnl`` documents a maximum page size of 100; the
 #: request used to send 200 (D-10: set to the documented maximum).
 BYBIT_CLOSED_PNL_LIMIT: int = 100
@@ -635,6 +663,45 @@ class ColdStartSymbolDiscoveryError(Exception):
     (allocator's Trade Volume tab stays empty even with 90 days of
     trades on the account) — see G12.B.1.
     """
+
+
+class BybitTradeWindowIncomplete(RuntimeError):
+    """The Bybit execution read could not return every execution of its window, so it returns none.
+
+    ``reason`` is closed: ``page_cap`` (a window still live after
+    ``BYBIT_EXECUTION_WINDOW_PAGE_CAP`` pages), ``cursor_stuck`` (a page with rows answered the
+    cursor it was sent), ``start_too_old`` (a start past the venue's two-year history) or
+    ``malformed_reply`` (a page with no ``result`` object or no ``list`` array, which reads as an
+    empty window and would end the walk as complete) or ``unreadable_fill`` (a
+    row whose ``execType`` is in ``BYBIT_FILL_EXEC_TYPES`` and whose time, price or quantity cannot
+    be read, which would be a fill missing from a read returned as complete).
+
+    The text is static per reason, with no digit and no venue text: ``run_sync_trades_job`` stores
+    ``str(e)[:200]``. It is not a ``PaginationCeilingExceeded``, so no existing handler for that
+    class catches it by accident.
+    """
+
+    _TEXTS: Final[dict[str, str]] = {
+        "page_cap": "Bybit trade read incomplete: a window holds more executions than the page cap allows",
+        "cursor_stuck": "Bybit trade read incomplete: the venue's page cursor did not advance",
+        "start_too_old": "Bybit trade read refused: the start is older than the venue's execution history",
+        "malformed_reply": "Bybit trade read refused: a page answer has no result list",
+        "unreadable_fill": "Bybit trade read refused: an execution has no readable time, price or quantity",
+    }
+
+    def __init__(
+        self,
+        reason: Literal[
+            "page_cap", "cursor_stuck", "start_too_old", "malformed_reply", "unreadable_fill"
+        ],
+    ) -> None:
+        self.reason = reason
+        super().__init__(self._TEXTS[reason])
+
+
+class _BybitWindowPageCap(Exception):
+    """The walker's ceiling error for the Bybit execution read. Its message carries the cap and the
+    window bounds, so the reader catches it and raises ``BybitTradeWindowIncomplete`` instead."""
 
 
 class BinancePerSymbolFetchError(Exception):
@@ -2770,8 +2837,21 @@ async def _fetch_raw_trades_bybit(
     since_ms: int | None,
     *,
     category: str = "linear",
+    now_ms: int | None = None,
+    default_lookback_days: int = BYBIT_EXECUTION_DEFAULT_LOOKBACK_DAYS,
 ) -> list[dict[str, Any]]:
-    """Bybit: private_get_v5_execution_list with cursor-based pagination.
+    """Bybit: private_get_v5_execution_list, every execution in ``[since_ms, now]`` or a refusal.
+
+    Phase 231 VREAD-03: Bybit answers a start-only request with seven days and a cursor belongs to
+    its query, so the read walks seven-day windows through ``walk_paginated``, sending ``startTime``
+    and ``endTime`` on every request and paging each window by ``nextPageCursor``. A missing start
+    walks ``default_lookback_days`` (``BYBIT_EXECUTION_DEFAULT_LOOKBACK_DAYS`` unless a caller
+    narrows it: ``BybitAdapter.fetch_raw`` passes 7, the reach a start-less read had before this
+    phase, because it serves the inline teaser (60 s budget) and the queued long_fetch onboard and
+    resync alike, census row C29). It raises ``BybitTradeWindowIncomplete`` (a
+    window past the page cap, a cursor that does not advance on a page with rows, a start past the
+    venue's two years) rather than return fewer executions than the window holds. ``now_ms`` is a
+    clock seam (the wall clock when None).
 
     NEW-C13-01: ``category`` is asserted against ``_BYBIT_FILL_CATEGORIES``
     so a future caller (or a refactor) cannot quietly request inverse
@@ -2791,150 +2871,202 @@ async def _fetch_raw_trades_bybit(
             f"_BYBIT_FILL_CATEGORIES — add explicit support before fetching"
         )
 
-    fills: list[dict[str, Any]] = []
-    cursor = ""
-    natural_break = False
+    now = int(time.time() * 1000) if now_ms is None else now_ms
+    day_ms = 24 * 60 * 60 * 1000
+    if since_ms is not None and since_ms < now - BYBIT_EXECUTION_HISTORY_DAYS * day_ms:
+        # Never clamped: a clamp would return a shorter history than the caller asked for.
+        raise BybitTradeWindowIncomplete("start_too_old")
 
-    PAGE_CAP = 100
-    for page in range(PAGE_CAP):
-        params: dict[str, str] = {"category": category, "limit": "100"}
-        if cursor:
-            params["cursor"] = cursor
-        if since_ms and not cursor:
-            params["startTime"] = str(since_ms)
+    async def _fetch_page(req: PageRequest) -> PageResult[dict[str, Any]]:
+        params: dict[str, str] = {
+            "category": category,
+            "limit": str(BYBIT_EXECUTION_PAGE_SIZE),
+            "startTime": str(req.window_start),
+            "endTime": str(req.window_end),
+        }
+        if req.cursor:
+            params["cursor"] = req.cursor
 
         try:
             result = await exchange.private_get_v5_execution_list(params)
-            items = result.get("result", {}).get("list", [])
-            if not items:
-                natural_break = True
-                break
-
-            for fill in items:
-                ts_raw = fill.get("execTime", "")
-                if ts_raw and ts_raw.isdigit():
-                    ts_dt = datetime.fromtimestamp(
-                        int(ts_raw) / 1000, tz=timezone.utc
-                    )
-                else:
-                    # Drop fills with unparseable ``execTime`` (C-0226 /
-                    # H-0667) — same rationale as the OKX branch. Log
-                    # whitelisted fields only.
-                    logger.error(
-                        "Bybit fill dropped: unparseable execTime=%r (symbol=%s, execId=%s)",
-                        ts_raw,
-                        fill.get("symbol"),
-                        fill.get("execId"),
-                    )
-                    continue
-
-                symbol = normalize_symbol("bybit", fill.get("symbol", ""))
-                side = fill.get("side", "").lower()
-                # Audit-2026-05-07 H-0661 — finite-value validation; same
-                # rationale as the OKX branch.
-                # NEW-C13-11: also reject zero/negative price and amount —
-                # both are physically impossible for a fill and indicate
-                # corrupt data; _finite_positive_float rejects ≤0 values.
-                # H-0669 — parse Bybit's decimal STRINGS straight to Decimal.
-                price_chk = _finite_positive_decimal(
-                    fill.get("execPrice", 0), label="Bybit execPrice"
-                )
-                amount_chk = _finite_positive_decimal(
-                    fill.get("execQty", 0), label="Bybit execQty"
-                )
-                if price_chk is None or amount_chk is None:
-                    logger.error(
-                        "Bybit fill dropped: non-finite price=%r or amount=%r "
-                        "(symbol=%s, execId=%s)",
-                        fill.get("execPrice"), fill.get("execQty"),
-                        fill.get("symbol"), fill.get("execId"),
-                    )
-                    continue
-                price = price_chk
-                amount = amount_chk
-                # Preserve signed fee so maker rebates remain negative
-                # (H-0671) — same rationale as the OKX branch.
-                fee_chk = _finite_decimal(
-                    fill.get("execFee", 0), label="Bybit execFee"
-                )
-                fee = fee_chk if fee_chk is not None else Decimal("0")
-                fee_currency = fill.get("feeCurrency", "USDT")
-                # Audit-2026-05-07 H-0670 — fee-currency mismatch flag.
-                _check_fee_currency_mismatch(
-                    exchange="bybit", symbol=symbol, fee_currency=fee_currency,
-                )
-                # Audit-2026-05-07 G12.B.9 — Bybit V5 sometimes returns
-                # boolean true/false (post JSON decode) and sometimes
-                # capital "True"/"TRUE". Strict string equality silently
-                # mis-classifies maker fills as taker, distorting the
-                # maker_ratio analytic + fee analysis. Accept either
-                # boolean True or any case-insensitive "true" string.
-                _raw_is_maker = fill.get("isMaker")
-                is_maker = _raw_is_maker is True or (
-                    isinstance(_raw_is_maker, str)
-                    and _raw_is_maker.lower() == "true"
-                )
-
-                # dict(...) widens the FillRow (TypedDict) factory output to the
-                # plain dict the list[dict[str, Any]] accumulator holds.
-                fills.append(dict(_make_fill_dict(
-                    exchange="bybit",
-                    symbol=symbol,
-                    side=side,
-                    price=price,
-                    quantity=amount,
-                    fee=fee,
-                    fee_currency=fee_currency,
-                    timestamp=ts_dt.isoformat(),
-                    exchange_order_id=fill.get("orderId", ""),
-                    exchange_fill_id=fill.get("execId", ""),
-                    is_maker=is_maker,
-                    raw_data=dict(fill),
-                    # Audit-2026-05-07 G12.B.4 — Bybit-side direction
-                    # derivation (closeOnTrigger, hedge mode flag) is
-                    # not in this batch's scope. Leave None; downstream
-                    # consumers fall back to side-based inference.
-                    position_direction=None,
-                )))
-
-            next_cursor = result.get("result", {}).get("nextPageCursor", "")
-            # Audit-2026-05-07 G12.B.6 — stuck-cursor guard. If Bybit
-            # returns the SAME nextPageCursor on a subsequent call, we'd
-            # otherwise loop until the page cap. Falsy nextPageCursor is
-            # the documented natural-stop condition.
-            if not next_cursor:
-                natural_break = True
-                break
-            if next_cursor == cursor:
-                logger.warning(
-                    "Pagination stuck on cursor=%s for exchange=bybit; terminating early",
-                    next_cursor,
-                )
-                natural_break = True
-                break
-            cursor = next_cursor
         except Exception as e:
             # Re-raise per-page failures (C-0227) — same rationale as the
             # OKX branch.
             # NEW-C13-10: scrub before logging.
             logger.error(
-                "Bybit execution list failed page %d (re-raising to fail the sync): exc_class=%s scrubbed=%s",
-                page, type(e).__name__, scrub_freeform_string(str(e)),
+                "Bybit execution list failed window=[%s,%s] cursor_set=%s (re-raising to fail the sync): exc_class=%s scrubbed=%s",
+                req.window_start, req.window_end, bool(req.cursor),
+                type(e).__name__, scrub_freeform_string(str(e)),
             )
             raise
 
-    if not natural_break:
-        # Audit-2026-05-07 M-0663 — same DQ flag pattern as OKX. Bybit
-        # cursor pagination doesn't expose a "has_more" hint other than
-        # nextPageCursor, so hitting the page cap is the only signal
-        # truncation occurred.
+        # Both keys are required, never defaulted: a reply with no ``result`` or no ``list``
+        # would otherwise read as an empty window and end the walk as a natural stop.
+        inner = result.get("result") if isinstance(result, dict) else None
+        items = inner.get("list") if isinstance(inner, dict) else None
+        if not isinstance(inner, dict) or not isinstance(items, list):
+            raise BybitTradeWindowIncomplete("malformed_reply")
+        next_cursor = inner.get("nextPageCursor") or ""
+        if not isinstance(next_cursor, str):
+            raise RuntimeError("Bybit execution list cursor is not a string")
+        if items and next_cursor and next_cursor == req.cursor:
+            # Audit-2026-05-07 G12.B.6 stopped silently here; Phase 231 refuses, because a stop
+            # on a live cursor is a short list stored as complete.
+            logger.warning(
+                "Pagination stuck on cursor for exchange=bybit; refusing the read"
+            )
+            raise BybitTradeWindowIncomplete("cursor_stuck")
+
+        page_fills: list[dict[str, Any]] = []
+        for fill in items:
+            # A fill the read cannot parse is a fill missing from a read returned as complete, so
+            # it refuses. A fill is a row whose ``execType`` is in ``BYBIT_FILL_EXEC_TYPES``
+            # (a liquidation, ADL or block trade is as much a fill as a Trade). Funding, Settle
+            # and Delivery rows are not fills, and a row with no ``execType`` has no type to judge
+            # by, so those keep the logged skip, as does a finite zero or negative quantity.
+            exec_type = fill.get("execType")
+            is_fill_row = exec_type in BYBIT_FILL_EXEC_TYPES
+            ts_raw = fill.get("execTime", "")
+            if ts_raw and ts_raw.isdigit():
+                ts_dt = datetime.fromtimestamp(
+                    int(ts_raw) / 1000, tz=timezone.utc
+                )
+            else:
+                # Drop fills with unparseable ``execTime`` (C-0226 /
+                # H-0667) — same rationale as the OKX branch. Log
+                # whitelisted fields only.
+                logger.error(
+                    "Bybit fill dropped: unparseable execTime=%r (execType=%s, symbol=%s, execId=%s)",
+                    ts_raw,
+                    exec_type,
+                    fill.get("symbol"),
+                    fill.get("execId"),
+                )
+                if is_fill_row:
+                    raise BybitTradeWindowIncomplete("unreadable_fill")
+                continue
+
+            symbol = normalize_symbol("bybit", fill.get("symbol", ""))
+            side = fill.get("side", "").lower()
+            # Audit-2026-05-07 H-0661 — finite-value validation; same
+            # rationale as the OKX branch.
+            # NEW-C13-11: also reject zero/negative price and amount —
+            # both are physically impossible for a fill and indicate
+            # corrupt data; _finite_positive_float rejects ≤0 values.
+            # H-0669 — parse Bybit's decimal STRINGS straight to Decimal.
+            price_chk = _finite_positive_decimal(
+                fill.get("execPrice", 0), label="Bybit execPrice"
+            )
+            amount_chk = _finite_positive_decimal(
+                fill.get("execQty", 0), label="Bybit execQty"
+            )
+            if price_chk is None or amount_chk is None:
+                logger.error(
+                    "Bybit fill dropped: non-finite price=%r or amount=%r "
+                    "(execType=%s, symbol=%s, execId=%s)",
+                    fill.get("execPrice"), fill.get("execQty"),
+                    exec_type, fill.get("symbol"), fill.get("execId"),
+                )
+                # Not finite (or absent) refuses; a finite zero or negative stays a skip.
+                if is_fill_row and (
+                    _finite_decimal(fill.get("execPrice"), label="Bybit execPrice") is None
+                    or _finite_decimal(fill.get("execQty"), label="Bybit execQty") is None
+                ):
+                    raise BybitTradeWindowIncomplete("unreadable_fill")
+                continue
+            price = price_chk
+            amount = amount_chk
+            # Preserve signed fee so maker rebates remain negative
+            # (H-0671) — same rationale as the OKX branch.
+            fee_chk = _finite_decimal(
+                fill.get("execFee", 0), label="Bybit execFee"
+            )
+            fee = fee_chk if fee_chk is not None else Decimal("0")
+            fee_currency = fill.get("feeCurrency", "USDT")
+            # Audit-2026-05-07 H-0670 — fee-currency mismatch flag.
+            _check_fee_currency_mismatch(
+                exchange="bybit", symbol=symbol, fee_currency=fee_currency,
+            )
+            # Audit-2026-05-07 G12.B.9 — Bybit V5 sometimes returns
+            # boolean true/false (post JSON decode) and sometimes
+            # capital "True"/"TRUE". Strict string equality silently
+            # mis-classifies maker fills as taker, distorting the
+            # maker_ratio analytic + fee analysis. Accept either
+            # boolean True or any case-insensitive "true" string.
+            _raw_is_maker = fill.get("isMaker")
+            is_maker = _raw_is_maker is True or (
+                isinstance(_raw_is_maker, str)
+                and _raw_is_maker.lower() == "true"
+            )
+
+            # dict(...) widens the FillRow (TypedDict) factory output to the
+            # plain dict the list[dict[str, Any]] accumulator holds.
+            page_fills.append(dict(_make_fill_dict(
+                exchange="bybit",
+                symbol=symbol,
+                side=side,
+                price=price,
+                quantity=amount,
+                fee=fee,
+                fee_currency=fee_currency,
+                timestamp=ts_dt.isoformat(),
+                exchange_order_id=fill.get("orderId", ""),
+                exchange_fill_id=fill.get("execId", ""),
+                is_maker=is_maker,
+                raw_data=dict(fill),
+                # Audit-2026-05-07 G12.B.4 — Bybit-side direction
+                # derivation (closeOnTrigger, hedge mode flag) is
+                # not in this batch's scope. Leave None; downstream
+                # consumers fall back to side-based inference.
+                position_direction=None,
+            )))
+
+        return PageResult(
+            rows=page_fills,
+            next_cursor=next_cursor,
+            is_full_page=len(items) >= BYBIT_EXECUTION_PAGE_SIZE,
+            is_empty=not items,
+        )
+
+    # Cursor-authoritative (a short page with a live cursor still has rows), so no short-page stop;
+    # a repeated cursor is refused in the page callback, never a stop.
+    contract = ProviderPaginationContract(
+        fetcher="fetch_raw_trades_bybit",
+        page_cap=BYBIT_EXECUTION_WINDOW_PAGE_CAP,
+        on_ceiling="raise",
+        stop_on_short_page=False,
+        stuck_cursor_is_stop=False,
+        window_max_days=7,
+        default_lookback_days=default_lookback_days,
+        ceiling_exc=_BybitWindowPageCap,
+        ceiling_label="BYBIT_EXECUTION_WINDOW_PAGE_CAP",
+    )
+    try:
+        walked = await walk_paginated(
+            contract, since_ms=since_ms, now_ms=now, fetch_page=_fetch_page
+        )
+    except _BybitWindowPageCap:
+        # Audit-2026-05-07 M-0663: the DQ flags a cap hit has always set, for any caller that
+        # drains them. The driver's message (cap and window bounds) is dropped on purpose.
         logger.warning(
-            "Pagination hit %d-page cap for bybit; possible truncation",
-            PAGE_CAP,
+            "Pagination hit %d-page cap for bybit; refusing the read",
+            BYBIT_EXECUTION_WINDOW_PAGE_CAP,
         )
         _record_dq_flag("sync_truncated_bybit", True)
-        _record_dq_flag("sync_truncated_bybit_pages", int(PAGE_CAP))
+        _record_dq_flag("sync_truncated_bybit_pages", int(BYBIT_EXECUTION_WINDOW_PAGE_CAP))
+        raise BybitTradeWindowIncomplete("page_cap") from None
 
+    # Windows do not overlap, so a repeated execId means the venue served a fill twice: keep the
+    # first. A fill with no execId has no identity to dedupe on, so it is always kept.
+    seen: set[str] = set()
+    fills: list[dict[str, Any]] = []
+    for row in walked.rows:
+        exec_id = row.get("exchange_fill_id")
+        if exec_id:
+            if exec_id in seen:
+                continue
+            seen.add(exec_id)
+        fills.append(row)
     return fills
 
 

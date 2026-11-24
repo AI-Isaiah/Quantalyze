@@ -2828,27 +2828,6 @@ a test that fails first when the guard is removed.
 ⛔ **Not a close:** a measurement of zero mismatches so far; the fail-closed bracket is why none
 show, and it is not a serialization.
 
-### 167.1.2.2-BYBIT-STATIC-EGRESS — the Bybit key's IP allow-list needs a stable egress address, and the founder step is still pending (booked 2026-10-09, Phase 167.1.2.2 D-17(a)) (owned by Phase 231 BYBITREADS, v1.22; REQUIREMENTS.md VREAD-05; tagged 2026-11-23)
-
-**Why it is open.** The plan 05 re-rehearsal read the one Bybit owner INCOMPLETE twice, on the
-exchange's 'Unmatched IP' refusal: the key is bound to an IP allow-list, and Railway's live config
-showed no static outbound IP on `quantalyze-analytics-backfill` or `quantalyze-analytics`, so the
-egress address the exchange sees can change. The daily cron was registered anyway under D-18(c)
-(2026-10-09), so until this lands that owner's derive ends in error every day and its book stays
-rebuilding.
-
-**The act (founder action, pending).** Turn on Railway Static Outbound IPs for both services, add
-the resulting address to the Bybit key's allow-list, then re-run one Bybit derive. ⛔ The address
-stays out of tracked text: record it only in the Bybit key's settings and the Railway dashboard.
-
-**Owner:** THE FOUNDER. Plan 08's first-scheduled-run reading will show whether that owner still reads `awaiting`.
-**Trigger:** now.
-**Gate (what closes it):** one Bybit derive reads `done` after the allow-list change, and the owner
-reads `ready` in census e on the next scheduled run.
-⛔ **Not a close:** a green Railway setting without a Bybit derive that reads `done`.
-
-**Phase 201 (2026-11-11, F-12; UI-SPEC U-29 deferred, A-12).** The wizard's egress link keeps pointing at `/security#egress-ips`, and that anchor now states plainly that there is no static egress address to allowlist yet. When the static egress exists, replace that statement on `/security#egress-ips` with the address list (U-29: a server-only source, tests on RFC 5737 documentation addresses, never a real address in tracked text) and point the sFOX guide's egress step at `#egress-ips` (A-12). This entry stays open and its gate is unchanged: one Bybit derive reads `done` after the allow-list change.
-
 ## Phase 167.1.2.2.1 (DERIBITWEDGE) — routed items (logged 2026-10-10)
 
 ### 167.1.2.2.1-MATERIALITY-OPTIONS-UPL — the FLOW-04 materiality ratio still uses the combined session UPL, so it overstates by the options session UPL (booked 2026-10-10, RESEARCH 1.5)
@@ -5075,10 +5054,6 @@ It runs the marker query first and reports counts only.
 
 2026-11-02 (Phase 176 LEGACYRETIRE): unaffected. `_fetch_current_equity` survives for the Binance mark, so `test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin` still compares the derive anchor with it. **Stays open.**
 
-### 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY — Bybit positions are read for USDT-settled linear contracts only, so other settle categories carry uPnL the anchor does not add (booked 2026-10-22, 167.2.1.1 RESEARCH, DATA INTEGRITY) (owned by Phase 231 BYBITREADS, v1.22; REQUIREMENTS.md VREAD-02; tagged 2026-11-23)
-
-**Still open (narrowed 2026-11-02 by Phase 176).** The holdings poll still lists USDT-settled linear Bybit positions only (ccxt `fetch_positions()` with no symbols, and the raw-V5 fallback asks for settleCoin USDT), so USDC-settled perps and inverse positions, and their uPnL, are missing from holdings. The reconstruct anchor that shared the gap was deleted by Phase 176, and the Bybit mark reads the Unified Trading Account totals. **Closed when:** the holdings poll reads every settle category, with a test.
-
 ### 167.2.1.1-BINANCE-FUTURES-WALLET-UNREAD — Binance is read with ccxt's default spot type, so a futures account's collateral never reaches any path (booked 2026-10-22, 167.2.1.1 plan 02 decision PD-D, DATA INTEGRITY)
 
 **Still open (narrowed 2026-11-02 by Phase 176).** Binance is read with ccxt's default spot type, so a futures account's collateral never reaches the derive anchor or the holdings spot rows, while `fetch_positions()` returns USD-M futures positions. If Binance is ever read with a futures type, `total` already includes uPnL. No Binance key existed at the 2026-10-22 census. **Trigger:** the first active Binance key, or `test_binance_tripwire_repo_reads_the_spot_wallet_only` going red. **Closed when:** the futures wallet is read and the skip set and the derive wedge change together, with real-parser tests.
@@ -5098,14 +5073,6 @@ It runs the marker query first and reports counts only.
 **Reading.** `test_malformed_records_are_skipped_with_one_warning_naming_the_series` in `analytics-service/tests/test_wealth_returns.py` asserts exactly one WARNING record from `caplog`, without filtering by logger. On PR #1119 (2026-10-23) a `urllib3.connectionpool` "Retrying" WARNING from another test's background connection on the same xdist worker landed inside its capture: `assert 2 == 1`. The re-run was green. The PR changed no Python.
 
 **Owner / Trigger:** unowned; the next phase that touches `services/wealth_returns.py` or its tests, or a second occurrence. Minimal fix: count only records from the logger the code under test uses.
-
-## Phase 167.2.1.1.2.1 (TRADEPAGES) — routed items (logged 2026-10-23)
-
-### 167.2.1.1.2.1-STRATEGY-BYBIT-7DAY — the strategy trade sync sends a Bybit start and no end, so an old start may read only its first 7 days (booked 2026-10-23, 167.2.1.1.2.1 RESEARCH, DATA INTEGRITY, candidate, not measured) (owned by Phase 231 BYBITREADS, v1.22; REQUIREMENTS.md VREAD-03; tagged 2026-11-23)
-
-**Reading.** `_fetch_raw_trades_bybit` in `analytics-service/services/exchange.py` sends `startTime` on the first page and never `endTime`. Bybit documents a start-only execution-list request as answering the start through the start plus 7 days (RESEARCH Q8, assumption A7), so a strategy backfill whose start is more than 7 days old may read only its first week. Whether the cursor continues past that week is not shown by the documentation and is unmeasured. The daily sync, whose start is recent, is not affected. Phase 167.2.1.1.2.1 fixed the allocator rebuild's own Bybit read with 7-day windows and an explicit end; CONTEXT deferred this loop, and that fix does not touch it.
-
-**Owner / Trigger:** unowned. Trigger: a read-only, counts-only probe of one strategy Bybit key with an old start, or a strategy whose stored trades stop 7 days after a gap. Closed when it is measured and either fixed with 7-day windows and an explicit end, with a test, or disproved.
 
 ## Phase 167.2.1.1.1.1 (MARKSOURCE) — routed items (logged 2026-10-27)
 
@@ -5182,12 +5149,6 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 **Reading.** Phase 186 asks the per-key derive's funding read for `on_malformed="raise"` and refuses the key by name when a funding row is dropped (`funding_rows_malformed`). Three other callers of the same fetchers keep the default `on_malformed="drop"`: `run_sync_funding_job`, the composite member read path, and `okx_archive_job`. A malformed funding row there is dropped with a WARNING and the series is stored as complete. Round 1 left them unfixed because each is a separate job with its own retry and recovery behaviour. The composite member path is the same gap as `[186-COMPOSITE-MEMBER-READ-GAPS]` for funding.
 
 **Owner / Trigger:** unowned. Trigger: a funding row is reported dropped by `fetch_funding_okx`, `fetch_funding_bybit` or `fetch_funding_binance` in the worker log of one of those three callers, or the next phase that edits `services/funding_fetch.py`. Action: decide per caller whether it refuses by name (as the derive does) or keeps dropping, with the founder where a published number changes. Closed when each of the three has a recorded decision, or the founder rules otherwise.
-
-### [186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED] — Bybit on-chain deposits that do not appear as Unified TRANSFER rows are unverified, so replace versus union was not decided on evidence (booked 2026-11-04, Phase 186 fix round 1 review, DATA INTEGRITY) (owned by Phase 231 BYBITREADS, v1.22; REQUIREMENTS.md VREAD-04; tagged 2026-11-23)
-
-**Reading.** Phase 186 reads Bybit Unified-edge transfers as flows (D-02) and the 186-04 gate set the flow source to `replace` (the Unified rows stand in for the on-chain reader). That verdict rested on the one measured Bybit key having no on-chain rows (`g2-flow-verdict: replace (no on-chain rows on PROD)`). With zero on-chain rows, replace and union give the same flows today, so the probe could not tell them apart. Whether a Bybit on-chain deposit also appears as a Unified TRANSFER row is therefore unverified: if it does not, `replace` would drop it from the flows and book the deposit as P&L.
-
-**Owner / Trigger:** unowned. Trigger: a Bybit key on PROD shows an on-chain deposit or withdrawal (the probe's `bybit_onchain_rows` above 0). Action: re-run the read-only probe (`analytics-service/scripts/derivegaps_probe.py`), read `bybit_paired_rows`, `bybit_unpaired_onchain_rows` and `bybit_near_miss_rows`, and bring the replace-versus-union question to the founder with those counts. Closed when the pairing is measured and the flow source is decided, or the founder rules otherwise.
 
 ## Phase 190 (FACTSHEETQUEUED) — routed items (logged 2026-11-03)
 

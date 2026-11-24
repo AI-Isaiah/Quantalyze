@@ -115,6 +115,7 @@ from services.db import (
 )
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
+    BybitTradeWindowIncomplete,
     aclose_exchange,
     create_exchange,
     fetch_all_trades,
@@ -126,7 +127,12 @@ from services.exchange import (
     parse_since_ms,
 )
 from services.exchange_pagination import PaginationCeilingExceeded
-from services.positions import fetch_positions, persist_position_snapshots
+from services.positions import (
+    BYBIT_LIST_NOT_ENDED_REASON,
+    BybitPositionReadRefused,
+    fetch_positions,
+    persist_position_snapshots,
+)
 from services.sfox_client import SfoxClient  # type annotations only
 from services.trade_resume import load_strategy_high_waters
 from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
@@ -1340,6 +1346,23 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # and shape as that arm: above the HTTPException, geo-block and ccxt arms, which would
     # otherwise let a RuntimeError subclass fall through to ``unknown`` (retried).
     if isinstance(exc, BybitUnifiedFlowReadError):
+        return ("permanent", str(exc)[:500])
+
+    # Phase 231 (review W2 SF-5, narrowed by round 2 R2-2). The Bybit trade read and the Bybit
+    # position read refuse by name when they cannot return the whole answer. Both are RuntimeError
+    # subclasses, so without an arm they fall through to ``unknown`` (retried), and both texts are
+    # static by contract (no venue text, id or number). PERMANENT only for the reasons that are
+    # deterministic, where a retry repeats the same walk for the same refusal: a window past the
+    # page cap, a start past the venue's history, a row that cannot be read, a position list that
+    # did not end within the page cap. Every other reason (a cursor that did not advance, a reply
+    # with no list, a position row with no size or mark) can be a venue blip, so it stays
+    # ``unknown`` and is retried; failing it for good would withhold the allocator's whole Bybit
+    # book with no second attempt.
+    if isinstance(exc, BybitTradeWindowIncomplete) and exc.reason in (
+        "page_cap", "start_too_old", "unreadable_fill",
+    ):
+        return ("permanent", str(exc)[:500])
+    if isinstance(exc, BybitPositionReadRefused) and str(exc) == BYBIT_LIST_NOT_ENDED_REASON:
         return ("permanent", str(exc)[:500])
 
     # Phase 215 SC-4: the CSV runner's four former HTTP raise sites are worker domain
