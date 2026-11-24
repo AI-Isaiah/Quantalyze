@@ -480,6 +480,16 @@ export const KCS12_PUBLIC_LEAD =
 export const KCS12_PUBLIC_UNKNOWN =
   "Right now, this strategy's factsheet link shows that the factsheet is not available. If no computation is running, use the contact form to have it checked.";
 
+/**
+ * KCS12-MINT-B-UNKNOWN (Phase 238 FACT-05, founder ruling 2026-11-24 "Neutral
+ * 'unknown' note"): the private-link note for a row whose compute state was not
+ * read (the jobs read failed). It replaces KCS12-UNREADABLE, whose "They appear
+ * there once a computation succeeds" promised numbers about a state nobody
+ * read. Same wording as KCS12-PUBLIC-UNKNOWN on the private-link lead.
+ */
+export const KCS12_MINT_B_UNKNOWN =
+  `${KCS12_MINT_B_LEAD} If no computation is running, use the contact form to have it checked.`;
+
 // Phase 238 (FACT-05): KCS12-MINT-B ("... not available yet. The numbers appear
 // there once a computation succeeds.") is RETIRED. `not_available` is reached
 // by failed, stalled, finished and never_started states, and a wait sentence
@@ -490,8 +500,7 @@ const MINT_TOKEN_NOTES = {
   in_progress:
     "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.",
   not_available: `${KCS12_MINT_B_LEAD} ${CONTACT_CHECK_REMEDY.before}`,
-  unreadable:
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.",
+  unreadable: KCS12_MINT_B_UNKNOWN,
 } as const satisfies Record<RecipientArm, string>;
 
 // KCS12-PUBLIC (words unchanged): the public URL while a computation is
@@ -507,7 +516,7 @@ const PUBLIC_URL_NOTES = {
 
 /**
  * What a recipient of this strategy's link sees right now (KCS12-MINT-A,
- * KCS12-UNREADABLE and the lead-plus-contact-check `not_available` answer for a
+ * KCS12-MINT-B-UNKNOWN (KCS12-UNREADABLE's successor) and the lead-plus-contact-check `not_available` answer for a
  * private link; for a published strategy's public URL KCS12-PUBLIC while in
  * progress, the lead-plus-contact-check answer when not available and
  * KCS12-PUBLIC-UNKNOWN when unreadable). KCS12-MINT-B is retired (Phase 238).

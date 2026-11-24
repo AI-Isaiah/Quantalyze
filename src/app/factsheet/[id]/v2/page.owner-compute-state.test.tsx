@@ -932,7 +932,7 @@ const RETIRED_MINT_B =
 const MINT_B_LEAD =
   "Right now, a private link to this strategy shows that its factsheet is not available.";
 const MINT_UNREADABLE =
-  "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
+  "Right now, a private link to this strategy shows that its factsheet is not available. If no computation is running, use the contact form to have it checked.";
 // 199-18 (UI-SPEC "Factsheet" row 3): the shipped KCS10 sentence, unchanged, then the one action a
 // visitor has (registered as factsheet.public-pending).
 const PUBLIC_SENTENCE =
@@ -1142,7 +1142,7 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(last.querySelector(`a[href="${EDIT_HREF}"]`)).not.toBeNull();
   });
 
-  it("SHARE-NOTE-UNREADABLE: an unreadable read -> the panel's last child is KCS12-UNREADABLE", async () => {
+  it("SHARE-NOTE-UNREADABLE: an unreadable read -> the panel's last child is KCS12-MINT-B-UNKNOWN (founder ruling 2026-11-24)", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       givenOwnerPendingDraft();

@@ -792,7 +792,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   const MINT_B_RELOAD =
     "Right now, a private link to this strategy shows that its factsheet is not available. Reload this page to try again.";
   const UNREADABLE =
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
+    "Right now, a private link to this strategy shows that its factsheet is not available. If no computation is running, use the contact form to have it checked.";
   const PUBLIC =
     "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
   // Phase 238 FACT-05: a published row whose compute state was not read (Health
@@ -1540,13 +1540,17 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     }
   });
 
-  it("UNREADABLE: an RPC error renders KCS12-UNREADABLE and is logged, never an in-progress claim", async () => {
+  it("UNREADABLE: an RPC error renders KCS12-MINT-B-UNKNOWN (founder ruling 2026-11-24, neutral unknown note) and is logged, never an in-progress claim and never a promise that numbers are coming", async () => {
     state.strategies = [row("s-1", { status: "draft", strategy_analytics: null })];
     state.jobsError = { message: "synthetic rpc failure" };
 
     const container = await renderPage();
 
     expect(noteOf(container, "Strategy s-1")).toBe(UNREADABLE);
+    // Founder ruling 2026-11-24: an unread state makes no wait promise, and the
+    // note's one action, the contact form, is a link open to every role.
+    expect(noteOf(container, "Strategy s-1")).not.toContain("once a computation succeeds");
+    expect(noteOf(container, "Strategy s-1")).not.toContain("placeholder page");
     expect(consoleError).toHaveBeenCalledWith(
       "[strategies/page] compute-state read failed",
       expect.objectContaining({ id: "s-1", message: "synthetic rpc failure" }),
@@ -1557,7 +1561,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     });
   });
 
-  it("UNREADABLE: an RPC that throws renders KCS12-UNREADABLE and is logged", async () => {
+  it("UNREADABLE: an RPC that throws renders KCS12-MINT-B-UNKNOWN and is logged", async () => {
     state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "pending" } })];
     state.jobsThrow = true;
 
@@ -1876,7 +1880,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(noteOf(container, "Strategy s-1")).toBe(MINT_B_LINK_KEY_EDIT);
   });
 
-  it("WINDOW-FULL (167.2-REVIEW-SFH M-5): a window still full at the cap renders KCS12-UNREADABLE and is logged and captured as its own case", async () => {
+  it("WINDOW-FULL (167.2-REVIEW-SFH M-5): a window still full at the cap renders KCS12-MINT-B-UNKNOWN and is logged and captured as its own case", async () => {
     state.strategies = [row("s-1", { status: "draft", strategy_analytics: null })];
     state.jobs = { "s-1": cron(1000) };
 
