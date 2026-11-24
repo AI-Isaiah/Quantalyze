@@ -1650,7 +1650,9 @@ def _check_live_realized_flags(flags: Mapping[str, Any]) -> None:
       CLASS only, never its text, which can carry a signed URL): a failed crawl is not a
       quiet account, and an empty series must not reach the reconciliation;
     * a page-cap truncation means the OLDEST live days are missing, the very days the
-      reconciliation and the NAV roll lean on: the live realized series is unusable."""
+      reconciliation and the NAV roll lean on: the live realized series is unusable;
+    * a non-stable OKX bill (``daily_pnl_non_usd_okx``, Phase 232's refusal flag) cannot be
+      valued in USD by the realized read: the live realized series is unusable too."""
     if flags.get("daily_pnl_fetch_error"):
         name = flags.get("daily_pnl_fetch_error_class")
         if name in _RATE_LIMIT_CLASSES:
@@ -1659,6 +1661,8 @@ def _check_live_realized_flags(flags: Mapping[str, Any]) -> None:
         raise _Stop("live_fetch_failed", f"class={label}")
     if flags.get("daily_pnl_truncated_okx"):
         raise _Stop("live_anchor_unusable", "live_realized=truncated")
+    if flags.get("daily_pnl_non_usd_okx"):
+        raise _Stop("live_anchor_unusable", "live_realized=non_usd")
 
 
 async def _live_reference(
