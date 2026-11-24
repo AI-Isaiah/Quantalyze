@@ -57,6 +57,7 @@ import {
   pickSameAccountHolder,
   readLiveSameLoginKeys,
   swapAccountSlot,
+  afterSlotSwap,
 } from "@/lib/venue-identity";
 import { isWorkingHolder } from "@/lib/account-share-note";
 
@@ -1080,6 +1081,15 @@ async function legacyValidateAndEncryptHandler(args: {
             );
           } else if (stampedKey?.venue_account_id != null) {
             swapLanded = true;
+            // The swap committed and lost its answer, so `swapAccountSlot`
+            // never ran its audit and recompose: run them here (225 N3-1).
+            // @audit-skip: the demotion audit lands inside afterSlotSwap (src/lib/venue-identity.ts).
+            await afterSlotSwap(admin, {
+              userId,
+              exchange: exchangeNormalized,
+              newKeyId: inserted.id,
+              oldHolderId: failingHolderId,
+            });
           }
         } else {
           console.warn(

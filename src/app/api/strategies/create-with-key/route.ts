@@ -62,6 +62,7 @@ import {
   pickSameAccountHolder,
   readLiveSameLoginKeys,
   swapAccountSlot,
+  afterSlotSwap,
   type PickMode,
 } from "@/lib/venue-identity";
 
@@ -2276,6 +2277,15 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             );
           } else if (stampedKey?.venue_account_id != null) {
             swapLanded = true;
+            // The swap committed and lost its answer, so `swapAccountSlot`
+            // never ran its audit and recompose: run them here (225 N3-1).
+            // @audit-skip: the demotion audit lands inside afterSlotSwap (src/lib/venue-identity.ts).
+            await afterSlotSwap(rpcAdmin, {
+              userId: user.id,
+              exchange: exchangeNormalized,
+              newKeyId: row.api_key_id,
+              oldHolderId: failingHolderId,
+            });
           }
         } else {
           // @audit-skip: compensating rollback of the draft THIS request created
