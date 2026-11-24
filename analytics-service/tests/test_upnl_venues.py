@@ -100,6 +100,8 @@ BYBIT_LINEAR_POSITIONS: list[dict[str, Any]] = [
         "entryPrice": 57495.0,
         "markPrice": 60000.0,
         "unrealizedPnl": 250.5,
+        # ccxt's ``info`` is the raw v5 row, whose ``size`` the Bybit arm requires.
+        "info": {"size": "0.1", "positionValue": "6000"},
     }
 ]
 
@@ -165,14 +167,35 @@ def _coin_row(payload: dict[str, Any], coin: str) -> dict[str, str]:
 
 def _fake_bybit(balance: dict[str, Any], positions: Any) -> MagicMock:
     """A venue stub whose balance is the REAL parsed balance. ``positions`` is a
-    list, or an exception instance for ``fetch_positions`` to raise."""
+    list, or an exception instance for ``fetch_positions`` to raise.
+
+    Phase 231 (VREAD-02): the holdings poll reads three position categories, so a
+    stub that answers every call with the same list would triple the rows. This one
+    dispatches on ``params`` like the venue: no params or ``settleCoin`` USDT answers
+    ``positions`` (``_fetch_current_equity`` still calls ``fetch_positions()`` with no
+    arguments), while ``settleCoin`` USDC and ``subType`` inverse answer an empty
+    list. An empty category is re-read on the raw V5 path, so
+    ``private_get_v5_position_list`` answers an empty page.
+    """
     ex = MagicMock()
     ex.id = "bybit"
     ex.fetch_balance = AsyncMock(return_value=copy.deepcopy(balance))
     if isinstance(positions, BaseException):
         ex.fetch_positions = AsyncMock(side_effect=positions)
     else:
-        ex.fetch_positions = AsyncMock(return_value=copy.deepcopy(positions))
+
+        async def fetch_positions(symbols: Any = None, params: Any = None) -> list[dict[str, Any]]:
+            p = params or {}
+            if p.get("settleCoin") == "USDC" or p.get("subType") == "inverse":
+                return []
+            return copy.deepcopy(positions)
+
+        ex.fetch_positions = AsyncMock(side_effect=fetch_positions)
+
+    async def private_get_v5_position_list(params: Any) -> dict[str, Any]:
+        return {"retCode": 0, "result": {"list": [], "nextPageCursor": ""}}
+
+    ex.private_get_v5_position_list = AsyncMock(side_effect=private_get_v5_position_list)
     ex.fetch_ticker = AsyncMock(return_value={"last": 0.0})
     ex.fetch_tickers = AsyncMock(return_value={})
     return ex
@@ -308,11 +331,16 @@ async def test_holdings_bybit_spot_row_is_wallet_balance_and_derivative_row_carr
 
     # No monkeypatch of fetch_positions: the derivative rows go through the REAL
     # positions seam (the ccxt dicts carry markPrice, entryPrice and unrealizedPnl).
-    rows, warning = await fetch_allocator_holdings(
-        "bybit", _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS)
-    )
+    fake = _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS)
+    rows, warning = await fetch_allocator_holdings("bybit", fake)
 
     assert warning is None
+    # 231 (VREAD-02): one derivative read per category, not one for everything.
+    assert [c.args[1] for c in fake.fetch_positions.await_args_list] == [
+        {"settleCoin": "USDT"},
+        {"settleCoin": "USDC"},
+        {"subType": "inverse"},
+    ]
     spot_rows = [r for r in rows if r["holding_type"] == "spot"]
     deriv_rows = [r for r in rows if r["holding_type"] == "derivative"]
     assert len(spot_rows) == 1 and len(deriv_rows) == 1, f"rows: {rows!r}"

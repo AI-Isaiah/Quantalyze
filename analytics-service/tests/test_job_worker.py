@@ -76,6 +76,48 @@ class TestClassifyException:
         assert kind == "transient"
         assert "429" in msg or "too many" in msg.lower()
 
+    def test_bybit_read_refusals_are_permanent_with_their_static_text(self) -> None:
+        """Review W2 SF-5, narrowed by round 2 R2-2: ``BybitTradeWindowIncomplete`` and
+        ``BybitPositionReadRefused`` are RuntimeError subclasses. The deterministic reasons are
+        permanent (a retry repeats the same walk for the same refusal). Every other reason can be a
+        venue blip and stays ``unknown``, which the queue retries. Mutation guard: drop the arm
+        and the permanent set flips to ('unknown', ...); widen it and the unknown set flips."""
+        from services.exchange import BybitTradeWindowIncomplete
+        from services.positions import (
+            BYBIT_CURSOR_STUCK_REASON,
+            BYBIT_LIST_NOT_ENDED_REASON,
+            BYBIT_MALFORMED_REPLY_REASON,
+            BYBIT_UNPRICED_INVERSE_REASON,
+            BYBIT_UNREADABLE_INVERSE_VALUE_REASON,
+            BYBIT_UNREADABLE_LINEAR_VALUE_REASON,
+            BYBIT_UNREADABLE_SIZE_REASON,
+            BybitPositionReadRefused,
+        )
+
+        permanent = [
+            BybitTradeWindowIncomplete("page_cap"),
+            BybitTradeWindowIncomplete("start_too_old"),
+            BybitTradeWindowIncomplete("unreadable_fill"),
+            BybitPositionReadRefused(BYBIT_LIST_NOT_ENDED_REASON),
+        ]
+        retried = [
+            BybitTradeWindowIncomplete("cursor_stuck"),
+            BybitTradeWindowIncomplete("malformed_reply"),
+            BybitPositionReadRefused(BYBIT_CURSOR_STUCK_REASON),
+            BybitPositionReadRefused(BYBIT_MALFORMED_REPLY_REASON),
+            BybitPositionReadRefused(BYBIT_UNREADABLE_SIZE_REASON),
+            BybitPositionReadRefused(BYBIT_UNPRICED_INVERSE_REASON),
+            BybitPositionReadRefused(BYBIT_UNREADABLE_INVERSE_VALUE_REASON),
+            BybitPositionReadRefused(BYBIT_UNREADABLE_LINEAR_VALUE_REASON),
+        ]
+        for exc in permanent:
+            kind, msg = classify_exception(exc)
+            assert kind == "permanent", (type(exc).__name__, str(exc), kind)
+            assert msg == str(exc)
+        for exc in retried:
+            kind, _msg = classify_exception(exc)
+            assert kind == "unknown", (type(exc).__name__, str(exc), kind)
+
     def test_bybit_cloudfront_geoblock_is_permanent_not_rate_limit(self) -> None:
         """Bybit's CloudFront country-block returns a non-JSON 403 that ccxt
         mis-maps to RateLimitExceeded. It MUST classify permanent (no retry,
