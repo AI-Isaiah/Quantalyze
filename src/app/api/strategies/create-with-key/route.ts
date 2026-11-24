@@ -190,8 +190,22 @@ function pickPlaceholderCodename(): string {
  *                    account is not working. It is decided BEFORE any strategy
  *                    read: a validated new key takes the slot from it (see the
  *                    member's own comment) whether or not it carries a strategy.
+ *                    OQ-2 (225-11): a demoted key that later recovers STAYS marked
+ *                    a duplicate of the working holder while that holder works.
+ *                    Nothing is disconnected, unpublished or re-pointed: the card
+ *                    sentence names the holder and the derive counts the account
+ *                    once, through the working holder (D-18). The only automatic
+ *                    move back is MT5D-08 itself (plan 09), and a demoted key that
+ *                    still carries its own strategy is the shape Q1 accepts.
+ *
  *   · `unresolved` — genuinely nothing to say: no live key, a read fault, or no
  *                    service-role credential. Fall through.
+ *
+ * ⭐ PER OWNER, ONLY (225-11, ONCE-02, Q3). Every member is decided from keys the
+ * CALLER owns: `readLiveSameLoginKeys` filters on `user_id`, so another owner's
+ * key on the same account is never read, named or swapped, and the connect then
+ * stamps the identity, which is the cross-owner share link. No cross-owner marker
+ * exists.
  *
  * ⛔ `orphaned` AND `unresolved` USED TO BE ONE ANSWER, and collapsing them was
  * the SECOND instance of the defect this type was created to make
@@ -601,6 +615,35 @@ function keyOrphanedResponse(): NextResponse {
     {
       code: "KEY_ORPHANED",
       error: "This key is already stored, but no strategy uses it.",
+    },
+    { status: 409, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
+ * 225-11 (TWIN-8 one-builder rule) — THE ONE `KEY_VENUE_ALREADY_CONNECTED` BODY,
+ * built once for ALL THREE arms that answer it: the post-validation `held` arm,
+ * and the race arm's `held` and `failing_holder` answers. It used to be written
+ * inline in the race arm (167.1.2 REVIEW WR-04) and plan 07 left `failing_holder`
+ * sharing that one literal; two or three copies of one body is how TWIN-8
+ * happened, so there is exactly one.
+ *
+ * The code is the venue-neutral refusal whose copy is true for a key held only
+ * through a composite (`held`), and for the interim case where the login-only
+ * index refused a connect beside a failing key on a DIFFERENT server. It is the
+ * same body `keys/validate-and-encrypt` answers.
+ *
+ * ⛔ IT TAKES NO PARAMETERS, WHICH IS THE STRUCTURAL REASON NO LOGIN, SERVER OR
+ * KEY ID CAN LEAK INTO IT (T-154-06-C). `code` FIRST, as a literal, the order the
+ * invariant scanner and the byte-pin in `route.test.ts` both read; the sentence
+ * is the pre-existing one, verbatim.
+ */
+function keyVenueAlreadyConnectedResponse(): NextResponse {
+  return NextResponse.json(
+    {
+      code: "KEY_VENUE_ALREADY_CONNECTED",
+      error:
+        "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
     },
     { status: 409, headers: NO_STORE_HEADERS },
   );
@@ -1396,7 +1439,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // Q1 — NOT a refusal. The holder is not working, so its slot is
       // available to a key that proves itself: fall through to `validateKey`
       // (the new credentials must be proven read-only BEFORE they take a slot,
-      // T-225-19) with the holder id remembered for the swap below.
+      // T-225-19). The post-validation resolve re-reads and sets the holder id
+      // used for the swap below (225-11), so this value is not trusted past
+      // validation.
       failingHolderId = venueMatch.holderId;
     }
     if (venueMatch.kind === "draft") {
@@ -1516,6 +1561,54 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // An MT5 login captured above is never overwritten.
     if (venueAccountId === null) {
       venueAccountId = validation.venue_account_id ?? null;
+    }
+
+    // ⭐ 225-11 (ONCE-01 / D-01, Q1, D-25, CONN-03) — THE POST-VALIDATION RESOLVE,
+    // FOR EVERY VENUE WHOSE IDENTITY IS NOW KNOWN. One more resolver call, in
+    // "fence" mode, between the verdict and the write. It is the first time the
+    // fence can speak for a ccxt venue (its id exists only after validation) and
+    // it re-reads MT5 too, because that validation can take up to 120 s and the
+    // account's holder may have moved since the pre-validation read.
+    //
+    // ⛔ `held` IS REFUSED HERE and no longer left to the index. Once plan 10's
+    // server-aware index ships, a null-server holder and a server-stamped new key
+    // do not collide there, so the index could no longer be the backstop for a
+    // working holder (T-225-36).
+    //
+    // The LATEST read wins for the swap: `failingHolderId` is re-derived from
+    // this result, so a holder that recovered during validation refuses instead
+    // of being swapped, and one that vanished is simply not swapped (the key is
+    // then created WITH its identity, as on any free account).
+    // ⛔ ZERO WRITES on every refusal below: the RPC, the swap and every
+    // `api_keys` write are after this point, so a strategy-linked key that also
+    // feeds an allocator book keeps both uses (ONCE-02). The read is per owner by
+    // `readLiveSameLoginKeys`' mandatory `user_id` filter; another owner's key on
+    // the account is never read, so the connect succeeds and stamps the identity,
+    // which is the share link (Q3). No cross-owner marker exists.
+    if (venueAccountId !== null) {
+      const postMatch = await resolveByVenueIdentity(
+        supabase,
+        user.id,
+        exchangeNormalized,
+        venueAccountId,
+        venueServer,
+        [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId, venueServer],
+        "fence",
+      );
+      failingHolderId = postMatch.kind === "failing_holder" ? postMatch.holderId : null;
+      if (postMatch.kind === "draft") {
+        return venueDraftInProgressResponse(postMatch.strategyName);
+      }
+      if (postMatch.kind === "connected") {
+        return venueAlreadyConnectedResponse(postMatch.strategyName);
+      }
+      if (postMatch.kind === "held") {
+        return keyVenueAlreadyConnectedResponse();
+      }
+      if (postMatch.kind === "orphaned") {
+        return keyOrphanedResponse();
+      }
+      // `failing_holder` → the admission below; `unresolved` → the normal RPC.
     }
 
     // encryptKey() validates the response against EncryptKeyResponseSchema
@@ -1764,8 +1857,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
                 venueAccountId,
                 venueServer,
                 [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId, venueServer],
-                // Plan 11 moves this call to "after_index_refusal".
-                "fence",
+                // ⭐ 225-11 (CONN-03, Q2) — "after_index_refusal", NOT "fence". The
+                // index has just refused this write, so the arm must name the key
+                // that refused it, and the login-only index refuses on a login
+                // alone: tier 3 of the pick (any live same-login key, even on a
+                // different server) is what finds it. ⚠️ THE THIRD TIER ONLY
+                // MATTERS WHILE THE LOGIN-ONLY INDEX IS LIVE and is DEAD after
+                // plan 10 ships the server-aware index, which never refuses a
+                // different-server write; the post-validation resolve above is
+                // then the only path that refuses a working holder.
+                "after_index_refusal",
               )
             : UNRESOLVED;
           if (venueMatch.kind === "draft") {
@@ -1789,10 +1890,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           }
           if (venueMatch.kind === "held" || venueMatch.kind === "failing_holder") {
             // 225-07 — `failing_holder` can only reach this arm in a race (the
-            // pre-validation arm admits it, and a key created WITHOUT identity
-            // cannot trip the index). The INSERT was refused and rolled back,
-            // so the same venue-neutral refusal is true for it; plan 11 folds
-            // both into the one builder.
+            // pre-validation and post-validation arms admit it, and a key created
+            // WITHOUT identity cannot trip the index). The INSERT was refused and
+            // rolled back, so the same venue-neutral refusal is true for it.
+            // INTERIM RULE (CONN-03): while the login-only index is live, this is
+            // also where a failing key on a DIFFERENT server is met (tier 3 of
+            // the pick), because the index refuses the new key regardless of
+            // server and nothing here may swap across servers.
             // 167.1.2 REVIEW WR-04 (narrowed by REVIEW-R2 CR-01) — the live key
             // on this account has no strategy row but a composite uses it
             // (`strategy_keys`, read in `resolveOtherKeyUse`), so KEY_ORPHANED's
@@ -1800,15 +1904,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // is the venue-neutral refusal whose copy holds for it: another
             // connected key of yours already reads this account, and the new
             // key was not saved (the INSERT above was refused and rolled back).
-            // Same body `keys/validate-and-encrypt` answers.
-            return NextResponse.json(
-              {
-                code: "KEY_VENUE_ALREADY_CONNECTED",
-                error:
-                  "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
-              },
-              { status: 409, headers: NO_STORE_HEADERS },
-            );
+            // Same body `keys/validate-and-encrypt` answers, through the one
+            // builder (225-11) that the post-validation `held` arm also uses.
+            return keyVenueAlreadyConnectedResponse();
           }
           if (venueMatch.kind === "orphaned") {
             // 161-05 / WIZERR-03 — THE ORPHAN, DISCRIMINATED BEFORE THE PINNED
@@ -1954,9 +2052,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
      * ⭐ 225-07 (Q1, D-25 / MT5D-08) — THE ADMISSION: A FAILING HOLDER GIVES UP
      * ITS SLOT TO THIS VALIDATED KEY.
      *
-     * Reached only when the pre-validation arm found a live key on this account
-     * that is not working (`isWorkingHolder` false) and `validateKey` has since
-     * proven THESE credentials read-only. The draft above was created with no
+     * Reached only when the post-validation resolve (every venue since 225-11:
+     * MT5 and ccxt alike) found a live key on this account that is not working
+     * (`isWorkingHolder` false) and `validateKey` has proven THESE credentials
+     * read-only. The draft above was created with no
      * identity; `swap_account_slot` now stamps the login and the server on it and
      * marks the failing key a duplicate of it, in one transaction. Nothing is
      * disconnected, unpublished or re-pointed. The swap itself re-checks D-18 on
