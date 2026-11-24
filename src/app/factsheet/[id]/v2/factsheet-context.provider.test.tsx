@@ -554,10 +554,21 @@ describe("FactsheetProvider — xRange follows the full range until the user set
       <RangeProbe />
     </FactsheetProvider>
   );
+  // Phase 239 (CACHE-02): the composer's 12M tab, as the provider sees it.
+  function PresetProbe() {
+    const { setPresetRange } = useXRange();
+    return (
+      <button data-testid="p12" onClick={() => setPresetRange(12)}>
+        12M
+      </button>
+    );
+  }
+
   const datedTree = (payload: FactsheetPayload) => (
     <FactsheetProvider payload={payload} persist={false}>
       <RangeProbe />
       <DatesProbe />
+      <PresetProbe />
     </FactsheetProvider>
   );
   const range = () => screen.getByTestId("range").textContent;
@@ -606,5 +617,62 @@ describe("FactsheetProvider — xRange follows the full range until the user set
     expect(range()).toBe("10-40");
     rerender(tree(20));
     expect(range()).toBe("0-19");
+  });
+
+  const click = (id: string) =>
+    act(() => {
+      fireEvent.click(screen.getByTestId(id));
+    });
+
+  it("12M preset is the last 12 calendar months ending on the latest day", () => {
+    render(datedTree(payloadOfLength(500)));
+    click("p12");
+    expect(dates()).toBe("2024-05-14..2025-05-14");
+  });
+
+  it("12M preset still ends on the latest day after front growth", () => {
+    const { rerender } = render(datedTree(payloadOfLength(500)));
+    click("p12");
+    rerender(datedTree(payloadSpanning(530, "2023-12-02")));
+    expect(dates()).toBe("2024-05-14..2025-05-14");
+  });
+
+  it("12M preset rolls to the new latest day on back growth", () => {
+    const { rerender } = render(datedTree(payloadOfLength(500)));
+    click("p12");
+    rerender(datedTree(payloadOfLength(530)));
+    expect(dates()).toBe("2024-06-13..2025-06-13");
+  });
+
+  it("a 12M preset on a short series is the full range", () => {
+    render(datedTree(payloadOfLength(200)));
+    click("p12");
+    expect(range()).toBe("0-199");
+  });
+
+  it("a short-series preset start moves earlier on front growth", () => {
+    // 200 days end on 2024-07-18; 400 days from 2023-06-15 end on the same day.
+    const { rerender } = render(datedTree(payloadOfLength(200)));
+    click("p12");
+    rerender(datedTree(payloadSpanning(400, "2023-06-15")));
+    expect(dates()).toBe("2023-07-18..2024-07-18");
+  });
+
+  it("reset after a preset returns the full range", () => {
+    render(datedTree(payloadOfLength(500)));
+    click("p12");
+    expect(dates()).toBe("2024-05-14..2025-05-14");
+    click("reset");
+    expect(range()).toBe("0-499");
+  });
+
+  it("a manual range set after a preset keeps its dates", () => {
+    const { rerender } = render(datedTree(payloadOfLength(500)));
+    click("p12");
+    click("set");
+    expect(dates()).toBe("2024-01-11..2024-02-10");
+    // A newer day arrives: the manual range does not roll.
+    rerender(datedTree(payloadOfLength(530)));
+    expect(dates()).toBe("2024-01-11..2024-02-10");
   });
 });

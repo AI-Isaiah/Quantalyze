@@ -90,6 +90,11 @@ function eyebrows(container: HTMLElement): string[] {
   return els.map((el) => el.textContent ?? "");
 }
 
+// Each arm mounts the whole factsheet body (up to twice); alone an arm takes under 1 s, but
+// one exceeded vitest's 5 s default under a parallel 26-file run, so the arms carry 20 s, as
+// the other full-body factsheet tests do (FactsheetView.terms.test.tsx).
+const BODY_RENDER_TIMEOUT = 20_000;
+
 describe("ScenarioFactsheetChart — presets are calendar months ending on the latest day (CACHE-02)", () => {
   it("12M is the last 12 calendar months ending on the latest day", () => {
     // 500 days from 2024-01-01: the latest day is 2025-05-14.
@@ -97,7 +102,7 @@ describe("ScenarioFactsheetChart — presets are calendar months ending on the l
     clickPeriod(container, "12M");
     expect(brushEdges(container)).toBe(edges("2024-05-14", "2025-05-14"));
     for (const text of eyebrows(container)) expect(text).toMatch(/^Selected range/);
-  });
+  }, BODY_RENDER_TIMEOUT);
 
   it("12M preset rolls to the new latest day on back growth", () => {
     const { container, rerender } = render(chart(makeReturnsSeries(500)));
@@ -105,7 +110,7 @@ describe("ScenarioFactsheetChart — presets are calendar months ending on the l
     // 30 newer days arrive: the latest day is now 2025-06-13.
     rerender(chart(makeReturnsSeries(530)));
     expect(brushEdges(container)).toBe(edges("2024-06-13", "2025-06-13"));
-  });
+  }, BODY_RENDER_TIMEOUT);
 
   it("12M preset still ends on the latest day after front growth", () => {
     const { container, rerender } = render(chart(makeReturnsSeries(500)));
@@ -113,7 +118,7 @@ describe("ScenarioFactsheetChart — presets are calendar months ending on the l
     // 30 earlier days arrive (from 2023-12-02); the latest day is still 2025-05-14.
     rerender(chart(makeReturnsSeries(530, "2023-12-02")));
     expect(brushEdges(container)).toBe(edges("2024-05-14", "2025-05-14"));
-  });
+  }, BODY_RENDER_TIMEOUT);
 
   it("a preset on a short series is Full history", () => {
     // 200 days is shorter than 12 calendar months.
@@ -121,7 +126,7 @@ describe("ScenarioFactsheetChart — presets are calendar months ending on the l
     clickPeriod(container, "12M");
     for (const text of eyebrows(container)) expect(text).toMatch(/^Full history/);
     expect(container.querySelectorAll('[data-testid^="range-reset-"]').length).toBe(0);
-  });
+  }, BODY_RENDER_TIMEOUT);
 
   it("every period tab stays aria-selected false", () => {
     const { container } = render(chart(makeReturnsSeries(500)));
@@ -131,12 +136,12 @@ describe("ScenarioFactsheetChart — presets are calendar months ending on the l
       expect(tabs.map((t) => t.textContent)).toEqual(["3M", "6M", "12M", "ALL"]);
       for (const tab of tabs) expect(tab.getAttribute("aria-selected")).toBe("false");
     }
-  });
+  }, BODY_RENDER_TIMEOUT);
 
   // Smoke arm, not a PROOF-01 gate: on a one-point axis every window equals the full range.
   it("a one-point series ignores a preset", () => {
     const { container } = render(chart(makeReturnsSeries(1)));
     expect(() => clickPeriod(container, "12M")).not.toThrow();
     expect(container.querySelectorAll('[data-testid^="range-reset-"]').length).toBe(0);
-  });
+  }, BODY_RENDER_TIMEOUT);
 });

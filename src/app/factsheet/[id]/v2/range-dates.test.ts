@@ -113,3 +113,43 @@ describe("basisAxisDates", () => {
     expect(basisAxisDates(payload({ smoothed_mtm: bundle(smDates) }), "smoothed_mtm")).toEqual(smDates);
   });
 });
+
+describe("resolveStoredRange — a preset rolls with the latest day", () => {
+  const preset = (months: number): StoredRange => ({ kind: "preset", months });
+
+  it("a preset ends on the latest axis day", () => {
+    // 500 days from 2024-01-01: the latest day is 2025-05-14, so 12M starts on 2024-05-14.
+    const axis = days(500, "2024-01-01");
+    const full = [0, 499] as const;
+    expect(resolveStoredRange(preset(12), axis, full)).toEqual([axis.indexOf("2024-05-14"), 499]);
+  });
+
+  it("the preset boundary is inclusive, and a gappy axis starts on the next day", () => {
+    const axis = days(100, "2024-03-01"); // ... 2024-06-08
+    expect(axis[resolveStoredRange(preset(1), axis, [0, 99])[0]]).toBe("2024-05-08");
+    // Weekdays only from Monday 2024-01-01; the latest day is Friday 2024-02-09. One month
+    // back is Tuesday 2024-01-09 (on the axis); three weeks of 2024-01 are covered.
+    const gappy = weekdays(30);
+    const g = resolveStoredRange(preset(1), gappy, [0, 29]);
+    expect(gappy[g[0]]).toBe("2024-01-09");
+    // Drop 2024-01-09 from the axis: the window starts on the next axis day, 2024-01-10.
+    const missing = gappy.filter((d) => d !== "2024-01-09");
+    const m = resolveStoredRange(preset(1), missing, [0, missing.length - 1]);
+    expect(missing[m[0]]).toBe("2024-01-10");
+    expect(m[1]).toBe(missing.length - 1);
+  });
+
+  it("a preset longer than the axis gives [0, last]", () => {
+    const axis = days(200, "2024-01-01");
+    expect(resolveStoredRange(preset(12), axis, [0, 199])).toEqual([0, 199]);
+  });
+
+  it("a non-ISO latest day gives fullRange", () => {
+    const full = [0, 2] as const;
+    expect(resolveStoredRange(preset(12), ["2024-01-01", "2024-01-02", "not-a-day"], full)).toBe(full);
+  });
+
+  it("a one-point axis gives [0, 0]", () => {
+    expect(resolveStoredRange(preset(12), ["2024-01-01"], [0, 0])).toEqual([0, 0]);
+  });
+});

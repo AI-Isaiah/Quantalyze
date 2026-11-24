@@ -177,8 +177,8 @@ describe("ScenarioFactsheetChart — equity + drawdown share ONE window (38-03 Q
     const brushSection = getByLabelText("Master timeline brush") as HTMLElement;
     const fullLabel = brushSection.textContent ?? "";
 
-    // Click "3M" — translates to a setXRange window over the most-recent ~63
-    // trading days. The brush window (shared xRange) must narrow.
+    // Click "3M" — selects the last three calendar months ending on the latest
+    // day. The brush window (shared xRange) must narrow.
     const tablist = getByRole("tablist", { name: "Period" });
     const threeMo = within(tablist).getByRole("tab", { name: "3M" });
     act(() => {
