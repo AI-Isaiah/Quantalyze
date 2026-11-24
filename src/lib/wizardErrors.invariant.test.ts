@@ -2203,6 +2203,7 @@ describe("[215-07 SC-5] each route's own-code tuple equals its emitted-code cont
         "KEY_REUSE_UNAVAILABLE",
         "KEY_VENUE_ALREADY_CONNECTED",
         "VENUE_ALREADY_CONNECTED",
+        "VENUE_DRAFT_IN_PROGRESS",
       ],
     },
     {
@@ -2337,6 +2338,7 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
     "KEY_REUSE_UNAVAILABLE",
     "KEY_VENUE_ALREADY_CONNECTED",
     "VENUE_ALREADY_CONNECTED",
+    "VENUE_DRAFT_IN_PROGRESS",
   ] as const;
 
   it("the derivation is NOT VACUOUS — the 409 population has a floor", () => {
@@ -2361,7 +2363,9 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
       // 23505 branch split into two emitters.
       // 5 → 6 at 167.1.2 REVIEW WR-04, re-measured the same way after the
       // venue-identity race arm gained its KEY_VENUE_ALREADY_CONNECTED emitter.
-    ).toBeGreaterThanOrEqual(6);
+      // 6 → 7 at 225-05 (CONN-01): `venueDraftInProgressResponse` is one new
+      // emitter site, re-measured the same way.
+    ).toBeGreaterThanOrEqual(7);
   });
 
   it("the 409 vocabulary is the hand-typed set — no more, no less", () => {
