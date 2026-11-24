@@ -3138,6 +3138,170 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(text).not.toContain(MT5_LOGIN);
       expect(text.toLowerCase()).not.toContain(SERVER_NORMALISED);
     });
+
+    it("an inactive holder (is_active false) is a failing holder too (D-18)", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, is_active: false }],
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(200);
+      expect(rpcCalls("swap_account_slot")).toHaveLength(1);
+    });
+
+    it("a WORKING same-login same-server key whose strategy is past draft is refused by name BEFORE validateKey, exactly as before (D-01)", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, venue_server: SERVER_NORMALISED }],
+        error: null,
+      });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(text.toLowerCase()).not.toContain(SERVER_NORMALISED);
+    });
+
+    it("a WORKING same-login key whose server is NULL matches at the fence for any server (the wildcard)", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, venue_server: null }],
+        error: null,
+      });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(409);
+      expect(JSON.parse(await res.text()).code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+    });
+
+    it("a same-login owner key on a DIFFERENT server is not this account: the fence admits and BOTH identity parameters ride", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, venue_server: "some-other-broker" }],
+        error: null,
+      });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(200);
+      // The other server's key was never classified.
+      expect(venueStrategyLookupMock).not.toHaveBeenCalled();
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+      const created = rpcCalls("create_wizard_strategy");
+      expect(created).toHaveLength(1);
+      expect(created[0][1]).toMatchObject({
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: SERVER_NORMALISED,
+      });
+      expect(rpcCalls("swap_account_slot")).toHaveLength(0);
+    });
+
+    it("the exact-server key wins over a null-server key when both are live (tier 1 before tier 2)", async () => {
+      // Exact-server row is FAILING, the null-server row works: the pick must
+      // take the exact one, so the connect is an admission, not a refusal.
+      venueKeyLookupMock.mockResolvedValue({
+        data: [
+          { id: "00000000-0000-4000-8000-000000000001", venue_server: null },
+          {
+            id: EXISTING_KEY_ID,
+            venue_server: SERVER_NORMALISED,
+            sync_status: "error",
+          },
+        ],
+        error: null,
+      });
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(200);
+      expect(rpcCalls("swap_account_slot")[0][1]).toMatchObject({
+        p_old_holder: EXISTING_KEY_ID,
+      });
+    });
+
+    it("no holder: the normalised server rides beside the login (trim + lower-case)", async () => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({ ...MT5_RECONNECT_BODY, passphrase: "  Broker-Live " }),
+      );
+      expect(res.status).toBe(200);
+      const created = rpcCalls("create_wizard_strategy");
+      expect(created[0][1]).toMatchObject({
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: "broker-live",
+      });
+      expect(rpcCalls("swap_account_slot")).toHaveLength(0);
+    });
+
+    it("a ccxt connect carries no p_venue_server", async () => {
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+      expect(res.status).toBe(200);
+      expect(rpcCalls("create_wizard_strategy")[0][1]).not.toHaveProperty(
+        "p_venue_server",
+      );
+    });
+
+    it("a swap that FAILS after the draft exists is logged at ERROR with Sentry (holder-swap) and still answers success, with neither login nor server in any line", async () => {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, sync_status: "revoked" }],
+        error: null,
+      });
+      routeRpc({
+        data: null,
+        error: {
+          code: "P0001",
+          message: `ACCOUNT_SLOT_REFUSED for login ${MT5_LOGIN} on ${SERVER_NORMALISED}`,
+        },
+      });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        ok: true,
+        strategy_id: STRATEGY_ID,
+        api_key_id: API_KEY_ID,
+      });
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(text.toLowerCase()).not.toContain(SERVER_NORMALISED);
+
+      const logged = JSON.stringify(consoleErr.mock.calls);
+      expect(logged).toContain("holder swap failed");
+      expect(logged).not.toContain(MT5_LOGIN);
+      expect(logged.toLowerCase()).not.toContain(SERVER_NORMALISED);
+
+      await vi.waitFor(() =>
+        expect(sentryState.captured.length).toBeGreaterThan(0),
+      );
+      const capture = sentryState.captured.at(-1);
+      expect(capture?.options.tags?.step).toBe("holder-swap");
+      const sent = JSON.stringify([
+        String((capture?.err as { message?: unknown })?.message),
+        capture?.options,
+      ]).toLowerCase();
+      expect(sent).not.toContain(MT5_LOGIN);
+      expect(sent).not.toContain(SERVER_NORMALISED);
+      // No demotion audit for a swap that did not land.
+      expect(auditMock).not.toHaveBeenCalled();
+    });
   });
 });
 

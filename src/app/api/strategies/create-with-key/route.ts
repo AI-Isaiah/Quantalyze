@@ -1565,7 +1565,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         {
           tags: { surface: "strategies-create-with-key", step: "encrypt-contract" },
           extra: { returned_keys: Object.keys(encrypted) },
-          secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+          secrets: [api_key, apiSecretNormalized, passphraseOrNull, venueServer],
         },
       );
       console.error(
@@ -1628,6 +1628,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           api_key,
           apiSecretNormalized,
           passphraseOrNull,
+          venueServer,
         ]),
       );
       return NextResponse.json(
@@ -1710,7 +1711,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       //     (a wildcard for every app fence) and an older caller is unchanged.
       ...(venueAccountId === null || failingHolderId !== null
         ? {}
-        : { p_venue_account_id: venueAccountId }),
+        : {
+            p_venue_account_id: venueAccountId,
+            ...(venueServer === null ? {} : { p_venue_server: venueServer }),
+          }),
     });
 
     if (error) {
@@ -1728,6 +1732,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           apiSecretNormalized,
           passphraseOrNull,
           venueAccountId,
+          venueServer,
         ]),
         error.code,
       );
@@ -1873,6 +1878,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
               apiSecretNormalized,
               passphraseOrNull,
               venueAccountId,
+              venueServer,
             ],
           });
           return NextResponse.json(
@@ -1912,7 +1918,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       captureToSentry(error, {
         tags: { surface: "strategies-create-with-key", step: "draft-rpc-error" },
         extra: { pg_code: error.code },
-        secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+        secrets: [api_key, apiSecretNormalized, passphraseOrNull, venueServer],
       });
       return NextResponse.json(
         { code: "UNKNOWN", error: "Could not create draft strategy" },
@@ -1935,7 +1941,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             has_strategy_id: Boolean(row?.strategy_id),
             has_api_key_id: Boolean(row?.api_key_id),
           },
-          secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+          secrets: [api_key, apiSecretNormalized, passphraseOrNull, venueServer],
         },
       );
       return NextResponse.json(
@@ -2073,7 +2079,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // so a throw from here on can echo it.
     console.error(
       "[strategies/create-with-key] caught exception:",
-      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId]),
+      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId, venueServer]),
     );
 
     // Classify into a stable wizardErrors code so the client never sees the raw
@@ -2128,7 +2134,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       captureToSentry(err, {
         tags: { surface: "strategies-create-with-key", step: "unclassified-key-error" },
         extra: { exchange: exchangeNormalized },
-        secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+        secrets: [api_key, apiSecretNormalized, passphraseOrNull, venueServer],
       });
     }
 
