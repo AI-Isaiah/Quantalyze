@@ -13,7 +13,7 @@ import { overlayBasisScalars, BASIS_KPI_MAP } from "@/lib/factsheet/basis-metric
 import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import { sanitizeLeverage } from "@/lib/leverage";
 import { LeverageContext } from "./leverage-context";
-import { useXRange } from "./factsheet-context";
+import { ActiveBasisContext, useXRange } from "./factsheet-context";
 
 /**
  * Phase 90 (FS-03, CONTEXT D5/D7) — the NARROW, EPHEMERAL basis context.
@@ -100,7 +100,11 @@ export function BasisProvider({ children }: { children: ReactNode }) {
   const gesture = useMemo<RangeGestureValue>(() => ({ held, ...actions }), [held, actions]);
   return (
     <BasisContext.Provider value={value}>
-      <RangeGestureContext.Provider value={gesture}>{children}</RangeGestureContext.Provider>
+      {/* Phase 239 (CACHE-02): publish the basis so useXRange resolves the stored range
+          dates on the active basis axis. */}
+      <ActiveBasisContext.Provider value={basis}>
+        <RangeGestureContext.Provider value={gesture}>{children}</RangeGestureContext.Provider>
+      </ActiveBasisContext.Provider>
     </BasisContext.Provider>
   );
 }
