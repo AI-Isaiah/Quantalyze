@@ -368,10 +368,29 @@ Plans:
 4. A job reclaimed after a crash keeps its curated error sentence, and its strategy's analytics status follows the reclaim. The lane arm that re-stamps a different sentence under the same job id shows the reclaimed one surviving. (HEAL-04)
 5. The daily positions poll enqueues private strategies too, so they get position snapshots, and the `poll_positions` enqueue stays live. (HEAL-05)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. New SQL arms carry `RED-UNDER` twins and list their migration in `RED-UNDER-SETUP`. Raising retries or a watchdog threshold is not a close. Each migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding before merge, and runs in the one serial migration lane (they auto-apply to PROD).
-**Plans:** 0 plans
+**Plans:** 11/11 plans executed
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 227-01-PLAN.md — The per-attempt failure ledger: a real error keeps its cause through the re-claim (MT5D-01)
+- [x] 227-03-PLAN.md — Token-fenced claim renewal RPC: a renewed waiting job survives the watchdog (HEAL-02, SQL half)
+- [x] 227-04-PLAN.md — The readmit-ceiling exhaustion row, written by a SQL detector pinned to the PROD sweep predicate (HEAL-03, durable half)
+- [x] 227-05-PLAN.md — The first-hop sweep: a dropped first `sync_trades` enqueue is re-enqueued once, or shown in a named state; runbook registration (HEAL-01)
+- [x] 227-06-PLAN.md — The daily positions poll covers private strategies and stays live, measured fresh on PROD (HEAL-05)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 227-02-PLAN.md — The watchdog reset and reclaim record their cause and bridge the strategy's status, so the curated sentence survives (MT5D-01, HEAL-04)
+- [x] 227-07-PLAN.md — A reaped orphan keeps its cause, through a trigger on the terminalizer's transition (MT5D-01)
+- [x] 227-08-PLAN.md — Worker: the pre-dispatch claim fence, the heartbeat renewal and the lost-mark error record (HEAL-02, MT5D-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 227-09-PLAN.md — Worker: the readmit-ceiling page through ops_alert, stamped on delivery (HEAL-03, page half)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 227-10-PLAN.md — Every phase migration applies on the local-stack lane, the corpus passes, and the censuses are measured (SC-6)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 227-11-PLAN.md — The migrations-schedule-nothing census, the operator runbook, the validation map and the ship records
 
 ### Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key
 
@@ -693,7 +712,7 @@ Plans:
 | 223. FLOWKINDS | 0/? | Not started | - |
 | 225. ONEACCOUNTONCE | 4/12 | In progress (PR-1 shipped as #1315) | - |
 | 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
-| 227. JOBLEDGER | 0/? | Not started | - |
+| 227. JOBLEDGER | 11/11 | In Progress | - |
 | 228. KEYANSWERS | 0/? | Not started | - |
 | 229. MT5DERIVE2 | 0/? | Not started | - |
 | 230. MT5NIGHTLY | 0/? | Not started | - |

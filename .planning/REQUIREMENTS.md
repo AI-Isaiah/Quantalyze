@@ -328,7 +328,7 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | NOCAP-02 | Phase 234 | Pending |
 | NOCAP-03 | Phase 234 | Pending |
 | NOCAP-04 | Phase 234 | Pending |
-| HEAL-01 | Phase 227 | Pending |
+| HEAL-01 | Phase 227 | Blocked (PROD go-live pending: first_hop_enqueue_sweep registration) |
 | HEAL-02 | Phase 227 | Pending |
 | HEAL-03 | Phase 227 | Pending |
 | HEAL-04 | Phase 227 | Pending |
