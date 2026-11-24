@@ -50,6 +50,15 @@ import type { User } from "@supabase/supabase-js";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { isSfoxEnabledServer, isMt5EnabledServer } from "@/lib/closed-sets";
 import { venueLabel } from "@/lib/display-labels";
+// Phase 225 ONEACCOUNTONCE plan 08 — the per-owner, server-aware holder rule
+// shared with the wizard seam (create-with-key) and the daily stamper's twin.
+import {
+  normaliseVenueServer,
+  pickSameAccountHolder,
+  readLiveSameLoginKeys,
+  swapAccountSlot,
+} from "@/lib/venue-identity";
+import { isWorkingHolder } from "@/lib/account-share-note";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
@@ -751,6 +760,44 @@ async function legacyValidateAndEncryptHandler(args: {
       ? api_key.trim()
       : (validation.venue_account_id ?? null);
 
+    // Phase 225 (CONN-03, Q2): an MT5 login is only unique within one broker
+    // server, so the server is stored beside it, normalised (the same
+    // normal form the database CHECK and `swap_account_slot` use). A ccxt key
+    // has none. The MT5 server is the `passphrase` slot, validated non-blank
+    // above, but `normaliseVenueServer` is total and returns null for an
+    // over-length value rather than letting the CHECK refuse the insert.
+    const venueServer = isMt5 ? normaliseVenueServer(passphrase) : null;
+
+    // Phase 225 (ONCE-01, Q1, D-25, MT5D-08): is this account already held by
+    // a live key of THIS owner? The `user_id` filter inside
+    // `readLiveSameLoginKeys` is the tenant boundary: a key of another owner on
+    // the same account is never read, so it never blocks and is never named
+    // (Q3, ONCE-02 — the share link is the supported way to reach it). The
+    // server is a wildcard when either side has none (Q2). A failed read never
+    // fails the add: the unique index is still the backstop, so it degrades to
+    // the behaviour this route had before the fence existed.
+    let failingHolderId: string | null = null;
+    if (venueAccountId !== null) {
+      const { rows, error: holderReadError } = await readLiveSameLoginKeys(admin, {
+        userId,
+        exchange: exchangeNormalized,
+        venueAccountId,
+      });
+      if (holderReadError) {
+        console.error(
+          "[keys/validate-and-encrypt] same-account holder read failed; relying on the unique index:",
+          { correlationId },
+          scrubSeamError(holderReadError, [api_key, api_secret, passphrase, venueAccountId, venueServer]),
+        );
+      } else {
+        const holder = pickSameAccountHolder(rows, venueServer, "fence");
+        // A holder that is not working (D-18) gives way to this key, which
+        // `validateKey` just proved works: the key is inserted with no identity
+        // and takes the slot through `swapAccountSlot` below (T-225-24).
+        if (holder !== null && !isWorkingHolder(holder)) failingHolderId = holder.id;
+      }
+    }
+
     type EncryptedColumns = z.infer<typeof EncryptKeyResponseSchema>;
     const encryptedColumns: { [K in keyof EncryptedColumns]: EncryptedColumns[K] } = {
       api_key_encrypted: encrypted.api_key_encrypted,
@@ -771,7 +818,12 @@ async function legacyValidateAndEncryptHandler(args: {
         attested_venue: exchangeNormalized,
         label: labelOrDefault,
         // 164.5.3-02 / 167.1.2 — see the `venueAccountId` derivation above.
-        venue_account_id: venueAccountId,
+        // Phase 225: a key admitted over a failing holder carries NO identity
+        // here (the holder still has it, and the index allows one); the swap
+        // below stamps login and server in the same transaction that demotes
+        // the holder.
+        venue_account_id: failingHolderId === null ? venueAccountId : null,
+        venue_server: failingHolderId === null ? venueServer : null,
       })
       .select("id")
       .single();
@@ -804,7 +856,7 @@ async function legacyValidateAndEncryptHandler(args: {
         console.error(
           "[keys/validate-and-encrypt] persist INSERT failed — venue-identity collision:",
           { correlationId },
-          scrubSeamError(insertError, [api_key, api_secret, passphrase, venueAccountId]),
+          scrubSeamError(insertError, [api_key, api_secret, passphrase, venueAccountId, venueServer]),
         );
         return NextResponse.json(
           {
@@ -823,7 +875,7 @@ async function legacyValidateAndEncryptHandler(args: {
       // the save did not.
       // 167.1.2: the venue account id is scrubbed too — any other 23505 or
       // CHECK failure DETAIL can echo the row's `venue_account_id`.
-      const perRequestSecrets = [api_key, api_secret, passphrase, venueAccountId];
+      const perRequestSecrets = [api_key, api_secret, passphrase, venueAccountId, venueServer];
       const insertFault =
         insertError ?? new Error("api_keys insert returned no row");
       console.error(
@@ -842,6 +894,39 @@ async function legacyValidateAndEncryptHandler(args: {
         },
         { status: 500, headers: NO_STORE_HEADERS },
       );
+    }
+
+    // Phase 225 (MT5D-08): take the slot from the failing holder. The demotion
+    // audit and the recompose enqueue happen inside `swapAccountSlot`
+    // (src/lib/venue-identity.ts). A refused or failed swap never fails the add:
+    // the key is saved, and the daily poll's identity stamper retries it.
+    if (failingHolderId !== null && venueAccountId !== null) {
+      // @audit-skip: the demotion audit and the recompose land inside swapAccountSlot (src/lib/venue-identity.ts).
+      const swap = await swapAccountSlot(admin, {
+        userId,
+        exchange: exchangeNormalized,
+        newKeyId: inserted.id,
+        oldHolderId: failingHolderId,
+        venueAccountId,
+        venueServer,
+      });
+      if (!swap.ok) {
+        const swapSecrets = [api_key, api_secret, passphrase, venueAccountId, venueServer];
+        console.error(
+          "[keys/validate-and-encrypt] holder swap failed; the key is saved and the daily poll retries it:",
+          { correlationId },
+          scrubSeamError(swap.error, swapSecrets),
+        );
+        captureToSentry(swap.error, {
+          tags: {
+            route: "api/keys/validate-and-encrypt",
+            arm: "persist",
+            step: "holder-swap",
+            correlation_id: correlationId,
+          },
+          secrets: swapSecrets,
+        });
+      }
     }
 
     // ⭐ NO CIPHERTEXT. The persist response carries the row id and the
