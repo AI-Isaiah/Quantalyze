@@ -182,7 +182,10 @@ const venueKeyLookupMock = vi.fn(
     },
 );
 const venueStrategyLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
-  data: { id: string } | null;
+  // 225-05 / CONN-01: the draft read now also selects `name`, which the route
+  // puts in the VENUE_DRAFT_IN_PROGRESS body. `unknown` so a test can seed a
+  // non-string to prove the shape guard.
+  data: { id: string; name?: unknown } | null;
   error: { code?: string; message?: string } | null;
 });
 /**
@@ -1603,6 +1606,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
   /** A DIFFERENT wizard session — the whole point: the token is gone. */
   const OTHER_SESSION_ID = "99999999-8888-4777-8666-555555555555";
   const MT5_LOGIN = "500123456";
+  /** 225-05 / CONN-01: the name of the OWN draft the refusal must carry. */
+  const EXISTING_DRAFT_NAME = "Atlas Basis Draft";
 
   const MT5_RECONNECT_BODY = {
     exchange: "mt5",
@@ -1667,29 +1672,74 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       error: null,
     });
     venueStrategyLookupMock.mockResolvedValue({
-      data: { id: EXISTING_STRATEGY_ID },
+      data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
       error: null,
     });
   }
 
-  it("THE BUG: same MT5 login + a DIFFERENT wizard_session_id resolves to the EXISTING row, not a second draft", async () => {
+  it("225-05 CONN-01: same MT5 login + a DIFFERENT wizard_session_id is REFUSED 409 VENUE_DRAFT_IN_PROGRESS naming the own draft, never a silent 200 deduped", async () => {
     seedExistingVenueRow();
 
     const POST = await importPost();
     const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-    expect(res.status).toBe(200);
-    // The ids are the SEEDED ones — the row that was already there.
-    expect(await res.json()).toEqual({
-      ok: true,
-      strategy_id: EXISTING_STRATEGY_ID,
-      api_key_id: EXISTING_KEY_ID,
-      deduped: true,
-    });
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    // `code` FIRST and the exact body: the draft's name rides, nothing else.
+    expect(text).toBe(
+      JSON.stringify({
+        code: "VENUE_DRAFT_IN_PROGRESS",
+        error: "This account is already in one of your unfinished drafts.",
+        strategy_name: EXISTING_DRAFT_NAME,
+      }),
+    );
+    // The silent answer is gone, and neither the other draft's ids, the login
+    // nor the user id crosses back.
+    expect(text).not.toContain("deduped");
+    expect(text).not.toContain(EXISTING_STRATEGY_ID);
+    expect(text).not.toContain(EXISTING_KEY_ID);
+    expect(text).not.toContain(MT5_LOGIN);
+    expect(text).not.toContain(MOCK_USER.id);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
-  it("FAILS TOWARD THE EXISTING ROW: the dedup path issues ZERO writes and never re-encrypts", async () => {
+  it("225-05 CONN-01: a BLANK, whitespace or non-string draft name OMITS strategy_name (the wizard renders the unnamed sentence)", async () => {
+    for (const name of ["", "   ", "\t\n", null, 42, undefined]) {
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe("VENUE_DRAFT_IN_PROGRESS");
+      expect(
+        "strategy_name" in body,
+        `a ${JSON.stringify(name)} name must be omitted, not nulled or blank`,
+      ).toBe(false);
+    }
+  });
+
+  it("225-05 CONN-01: the draft's name is trimmed on the wire and carried verbatim otherwise", async () => {
+    const name = 'Alpha "Beta" \u00e9 \u30c6\u30b9\u30c8';
+    venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+    venueStrategyLookupMock.mockResolvedValue({
+      data: { id: EXISTING_STRATEGY_ID, name: `  ${name}  ` },
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).strategy_name).toBe(name);
+  });
+
+  it("225-05 CONN-01: the by-name refusal issues ZERO writes and never validates or re-encrypts", async () => {
     // ⭐ THE INVARIANT THAT MATTERS MOST. The existing api_keys row carries
     // strategy_keys membership and synced history other strategies depend on,
     // so "resolving" the collision by overwriting it would orphan all of that.
@@ -2081,21 +2131,22 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(encryptKeyMock).not.toHaveBeenCalled();
     });
 
-    it("ANTI-REGRESSION: a real DRAFT on the same key still dedups — the fence was narrowed, not disabled", async () => {
+    it("ANTI-REGRESSION: a real DRAFT on the same key is still FOUND and refused by name — the fence was narrowed, not disabled", async () => {
       // The vacuity fence for the whole block above. If the filters were added
       // in a way that made the draft read match nothing, every assertion here
       // would still pass while WIZCONT-02 itself silently stopped working.
+      // 225-05 / CONN-01: the draft is still found; the answer changed from a
+      // silent 200 deduped to a 409 naming it.
       seedExistingVenueRow();
 
       const POST = await importPost();
       const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(409);
       expect(await res.json()).toEqual({
-        ok: true,
-        strategy_id: EXISTING_STRATEGY_ID,
-        api_key_id: EXISTING_KEY_ID,
-        deduped: true,
+        code: "VENUE_DRAFT_IN_PROGRESS",
+        error: "This account is already in one of your unfinished drafts.",
+        strategy_name: EXISTING_DRAFT_NAME,
       });
       // And the second read is never even issued: a resumable draft answers the
       // question outright.
@@ -2190,7 +2241,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       vi.spyOn(console, "error").mockImplementation(() => {});
     });
 
-    it("venue-identity constraint + resolvable → 200 deduped with the EXISTING ids", async () => {
+    it("225-05 CONN-01: venue-identity constraint + an own DRAFT → 409 VENUE_DRAFT_IN_PROGRESS naming it, not a silent 200 deduped", async () => {
       // The race the app fence cannot win: the row appeared between the fence
       // read and the RPC. The DB caught it; we resolve toward the existing row.
       rpcMock.mockResolvedValue({
@@ -2205,20 +2256,52 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
         .mockResolvedValueOnce({ data: null, error: null })
         .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
       venueStrategyLookupMock.mockResolvedValue({
-        data: { id: EXISTING_STRATEGY_ID },
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
         error: null,
       });
 
       const POST = await importPost();
       const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({
-        ok: true,
-        strategy_id: EXISTING_STRATEGY_ID,
-        api_key_id: EXISTING_KEY_ID,
-        deduped: true,
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        code: "VENUE_DRAFT_IN_PROGRESS",
+        error: "This account is already in one of your unfinished drafts.",
+        strategy_name: EXISTING_DRAFT_NAME,
       });
+      expect(text).not.toContain(EXISTING_STRATEGY_ID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(text).not.toContain(MOCK_USER.id);
+      // The INSERT was refused and rolled back by Postgres: nothing else wrote.
+      expect(assetClassUpdateMock).not.toHaveBeenCalled();
+    });
+
+    it("225-05 CONN-01: the race arm omits strategy_name for a blank draft name", async () => {
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+        },
+      });
+      venueKeyLookupMock
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "   " },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe("VENUE_DRAFT_IN_PROGRESS");
+      expect("strategy_name" in body).toBe(false);
     });
 
     it("venue-identity constraint + UNRESOLVABLE → the existing 409, not a new code", async () => {
@@ -2689,23 +2772,28 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(await res.text()).not.toContain(OKX_UID);
     });
 
-    it("an own DRAFT on the same account → 200 deduped with the EXISTING ids", async () => {
+    it("225-05 CONN-01: an own DRAFT on the same account → 409 VENUE_DRAFT_IN_PROGRESS naming it, not a silent 200 deduped", async () => {
       collideOnVenueIdentity();
       venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
-      venueStrategyLookupMock.mockResolvedValue({ data: { id: EXISTING_STRATEGY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Own OKX Draft" },
+        error: null,
+      });
 
       const POST = await importPost();
       const res = await POST(makeReq(OKX_RECONNECT_BODY));
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(409);
       const text = await res.text();
       expect(JSON.parse(text)).toEqual({
-        ok: true,
-        strategy_id: EXISTING_STRATEGY_ID,
-        api_key_id: EXISTING_KEY_ID,
-        deduped: true,
+        code: "VENUE_DRAFT_IN_PROGRESS",
+        error: "This account is already in one of your unfinished drafts.",
+        strategy_name: "Own OKX Draft",
       });
       expect(text).not.toContain(OKX_UID);
+      expect(text).not.toContain(EXISTING_STRATEGY_ID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      expect(text).not.toContain(MOCK_USER.id);
       // The re-read is keyed on the ccxt venue and the validator's id.
       const keyRead = capturedSelects.find((c) => c.table === "api_keys");
       expect(keyRead?.filters).toMatchObject({ exchange: "okx", venue_account_id: OKX_UID });

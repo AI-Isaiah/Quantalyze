@@ -196,7 +196,15 @@ function pickPlaceholderCodename(): string {
  */
 type VenueIdentityResolution =
   | { kind: "unresolved" }
-  | { kind: "draft"; strategy_id: string; api_key_id: string }
+  | {
+      kind: "draft";
+      strategy_id: string;
+      api_key_id: string;
+      // 225-05 / CONN-01 — the draft's own name, for the refusal body. Null
+      // when it is not a non-blank string. Only `handleReuseExistingKey`'s
+      // idempotent arm and the venue fence's refusal read this member.
+      strategyName: string | null;
+    }
   | { kind: "connected"; strategyName: string | null }
   | { kind: "held" }
   | { kind: "orphaned" };
@@ -374,9 +382,11 @@ async function resolveStrategiesForKey(
   // `strategies.api_key_id` carries no UNIQUE, so if a row ever shares a key the
   // ORIGINAL is the one to continue with — and a fence that picked
   // non-deterministically would be untestable.
+  // 225-05 / CONN-01: `name` rides the SAME read (no new query) so the venue
+  // fence can name the draft it refuses on.
   const { data: draftRow, error: draftRowErr } = await supabase
     .from("strategies")
-    .select("id")
+    .select("id, name")
     .eq("user_id", userId)
     .eq("api_key_id", liveKeyId)
     .eq("source", "wizard")
@@ -401,7 +411,17 @@ async function resolveStrategiesForKey(
   }
 
   if (draftRow?.id) {
-    return { kind: "draft", strategy_id: draftRow.id, api_key_id: liveKeyId };
+    return {
+      kind: "draft",
+      strategy_id: draftRow.id,
+      api_key_id: liveKeyId,
+      // Same shape guard as the `connected` member below: a non-string, or a
+      // blank one, is "no name" rather than a stringified surprise in copy.
+      strategyName:
+        typeof draftRow.name === "string" && draftRow.name.trim().length > 0
+          ? draftRow.name.trim()
+          : null,
+    };
   }
 
   // ⭐ NO DRAFT IS NOT YET AN ANSWER. Two very different situations reach this
@@ -480,6 +500,41 @@ function venueAlreadyConnectedResponse(strategyName: string | null): NextRespons
       code: "VENUE_ALREADY_CONNECTED",
       error: "This account is already connected to an existing strategy.",
       ...(strategyName === null ? {} : { strategy_name: strategyName }),
+    },
+    { status: 409, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
+ * 225-05 / CONN-01 (founder D-23, "Say so") — THE ONE REFUSAL BODY FOR "THIS
+ * ACCOUNT IS ALREADY IN ONE OF YOUR OWN UNFINISHED DRAFTS", built once for BOTH
+ * emitting arms (the MT5 pre-validation fence and the 23505 venue-identity race
+ * arm). Two copies of one body is how TWIN-8 happened.
+ *
+ * It replaced a silent `200 deduped` that handed the wizard the OTHER draft's
+ * ids and dropped the key the user had just typed, which the user could not
+ * explain. The new key is never stored on this path.
+ *
+ * ⛔ WHY NOT AN EXISTING CODE. `DRAFT_ALREADY_EXISTS` is the SAME-session
+ * collision, and its remedies (resume, start fresh) act on THIS wizard
+ * session's draft. The draft that holds the account is a DIFFERENT session's,
+ * so those remedies would act on the wrong row. `VENUE_ALREADY_CONNECTED` says
+ * the account is held by a connected strategy, which is false for a draft.
+ *
+ * ⛔ IT TAKES NO IDENTITY PARAMETER, so the login, the server and every id are
+ * structurally unable to leak through it (T-154-06-C / T-225-14). The only value
+ * it carries is the caller's OWN draft's name (owner-scoped read), and that is
+ * OMITTED, not nulled, when blank: the wizard then renders the unnamed
+ * sentence, never empty quotes. `code` FIRST, as a literal, the order the
+ * invariant scanner and the route's byte-pin read.
+ */
+function venueDraftInProgressResponse(draftName: string | null): NextResponse {
+  const name = typeof draftName === "string" ? draftName.trim() : "";
+  return NextResponse.json(
+    {
+      code: "VENUE_DRAFT_IN_PROGRESS",
+      error: "This account is already in one of your unfinished drafts.",
+      ...(name.length === 0 ? {} : { strategy_name: name }),
     },
     { status: 409, headers: NO_STORE_HEADERS },
   );
@@ -1248,7 +1303,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
    * (the named schema field, never a spread) and rides the RPC as
    * `p_venue_account_id`, so a second live key on one ccxt account trips the
    * venue-identity index and resolves through the race arm in the 23505 block
-   * (own draft → deduped, connected strategy → VENUE_ALREADY_CONNECTED, orphan
+   * (own draft → VENUE_DRAFT_IN_PROGRESS since 225-05, connected strategy → VENUE_ALREADY_CONNECTED, orphan
    * → KEY_ORPHANED). sFOX has no known id and stays NULL (D-10).
    *
    * ⛔ ONE CAPTURE POINT, NOT A VENUE LITERAL SPRINKLED DOWNSTREAM. `isMt5` is
@@ -1278,25 +1333,15 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId],
     );
     if (venueMatch.kind === "draft") {
-      // ⭐ `deduped` IS ADDITIVE AND APPEARS ON THIS ARM ONLY. The session-fence
-      // arm above stays byte-identical: the common case (a double-click) is
-      // already safe, already silent, and gets no new UI. This arm is the one
-      // the user cannot otherwise explain — they pressed Connect and did not
-      // get a new strategy — so it is the one that earns a line on screen.
+      // 225-05 / CONN-01 (D-23, "Say so") — REFUSE BY NAME. This account is in
+      // one of the caller's OWN unfinished drafts from a DIFFERENT wizard
+      // session (the same-session resume is answered by the fence above and is
+      // D-23's carve-out). It used to answer a silent `200 deduped` that
+      // dropped the key just typed; the user could not explain that, so it now
+      // says so. Short-circuits before `validateKey`/`encryptKey` like its
+      // siblings: zero writes, zero charged seam calls.
       // ⛔ The identity itself never crosses back (UI-SPEC / T-154-06-C).
-      // ⛔ CORRECTED 2026-11-14 (Phase 213 decision (a)): the session-fence arm
-      // above now ALSO answers `deduped: true` (decision (a): deduped whenever
-      // a route-owned arm returns an existing draft). The two sentences above
-      // are kept as lineage; they described the world before that decision.
-      return NextResponse.json(
-        {
-          ok: true,
-          strategy_id: venueMatch.strategy_id,
-          api_key_id: venueMatch.api_key_id,
-          deduped: true,
-        },
-        { headers: NO_STORE_HEADERS },
-      );
+      return venueDraftInProgressResponse(venueMatch.strategyName);
     }
     if (venueMatch.kind === "connected") {
       // 154.1 REVIEW CR — REFUSE, AND SAY WHY TRUTHFULLY. This account is held
@@ -1635,15 +1680,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
               )
             : UNRESOLVED;
           if (venueMatch.kind === "draft") {
-            return NextResponse.json(
-              {
-                ok: true,
-                strategy_id: venueMatch.strategy_id,
-                api_key_id: venueMatch.api_key_id,
-                deduped: true,
-              },
-              { headers: NO_STORE_HEADERS },
-            );
+            // 225-05 / CONN-01 — the SAME by-name refusal as the pre-RPC arm,
+            // through the SAME builder. The INSERT was refused by the index and
+            // rolled back, so "the new key was not saved" holds here too.
+            return venueDraftInProgressResponse(venueMatch.strategyName);
           }
           if (venueMatch.kind === "connected") {
             // 154.1 REVIEW CR — the SAME refusal as the pre-RPC arm, through the

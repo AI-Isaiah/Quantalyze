@@ -57,6 +57,7 @@ import { seamErrorCode } from "@/lib/seam-discriminator";
 // into a sentence is how the client came to promise a rule the server did not
 // enforce (the three-failed-submit incident).
 import {
+  EXCHANGE_DISPLAY,
   MAGNITUDE_CAPS,
   venueIsSubstitutable,
   type SupportedExchange,
@@ -344,6 +345,26 @@ export type WizardErrorCode =
   // fail again. Same reading `COMPOSITE_TOO_MANY_MEMBERS` and `SEAM_MISCONFIGURED`
   // are authored under.
   | "VENUE_ALREADY_CONNECTED"
+  // 225-05 / CONN-01 (founder D-23, "Say so") — the account the caller just
+  // connected is already in one of THEIR OWN unfinished drafts, started from a
+  // DIFFERENT wizard session. Emitted by `create-with-key` alone, from both the
+  // MT5 pre-validation fence and the 23505 race arm, through one body builder.
+  // It replaced a silent `200 deduped` that dropped the new key.
+  //
+  // ⛔ NOT `DRAFT_ALREADY_EXISTS`: that is the SAME-session collision, and its
+  // remedies (`resume_draft`, `start_fresh`) act on THIS session's draft. The
+  // conflicting draft is another session's, so `start_fresh` would open the
+  // delete dialog for the wrong row. ⛔ NOT `VENUE_ALREADY_CONNECTED`: that says
+  // the account backs a strategy that has moved past draft, which is false here.
+  //
+  // WHAT THE COPY MAY CLAIM: the new key was not saved (both arms return before
+  // any write, or after the INSERT was refused and rolled back); one account
+  // backs one strategy at a time. WHAT IT MAY NOT: anything about the account
+  // login, server or any id, none of which the wire carries.
+  //
+  // NON-RECOVERABLE by construction: `actions` holds neither member of
+  // `RECOVERABLE_ACTIONS`, because resubmitting is refused identically.
+  | "VENUE_DRAFT_IN_PROGRESS"
   // 161-05 / WIZERR-03 — THE THIRD ANSWER THE VENUE FENCE OWED, and the one
   // `create-with-key` explicitly DECLINED to mint. Its 23505 race arm carried
   // the rationale it was declined under: minting a member "would move the
@@ -2625,6 +2646,36 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["request_call", "expand_log"],
   },
 
+  // 225-05 / CONN-01 — see the union member's docblock for why this mints
+  // rather than reusing `DRAFT_ALREADY_EXISTS` or `VENUE_ALREADY_CONNECTED`.
+  //
+  // ⛔ `actions` ARE `request_call` + `expand_log`, NOT `resume_draft` /
+  // `start_fresh`: those act on THIS wizard session's draft, and `start_fresh`
+  // (WizardClient `handleStartFresh`) opens the delete dialog for a draft that is
+  // not the conflicting one. The founder's remedy, "finish or delete it first",
+  // is carried by the fix bullets, performed from the strategies page.
+  // ⚠️ "The new key was not saved" is true on both emitting arms: the
+  // pre-validation arm returns before `validateKey`/`encryptKey`/the RPC, and the
+  // race arm is reached because the INSERT raised and rolled back.
+  VENUE_DRAFT_IN_PROGRESS: {
+    title: "This exchange account is already in one of your unfinished drafts.",
+    cause:
+      "The key you just entered reads an account that one of your own unfinished drafts already uses, and one account backs one strategy at a time. Your new key was not saved.",
+    fix: [
+      "Finish that draft, or delete it from your strategies page, and then connect again.",
+      "To list another strategy, connect a different account: a separate exchange account or sub-account.",
+      "If this looks wrong, send the correlation id below through the contact form before deleting anything.",
+    ],
+    fixRequires: [null, null, null],
+    docsHref: "/security",
+    // ⛔ NEITHER member of `RECOVERABLE_ACTIONS`: resubmitting the same account
+    // is refused identically, so no Retry renders. ⛔ AND NEITHER `resume_draft`
+    // NOR `start_fresh`, for the reason above; their absence also keeps this
+    // entry outside the destructive-action population the `[140.3-10 / TRAP-4]`
+    // scan walks.
+    actions: ["request_call", "expand_log"],
+  },
+
   // 161-05 / WIZERR-03 — THE THIRD ENTRY OF THE VENUE-FENCE FAMILY, adjacent to
   // the two it splits from for the same reason they are adjacent to each other:
   // the three differ by ONE fact — what, if anything, hangs off the live key —
@@ -4831,6 +4882,30 @@ export function formatKeyError(
       cause:
         `It is connected to "${context.strategyName.trim()}". ` + base.cause,
     };
+  }
+
+  // 225-05 / CONN-01 — NAME THE DRAFT BY EXCHANGE AND NAME when we were given its
+  // name, and degrade to the table's unnamed cause when we were not (absent or
+  // blank name: never empty quotes, never `undefined`). The name is the caller's
+  // OWN draft (owner-scoped read) and is rendered as React text, so it is carried
+  // verbatim apart from the trim. The exchange display name comes from the closed
+  // `EXCHANGE_DISPLAY` record keyed by `context.venue`; an unknown or absent venue
+  // omits the exchange rather than guessing one.
+  if (
+    code === "VENUE_DRAFT_IN_PROGRESS" &&
+    context?.strategyName !== undefined &&
+    context.strategyName.trim().length > 0
+  ) {
+    const exchange =
+      context.venue !== undefined &&
+      Object.prototype.hasOwnProperty.call(EXCHANGE_DISPLAY, context.venue)
+        ? EXCHANGE_DISPLAY[context.venue as SupportedExchange]
+        : null;
+    const lead =
+      exchange === null
+        ? `Your unfinished draft "${context.strategyName.trim()}" already uses this account. `
+        : `Your unfinished ${exchange} draft "${context.strategyName.trim()}" already uses this account. `;
+    return { ...base, cause: lead + base.cause };
   }
 
   // ⛔ DELETED 2026-08-26 (Phase 162 / HONEST-01, UI-SPEC C-2) — the arm that
