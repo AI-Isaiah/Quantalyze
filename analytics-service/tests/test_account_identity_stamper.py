@@ -37,7 +37,14 @@ ACCOUNT_ID = "70000001"
 
 # Columns the stamper may write (T-167.1.2-16). Anything else is a defect.
 ALLOWED_WRITE_COLUMNS = frozenset(
-    {"venue_account_id", "account_shared_with_api_key_id", "account_share_kind"}
+    {
+        "venue_account_id",
+        # Phase 225 plan 12 (CONN-03): the MT5 broker server, written beside the
+        # login on a stamp and alone on a backfill.
+        "venue_server",
+        "account_shared_with_api_key_id",
+        "account_share_kind",
+    }
 )
 STATUS_COLUMNS = frozenset(
     {"sync_status", "sync_error", "disconnected_at", "is_active", "last_sync_at"}
@@ -1462,14 +1469,18 @@ async def test_no_escalation_where_no_duplicate_check_is_missing(
 # ccxt one, unchanged: index refusal -> holder look-up -> 'duplicate' marker ->
 # one api_key.account_duplicate_detected audit.
 #
-# ⛔ The broker server is NOT part of the identity (TODOS.md A-3), on purpose:
-# connect stores the login alone, so a server-qualified poll value would never
-# collide with a connect-stamped key. The poll's collision set is exactly
-# connect's, no wider.
+# ⛔ SUPERSEDED 2026-11-24 (Phase 225 plan 12, CONTEXT Q2 / CONN-03). This block
+# used to say the broker server is NOT part of the identity (TODOS.md A-3),
+# because connect stored the login alone. Connect now stores the server too
+# (plans 07 and 11), so the poll captures and backfills it, and the holder look-up
+# treats a null server as a wildcard (``pick_same_account_holder``). The pre-225
+# wording is kept here as lineage.
 
 # Synthetic login. Never logged, so tests assert its absence.
 MT5_LOGIN = "80000017"
 MT5_SERVER = "Synthetic-Server"
+# What the stamper stores: trimmed and lower-cased (normalise_venue_server).
+MT5_SERVER_STORED = "synthetic-server"
 
 
 def _mt5_session(monkeypatch: pytest.MonkeyPatch, login_slot: str) -> Any:
@@ -1525,8 +1536,11 @@ async def test_mt5_null_identity_key_is_stamped_from_its_login_without_touching_
     outcome = await _stamp(sb, _mt5_row(), session)
 
     assert outcome == "stamped"
+    # Phase 225 plan 12 (Q2, CONN-03): the login and its normalised broker server
+    # are written in ONE update.
     assert sb.updates() == [{
         "venue_account_id": MT5_LOGIN,
+        "venue_server": MT5_SERVER_STORED,
         "account_shared_with_api_key_id": None,
         "account_share_kind": None,
     }]
@@ -1588,6 +1602,9 @@ async def test_mt5_collision_marks_the_key_duplicate_and_audits_once(
         "account_share_kind": "duplicate",
     }
     _assert_write_set_is_identity_only(sb)
+    # Phase 225 plan 12 (Q2): a null-server holder no longer collides in the
+    # server index, so the holder is looked up BEFORE the stamp, and one look-up
+    # is all a held account needs.
     (look,) = [c for c in sb.calls if c.table == "api_keys" and c.op == "select"]
     assert ("eq", "user_id", OWNER_ID) in look.filters
     assert ("eq", "exchange", "mt5") in look.filters
@@ -1600,17 +1617,253 @@ async def test_mt5_collision_marks_the_key_duplicate_and_audits_once(
     assert kwargs["metadata"] == {"venue": "mt5", "holder_api_key_id": HOLDER_ID}
 
 
-async def test_an_already_stamped_mt5_key_is_left_alone(
+async def test_an_unstamped_mt5_key_finds_its_null_server_holder_before_any_update(
+    monkeypatch: pytest.MonkeyPatch, audit_mock: MagicMock,
+) -> None:
+    # PROOF-01 neuter B: without the pre-check the stamp UPDATE runs first and,
+    # once the server index ships, a null-server holder no longer refuses it, so
+    # two live keys would carry one account.
+    sb = FakeSupabase(_mt5_collision_responder())
+
+    outcome = await _stamp(sb, _mt5_row(), _mt5_session(monkeypatch, MT5_LOGIN))
+
+    assert outcome == "marked_duplicate"
+    assert (sb.calls[0].table, sb.calls[0].op) == ("api_keys", "select")
+    # The stamp update never ran: no write carries the login or the server.
+    assert [u for u in sb.updates() if "venue_account_id" in u or "venue_server" in u] == []
+
+
+def _mt5_index_refusal_responder(holder_server: str | None, **holder_overrides: Any) -> Callable[[_Call], Any]:
+    """The live holder is on ``holder_server``; the stamp UPDATE is refused by the
+    login-only index, whatever the servers are (the interim index)."""
+
+    def _r(call: _Call) -> Any:
+        if call.table == "api_keys" and call.op == "update" and (
+            call.payload or {}
+        ).get("venue_account_id") is not None:
+            return _mt5_unique_violation()
+        if call.table == "api_keys" and call.op == "select":
+            return MagicMock(data=[_holder_row(venue_server=holder_server, **holder_overrides)])
+        return None
+
+    return _r
+
+
+async def test_an_mt5_holder_on_another_server_is_admitted_then_settled_after_the_index_refuses(
+    monkeypatch: pytest.MonkeyPatch, audit_mock: MagicMock,
+) -> None:
+    # Interim rule, live while the index is login-only: the pre-check admits a
+    # same-login holder on a DIFFERENT server (the new index would too), the
+    # UPDATE is refused by the old index, and the after-refusal look-up names
+    # that holder. Dead once plan 10 ships the server index.
+    sb = FakeSupabase(_mt5_index_refusal_responder("other-server"))
+
+    outcome = await _stamp(sb, _mt5_row(), _mt5_session(monkeypatch, MT5_LOGIN))
+
+    assert outcome == "marked_duplicate"
+    ops = [(c.op, (c.payload or {}).get("venue_account_id") is not None) for c in sb.calls]
+    # select (pre-check, admits) -> stamp update (refused) -> select (after the
+    # refusal, names the holder) -> ... -> the marker update
+    assert ops[:3] == [("select", False), ("update", True), ("select", False)]
+    assert ops[-1] == ("update", False)
+    assert sb.updates()[0]["venue_server"] == MT5_SERVER_STORED
+    assert sb.updates()[-1] == {
+        "account_shared_with_api_key_id": HOLDER_ID,
+        "account_share_kind": "duplicate",
+    }
+    _assert_write_set_is_identity_only(sb)
+
+
+async def test_the_refused_mt5_stamp_hands_its_captured_server_to_the_swap(
+    monkeypatch: pytest.MonkeyPatch, audit_mock: MagicMock,
+) -> None:
+    # Plan 09 sends the stamping key's server to the swap. For an unstamped MT5
+    # key that server is the session's, captured here, not a stored value.
+    sb = FakeSupabase(_mt5_index_refusal_responder("other-server", sync_status=FAILING_STATUS))
+
+    outcome = await _stamp(sb, _mt5_row(), _mt5_session(monkeypatch, MT5_LOGIN))
+
+    assert outcome == "swapped_holder"
+    (swap,) = [p for n, p in sb.rpc_calls if n == "swap_account_slot"]
+    assert swap["p_venue_server"] == MT5_SERVER_STORED
+    assert swap["p_venue_account_id"] == MT5_LOGIN
+
+
+# ONCE-04 (Q3): two OWNERS' keys on one login and server each stamp their OWN
+# identity and neither is marked. The equal identity is the share link, so a
+# marker here would hide one owner's factsheet.
+
+OTHER_OWNER_ID = "00000000-0000-4000-8000-0000000000ab"
+OTHER_KEY_ID = "00000000-0000-4000-8000-00000000000c"
+
+
+def _table_responder(rows: list[dict[str, Any]]) -> Callable[[_Call], Any]:
+    """A select that APPLIES the eq and neq filters it is given, like the database,
+    so a look-up that forgets its owner filter reads another owner's key."""
+
+    def _r(call: _Call) -> Any:
+        if call.table != "api_keys" or call.op != "select":
+            return None
+        hits = [
+            row for row in rows
+            if all(
+                (row[col] == val) if kind == "eq" else (row[col] != val)
+                for kind, col, val in call.filters
+                if kind in ("eq", "neq")
+            )
+        ]
+        return MagicMock(data=hits)
+
+    return _r
+
+
+@pytest.mark.parametrize(
+    ("stamper_key", "stamper_owner", "other_key", "other_owner"),
+    [
+        pytest.param(KEY_ID, OWNER_ID, OTHER_KEY_ID, OTHER_OWNER_ID, id="first-owner-stamps"),
+        pytest.param(OTHER_KEY_ID, OTHER_OWNER_ID, KEY_ID, OWNER_ID, id="second-owner-stamps"),
+    ],
+)
+async def test_two_owners_keys_on_one_mt5_login_each_stamp_their_own_identity(
+    monkeypatch: pytest.MonkeyPatch, audit_mock: MagicMock,
+    stamper_key: str, stamper_owner: str, other_key: str, other_owner: str,
+) -> None:
+    other = _holder_row(
+        other_key, venue_account_id=MT5_LOGIN, venue_server=MT5_SERVER_STORED,
+        user_id=other_owner, exchange="mt5",
+    )
+    sb = FakeSupabase(_table_responder([other]))
+
+    outcome = await _stamp(
+        sb, _mt5_row(id=stamper_key, user_id=stamper_owner),
+        _mt5_session(monkeypatch, MT5_LOGIN),
+    )
+
+    assert outcome == "stamped"
+    (look,) = [c for c in sb.calls if c.op == "select"]
+    assert ("eq", "user_id", stamper_owner) in look.filters
+    assert sb.updates() == [{
+        "venue_account_id": MT5_LOGIN,
+        "venue_server": MT5_SERVER_STORED,
+        "account_shared_with_api_key_id": None,
+        "account_share_kind": None,
+    }]
+    # Nobody is marked, and nothing is audited: the link is the equal identity.
+    assert [u for u in sb.updates() if u.get("account_share_kind") is not None] == []
+    audit_mock.assert_not_called()
+
+
+# CONN-03 / Q2: the poll backfills the broker server of a key stamped before the
+# column existed. No data-reading DO guard anywhere: it is one guarded update.
+
+
+async def test_an_already_stamped_mt5_key_without_a_server_is_backfilled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # DATED NOTE, 2026-11-24 (Phase 225 plan 12). This case REPLACES the Phase
+    # 167.1.2 pin "an already-stamped MT5 key is left alone". Superseded by
+    # CONTEXT Q2 (CONN-03): the poll "keeps stamping every live key" and captures
+    # the broker server, so a stamped key whose venue_server is still null gets
+    # it from its session. The left-alone case survives for a key whose server is
+    # set (below).
     sb = FakeSupabase()
+    session = _mt5_session(monkeypatch, MT5_LOGIN)
+
+    outcome = await _stamp(sb, _mt5_row(venue_account_id=MT5_LOGIN), session)
+
+    assert outcome == "server_backfilled"
+    assert sb.updates() == [{"venue_server": MT5_SERVER_STORED}]
+    (upd,) = [c for c in sb.calls if c.op == "update"]
+    # Only while venue_server is still null, so a concurrent writer is never
+    # overwritten, and only this key.
+    assert ("is", "venue_server", "null") in upd.filters
+    assert ("eq", "id", KEY_ID) in upd.filters
+    _assert_write_set_is_identity_only(sb)
+    # No holder look-up: a backfill cannot create a second key on the account.
+    assert [c for c in sb.calls if c.op == "select"] == []
+    assert session.client.mock_calls == []
+
+
+async def test_a_backfill_whose_guard_matched_no_row_is_skipped_already_stamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sb = FakeSupabase(lambda c: MagicMock(data=[]) if c.op == "update" else None)
 
     outcome = await _stamp(
         sb, _mt5_row(venue_account_id=MT5_LOGIN), _mt5_session(monkeypatch, MT5_LOGIN)
     )
 
     assert outcome == "skipped_already_stamped"
+
+
+async def test_an_already_stamped_mt5_key_with_a_server_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sb = FakeSupabase()
+
+    outcome = await _stamp(
+        sb,
+        _mt5_row(venue_account_id=MT5_LOGIN, venue_server=MT5_SERVER_STORED),
+        _mt5_session(monkeypatch, MT5_LOGIN),
+    )
+
+    assert outcome == "skipped_already_stamped"
     assert sb.calls == []
+
+
+@pytest.mark.parametrize("session_login", ["80000099", None])
+async def test_a_backfill_never_uses_a_session_of_another_login(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, session_login: str | None,
+) -> None:
+    # T-225-29: a server read off a session of a DIFFERENT login would stamp the
+    # wrong broker onto this key. No write; one WARNING naming the cause, and
+    # neither login nor the server in it.
+    import dataclasses
+
+    caplog.set_level("DEBUG")
+    sb = FakeSupabase()
+    session = dataclasses.replace(
+        _mt5_session(monkeypatch, MT5_LOGIN), venue_account_id=session_login
+    )
+
+    outcome = await _stamp(sb, _mt5_row(venue_account_id=MT5_LOGIN), session)
+
+    assert outcome == "skipped_already_stamped"
+    assert sb.calls == []
+    (rec,) = [r for r in caplog.records if "server backfill" in r.getMessage()]
+    assert rec.levelname == "WARNING"
+    assert KEY_ID in rec.getMessage()
+    for secret in (MT5_LOGIN, "80000099", MT5_SERVER, MT5_SERVER_STORED):
+        assert secret not in caplog.text
+
+
+async def test_a_blank_session_server_backfills_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dataclasses
+
+    sb = FakeSupabase()
+    session = dataclasses.replace(_mt5_session(monkeypatch, MT5_LOGIN), server="  \t ")
+
+    outcome = await _stamp(sb, _mt5_row(venue_account_id=MT5_LOGIN), session)
+
+    assert outcome == "skipped_already_stamped"
+    assert sb.calls == []
+
+
+async def test_a_backfill_that_hits_the_index_is_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Two live same-login same-server keys would be a census (gate A5) failure,
+    # not something to retry silently: it reaches the boundary's ERROR line.
+    sb = FakeSupabase(lambda c: _mt5_unique_violation() if c.op == "update" else None)
+
+    outcome = await _stamp(
+        sb, _mt5_row(venue_account_id=MT5_LOGIN), _mt5_session(monkeypatch, MT5_LOGIN)
+    )
+
+    assert outcome == "error"
+    assert [r for r in caplog.records if r.levelname == "ERROR"] != []
 
 
 async def test_the_mt5_login_never_reaches_the_log(
@@ -1624,6 +1877,37 @@ async def test_the_mt5_login_never_reaches_the_log(
     assert outcome == "marked_duplicate"
     assert KEY_ID in caplog.text
     assert MT5_LOGIN not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["stamp", "backfill", "marked", "refused-then-marked", "swapped", "backfill-guard-miss"],
+)
+async def test_neither_the_mt5_login_nor_the_server_reaches_the_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    audit_mock: MagicMock, path: str,
+) -> None:
+    caplog.set_level("DEBUG")
+    row = _mt5_row()
+    responder: Callable[[_Call], Any] | None = None
+    if path == "backfill":
+        row = _mt5_row(venue_account_id=MT5_LOGIN)
+    elif path == "backfill-guard-miss":
+        row = _mt5_row(venue_account_id=MT5_LOGIN)
+        responder = lambda c: MagicMock(data=[]) if c.op == "update" else None  # noqa: E731
+    elif path == "marked":
+        responder = _mt5_collision_responder()
+    elif path == "refused-then-marked":
+        responder = _mt5_index_refusal_responder("other-server")
+    elif path == "swapped":
+        responder = _mt5_index_refusal_responder("other-server", sync_status=FAILING_STATUS)
+    sb = FakeSupabase(responder)
+
+    await _stamp(sb, row, _mt5_session(monkeypatch, MT5_LOGIN))
+
+    assert KEY_ID in caplog.text
+    for secret in (MT5_LOGIN, MT5_SERVER, MT5_SERVER_STORED):
+        assert secret not in caplog.text
 
 
 async def test_an_mt5_key_unstamped_for_days_escalates_like_a_ccxt_key(
@@ -1652,7 +1936,8 @@ async def test_poll_stamps_an_mt5_key_on_its_done_path(monkeypatch: pytest.Monke
     result = await _drive_poll(monkeypatch, _mt5_row(), sb, session)
 
     assert result.outcome == jw.DispatchOutcome.DONE
-    assert {"venue_account_id": MT5_LOGIN, "account_shared_with_api_key_id": None,
+    assert {"venue_account_id": MT5_LOGIN, "venue_server": MT5_SERVER_STORED,
+            "account_shared_with_api_key_id": None,
             "account_share_kind": None} in sb.updates()
 
 
@@ -1705,8 +1990,8 @@ def _poll_failure_cases() -> list[Any]:
     ]
 
 
-_MT5_STAMP = {"venue_account_id": MT5_LOGIN, "account_shared_with_api_key_id": None,
-              "account_share_kind": None}
+_MT5_STAMP = {"venue_account_id": MT5_LOGIN, "venue_server": MT5_SERVER_STORED,
+              "account_shared_with_api_key_id": None, "account_share_kind": None}
 
 
 @pytest.mark.parametrize("overrides", _poll_failure_cases())
@@ -1753,7 +2038,9 @@ async def test_an_mt5_done_poll_on_a_held_account_audits_the_duplicate_once(
     result = await _drive_poll(monkeypatch, _mt5_row(), sb, _mt5_session(monkeypatch, MT5_LOGIN))
 
     assert result.outcome == jw.DispatchOutcome.DONE
-    assert [u for u in sb.updates() if "venue_account_id" in u] == [_MT5_STAMP]
+    # Phase 225 plan 12: the holder is found BEFORE the stamp, so the login is
+    # never written for a key that is marked (it used to be refused by the index).
+    assert [u for u in sb.updates() if "venue_account_id" in u] == []
     assert sb.updates().count(
         {"account_shared_with_api_key_id": HOLDER_ID, "account_share_kind": "duplicate"}
     ) == 1
@@ -2106,7 +2393,8 @@ async def test_an_mt5_login_obeys_the_ccxt_length_cap(
 
     assert outcome == expected
     stamped = [u for u in sb.updates() if u.get("venue_account_id")]
-    assert stamped == ([{"venue_account_id": login, "account_shared_with_api_key_id": None,
+    assert stamped == ([{"venue_account_id": login, "venue_server": MT5_SERVER_STORED,
+                         "account_shared_with_api_key_id": None,
                          "account_share_kind": None}] if expected == "stamped" else [])
     if expected == "no_id":
         assert any(

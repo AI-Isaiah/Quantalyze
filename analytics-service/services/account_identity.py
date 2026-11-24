@@ -45,6 +45,17 @@ keys on one broker account were invisible to the unique index and summed
 twice. MT5 is NOT in :data:`VENUES_WITH_ACCOUNT_ID`: that set names the ccxt
 venues whose validator responses carry an id, and other modules read it as
 such. sFOX stays unstamped (D-10).
+
+Phase 225 plan 12 (CONN-03, CONTEXT Q2). The poll also captures an MT5 key's
+BROKER SERVER from the same session (``Mt5Session.server``, no terminal call):
+it is stored, normalised, beside the login in ``api_keys.venue_server``. An
+unstamped key writes both in one update; an already-stamped key with no server
+is backfilled (outcome ``server_backfilled``) only when the session's login
+equals the stored login. Because a null-server holder no longer collides in the
+server-qualified identity index, an unstamped MT5 key's same-owner holder is
+looked up BEFORE the update. Neither the login nor the server is ever logged.
+Two OWNERS' keys on one login and server each stamp their own identity and
+neither is marked: the equal identity is the share link (ONCE-04).
 """
 
 from __future__ import annotations
@@ -270,6 +281,7 @@ StampOutcome = Literal[
     "marked_duplicate",
     "marked_composite_member",
     "swapped_holder",
+    "server_backfilled",
     "no_id",
     "error",
 ]
@@ -702,6 +714,64 @@ async def _settle_with_holder(
     return await _mark_shared(supabase, key_row, holder_id, kind)
 
 
+def _mt5_session_server(session: Any) -> str | None:
+    """The normalised broker server an MT5 poll session carries, or ``None``.
+
+    ``Mt5Session.server`` is the server the credentials were parsed with, so
+    reading it needs no terminal call. A blank, over-length or non-string value is
+    ``None``, which makes the key a wildcard on the server (CONTEXT Q2) instead of
+    writing a value the ``api_keys_venue_server_valid`` CHECK would refuse.
+    """
+    return normalise_venue_server(getattr(session, "server", None))
+
+
+async def _backfill_mt5_server(
+    supabase: Any, key_row: Mapping[str, Any], session: Any
+) -> StampOutcome:
+    """Give an already-stamped MT5 key the broker server its session carries.
+
+    Phase 225 plan 12 (Q2, CONN-03). A key stamped before ``venue_server`` existed
+    has the login and no server, and a null-server key matches any server, so the
+    column is filled from the poll that already holds the credentials. One guarded
+    update, no data-reading guard: it runs only while ``venue_server`` is still
+    null, so a concurrent writer (a connect, another poll) is never overwritten.
+
+    T-225-29: the server is taken from the session ONLY when the session's login
+    equals the stored login, so a session of another login can never stamp its
+    broker onto this key. A mismatch writes nothing and logs one WARNING naming
+    the cause; neither login nor server is in the line. A 23505 here is not
+    retried: it would mean two live same-login same-server keys, which census
+    gate A5 must have caught, so it propagates to the boundary's ERROR line.
+    """
+    stored_login = key_row.get("venue_account_id")
+    if _mt5_account_id(session) != stored_login:
+        logger.warning(
+            "account_identity: api_key %s (venue %s) server backfill skipped: the "
+            "poll session's login does not match the stored login (or carries "
+            "none), so its broker server is not used",
+            key_row.get("id"), key_row.get("exchange"),
+        )
+        return "skipped_already_stamped"
+    server = _mt5_session_server(session)
+    if server is None:
+        return "skipped_already_stamped"
+
+    def _q() -> object:
+        return (
+            supabase.table("api_keys")
+            .update({"venue_server": server})
+            .eq("id", key_row["id"])
+            .eq("venue_account_id", stored_login)
+            .is_("venue_server", "null")
+            .execute()
+        )
+
+    if _first_row(await db_execute(_q)) is None:
+        # Another writer filled the server, or the key left, first.
+        return "skipped_already_stamped"
+    return "server_backfilled"
+
+
 async def _stamp(
     supabase: Any, key_row: Mapping[str, Any], exchange: Any
 ) -> StampOutcome:
@@ -710,26 +780,56 @@ async def _stamp(
 
     A ccxt key's id comes from ONE venue call (:func:`read_venue_account_id`);
     an MT5 key's from the login text its poll session carries
-    (:func:`_mt5_account_id`, no terminal call). Both then share the one UPDATE
-    and, on a refusal by the identity index, the one holder look-up ->
-    :func:`_mark_shared` -> audit path. sFOX and any other venue are skipped
-    (``skipped_not_ccxt``, the token name kept for log continuity).
+    (:func:`_mt5_account_id`, no terminal call), and its broker server from the
+    same session (Phase 225 plan 12, :func:`_mt5_session_server`). Both then
+    share the one UPDATE and, on a refusal by the identity index, the one holder
+    look-up -> :func:`_settle_with_holder` path. sFOX and any other venue are
+    skipped (``skipped_not_ccxt``, the token name kept for log continuity).
+
+    An MT5 key's holder is looked up BEFORE its UPDATE (Q2): once the identity
+    index includes the server, a holder whose ``venue_server`` is still null no
+    longer collides with the stamp, so the index alone would let two live keys
+    carry one account. A ccxt key keeps the UPDATE-first order, because every
+    ccxt server is null and the index refuses those exactly.
     """
     venue = key_row["exchange"]
     if venue not in _STAMPED_VENUES:
         return "skipped_not_ccxt"
     if key_row.get("venue_account_id") is not None:
+        if venue == _MT5 and key_row.get("venue_server") is None:
+            return await _backfill_mt5_server(supabase, key_row, exchange)
         return "skipped_already_stamped"
 
+    server: str | None
     if venue == _MT5:
         # The login text the session was built with; no terminal call. From
         # here on MT5 shares the ccxt path: the same UPDATE, the same 23505 ->
         # holder -> marker -> one audit.
         account_id = _mt5_account_id(exchange)
+        server = _mt5_session_server(exchange)
     else:
         account_id = await read_venue_account_id(exchange, venue)
+        server = None
     if account_id is None:
         return "no_id"
+    if server is None:
+        # A key's stored server is read as before (null for every ccxt key).
+        server = normalise_venue_server(key_row.get("venue_server"))
+
+    if venue == _MT5:
+        holder = await _find_live_holder(
+            supabase, key_row, account_id, server, after_index_refusal=False
+        )
+        if holder is not None:
+            return await _settle_with_holder(supabase, key_row, holder, account_id, server)
+
+    stamp: dict[str, Any] = {
+        "venue_account_id": account_id,
+        "account_shared_with_api_key_id": None,
+        "account_share_kind": None,
+    }
+    if venue == _MT5 and server is not None:
+        stamp["venue_server"] = server
 
     def _q() -> object:
         # Clears any marker in the same write: a key that stamps has no live
@@ -737,11 +837,7 @@ async def _stamp(
         # longer shares one.
         return (
             supabase.table("api_keys")
-            .update({
-                "venue_account_id": account_id,
-                "account_shared_with_api_key_id": None,
-                "account_share_kind": None,
-            })
+            .update(stamp)
             .eq("id", key_row["id"])
             .is_("venue_account_id", "null")
             .execute()
@@ -751,7 +847,6 @@ async def _stamp(
         res = await db_execute(_q)
     except Exception as exc:  # noqa: BLE001 — classified below, re-raised otherwise
         if _error_code(exc) == _PG_UNIQUE_VIOLATION and _names_identity_index(exc):
-            server = normalise_venue_server(key_row.get("venue_server"))
             holder = await _find_live_holder(
                 supabase, key_row, account_id, server, after_index_refusal=True
             )
@@ -1002,7 +1097,13 @@ async def stamp_account_identity(
     and the owner's allocator curve is recomposed. A swap the database refuses
     (an ``ACCOUNT_SLOT_*`` token: the holder recovered, a composite depends on
     it, the rows moved) is logged at WARNING with the token only and falls back to
-    the marker, today's stable state; the next poll re-decides. ``timeout_s`` bounds
+    the marker, today's stable state; the next poll re-decides. ``server_backfilled``
+    (Phase 225 plan 12, Q2 / CONN-03) is an already-stamped MT5 key that had no
+    broker server and now carries its session's, written only while the column is
+    still null and only when the session's login equals the stored login. An
+    unstamped MT5 key is checked for a same-owner holder BEFORE its update (a
+    null-server holder no longer collides in the server index); a ccxt key is
+    stamped first and checked after a refusal. ``timeout_s`` bounds
     the whole step so it cannot run the poll past its own handler timeout; a
     budget of zero or less skips the step (``skipped_no_budget``). Every failure,
     the venue call, the look-up, the write and a refusal by the database
