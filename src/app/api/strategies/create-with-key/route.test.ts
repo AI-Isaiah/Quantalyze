@@ -219,7 +219,7 @@ const venueStrategyLookupMock = vi.fn(async () => ({ data: null, error: null }) 
   // 225-05 / CONN-01: the draft read now also selects `name`, which the route
   // puts in the VENUE_DRAFT_IN_PROGRESS body. `unknown` so a test can seed a
   // non-string to prove the shape guard.
-  data: { id: string; name?: unknown } | null;
+  data: { id: string; name?: unknown; wizard_session_id?: unknown } | null;
   error: { code?: string; message?: string } | null;
 });
 /**
@@ -3569,6 +3569,68 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(rpcMock).not.toHaveBeenCalled();
       expect(writeAttempts).toEqual([]);
       expect(text).not.toContain(MT5_LOGIN);
+    });
+
+    // 225 PR-2 review WR-02 (orchestrator decision 3). The session fence runs
+    // once, BEFORE validation. A same-session resubmit that raced past it (reload,
+    // second tab, double submit during a 120 s validate) meets the FIRST request's
+    // committed draft at the post-validation resolve. The fence read is empty and
+    // so is the pre-validation key read: only the POST-validation reads see it.
+    describe("[WR-02] a same-session draft met at the post-validation resolve", () => {
+      beforeEach(() => {
+        venueKeyLookupMock
+          .mockResolvedValueOnce({ data: null, error: null })
+          .mockResolvedValue({ data: [{ id: EXISTING_KEY_ID }], error: null });
+      });
+
+      it("answers the session fence's deduped body, with no encrypt and no write", async () => {
+        venueStrategyLookupMock.mockResolvedValue({
+          data: {
+            id: EXISTING_STRATEGY_ID,
+            name: EXISTING_DRAFT_NAME,
+            wizard_session_id: OTHER_SESSION_ID,
+          },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq({ ...MT5_RECONNECT_BODY, wizard_session_id: OTHER_SESSION_ID }));
+
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        expect(JSON.parse(text)).toEqual({
+          ok: true,
+          strategy_id: EXISTING_STRATEGY_ID,
+          api_key_id: EXISTING_KEY_ID,
+          deduped: true,
+        });
+        expect(text).not.toContain(EXISTING_DRAFT_NAME);
+        expect(text).not.toContain(MT5_LOGIN);
+        // Validation ran (the resolve follows it); nothing after it did.
+        expect(validateKeyMock).toHaveBeenCalledTimes(1);
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+        expect(writeAttempts).toEqual([]);
+      });
+
+      it("NEGATIVE CONTROL: another session's draft is still refused by name", async () => {
+        venueStrategyLookupMock.mockResolvedValue({
+          data: {
+            id: EXISTING_STRATEGY_ID,
+            name: EXISTING_DRAFT_NAME,
+            wizard_session_id: WIZARD_SESSION_ID,
+          },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq({ ...MT5_RECONNECT_BODY, wizard_session_id: OTHER_SESSION_ID }));
+
+        expect(res.status).toBe(409);
+        const body = JSON.parse(await res.text());
+        expect(body.code).toBe("VENUE_DRAFT_IN_PROGRESS");
+        expect(body.strategy_name).toBe(EXISTING_DRAFT_NAME);
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+      });
     });
 
     it("MT5: a failing holder that is GONE after validation is not swapped: the key is created WITH its identity", async () => {

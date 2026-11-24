@@ -238,6 +238,11 @@ type VenueIdentityResolution =
       // when it is not a non-blank string. Only `handleReuseExistingKey`'s
       // idempotent arm and the venue fence's refusal read this member.
       strategyName: string | null;
+      // 225 PR-2 review WR-02 — the draft's own `wizard_session_id`, so the
+      // POST-validation resolve can tell the caller's OWN same-session draft (a
+      // resubmit that raced past the session fence during a long validate) from
+      // another session's. Null when not a string. Read by that one site only.
+      wizardSessionId: string | null;
     }
   | { kind: "connected"; strategyName: string | null }
   | { kind: "held" }
@@ -463,9 +468,11 @@ async function resolveStrategiesForKey(
   // non-deterministically would be untestable.
   // 225-05 / CONN-01: `name` rides the SAME read (no new query) so the venue
   // fence can name the draft it refuses on.
+  // 225 PR-2 review WR-02: `wizard_session_id` rides the SAME read (no new
+  // query) so the post-validation resolve can recognise the caller's own draft.
   const { data: draftRow, error: draftRowErr } = await supabase
     .from("strategies")
-    .select("id, name")
+    .select("id, name, wizard_session_id")
     .eq("user_id", userId)
     .eq("api_key_id", liveKeyId)
     .eq("source", "wizard")
@@ -499,6 +506,10 @@ async function resolveStrategiesForKey(
       strategyName:
         typeof draftRow.name === "string" && draftRow.name.trim().length > 0
           ? draftRow.name.trim()
+          : null,
+      wizardSessionId:
+        typeof draftRow.wizard_session_id === "string"
+          ? draftRow.wizard_session_id
           : null,
     };
   }
@@ -1636,6 +1647,24 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       failingHolderId = postMatch.kind === "failing_holder" ? postMatch.holderId : null;
       if (postMatch.kind === "read_failed") return holderReadFailedResponse();
       if (postMatch.kind === "draft") {
+        // 225 PR-2 review WR-02 (orchestrator decision 3) — the session fence
+        // runs ONCE, before validation, so a same-session resubmit (reload, second
+        // tab, double submit) during a long validate passes it and then finds the
+        // FIRST request's committed draft here. That draft is the caller's own
+        // resume (D-23's carve-out), not "another unfinished draft": answer the
+        // session fence's deduped body, byte for byte in shape. Only another
+        // session's draft is refused by name.
+        if (postMatch.wizardSessionId === wizard_session_id) {
+          return NextResponse.json(
+            {
+              ok: true,
+              strategy_id: postMatch.strategy_id,
+              api_key_id: postMatch.api_key_id,
+              deduped: true,
+            },
+            { headers: NO_STORE_HEADERS },
+          );
+        }
         return venueDraftInProgressResponse(postMatch.strategyName);
       }
       if (postMatch.kind === "connected") {
