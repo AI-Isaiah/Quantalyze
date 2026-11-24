@@ -31,6 +31,7 @@ PR-2 of three for Phase 225. It ships plans 05 to 09, 11 and 12, plus three revi
 - **WR-05.** Gate A5's Census 2 is dropped, because the live unique index means it can never return a row.
 - **SF-M2.** The three contract slot refusals log at ERROR.
 - **WR-08.** The rollback test mocks tell `.is` from `.eq` and return rows only after `.select`, so they can fail.
+- **SEAMCORE-06 seam-log gate.** The fence-read failure log in `create-with-key` passes only the scrubbed error. It used to also pass a `code` argument that read the raw error binding. The scrubbed string already carries the SQLSTATE.
 
 ### Removed
 - **TODOS `[167.1.2-DRAFT-CLASH-SAYS-SO]`**, closed by VENUE_DRAFT_IN_PROGRESS (CONN-01).
