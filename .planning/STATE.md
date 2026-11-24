@@ -8,8 +8,8 @@ last_activity: 2026-11-23
 progress:
   total_phases: 21
   completed_phases: 0
-  total_plans: 20
-  completed_plans: 14
+  total_plans: 33
+  completed_plans: 27
   percent: 0
 ---
 
@@ -174,7 +174,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: 226 (MT5SOAK) — ready to plan; wave 0, beside the read-only Deribit diagnosis
 Plan: —
 Status: Ready to plan
-Last activity: 2026-11-23 — v1.22 roadmap created: 21 phases (155.2, 157, 222, 223, 225, 226–241), 81/81 requirements mapped
+Last activity: 2026-11-24 — Phase 237 FACTSHEETHONEST shipped (v0.133.63.0, #1316), 13/13 plans; verification human_needed (2 visual checks)
 Progress: [░░░░░░░░░░] 0%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.

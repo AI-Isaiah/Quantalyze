@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.63.2] - 2026-11-24 — records: Phase 237 FACTSHEETHONEST phase records (verification human_needed)
+
+Records PR. It holds no source, test, script, workflow or migration change. One commit on `records/237-factsheethonest`.
+
+### Added
+- **The Phase 237 directory**, in `.planning/phases/237-factsheethonest-every-surface-shows-a-strategy-s-true-state/`: CONTEXT and DISCUSSION-LOG with the founder rulings Q1–Q4 of 2026-11-23, UI-SPEC, RESEARCH, PATTERNS, VALIDATION, the 13 plans and their 13 SUMMARYs, REVIEW (clean after round 2), SECURITY (SECURED, 21/21 threats closed) and VERIFICATION.
+
+### Changed
+- **`ROADMAP.md`.** Phase 237 lists its 13 plans, all ticked. Its Progress row reads 13/13, shipped as v0.133.63.0 (#1316), with human verification pending.
+- **`REQUIREMENTS.md`.** FACT-01, FACT-02, FACT-04, CACHE-01 and CACHE-03 read "Shipped (#1316), human verification pending".
+- **`STATE.md`.** Plan progress is now 27 of 33, and Last activity names the ship. Current Position is unchanged, because several phases run in parallel.
+
+### Notes
+- **The phase is not marked complete.** `phase complete 237` refuses while verification is `human_needed`, and this repo counts a phase complete only when verification has `passed`. The two checks left for the founder:
+  1. The share card for a strategy mid re-run over a stored success shows the last computed figures, with the Updating line legible under the stat row, and `Cache-Control: public, max-age=60, s-maxage=60`.
+  2. A real Withheld factsheet, at full history and inside a zoom, shows the withheld panels' notes. Worst 10 keeps its zoomed slice. A failed-cause row shows none of these panels.
+- **`verified_at_sha` is rebound** from the phase-branch commit, which `main` cannot reach after the squash, to the merge commit of #1316. None of the files listed in `drift_subjects` differs between the two commits.
+
 ## [0.133.63.1] - 2026-11-23 — BASELINE: automated re-dump after the PROD apply of 3cc96839
 
 ### Changed

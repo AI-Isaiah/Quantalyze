@@ -537,11 +537,23 @@ DBACC-01 (v1.23) edits this seam's whole-column select later and re-bases on it.
 3. A strategy published after its OG card was first requested shows its real card on the next request, and a not-found card is never long-cached. A failed BTC price read is not cached as a normal payload, and the next view retries it. Each case is driven by a good-after-bad-within-TTL test on the real cache wrapper. (CACHE-01, CACHE-03)
 4. The owner's private factsheet shows the data source of their own key-backed strategy, never "Data source —", while anon still reads only the published tier; owner and anon are tested per surface. (FACT-04)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 13 plans
 **UI hint**: yes
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 237-01-PLAN.md — The shared held-re-run verdict `analyticsHold` and the returns API's held series with `analytics_updating` (FACT-02 S6)
+- [x] 237-02-PLAN.md — OG not-found and figure-less cards go out `no-store` keyed on `figuresRendered`; good-after-bad on the real GET (CACHE-01)
+- [x] 237-03-PLAN.md — The panel note slot and component, and Worst 10 Drawdowns shows the Withheld note (FACT-01)
+- [x] 237-04-PLAN.md — A failed BTC price read throws inside the payload cache callback, key v27, the reload sentence (CACHE-03)
+- [x] 237-05-PLAN.md — The share card holds during a re-run with the Updating line and the 60 s held cache; `OG_CARD_VERSION` 3 (FACT-02 S5, CACHE-01)
+- [x] 237-06-PLAN.md — Both PDF routes hold with a held ETag and the 60 s cache; tear sheet seam T5b (FACT-02 S2-S4)
+- [x] 237-07-PLAN.md — Recommendation cards hold with the Updating line through the full verdict (FACT-02 S7)
+- [x] 237-08-PLAN.md — Composer drawer-added rows show the Updating line from the returns field; registry entry (FACT-02 S8)
+- [x] 237-09-PLAN.md — The EOY bar chart, heatmap YTD, Worst 10 chart and rolling hover value are withheld too (FACT-01 follow-on)
+- [x] 237-10-PLAN.md — The owner's unpublished factsheet reads its own trust tier on Lane B through RLS (FACT-04)
+- [x] 237-11-PLAN.md — The recompute-verdict census, the retired surfaces asserted, pins reconciled, full suite green (FACT-02 SC-2)
+- [x] 237-12-PLAN.md — EOY Returns, Calmar by Year and Style Drift with KS show the Withheld note (FACT-01)
+- [x] 237-13-PLAN.md — Composer book-strategy rows show the Updating line from a new book-payload field, book wins (FACT-02 S8b)
 
 ### Phase 238: NEVERCOMPUTED — a strategy that never computed, failed or stalled never claims a compute time or tells its owner to wait
 
@@ -642,7 +654,7 @@ Plans:
 | 234. NOCAPITAL | 0/? | Not started | - |
 | 235. HOLDINGSTRUTH | 0/? | Not started | - |
 | 236. FIGUREMATH | 0/? | Not started | - |
-| 237. FACTSHEETHONEST | 0/? | Not started | - |
+| 237. FACTSHEETHONEST | 13/13 | Shipped v0.133.63.0 (#1316); human verification pending (2 visual checks) | - |
 | 238. NEVERCOMPUTED | 0/? | Not started | - |
 | 239. SURFACECACHE | 0/? | Not started | - |
 | 240. CONNECTTRUTH | 0/? | Not started | - |
