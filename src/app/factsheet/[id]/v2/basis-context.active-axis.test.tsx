@@ -154,3 +154,44 @@ describe("an MTM manual range keeps its MTM dates when the MTM axis grows at the
     expect(screen.getByTestId("mtm-dates").textContent).toBe("2031-01-11..2031-02-10");
   });
 });
+
+describe("the fallback range is the full range of the ACTIVE axis, not the cash axis", () => {
+  function FallbackProbe() {
+    const { xRange, setXRange } = useXRange();
+    return (
+      <>
+        <span data-testid="range">{`${xRange[0]}..${xRange[1]}`}</span>
+        <button data-testid="set" onClick={() => setXRange([10, 40] as const)}>
+          set
+        </button>
+      </>
+    );
+  }
+
+  const tree = (payload: FactsheetPayload) => (
+    <FactsheetProvider payload={payload} persist={false}>
+      <BasisProvider>
+        <BasisSetter basis="mark_to_market" />
+        <BasisReadout />
+        <FallbackProbe />
+      </BasisProvider>
+    </FactsheetProvider>
+  );
+
+  it("an MTM axis longer than cash resolves to the full MTM axis with no range set, and when a manual range falls off the axis", async () => {
+    const { rerender } = render(tree(makePayloadWithMtmBundle()));
+    await waitFor(() => expect(screen.getByTestId("basis").textContent).toBe("mark_to_market"));
+    // No range set: the whole MTM axis (150 days), not the cash-sized [0, 99] that would
+    // drop the 50 most recent MTM days while reading as full history.
+    expect(screen.getByTestId("range").textContent).toBe(`0..${MTM_LEN - 1}`);
+
+    act(() => {
+      fireEvent.click(screen.getByTestId("set"));
+    });
+    expect(screen.getByTestId("range").textContent).toBe("10..40");
+    // The MTM axis now starts 20 days AFTER the stored start (2031-01-11): the range is off
+    // the axis, so it falls back to the full range of that same axis.
+    rerender(tree(makePayloadWithMtmBundle(Date.UTC(2031, 0, 21), MTM_LEN)));
+    expect(screen.getByTestId("range").textContent).toBe(`0..${MTM_LEN - 1}`);
+  });
+});

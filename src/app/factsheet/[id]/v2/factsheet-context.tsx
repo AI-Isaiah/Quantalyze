@@ -87,7 +87,6 @@ interface XRangeStoreValue {
   setStored: (next: StoredRange) => void;
   resetXRange: () => void;
   payload: FactsheetPayload;
-  fullRange: readonly [number, number];
 }
 
 const PayloadContext = createContext<FactsheetPayload | null>(null);
@@ -231,10 +230,6 @@ export function FactsheetProvider({
    */
   persist?: boolean;
 }) {
-  const fullRange = useMemo<readonly [number, number]>(
-    () => [0, Math.max(0, payload.dates.length - 1)],
-    [payload.dates.length],
-  );
   const [comparator, setComparator] = useState<ComparatorKey>(payload.activeComparator);
   // Phase 201.1 (D-07): the range the USER set (a pan, zoom, brush drag or the period
   // control), null until they set one. `useXRange` derives the visible range: the user's
@@ -252,7 +247,7 @@ export function FactsheetProvider({
   // resetXRange is low-volume (one click), so the eager update is preferable
   // — wrapping it in startTransition risks interleaving with the URL-writer
   // debounce when a user pans then immediately resets.
-  // Clearing the user's range hands `xRange` back to the CURRENT `fullRange`.
+  // Clearing the user's range hands `xRange` back to the full range of the active axis.
   const resetXRange = useCallback(() => setUserRange(null), []);
 
   // B7 — the localStorage half of view-state persistence now routes through the
@@ -394,8 +389,8 @@ export function FactsheetProvider({
   // own slice changes. The lower-churn contexts can stay shallow-equal
   // across high-churn xRange updates.
   const xRangeValue = useMemo<XRangeStoreValue>(
-    () => ({ stored: userRange, setStored: setUserRange, resetXRange, payload, fullRange }),
-    [userRange, resetXRange, payload, fullRange],
+    () => ({ stored: userRange, setStored: setUserRange, resetXRange, payload }),
+    [userRange, resetXRange, payload],
   );
   const comparatorValue = useMemo<ComparatorContextValue>(
     () => ({ comparator, setComparator }),
@@ -436,13 +431,23 @@ export function usePayload(): FactsheetPayload {
 export function useXRange(): XRangeContextValue {
   const v = useContext(XRangeContext);
   if (!v) throw new Error("useXRange must be used inside <FactsheetProvider>");
-  const { stored, setStored, resetXRange, payload, fullRange } = v;
+  const { stored, setStored, resetXRange, payload } = v;
   const basis = useContext(ActiveBasisContext) ?? "cash_settlement";
   // Phase 239 (CACHE-02): the axis the consumer indexes is the ACTIVE basis view's dates
   // (a mark_to_market or smoothed_mtm bundle can be longer than cash and dated
   // differently), so the stored dates resolve on that axis, not on cash.
   const axis = useMemo(() => basisAxisDates(payload, basis), [payload, basis]);
-  const xRange = useMemo(() => resolveStoredRange(stored, axis, fullRange), [stored, axis, fullRange]);
+  // The fallback (no range set, an off-axis or inverted range) is the full range of THAT
+  // axis: a cash-sized one would drop the recent days of a longer MTM or smoothed axis while
+  // reading as full history. Under cash the axis is `payload.dates`, so the value is unchanged.
+  const axisFullRange = useMemo<readonly [number, number]>(
+    () => [0, Math.max(0, axis.length - 1)],
+    [axis.length],
+  );
+  const xRange = useMemo(
+    () => resolveStoredRange(stored, axis, axisFullRange),
+    [stored, axis, axisFullRange],
+  );
 
   // setXRange fires 60+ times/sec during pan/zoom. Wrapping the write in a
   // transition lets React interrupt expensive chart-stack reconciliations
@@ -457,8 +462,7 @@ export function useXRange(): XRangeContextValue {
   // a cash-space index). Only under an MTM axis LONGER than cash does a brush drag
   // emit indices in `(cashLen-1, mtmLen-1]`; without this widening the old
   // cash-sized clamp clipped them, leaving the recent MTM days PERMANENTLY
-  // unreachable (the reported harm). `fullRange` below deliberately STAYS
-  // cash-sized so the initial/reset window is byte-identical under cash.
+  // unreachable (the reported harm).
   // Phase 239 (CACHE-02): after the clamp, the two indices are turned into the DATES of
   // the active axis and those are stored. Its identity follows the axis, so a consumer
   // that re-fires on a new setXRange (MasterBrush.basis's driver) writes on the new axis.
@@ -473,7 +477,7 @@ export function useXRange(): XRangeContextValue {
           // charts) a smoothed axis LONGER than cash would otherwise have its recent
           // days permanently brush-unreachable — the exact harm the F2.3 comment above
           // documents for MTM. Strictly additive: max over an extra `?? 0` term is a
-          // NO-OP for every cash/MTM payload (byte-identity; `fullRange` stays cash-sized).
+          // NO-OP for every cash/MTM payload (byte-identity).
           payload.seriesByBasis?.smoothed_mtm?.dates.length ?? 0,
         ) - 1;
       let [s, e] = next;
