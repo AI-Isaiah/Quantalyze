@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.133.69.0] - 2026-11-24 — Phase 229 MT5DERIVE2: an MT5 key's return chain keeps every day it should, and a mismatched re-derive pair is refused by name
+
+Analytics-service only (`nav_twr.py`, `job_worker.py`, `allocator_equity_derive.py`, `transforms.py`, `analytics_runner.py`, `scripts/mt5_soak.py`). No migration, no frontend change. Covers MT5D-04 to MT5D-07 and HOLD-03. Published MT5 returns move for a key that had a re-fund day into an emptied account.
+
+### Fixed
+- **A re-fund day into an emptied account publishes (MT5D-04).** `_judged_cohorts` skips an empty cohort 0 whenever a later cohort on the day holds P&L. The day was dropped as `negative_nav_guard`/`dust_nav_guard`, and the interior `twr_chain_broken` cut the headline to the suffix. Phase 188's tiny-base rule still runs first and keeps precedence.
+- **A timed MT5 key with no writer basis is blocked by name (MT5D-07).** Every former silent `None` exit of `_native_key_usd_writer_basis` now returns a closed reason token. The store gate writes it as `writer_basis_withheld` on the key's `key_inputs` row, and the compose raises the blocking `key_inputs_mismatch` at the counted, departed and stitch-source sites, like the holed-key case. The log line carries counts and the token only. Founder ruling 2026-11-24: "Block it (Recommended)". It clears on the key's next derive once the basis lands. A departed key is exempt (founder scope ruling 2026-11-24, "Exempt departed keys"): it never re-derives, so its withheld token or stale stamp raises the non-blocking flag `departed_writer_basis_unchecked` with a count in `inputs.departed_writer_basis_unchecked_keys` and a counts-only log, in the spirit of D-22. Live keys still block.
+
+### Added
+- **The inception day's P&L is flagged, not dropped silently (MT5D-05).** New annotation `inception_day_pnl_dropped` (with `inception_day_pnl_dropped_days`) in `NavTWRMeta`, carried through `transforms.py`, `analytics_runner.py` and the job worker's pre-stamp into `data_quality_flags`. It is an annotation, so it never promotes the status. Nothing in `src/` reads it yet.
+- **A same-terminal re-derive pair whose returns differ is refused (HOLD-03).** Each derive exit writes a per-day `returns_stamp` (the rows it wrote) into its `key_inputs` row. The compose compares it per raw key before the stitch (`read_returns_stamp`, `returns_stamp_mismatch_days`, tolerance 1e-12) and refuses a differing pair as the blocking `key_inputs_mismatch`. A stamp mismatch on a counted key first rides the R2-WR-01 transient retry (30 s, then 2 min), so a compose that reads between a derive's returns write and its `key_inputs` write re-reads instead of persisting a block. `read_writer_basis` is byte-unchanged.
+
+### Changed
+- **The D-15 band is accepted (MT5D-06).** `FLOW_TIMING_LARGE_RATIO` stays 1.0 and the factsheet copy is unchanged. Founder ruling 2026-11-24: "Keep 1.0, accept band (Recommended)". No code change.
+- **`scripts/mt5_soak.py`.** Its cohort walk follows the new cohort-0 rule, with a knife-edge builder. It now encodes the same rule as production, so the soak checks the arithmetic, not the rule.
+
+### Tests
+- Re-fund classes, 188 precedence and the moved inception arm; inception-day flag at every hop; MT5D-07 token families at all three compose sites; HOLD-03 pairs (timed day, stitched member, departed, short exit, removed key), healthy pairs, malformed stamps, non-finite refusal, a determinism pin, and the transient-retry case. Money-math oracles use a hand `Fraction` walk with no production import. Each data-integrity gate was neutered, seen RED and restored from a byte backup.
+
+### Removed
+- `TODOS.md` entries closed by this phase: `[164.6.6.2.3-EMPTY-COHORT0-REFUND]`, `[164.6.6.2.3-INCEPTION-DAY0-PNL]`, `[164.6.6.2.3-D15-THRESHOLD-BAND]`, `[164.6.6.2.3-MT5-BASIS-SILENT-NONE]` and the section `167.1.2.2.1-WRITER-BASIS-VALUES`.
+
+### Notes
+- **Known limits, recorded rather than fixed.**
+  - A key whose timed days all sit in the nav-marks era can be over-blocked (A-03-1).
+  - A compose racing a derive can still persist a block on the job's last attempt (the accepted R2-WR-01 residual, T-229-12).
+  - A row written before this change carries no stamp and is counted at info level, not compared, until the key's next derive. The 1e-12 tolerance is not measured against live PostgREST.
+- **Founder live soak pending.** `python -m scripts.mt5_soak` on the merged analytics-service tree, with the founder's MT5 credentials.
 ## [0.133.68.1] - 2026-11-24 — records: Phase 227 JOBLEDGER phase records, HEAL-01 go-live evidence and the cron manifest re-capture
 
 This is a records PR. It has no source, test, workflow or migration change. The one non-planning file is `scripts/prod-prober/cron-manifest.json`, the re-capture that `docs/runbooks/jobledger-go-live.md` Step 2 requires.

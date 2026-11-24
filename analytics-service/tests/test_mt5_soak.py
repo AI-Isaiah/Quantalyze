@@ -49,6 +49,7 @@ import ast
 import json
 import math
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -1685,11 +1686,23 @@ _COHORT_CASES = {
         lambda: [_cohort_flow(1.0, 9), *_cohort_trade(7, 10, 15, 0.015)],
         0.5, _BTC_DUST, 0.01, None,
     ),
-    # USD dust: prev 50, deposit 1_000 at 09:00, open 10:00, close +10. Cohort 0 is (50, 0),
-    # and 50 is under the 100 dust floor: NaN.
+    # USD dust: prev 50, open 08:00, deposit 1_000 at 09:00, close +10. The position opened before
+    # the deposit, so cohort 0 is (50, 10) and carries P&L: judged, and 50 is under the 100 dust
+    # floor: NaN. (Phase 229 MT5D-04: this case used to open at 10:00, after the deposit. Its cohort
+    # 0 (50, 0) was empty and judged, so the dust floor read NaN. Under the founder's cohort-0 rule an
+    # empty cohort 0 is skipped when a later cohort holds P&L, so that ledger is the next case. The
+    # invariant this case pins is unchanged: a JUDGED cohort on a dust base reads `base_guard`.)
     "usd_dust_cohort": (
-        lambda: [_cohort_flow(1_000.0, 9), *_cohort_trade(7, 10, 15, 10.0)],
+        lambda: [_cohort_trade(7, 8, 15, 10.0)[0], _cohort_flow(1_000.0, 9),
+                 _cohort_trade(7, 8, 15, 10.0)[1]],
         50.0, _USD_DUST, None, "base_guard",
+    ),
+    # Phase 229 MT5D-04: prev 50 (dust), deposit 1_000 at 09:00, open 10:00, close +10. Cohort 0 is
+    # (50, 0), empty with a later cohort holding P&L, so it is skipped; cohort 1 is (1_050, 10):
+    # 10 / 1_050. A re-fund from a dust level that is not tiny is measured on the deposit's cohort.
+    "usd_dust_refund_is_measured": (
+        lambda: [_cohort_flow(1_000.0, 9), *_cohort_trade(7, 10, 15, 10.0)],
+        50.0, _USD_DUST, 10.0 / 1_050.0, None,
     ),
     # prev 1_000, open 08:00, deposit 100 at 09:00, close +10_000. The position opened before
     # the deposit, so cohort 0 is (1_000, 10_000): |10_000| >= 10 * 1_000, P&L dominated: NaN.
@@ -1742,11 +1755,136 @@ def test_an_inception_day_skips_its_empty_cohort_zero():
     value, reason = _soak._walk_timed_return(0.0, timing, dust_nav=_USD_DUST, inception=True)
     assert value == pytest.approx(0.01, abs=1e-12)
     assert reason is None
-    # The same day off the inception reading is judged on the zero base: the flag decides.
+    # Phase 229 MT5D-04: this arm used to assert that the same day OFF the inception reading is judged
+    # on the zero base (`base_guard`), "the flag decides". Under the founder's cohort-0 rule an empty
+    # cohort 0 is skipped on EVERY day whose later cohort holds P&L, so the flag no longer decides a
+    # day like this one: both readings are 0.01.
     off_value, off_reason = _soak._walk_timed_return(
         0.0, timing, dust_nav=_USD_DUST, inception=False
     )
+    assert off_value == pytest.approx(0.01, abs=1e-12)
+    assert off_reason is None
+    # What the flag still decides is a day NOTHING tests: a deposit and an opening that books no cash.
+    # An inception day has no judged cohort (`inception_no_pnl`); any other day keeps its empty cohort
+    # 0, which on a zero base reads `base_guard`.
+    untested = _soak._walk_deal_ledger(
+        [
+            _cohort_flow(10_000.0, 9),
+            _stamped_deal(
+                {"type": _DEAL_TYPE_BUY, "entry": 0, "position_id": 7, "profit": 0.0}, _ms(17, 10)
+            ),
+        ],
+        0,
+    ).timing["2025-10-17"]
+    on_value, on_reason = _soak._walk_timed_return(
+        0.0, untested, dust_nav=_USD_DUST, inception=True
+    )
+    assert math.isnan(on_value) and on_reason == "inception_no_pnl"
+    off_value, off_reason = _soak._walk_timed_return(
+        0.0, untested, dust_nav=_USD_DUST, inception=False
+    )
     assert math.isnan(off_value) and off_reason == "base_guard"
+
+
+# ---------------------------------------------------------------------------
+# Phase 229 MT5D-04 — the soak's walk follows the founder-ruled cohort-0 rule, from the rule TEXT
+# (CONTEXT 2026-11-24, "Empty cohort 0"): an empty cohort 0 (no P&L) is skipped whenever a later
+# cohort on the same timed day holds P&L, on every day and not only inception; a cohort 0 with P&L
+# is always judged; a day with no judged cohort keeps its previous reading. The expected values
+# below are built by hand with `Fraction`, never with a production helper.
+# ---------------------------------------------------------------------------
+def _refund_into_an_emptied_account_deals() -> tuple[list[dict], float]:
+    """October 2025. Day 1: deposit 10_000 at 08:00, trade 10:00-15:00 for +100. Day 2: the whole
+    10_100 withdrawn at 08:00 (the account is EMPTY). Day 3: 1_000 re-funded at 08:00, trade
+    10:00-15:00 for +50 (start-of-day level 0, a morning deposit, a later trade). Day 4: a trade
+    for +21 and no flow. Closing level 1_000 + 50 + 21 = 1_071."""
+
+    def trade(position_id: int, day: int, cash: float) -> list[dict]:
+        return [
+            _stamped_deal(
+                {"type": _DEAL_TYPE_BUY, "entry": 0, "position_id": position_id, "profit": 0.0},
+                _ms(day, 10),
+            ),
+            _stamped_deal(
+                {"type": _DEAL_TYPE_SELL, "entry": 1, "position_id": position_id, "profit": cash},
+                _ms(day, 15),
+            ),
+        ]
+
+    deals = [
+        _stamped_deal({"type": _DEAL_TYPE_BALANCE, "profit": 10_000.0}, _ms(1, 8)),
+        *trade(1, 1, 100.0),
+        _stamped_deal({"type": _DEAL_TYPE_BALANCE, "profit": -10_100.0}, _ms(2, 8)),
+        _stamped_deal({"type": _DEAL_TYPE_BALANCE, "profit": 1_000.0}, _ms(3, 8)),
+        *trade(2, 3, 50.0),
+        *trade(3, 4, 21.0),
+    ]
+    return deals, 1_071.0
+
+
+def test_a_refund_day_into_an_emptied_account_is_verified_by_the_soaks_own_walk():
+    deals, balance = _refund_into_an_emptied_account_deals()
+    parity = _reconcile(_make_factory(equity=balance, balance=balance, deals=deals))
+    check = parity["return_check"]
+    # The published re-fund day is 50 / 1_000 (cohort 0 is empty and skipped, the deposit's cohort is
+    # the measured one). The old walk judged the empty cohort 0 on its zero base and expected NaN,
+    # so this was `timed_day_not_nan` on correct output.
+    assert check["mismatch_count"] == 0, check["mismatches"]
+    # Day 1 (inception, cohort 1) and day 3 (the re-fund) are timed days the walk verified by value.
+    assert check["timed_verified"] == 2
+    assert parity["parity_ok"] is True
+
+
+def _fraction_walk(judged: list[tuple[Fraction, Fraction]]) -> Fraction:
+    """D-17 by hand: ``prod(1 + P_k / B_k) - 1`` over exact rationals."""
+    growth = Fraction(1)
+    for base, pnl in judged:
+        growth *= 1 + pnl / base
+    return growth - 1
+
+
+def test_the_soak_walk_matches_a_hand_fraction_walk_on_the_refund_day():
+    # Arm 1 — prev 0, deposit 1_000 at 09:00, trade 10:00-15:00 for +50: ONE judged cohort, on the
+    # deposit's base. Cohort 0 is empty and a later cohort holds P&L, so it is skipped.
+    refund = _soak._walk_deal_ledger(
+        [_cohort_flow(1_000.0, 9), *_cohort_trade(7, 10, 15, 50.0)], 0
+    ).timing["2025-10-17"]
+    judged = _soak._walk_cohorts(0.0, refund, inception=False)
+    assert [(Fraction(b), Fraction(p)) for b, p in judged] == [(Fraction(1_000), Fraction(50))]
+    value, reason = _soak._walk_timed_return(0.0, refund, dust_nav=_USD_DUST, inception=False)
+    assert reason is None
+    assert value == pytest.approx(float(_fraction_walk([(Fraction(1_000), Fraction(50))])), abs=1e-12)
+    assert value == pytest.approx(float(Fraction(50, 1_000)), abs=1e-12)
+
+    # Arm 2 — prev 0, a position carried overnight that books +20 in cohort 0, then the same
+    # deposit-then-trade. A cohort 0 WITH P&L is always judged: on base 0, a broken base.
+    carried_in = _stamped_deal(
+        {"type": _DEAL_TYPE_BUY, "entry": 0, "position_id": 5, "profit": 0.0}, _ms(16, 12)
+    )
+    carried_out = _stamped_deal(
+        {"type": _DEAL_TYPE_SELL, "entry": 1, "position_id": 5, "profit": 20.0}, _ms(17, 8)
+    )
+    overnight = _soak._walk_deal_ledger(
+        [carried_in, carried_out, _cohort_flow(1_000.0, 9), *_cohort_trade(7, 10, 15, 50.0)], 0
+    ).timing["2025-10-17"]
+    judged = _soak._walk_cohorts(0.0, overnight, inception=False)
+    assert [(Fraction(b), Fraction(p)) for b, p in judged] == [
+        (Fraction(0), Fraction(20)),
+        (Fraction(1_020), Fraction(50)),
+    ]
+    value, reason = _soak._walk_timed_return(0.0, overnight, dust_nav=_USD_DUST, inception=False)
+    assert math.isnan(value) and reason == "base_guard"
+
+    # Arm 3 — prev 1_000, a deposit of 100 at 09:00 and no P&L anywhere: a day with nothing judged
+    # elsewhere keeps its previous reading, cohort 0 judged on the 1_000 base (a factor of 1).
+    flow_only = _soak._WalkDayTiming(flows=((_ms(17, 9), 100.0),), pnl=())
+    judged = _soak._walk_cohorts(1_000.0, flow_only, inception=False)
+    assert [(Fraction(b), Fraction(p)) for b, p in judged] == [(Fraction(1_000), Fraction(0))]
+    value, reason = _soak._walk_timed_return(
+        1_000.0, flow_only, dust_nav=_USD_DUST, inception=False
+    )
+    assert reason is None
+    assert value == pytest.approx(float(_fraction_walk([(Fraction(1_000), Fraction(0))])), abs=1e-12)
 
 
 def test_the_walk_pnl_dominance_ratio_matches_production():
@@ -2617,30 +2755,43 @@ def _direct_timed_reconcile(deals, published, *, initial, floors, timing="walk")
 
 def test_a_timed_first_day_is_judged_on_the_account_units_residual_floor():
     # (a) The timed branch's inception test is `abs(base) <= floors.residual_abs_tol`, and the
-    # floor is the ACCOUNT UNIT's. BTC deposit +1.0 at 09:00, a position 10:00-15:00 for +0.006, on a
-    # base of -0.4 BTC: above the BTC floor (1e-6), under the USD floor (1.0).
-    #   BTC floor: not inception; cohort 0 is (-0.4, 0.0), a non-positive base: NaN, `base_guard`.
-    #   USD floor: inception; the empty cohort 0 is skipped and cohort 1 is (0.6, 0.006) = 0.01.
-    # A POSITIVE 0.4 base cannot tell the units apart: skipping an empty cohort 0 on a healthy base
-    # and judging it are both a factor of 1. A base the guard breaks is what makes the unit visible.
-    deals = [_cohort_flow(1.0, 9), *_cohort_trade(7, 10, 15, 0.006)]
+    # floor is the ACCOUNT UNIT's. BTC deposit +1.0 at 09:00 and an opening at 10:00 that books no
+    # cash, on a base of 0.4 BTC: above the BTC floor (1e-6), under the USD floor (1.0).
+    #   BTC floor: not inception; nothing tests the day, so its empty cohort 0 is kept and judged:
+    #     (0.4, 0.0), a healthy base: 0.0.
+    #   USD floor: inception; the empty cohort 0 is skipped, nothing is judged: NaN.
+    # Phase 229 MT5D-04: this test used to put a +0.006 trade AFTER the deposit on a base of -0.4, so
+    # the BTC reading judged the empty cohort 0 on a broken base (NaN) and the USD reading skipped it
+    # (0.01). Under the founder's cohort-0 rule a later cohort's P&L skips the empty cohort 0 on both
+    # readings, so the inception flag, and with it the unit's residual floor, decides only a day
+    # nothing tests. The invariant is unchanged: the floor is the ACCOUNT UNIT's.
+    deals = [
+        _cohort_flow(1.0, 9),
+        _stamped_deal(
+            {"type": _DEAL_TYPE_BUY, "entry": 0, "position_id": 7, "profit": 0.0}, _ms(17, 10)
+        ),
+    ]
     btc_floors = classify_account_currency("BTC").floors
-    published = pd.Series([float("nan")], index=pd.DatetimeIndex(["2025-10-17"]).as_unit("us"))
-    result = _direct_timed_reconcile(deals, published, initial=-0.4, floors=btc_floors)
-    # FIRST (unit-floor arm): the BTC reading is NaN, so the published NaN is honest. Were the
-    # clause read on the USD floor the walk would read 0.01 and the NaN would be a mismatch.
+    published = pd.Series([0.0], index=pd.DatetimeIndex(["2025-10-17"]).as_unit("us"))
+    result = _direct_timed_reconcile(deals, published, initial=0.4, floors=btc_floors)
+    # FIRST (unit-floor arm): the BTC reading is 0.0, so the published 0.0 is honest. Were the clause
+    # read on the USD floor the walk would read NaN (inception) and the 0.0 would be a mismatch.
     assert result["mismatch_count"] == 0, result["mismatches"]
-    assert result["timed"] == 1
+    assert result["flow_only"] == 1
+    usd_result = _direct_timed_reconcile(deals, published, initial=0.4, floors=USD_FLOORS)
+    assert {(m["day"], m["kind"]) for m in usd_result["mismatches"]} == {
+        ("2025-10-17", "timed_day_not_nan")
+    }
     # The inception flag is what separates the two readings of the same day on the BTC dust floor.
     timing = _soak._walk_deal_ledger(deals, 0).timing["2025-10-17"]
-    as_inception, _ = _soak._walk_timed_return(
-        -0.4, timing, dust_nav=btc_floors.dust_nav, inception=True
+    as_inception, inception_reason = _soak._walk_timed_return(
+        0.4, timing, dust_nav=btc_floors.dust_nav, inception=True
     )
     as_ordinary, ordinary_reason = _soak._walk_timed_return(
-        -0.4, timing, dust_nav=btc_floors.dust_nav, inception=False
+        0.4, timing, dust_nav=btc_floors.dust_nav, inception=False
     )
-    assert as_inception == pytest.approx(0.01, abs=1e-12)
-    assert math.isnan(as_ordinary) and ordinary_reason == "base_guard"
+    assert math.isnan(as_inception) and inception_reason == "inception_no_pnl"
+    assert as_ordinary == 0.0 and ordinary_reason is None
 
 
 @pytest.mark.parametrize("timing", [{}, None])
@@ -2705,14 +2856,23 @@ def test_the_attribution_tolerances_are_tight_on_small_amounts_and_loose_only_on
 # a run that certified one trading day in eleven read share 1.0 and exit 0: the same hole CR-01
 # closed for flow-only days. They count against the share and never toward it, as guarded days do.
 # ---------------------------------------------------------------------------
-def _funded_each_morning_and_swept_each_evening(
+def _opened_before_each_morning_deposit_and_swept_each_evening(
     first_deposit: float, drain: float, sweep_days: int
 ) -> tuple[list[dict], float]:
-    """Review CR-04's ledger. 10-01 a deposit, 10-02 a +50 trade (the one checked day), 10-03 a
-    withdrawal of ``drain`` (to zero, or to the 100 dust floor), then ``sweep_days`` days each of:
-    deposit 1_000 at 08:00, open 09:00, close 15:00 for +p, withdraw 1_000 + p at 20:00. A final
-    deposit of 1_000 follows. Every sweep day opens on the evening level, a knife edge. Returns the
-    deals and the closing balance."""
+    """Review CR-04's ledger, on a JUDGED knife-edge base. 10-01 a deposit, 10-02 a +50 trade (the
+    one checked day), 10-03 a withdrawal of ``drain`` (to zero, or to the 100 dust floor), then
+    ``sweep_days`` days each of: open 07:00, deposit 1_000 at 08:00, close 15:00 for +p, withdraw
+    1_000 + p at 20:00. A final deposit of 1_000 follows. Returns the deals and the closing balance.
+
+    Phase 229 MT5D-04 replaced the old builder, which opened each position AFTER the morning deposit
+    (09:00). Under the founder's cohort-0 rule its empty cohort 0 on the evening level is skipped
+    and the day is measured on the deposit's base, so its sweep days certified and the run turned
+    green. Here the position is opened BEFORE the deposit, so the day's P&L sits in cohort 0, which
+    carries P&L and is therefore always judged, on the evening level: 0 for the zero-base sweep (the
+    base guard breaks it) and the 100 dust floor for the dust sweep (``_near`` the floor). That
+    judged base is within noise of zero or of the floor under either reading of the rule, so the day
+    stays indeterminate and certifies nothing. The ledger is synthetic (a real account holds no margin
+    to open a position at level 0); it exists only to put a judged cohort base on the knife edge."""
     deals = [
         _stamped_deal({"type": _DEAL_TYPE_BALANCE, "profit": first_deposit}, _ms(1, 8)),
         _stamped_deal({"type": _DEAL_TYPE_SELL, "entry": 1, "profit": 50.0}, _ms(2, 12)),
@@ -2721,11 +2881,11 @@ def _funded_each_morning_and_swept_each_evening(
     for day in range(4, 4 + sweep_days):
         pnl = 10.0 + day
         deals += [
-            _stamped_deal({"type": _DEAL_TYPE_BALANCE, "profit": 1_000.0}, _ms(day, 8)),
             _stamped_deal(
                 {"type": _DEAL_TYPE_BUY, "entry": 0, "position_id": 100 + day, "profit": 0.0},
-                _ms(day, 9),
+                _ms(day, 7),
             ),
+            _stamped_deal({"type": _DEAL_TYPE_BALANCE, "profit": 1_000.0}, _ms(day, 8)),
             _stamped_deal(
                 {"type": _DEAL_TYPE_SELL, "entry": 1, "position_id": 100 + day, "profit": pnl},
                 _ms(day, 15),
@@ -2745,7 +2905,7 @@ _KNIFE_EDGE_SWEEPS = [(10_000.0, 10_050.0), (1_000.0, 950.0)]
 
 @pytest.mark.parametrize(("first_deposit", "drain"), _KNIFE_EDGE_SWEEPS)
 def test_one_checked_day_among_knife_edge_sweep_days_is_not_green(first_deposit, drain):
-    deals, balance = _funded_each_morning_and_swept_each_evening(first_deposit, drain, 5)
+    deals, balance = _opened_before_each_morning_deposit_and_swept_each_evening(first_deposit, drain, 5)
     parity = _reconcile(_make_factory(equity=balance, balance=balance, deals=deals))
     check = parity["return_check"]
     # The series is honest, so nothing is a mismatch; the run is red on its coverage alone.
@@ -2763,7 +2923,7 @@ def test_one_checked_day_among_knife_edge_sweep_days_cannot_exit_zero(
     tmp_path, monkeypatch, first_deposit, drain
 ):
     _set_env(monkeypatch, tmp_path)
-    deals, balance = _funded_each_morning_and_swept_each_evening(first_deposit, drain, 5)
+    deals, balance = _opened_before_each_morning_deposit_and_swept_each_evening(first_deposit, drain, 5)
     rc = main(
         [],
         client_factory=_make_factory(equity=balance, balance=balance, deals=deals),

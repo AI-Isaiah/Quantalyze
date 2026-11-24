@@ -355,6 +355,7 @@ async def test_an_mt5_key_mode_derive_stores_its_composed_flows_and_day_pnl(monk
         monkeypatch, _mt5_deals(book), equity=nav_t, balance=nav_t
     )
     assert "realized_terminal_usd" in payload and "dropped_day_pnl" in payload
+    assert "writer_basis_withheld" not in payload  # 229: a USD MT5 key stores its basis, no token
 
     stored_flows = {r["utc_day_iso"]: r["flow_usd"] for r in payload["composed_flows"]}
     stored_pnl = {r["utc_day_iso"]: r["pnl_usd"] for r in payload["composed_day_pnl"]}
@@ -679,6 +680,7 @@ async def test_a_hole_free_btc_key_stores_the_usd_level_identity_and_replays_exa
     )
 
     assert payload["unpriced_days"] == [] and payload["segment_terminals"] == []
+    assert "writer_basis_withheld" not in payload  # 229: a stored basis carries no token
     stored_pnl = {r["utc_day_iso"]: r["pnl_usd"] for r in payload["composed_day_pnl"]}
     stored_flows = {r["utc_day_iso"]: r["flow_usd"] for r in payload["composed_flows"]}
     assert sorted(stored_pnl) == [d.isoformat() for d in _BTC_DAYS]  # dense, the quiet day too
@@ -759,6 +761,8 @@ async def test_a_holed_btc_key_with_a_timed_day_withholds_the_basis_and_the_term
     )
     assert "key_inputs_mismatch" in book["degrade_reasons"]
     assert book["is_trustworthy"] is False
+    # 229 MT5D-07: the same block now also names its cause on the row.
+    assert payload["writer_basis_withheld"] == "interior_hole"
 
 
 @pytest.mark.asyncio
@@ -786,6 +790,88 @@ async def test_a_holed_btc_key_with_no_timed_day_is_stored_exactly_as_today(monk
           "api_key": {"exchange": "mt5"}}]
     )
     assert "key_inputs_mismatch" not in book["degrade_reasons"]
+    assert "writer_basis_withheld" not in payload  # untimed: no token, no block
+
+
+# ── 229 plan 03 (MT5D-07): a timed MT5 key that stores no writer basis is blocked, by name ────
+
+# No close on 10-07 (day 3) only: day 4 is priced. Unlike the hole shape above, nothing happens on
+# the unpriced days, so the key has unpriced days but no INTERIOR hole (nothing separates).
+_SILENT_BTC_CLOSES = {k: v for k, v in _BTC_CLOSES.items() if k != "2026-10-07"}
+
+
+def _btc_silent_timed_ledger():
+    """Deposit on day 0, a trade on day 1 with no flow, a timed deposit (09:00) then a SMALL
+    position (10:00-15:00) on day 2, a flow-free trade on days 3 and 4. The timed trade is small and late on
+    purpose: a large timed day trips ``inception_unreconciled`` and would block the book for the
+    wrong reason (RESEARCH Pitfall 1)."""
+    from tests.test_mt5_deal_reconstruction import _timed_flow_deal, _timed_position_deals, _utc_ms
+
+    d = _BTC_DAYS
+    flows = [(_utc_ms(d[0], 8), Fraction(1)), (_utc_ms(d[2], 9), Fraction("0.01"))]
+    positions = [
+        (_utc_ms(d[1], 9), _utc_ms(d[1], 16), Fraction("0.01")),
+        (_utc_ms(d[2], 10), _utc_ms(d[2], 15), Fraction("0.0005")),
+        # Untimed-in-effect trades on days 3 and 4: they give the days a native return row, which
+        # the missing 10-07 close then leaves unpriced (days 3 and 4, nothing after them).
+        (_utc_ms(d[3], 9), _utc_ms(d[3], 16), Fraction("0.001")),
+        (_utc_ms(d[4], 9), _utc_ms(d[4], 16), Fraction("0.001")),
+    ]
+    deals = [_timed_flow_deal(ms, amount) for ms, amount in flows]
+    for position_id, position in enumerate(positions, start=5001):
+        deals += _timed_position_deals(position_id, *position)
+    return deals
+
+
+async def _derive_silent_btc_key(monkeypatch):
+    return await _derive_btc_key(
+        monkeypatch, _btc_silent_timed_ledger(), equity=1.0225, closes=_SILENT_BTC_CLOSES
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_timed_btc_key_with_a_trailing_unpriced_close_is_blocked_by_name(
+    monkeypatch, caplog
+) -> None:
+    """MT5D-07 (founder ruling 2026-11-24, "Block it"). A timed MT5 key with a missing close but
+    no interior hole stores neither a basis nor segment terminals, so before this phase it
+    composed on the legacy roll with ``degrade_reasons == []`` and ``is_trustworthy`` True. The
+    writer now stores the branch that returned no basis, the compose blocks the book as
+    ``key_inputs_mismatch``, and each side logs one counts-only line."""
+    import logging
+
+    from tests.test_allocator_equity_dropped_day_pnl import _csv_returns
+
+    with caplog.at_level(logging.WARNING):
+        payload, capture = await _derive_silent_btc_key(monkeypatch)
+
+    # Preconditions: a fixture that blocks for another reason, or is not this shape, must not pass.
+    assert payload["unpriced_days"], payload["unpriced_days"]
+    assert "2026-10-07" in payload["unpriced_days"]
+    assert payload["segment_terminals"] == []
+    assert "composed_flows" not in payload and "composed_day_pnl" not in payload
+
+    # The writer names the branch that withheld the basis.
+    assert payload.get("writer_basis_withheld") == "unpriced_days_without_interior_hole"
+    derive_lines = [r.getMessage() for r in caplog.records if "stores no writer basis" in r.getMessage()]
+    assert len(derive_lines) == 1, derive_lines
+    assert "unpriced_days_without_interior_hole" in derive_lines[0]
+    assert "123456" not in derive_lines[0]  # the login
+    assert not any(day.isoformat() in derive_lines[0] for day in _BTC_DAYS)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        book = await _compose_job(
+            [{"id": "key-mt5", "payload": payload, "returns": _csv_returns(capture),
+              "api_key": {"exchange": "mt5"}}]
+        )
+    assert "key_inputs_mismatch" in book["degrade_reasons"], book["degrade_reasons"]
+    assert book["is_trustworthy"] is False
+    compose_lines = [r.getMessage() for r in caplog.records if "no writer basis" in r.getMessage()
+                     and "compose" in r.getMessage()]
+    assert len(compose_lines) == 1, compose_lines
+    assert "key-mt5" not in compose_lines[0] and _ALLOC not in compose_lines[0]
+    assert "unpriced_days_without_interior_hole=1" in compose_lines[0]
 
 
 def _convert(closes: dict[str, float], *, days: int = 3):
@@ -1921,3 +2007,904 @@ def test_the_refusal_for_a_non_finite_writer_pnl_names_no_amount() -> None:
     msg = str(exc.value)
     assert "non-finite writer day P&L" in msg
     assert not any(ch.isdigit() for ch in msg)
+
+
+# ── 229 plan 03 Task 2: every read site, the no-history removal, the closed token set ─────────
+
+
+def _rows_with_token(rows: list[dict], key: str, token: str = "interior_hole") -> list[dict]:
+    """``rows`` with ``key``'s stored payload carrying the withheld token."""
+    for r in rows:
+        if r["id"] == key:
+            r["payload"] = {**r["payload"], "writer_basis_withheld": token}
+    return rows
+
+
+async def _departed_book_pair() -> tuple[dict, dict]:
+    """A live key plus a revoked (departed) key, composed without and with the token."""
+    acct = _Forward()
+    last_live = 20
+    live_days = [_iso(i) for i in range(0, last_live + 1)]
+    live = {
+        "id": "key-L",
+        "payload": {
+            "flows": [], "anchor_usd": 1000.0, "anchor_null_reason": None,
+            "anchor_asof": f"{live_days[-1]}T06:00:00+00:00", "venue": "binance",
+        },
+        "returns": pd.Series([0.01] * len(live_days), index=live_days),
+        "api_key": {"exchange": "binance"},
+    }
+    tday, tusd = acct.terminal
+
+    def _departed(token: str | None) -> dict:
+        payload = {
+            "flows": [{"utc_day_iso": f.utc_day_iso, "usd_signed": f.usd_signed} for f in acct.event_flows],
+            "anchor_usd": tusd, "anchor_null_reason": None,
+            "anchor_asof": f"{tday}T06:00:00+00:00", "venue": "deribit",
+            "realized_terminal_usd": tusd, "realized_terminal_day": tday,
+        }
+        if token is not None:
+            payload["writer_basis_withheld"] = token
+        return {
+            "id": "key-D", "payload": payload, "returns": acct.returns,
+            "api_key": {"sync_status": "revoked", "venue_account_id": "acct-departed"},
+        }
+
+    without = await _compose_job([live, _departed(None)])
+    assert "departed_history_included" in without["flags"]  # the departed key is in the book
+    blocked = await _compose_job([live, _departed("unpriced_days_without_interior_hole")])
+    return without, blocked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["stitch-source", "counted"])
+async def test_a_stitch_source_or_counted_key_with_the_token_blocks_the_book(
+    measured: _Measured, measured_payload: dict, site: str
+) -> None:
+    """The token blocks at the LIVE ``key_inputs`` read sites (a departed key is exempt, see the
+    test below). The same account is composed with and without it, so the block keys on the token
+    and not on the account's shape. In ``_STITCH_WINDOWS`` key-M is the newest member (the counted
+    key) and key-A a stitch source."""
+    clean = await _compose_job(_member_rows(measured, measured_payload))
+    key = {"stitch-source": "key-A", "counted": "key-M"}[site]
+    book = await _compose_job(_rows_with_token(_member_rows(measured, measured_payload), key))
+    assert "key_inputs_mismatch" not in clean["degrade_reasons"]
+    assert "key_inputs_mismatch" in book["degrade_reasons"], book["degrade_reasons"]
+    assert book["is_trustworthy"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_departed_key_with_the_token_is_exempt_and_flagged_not_blocked(caplog) -> None:
+    """229 MR-01 (founder ruling "Exempt departed keys"): a revoked key's saved row is its last
+    word, and a basis the writer withheld cannot be rebuilt for a key nobody is syncing. The book
+    is NOT blocked; it carries the benign ``departed_writer_basis_unchecked`` flag and the count,
+    and the log says the count only."""
+    import logging
+
+    clean, _ = await _departed_book_pair()
+    with caplog.at_level(logging.WARNING):
+        _, book = await _departed_book_pair()
+    assert "key_inputs_mismatch" not in book["degrade_reasons"], book["degrade_reasons"]
+    assert "departed_writer_basis_unchecked" in book["flags"]
+    assert book["inputs"]["departed_writer_basis_unchecked_keys"] == 1
+    assert "departed_writer_basis_unchecked" not in clean["flags"]
+    assert "departed_writer_basis_unchecked_keys" not in clean["inputs"]
+    lines = [r.getMessage() for r in caplog.records if "229 MR-01" in r.getMessage()]
+    assert lines and "1 departed key(s)" in lines[0], lines
+    assert not any("key-D" in ln or "unpriced_days" in ln for ln in lines), lines
+
+
+@pytest.mark.asyncio
+async def test_a_removed_no_history_key_with_the_token_does_not_block_the_book() -> None:
+    """A failing key with a saved row and NO return day is left out of the book by the
+    no-history rule. It is not in the book, so its token must not block it."""
+    days = [_iso(i) for i in range(0, 21)]
+    healthy = {
+        "id": "key-H",
+        "payload": {
+            "flows": [], "anchor_usd": 1000.0, "anchor_null_reason": None,
+            "anchor_asof": f"{days[-1]}T06:00:00+00:00", "venue": "binance",
+        },
+        "returns": pd.Series([0.01] * len(days), index=days),
+        "api_key": {"exchange": "binance"},
+    }
+
+    def _failing(token: str | None) -> dict:
+        payload = {
+            "flows": [], "anchor_usd": 500.0, "anchor_null_reason": None,
+            "anchor_asof": f"{days[-1]}T06:00:00+00:00", "venue": "mt5",
+        }
+        if token is not None:
+            payload["writer_basis_withheld"] = token
+        return {
+            "id": "key-F", "payload": payload,
+            "returns": pd.Series([], index=pd.Index([], dtype=object), dtype=float),
+            "api_key": {"exchange": "mt5", "sync_status": "error"},
+        }
+
+    plain = await _compose_job([healthy, _failing(None)])
+    tokened = await _compose_job([healthy, _failing("interior_hole")])
+    assert "key_inputs_mismatch" not in tokened["degrade_reasons"], tokened["degrade_reasons"]
+    assert tokened["degrade_reasons"] == plain["degrade_reasons"]  # the token moved nothing
+
+
+def test_every_writer_basis_branch_names_a_closed_token() -> None:
+    """Each branch that builds no basis names itself with a member of the closed set, and a
+    fully priced hole-free key builds a basis and carries no reason."""
+    from services.allocator_equity_derive import WRITER_BASIS_WITHHELD_TOKENS
+    from services.job_worker import _convert_native_key_to_usd, _native_key_usd_writer_basis
+
+    produced: dict[str, str] = {}
+
+    # no_usd_return_day: closes on no return day (priced_through is None)
+    out = _convert({"2026-10-20": 100.0})
+    assert out.priced_through is None and out.composed_day_pnl is None
+    produced["no_usd_return_day"] = out.writer_basis_reason or ""
+
+    def _five_days(close_days: tuple[int, ...]):
+        idx = pd.DatetimeIndex([pd.Timestamp(2026, 10, 4 + i) for i in range(5)])
+        closes = pd.Series(
+            [100.0 + d for d in close_days],
+            index=pd.DatetimeIndex([pd.Timestamp(2026, 10, d) for d in close_days]),
+        )
+        return _convert_native_key_to_usd(
+            unit="BTC", closes=closes,
+            native_returns=pd.Series([float("nan"), 0.1, 0.01, 0.02, 0.01], index=idx),
+            native_day_pnl=pd.Series([0.5, 0.2, 0.02, 0.04, 0.02], index=idx),
+            native_nav_levels=pd.Series([2.0, 2.2, 2.22, 2.26, 2.28], index=idx),
+            native_flow_by_day={},
+        )
+
+    # interior_hole: no close on 10-06 while 10-08 is priced, so a priced event follows the gap
+    hole = _five_days((4, 5, 7, 8))
+    assert hole.unpriced_days and hole.composed_day_pnl is None
+    produced["interior_hole"] = hole.writer_basis_reason or ""
+
+    # unpriced_days_without_interior_hole: unpriced days with no priced event after them
+    trailing = _five_days((4, 5, 6, 8))  # 10-07 has no close, so 10-07 and 10-08 are unpriced
+    assert trailing.unpriced_days and trailing.composed_day_pnl is None
+    produced["unpriced_days_without_interior_hole"] = trailing.writer_basis_reason or ""
+
+    # the pure function: its three remaining branches
+    empty = pd.Series([], index=pd.DatetimeIndex([]), dtype=float)
+    lv = pd.Series([2.0, 2.2], index=pd.DatetimeIndex([pd.Timestamp(2026, 10, 4), pd.Timestamp(2026, 10, 5)]))
+    kw = {"native_flow_by_day": {}, "flows": []}
+    produced["no_levels_or_pnl"] = _native_key_usd_writer_basis(
+        native_nav_levels=empty, native_day_pnl=empty, close_by_day={},
+        priced_through=pd.Timestamp(2026, 10, 5), **kw,
+    )  # type: ignore[assignment]
+    produced["first_day_unpriceable"] = _native_key_usd_writer_basis(
+        native_nav_levels=lv,
+        native_day_pnl=pd.Series([0.2], index=pd.DatetimeIndex([pd.Timestamp(2026, 10, 5)])),
+        close_by_day={pd.Timestamp(2026, 10, 4): 1.0, pd.Timestamp(2026, 10, 5): 1.0},
+        priced_through=pd.Timestamp(2026, 10, 5), **kw,
+    )  # type: ignore[assignment]
+    produced["calendar_day_without_close"] = _native_key_usd_writer_basis(
+        native_nav_levels=lv,
+        native_day_pnl=pd.Series([0.5, 0.2], index=lv.index),
+        close_by_day={pd.Timestamp(2026, 10, 4): 1.0},
+        priced_through=pd.Timestamp(2026, 10, 5), **kw,
+    )  # type: ignore[assignment]
+
+    for branch, token in produced.items():
+        assert token == branch, (branch, token)
+        assert token in WRITER_BASIS_WITHHELD_TOKENS
+    # no_carried_level and store_gate_unmet are reasoned unreachable / a fallback: members only
+    assert {"no_carried_level", "store_gate_unmet"} <= WRITER_BASIS_WITHHELD_TOKENS
+    assert set(produced) | {"no_carried_level", "store_gate_unmet"} == WRITER_BASIS_WITHHELD_TOKENS
+
+    full = _convert({"2026-10-04": 100.0, "2026-10-05": 110.0, "2026-10-06": 90.0})
+    assert full.composed_day_pnl is not None and full.writer_basis_reason is None
+
+
+@pytest.mark.parametrize(
+    ("stored", "want"),
+    [
+        ({}, None),
+        ({"writer_basis_withheld": None}, None),
+        ({"writer_basis_withheld": "interior_hole"}, "interior_hole"),
+        ({"writer_basis_withheld": "a_token_a_later_writer_adds"}, "a_token_a_later_writer_adds"),
+        ({"writer_basis_withheld": ""}, ValueError),
+        ({"writer_basis_withheld": 0}, ValueError),
+        ({"writer_basis_withheld": True}, ValueError),
+        ({"writer_basis_withheld": ["interior_hole"]}, ValueError),
+        ({"writer_basis_withheld": {"t": "interior_hole"}}, ValueError),
+    ],
+)
+def test_the_withheld_token_reader(stored: dict, want: object) -> None:
+    """Absent or null is a legacy row (None, never blocked); a non-empty string comes back
+    unchanged, one outside the closed set included (it still blocks); anything else is a
+    ``ValueError`` that echoes no stored value."""
+    from services.allocator_equity_derive import read_writer_basis_withheld
+
+    if want is ValueError:
+        with pytest.raises(ValueError) as exc:
+            read_writer_basis_withheld(stored)
+        assert "interior_hole" not in str(exc.value)
+        return
+    assert read_writer_basis_withheld(stored) == want
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["", 7, ["secret-token-987"]])
+async def test_a_malformed_withheld_token_disposes_the_compose_job_as_a_corrupt_input(
+    measured: _Measured, measured_payload: dict, bad: object
+) -> None:
+    row = _stored_row(measured_payload)
+    row["writer_basis_withheld"] = bad
+    result, fake = await _run_compose(
+        [{"id": "key-drb", "payload": row, "returns": measured.stored_returns}]
+    )
+
+    assert result.outcome.name == "FAILED"
+    assert result.error_kind == "permanent"
+    assert "corrupt persisted input" in result.error_message
+    assert "987" not in result.error_message
+    from tests.test_derive_allocator_equity_job import _curve_upserts
+
+    assert _curve_upserts(fake) == []
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_stored_token_blocks_and_is_counted_as_unknown_never_echoed(
+    measured: _Measured, measured_payload: dict, caplog
+) -> None:
+    import logging
+
+    rows = _rows_with_token(_member_rows(measured, measured_payload), "key-M", "totally_new_token")
+    with caplog.at_level(logging.WARNING):
+        book = await _compose_job(rows)
+    assert "key_inputs_mismatch" in book["degrade_reasons"]
+    lines = [r.getMessage() for r in caplog.records if "carry no writer basis" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "unknown=1" in lines[0]
+    assert "totally_new_token" not in lines[0]
+
+
+# ── 229 plan 05 (HOLD-03): the per-day returns stamp, compared per raw key before the stitch ──
+
+
+def _btc_deals_from(flows, positions) -> list[dict]:
+    """The MT5 deals for an exact flow and position list (the shape ``_btc_timed_ledger`` builds)."""
+    from tests.test_mt5_deal_reconstruction import _timed_flow_deal, _timed_position_deals
+
+    deals = [_timed_flow_deal(ms, amount) for ms, amount in flows]
+    for position_id, position in enumerate(positions, start=3001):
+        deals += _timed_position_deals(position_id, *position)
+    return deals
+
+
+async def _btc_derive_with_position(monkeypatch, index: int, pnl: Fraction):
+    """A BTC derive of the timed ledger with position ``index``'s P&L replaced by ``pnl`` (the
+    equity moved with it), so two such derives end on the same last day with different returns."""
+    _deals, flows, positions = _btc_timed_ledger()
+    positions = [
+        (*p[:2], pnl) if i == index else p for i, p in enumerate(positions)
+    ]
+    native_terminal = float(
+        sum((a for _m, a in flows), Fraction(0)) + sum((p for *_x, p in positions), Fraction(0))
+    )
+    return await _derive_btc_key(
+        monkeypatch, _btc_deals_from(flows, positions), equity=native_terminal, closes=_BTC_CLOSES
+    )
+
+
+_STAMP_LINE = "returns stamp"
+
+
+def _stamp_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if _STAMP_LINE in r.getMessage()
+            and r.levelname == "WARNING"]
+
+
+# SFH-229-02: the job's LAST attempt. A stamp mismatch ends the job transient on every earlier attempt
+# (the R2-WR-01 read-race retry) and blocks as ``key_inputs_mismatch`` only on this one.
+_LAST_ATTEMPT = {"attempts": 3, "max_attempts": 3}
+
+
+def _pair_members(payload_from: tuple, returns_from: tuple) -> list[dict]:
+    from tests.test_allocator_equity_dropped_day_pnl import _csv_returns
+
+    return [
+        {"id": "key-mt5", "payload": payload_from[0], "returns": _csv_returns(returns_from[1]),
+         "api_key": {"exchange": "mt5"}}
+    ]
+
+
+async def _pair_book(payload_from: tuple, returns_from: tuple) -> dict:
+    """Compose one key whose row is one derive's and whose returns are another's, on the last attempt."""
+    return await _compose_job(
+        _pair_members(payload_from, returns_from), job_extra=_LAST_ATTEMPT
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_same_terminal_rederive_pair_with_a_quiet_day_correction_is_refused(
+    monkeypatch, caplog
+) -> None:
+    """HOLD-03 (ROADMAP SC-4, second sentence). Derive A, and derive B whose 10-07 position P&L
+    moved from 0.021 to 0.022 BTC: both end on the same last day, so the calendar gate and the
+    terminal gate pass. A key_inputs row from A composed with B's returns is two derives sharing
+    a calendar, and must be refused as the blocking ``key_inputs_mismatch`` (at the unedited
+    code it composed with ``degrade_reasons == []``). A with its own returns is never refused."""
+    import logging
+
+    a = await _btc_derive_with_position(monkeypatch, 1, Fraction("0.021"))
+    b = await _btc_derive_with_position(monkeypatch, 1, Fraction("0.022"))
+
+    # Preconditions: the two derives share a calendar and differ in a stored return.
+    from tests.test_allocator_equity_dropped_day_pnl import _csv_returns
+
+    ra, rb = _csv_returns(a[1]), _csv_returns(b[1])
+    assert list(ra.index) == list(rb.index)
+    assert not ra.equals(rb)
+    # A's payload carries the stamp of exactly A's own stored returns.
+    stamp = {r["utc_day_iso"]: r["return"] for r in a[0]["returns_stamp"]}
+    assert stamp == {d: float(v) for d, v in ra.items()}
+
+    with caplog.at_level(logging.WARNING):
+        own = await _pair_book(a, a)
+    assert "key_inputs_mismatch" not in own["degrade_reasons"], own["degrade_reasons"]
+    assert not _stamp_lines(caplog)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        mixed = await _pair_book(a, b)
+    assert "key_inputs_mismatch" in mixed["degrade_reasons"], mixed["degrade_reasons"]
+    assert mixed["is_trustworthy"] is False
+    lines = _stamp_lines(caplog)
+    assert len(lines) == 1, lines
+    assert "key-mt5" not in lines[0] and _ALLOC not in lines[0]
+    assert not any(d.isoformat() in lines[0] for d in _BTC_DAYS)
+
+
+@pytest.mark.asyncio
+async def test_a_same_terminal_rederive_pair_with_a_timed_day_correction_is_refused(
+    monkeypatch, caplog
+) -> None:
+    """HOLD-03, the timed half. B moves the 10-05 position (the timed deposit-and-trade day, whose
+    stored return is a product of cohort returns and cannot be inverted to a P&L) from 0.011 to
+    0.012 BTC. A with B's returns is refused by name; A with its own returns is not."""
+    import logging
+
+    a = await _btc_derive_with_position(monkeypatch, 0, Fraction("0.011"))
+    b = await _btc_derive_with_position(monkeypatch, 0, Fraction("0.012"))
+
+    with caplog.at_level(logging.WARNING):
+        own = await _pair_book(a, a)
+    assert "key_inputs_mismatch" not in own["degrade_reasons"], own["degrade_reasons"]
+    assert not _stamp_lines(caplog)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        mixed = await _pair_book(a, b)
+    assert "key_inputs_mismatch" in mixed["degrade_reasons"], mixed["degrade_reasons"]
+    assert mixed["is_trustworthy"] is False
+    assert len(_stamp_lines(caplog)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_counted_key_whose_stamp_disagrees_ends_transient_before_the_last_attempt(
+    monkeypatch,
+) -> None:
+    """SFH-229-02. The derive writes ``csv_daily_returns`` BEFORE its ``key_inputs`` row, so a compose
+    reading between those writes sees new returns against the old stamp. A same-terminal re-derive
+    that revises an in-window return does not move the last day, so R2-WR-01's last-day check misses
+    it. Every attempt before the last ends the job transient (nothing is persisted, the retry
+    re-reads); the last attempt composes what is stored and blocks as ``key_inputs_mismatch``."""
+    a = await _btc_derive_with_position(monkeypatch, 1, Fraction("0.021"))
+    b = await _btc_derive_with_position(monkeypatch, 1, Fraction("0.022"))
+    members = _pair_members(a, b)
+
+    for attempt in (0, 1, 2):
+        result, fake = await _run_compose(members, job_extra={"attempts": attempt, "max_attempts": 3})
+        assert result.outcome.name == "FAILED", (attempt, result.outcome)
+        assert result.error_kind == "transient", (attempt, result.error_kind)
+        assert "newer than their key_inputs row" in (result.error_message or "")
+        from tests.test_derive_allocator_equity_job import _curve_upserts
+
+        assert not _curve_upserts(fake), "a transient end must not persist a curve"
+
+    book = await _compose_job(members, job_extra=_LAST_ATTEMPT)
+    assert "key_inputs_mismatch" in book["degrade_reasons"], book["degrade_reasons"]
+    assert book["is_trustworthy"] is False
+
+
+def _stamped(rows: list[dict]) -> list[dict]:
+    """Each member's row carrying the returns stamp of exactly that member's own stored returns."""
+    for r in rows:
+        r["payload"] = {
+            **r["payload"],
+            "returns_stamp": [
+                {"utc_day_iso": str(d), "return": float(v)} for d, v in r["returns"].items()
+            ],
+        }
+    return rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("member", ["key-A", "key-M"])
+async def test_a_stitched_member_whose_rows_disagree_with_its_stamp_is_refused(
+    measured: _Measured, measured_payload: dict, member: str, caplog
+) -> None:
+    """The compare runs per RAW member, before ``stitch_shared_account`` joins the series. With
+    every member stamped from its own rows the stitched account composes with no stamp warning.
+    Moving ONE stored return of ONE member by 1e-6 (its stamp unchanged) raises
+    ``key_inputs_mismatch``: key-A is a stitch source, key-M the counted key (two read sites)."""
+    import logging
+
+    healthy = _stamped(_member_rows(measured, measured_payload))
+    with caplog.at_level(logging.WARNING):
+        clean = await _compose_job(healthy)
+    assert "key_inputs_mismatch" not in clean["degrade_reasons"], clean["degrade_reasons"]
+    assert "shared_account_history_stitched" in clean["flags"]
+    assert not _stamp_lines(caplog)
+
+    perturbed = _stamped(_member_rows(measured, measured_payload))
+    for r in perturbed:
+        if r["id"] == member:
+            series = r["returns"].copy()
+            series.iloc[len(series) // 2] += 1e-6
+            r["returns"] = series
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        book = await _compose_job(perturbed, job_extra=_LAST_ATTEMPT)
+    assert "key_inputs_mismatch" in book["degrade_reasons"], book["degrade_reasons"]
+    assert book["is_trustworthy"] is False
+    lines = _stamp_lines(caplog)
+    assert len(lines) == 1 and "1 key(s)" in lines[0] and "1 day(s)" in lines[0], lines
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agrees", [True, False])
+async def test_a_departed_key_whose_rows_disagree_with_its_stamp_is_exempt_and_flagged(
+    agrees: bool,
+) -> None:
+    """The departed site: a revoked key replayed from its saved row. 229 MR-01 (founder ruling
+    "Exempt departed keys"): a disagreeing stamp no longer refuses the book. It raises the benign
+    ``departed_writer_basis_unchecked`` flag and the count; an agreeing one raises neither. The
+    live-key refusal on a disagreeing stamp is pinned by the test above this one."""
+    acct = _Forward()
+    days = [_iso(i) for i in range(0, 21)]
+    live = {
+        "id": "key-L",
+        "payload": {
+            "flows": [], "anchor_usd": 1000.0, "anchor_null_reason": None,
+            "anchor_asof": f"{days[-1]}T06:00:00+00:00", "venue": "binance",
+        },
+        "returns": pd.Series([0.01] * len(days), index=days),
+        "api_key": {"exchange": "binance"},
+    }
+    tday, tusd = acct.terminal
+    stamp_values = {str(d): float(v) for d, v in acct.returns.items()}
+    if not agrees:
+        first = sorted(stamp_values)[3]
+        stamp_values[first] += 1e-6
+    departed = {
+        "id": "key-D",
+        "payload": {
+            "flows": [{"utc_day_iso": f.utc_day_iso, "usd_signed": f.usd_signed} for f in acct.event_flows],
+            "anchor_usd": tusd, "anchor_null_reason": None,
+            "anchor_asof": f"{tday}T06:00:00+00:00", "venue": "deribit",
+            "realized_terminal_usd": tusd, "realized_terminal_day": tday,
+            "returns_stamp": [
+                {"utc_day_iso": d, "return": v} for d, v in sorted(stamp_values.items())
+            ],
+        },
+        "returns": acct.returns,
+        "api_key": {"sync_status": "revoked", "venue_account_id": "acct-departed"},
+    }
+    book = await _compose_job([live, departed])
+    assert "departed_history_included" in book["flags"]  # the departed key is in the book
+    assert "key_inputs_mismatch" not in book["degrade_reasons"], book["degrade_reasons"]
+    assert ("departed_writer_basis_unchecked" in book["flags"]) is (not agrees)
+    assert book["inputs"].get("departed_writer_basis_unchecked_keys") == (None if agrees else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_marks", [False, True])
+async def test_the_short_exit_stamps_only_the_rows_it_wrote(monkeypatch, with_marks: bool) -> None:
+    """The under-two-days exit upserts no ``csv_daily_returns`` row here (no marked row was
+    measured), so its ``key_inputs`` carries NO ``returns_stamp``: a stamp of the in-memory returns
+    would refuse a healthy key forever. Built on the ``read_key_marks`` patch shape of
+    ``tests.test_mt5_derive_branch._derive_and_observe_apply_marks`` (a USD key of 10 USD, so the
+    material-equity refusal does not fire, with a one-day ledger), with and without a stored mark.
+    Not reachable here: a short exit that DOES upsert a marked row (see the SUMMARY)."""
+    import logging
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import services.mt5_concurrency as mt5_conc
+    from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
+    from tests.test_mt5_derive_branch import (
+        StoredMark,
+        _apply,
+        _build_ctx as _mt5_build_ctx,
+        _FakeMt5Transport,
+    )
+
+    def _wall(day: int, hour: int) -> int:
+        from datetime import datetime, timezone
+
+        return int(datetime(2025, 11, day, hour, tzinfo=timezone.utc).timestamp())
+
+    zero = {"swap": 0.0, "commission": 0.0, "fee": 0.0}
+    deals = [
+        {"type": 2, "profit": 100_000.0, "time": _wall(9, 6), "time_msc": _wall(9, 6) * 1000, **zero},
+        {"type": 0, "entry": 1, "profit": 500.0, "time": _wall(9, 12), **zero},
+    ]
+    mark = StoredMark(
+        "2025-11-09", "2025-11-10T00:10:00+00:00", "mt5", 100_500.0, 0.0, 100_500.0, "USD", 0.0
+    )
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={"equity": 10.0, "balance": 10.0, "currency": "USD", "login": 123456}, deals=deals
+    )
+    ctx, capture = _mt5_build_ctx(transport)
+    ctx.strategy_row = None
+    mt5_conc.reset_terminal_state_for_tests()
+    try:
+        with _apply([
+            patch("services.job_worker._allocator_key_preflight", new=AsyncMock(return_value=ctx)),
+            patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+            patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())),
+            patch(
+                "services.job_worker.read_key_marks",
+                new=MagicMock(return_value=[mark] if with_marks else []),
+            ),
+        ]):
+            result = await run_derive_broker_dailies_job(
+                {"id": "j-short", "kind": "derive_broker_dailies", "api_key_id": "key-mt5"}
+            )
+    finally:
+        mt5_conc.reset_terminal_state_for_tests()
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    # Preconditions: this IS the under-two-days exit, and it wrote no returns row.
+    assert not [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+    payload = _key_inputs_payload(capture, "key-mt5")
+    assert ("marks_since" in payload) is with_marks
+    assert "composed_day_pnl" in payload  # the store gate's basis branch DID run
+    assert "returns_stamp" not in payload
+
+
+@pytest.mark.asyncio
+async def test_a_removed_no_history_key_with_a_stamp_does_not_block_the_book() -> None:
+    """A failing key with a stamped row and NO return day is left out by the no-history rule, so
+    its stamp (two days against no rows) must not block the book."""
+    days = [_iso(i) for i in range(0, 21)]
+    healthy = {
+        "id": "key-H",
+        "payload": {
+            "flows": [], "anchor_usd": 1000.0, "anchor_null_reason": None,
+            "anchor_asof": f"{days[-1]}T06:00:00+00:00", "venue": "binance",
+        },
+        "returns": pd.Series([0.01] * len(days), index=days),
+        "api_key": {"exchange": "binance"},
+    }
+
+    def _failing(stamped: bool) -> dict:
+        payload = {
+            "flows": [], "anchor_usd": 500.0, "anchor_null_reason": None,
+            "anchor_asof": f"{days[-1]}T06:00:00+00:00", "venue": "mt5",
+        }
+        if stamped:
+            payload["returns_stamp"] = [
+                {"utc_day_iso": days[0], "return": 0.01}, {"utc_day_iso": days[1], "return": 0.02}
+            ]
+        return {
+            "id": "key-F", "payload": payload,
+            "returns": pd.Series([], index=pd.Index([], dtype=object), dtype=float),
+            "api_key": {"exchange": "mt5", "sync_status": "error"},
+        }
+
+    plain = await _compose_job([healthy, _failing(False)])
+    stamped = await _compose_job([healthy, _failing(True)])
+    assert "key_inputs_mismatch" not in stamped["degrade_reasons"], stamped["degrade_reasons"]
+    assert stamped["degrade_reasons"] == plain["degrade_reasons"]
+
+
+# ── 229 plan 05 Task 3: the healthy-pair family, the unit tables, the determinism pin ─────────
+
+_HEALTHY_SHAPES = [
+    "btc-timed",
+    "usd-timed-mixed",
+    "usd-timed-flows-net-to-zero",
+    "usd-guard-nan-day",
+    "usd-dust-interior-nan-day",
+    "usd-two-day-run",
+]
+
+
+async def _healthy_shape(monkeypatch, name: str) -> tuple[dict, dict]:
+    """One derive of ``name``; ``(key_inputs payload, capture)``."""
+    from tests.test_allocator_equity_dropped_day_pnl import (
+        _mt5_deals,
+        funding_and_dominated_book,
+        funding_and_dust_interior_book,
+        two_day_run_book,
+    )
+    from tests.test_mt5_deal_reconstruction import (
+        _MM2X_FIRST_DEPOSIT,
+        _timed_flow_deal,
+        _timed_position_deals,
+        _utc_ms,
+    )
+
+    if name == "btc-timed":
+        deals, flows, positions = _btc_timed_ledger()
+        terminal = float(
+            sum((a for _m, a in flows), Fraction(0)) + sum((p for *_x, p in positions), Fraction(0))
+        )
+        return await _derive_btc_key(monkeypatch, deals, equity=terminal, closes=_BTC_CLOSES)
+    if name == "usd-timed-mixed":
+        flows, positions = _timed_shape("mixed")
+        day_of = lambda ms: ms // 86_400_000  # noqa: E731
+        last = max([day_of(ms) for ms, _a in flows] + [day_of(c) for _o, c, _p in positions])
+        deals = [_timed_flow_deal(ms, amount) for ms, amount in flows]
+        for position_id, position in enumerate(positions, start=2001):
+            deals += _timed_position_deals(position_id, *position)
+        terminal = float(_event_levels(flows, positions, last_day=last)[last])
+        return await _run_mt5_key_derive(monkeypatch, deals, equity=terminal, balance=terminal)
+    if name == "usd-timed-flows-net-to-zero":
+        d = [_MM2X_FIRST_DEPOSIT + timedelta(i) for i in range(4)]
+        flows = [
+            (_utc_ms(d[0], 8), Fraction(1000)),
+            (_utc_ms(d[1], 9), Fraction(100)),    # deposit, a trade, then the same amount out
+            (_utc_ms(d[1], 16), Fraction(-100)),
+        ]
+        positions = [
+            (_utc_ms(d[1], 10), _utc_ms(d[1], 15), Fraction(11)),
+            (_utc_ms(d[2], 9), _utc_ms(d[2], 15), Fraction(21)),
+            (_utc_ms(d[3], 9), _utc_ms(d[3], 15), Fraction(-13)),
+        ]
+        deals = [_timed_flow_deal(ms, amount) for ms, amount in flows]
+        for position_id, position in enumerate(positions, start=2001):
+            deals += _timed_position_deals(position_id, *position)
+        terminal = float(
+            sum((a for _m, a in flows), Fraction(0)) + sum((p for *_x, p in positions), Fraction(0))
+        )
+        return await _run_mt5_key_derive(monkeypatch, deals, equity=terminal, balance=terminal)
+    book = {
+        "usd-guard-nan-day": funding_and_dominated_book,
+        "usd-dust-interior-nan-day": funding_and_dust_interior_book,
+        "usd-two-day-run": two_day_run_book,
+    }[name]()
+    nav_t = float(book.nav[-1])
+    return await _run_mt5_key_derive(monkeypatch, _mt5_deals(book), equity=nav_t, balance=nav_t)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", _HEALTHY_SHAPES)
+async def test_a_healthy_pair_is_never_refused(monkeypatch, caplog, shape: str) -> None:
+    """HOLD-03: one derive's row composed with its own returns is never refused, on every day type:
+    a timed flow day (stored return a product of cohort returns), a timed day whose flows net to
+    zero, a guard-NaN day (P&L, no return), a dust-interior NaN day, a gap-filled quiet day, and
+    a two-day run (the tiny-base book cannot go through ``_mt5_deals``: it has days without a
+    trading deal). The same row with its stamp deleted is the pre-229 compose; the
+    stamp must move nothing about it, and the warning must be absent."""
+    import logging
+
+    from tests.test_allocator_equity_dropped_day_pnl import _csv_returns
+
+    payload, capture = await _healthy_shape(monkeypatch, shape)
+    assert payload["returns_stamp"], shape  # not vacuous: this derive stored a stamp
+    if shape in ("usd-guard-nan-day", "usd-dust-interior-nan-day"):
+        assert payload["dropped_day_pnl"], shape  # a day with P&L and no stored return
+    returns = _csv_returns(capture)
+    stamp = {r["utc_day_iso"]: r["return"] for r in payload["returns_stamp"]}
+    assert stamp == {str(d): float(v) for d, v in returns.items()}, shape
+
+    api_key = {"exchange": "mt5"}
+    with caplog.at_level(logging.WARNING):
+        stamped = await _compose_job(
+            [{"id": "key-mt5", "payload": payload, "returns": returns, "api_key": api_key}]
+        )
+    bare = {k: v for k, v in payload.items() if k != "returns_stamp"}
+    unstamped = await _compose_job(
+        [{"id": "key-mt5", "payload": bare, "returns": returns, "api_key": api_key}]
+    )
+    assert not _stamp_lines(caplog), shape
+    assert stamped["degrade_reasons"] == unstamped["degrade_reasons"], shape
+    assert stamped["is_trustworthy"] == unstamped["is_trustworthy"], shape
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_pair_is_never_refused_with_a_gap_filled_quiet_day() -> None:
+    """A gap-filled quiet day stores an exact 0.0 return: its stamp row is 0.0 and agrees."""
+    days = [_iso(i) for i in range(0, 21)]
+    returns = pd.Series([0.01] * 7 + [0.0] * 3 + [0.01] * 11, index=days)
+    row = {
+        "id": "key-H",
+        "payload": {
+            "flows": [], "anchor_usd": 1000.0, "anchor_null_reason": None,
+            "anchor_asof": f"{days[-1]}T06:00:00+00:00", "venue": "binance",
+            "returns_stamp": [{"utc_day_iso": d, "return": float(v)} for d, v in returns.items()],
+        },
+        "returns": returns,
+        "api_key": {"exchange": "binance"},
+    }
+    book = await _compose_job([row])
+    assert "key_inputs_mismatch" not in book["degrade_reasons"], book["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_pair_is_never_refused_in_the_nav_marks_era(monkeypatch) -> None:
+    """A nav-marks-era MT5 key: the derive stores the stamp of the rows it wrote (the marked
+    days, the rest deleted) and the compose, reading those rows back, never refuses it."""
+    from tests.test_nav_marks_compose_roundtrip import (
+        KEY_MT5,
+        MT5_ACCOUNT,
+        KeyDb,
+        _mt5_deals_with,
+        compose_curve,
+        derive_mt5_key,
+        seed_mt5_marks,
+    )
+
+    db = KeyDb()
+    seed_mt5_marks(db)
+    deals = _mt5_deals_with({(2026, 10, 7): 5000.0})
+    result, capture = await derive_mt5_key(monkeypatch, db, account=MT5_ACCOUNT, deals=deals)
+    assert result.outcome.name == "DONE", result.error_message
+    ki = _key_inputs_payload(capture, KEY_MT5)
+    stamp = {r["utc_day_iso"]: r["return"] for r in ki["returns_stamp"]}
+    assert stamp == dict(db.rows(KEY_MT5))  # the stamp is exactly the rows the table holds
+    assert "2026-10-06" in stamp and "2026-10-08" in stamp
+    payload = await compose_curve(db, capture, key=KEY_MT5, venue="mt5")
+    assert "key_inputs_mismatch" not in payload["degrade_reasons"], payload["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_a_row_without_a_stamp_is_not_refused_and_is_counted(monkeypatch, caplog) -> None:
+    """A row written before 229 carries no stamp: never refused, counted at info level."""
+    import logging
+
+    from tests.test_allocator_equity_dropped_day_pnl import _csv_returns
+
+    payload, capture = await _healthy_shape(monkeypatch, "btc-timed")
+    bare = {k: v for k, v in payload.items() if k != "returns_stamp"}
+    assert "composed_day_pnl" in bare  # a basis row, so it is counted
+    with caplog.at_level(logging.INFO):
+        book = await _compose_job(
+            [{"id": "key-mt5", "payload": bare, "returns": _csv_returns(capture),
+              "api_key": {"exchange": "mt5"}}]
+        )
+    assert "key_inputs_mismatch" not in book["degrade_reasons"], book["degrade_reasons"]
+    counted = [r for r in caplog.records if r.levelname == "INFO" and "carry no returns stamp" in r.getMessage()]
+    assert len(counted) == 1 and counted[0].getMessage().startswith(
+        "derive_allocator_equity: 1 writer-basis row(s)"
+    ), [r.getMessage() for r in counted]
+    assert not _stamp_lines(caplog)
+
+
+def _s(*rows: tuple[str, float]) -> dict[str, float]:
+    return dict(rows)
+
+
+@pytest.mark.parametrize(
+    ("stamp", "series", "want"),
+    [
+        (_s(("2026-02-01", 0.01), ("2026-02-02", 0.02)), _s(("2026-02-01", 0.01), ("2026-02-02", 0.02)), 0),
+        (_s(("2026-02-01", 0.01), ("2026-02-02", 0.02)), _s(("2026-02-01", 0.01 + 5e-13), ("2026-02-02", 0.02)), 0),
+        (_s(("2026-02-01", 0.01), ("2026-02-02", 0.02)), _s(("2026-02-01", 0.01 + 2e-12), ("2026-02-02", 0.02)), 1),
+        (_s(("2026-02-01", 0.01), ("2026-02-02", 0.02)), _s(("2026-02-02", 0.02)), 1),  # stamped day missing
+        (_s(("2026-02-01", 0.01), ("2026-02-03", 0.03)),
+         _s(("2026-02-01", 0.01), ("2026-02-02", 0.5), ("2026-02-03", 0.03)), 1),  # stored day inside, unstamped
+        (_s(("2026-02-02", 0.02), ("2026-02-03", 0.03)),
+         _s(("2026-02-02", 0.02), ("2026-02-03", 0.03), ("2026-02-04", 0.9)), 0),  # after the window
+        (_s(("2026-02-02", 0.02), ("2026-02-03", 0.03)),
+         _s(("2026-02-01", 0.9), ("2026-02-02", 0.02), ("2026-02-03", 0.03)), 0),  # before the window
+        ({}, _s(("2026-02-01", 0.9)), 0),  # an empty stamp has no window
+        (_s(("2026-02-01", 0.01), ("2026-02-02", 0.02)), None, 2),  # no rows at all
+    ],
+    ids=["equal", "below-tol", "above-tol", "stamped-missing", "stored-inside-unstamped",
+         "after-window", "before-window", "empty-stamp", "none-series"],
+)
+def test_the_returns_stamp_mismatch_count(stamp: dict, series: object, want: int) -> None:
+    from services.allocator_equity_derive import returns_stamp_mismatch_days
+
+    as_series = None if series is None else pd.Series(series, dtype="float64")
+    assert returns_stamp_mismatch_days(stamp, as_series) == want
+    if series is not None:  # a plain mapping reads the same as a Series
+        assert returns_stamp_mismatch_days(stamp, series) == want  # type: ignore[arg-type]
+
+
+def _stamp_good() -> dict:
+    return {"returns_stamp": [
+        {"utc_day_iso": "2026-02-01", "return": 0.01},
+        {"utc_day_iso": "2026-02-02", "return": -0.02},
+    ]}
+
+
+def _stamp_with(rows: object) -> dict:
+    return {"returns_stamp": rows}
+
+
+@pytest.mark.parametrize("payload", [{}, {"returns_stamp": None}], ids=["absent", "null"])
+def test_an_older_row_reads_as_no_stamp(payload: dict) -> None:
+    from services.allocator_equity_derive import read_returns_stamp
+
+    assert read_returns_stamp(payload) is None
+
+
+def test_a_well_formed_stamp_reads_back() -> None:
+    from services.allocator_equity_derive import read_returns_stamp
+
+    assert read_returns_stamp(_stamp_good()) == {"2026-02-01": 0.01, "2026-02-02": -0.02}
+    assert read_returns_stamp(_stamp_with([])) == {}
+
+
+_MALFORMED_STAMPS = [
+    (_stamp_with([{"utc_day_iso": "2026-02-01", "return": 0.1}, {"utc_day_iso": "2026-02-01", "return": 0.2}]),
+     "duplicate day"),
+    (_stamp_with([{"utc_day_iso": "not-a-day", "return": 0.1}]), "Invalid isoformat"),
+    (_stamp_with([{"utc_day_iso": "2026-02-01", "return": "0.1"}]), "non-numeric"),
+    (_stamp_with([{"utc_day_iso": "2026-02-01", "return": True}]), "non-numeric"),
+    (_stamp_with([{"utc_day_iso": "2026-02-01", "return": float("nan")}]), "non-finite"),
+    (_stamp_with([{"utc_day_iso": "2026-02-01", "return": float("inf")}]), "non-finite"),
+    (_stamp_with({"2026-02-01": 0.1}), "not a list"),
+    (_stamp_with([{"utc_day_iso": "2026-02-01"}]), "malformed row"),
+]
+_MALFORMED_IDS = ["dup-day", "bad-day", "str-value", "bool", "nan", "inf", "not-a-list", "malformed-row"]
+
+
+@pytest.mark.parametrize(("payload", "match"), _MALFORMED_STAMPS, ids=_MALFORMED_IDS)
+def test_a_malformed_returns_stamp_raises_rather_than_being_read_as_a_guess(
+    payload: dict, match: str
+) -> None:
+    from services.allocator_equity_derive import read_returns_stamp
+
+    with pytest.raises(ValueError, match=match):
+        read_returns_stamp(payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("payload", "_match"), _MALFORMED_STAMPS[:4] + _MALFORMED_STAMPS[6:7],
+                         ids=_MALFORMED_IDS[:4] + _MALFORMED_IDS[6:7])
+async def test_a_malformed_returns_stamp_disposes_the_compose_job_as_a_corrupt_input(
+    payload: dict, _match: str
+) -> None:
+    days = [_iso(i) for i in range(0, 21)]
+    row = {
+        "id": "key-H",
+        "payload": {
+            "flows": [], "anchor_usd": 1000.0, "anchor_null_reason": None,
+            "anchor_asof": f"{days[-1]}T06:00:00+00:00", "venue": "binance", **payload,
+        },
+        "returns": pd.Series([0.01] * len(days), index=days),
+        "api_key": {"exchange": "binance"},
+    }
+    result, _fake = await _run_compose([row])
+    assert result.outcome.name == "FAILED"
+    assert result.error_kind == "permanent"
+    assert "corrupt persisted input" in result.error_message
+    # No stored AMOUNT is echoed (a bad day string is echoed by ``date.fromisoformat``, as it
+    # already is for the basis fields; it names no amount).
+    assert "0.1" not in result.error_message.replace("not-a-day", "")
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
+def test_a_non_finite_return_is_refused_before_the_upsert_without_naming_it(bad: float) -> None:
+    from services.allocator_equity_derive import returns_stamp_payload
+    from services.nav_twr import NavReconstructionError
+
+    with pytest.raises(NavReconstructionError, match="refusing to persist it") as exc:
+        returns_stamp_payload({"2026-02-01": 0.01, "2026-02-02": bad})
+    assert not any(ch.isdigit() for ch in str(exc.value))
+    assert "nan" not in str(exc.value).lower() and "inf" not in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_two_derives_over_the_same_inputs_store_a_byte_equal_returns_stamp(
+    monkeypatch,
+) -> None:
+    """A no-false-refusal pin only (the TODOS entry says determinism alone does not close HOLD-03;
+    the refused pairs above are the close): two derives over the same deals and closes store a
+    byte-equal ``returns_stamp``."""
+    import json
+
+    first, _ = await _healthy_shape(monkeypatch, "btc-timed")
+    second, _ = await _healthy_shape(monkeypatch, "btc-timed")
+    assert len(first["returns_stamp"]) >= 3
+    assert json.dumps(first["returns_stamp"], sort_keys=True) == json.dumps(
+        second["returns_stamp"], sort_keys=True
+    )

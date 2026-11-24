@@ -2596,6 +2596,49 @@ class TestDeriveBrokerDailies:
             assert "flow_timing_day_level_large_days" not in f
 
     @pytest.mark.asyncio
+    async def test_a_day_zero_pnl_on_an_inception_day_prestamps_the_bool(self) -> None:
+        """MT5D-05 end to end (the tracer). A binance strategy-mode derive whose first realized
+        day carries BOTH the account's first deposit (a 5000 USDT inception) and a realized
+        P&L (+40): the day has no return (D-12, the broker path supplies no time of day) but its
+        P&L is no longer dropped as a silent NaN. Every pre-stamp ``data_quality_flags`` dict
+        carries ``inception_day_pnl_dropped`` as a BOOL, never the in-process day count and
+        never an amount (T-73-02), and no guard key (an annotation never warns, T-229-04).
+
+        Anchor 5150 = 5000 deposit + (40 + 50 + 60) realized, so the day-0 base reconstructs to
+        zero (the inception predicate) and day 0's own P&L is the +40. Mutation-honest: removing
+        the pre-stamp carry in ``job_worker`` drops the key -> RED."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+        from services.nav_twr import NAV_TWR_GUARD_KEYS
+
+        days, realized, _ = self._guarded_day_inputs([40.0, 50.0, 60.0], None)
+        day0_ms = int(
+            _dt.datetime.fromisoformat(days[0] + "T00:00:00+00:00").timestamp() * 1000
+        )
+        deposit = {"id": "d0", "type": "deposit", "currency": "USDT",
+                   "amount": 5_000.0, "timestamp": day0_ms, "internal": False}
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="binance", deposits=[deposit], realized=realized, equity=5_150.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # day 0 is the inception day (no return, D-12); days 1 and 2 are measured
+        assert sorted(r["date"] for r in captured["csv_rows"]) == days[1:]
+        prestamp_flags = [
+            u["data_quality_flags"]
+            for u in captured["analytics_upserts"]
+            if "data_quality_flags" in u
+        ]
+        assert prestamp_flags
+        assert all(f.get("inception_day_pnl_dropped") is True for f in prestamp_flags)
+        for f in prestamp_flags:
+            assert "inception_day_pnl_dropped_days" not in f
+            assert not (set(f) & set(NAV_TWR_GUARD_KEYS))
+
+    @pytest.mark.asyncio
     async def test_clean_broker_rederive_clears_stale_warn_flags(self) -> None:
         """MED-3: the pre-stamp is UNCONDITIONAL and writes the FULL current flag
         state, so a CLEAN re-derive emits data_quality_flags == {csv_source: True}

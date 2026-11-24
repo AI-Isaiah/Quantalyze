@@ -375,6 +375,11 @@ def _merge_status_meta(
     # at least the prior NAV, whose end-of-day return can be extreme). Never a warning.
     if nav_meta.get("flow_timing_day_level_large") is True:
         meta["flow_timing_day_level_large"] = True
+    # 229 MT5D-05: same present-only carry for the inception-day annotation (a day-0 P&L the
+    # no-timing inception branch has no return for, counted by name). A BOOL only: the
+    # in-process day count is never carried (T-73-02). Never a warning.
+    if nav_meta.get("inception_day_pnl_dropped") is True:
+        meta["inception_day_pnl_dropped"] = True
     # 188 D-02: the tiny-base day list and its P&L map ride their OWN present-only carry, outside
     # the guard loop (the bool ``tiny_base_guard`` already rode it and promoted the hint). The
     # P&L map is amounts, in-process only (T-188-06): it is handed to the derive's stored
