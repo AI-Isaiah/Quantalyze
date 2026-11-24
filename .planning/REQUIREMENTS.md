@@ -151,9 +151,9 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### CI and tooling: MT5 soak (MT5SOAK)
 
-- [ ] **SOAK-01**: The soak judges a BTC-unit account on floors in its own unit, not on USD floors. (covers: 164.6.6.2.3-SOAK-BTC-FLOORS)
-- [ ] **SOAK-02**: The soak's timed-day check rejects NaN and implausible returns, not only infinity, and goes RED on a 1e-3 nudge to a timed day. (covers: 164.6.6.2.3-SOAK-TIMED-DAYS-UNCHECKED)
-- [ ] **SOAK-03**: The soak checks day attribution against an independent per-day walk that imports no production helper, and goes RED when one deal is moved by one UTC day. (covers: 164.6.6.2.3-SOAK-DAY-ATTRIBUTION)
+- [x] **SOAK-01**: The soak judges a BTC-unit account on floors in its own unit, not on USD floors. (covers: 164.6.6.2.3-SOAK-BTC-FLOORS)
+- [x] **SOAK-02**: The soak's timed-day check rejects NaN and implausible returns, not only infinity, and goes RED on a 1e-3 nudge to a timed day. (covers: 164.6.6.2.3-SOAK-TIMED-DAYS-UNCHECKED)
+- [x] **SOAK-03**: The soak checks day attribution against an independent per-day walk that imports no production helper, and goes RED when one deal is moved by one UTC day. (covers: 164.6.6.2.3-SOAK-DAY-ATTRIBUTION)
 
 ### Carried phase 222 ALERTTRUTH
 
@@ -384,9 +384,9 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | LANE-02 | Phase 249 (v1.23) | Pending |
 | LANE-03 | Phase 249 (v1.23) | Pending |
 | LANE-04 | Phase 249 (v1.23) | Pending |
-| SOAK-01 | Phase 226 | Pending |
-| SOAK-02 | Phase 226 | Pending |
-| SOAK-03 | Phase 226 | Pending |
+| SOAK-01 | Phase 226 | Complete |
+| SOAK-02 | Phase 226 | Complete |
+| SOAK-03 | Phase 226 | Complete |
 
 **Coverage:**
 - 116 requirements in all, across two milestones (F-10). FLOWK-01 was dropped by the founder on 2026-11-23 and is not counted.

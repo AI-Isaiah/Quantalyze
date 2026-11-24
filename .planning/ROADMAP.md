@@ -161,7 +161,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [ ] **Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists** - User-facing error copy and the benchmark outage label, with a migration; independent of the MT5 parity phases
 - [ ] **Phase 223: FLOWKINDS — each funding caller treats a malformed row by a recorded, tested decision, and the malformed count is on record first** - Flow-source half only (F-2, no composites): the funding callers' malformed-row decisions and the PROD malformed count; FLOWK-01 dropped
 - [ ] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23; also the seam S4 owner: server-qualified MT5 identity, the draft-clash answer, the failing-holder rule
-- [ ] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit
+- [x] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit (completed 2026-11-24)
 - [ ] **Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job** - Seam S3 owner: per-attempt failure record, first-hop drop, batch-mate reset, readmit ceiling signal, reclaim provenance, private strategies polled; migrations
 - [ ] **Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key** - Sibling of 225 on seam S4, right after it: the rotated MT5 password reconnect and the KEY_ORPHANED copy for allocators
 - [ ] **Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently** - nav_twr.py empty-cohort refund, day-0 P&L and the D-15 band, basis-silent keys, writer-basis values; moves MT5 numbers (155.2 freeze)
@@ -332,10 +332,23 @@ Plans:
 2. The timed-day check rejects NaN and implausible returns as well as infinity, and goes RED when one timed day is nudged by 1e-3. (SOAK-02)
 3. Day attribution is checked against an independent per-day walk that imports no production helper, and goes RED when one deal is moved by one UTC day. (SOAK-03)
 4. PROOF-01: each check goes RED on a neutered copy of `mt5_soak.py` with its own arm first (the BTC-floor arm, the timed-day arm, the attribution arm). It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN. The neuter edit, command, RED line and GREEN line are recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 5/5 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 226-01-PLAN.md — SOAK-01: the unit is resolved once and its floors reach the combiner, the guard and inception reads, the level tolerance and the wedge gate; an unresolvable currency is INCONCLUSIVE (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 226-02-PLAN.md — SOAK-03: a soak-owned per-day walk from the raw deals, a day and flow attribution compare against the fold, and an AST test that the walk imports no production helper (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 226-03-PLAN.md — SOAK-02: the soak's own timed-day set from raw instants and positions; a flow day the fold and the walk time differently is a named mismatch (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 226-04-PLAN.md — SOAK-02: the soak's own D-17 cohort walk; each timed day is compared exactly, so a 1e-3 nudge, NaN, inf, 7.0 and -0.99 are named mismatches (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 226-05-PLAN.md — SOAK-02: the minimum checked share (0.5), the soak-owned tiny-base reading, the untimed guards on the soak-owned predicate, the phase gates and the ship note (wave 5)
 
 ### Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job
 
@@ -666,7 +679,7 @@ Plans:
 | 222. ALERTTRUTH | 0/? | Not started | - |
 | 223. FLOWKINDS | 0/? | Not started | - |
 | 225. ONEACCOUNTONCE | 4/12 | In progress (PR-1 shipped as #1315) | - |
-| 226. MT5SOAK | 0/? | Not started | - |
+| 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
 | 227. JOBLEDGER | 0/? | Not started | - |
 | 228. KEYANSWERS | 0/? | Not started | - |
 | 229. MT5DERIVE2 | 0/? | Not started | - |
