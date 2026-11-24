@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.133.67.0] - 2026-11-24 — Phase 227 JOBLEDGER: a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job
+
+Eight migrations (20261124120000 to 20261124120700), worker changes in `analytics-service/main_worker.py` and a new readmit page. Covers MT5D-01 and HEAL-01 to HEAL-05. All eight migrations auto-apply to TEST and then PROD on merge. None schedules a job: HEAL-01's sweep is registered by hand afterwards (see Notes).
+
+### Added
+- **Attempt-failure ledger (MT5D-01).** New append-only table `compute_job_attempt_failures` (20261124120000).
+  - Every failed attempt leaves a row with its cause class: `error`, `watchdog_reset`, `stall_reclaim` or `orphan_reaped`. A stall or watchdog reset is therefore told apart from a real error.
+  - `mark_compute_job_failed` (re-based) writes the `error` row in the same transaction as the status change. The re-claim's deliberate `last_error` clear (M-1137) stays and stays pinned.
+  - New RPC `record_compute_job_attempt_error`, service_role only and token-attested. It records the real error when the worker loses the failed mark (55P03 lock bound, a late 55006, or a P0002 "not running" refusal).
+  - The table has no FK to `compute_jobs`, so the cause outlives the job rows' 30/90-day prune. It is RLS on with no policy, with service_role SELECT only.
+- **Reset and reclaim keep provenance (HEAL-04).** `reset_stalled_compute_jobs` and `reclaim_stuck_compute_jobs` (re-based, 20261124120100) write `watchdog_reset` and `stall_reclaim` rows. They also re-derive each strategy's analytics status through `sync_strategy_analytics_status`, in a sorted bridge loop.
+- **No reset and run twice (HEAL-02).** New `renew_compute_job_claims` (20261124120200), token-fenced and service_role only.
+  - The worker fences each claimed job before dispatch and skips any job the watchdog already took.
+  - A heartbeat renews the claims of the jobs queued behind the running one, never the running job itself.
+- **Readmit ceiling page (HEAL-03).** New table `reconcile_readmit_exhaustions` and detector `record_reconcile_readmit_exhaustions` (20261124120300).
+  - New `analytics-service/services/readmit_ceiling_alert.py` pages through `ops_alert`, with new source `reconcile_readmit_ceiling`. It runs from the watchdog loop.
+  - `paged_at` is stamped only after delivery is confirmed.
+- **First-hop sweep (HEAL-01).** New `first_hop_enqueue_sweep` and table `first_hop_enqueue_retries` (20261124120400).
+  - A private contribution strategy whose first `sync_trades` enqueue dropped is re-enqueued once after a 90-minute grace. If that fails, it is shown in a named failed state.
+  - Healthy look-alikes are excluded. A job on the strategy's key counts only while it is in flight.
+- **Positions poll covers private strategies (HEAL-05).** `enqueue_poll_positions_for_all_strategies` (re-based, 20261124120500) admits `private` strategies, plus a live-key conjunct and strategies kept current by the cron sync. The PROD cohort measured goes from 1 to 7.
+- **Reaped orphans keep their cause.** New trigger `compute_jobs_record_orphan_reaped_attempt` (20261124120600) records `orphan_reaped` on the terminalizer's transition.
+- **Runbooks.** New `docs/runbooks/jobledger-go-live.md` and a new section in `docs/runbooks/compute-queue.md`.
+
+### Security
+- **Erasure (GDPR-ERASE).** `sanitize_user` (re-based on 20260827130000, in 20261124120700) deletes attempt-failure rows for every owner key: `allocator_id`, `strategy_id`, `portfolio_id` and `api_key_id`.
+  - The owner cascades alone did not erase them, because `sanitize_user` anonymizes strategies, portfolios and `auth.users` rather than deleting them.
+  - The false cascade entry in `scripts/check-gdpr-export-coverage.ts` was replaced by a matrix row.
+- **Owner columns.** The ledger carries `portfolio_id` and `allocator_id` (ON DELETE CASCADE), copied at all seven writers. Portfolio- and allocator-scoped jobs are therefore owned too.
+- **Export.** The Art. 15 export includes the ledger's allocator-keyed rows (`src/lib/gdpr-export-manifest.ts`).
+- **RLS and threats.** rls-policy-auditor is clean and migration-reviewer is clean. The phase threat register has `threats_open: 0`.
+
+### Fixed
+Review findings, fixed before ship over three code-review rounds plus silent-failure review:
+- **First-hop sweep blind spot.** The sweep could not see its own cohort, because the daily key-scoped crons (`poll-allocator-positions`, `derive-allocator-key-dailies`) put a job on every active key. A key job now hides a candidate only while it is in flight.
+- **Readmit detector starvation.** The detector could starve a new exhaustion behind 100 already-recorded ones. Generations already on file are now skipped before the LIMIT.
+- **Readmit page.** A detector failure no longer blocks paging of rows already on disk. A down channel stops the pass instead of holding the watchdog loop.
+- **Claim fence.**
+  - The pre-dispatch renew is bounded by a timeout.
+  - A renew failure raises one distinct Sentry event per tick.
+  - A missing renew RPC is logged at error level and re-logged every 15 minutes.
+  - A FALSE answer from `record_compute_job_attempt_error` is logged.
+- **Rollback ordering.** Rollback 20261124120000 refuses while 20261124120100, 20261124120600 or 20261124120700 still write the table.
+
+### Tests
+- **Gates.** Seven new SQL gates (80 arms), each arm RED-UNDER twinned, plus the new pin `src/__tests__/jobledger-migrations-schedule-nothing.test.ts`.
+- **Floors.** FILES_FLOOR 86 -> 93 and ARMS_FLOOR 940 -> 1020 (this phase's +7 files and +80 arms, merged onto Phase 225's floors).
+- **Censuses.**
+  - `sql-tests` sentinel: SENTINEL_FLOOR 37, ARMS_FLOOR 579.
+  - lint-sql-gates: 120 files scanned.
+  - COMPARED_FLOOR: 144.
+  - Five dated NAME_SET_RATCHET `snapshot-only` rows.
+- **Measured.**
+  - Full mutation run on the branch: 990/990 arms biting, exit 0. On the merged tree, `--parse-only` gives 1020 arms.
+  - pytest: 15280 passed.
+  - mypy strict: clean.
+
+### Removed
+TODOS entries closed by this phase:
+- HEAL-04 `[164.2-RECLAIM-PROVENANCE]`
+- HEAL-02 `166.5.1-DERIVE-BATCH-RESET-RESIDUAL` (with its now-empty `## Phase 166.5.1 (SENTRYTRIAGE)` heading)
+- HEAL-05 `FANOUT-COHORT-SIBLING-POLL-01`
+- HEAL-03, the "readmit ceiling is SILENT" bullet
+
+`[175-NIGHTLY-MT5-DERIVE-CHECK]` is kept and re-pointed: Phase 230 MT5NIGHTLY owns its close.
+
+### Notes
+- **HEAL-01 is shipped but inert until registration.** `first_hop_enqueue_sweep` runs only once it is registered on PROD per `docs/runbooks/jobledger-go-live.md`, after the PROD apply. HEAL-01's TODOS entry and its REQUIREMENTS Blocked mark are cleared in that go-live bookkeeping PR, not here.
+- **Expected red until apply.** `baseline-content-drift` (5 SNAPSHOT_MISSING, 5 DRIFT) and VAC-08 are red on this PR by construction until the PROD apply and the baseline re-dump. Nothing was allowlisted.
+- **Recorded, not fixed (low).**
+  - The ledger has no retention window. It is to be set with Phase 230.
+  - Strategy- and key-keyed ledger rows are erased but not exported, the same posture as `compute_jobs`.
+  - An attempt in flight at erasure can write one row after the purge.
+  - On today's data, 6 private strategies with a live key stay outside the poll cohort.
+- **Owed to CI.** The local-stack lane proof is owed to this PR's CI, because there was no Docker on the build host.
 ## [0.133.66.0] - 2026-11-24 — Phase 225 ONEACCOUNTONCE PR-2: one account, one working key
 
 PR-2 of three for Phase 225. It ships plans 05 to 09, 11 and 12, plus three review rounds, and contains no migration. It is the code that uses PR-1's `venue_server` column and `swap_account_slot` function (#1315). PR-3 follows with migration B, which rebuilds the live unique index on login plus server.

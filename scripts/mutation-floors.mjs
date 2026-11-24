@@ -1378,7 +1378,20 @@
 // exit-2-by-design DIAGNOSTIC run `--file supabase/tests/test_swap_account_slot.sql`: `arms: 13/13/0`, `biting: 13`, `lane-invocations: 13` (the two independent tallies AGREE), every arm
 // `RED (identity ok)`. Per-file line in the parse-only table: `test_swap_account_slot.sql: sections 13 / judged 0 / annotated 13 / waived 0 / biting 0` (that mode executes nothing). The FULL local
 // run was NOT run on this host; CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the authoritative full run. WAIVED_CEILING stays 0 - no waiver was added.
-export const FILES_FLOOR = 86;
+// RAISED 85 -> 92 2026-11-24 (Phase 227 JOBLEDGER, plan 10): +7 files, the phase's seven gates (migrations 20261124120000 to 20261124120600): test_compute_job_attempt_failures.sql (14 arms),
+// test_reset_stalled_bridge_provenance.sql (6), test_compute_job_claim_renewal.sql (5), test_reconcile_readmit_exhaustions.sql (8), test_first_hop_enqueue_sweep.sql (21),
+// test_enqueue_poll_positions_cohort.sql (11) and test_orphan_reaped_attempt_record.sql (4), each arm carrying a prose RED-UNDER and a machine RED-UNDER-M twin, so 92 of 119 files.
+// MEASURED on this host by ONE full `node scripts/mutation-runner/run.mjs` run (no --file), exit 0: `scope: FULL 92/92 annotated files`, `coverage: files 92/119`, `arms: 979/979/0   (executed/annotated/waived)`,
+// `biting: 979`, `lane-invocations: 979 ... plus 92 baseline / 92 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`,
+// `per-arm lane time: mean 3.8s over 979 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file lines, each biting equal to annotated:
+// `test_compute_job_attempt_failures.sql: sections 13 / judged 14 / annotated 14 / waived 0 / biting 14`, `test_compute_job_claim_renewal.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5`,
+// `test_enqueue_poll_positions_cohort.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11`, `test_first_hop_enqueue_sweep.sql: sections 14 / judged 21 / annotated 21 / waived 0 / biting 21`,
+// `test_orphan_reaped_attempt_record.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4`, `test_reconcile_readmit_exhaustions.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8` and
+// `test_reset_stalled_bridge_provenance.sql: sections 5 / judged 6 / annotated 6 / waived 0 / biting 6`. The FIRST full run of this plan went RED on one baseline (test_compute_job_claim_renewal.sql, pristine exit 3 at R1,
+// SQLSTATE 42P01): its RED-UNDER-SETUP applied the reset_stalled_compute_jobs.sql snapshot that plan 02's migration had moved; the setup now applies plan 02's chain and the rerun above is green. WAIVED_CEILING stays 0 - no waiver was added.
+// MERGED 2026-11-24: Phase 227 JOBLEDGER (85 -> 92 on its branch, +7 files) onto origin/main at 86 (Phase 225, +1 file): 86 + 7 = 93.
+// The CI `sql-mutation` FULL run on the PR head is the measurement of the merged corpus.
+export const FILES_FLOOR = 93;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3524,7 +3537,27 @@ export const FILES_FLOOR = 86;
 // swap gate and `arms: 14/14/0`, `biting: 14`, `lane-invocations: 14` for the identity gate, every arm `RED (identity ok)`, `No defects in the narrowed scope`.
 // NOT MEASURED by a FULL local run, so 940 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA is the run that compares it with a
 // real biting count. WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 940;
+// RAISED 910 -> 979 2026-11-24 (Phase 227 JOBLEDGER, plan 10): +69 arms, each twinned, across the phase's seven NEW gates (FILES_FLOOR 85 -> 92, see its block above): 14 + 6 + 5 + 8 + 21 + 11 + 4 = 69.
+// MEASURED on this host by ONE full `node scripts/mutation-runner/run.mjs` run, exit 0: `coverage: files 92/119`, `arms: 979/979/0   (executed/annotated/waived)`, `biting: 979`, `lane-invocations: 979`
+// (the two independent tallies AGREE), `No defects. Every annotated arm bit its own arm first.` This is a measured biting count, not the static annotated count; CI `sql-mutation` FULL on the PR head SHA is the
+// run that compares it again. WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 979 -> 989 2026-11-24 (Phase 227 JOBLEDGER, review round 1 fixes): +10 twinned arms in files that already
+// counted toward FILES_FLOOR: test_compute_job_attempt_failures.sql 14 -> 22 (E9, E9b, E9c, E10, E11 to E11d),
+// test_first_hop_enqueue_sweep.sql 21 -> 22 (H10c) and test_reconcile_readmit_exhaustions.sql 8 -> 9 (X8). MEASURED:
+// `--parse-only` printed `arms: 0/989/0` and `No static defects`, and the exit-0-by-design DIAGNOSTIC runs of those three
+// files each printed biting equal to annotated (22/22, 22/22, 9/9) with every arm `RED (identity ok)`. A full run was not
+// repeated on this host; CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the authoritative one.
+// WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 989 -> 990 2026-11-24 (Phase 227 JOBLEDGER, review round 2 fixes): +1 twinned arm in a file that already
+// counted toward FILES_FLOOR: test_first_hop_enqueue_sweep.sql 22 -> 23 (H10d, a finished key-scoped derive on the
+// candidate's key must not hide the strategy). MEASURED: `--parse-only` printed `arms: 0/990/0` and `No static defects`,
+// and the exit-0-by-design DIAGNOSTIC run of that file printed `arms: 23/23/0`, `biting: 23`, `lane-invocations: 23`
+// with every arm `RED (identity ok)`. The arm was also neutered by hand on the lane (RED, named H10d) and restored from a
+// byte backup (GREEN). The full-corpus run is recorded in the review-fix report, not restated here.
+// WAIVED_CEILING stays 0 - no waiver was added.
+// MERGED 2026-11-24: Phase 227 JOBLEDGER (910 -> 990 on its branch, +80 twinned arms) onto origin/main at 940 (Phase 225, +30): 940 + 80 = 1020.
+// The CI `sql-mutation` FULL run on the PR head is the measurement of the merged corpus. WAIVED_CEILING stays 0.
+export const ARMS_FLOOR = 1020;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

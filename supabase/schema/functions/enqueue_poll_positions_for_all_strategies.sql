@@ -2,27 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260412094449_compute_jobs_admin_and_defer.sql
--- --------------------------------------------------------------------------
--- STEP 4: enqueue_poll_positions_for_all_strategies RPC
--- --------------------------------------------------------------------------
--- Daily fanout helper called by the Railway worker's 24h enqueue loop.
--- Loops strategies that are (a) published or in-review (i.e. not drafts),
--- (b) have a non-null api_key_id, and (c) have had at least one successful
--- sync_trades job in the last 30 days (indicating the key still works).
--- For each qualifying strategy, calls enqueue_compute_job which is
--- idempotent via the partial unique index — a second call within the same
--- day returns the existing in-flight row.
---
--- Returns the number of rows actually enqueued (excludes duplicates that
--- returned existing in-flight jobs). Called exclusively by the worker;
--- REVOKE from all non-service roles.
---
--- The multi-worker race (two workers running the daily loop concurrently)
--- is handled at the worker layer via pg_try_advisory_lock('daily_position_polling').
--- This function is safe to call multiple times — the idempotency of
--- enqueue_compute_job guarantees no duplicate jobs — but advisory locking
--- at the call site saves the unnecessary work.
+-- source migration: 20261124120500_poll_positions_cohort.sql
+-- ==========================================================================
+-- STEP 1: the function
+-- ==========================================================================
 CREATE OR REPLACE FUNCTION enqueue_poll_positions_for_all_strategies()
 RETURNS INTEGER
 LANGUAGE plpgsql
@@ -41,13 +24,26 @@ BEGIN
       FROM strategies s
       JOIN api_keys ak ON ak.id = s.api_key_id
       WHERE s.api_key_id IS NOT NULL
-        AND s.status IN ('published', 'pending_review')
-        AND EXISTS (
-          SELECT 1 FROM compute_jobs cj
-            WHERE cj.strategy_id = s.id
-              AND cj.kind = 'sync_trades'
-              AND cj.status = 'done'
-              AND cj.updated_at > (now() - interval '30 days')
+        -- HEAL-05 (phase 227): the cohort. Private strategies are polled too, through a live
+        -- key only, and "the key still works" is read from either sync path: a done
+        -- sync_trades job (the user triggered path) or the per-strategy cursor the cron
+        -- path writes. See the migration header, DEC-06-A and DEC-06-B.
+        AND s.status IN ('published', 'pending_review', 'private')
+        AND ak.is_active
+        AND ak.disconnected_at IS NULL
+        AND (
+          EXISTS (
+            SELECT 1 FROM compute_jobs cj
+              WHERE cj.strategy_id = s.id
+                AND cj.kind = 'sync_trades'
+                AND cj.status = 'done'
+                AND cj.updated_at > (now() - interval '30 days')
+          )
+          OR EXISTS (
+            SELECT 1 FROM strategy_sync_cursors ssc
+              WHERE ssc.strategy_id = s.id
+                AND ssc.last_sync_at > (now() - interval '30 days')
+          )
         )
   LOOP
     -- Count pre-existing in-flight poll_positions jobs for this strategy

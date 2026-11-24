@@ -2,16 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261024120000_fan_in_graph_and_decision_cascade.sql
--- --------------------------------------------------------------------------
--- (1) mark_compute_job_failed: the failure cascade (D-01 to D-03)
--- --------------------------------------------------------------------------
--- The body is the LATEST definition (20261009120000, sync_status_analytics_scope;
--- re-grepped on this tree and on origin/main, no later CREATE or ALTER of it),
--- byte for byte, with ONLY the declarations and the cascade block added (and, in
--- the same file, the multi-strategy bridge that replaces the single-strategy one;
--- see the bridge comment in the body). The fences stay SQLSTATE 55006; the
--- cascade raises nothing.
+-- source migration: 20261124120000_jobledger_attempt_failures.sql
+-- ==========================================================================
+-- STEP 3: mark_compute_job_failed, re-based on 20261024120000 with ONE added statement
+-- ==========================================================================
 CREATE OR REPLACE FUNCTION mark_compute_job_failed(
   p_job_id      UUID,
   p_error       TEXT,
@@ -110,6 +104,23 @@ BEGIN
          error_kind = p_error_kind,
          next_attempt_at = v_next_attempt
    WHERE id = p_job_id;
+
+  -- MT5D-01 (phase 227): keep this attempt's cause. The record is written in the SAME
+  -- transaction that flips the job to failed, so a committed failure always has its
+  -- record and a rolled-back one has none. It must come before any later claim, because
+  -- claim_compute_jobs_with_priority clears last_error and error_kind on re-claim
+  -- (M-1137/M-1138), which stays. claim_token and attempts are still the failed
+  -- attempt's own (the UPDATE above does not touch them). ON CONFLICT: the same cause
+  -- for one attempt collapses into one row. The fan-in cascade below records NOTHING
+  -- for its children: they never ran.
+  INSERT INTO public.compute_job_attempt_failures
+         (job_id, kind, strategy_id, api_key_id, portfolio_id, allocator_id, exchange, job_created_at,
+          attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+  SELECT cj.id, cj.kind, cj.strategy_id, cj.api_key_id, cj.portfolio_id, cj.allocator_id, cj.exchange, cj.created_at,
+         cj.attempts, p_claim_token, 'error', p_error_kind, p_error, cj.claimed_by
+    FROM compute_jobs cj
+   WHERE cj.id = p_job_id
+  ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING;
 
   -- Phase 164.9.3.1 D-01 to D-03: a parent that ENDS failed_final can never
   -- release a waiting fan-in child (release needs every parent `done`), so the

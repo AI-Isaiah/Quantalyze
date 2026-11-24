@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=30 and ARMS_FLOOR=504 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=37 and ARMS_FLOOR=579 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -5112,9 +5112,21 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // RAISED 2026-11-05 (Phase 191 REFUSALRACE, fix round 1), 27/416 -> 27/418. The same file goes from
     // `ALL 11 ARMS EXECUTED` to `ALL 13 ARMS EXECUTED` (arms 12 and 13); no file joined. MEASURED: this pin read
     // `expected 1 to be +0` once ci.yml carried ARMS_FLOOR=418. 416 + 2 = 418 is the table's own sum.
+    // RAISED 2026-11-24 (Phase 227 JOBLEDGER, plan 10), 30/504 -> 37/568. SEVEN files JOINED (ordinary
+    // sql-tests gates: each runs on a database private to its runner), each read off its own first
+    // `ALL N ARMS EXECUTED` sentinel: test_compute_job_attempt_failures.sql 14, test_reset_stalled_bridge_provenance.sql 6,
+    // test_compute_job_claim_renewal.sql 5, test_reconcile_readmit_exhaustions.sql 7, test_first_hop_enqueue_sweep.sql 21,
+    // test_enqueue_poll_positions_cohort.sql 7 and test_orphan_reaped_attempt_record.sql 4. MEASURED:
+    // ci-anti-skip-gate.contract.test.ts read `expected 37 to be 30` against the floor and 37 sentinel-bearing files against
+    // the table's 30. 504 + 14 + 6 + 5 + 7 + 21 + 7 + 4 = 568 is the table's own sum.
+    // RAISED 2026-11-24 (Phase 227 JOBLEDGER, review round 1 fixes), 37/568 -> 37/578. No file joined; three
+    // sentinels grew: test_compute_job_attempt_failures.sql 14 -> 22, test_first_hop_enqueue_sweep.sql 21 -> 22 and
+    // test_reconcile_readmit_exhaustions.sql 7 -> 8. 568 + 8 + 1 + 1 = 578 is the table's own sum.
+    // RAISED 2026-11-24 (Phase 227 JOBLEDGER, review round 2 fixes), 37/578 -> 37/579. No file joined; one
+    // sentinel grew: test_first_hop_enqueue_sweep.sql 22 -> 23 (H10d). 578 + 1 = 579 is the table's own sum.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=30", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=37", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -5125,7 +5137,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=504", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=579", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
