@@ -287,6 +287,7 @@ Plans:
 **Goal:** A user cannot connect the same exchange account more than once: a second key or draft that reads the same account under the same owner is refused by name at connect time, and any such pair already stored is surfaced and resolved instead of publishing one account's numbers under two names. One key or account shared across several users stays allowed, and a strategy-linked key may also sit in an allocator book; that is never called "manager-only by design". Context: Phase 155.2 found on PROD a key marked as a duplicate of MM2's account under the same owner that publishes MM2's numbers under the name MM3, and MM2's login shared with a draft key for FX-AI_V with no share link between them. `analytics-service/services/account_identity.py` stamps the share link. Trigger: founder decisions 2026-11-23, "several accounts can use one key. one account should not use the same key several times". ⭐ **v1.22 scope (roadmap 2026-11-23):** 225 owns seam S4 and takes the identity members that must ship with its refusal. CONN-01 is a connect that matches the user's own draft: it names what was stored instead of a silent `200 deduped`, in the same `venueMatch.kind === "draft"` arm ONCE-01 rewrites. CONN-03 makes MT5 account identity include the broker server, by migration with a backfill that uses no data-reading `DO` guard; it defines the identity ONCE-01 compares. MT5D-08 bars an MT5 key whose sign-in keeps failing from claiming an account's holder slot, and is settled before the refusal ships (PITFALLS §E). CONN-02 and CONN-04, the other two answers in `create-with-key/route.ts`, go to the sibling 228 KEYANSWERS, ordered right after this phase. Nine requirements would not fit five criteria without compound ones.
 **Requirements**: ONCE-01, ONCE-02, ONCE-03, ONCE-04, CONN-01, CONN-03, MT5D-08
 **Depends on:** nothing hard. It shares no seam with 227 and follows it in the data-integrity order. 155.2 freeze: resolving the MM3-publishes-MM2 duplicate (ONCE-03) moves MT5 numbers, so this phase merges before 155.2 plan 12's recapture or after plan 14, never in between. Research schedules it before plan 12. Research first: the read-only PROD same-owner duplicate count, and the CONN-03 backfill design.
+**Deviation (founder override, 2026-11-23):** the standing rule "keep data; disconnect, never delete" and the never-deletes half of 167.1.2 D-01 are overridden for SAME-OWNER duplicate keys only. Founder, verbatim: "Delete all duplicate keys. So same key in one accused twice. Delete also all associated factsheet, data etc. One key can be used over several accounts. Imagine one team sharing the key if their master account with several allocator. Of course each allocator should be able to generate a factsheet". Same-owner duplicate keys and their strategies, factsheets and derived data are deleted once, from a read-only PROD manifest the founder confirms first; cross-user sharing stays and each user keeps their own factsheet. Recorded in `225-CONTEXT.md` too.
 **Success Criteria** (what must be TRUE):
 1. Connecting a key or saving a draft whose account identity matches a key the same owner already holds is refused with a named reason, in the wizard and in the API; a test drives it for an exchange key and for an MT5 login. A connect that matches the user's own draft answers with what was stored, never a silent `200 deduped`. (ONCE-01, CONN-01)
 2. The same account connected by two different users stays allowed and keeps its share link; a test pins that the refusal is per owner, and a strategy-linked key in an allocator book is unaffected. (ONCE-02)
@@ -294,10 +295,32 @@ Plans:
 4. Two keys that share a login always carry a share link, so a shared login with no link cannot recur; a test drives the stamping in `account_identity.py` for that case. MT5 account identity includes the broker server, so the same login on two servers never collides, and the backfill uses no data-reading `DO` guard. (ONCE-04, CONN-03)
 5. An MT5 key whose sign-in keeps failing cannot claim an account's holder slot. A test drives a failing key beside a working one for the same account, and the working key holds the slot. (MT5D-08)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration (the CONN-03 identity change and backfill, any per-owner refusal constraint) passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 0 plans
+**Plans:** 12 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 225-01-PLAN.md — migration A1: `api_keys.venue_server` column and the 13-parameter `create_wizard_strategy` (PR-1)
+- [x] 225-02-PLAN.md — the same-owner duplicate census and the one-time delete, run by the orchestrator on PROD (PR-1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 225-03-PLAN.md — move every SQL gate pin to the 13-parameter signature (PR-1)
+- [x] 225-04-PLAN.md — migration A2: `swap_account_slot`, the one place a holder slot moves; the orchestrator ships PR-1 and confirms both migrations on PROD before wave 3 (PR-1)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 225-05-PLAN.md — an own-draft match is refused by name, `VENUE_DRAFT_IN_PROGRESS` (PR-2)
+- [ ] 225-06-PLAN.md — the shared server rule, holder pick and swap helper, TS and Python held equal by one fixture (PR-2)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 225-07-PLAN.md — the wizard connect, MT5 path: server-aware resolver, server write, failing-holder swap (PR-2)
+- [ ] 225-08-PLAN.md — the Exchanges-page connect gets the same rule, and the demoted key's card names its holder (PR-2)
+- [ ] 225-09-PLAN.md — the poll stamper: a working key takes a failing holder's slot through the swap (PR-2)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 225-11-PLAN.md — the wizard connect, every venue: post-validation refusal, interim race arm, per-owner pins (PR-2)
+- [ ] 225-12-PLAN.md — the poll stamper: MT5 server capture and backfill, cross-owner stamping, the backfill census (PR-2)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 225-10-PLAN.md — migration B: the index gains the server member and reconnect agrees, after the backfill census passes (PR-3)
 
 ### Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks
 
@@ -642,7 +665,7 @@ Plans:
 | 157. FOUNDER-CONFIRM | 1/3 | In progress | - |
 | 222. ALERTTRUTH | 0/? | Not started | - |
 | 223. FLOWKINDS | 0/? | Not started | - |
-| 225. ONEACCOUNTONCE | 0/? | Not started | - |
+| 225. ONEACCOUNTONCE | 4/12 | In progress (PR-1 shipped as #1315) | - |
 | 226. MT5SOAK | 0/? | Not started | - |
 | 227. JOBLEDGER | 0/? | Not started | - |
 | 228. KEYANSWERS | 0/? | Not started | - |

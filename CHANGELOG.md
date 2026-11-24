@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.133.63.3] - 2026-11-24 — records: Phase 225 ONEACCOUNTONCE PR-1 records, and the stale swap_account_slot ratchet row deleted
+
+This is a records PR. It changes no migration, workflow or runtime source. One commit.
+
+### Removed
+- **The `swap_account_slot` row in `NAME_SET_RATCHET`** (`scripts/dump-sql-functions.ts`). The re-dump after the PROD apply of #1315 landed as #1317, and the function then existed on both sides, so `dump-sql-functions --check` reported the row `ratchet-stale`. The row is deleted with a dated note, as #1302 did for the previous ones. This clears the `snapshot-drift` red accepted on #1317.
+
+### Added
+- **Phase 225 planning records.** The phase directory: CONTEXT with founder rulings Q1-Q5 and the deviation record, DISCUSSION-LOG, RESEARCH, VALIDATION, PATTERNS, plans 01-12, SUMMARYs 01-04 and the REVIEW (two rounds).
+  - 225-02-SUMMARY records the one-time PROD delete of same-owner duplicates as counts only.
+  - 225-04-SUMMARY records `PROD catalogue gate: PASSED` after the PR-1 apply.
+
+### Changed
+- **ROADMAP:** Phase 225's deviation line and plan rows. Plans 01-04 are ticked, and the progress row reads 4/12.
+- **STATE:** the plan totals gain Phase 225's 12 plans, 4 of them complete, so they read 45 total and 31 completed together with Phase 237's records (#1318). Current Position is left as it was, because several phases run in parallel.
 ## [0.133.63.2] - 2026-11-24 — records: Phase 237 FACTSHEETHONEST phase records (verification human_needed)
 
 Records PR. It holds no source, test, script, workflow or migration change. One commit on `records/237-factsheethonest`.
