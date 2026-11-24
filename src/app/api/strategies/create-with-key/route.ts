@@ -58,7 +58,7 @@ import { venueLabel } from "@/lib/display-labels";
 // working-holder rule and the slot swap. See `resolveByVenueIdentity`.
 import { isWorkingHolder } from "@/lib/account-share-note";
 import {
-  normaliseVenueServer,
+  normaliseConnectedVenueServer,
   pickSameAccountHolder,
   readLiveSameLoginKeys,
   swapAccountSlot,
@@ -1416,7 +1416,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // form (trim, lower-case, 128 cap, blank is null). Like the login it is never
   // logged or returned, and it joins every per-request secrets array below
   // because a PostgREST error can echo the normalised value back.
-  const venueServer: string | null = isMt5 ? normaliseVenueServer(passphrase) : null;
+  const venueServer: string | null = isMt5 ? normaliseConnectedVenueServer(passphrase) : null;
 
   // 225-07 (Q1, D-25 / MT5D-08) — set when the account's live holder is NOT
   // working: the new credentials are validated below, created with no identity,

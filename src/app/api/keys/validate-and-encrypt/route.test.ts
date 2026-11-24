@@ -3065,6 +3065,15 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
   });
 
+  it("WR-03: an MT5 add whose server carries no-break-space padding stores the value the Python poll captures (str.strip first)", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add({ passphrase: "\u00a0MetaQuotes-Demo\u00a0" }));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
+  });
+
   it("an okx add carries venue_server null", async () => {
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true, venue_account_id: OKX_UID });
     const { POST } = await import("./route");

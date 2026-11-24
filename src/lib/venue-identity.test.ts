@@ -15,6 +15,7 @@ vi.mock("@/lib/audit", () => auditMock);
 
 import {
   MAX_VENUE_SERVER_LENGTH,
+  normaliseConnectedVenueServer,
   normaliseVenueServer,
   pickSameAccountHolder,
   readLiveSameLoginKeys,
@@ -40,6 +41,7 @@ const spec = JSON.parse(
   ),
 ) as {
   normalise: Array<{ in: unknown; out: string | null }>;
+  connect: Array<{ raw: string; stored: string | null }>;
   same: Array<{ a: string | null; b: string | null; same: boolean }>;
   pick: PickCase[];
 };
@@ -47,8 +49,33 @@ const spec = JSON.parse(
 describe("the shared fixture is not vacuous", () => {
   it("holds cases in every array", () => {
     expect(spec.normalise.length).toBeGreaterThan(0);
+    expect(spec.connect.length).toBeGreaterThan(0);
     expect(spec.same.length).toBeGreaterThan(0);
     expect(spec.pick.length).toBeGreaterThan(0);
+  });
+});
+
+describe("normaliseConnectedVenueServer (the fixture's end-to-end connect cases, WR-03)", () => {
+  // The Python poll normalises what `parse_mt5_credentials` already stripped with
+  // `str.strip()`. The connect routes must store that same value, or one broker
+  // server is two identities depending on which writer stamped the row.
+  it.each(spec.connect)("raw $raw is stored as $stored", ({ raw, stored }) => {
+    expect(normaliseConnectedVenueServer(raw)).toBe(stored);
+  });
+
+  it("a no-break-space-padded server is the SAME stored value the Python poll captures", () => {
+    expect(normaliseConnectedVenueServer("MetaQuotes-Demo\u00a0")).toBe(
+      normaliseConnectedVenueServer("MetaQuotes-Demo"),
+    );
+    // The function-level form is deliberately unchanged: it keeps the no-break
+    // space the database CHECK keeps, which is why the routes need the strip.
+    expect(normaliseVenueServer("MetaQuotes-Demo\u00a0")).toBe("metaquotes-demo\u00a0");
+  });
+
+  it("is total: a non-string is null, never stringified", () => {
+    expect(normaliseConnectedVenueServer(5)).toBeNull();
+    expect(normaliseConnectedVenueServer(null)).toBeNull();
+    expect(normaliseConnectedVenueServer(undefined)).toBeNull();
   });
 });
 

@@ -1,5 +1,5 @@
 {
-  "_comment": "Phase 225 plan 06 (CONN-03, MT5D-08). The cross-runtime oracle for the broker-server identity rule. Read by src/lib/venue-identity.test.ts (normaliseVenueServer, sameVenueServer, pickSameAccountHolder) and analytics-service/tests/test_venue_server_identity.py (normalise_venue_server, same_venue_server, pick_same_account_holder). HAND-TYPED: every expectation below was worked out by hand from the rule, never produced by either implementation, and every id and server is synthetic. The rule. NORMALISE: trim only space, tab, CR and LF from both ends (the SQL btrim(x, E' \\t\\r\\n') of swap_account_slot and api_keys_venue_server_valid, so a vertical tab or a no-break space is NOT trimmed, in all three places), lower-case, blank becomes null, more than 128 characters after trimming becomes null, anything that is not a string becomes null. SAME: two servers are the same account when both are equal OR when EITHER is null (a key not yet backfilled matches on login alone). PICK: among the live keys of one login, tier 1 is a row whose server equals the new key's server (null equals null), tier 2 is a row where either side is null, tier 3 exists only in mode after_index_refusal (the old login-only index refused the write) and takes any row; the first non-empty tier wins and inside it the smallest id by plain string comparison, so the pick never depends on row order. ASCII letters only in the case-folded cases: JS toLowerCase, Python lower and SQL lower differ on a few non-ASCII code points. Do not add a case here without its expectation; both suites consume this file whole and assert every array is non-empty.",
+  "_comment": "Phase 225 plan 06 (CONN-03, MT5D-08). The cross-runtime oracle for the broker-server identity rule. Read by src/lib/venue-identity.test.ts (normaliseVenueServer, sameVenueServer, pickSameAccountHolder) and analytics-service/tests/test_venue_server_identity.py (normalise_venue_server, same_venue_server, pick_same_account_holder). HAND-TYPED: every expectation below was worked out by hand from the rule, never produced by either implementation, and every id and server is synthetic. The rule. NORMALISE: trim only space, tab, CR and LF from both ends (the SQL btrim(x, E' \\t\\r\\n') of swap_account_slot and api_keys_venue_server_valid, so a vertical tab or a no-break space is NOT trimmed, in all three places), lower-case, blank becomes null, more than 128 characters after trimming becomes null, anything that is not a string becomes null. SAME: two servers are the same account when both are equal OR when EITHER is null (a key not yet backfilled matches on login alone). PICK: among the live keys of one login, tier 1 is a row whose server equals the new key's server (null equals null), tier 2 is a row where either side is null, tier 3 exists only in mode after_index_refusal (the old login-only index refused the write) and takes any row; the first non-empty tier wins and inside it the smallest id by plain string comparison, so the pick never depends on row order. ASCII letters only in the case-folded cases: JS toLowerCase, Python lower and SQL lower differ on a few non-ASCII code points. CONNECT (end to end, WR-03): the stored server for a RAW connect-time passphrase. The Python seam strips the raw value with str.strip() (parse_mt5_credentials) BEFORE the poll normalises it, so the TS connect routes strip the same set first (normaliseConnectedVenueServer). That set is Python's isspace(): tab to CR, U+001C to U+0020, U+0085, U+00A0, U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F, U+3000. It is NOT JavaScript's trim(): U+FEFF is kept and U+001C to U+001F and U+0085 are stripped, so the U+0085 and U+FEFF cases below tell the two apart where a no-break space alone would not. Python replays each case through the real parse_mt5_credentials then _mt5_session_server; TS through normaliseConnectedVenueServer. A raw value that is only whitespace has no case because the Python seam refuses it. Do not add a case here without its expectation; both suites consume this file whole and assert every array is non-empty.",
   "normalise": [
     { "in": "srv-a", "out": "srv-a" },
     { "in": "  Srv-A  ", "out": "srv-a" },
@@ -30,6 +30,25 @@
     { "in": true, "out": null },
     { "in": {}, "out": null },
     { "in": ["srv-a"], "out": null }
+  ],
+  "connect": [
+    { "raw": "Srv-A", "stored": "srv-a" },
+    { "raw": "Srv\u00a0", "stored": "srv" },
+    { "raw": "\u00a0 Srv-A \u00a0", "stored": "srv-a" },
+    { "raw": "\u0085Srv\u0085", "stored": "srv" },
+    { "raw": "\u001fSrv\u001c", "stored": "srv" },
+    { "raw": "\u000bSrv\f", "stored": "srv" },
+    { "raw": "\u2028Srv\u3000", "stored": "srv" },
+    { "raw": "\ufeffSrv", "stored": "\ufeffsrv" },
+    { "raw": "Srv\ufeff", "stored": "srv\ufeff" },
+    { "raw": "\u200bSrv", "stored": "\u200bsrv" },
+    { "raw": "Srv\u00a0A", "stored": "srv\u00a0a" },
+    { "raw": "\u00a0 \tSrv-A\u00a0\n", "stored": "srv-a" },
+    {
+      "raw": "\u00a0Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01\u00a0",
+      "stored": "broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01broker-server-01"
+    },
+    { "raw": "Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01Broker-Server-01X\u00a0", "stored": null }
   ],
   "same": [
     { "a": null, "b": null, "same": true },

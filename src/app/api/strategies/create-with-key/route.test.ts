@@ -3279,6 +3279,18 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(rpcCalls("swap_account_slot")).toHaveLength(0);
     });
 
+    it("WR-03: a server pasted with no-break-space padding is stored as the value the Python poll captures (str.strip first)", async () => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({ ...MT5_RECONNECT_BODY, passphrase: "\u00a0Broker-Live\u00a0" }),
+      );
+      expect(res.status).toBe(200);
+      expect(rpcCalls("create_wizard_strategy")[0][1]).toMatchObject({
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: "broker-live",
+      });
+    });
+
     it("a ccxt connect carries no p_venue_server", async () => {
       const POST = await importPost();
       const res = await POST(makeReq(VALID_BODY));

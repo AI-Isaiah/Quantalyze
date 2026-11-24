@@ -53,7 +53,7 @@ import { venueLabel } from "@/lib/display-labels";
 // Phase 225 ONEACCOUNTONCE plan 08 — the per-owner, server-aware holder rule
 // shared with the wizard seam (create-with-key) and the daily stamper's twin.
 import {
-  normaliseVenueServer,
+  normaliseConnectedVenueServer,
   pickSameAccountHolder,
   readLiveSameLoginKeys,
   swapAccountSlot,
@@ -781,9 +781,9 @@ async function legacyValidateAndEncryptHandler(args: {
     // server, so the server is stored beside it, normalised (the same
     // normal form the database CHECK and `swap_account_slot` use). A ccxt key
     // has none. The MT5 server is the `passphrase` slot, validated non-blank
-    // above, but `normaliseVenueServer` is total and returns null for an
+    // above, but `normaliseConnectedVenueServer` is total and returns null for an
     // over-length value rather than letting the CHECK refuse the insert.
-    const venueServer = isMt5 ? normaliseVenueServer(passphrase) : null;
+    const venueServer = isMt5 ? normaliseConnectedVenueServer(passphrase) : null;
 
     // Phase 225 (ONCE-01, Q1, D-25, MT5D-08): is this account already held by
     // a live key of THIS owner?
