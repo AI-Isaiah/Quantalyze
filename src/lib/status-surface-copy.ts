@@ -449,33 +449,24 @@ export function ownerRemedy(
 
 // ── S5 / S7 — KCS-12 share notes ──────────────────────────────────────────
 
-const MINT_TOKEN_NOTES = {
-  in_progress:
-    "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.",
-  not_available:
-    "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.",
-  unreadable:
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.",
-} as const satisfies Record<RecipientArm, string>;
-
-const PUBLIC_URL_NOTE =
-  "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
-
 /**
  * KCS12-MINT-B-LEAD (Phase 238 FACT-05): the first sentence of a private-link
  * note for a row that is not available and not computing (state failed,
- * stalled or never_started). It is the retired `MINT_TOKEN_NOTES.not_available`
- * sentence with `yet` removed, because `yet` promises a change when nothing is
- * running. The note is this lead, one space, then the row's action sentence
- * (`ACTION_SENTENCES`, composed where it renders: the `/strategies` page). Do
- * not import `degrade-warnings` here: it value-imports this module.
+ * stalled, finished or never_started). It is the retired KCS12-MINT-B sentence
+ * with `yet` removed, because `yet` promises a change when nothing is running.
+ * A page composes the note itself: this lead, one space, then the row's action
+ * sentence (`ACTION_SENTENCES`; the `/strategies` page and the owner pending
+ * page). The string API answers the same arm with this lead plus the
+ * contact-check remedy. Do not import `degrade-warnings` here: it
+ * value-imports this module.
  */
 export const KCS12_MINT_B_LEAD =
   "Right now, a private link to this strategy shows that its factsheet is not available.";
 
 /**
  * KCS12-PUBLIC-LEAD (Phase 238 FACT-05): KCS12-MINT-B-LEAD's counterpart for a
- * published strategy's public URL. Consumed by plan 238-02.
+ * published strategy's public URL, consumed by the `/strategies` page and by
+ * the string API's `not_available` answer for a public URL.
  */
 export const KCS12_PUBLIC_LEAD =
   "Right now, this strategy's factsheet link shows that the factsheet is not available.";
@@ -483,16 +474,46 @@ export const KCS12_PUBLIC_LEAD =
 /**
  * KCS12-PUBLIC-UNKNOWN (Phase 238 FACT-05): the public-URL note for a row whose
  * compute state was not read. It conditions its action on the one fact it
- * cannot see, and points at the one remedy open to every shape and viewer.
- * Consumed by plan 238-02.
+ * cannot see, and points at the one remedy open to every shape and viewer. It
+ * is also the string API's public-URL `unreadable` answer.
  */
 export const KCS12_PUBLIC_UNKNOWN =
   "Right now, this strategy's factsheet link shows that the factsheet is not available. If no computation is running, use the contact form to have it checked.";
 
+// Phase 238 (FACT-05): KCS12-MINT-B ("... not available yet. The numbers appear
+// there once a computation succeeds.") is RETIRED. `not_available` is reached
+// by failed, stalled, finished and never_started states, and a wait sentence
+// is false for every one of them. The string API stays total with an answer
+// that is true in every state and for every role: the lead plus the contact
+// form, the one remedy open to all (it is also `ownerRemedyAction`'s fallback).
+const MINT_TOKEN_NOTES = {
+  in_progress:
+    "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.",
+  not_available: `${KCS12_MINT_B_LEAD} ${CONTACT_CHECK_REMEDY.before}`,
+  unreadable:
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.",
+} as const satisfies Record<RecipientArm, string>;
+
+// KCS12-PUBLIC (words unchanged): the public URL while a computation is
+// actually in progress. The other two public arms are arm-aware since 238.
+const PUBLIC_URL_NOTE =
+  "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
+
+const PUBLIC_URL_NOTES = {
+  in_progress: PUBLIC_URL_NOTE,
+  not_available: `${KCS12_PUBLIC_LEAD} ${CONTACT_CHECK_REMEDY.before}`,
+  unreadable: KCS12_PUBLIC_UNKNOWN,
+} as const satisfies Record<RecipientArm, string>;
+
 /**
  * What a recipient of this strategy's link sees right now (KCS12-MINT-A,
- * KCS12-MINT-B, KCS12-UNREADABLE for a private link; KCS12-PUBLIC for a
- * published strategy's public URL, whatever the arm).
+ * KCS12-UNREADABLE and the lead-plus-contact-check `not_available` answer for a
+ * private link; for a published strategy's public URL KCS12-PUBLIC while in
+ * progress, the lead-plus-contact-check answer when not available and
+ * KCS12-PUBLIC-UNKNOWN when unreadable). KCS12-MINT-B is retired (Phase 238).
+ * KCS12-PUBLIC keeps its old words and is returned ONLY for the public-url
+ * `in_progress` arm. A page that knows the row's state composes lead + action
+ * itself and does not read the `not_available` answer.
  *
  * Phase 167.2.1 (D-02) adds four rows to this family for a row that is
  * computed but whose factsheet cannot build: KCS12-UNBUILDABLE-SHORT,
@@ -507,7 +528,7 @@ export function recipientShareNote(
   mode: ShareAffordanceMode,
   arm: RecipientArm,
 ): string {
-  return mode === "public-url" ? PUBLIC_URL_NOTE : MINT_TOKEN_NOTES[arm];
+  return mode === "public-url" ? PUBLIC_URL_NOTES[arm] : MINT_TOKEN_NOTES[arm];
 }
 
 /**
