@@ -2348,7 +2348,7 @@ function selfTest({ withGitleaks = false } = {}) {
     execFileSync(
       "git",
       ["-c", "user.name=self-test", "-c", "user.email=self-test@invalid", "-c", "commit.gpgsign=false", ...args],
-      { cwd: opts.cwd ?? join(dir, "repo"), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      { cwd: opts.cwd ?? join(dir, "repo"), encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] },
     );
   const repo = join(dir, "repo");
   try {

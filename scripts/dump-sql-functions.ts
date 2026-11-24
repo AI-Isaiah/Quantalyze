@@ -396,56 +396,11 @@ export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
   // (`swap_account_slot`, `snapshot-only`, captured 2026-11-23) is DELETED: its clearing
   // condition, a re-dump taken after 20261123180100_swap_account_slot.sql applied to PROD,
   // landed as #1317, and the gate then reported it `ratchet-stale`.
-  // ⭐ 2026-11-24 (Phase 227 JOBLEDGER plan 10): five `snapshot-only` rows, one per function
-  // the phase's migrations (20261124120000 to 20261124120600) add before
-  // supabase/schema/baseline.sql knows them. Same clearing condition as every row deleted
-  // below: the re-dump taken after the migration has applied to PROD turns the row into
-  // `ratchet-stale` and it is DELETED. Each reason names its migration.
-  {
-    name: "record_compute_job_attempt_error",
-    side: "snapshot-only",
-    capturedAt: "2026-11-24",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after its migration applied to PROD",
-    reason:
-      "Phase 227 JOBLEDGER defines it in 20261124120000_jobledger_attempt_failures.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
-  {
-    name: "renew_compute_job_claims",
-    side: "snapshot-only",
-    capturedAt: "2026-11-24",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after its migration applied to PROD",
-    reason:
-      "Phase 227 JOBLEDGER defines it in 20261124120200_compute_job_claim_renewal.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
-  {
-    name: "record_reconcile_readmit_exhaustions",
-    side: "snapshot-only",
-    capturedAt: "2026-11-24",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after its migration applied to PROD",
-    reason:
-      "Phase 227 JOBLEDGER defines it in 20261124120300_reconcile_readmit_exhaustions.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
-  {
-    name: "first_hop_enqueue_sweep",
-    side: "snapshot-only",
-    capturedAt: "2026-11-24",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after its migration applied to PROD",
-    reason:
-      "Phase 227 JOBLEDGER defines it in 20261124120400_first_hop_enqueue_sweep.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
-  {
-    name: "record_orphan_reaped_attempt",
-    side: "snapshot-only",
-    capturedAt: "2026-11-24",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after its migration applied to PROD",
-    reason:
-      "Phase 227 JOBLEDGER defines it in 20261124120600_orphan_reaped_attempt_record.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
+  // ⭐ 2026-11-24: the five Phase 227 JOBLEDGER plan 10 rows (`record_compute_job_attempt_error`,
+  // `renew_compute_job_claims`, `record_reconcile_readmit_exhaustions`, `first_hop_enqueue_sweep`,
+  // `record_orphan_reaped_attempt`, all `snapshot-only`, captured 2026-11-24) are DELETED: their
+  // clearing condition, a re-dump taken after 20261124120000..20261124120600 applied to PROD,
+  // landed in this re-dump PR, and the gate then reported each `ratchet-stale`.
   // ⭐ 2026-11-20: the Phase 219 ACCOUNTEMAIL gap closure plan 08 row
   // (`auth_user_has_password`, `snapshot-only`, captured 2026-11-20) is DELETED: its
   // clearing condition, a re-dump taken after

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.133.67.1] - 2026-11-24 — BASELINE: automated re-dump after the PROD apply of d04ef47c
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `45429669614`, after the PROD apply of merge `d04ef47c`: sha256 `e5d41466…` → `98821446…`.
+- Shape, old → new: tables 68 → 71, policies 154 → 154, function statements 139 → 144, distinct function names 137 → 142, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261124120000_jobledger_attempt_failures.sql`, `20261124120100_jobledger_reset_ledger_and_bridge.sql`, `20261124120200_compute_job_claim_renewal.sql`, `20261124120300_reconcile_readmit_exhaustions.sql`, `20261124120400_first_hop_enqueue_sweep.sql`, `20261124120500_poll_positions_cohort.sql`, `20261124120600_orphan_reaped_attempt_record.sql`, `20261124120700_sanitize_user_attempt_failures.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-24` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.67.0 → 0.133.67.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=336 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 144 — MATCH 141, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Fixed
+- **`scripts/baseline-redump.mjs --self-test` died with `spawnSync git ENOBUFS` on this dump.** Its scratch-repo git helper used Node's default 1 MiB `maxBuffer`. This dump is the first baseline over 1 MiB (1050573 bytes, against 1008964 before). The helper now uses the same 256 MiB buffer as the script's own `git()` helper. Measured: `baseline-redump self-test OK: 226 assertion(s)`, and `baseline-redump-wiring.test.ts` passes 17/17.
+
+### Removed
+- The five Phase 227 `snapshot-only` NAME_SET_RATCHET rows in `scripts/dump-sql-functions.ts` (`record_compute_job_attempt_error`, `renew_compute_job_claims`, `record_reconcile_readmit_exhaustions`, `first_hop_enqueue_sweep`, `record_orphan_reaped_attempt`). With the functions now in the dump, the snapshot gate reported each `ratchet-stale`. It now reads `SQL function snapshot is current (142 functions)`.
+- This clears main's `sql-gate-lint` red from #1325 (the declared baseline-content-drift findings), and the `frontend` aggregator red that rolls it up.
+
+### Notes
+- What the eight carried migrations add: the Phase 227 JOBLEDGER attempt-failure ledger, the claim renewal, the readmit exhaustion record, the first-hop sweep, the private positions-poll cohort, the orphan-reaped trigger and the `sanitize_user` ledger purge. See the 0.133.67.0 entry. The first-hop sweep was registered on PROD after the apply (`docs/runbooks/jobledger-go-live.md`).
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45429669614` succeeded, and this entry was composed by the `redump-pr` job. Run `45429669614` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.67.0] - 2026-11-24 — Phase 227 JOBLEDGER: a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job
 
 Eight migrations (20261124120000 to 20261124120700), worker changes in `analytics-service/main_worker.py` and a new readmit page. Covers MT5D-01 and HEAL-01 to HEAL-05. All eight migrations auto-apply to TEST and then PROD on merge. None schedules a job: HEAL-01's sweep is registered by hand afterwards (see Notes).

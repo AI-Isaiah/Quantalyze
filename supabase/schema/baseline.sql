@@ -6454,13 +6454,26 @@ BEGIN
       FROM strategies s
       JOIN api_keys ak ON ak.id = s.api_key_id
       WHERE s.api_key_id IS NOT NULL
-        AND s.status IN ('published', 'pending_review')
-        AND EXISTS (
-          SELECT 1 FROM compute_jobs cj
-            WHERE cj.strategy_id = s.id
-              AND cj.kind = 'sync_trades'
-              AND cj.status = 'done'
-              AND cj.updated_at > (now() - interval '30 days')
+        -- HEAL-05 (phase 227): the cohort. Private strategies are polled too, through a live
+        -- key only, and "the key still works" is read from either sync path: a done
+        -- sync_trades job (the user triggered path) or the per-strategy cursor the cron
+        -- path writes. See the migration header, DEC-06-A and DEC-06-B.
+        AND s.status IN ('published', 'pending_review', 'private')
+        AND ak.is_active
+        AND ak.disconnected_at IS NULL
+        AND (
+          EXISTS (
+            SELECT 1 FROM compute_jobs cj
+              WHERE cj.strategy_id = s.id
+                AND cj.kind = 'sync_trades'
+                AND cj.status = 'done'
+                AND cj.updated_at > (now() - interval '30 days')
+          )
+          OR EXISTS (
+            SELECT 1 FROM strategy_sync_cursors ssc
+              WHERE ssc.strategy_id = s.id
+                AND ssc.last_sync_at > (now() - interval '30 days')
+          )
         )
   LOOP
     -- Count pre-existing in-flight poll_positions jobs for this strategy
@@ -6494,7 +6507,7 @@ $$;
 ALTER FUNCTION "public"."enqueue_poll_positions_for_all_strategies"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."enqueue_poll_positions_for_all_strategies"() IS 'Daily fanout: enqueues a poll_positions job per qualifying strategy. Idempotent via enqueue_compute_job partial unique index. Returns count of newly-enqueued jobs. Called by worker daily loop under advisory lock to prevent multi-replica duplication. See migration 033.';
+COMMENT ON FUNCTION "public"."enqueue_poll_positions_for_all_strategies"() IS 'Daily fanout: enqueues a poll_positions job per qualifying strategy. Cohort (phase 227 HEAL-05): published, pending_review or private, through an active and connected key, with a done sync_trades job OR a strategy_sync_cursors row advanced in the last 30 days. Idempotent via enqueue_compute_job partial unique index. Returns count of newly-enqueued jobs. Called by worker daily loop under advisory lock to prevent multi-replica duplication. See migration 033 and 20261124120500.';
 
 
 
@@ -7032,6 +7045,187 @@ $$;
 
 
 ALTER FUNCTION "public"."finalize_wizard_strategy"("p_strategy_id" "uuid", "p_user_id" "uuid", "p_name" "text", "p_description" "text", "p_category_id" "uuid", "p_strategy_types" "text"[], "p_subtypes" "text"[], "p_markets" "text"[], "p_supported_exchanges" "text"[], "p_leverage_range" "text", "p_aum" numeric, "p_max_capacity" numeric, "p_terminal_status" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."first_hop_enqueue_sweep"() RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  -- The named failed state's user-visible sentence (DEC-05-E). It is DECLAREd
+  -- ONCE, here, and every write below reads this constant. A fixed literal,
+  -- never data: nothing a caller or a row can supply reaches computation_error.
+  c_named_state_copy CONSTANT TEXT :=
+    'Analytics has not started for this strategy: its first sync was never queued, and the automatic retry did not complete. Retry the sync, or contact support if this persists.';
+
+  v_cleared   INTEGER;
+  v_observed  INTEGER;
+  v_reenq     INTEGER;
+  v_named     INTEGER;
+BEGIN
+  -- ONE statement, ONE candidate predicate. The `cand` CTE is written once and
+  -- shared by the clear, the observe and the re-enqueue below, so the three can
+  -- never disagree about what a candidate is. Data-modifying CTEs share a
+  -- snapshot: an observation this call inserts is invisible to the re-enqueue in
+  -- the same call, and the 90-minute grace could not have elapsed for it anyway.
+  WITH cand AS MATERIALIZED (
+    SELECT s.id
+      FROM public.strategies s
+     WHERE s.status = 'private'
+       AND EXISTS (
+             SELECT 1
+               FROM public.api_keys ak
+              WHERE ak.id = s.api_key_id
+                AND ak.is_active
+                AND ak.disconnected_at IS NULL
+           )
+       AND NOT EXISTS (
+             SELECT 1
+               FROM public.compute_jobs cj
+              WHERE cj.strategy_id = s.id
+                 OR (cj.api_key_id = s.api_key_id
+                     AND cj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')
+                     AND cj.kind NOT IN ('poll_allocator_positions',
+                                         'refresh_allocator_equity_daily',
+                                         'reconstruct_allocator_history'))
+           )
+       AND NOT EXISTS (SELECT 1 FROM public.trades t WHERE t.strategy_id = s.id)
+       AND NOT EXISTS (SELECT 1 FROM public.csv_daily_returns d WHERE d.strategy_id = s.id)
+       AND NOT EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy_id = s.id)
+       AND NOT EXISTS (
+             SELECT 1
+               FROM public.strategy_analytics sa
+              WHERE sa.strategy_id = s.id
+                AND sa.computation_status <> 'pending'
+           )
+  ),
+  -- (1) An observation whose first hop arrived late is healthy: forget it. Only
+  -- an observation that has NOT been re-enqueued is forgotten; one that has is
+  -- the once-only guard and is never deleted.
+  cleared AS (
+    DELETE FROM public.first_hop_enqueue_retries r
+     WHERE r.reenqueued_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM cand c WHERE c.id = r.strategy_id)
+    RETURNING r.strategy_id
+  ),
+  -- (2) Observe every candidate not yet observed.
+  observed AS (
+    INSERT INTO public.first_hop_enqueue_retries (strategy_id)
+    SELECT c.id
+      FROM cand c
+     WHERE NOT EXISTS (
+             SELECT 1 FROM public.first_hop_enqueue_retries r0 WHERE r0.strategy_id = c.id
+           )
+     LIMIT 100
+    ON CONFLICT (strategy_id) DO NOTHING
+    RETURNING strategy_id
+  ),
+  -- (3) Observed for more than the grace, still a candidate, not yet re-enqueued.
+  due AS (
+    SELECT r.strategy_id
+      FROM public.first_hop_enqueue_retries r
+      JOIN cand c ON c.id = r.strategy_id
+     WHERE r.reenqueued_at IS NULL
+       AND r.first_seen_at < now() - interval '90 minutes'
+     ORDER BY r.first_seen_at
+     LIMIT 25
+       FOR UPDATE OF r SKIP LOCKED
+  ),
+  enq AS (
+    INSERT INTO public.compute_jobs (strategy_id, kind, metadata)
+    SELECT d.strategy_id,
+           'sync_trades',
+           jsonb_build_object('source', 'first-hop-sweep', 'detected_at', now())
+      FROM due d
+    ON CONFLICT DO NOTHING
+    RETURNING id, strategy_id
+  ),
+  stamped AS (
+    UPDATE public.first_hop_enqueue_retries r
+       SET reenqueued_at = now(),
+           reenqueued_job_id = e.id
+      FROM enq e
+     WHERE r.strategy_id = e.strategy_id
+    RETURNING r.strategy_id
+  )
+  SELECT (SELECT count(*) FROM cleared),
+         (SELECT count(*) FROM observed),
+         (SELECT count(*) FROM stamped)
+    INTO v_cleared, v_observed, v_reenq;
+
+  -- (4) THE NAMED STATE, only when the retry ALSO ended without a result. A
+  -- re-enqueued strategy is ripe when it has at least one failed_final job and
+  -- NO job in any other status (so nothing is queued, running or retrying), and
+  -- its analytics row is absent or still 'pending'. A strategy with no job row
+  -- at all is NOT ripe: retention pruned the retry or someone removed it, and
+  -- "the retry did not complete" would be a claim nobody measured.
+  --
+  -- A retry that the bridge already turned into its own 'failed' row (its
+  -- curated, per-kind sentence) is KEPT, by two layers that are redundant on
+  -- purpose: the admission test below excludes any row not 'pending', and the
+  -- DO UPDATE's WHERE clause refuses to overwrite anything but 'pending' even
+  -- if a row appears between the two.
+  WITH ripe AS (
+    SELECT r.strategy_id
+      FROM public.first_hop_enqueue_retries r
+     WHERE r.reenqueued_at IS NOT NULL
+       AND r.named_state_at IS NULL
+       AND EXISTS (
+             SELECT 1
+               FROM public.compute_jobs cjf
+              WHERE cjf.strategy_id = r.strategy_id
+                AND cjf.status = 'failed_final'
+           )
+       AND NOT EXISTS (
+             SELECT 1
+               FROM public.compute_jobs cjn
+              WHERE cjn.strategy_id = r.strategy_id
+                AND cjn.status <> 'failed_final'
+           )
+       AND NOT EXISTS (
+             SELECT 1
+               FROM public.strategy_analytics san
+              WHERE san.strategy_id = r.strategy_id
+                AND san.computation_status <> 'pending'
+           )
+     ORDER BY r.reenqueued_at
+     LIMIT 25
+       FOR UPDATE OF r SKIP LOCKED
+  ),
+  named AS (
+    INSERT INTO public.strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+    SELECT p.strategy_id, 'failed', c_named_state_copy, NULL, NULL, NULL
+      FROM ripe p
+    ON CONFLICT (strategy_id) DO UPDATE
+       SET computation_status = EXCLUDED.computation_status,
+           computation_error = EXCLUDED.computation_error,
+           computing_started_at = EXCLUDED.computing_started_at,
+           computation_error_source = EXCLUDED.computation_error_source,
+           computation_error_job_id = EXCLUDED.computation_error_job_id
+     WHERE strategy_analytics.computation_status = 'pending'
+    RETURNING strategy_id
+  )
+  UPDATE public.first_hop_enqueue_retries r
+     SET named_state_at = now()
+    FROM named n
+   WHERE r.strategy_id = n.strategy_id;
+  GET DIAGNOSTICS v_named = ROW_COUNT;
+
+  RETURN jsonb_build_object(
+    'cleared', v_cleared,
+    'observed', v_observed,
+    'reenqueued', v_reenq,
+    'named_state', v_named
+  );
+END
+$$;
+
+
+ALTER FUNCTION "public"."first_hop_enqueue_sweep"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."first_hop_enqueue_sweep"() IS 'Phase 227 / plan 05 (HEAL-01): re-enqueues the first sync_trades job of a private strategy whose finalize-time enqueue dropped (an active connected key and no job of its own, no in-flight strategy-evidencing job on its key, no trade, daily-return, member or non-pending analytics row), once, after the sweep has observed it for more than 90 minutes. Returns jsonb with cleared, observed, reenqueued and named_state counts. EXECUTE is held by the owner alone. This function registers nothing: the hourly pg_cron registration is a live PROD operation owned by docs/runbooks/jobledger-go-live.md.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."flip_capital_ownership_to_team_review"("p_strategy_id" "uuid") RETURNS TABLE("removed_positions" integer, "updated_strategies" integer)
@@ -8356,6 +8550,23 @@ BEGIN
          next_attempt_at = v_next_attempt
    WHERE id = p_job_id;
 
+  -- MT5D-01 (phase 227): keep this attempt's cause. The record is written in the SAME
+  -- transaction that flips the job to failed, so a committed failure always has its
+  -- record and a rolled-back one has none. It must come before any later claim, because
+  -- claim_compute_jobs_with_priority clears last_error and error_kind on re-claim
+  -- (M-1137/M-1138), which stays. claim_token and attempts are still the failed
+  -- attempt's own (the UPDATE above does not touch them). ON CONFLICT: the same cause
+  -- for one attempt collapses into one row. The fan-in cascade below records NOTHING
+  -- for its children: they never ran.
+  INSERT INTO public.compute_job_attempt_failures
+         (job_id, kind, strategy_id, api_key_id, portfolio_id, allocator_id, exchange, job_created_at,
+          attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+  SELECT cj.id, cj.kind, cj.strategy_id, cj.api_key_id, cj.portfolio_id, cj.allocator_id, cj.exchange, cj.created_at,
+         cj.attempts, p_claim_token, 'error', p_error_kind, p_error, cj.claimed_by
+    FROM compute_jobs cj
+   WHERE cj.id = p_job_id
+  ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING;
+
   -- Phase 164.9.3.1 D-01 to D-03: a parent that ENDS failed_final can never
   -- release a waiting fan-in child (release needs every parent `done`), so the
   -- child would hold its (target, kind) in-flight slot forever and its strategy
@@ -9315,25 +9526,64 @@ CREATE OR REPLACE FUNCTION "public"."reclaim_stuck_compute_jobs"("p_older_than" 
     AS $$
 DECLARE
   v_reclaimed INTEGER;
+  -- HEAL-04 / MT5D-01 (phase 227): the ids this call reclaimed, for the bridge loop below.
+  v_ids       UUID[];
+  r_b         RECORD;
 BEGIN
-  UPDATE compute_jobs
-     SET status          = 'pending',
-         claimed_at      = NULL,
-         claimed_by      = NULL,
-         next_attempt_at = now(),
-         attempts        = GREATEST(attempts - 1, 0),
-         reclaim_count   = reclaim_count + 1
-   WHERE id IN (
-     SELECT id FROM compute_jobs
-       WHERE status = 'running'
-         AND claimed_at IS NOT NULL
-         AND claimed_at < (now() - p_older_than)
-       ORDER BY claimed_at
-       LIMIT 500
-       FOR UPDATE SKIP LOCKED
-   );
+  -- HEAL-04 / MT5D-01 (phase 227): the same bounded UPDATE, in one statement with its
+  -- ledger rows. `old` takes the row locks (SKIP LOCKED) and remembers the token, attempts
+  -- and worker the row held BEFORE the reclaim; `ins` writes one stall_reclaim record per
+  -- reclaimed row with that PRE-decrement attempt count.
+  WITH old AS (
+    SELECT id,
+           claim_token AS old_claim_token,
+           attempts    AS old_attempts,
+           claimed_by  AS old_claimed_by
+      FROM compute_jobs
+     WHERE status = 'running'
+       AND claimed_at IS NOT NULL
+       AND claimed_at < (now() - p_older_than)
+     ORDER BY claimed_at
+     LIMIT 500
+     FOR UPDATE SKIP LOCKED
+  ), upd AS (
+    UPDATE compute_jobs cj
+       SET status          = 'pending',
+           claimed_at      = NULL,
+           claimed_by      = NULL,
+           next_attempt_at = now(),
+           attempts        = GREATEST(cj.attempts - 1, 0),
+           reclaim_count   = cj.reclaim_count + 1
+      FROM old
+     WHERE cj.id = old.id
+    RETURNING cj.id, cj.kind, cj.strategy_id, cj.api_key_id, cj.portfolio_id, cj.allocator_id, cj.exchange, cj.created_at,
+              old.old_claim_token, old.old_attempts, old.old_claimed_by
+  ), ins AS (
+    INSERT INTO public.compute_job_attempt_failures
+           (job_id, kind, strategy_id, api_key_id, portfolio_id, allocator_id, exchange, job_created_at,
+            attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+    SELECT u.id, u.kind, u.strategy_id, u.api_key_id, u.portfolio_id, u.allocator_id, u.exchange, u.created_at,
+           u.old_attempts, u.old_claim_token, 'stall_reclaim', NULL, NULL, u.old_claimed_by
+      FROM upd u
+    ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING
+  )
+  SELECT count(*), COALESCE(array_agg(upd.id), '{}'::uuid[])
+    INTO v_reclaimed, v_ids
+    FROM upd;
 
-  GET DIAGNOSTICS v_reclaimed = ROW_COUNT;
+  -- HEAL-04 / MT5D-01 (phase 227): the same sorted bridge loop as reset_stalled_compute_jobs
+  -- (DEC-02-B, DEC-02-C). The bridge decides whether a side-kind job bounces the status.
+  FOR r_b IN
+    SELECT cj.strategy_id, cj.kind, min(cj.id::text)::uuid AS job_id
+      FROM compute_jobs cj
+     WHERE cj.id = ANY (v_ids)
+       AND cj.strategy_id IS NOT NULL
+     GROUP BY cj.strategy_id, cj.kind
+     ORDER BY hashtext(cj.strategy_id::text), cj.strategy_id, cj.kind
+  LOOP
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(r_b.strategy_id::text));
+    PERFORM sync_strategy_analytics_status(r_b.strategy_id, r_b.job_id);
+  END LOOP;
 
   RETURN v_reclaimed;
 END;
@@ -9487,6 +9737,197 @@ COMMENT ON FUNCTION "public"."reconstruct_positions_atomic"("p_strategy_id" "uui
 
 
 
+CREATE OR REPLACE FUNCTION "public"."record_compute_job_attempt_error"("p_job_id" "uuid", "p_claim_token" "uuid", "p_error" "text", "p_error_kind" "text" DEFAULT 'unknown'::"text") RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  v_rows integer;
+BEGIN
+  IF p_claim_token IS NULL THEN
+    RAISE EXCEPTION 'record_compute_job_attempt_error: p_claim_token is required, an unattested error would be recorded against no attempt'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  IF p_error_kind IS NOT NULL
+     AND p_error_kind NOT IN ('transient', 'permanent', 'unknown') THEN
+    RAISE EXCEPTION 'record_compute_job_attempt_error: p_error_kind must be transient/permanent/unknown, got %', p_error_kind
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- (a) attested by the job row (the 55P03 shape).
+  INSERT INTO public.compute_job_attempt_failures
+         (job_id, kind, strategy_id, api_key_id, portfolio_id, allocator_id, exchange, job_created_at,
+          attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+  SELECT cj.id, cj.kind, cj.strategy_id, cj.api_key_id, cj.portfolio_id, cj.allocator_id, cj.exchange, cj.created_at,
+         cj.attempts, p_claim_token, 'error', p_error_kind, p_error, cj.claimed_by
+    FROM compute_jobs cj
+   WHERE cj.id = p_job_id
+     AND cj.status = 'running'
+     AND cj.claim_token = p_claim_token
+  ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING;
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  IF v_rows > 0 THEN
+    RETURN TRUE;
+  END IF;
+
+  -- The job row attests this token and its error is already on file: nothing to add.
+  IF EXISTS (SELECT 1 FROM compute_jobs cj
+              WHERE cj.id = p_job_id
+                AND cj.status = 'running'
+                AND cj.claim_token = p_claim_token) THEN
+    RETURN FALSE;
+  END IF;
+
+  -- (b) attested by an existing reset or reclaim record of the same attempt (the late-55006
+  -- shape). The columns are copied from THAT record, never from the job row.
+  INSERT INTO public.compute_job_attempt_failures
+         (job_id, kind, strategy_id, api_key_id, portfolio_id, allocator_id, exchange, job_created_at,
+          attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+  SELECT f.job_id, f.kind, f.strategy_id, f.api_key_id, f.portfolio_id, f.allocator_id, f.exchange, f.job_created_at,
+         f.attempt, p_claim_token, 'error', p_error_kind, p_error, f.worker_id
+    FROM public.compute_job_attempt_failures f
+   WHERE f.job_id = p_job_id
+     AND f.claim_token = p_claim_token
+     AND f.cause_class IN ('watchdog_reset', 'stall_reclaim', 'orphan_reaped')
+   ORDER BY f.recorded_at, f.id
+   LIMIT 1
+  ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING;
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows > 0;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."record_compute_job_attempt_error"("p_job_id" "uuid", "p_claim_token" "uuid", "p_error" "text", "p_error_kind" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."record_compute_job_attempt_error"("p_job_id" "uuid", "p_claim_token" "uuid", "p_error" "text", "p_error_kind" "text") IS 'Phase 227 MT5D-01 (migration 20261124120000): files a REAL worker error as a cause_class error record in compute_job_attempt_failures when mark_compute_job_failed could not land (SQLSTATE 55P03 closure bound, or a 55006 late mark after the watchdog took the claim). The claim token must be attested by the running job row or by an existing watchdog_reset / stall_reclaim / orphan_reaped record of the same job; otherwise nothing is written and it returns false. Returns whether a row was inserted. service_role only.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."record_orphan_reaped_attempt"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+BEGIN
+  -- MT5D-01 (phase 227 plan 07): the terminalizer just ended a running attempt as an
+  -- orphan. Record it in the same statement, from the row it transitioned.
+  INSERT INTO public.compute_job_attempt_failures
+    (job_id, kind, strategy_id, api_key_id, portfolio_id, allocator_id, exchange, job_created_at,
+     attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+  VALUES
+    (NEW.id, NEW.kind, NEW.strategy_id, NEW.api_key_id, NEW.portfolio_id, NEW.allocator_id, NEW.exchange, NEW.created_at,
+     OLD.attempts, OLD.claim_token, 'orphan_reaped', NEW.error_kind, NEW.last_error, OLD.claimed_by)
+  ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING;
+
+  RETURN NULL;
+END
+$$;
+
+
+ALTER FUNCTION "public"."record_orphan_reaped_attempt"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."record_orphan_reaped_attempt"() IS 'Phase 227 MT5D-01 (migration 20261124120600): trigger function of compute_jobs_record_orphan_reaped_attempt. Writes one cause_class orphan_reaped row to compute_job_attempt_failures when the orphan terminalizer moves a running job to failed_final with error_kind orphaned. SECURITY DEFINER, search_path pinned, executable by no API role (a trigger function needs no caller grant). Not a callable API.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."record_reconcile_readmit_exhaustions"() RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  v_written integer;
+BEGIN
+  INSERT INTO public.reconcile_readmit_exhaustions (strategy_id, generation_key, marker_count)
+  SELECT s.id,
+         (SELECT cjm.id
+            FROM public.compute_jobs cjm
+           WHERE cjm.strategy_id = s.id
+             AND cjm.status = 'failed_final'
+             AND cjm.last_error LIKE 'orphaned_running_reaped:%'
+           ORDER BY cjm.created_at DESC, cjm.id DESC
+           LIMIT 1),
+         (SELECT count(*)
+            FROM public.compute_jobs cjn
+           WHERE cjn.strategy_id = s.id
+             AND cjn.status = 'failed_final'
+             AND cjn.last_error LIKE 'orphaned_running_reaped:%')
+    -- SFH-01 (review round 1): the LIMIT below applies BEFORE ON CONFLICT, so exhaustions already
+    -- on file (oldest dailies first) could fill every slot on every call and a newer exhaustion
+    -- would never be written or paged. The already-recorded generations are therefore removed
+    -- here, in the FROM list and outside the span the parity vitest compares with the sweep.
+    FROM (SELECT st.*
+            FROM public.strategies st
+           WHERE NOT EXISTS (
+                   SELECT 1
+                     FROM public.reconcile_readmit_exhaustions rx
+                    WHERE rx.strategy_id = st.id
+                      AND rx.generation_key = (SELECT cjr.id
+                                                 FROM public.compute_jobs cjr
+                                                WHERE cjr.strategy_id = st.id
+                                                  AND cjr.status = 'failed_final'
+                                                  AND cjr.last_error LIKE 'orphaned_running_reaped:%'
+                                                ORDER BY cjr.created_at DESC, cjr.id DESC
+                                                LIMIT 1))) s
+    WHERE s.status <> 'archived'
+    AND EXISTS (
+    SELECT 1
+    FROM public.csv_daily_returns d
+    WHERE d.strategy_id = s.id
+    )
+    AND NOT EXISTS (
+    SELECT 1
+    FROM public.compute_jobs cj
+    WHERE cj.strategy_id = s.id
+    AND NOT ((cj.status = 'failed_final'
+    AND cj.last_error LIKE 'orphaned_running_reaped:%') IS TRUE)
+    )
+    AND (
+    SELECT count(*)
+    FROM public.compute_jobs cjc
+    WHERE cjc.strategy_id = s.id
+    AND cjc.status = 'failed_final'
+    AND cjc.last_error LIKE 'orphaned_running_reaped:%'
+    ) >= 3
+    AND NOT EXISTS (
+    SELECT 1
+    FROM public.strategy_analytics sa
+    WHERE sa.strategy_id = s.id
+    AND sa.computation_status IN ('computing', 'complete', 'complete_with_warnings', 'failed')
+    )
+    AND NOT EXISTS (
+    SELECT 1
+    FROM public.strategy_keys sk
+    WHERE sk.strategy_id = s.id
+    )
+    AND (
+    SELECT max(dg.created_at)
+    FROM public.csv_daily_returns dg
+    WHERE dg.strategy_id = s.id
+    ) < now() - interval '1 hour'
+    ORDER BY (
+    SELECT max(dg.created_at)
+    FROM public.csv_daily_returns dg
+    WHERE dg.strategy_id = s.id
+    ) ASC
+    LIMIT 100
+    ON CONFLICT (strategy_id, generation_key) DO NOTHING;
+
+  GET DIAGNOSTICS v_written = ROW_COUNT;
+  RETURN v_written;
+END
+$$;
+
+
+ALTER FUNCTION "public"."record_reconcile_readmit_exhaustions"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."record_reconcile_readmit_exhaustions"() IS 'Phase 227 plan 04 (HEAL-03): writes one public.reconcile_readmit_exhaustions row for every strategy the reconcile sweep would otherwise readmit but cannot, because it already carries three orphan markers. The candidate predicate is the sweep''s own with the ceiling comparison inverted (pinned to the PROD-captured cron manifest by a vitest). Idempotent per exhaustion (UNIQUE on strategy and newest marker id, ON CONFLICT DO NOTHING); at most 100 rows per call, oldest dailies first, among strategies whose current exhaustion is not already on file (so recorded rows cannot starve a new one). Returns the number of rows written. Registers nothing; plan 09''s reader calls it. EXECUTE is held by service_role only.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."reject_sentinel_writes"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -9519,6 +9960,40 @@ ALTER FUNCTION "public"."reject_sentinel_writes"() OWNER TO "postgres";
 
 
 COMMENT ON FUNCTION "public"."reject_sentinel_writes"() IS 'Rejects user-originated writes that land the sanitize_user sentinel into profiles/strategies/portfolios. Gated on current_user IN (authenticated, anon). See migrations 120, 127.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."renew_compute_job_claims"("p_job_ids" "uuid"[], "p_claim_tokens" "uuid"[]) RETURNS SETOF "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+BEGIN
+  IF p_job_ids IS NULL
+     OR p_claim_tokens IS NULL
+     OR cardinality(p_job_ids) <> cardinality(p_claim_tokens) THEN
+    RAISE EXCEPTION 'renew_compute_job_claims: p_job_ids and p_claim_tokens must be non-null arrays of equal length'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  RETURN QUERY
+  WITH renewed AS (
+    UPDATE compute_jobs c
+       SET claimed_at = now()
+      FROM unnest(p_job_ids, p_claim_tokens) AS r(id, tok)
+     WHERE c.id = r.id
+       AND c.claim_token = r.tok
+       AND c.status = 'running'
+    RETURNING c.id
+  )
+  SELECT renewed.id FROM renewed;
+END
+$$;
+
+
+ALTER FUNCTION "public"."renew_compute_job_claims"("p_job_ids" "uuid"[], "p_claim_tokens" "uuid"[]) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."renew_compute_job_claims"("p_job_ids" "uuid"[], "p_claim_tokens" "uuid"[]) IS 'Phase 227 JOBLEDGER HEAL-02. Moves claimed_at to now() for each (id, claim_token) pair whose row is still status running under exactly that token, and returns the ids it renewed. A row the watchdog already reset (token NULLed), a row not running, and a token that does not match renew nothing and are absent from the result, so the caller reads membership of the result as "I still own this row". Mismatched or NULL arrays raise invalid_parameter_value. Writes no column but claimed_at. Never call it for the row currently executing: that row''s staleness stays governed by its own per-kind watchdog override. service_role only.';
 
 
 
@@ -9638,6 +10113,10 @@ DECLARE
   v_partial   INTEGER;
   v_kind      TEXT;
   v_threshold INTERVAL;
+  -- HEAL-04 / MT5D-01 (phase 227): the ids this call reset, for the bridge loop below.
+  v_ids       UUID[] := '{}';
+  v_pass_ids  UUID[];
+  r_b         RECORD;
 BEGIN
   IF p_stale_threshold IS NULL OR p_stale_threshold <= interval '0' THEN
     RAISE EXCEPTION 'reset_stalled_compute_jobs: p_stale_threshold must be > 0, got %', p_stale_threshold
@@ -9649,53 +10128,117 @@ BEGIN
     FOR v_kind IN SELECT jsonb_object_keys(p_per_kind_overrides) LOOP
       v_threshold := (p_per_kind_overrides ->> v_kind)::INTERVAL;
 
-      UPDATE compute_jobs
-         SET status          = 'pending',
-             claimed_at      = NULL,
-             claimed_by      = NULL,
-             next_attempt_at = now(),
-             last_error      = 'worker_stalled',
-             claim_token     = NULL    -- mig 117: P97 fence invalidation
-       WHERE id IN (
-         SELECT id FROM compute_jobs
-           WHERE status = 'running'
-             AND kind = v_kind
-             AND claimed_at IS NOT NULL
-             AND claimed_at < (now() - v_threshold)
-           ORDER BY claimed_at
-           LIMIT 500
-           FOR UPDATE SKIP LOCKED
-       );
+      -- HEAL-04 / MT5D-01 (phase 227): the same bounded UPDATE, now in one statement with
+      -- its ledger rows. `old` takes the row locks (SKIP LOCKED) and remembers the token,
+      -- attempts and worker the row held BEFORE the reset; `upd` is the existing UPDATE;
+      -- `ins` writes one watchdog_reset record per reset row.
+      WITH old AS (
+        SELECT id,
+               claim_token AS old_claim_token,
+               attempts    AS old_attempts,
+               claimed_by  AS old_claimed_by
+          FROM compute_jobs
+         WHERE status = 'running'
+           AND kind = v_kind
+           AND claimed_at IS NOT NULL
+           AND claimed_at < (now() - v_threshold)
+         ORDER BY claimed_at
+         LIMIT 500
+         FOR UPDATE SKIP LOCKED
+      ), upd AS (
+        UPDATE compute_jobs cj
+           SET status          = 'pending',
+               claimed_at      = NULL,
+               claimed_by      = NULL,
+               next_attempt_at = now(),
+               last_error      = 'worker_stalled',
+               claim_token     = NULL    -- mig 117: P97 fence invalidation
+          FROM old
+         WHERE cj.id = old.id
+        RETURNING cj.id, cj.kind, cj.strategy_id, cj.api_key_id, cj.portfolio_id, cj.allocator_id, cj.exchange, cj.created_at,
+                  old.old_claim_token, old.old_attempts, old.old_claimed_by
+      ), ins AS (
+        INSERT INTO public.compute_job_attempt_failures
+               (job_id, kind, strategy_id, api_key_id, portfolio_id, allocator_id, exchange, job_created_at,
+                attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+        SELECT u.id, u.kind, u.strategy_id, u.api_key_id, u.portfolio_id, u.allocator_id, u.exchange, u.created_at,
+               u.old_attempts, u.old_claim_token, 'watchdog_reset', NULL, 'worker_stalled', u.old_claimed_by
+          FROM upd u
+        ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING
+      )
+      SELECT count(*), COALESCE(array_agg(upd.id), '{}'::uuid[])
+        INTO v_partial, v_pass_ids
+        FROM upd;
 
-      GET DIAGNOSTICS v_partial = ROW_COUNT;
       v_reset := v_reset + v_partial;
+      v_ids   := v_ids || v_pass_ids;
     END LOOP;
   END IF;
 
   -- Default threshold pass: kinds NOT in the override map.
-  UPDATE compute_jobs
-     SET status          = 'pending',
-         claimed_at      = NULL,
-         claimed_by      = NULL,
-         next_attempt_at = now(),
-         last_error      = 'worker_stalled',
-         claim_token     = NULL    -- mig 117: P97 fence invalidation
-   WHERE id IN (
-     SELECT id FROM compute_jobs
-       WHERE status = 'running'
-         AND claimed_at IS NOT NULL
-         AND claimed_at < (now() - p_stale_threshold)
-         AND (
-           p_per_kind_overrides IS NULL
-           OR NOT (p_per_kind_overrides ? kind)
-         )
-       ORDER BY claimed_at
-       LIMIT 500
-       FOR UPDATE SKIP LOCKED
-   );
+  WITH old AS (
+    SELECT id,
+           claim_token AS old_claim_token,
+           attempts    AS old_attempts,
+           claimed_by  AS old_claimed_by
+      FROM compute_jobs
+     WHERE status = 'running'
+       AND claimed_at IS NOT NULL
+       AND claimed_at < (now() - p_stale_threshold)
+       AND (
+         p_per_kind_overrides IS NULL
+         OR NOT (p_per_kind_overrides ? kind)
+       )
+     ORDER BY claimed_at
+     LIMIT 500
+     FOR UPDATE SKIP LOCKED
+  ), upd AS (
+    UPDATE compute_jobs cj
+       SET status          = 'pending',
+           claimed_at      = NULL,
+           claimed_by      = NULL,
+           next_attempt_at = now(),
+           last_error      = 'worker_stalled',
+           claim_token     = NULL    -- mig 117: P97 fence invalidation
+      FROM old
+     WHERE cj.id = old.id
+    RETURNING cj.id, cj.kind, cj.strategy_id, cj.api_key_id, cj.portfolio_id, cj.allocator_id, cj.exchange, cj.created_at,
+              old.old_claim_token, old.old_attempts, old.old_claimed_by
+  ), ins AS (
+    INSERT INTO public.compute_job_attempt_failures
+           (job_id, kind, strategy_id, api_key_id, portfolio_id, allocator_id, exchange, job_created_at,
+            attempt, claim_token, cause_class, error_kind, error_text, worker_id)
+    SELECT u.id, u.kind, u.strategy_id, u.api_key_id, u.portfolio_id, u.allocator_id, u.exchange, u.created_at,
+           u.old_attempts, u.old_claim_token, 'watchdog_reset', NULL, 'worker_stalled', u.old_claimed_by
+      FROM upd u
+    ON CONFLICT (job_id, claim_token, cause_class) DO NOTHING
+  )
+  SELECT count(*), COALESCE(array_agg(upd.id), '{}'::uuid[])
+    INTO v_partial, v_pass_ids
+    FROM upd;
 
-  GET DIAGNOSTICS v_partial = ROW_COUNT;
   v_reset := v_reset + v_partial;
+  v_ids   := v_ids || v_pass_ids;
+
+  -- HEAL-04 / MT5D-01 (phase 227): re-derive the status of every strategy a reset row
+  -- belongs to, once per distinct (strategy_id, kind), through the existing bridge.
+  -- Every row lock is already held (the SKIP LOCKED selections above); the per-strategy
+  -- advisory locks come AFTER them, in ONE sorted order (hashtext of the strategy id, the
+  -- id, the kind) so two callers that bridge overlapping strategy sets cannot take them in
+  -- opposite orders. The bridge itself decides whether a side-kind job bounces the status
+  -- (its own early return); this loop spells no kind list. A key-mode row has a NULL
+  -- strategy_id and makes no call.
+  FOR r_b IN
+    SELECT cj.strategy_id, cj.kind, min(cj.id::text)::uuid AS job_id
+      FROM compute_jobs cj
+     WHERE cj.id = ANY (v_ids)
+       AND cj.strategy_id IS NOT NULL
+     GROUP BY cj.strategy_id, cj.kind
+     ORDER BY hashtext(cj.strategy_id::text), cj.strategy_id, cj.kind
+  LOOP
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(r_b.strategy_id::text));
+    PERFORM sync_strategy_analytics_status(r_b.strategy_id, r_b.job_id);
+  END LOOP;
 
   RETURN v_reset;
 END;
@@ -9962,6 +10505,19 @@ BEGIN
     partner_tag   = NULL
   WHERE id = p_user_id
     AND display_name IS DISTINCT FROM '[deleted]';
+
+  -- GDPR-ERASE (Phase 227 JOBLEDGER review): compute_job_attempt_failures keeps error_text
+  -- that can name a broker account. Its owner FKs cascade only when the OWNER ROW IS DELETED,
+  -- and this function deletes api_keys but only ANONYMIZES strategies, portfolios and
+  -- auth.users, so the strategy_id, portfolio_id and allocator_id cascades never fire here.
+  -- Delete the subject's records explicitly, for all four owner keys, before the api_keys
+  -- delete below (whose cascade would take the api_key_id rows anyway). The ledger holds no
+  -- counter anything depends on, so unlike strategy_shares a DELETE is the right erasure.
+  DELETE FROM compute_job_attempt_failures
+   WHERE allocator_id = p_user_id
+      OR strategy_id  IN (SELECT id FROM strategies WHERE user_id = p_user_id)
+      OR portfolio_id IN (SELECT id FROM portfolios WHERE user_id = p_user_id)
+      OR api_key_id   IN (SELECT id FROM api_keys   WHERE user_id = p_user_id);
 
   DELETE FROM api_keys WHERE user_id = p_user_id;
 
@@ -13457,6 +14013,99 @@ COMMENT ON CONSTRAINT "bridge_outcomes_percent_allocated_range_check" ON "public
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."compute_job_attempt_failures" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "job_id" "uuid" NOT NULL,
+    "kind" "text" NOT NULL,
+    "strategy_id" "uuid",
+    "api_key_id" "uuid",
+    "portfolio_id" "uuid",
+    "allocator_id" "uuid",
+    "exchange" "text",
+    "job_created_at" timestamp with time zone NOT NULL,
+    "attempt" integer NOT NULL,
+    "claim_token" "uuid",
+    "cause_class" "text" NOT NULL,
+    "error_kind" "text",
+    "error_text" "text",
+    "worker_id" "text",
+    "recorded_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "compute_job_attempt_failures_attempt_chk" CHECK (("attempt" >= 0)),
+    CONSTRAINT "compute_job_attempt_failures_cause_class_chk" CHECK (("cause_class" = ANY (ARRAY['error'::"text", 'watchdog_reset'::"text", 'stall_reclaim'::"text", 'orphan_reaped'::"text"])))
+);
+
+
+ALTER TABLE "public"."compute_job_attempt_failures" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."compute_job_attempt_failures" IS 'Phase 227 MT5D-01 (migration 20261124120000): append-only, one row per failed compute-job attempt and cause. Written ONLY by SECURITY DEFINER functions (mark_compute_job_failed and record_compute_job_attempt_error write cause_class error; plan 02 writes watchdog_reset and stall_reclaim; plan 07 writes orphan_reaped). Outlives the compute_jobs rows: there is NO foreign key to compute_jobs, so the 30/90-day retention prunes never delete a record. Read order for one job: attempt, then recorded_at, then id. strategy_id, api_key_id, portfolio_id and allocator_id cascade (mirroring compute_jobs), so error text that can name a broker account is deleted with its strategy, api key, portfolio or allocator. allocator_id is exported by the GDPR manifest. No retention cron in this phase; retention is routed to /gsd-secure-phase. service_role holds SELECT only.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."id" IS 'Row id, generated. The last tie-break of the documented read order (attempt, recorded_at, id).';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."job_id" IS 'The compute_jobs.id of the failed attempt. NOT a foreign key: the record outlives the job row.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."kind" IS 'compute_jobs.kind of the job, copied at failure time (Phase 230 reads derive_broker_dailies nights).';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."strategy_id" IS 'compute_jobs.strategy_id, copied. NULL for a job keyed by api_key_id. ON DELETE CASCADE: the record dies with its strategy.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."api_key_id" IS 'compute_jobs.api_key_id, copied. Phase 230 reads MT5 derive jobs keyed by it with a NULL strategy_id. ON DELETE CASCADE: the record dies with its api key.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."portfolio_id" IS 'compute_jobs.portfolio_id, copied. Set for compute_portfolio jobs, whose strategy_id and api_key_id are NULL. ON DELETE CASCADE: the record dies with its portfolio.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."allocator_id" IS 'compute_jobs.allocator_id, copied. Set for derive_allocator_equity and rescore_allocator jobs, whose strategy_id and api_key_id are NULL. ON DELETE CASCADE from auth.users: the record dies with its allocator, and the GDPR export reads it by this column.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."exchange" IS 'compute_jobs.exchange, copied. NULL when the job carries none.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."job_created_at" IS 'compute_jobs.created_at of the job, copied, so a reader can place the record in the job''s life after the job row is pruned.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."attempt" IS 'The attempt number that failed: compute_jobs.attempts at the moment it ended. Not an identity (reclaim_stuck_compute_jobs decrements attempts); the identity is (job_id, claim_token, cause_class).';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."claim_token" IS 'The claim_token the failed attempt held. Every claim mints a fresh one, so it separates attempts of one job. NULL (a legacy row) never deduplicates.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."cause_class" IS 'Why the attempt ended: error (a real failure, written by mark_compute_job_failed or record_compute_job_attempt_error), watchdog_reset (reset_stalled_compute_jobs, plan 02), stall_reclaim (reclaim_stuck_compute_jobs, plan 02), orphan_reaped (the orphan terminalizer trigger, plan 07). One attempt can carry an error row AND a reset row; both happened.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."error_kind" IS 'transient, permanent or unknown, as the worker classified a real error. NULL on a reset or reap record.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."error_text" IS 'The error text the worker reported. NULL when the worker reported none; a NULL is never replaced by a made-up string. May name a broker account, which is why the owner cascade exists.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."worker_id" IS 'compute_jobs.claimed_by of the failed attempt (the worker that held the claim). NULL when none was recorded.';
+
+
+
+COMMENT ON COLUMN "public"."compute_job_attempt_failures"."recorded_at" IS 'When the record was written. Second key of the documented read order (attempt, recorded_at, id).';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."compute_job_dedup_events" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "job_id" "uuid" NOT NULL,
@@ -13898,6 +14547,44 @@ CREATE TABLE IF NOT EXISTS "public"."feature_flags" (
 
 
 ALTER TABLE "public"."feature_flags" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."first_hop_enqueue_retries" (
+    "strategy_id" "uuid" NOT NULL,
+    "first_seen_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "reenqueued_at" timestamp with time zone,
+    "reenqueued_job_id" "uuid",
+    "named_state_at" timestamp with time zone,
+    CONSTRAINT "first_hop_enqueue_retries_named_implies_reenqueued_check" CHECK ((("named_state_at" IS NULL) OR ("reenqueued_at" IS NOT NULL))),
+    CONSTRAINT "first_hop_enqueue_retries_reenqueued_after_seen_check" CHECK ((("reenqueued_at" IS NULL) OR ("reenqueued_at" >= "first_seen_at")))
+);
+
+
+ALTER TABLE "public"."first_hop_enqueue_retries" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."first_hop_enqueue_retries" IS 'Phase 227 / plan 05 (HEAL-01): one row per strategy the first-hop sweep has observed as a dropped first sync_trades enqueue. It is the sweep''s grace anchor (first_seen_at) and its once-only guard (a row with reenqueued_at set is never deleted, so a strategy is re-enqueued at most once, ever). Written only by public.first_hop_enqueue_sweep(); service_role may read it.';
+
+
+
+COMMENT ON COLUMN "public"."first_hop_enqueue_retries"."strategy_id" IS 'The observed strategy. Cascades with it. One row per strategy by primary key.';
+
+
+
+COMMENT ON COLUMN "public"."first_hop_enqueue_retries"."first_seen_at" IS 'When the sweep first saw the strategy match the candidate predicate. The grace window of 90 minutes is measured from here, never from created_at.';
+
+
+
+COMMENT ON COLUMN "public"."first_hop_enqueue_retries"."reenqueued_at" IS 'When the sweep inserted the retry job. NULL until then. Once set the row is permanent: it is the once-only guard.';
+
+
+
+COMMENT ON COLUMN "public"."first_hop_enqueue_retries"."reenqueued_job_id" IS 'The compute_jobs id of the retry. Deliberately NOT a foreign key: retention prunes job rows and must not be coupled to this ledger.';
+
+
+
+COMMENT ON COLUMN "public"."first_hop_enqueue_retries"."named_state_at" IS 'When the sweep wrote the named failed state because the retry also ended without a result. NULL means it did not. Implies reenqueued_at.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."for_quants_leads" (
@@ -14718,6 +15405,48 @@ CREATE OR REPLACE VIEW "public"."public_profiles" WITH ("security_invoker"='on')
 ALTER VIEW "public"."public_profiles" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."reconcile_readmit_exhaustions" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "strategy_id" "uuid" NOT NULL,
+    "generation_key" "uuid" NOT NULL,
+    "marker_count" integer NOT NULL,
+    "detected_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "paged_at" timestamp with time zone,
+    CONSTRAINT "reconcile_readmit_exhaustions_marker_count_chk" CHECK (("marker_count" >= 3))
+);
+
+
+ALTER TABLE "public"."reconcile_readmit_exhaustions" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."reconcile_readmit_exhaustions" IS 'Phase 227 plan 04 (HEAL-03, migration 20261124120300): one row per strategy whose reconcile readmit hit its attempt ceiling of three orphan markers. Written only by public.record_reconcile_readmit_exhaustions(); paged_at is stamped only by the Python reader after a delivered page. Outlives the 90-day failed-row retention because generation_key carries no foreign key to compute_jobs. Deleted with its strategy.';
+
+
+
+COMMENT ON COLUMN "public"."reconcile_readmit_exhaustions"."id" IS 'Row id, generated. Written only by public.record_reconcile_readmit_exhaustions().';
+
+
+
+COMMENT ON COLUMN "public"."reconcile_readmit_exhaustions"."strategy_id" IS 'The strategy the reconcile sweep stopped readmitting. ON DELETE CASCADE: the row dies with its strategy. Written only by public.record_reconcile_readmit_exhaustions().';
+
+
+
+COMMENT ON COLUMN "public"."reconcile_readmit_exhaustions"."generation_key" IS 'The id of the strategy''s newest orphan marker row when the exhaustion was detected. No foreign key, so the row survives the deletion of every marker it was derived from. With strategy_id it makes one row per exhaustion. Written only by public.record_reconcile_readmit_exhaustions().';
+
+
+
+COMMENT ON COLUMN "public"."reconcile_readmit_exhaustions"."marker_count" IS 'How many orphan markers the strategy carried at detection (at least 3). Written only by public.record_reconcile_readmit_exhaustions().';
+
+
+
+COMMENT ON COLUMN "public"."reconcile_readmit_exhaustions"."detected_at" IS 'When the detector first wrote the row. Written only by public.record_reconcile_readmit_exhaustions().';
+
+
+
+COMMENT ON COLUMN "public"."reconcile_readmit_exhaustions"."paged_at" IS 'NULL until the Python reader delivered the page for this row. Stamped only by plan 09''s reader after a delivered page; the one column service_role may UPDATE.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."reconciliation_reports" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "strategy_id" "uuid" NOT NULL,
@@ -15311,6 +16040,16 @@ ALTER TABLE ONLY "public"."bridge_outcomes"
 
 
 
+ALTER TABLE ONLY "public"."compute_job_attempt_failures"
+    ADD CONSTRAINT "compute_job_attempt_failures_attempt_cause_uq" UNIQUE ("job_id", "claim_token", "cause_class");
+
+
+
+ALTER TABLE ONLY "public"."compute_job_attempt_failures"
+    ADD CONSTRAINT "compute_job_attempt_failures_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."compute_job_dedup_events"
     ADD CONSTRAINT "compute_job_dedup_events_pkey" PRIMARY KEY ("id");
 
@@ -15387,6 +16126,11 @@ ALTER TABLE ONLY "public"."discovery_categories"
 
 ALTER TABLE ONLY "public"."feature_flags"
     ADD CONSTRAINT "feature_flags_pkey" PRIMARY KEY ("flag_key");
+
+
+
+ALTER TABLE ONLY "public"."first_hop_enqueue_retries"
+    ADD CONSTRAINT "first_hop_enqueue_retries_pkey" PRIMARY KEY ("strategy_id");
 
 
 
@@ -15497,6 +16241,16 @@ ALTER TABLE ONLY "public"."positions"
 
 ALTER TABLE ONLY "public"."profiles"
     ADD CONSTRAINT "profiles_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."reconcile_readmit_exhaustions"
+    ADD CONSTRAINT "reconcile_readmit_exhaustions_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."reconcile_readmit_exhaustions"
+    ADD CONSTRAINT "reconcile_readmit_exhaustions_strategy_generation_uq" UNIQUE ("strategy_id", "generation_key");
 
 
 
@@ -16312,6 +17066,10 @@ COMMENT ON TRIGGER "check_strategy_api_key_ownership_trigger" ON "public"."strat
 
 
 
+CREATE OR REPLACE TRIGGER "compute_jobs_record_orphan_reaped_attempt" AFTER UPDATE OF "status" ON "public"."compute_jobs" FOR EACH ROW WHEN ((("old"."status" = 'running'::"text") AND ("new"."status" = 'failed_final'::"text") AND ("new"."error_kind" = 'orphaned'::"text"))) EXECUTE FUNCTION "public"."record_orphan_reaped_attempt"();
+
+
+
 CREATE OR REPLACE TRIGGER "compute_jobs_set_updated_at_trigger" BEFORE UPDATE ON "public"."compute_jobs" FOR EACH ROW EXECUTE FUNCTION "public"."compute_jobs_set_updated_at"();
 
 
@@ -16544,6 +17302,26 @@ ALTER TABLE ONLY "public"."bridge_outcomes"
 
 
 
+ALTER TABLE ONLY "public"."compute_job_attempt_failures"
+    ADD CONSTRAINT "compute_job_attempt_failures_allocator_id_fkey" FOREIGN KEY ("allocator_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."compute_job_attempt_failures"
+    ADD CONSTRAINT "compute_job_attempt_failures_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."compute_job_attempt_failures"
+    ADD CONSTRAINT "compute_job_attempt_failures_portfolio_id_fkey" FOREIGN KEY ("portfolio_id") REFERENCES "public"."portfolios"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."compute_job_attempt_failures"
+    ADD CONSTRAINT "compute_job_attempt_failures_strategy_id_fkey" FOREIGN KEY ("strategy_id") REFERENCES "public"."strategies"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."compute_job_dedup_events"
     ADD CONSTRAINT "compute_job_dedup_events_job_id_fkey" FOREIGN KEY ("job_id") REFERENCES "public"."compute_jobs"("id") ON DELETE CASCADE;
 
@@ -16620,6 +17398,11 @@ ALTER TABLE ONLY "public"."deck_strategies"
 
 ALTER TABLE ONLY "public"."deck_strategies"
     ADD CONSTRAINT "deck_strategies_strategy_id_fkey" FOREIGN KEY ("strategy_id") REFERENCES "public"."strategies"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."first_hop_enqueue_retries"
+    ADD CONSTRAINT "first_hop_enqueue_retries_strategy_id_fkey" FOREIGN KEY ("strategy_id") REFERENCES "public"."strategies"("id") ON DELETE CASCADE;
 
 
 
@@ -16765,6 +17548,11 @@ ALTER TABLE ONLY "public"."positions"
 
 ALTER TABLE ONLY "public"."profiles"
     ADD CONSTRAINT "profiles_id_fkey" FOREIGN KEY ("id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."reconcile_readmit_exhaustions"
+    ADD CONSTRAINT "reconcile_readmit_exhaustions_strategy_id_fkey" FOREIGN KEY ("strategy_id") REFERENCES "public"."strategies"("id") ON DELETE CASCADE;
 
 
 
@@ -17228,6 +18016,9 @@ CREATE POLICY "categories_public_read" ON "public"."discovery_categories" FOR SE
 
 
 
+ALTER TABLE "public"."compute_job_attempt_failures" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."compute_job_dedup_events" ENABLE ROW LEVEL SECURITY;
 
 
@@ -17365,6 +18156,9 @@ CREATE POLICY "feature_flags_public_select" ON "public"."feature_flags" FOR SELE
 
 CREATE POLICY "feature_flags_service_all" ON "public"."feature_flags" USING (("auth"."role"() = 'service_role'::"text")) WITH CHECK (("auth"."role"() = 'service_role'::"text"));
 
+
+
+ALTER TABLE "public"."first_hop_enqueue_retries" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."for_quants_leads" ENABLE ROW LEVEL SECURITY;
@@ -17637,6 +18431,9 @@ CREATE POLICY "profiles_self_update" ON "public"."profiles" FOR UPDATE USING (("
 
 COMMENT ON POLICY "profiles_self_update" ON "public"."profiles" IS 'Audit-2026-05-07 P337. USING + WITH CHECK both require auth.uid() = id. No OR-true escape allowed.';
 
+
+
+ALTER TABLE "public"."reconcile_readmit_exhaustions" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."reconciliation_reports" ENABLE ROW LEVEL SECURITY;
@@ -18438,6 +19235,10 @@ GRANT ALL ON FUNCTION "public"."finalize_wizard_strategy"("p_strategy_id" "uuid"
 
 
 
+REVOKE ALL ON FUNCTION "public"."first_hop_enqueue_sweep"() FROM PUBLIC;
+
+
+
 REVOKE ALL ON FUNCTION "public"."flip_capital_ownership_to_team_review"("p_strategy_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."flip_capital_ownership_to_team_review"("p_strategy_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."flip_capital_ownership_to_team_review"("p_strategy_id" "uuid") TO "service_role";
@@ -18659,9 +19460,28 @@ GRANT ALL ON FUNCTION "public"."reconstruct_positions_atomic"("p_strategy_id" "u
 
 
 
+REVOKE ALL ON FUNCTION "public"."record_compute_job_attempt_error"("p_job_id" "uuid", "p_claim_token" "uuid", "p_error" "text", "p_error_kind" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."record_compute_job_attempt_error"("p_job_id" "uuid", "p_claim_token" "uuid", "p_error" "text", "p_error_kind" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."record_orphan_reaped_attempt"() FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "public"."record_reconcile_readmit_exhaustions"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."record_reconcile_readmit_exhaustions"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."reject_sentinel_writes"() TO "anon";
 GRANT ALL ON FUNCTION "public"."reject_sentinel_writes"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."reject_sentinel_writes"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."renew_compute_job_claims"("p_job_ids" "uuid"[], "p_claim_tokens" "uuid"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."renew_compute_job_claims"("p_job_ids" "uuid"[], "p_claim_tokens" "uuid"[]) TO "service_role";
 
 
 
@@ -19055,6 +19875,10 @@ GRANT ALL ON TABLE "public"."bridge_outcomes" TO "service_role";
 
 
 
+GRANT SELECT ON TABLE "public"."compute_job_attempt_failures" TO "service_role";
+
+
+
 GRANT SELECT ON TABLE "public"."compute_job_dedup_events" TO "service_role";
 
 
@@ -19364,6 +20188,10 @@ GRANT ALL ON TABLE "public"."feature_flags" TO "service_role";
 
 
 
+GRANT SELECT ON TABLE "public"."first_hop_enqueue_retries" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."for_quants_leads" TO "service_role";
 
 
@@ -19492,6 +20320,14 @@ GRANT ALL ON TABLE "public"."positions" TO "service_role";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."public_profiles" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."public_profiles" TO "authenticated";
 GRANT ALL ON TABLE "public"."public_profiles" TO "service_role";
+
+
+
+GRANT SELECT ON TABLE "public"."reconcile_readmit_exhaustions" TO "service_role";
+
+
+
+GRANT UPDATE("paged_at") ON TABLE "public"."reconcile_readmit_exhaustions" TO "service_role";
 
 
 
