@@ -176,10 +176,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 226 (MT5SOAK) — COMPLETE (shipped v0.133.64.0, #1319)
-Plan: 5 of 5
-Status: Phase complete; other v1.22 phases run in parallel
-Last activity: 2026-11-24 — Phase 226 MT5SOAK shipped (v0.133.64.0, #1319); verification passed, threats_open 0
+Phase: 231 (BYBITREADS) — IN PROGRESS (plans 01-05 shipped: v0.133.61.6 #1314, v0.133.65.0 #1321; plan 06 waits for Phase 229)
+Plan: 5 of 6
+Status: In progress; plan 06 (VREAD-01) blocked on Phase 229; other v1.22 phases run in parallel
+Last activity: 2026-11-24 — Phase 231 BYBITREADS plans 03-05 shipped (v0.133.65.0, #1321); VREAD-02..05 complete
 Progress: [█░░░░░░░░░] 5%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
