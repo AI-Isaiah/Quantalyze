@@ -1,35 +1,27 @@
 ---
 phase: 225-oneaccountonce-a-user-cannot-connect-the-same-exchange-accou
-reviewed: 2026-11-24T14:00:36Z
-round: 2
+reviewed: 2026-11-24T14:26:45Z
+round: 3
+round_2_reviewed: 2026-11-24T14:00:36Z
 round_1_reviewed: 2026-11-24T12:42:05Z
 depth: standard
-# Round 2 scope: the fixer diff 629260a5c..HEAD (non-planning). Round 1 covered 27 files.
-files_reviewed: 15
+# Round 3 scope: the third fixer diff 9ff8e21b9..HEAD (non-planning), at b46ed833a.
+# Round 2 covered 15 files (629260a5c..HEAD); round 1 covered 27 files.
+files_reviewed: 4
 files_reviewed_list:
-  - analytics-service/services/account_identity.py
-  - analytics-service/tests/fixtures/venue_server_identity.json
-  - analytics-service/tests/test_account_identity_stamper.py
-  - analytics-service/tests/test_venue_server_identity.py
-  - docs/runbooks/venue-server-backfill/README.md
-  - docs/runbooks/venue-server-backfill/census.sql
-  - src/app/api/keys/[id]/rotate-secret/route.test.ts
-  - src/app/api/keys/[id]/rotate-secret/route.ts
   - src/app/api/keys/validate-and-encrypt/route.test.ts
   - src/app/api/keys/validate-and-encrypt/route.ts
   - src/app/api/strategies/create-with-key/route.test.ts
   - src/app/api/strategies/create-with-key/route.ts
-  - src/lib/venue-identity.test.ts
-  - src/lib/venue-identity.ts
-  - src/lib/wizardErrors.invariant.test.ts
-# Counts are OPEN after round 2: round-1 WR-01..WR-05, SF-M1..SF-M3 and IN-11 are fixed,
-# IN-02 is superseded by IN-12. Open = WR-06..WR-08, IN-01, IN-03..IN-10, IN-12..IN-17.
+# Counts are OPEN after round 3: WR-06, WR-07, WR-08 and IN-12 (SF2-N1) are fixed.
+# Open = IN-01, IN-03..IN-10, IN-13..IN-24 (IN-18..IN-24 new in round 3, all LOW/Info).
+# Round 2 was critical 0, warning 3, info 15, total 18, necessity 0.
 # Round 1 was critical 0, warning 5, info 11, total 16, necessity 1.
 findings:
   critical: 0
-  warning: 3
-  info: 15
-  total: 18
+  warning: 0
+  info: 21
+  total: 21
   necessity: 0
 status: issues_found
 ---
@@ -401,3 +393,117 @@ Round-3 decisions. The fixer implements exactly these.
    - Prove it: neuter `.is` to `.eq` and the WR-01 rollback test goes RED; drop `.select("id")` and the orphan-draft test goes RED.
 
 The remaining items stay recorded and are not fixed, as LOW/Info: IN-13 to IN-17, and the WR-04 syncing log line.
+
+## Round 3 (2026-11-24)
+
+**Reviewed:** 2026-11-24T14:26:45Z, at HEAD `b46ed833a` (branch `gsd/phase-225-oneaccountonce`)
+**Scope:** the third fixer round, `git diff 9ff8e21b9..HEAD -- . ':!.planning'`: 4 commits plus a merge, 4 files (the two routes and their two test suites). Each file was read in full around every hunk. The callees were read too: `swapAccountSlot` (`src/lib/venue-identity.ts`), the `swap_account_slot` SQL body (`20261123180100`), the `api_keys` share-marker trigger and CHECK in `baseline.sql`, and the race arm.
+**Depth:** standard, with cross-file traces where a finding needed them.
+**Tests:** all run at HEAD.
+- The two route suites passed, 357 tests.
+- Round 2's other four suites passed, 238 tests: `venue-identity`, `wizardErrors.invariant`, `audit-coverage` and `rotate-secret`. The two source-scanning gates are still green over the new route text.
+**Neuters:** 17, run in a throwaway worktree (since removed), each restored from a byte backup. Every one went RED:
+- create-with-key:
+  - `.is` changed to `.eq` on the rollback delete;
+  - `.select("id")` dropped;
+  - `swapLanded` never set;
+  - the split always answers 409;
+  - the split never matches a token;
+  - the composite refusal removed;
+  - the pre-validation `held` return removed;
+  - each of the two WR-07 `read_failed` conversions removed;
+  - the `holder-swap-rollback-noop` tag renamed;
+  - the re-read's `id` filter dropped.
+- validate-and-encrypt: `.is` changed to `.eq`, `.select` dropped, `swapLanded` never set, always 409, never a token, and the composite refusal removed.
+
+The round-3 tests can fail.
+**Necessity:** `necessity-review.md` was read this round. No round-3 change guards an impossible state. The composite read's `user_id` filter repeats `enforce_api_keys_account_share_same_owner`, but it is defense in depth, which the rubric excludes.
+
+### Status of the round-3 decisions and the open round-2 findings
+
+| Finding | Status | Evidence at HEAD |
+|---|---|---|
+| SF2-N1 / IN-12 | **FIXED** in both routes | `create-with-key/route.ts:2252-2279`, `validate-and-encrypt/route.ts:1049-1083`. When the delete removes zero rows, the route captures `holder-swap-rollback-noop`, then re-reads `venue_account_id` for this key and this owner. Stamped → `swapLanded`, and the request falls through to the normal success (`{ok, strategy_id, api_key_id}` and `{api_key_id, valid, read_only}` respectively). Not stamped, or the re-read fails → the 409/503 split. The fall-through is checked below. The residual is IN-18. |
+| WR-06 | **FIXED as decided** | Split: `create-with-key/route.ts:2311-2318`, `validate-and-encrypt/route.ts:1097-1104`. A message carrying an `ACCOUNT_SLOT_` token answers 409, and anything else answers `holderReadFailedResponse()` (503 UNKNOWN) after the same rollback. Pre-admission: `create-with-key/route.ts:343-362` sits inside `resolveByVenueIdentity`, so the pre-validation fence refuses before `validateKey` (`:1573-1575`), and the post-validation fence and the race arm get it too. `validate-and-encrypt/route.ts:860-887` refuses before the insert. The predicate matches the SQL (`swap_account_slot` step 3: `account_shared_with_api_key_id = p_old_holder AND account_share_kind = 'composite_member'`). The extra `user_id` filter is equivalent, because the marker trigger refuses a cross-owner holder. A read fault fails closed with 503 (`holder-read`). No copy changed. The residual copy issue is recorded as IN-23 and was accepted by the decision. |
+| WR-07 | **FIXED** | `create-with-key/route.ts:394-397`. Once a WORKING holder is picked, an `unresolved` from `resolveStrategiesForKey` (draft or owner read) or from `resolveOtherKeyUse` (`strategy_keys`) becomes `read_failed`, and both fences answer 503 before any write. The race arm has no `read_failed` branch, so it falls through to the `DRAFT_ALREADY_EXISTS` 409 exactly as `unresolved` did (`:2060-2066`). `handleReuseExistingKey` calls `resolveStrategiesForKey` directly and is unaffected. The pinning test at the old `:1988` is inverted, and a post-validation twin and a `strategy_keys` twin were added. |
+| WR-08 | **FIXED** | Both mocks now resolve delete rows only after `.select(...)`, and the create-with-key mock records `.is` under `${col}:is`. Proven by neuter: `.is`→`.eq` turns the WR-01 rollback test RED in both routes. Dropping `.select("id")` turns 3 create-with-key tests RED (the draft delete is skipped) and 2 validate-and-encrypt tests RED (an extra `holder-swap-rollback-noop` capture). |
+| IN-01, IN-03 to IN-10, IN-13, IN-14, IN-16, IN-17 | Unchanged, still LOW/Info | IN-01's dead assignment is now at `create-with-key/route.ts:1530`. |
+| IN-15 | Unchanged, and it now also covers the transient-swap 503 | The wizard renders the generic `UNKNOWN` entry for the new 503 as well. The remedy, "try again", is correct there. |
+
+### Regressions checked, with answers
+
+- **Can the early pre-validation `held` return refuse a connect that was legitimate before?** No. `held` comes from two places.
+  - **(a) A failing holder with a composite dependent.** Before round 3 this was admitted, then the swap refused it (`COMPOSITE_DEPENDENT`, deterministic), then the route rolled back and answered the same 409.
+  - **(b) A working holder used only through `strategy_keys`.** The post-validation fence already refused this since 225-11 (`:1718-1720`). Before PR-2 the login-only index refused it and the race arm answered the same 409.
+  - So the final answer is unchanged in both shapes. Two things differ:
+    - Validation no longer runs first. A user with wrong credentials now hears "already connected" before the credential error, which is Phase 212 SC5's accepted trade for `orphaned` (IN-23).
+    - A state change during the up-to-120 s validation can no longer rescue the connect: a composite unlinked in that window. That is negligible.
+- **The IN-12 fall-through into the success flow.** It is correct in both shapes that reach it.
+  - **Same-session replay race.** Request A's swap stamped the replayed key. B's swap is refused (`IDENTITY_MISMATCH`, "new key already holds an account"), B's delete removes zero rows (it waits on A's `FOR UPDATE` lock, then re-evaluates `IS NULL` as false), the re-read finds the key stamped, and B answers success with A's pair.
+  - **A swap that committed and lost its answer.** The success body is honest.
+  - **Why a stamped key cannot be a second holder.** Two live stamped same-login keys are impossible under the login-only index. So a stamped key means this key holds the account, and the old holder was demoted or departed.
+  - **The asset-class update on the replayed draft** is idempotent.
+  - **Not covered.** The success path does NOT replay `swapAccountSlot`'s post-RPC tail: the audit row and the recompose (IN-18).
+- **The token regex.** `/ACCOUNT_SLOT_[A-Z_]+/` is case-sensitive.
+  - The function name in a PostgREST error (`swap_account_slot`, PGRST202, a permission error) is lower-case and does not match.
+  - Every refusal in the SQL raises one of 7 upper-case tokens as the whole message.
+  - A lock timeout (55P03), a statement timeout, a deadlock or a fetch throw carries no token, so it answers 503.
+  - It is unanchored (`.test`), while Python's `_SLOT_REFUSAL.match` is anchored at the start of the message. Harmless today (IN-22).
+- **Tests that cannot fail.** None found among the round-3 tests: all 17 neuters above went RED. The create-with-key `refusedSwap` fixture uses a token the SQL never raises (IN-22).
+- **Other callers of the swap.** `swapAccountSlot(` has exactly two callers, the two routes reviewed here. `rotate-secret` does not swap.
+
+### LOW and Info (new in round 3, brief, not for TODOS.md)
+
+- **IN-18 (LOW, pre-existing, not introduced by round 3): a swap that committed and lost its answer now answers 200, but the demotion audit row and the recompose never run.**
+  - **File:** `create-with-key/route.ts:2278`, `validate-and-encrypt/route.ts:1082`, with `src/lib/venue-identity.ts:204-236`.
+  - **Why.** `swapAccountSlot` writes `api_key.account_duplicate_detected` and enqueues `derive_allocator_equity` only after a clean RPC answer.
+  - **The heal.** For MT5, `run_derive_broker_dailies_job` enqueues a compose (`analytics-service/services/job_worker.py:5233`, `:10197`). For ccxt the heal is unverified, and `swapAccountSlot`'s own comment says "nothing else enqueues a compose for it". The audit row is never written.
+  - **Reach.** A double rarity: the RPC committed and the client still saw an error. Before round 3 the same path answered 409 and also skipped both.
+  - **Fix, if wanted.** On `swapLanded`, re-run the audit and the enqueue. The replay-race shape then audits twice, because request A already did, so prefer the enqueue alone. It is deduped while a job for that allocator is in flight (allocator-scoped in-flight dedup).
+- **IN-19 (LOW): a transient swap failure whose compensating key delete ALSO fails answers 503 "try again" while the unstamped key, and in create-with-key the draft, is still live.**
+  - **File:** `create-with-key/route.ts:2244-2252` then `:2311-2318`, `validate-and-encrypt/route.ts:1035-1048` then `:1097-1104`.
+  - **Conflicting decisions (Rule 7).** Round-2 decision 1 says "if the compensating delete itself fails … the response is still 409". Round-3 decision 2 sends a token-less failure to 503 with no carve-out for this case. The code follows round 3. A token refusal plus a failed delete still answers 409 and is tested; this combination is not tested.
+  - **What follows.** In create-with-key, the retry hits the session fence and gets `deduped` 200 on the leftover pair. In both routes, the next allocator poll's stamper (`_settle_with_holder`) swaps the working unstamped key into the failing holder's slot, unless a composite dependent appeared in between. So it heals.
+  - **Reach.** A network fault can fail both calls at once, so the faults are correlated.
+  - **Fix, if wanted.** Make the decisions agree: either answer 409 whenever `keyDeleteErr` is set, or record that 503 is right here. Add the missing test.
+- **IN-20 (Info): extra Sentry noise.** The zero-row arm now sends two events: `holder-swap` at ERROR, logged as "rolling back", then `holder-swap-rollback-noop`. This includes the benign replay race and a landed swap that answers 200. Decision 1 required the noop capture, so this is recorded only.
+- **IN-21 (Info): stale docblocks in `create-with-key/route.ts`.**
+  - `:156-160` says every read fault answers `unresolved` and "a dark fence costs correctness nothing".
+  - `:201-202`, the `unresolved` bullet, still lists "a strategy-read fault … Fall through".
+  - `:204-208`, the `read_failed` bullet, names only the same-login `api_keys` read. It now also covers the composite-dependent, strategies and `strategy_keys` reads past a picked holder.
+  - `:1611-1612` still says "`held` keeps the latency … out of scope here", which the new `:1573` return contradicts.
+- **IN-22 (Info): token match and fixture.**
+  - TS `.test` is unanchored, while Python's `_SLOT_REFUSAL.match` (`account_identity.py:601`, `:624`) is anchored. The comments at `:2305` and `:1092` call it "the same token".
+  - create-with-key's `refusedSwap` (`route.test.ts:3507`) raises `ACCOUNT_SLOT_REFUSED`, which the SQL never raises. So no create-with-key test pins a real token (for example `COMPOSITE_DEPENDENT` or `IDENTITY_MISMATCH`) to the 409, and an allow-list narrowing of the regex would turn these tests RED for the wrong reason. validate-and-encrypt uses the real `ACCOUNT_SLOT_HOLDER_WORKING`.
+  - The validate-and-encrypt mock routes every admin `maybeSingle` without `account_share_kind` to the stamp re-read. A future admin `maybeSingle` read would be answered with stamp data without anyone noticing.
+- **IN-23 (LOW, decision-bound): the composite-dependent refusal answers `KEY_VENUE_ALREADY_CONNECTED`, whose copy says the existing key "keeps working".**
+  - **File:** `create-with-key/route.ts:362` → `:1573-1575`, `validate-and-encrypt/route.ts:886`.
+  - **What is wrong.** On this path the holder is failing, so WR-06's copy complaint holds for this cause and for the `IDENTITY_MISMATCH` race. The refusal also now comes before validation, so wrong credentials are not reported first.
+  - **Why it stays.** Decision 2 said "Change no copy", so this is recorded and not reopened.
+- **IN-24 (Info): a throw is still fail-open.** A throw, as opposed to an error value, from the new composite read in `resolveByVenueIdentity` lands in the outer `catch (adminErr)` and returns `UNRESOLVED`. supabase-js returns errors as values, so this is not reachable in practice, and the post-validation `unresolved` attaches the identity, so today's login-only index still refuses. It is the same class as the existing service-role `catch`.
+
+### Round 3 summary
+
+All four round-3 decisions are implemented as written, in both routes where they apply:
+
+- SF2-N1 / IN-12: the re-read before answering.
+- WR-06: the token split and the composite pre-admission refusal.
+- WR-07: `read_failed` past a picked holder.
+- WR-08: mocks that can fail.
+
+All 17 neuters went RED. The early `held` return does not refuse anything the code did not already refuse after validation. The IN-12 fall-through answers success only when this key holds the slot. The token regex cannot mistake a non-refusal error for a refusal.
+
+There are **no new BLOCKER, critical or MEDIUM findings.** The new items are LOW or Info: IN-18 to IN-24. Under the repo's rule they are recorded here and not booked in `TODOS.md`. IN-19 records a conflict between round-2 decision 1 and round-3 decision 2 for the orchestrator to settle.
+
+**Open after round 3:** 0 warnings and 21 info: IN-01, IN-03 to IN-10, IN-13 to IN-24.
+
+_Round 3 reviewed: 2026-11-24T14:26:45Z_
+_Reviewer: Claude (gsd-code-reviewer)_
+_Depth: standard_
+
+### Orchestrator decisions after round 3 (2026-11-24, final round)
+
+- **IN-18 / SFH N3-1: the two reviewers disagree on severity.** The reviewer rated it LOW, and the silent-failure hunter rated it MEDIUM as a data-correctness issue. I take **MEDIUM, data-integrity**: for ccxt, nothing confirmed enqueues the recompose. It is a survivor of the 3 allowed rounds, so it gets **no fourth fixer round**. It is booked in `TODOS.md` as `[225-SWAPLANDED-NO-RECOMPOSE]` and goes to the coordinator for routing. The fix is one enqueue on the `swapLanded` arm, with no audit replay, because the replay race already audited once.
+- **IN-19: round-2 decision 1 and round-3 decision 2 conflict. Under Rule 7, the more recent decision, round-3 decision 2, wins.** A transient swap failure answers 503 even when the compensating delete also failed. The leftover pair heals either way: through the session fence's deduped retry, or through the next poll's stamper swap. Round-2 decision 1's "still 409" now holds only for a token refusal. This is recorded and not fixed (LOW).
+- Recorded only, as LOW and Info: IN-20, IN-21, IN-22, IN-23 (bound by the decision) and IN-24. SFH N3-2 to N3-5 duplicate IN-22 and IN-23 or are hardening notes.
+- **PR-2 review is closed at round 3.** 0 MEDIUM+ remain open in the code. The one MEDIUM survivor is booked.
