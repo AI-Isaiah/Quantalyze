@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.133.65.0] - 2026-11-24 — Phase 231 BYBITREADS plans 03-05: every Bybit settle type and trade window, or a named refusal
+
+The Bybit reads now cover every settle type and every trade window, or refuse by name. There are two commits: the code, squashed from 27 branch commits, and this release commit. The code commits break down as:
+- 4 for plan 03 and 4 for plan 04;
+- 1 census-pin commit for plan 05;
+- 16 review-fix commits over three rounds;
+- 1 CI fix for the pinned ccxt 4.5.89;
+- 1 that deletes the TODOS entries.
+
+Evidence comes from the plan 02 probe run on PROD, 2026-11-23, with one live key:
+- The legacy trade read returned 100 rows against 24201 from the windowed walk.
+- All three position categories read cleanly, with 45 open linear USDT positions.
+- 0 on-chain deposits.
+- A first funding walk takes 379 s, against a 180 s job budget.
+
+### Changed
+- **The holdings poll reads every settle category (VREAD-02):** `services/positions.py::_fetch_positions_bybit` now reads linear USDT, linear USDC and inverse.
+  - ccxt goes first, and each category falls back to a raw cursor read on its own.
+  - Inverse size and uPnL are converted to USD at the payload's own mark.
+  - A USDC perp keeps its raw id.
+  - A failed category ships no rows, so no other category's rows go out alone.
+- **The strategy trade read walks windows (VREAD-03):** `services/exchange.py::_fetch_raw_trades_bybit` walks seven-day windows that send both `startTime` and `endTime`.
+  - With no start it walks a 365-day default.
+  - Each window has a cap of 200 pages. The probe's cap input was field-absent, and its lower bound was 121 pages per window.
+  - A start older than two years is refused before any request.
+  - Repeated `execId`s are kept once.
+- **The inline and onboarding adapter keeps its pre-phase reach:** `BybitAdapter.fetch_raw` (the teaser, csv, internal report, and long_fetch onboard and resync) keeps a seven-day reach. A 365-day walk does not fit the teaser's 60 s budget or the onboarding budget on busy keys. Census row C29.
+
+### Fixed (three review rounds before the first merge)
+- **Named refusals:** each of these now refuses by name with static, digit-free text:
+  - a reply that is missing `result` or `list`;
+  - a position row with a blank, absent or non-finite size;
+  - an inverse row with no usable value or pnl;
+  - a linear open row with no value or mark;
+  - a fill-type execution (Trade, BustTrade, AdlTrade, BlockTrade) whose time, price or quantity cannot be read.
+- **ccxt 4.5.89 back-fills derived fields (CI fix):** ccxt 4.5.89 fills a blank `positionValue` (contracts times mark) and a zero uPnL (mark minus entry). The Bybit position read now reads the raw `info.positionValue` and `info.unrealisedPnl`. A blank or zero raw uPnL routes the category to the raw read, on every ccxt version.
+- **What still skips:** Funding, Settle and Delivery rows, and rows with no type, keep their logged skip.
+- **Retry classification:** `classify_exception` marks a refusal permanent only when a retry would repeat it (`page_cap`, `start_too_old`, `unreadable_fill`, and a position list that does not end). Every other refusal retries. This keeps a venue blip from withholding the allocator's whole Bybit book.
+
+### Tests
+- New `tests/_bybit_real_markets.py` builds real ccxt markets and a position book that follows the venue's rules.
+- New `tests/test_bybitreads_census_pins.py` covers census rows C18, C19 and C27.
+- New tests for C28 (options are not read) and C29.
+- Every new or flipped gate carries a neuter, RED, byte-restore, GREEN proof. The full analytics suite is green: 15458 passed after round 2.
+
+### Removed
+- Four `TODOS.md` entries these plans close:
+  - `167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY` (VREAD-02)
+  - `167.2.1.1.2.1-STRATEGY-BYBIT-7DAY` (VREAD-03)
+  - `186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED` (VREAD-04): the verdict is undecided because there are 0 on-chain rows, so `replace` stays.
+  - `167.1.2.2-BYBIT-STATIC-EGRESS` (VREAD-05): the founder allow-listed the worker IP, and every derive since 2026-10-24 has completed with 0 IP errors.
+- The emptied Phase 167.2.1.1.2.1 heading goes with them.
+
+### Notes
+- **Known limits, routed in the phase report:**
+  - After a refused trade read, the trade cursor still advances. Phase 232 VREAD-08 / 222 owns `advance_fetched_cursor`, and raw trade ingestion stays off until that lands.
+  - A first strategy sync of a busy key may not fit the 900 s `sync_trades` budget.
+  - The daily `sync_funding` timeout (C27).
+  - Bybit options are not read (C28).
+  - Onboarding keeps a seven-day reach (C29).
+- **Still to measure:** Bybit's real Funding execution row shape. Today an unreadable Funding row skips.
+- **Plan 06 (VREAD-01, the derive anchor's coin set) waits for Phase 229.**
+
 ## [0.133.64.0] - 2026-11-24 — Phase 226 MT5SOAK: the MT5 soak checks what it claims, independently of the code it checks
 
 The MT5 derive soak (`analytics-service/scripts/mt5_soak.py`) is now an oracle that cannot agree with the derive by construction (PITFALLS Pitfall 12). It used to judge every account on USD floors, reject a timed day only for infinity, and never check which day a deal was booked on. It now judges a BTC-unit account on its own unit's floors, recomputes every timed day with its own D-17 cohort walk, and checks each deal's day against its own per-day walk that imports no production helper. One script and its tests changed; no migration, no service code, and no published number moves.
