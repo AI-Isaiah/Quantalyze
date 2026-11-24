@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.133.68.0] - 2026-11-24 — Phase 223 FLOWKINDS: each funding caller treats a malformed row by a recorded, tested decision, and the Bybit funding sync fills its table
+
+This release is analytics-service only: no migration, no UI and no published number moves. It covers FLOWK-02 and FLOWK-03, and fixes Phase 231 census row C27 (the census row is owned by Phase 231 and is not edited here). It follows three founder rulings of 2026-11-24.
+
+### Changed
+- **OKX archive rebuild: a malformed live funding row stops the rebuild by name (ruling 1, "Stop by name").**
+  - `okx_archive_job._live_reference` now reads OKX funding with `on_malformed="raise"`. A dropped row ends calibrate and apply as `live_anchor_unusable live_funding=malformed` before any write.
+  - Before this change, live funding fed `rebuild_union` and the rolled NAV anchor on live-only days that the cent-level reconciliation does not cover. A dropped row could therefore reach a published rebuild.
+  - The stop is permanent and uses an existing stop class, so no closed set changes. Its detail is a fixed literal.
+- **Bybit `sync_funding` keeps every window it finished (C27, ruling 3, "Yes, 223 fixes it").**
+  - `run_sync_funding_job` now walks the Bybit range one 7-day window at a time, oldest first, reading linear then inverse in each window.
+  - New `_store_funding_window` stores each window before the next is read: rows sorted ascending, upserted in 500-row slices, stopping at the first failing slice. What is stored is therefore always an unbroken run from the oldest row, and the existing cursor (newest stored timestamp minus 2 days) resumes the walk where it stopped.
+  - Before this change, rows were upserted only after the whole walk. The one live Bybit key's first walk takes 379 s against a 180 s budget (231 probe), so every attempt timed out and stored nothing, and `funding_fees` was never filled.
+  - There is no self-deadline. A walk still over budget fails as "Handler exceeded timeout" and is retried, so a timeout is never turned into a quiet DONE. A first walk needs about three attempts at best; otherwise the next 04:00 UTC cron resumes from what was stored.
+- `fetch_funding_bybit` takes a keyword-only `until_ms` end bound. New public `bybit_funding_windows` returns the same windows one full walk sends. The default call is unchanged.
+
+### Notes
+- **`run_sync_funding_job` keeps dropping a malformed funding row (FLOWK-02).** The WARNING stays on all three venues. No published number reads `funding_fees`; its one reader, `position_reconstruction.reconstruct_positions`, has no non-test caller. Refusing would also starve the table, because a refused walk stores nothing. The decision is recorded in the handler's docstring, to be revisited when a published reader appears.
+- **A malformed realized row keeps being flagged, not refused (FLOWK-03, ruling 2, "Keep flagging").** The read-only PROD count on 2026-11-24 found 0 `daily_pnl_malformed_<venue>` flags on every measured key and strategy. Two Bybit key rows older than Phase 186, and the Bybit keys with no derived row, are not measured. Phase 186 D-12 stands, and the code pointers now carry the reading and the ruling.
+- **Closed and deleted from `TODOS.md`:**
+  - `[186-REALIZED-MALFORMED-COUNT]`: the count is recorded and the founder ruled.
+  - `[186-OTHER-FUNDING-CALLERS-DROP]`: `run_sync_funding_job` and `okx_archive_job` each have a recorded, test-pinned decision. The composite member caller is out of scope by founder ruling F-2 ("Forget about conposites", 2026-11-23), not fixed. `[186-COMPOSITE-MEMBER-READ-GAPS]` still tracks it.
+- **Known limits, recorded rather than fixed:**
+  - A run of empty leading windows does not move the cursor. An empty window costs two requests, so a fully empty first walk stays well inside the budget.
+  - A Bybit key without inverse permission now gets one refused inverse request and one WARNING per window.
+  - The dropped-row WARNING repeats once per window.
+  - A single window over the page ceiling still fails that run, but the windows before it are kept.
+  - The Binance and OKX arms still store once after their walk; their timing is unmeasured.
+  - A funding page-ceiling raise in the OKX archive job still takes the generic path.
+- After deploy, a read-only PROD check of `funding_fees` growth for the Bybit strategy and of the `sync_funding` outcomes confirms C27 on PROD.
+
+### Tests
+- `TestLiveFundingMalformed` drives the real OKX fetcher through calibrate and apply, plus a clean-read control.
+- `TestC27WindowedBybitWalk` has a cancelled-walk tracer through the real `dispatch` and `asyncio.wait_for`. It also covers the prefix invariant, window seams, empty cases and a 429 in the middle of a walk.
+- `TestBybitUntilMs` covers the end bound and the window helper.
+- `TestSyncFundingMalformedRowDecision` covers binance, okx and bybit with the real fetchers.
+- Three cursor and happy-path tests were updated on purpose, keeping their intent.
+- Each decision test was shown RED on a neutered copy and GREEN after a byte restore.
+- Full analytics suite: 15608 passed, coverage 94.79%. mypy strict is clean.
 ## [0.133.67.1] - 2026-11-24 — BASELINE: automated re-dump after the PROD apply of d04ef47c
 
 ### Changed
