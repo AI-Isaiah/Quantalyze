@@ -510,3 +510,5 @@ _Depth: standard_
 - **PR-2 review is closed at round 3.** 0 MEDIUM+ remain open in the code. The one MEDIUM survivor is booked.
 
 - **Coordinator routing, 2026-11-24.** `[225-SWAPLANDED-NO-RECOMPOSE]` stays in Phase 225. On the phase branch, the `swapLanded` arm of both routes gets the `derive_allocator_equity` enqueue and the audit row, plus a test that goes RED when neutered. It ships in its own small PR with no migration, after #1324 and before PR-3, and deletes the TODOS entry. The coordinator also confirmed the IN-19 resolution, and round-2 decision 1 is flagged superseded at its source.
+
+- **N3-1 fixed on the phase branch (2026-11-24), commit 083eed790, merged as b8308c5c0.** `afterSlotSwap` in `src/lib/venue-identity.ts` holds the audit and the recompose enqueue. `swapAccountSlot` calls it, and so does the `swapLanded` arm of both routes. PROOF-01: removing the call makes the stamped-re-read test go RED in each route (`expected "vi.fn()" to be called 1 times, but got 0 times`). After a byte restore with cp and cmp, both suites are GREEN (214 and 143). Gates: tsc clean; eslint clean; vitest 7 files, 548 tests. It ships in its own PR after #1324.
