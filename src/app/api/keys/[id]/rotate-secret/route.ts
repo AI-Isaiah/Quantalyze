@@ -21,6 +21,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { isLiveKey } from "@/lib/departed-history";
+import { pickSameAccountHolder, readLiveSameLoginKeys } from "@/lib/venue-identity";
 import type { z } from "zod";
 
 /**
@@ -555,7 +556,31 @@ export async function PATCH(
       .eq("exchange", "mt5")
       .select("id");
 
-  const shouldBackfillVenueAccountId = keyRow.venue_account_id === null;
+  let shouldBackfillVenueAccountId = keyRow.venue_account_id === null;
+  // Phase 225 (CONN-03, RESEARCH W4): the login backfill used to lean on the
+  // login-only unique index's 23505 to refuse a second slot holder. Once the
+  // server-aware index ships (plan 10) that index stops firing against a
+  // server-stamped holder, and this write carries no server (the rotate does
+  // not know it), so the index would admit a second holder beside it. The
+  // fence moves here: when another live key of the SAME owner already reads
+  // this login on any server (a null server is the wildcard, Q2), the login is
+  // not backfilled and the password is saved without it. A read error keeps
+  // today's attempt-then-retry path below; the 23505 retry stays for the race.
+  if (shouldBackfillVenueAccountId) {
+    const { rows, error: holderReadError } = await readLiveSameLoginKeys(admin, {
+      userId: user.id,
+      exchange: "mt5",
+      venueAccountId: parsed.venue_account_id,
+    });
+    if (holderReadError) {
+      console.error(
+        "[api/keys/[id]/rotate-secret] same-account holder read failed; relying on the unique index:",
+        scrubSeamError(holderReadError, [newSecret, parsed.venue_account_id]),
+      );
+    } else if (pickSameAccountHolder(rows, null, "fence") !== null) {
+      shouldBackfillVenueAccountId = false;
+    }
+  }
   let { data: updatedRows, error: updateErr } = await attemptPersist(
     shouldBackfillVenueAccountId,
   );

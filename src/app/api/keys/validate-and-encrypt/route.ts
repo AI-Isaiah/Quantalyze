@@ -523,6 +523,23 @@ async function _unifiedValidateAndEncryptHandler(args: {
 }
 
 /**
+ * The one KEY_VENUE_ALREADY_CONNECTED answer (ONCE-01, D-01), used by the
+ * pre-insert holder fence and by the unique-index 23505 arm so the two cannot
+ * drift. The code stays a literal at the call site's grep distance; the
+ * sentence names no account id and is venue-neutral.
+ */
+function keyVenueAlreadyConnectedResponse(): NextResponse {
+  return NextResponse.json(
+    {
+      code: "KEY_VENUE_ALREADY_CONNECTED",
+      error:
+        "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+    },
+    { status: 409, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
  * The LEGACY path in the legacy-vs-unified-/process-key sense ONLY (see NOTE
  * (M-9) below, which fixes that meaning) — it is NO LONGER "preserved verbatim
  * from the pre-Phase-19 implementation", as this line used to claim. Two
@@ -769,13 +786,19 @@ async function legacyValidateAndEncryptHandler(args: {
     const venueServer = isMt5 ? normaliseVenueServer(passphrase) : null;
 
     // Phase 225 (ONCE-01, Q1, D-25, MT5D-08): is this account already held by
-    // a live key of THIS owner? The `user_id` filter inside
-    // `readLiveSameLoginKeys` is the tenant boundary: a key of another owner on
-    // the same account is never read, so it never blocks and is never named
-    // (Q3, ONCE-02 — the share link is the supported way to reach it). The
-    // server is a wildcard when either side has none (Q2). A failed read never
-    // fails the add: the unique index is still the backstop, so it degrades to
-    // the behaviour this route had before the fence existed.
+    // a live key of THIS owner?
+    //   - Per owner: the `user_id` filter inside `readLiveSameLoginKeys` is the
+    //     tenant boundary. A key of another owner on the same account is never
+    //     read, so it never blocks and is never named: there is no cross-owner
+    //     marker (Q3, ONCE-02 — the share link is the supported way to reach it).
+    //   - The server is a wildcard when either side has none (Q2): a holder
+    //     with a null server blocks a connect on any server of that login.
+    //   - This read, not the unique index, is what refuses a null-server holder
+    //     once the server-aware index ships (plan 10): the index alone will not.
+    //   - A WORKING holder refuses the add by name before any insert (D-01).
+    //   - A failed read never fails the add: the unique index is still the
+    //     backstop, so it degrades to the behaviour this route had before the
+    //     fence existed.
     let failingHolderId: string | null = null;
     if (venueAccountId !== null) {
       const { rows, error: holderReadError } = await readLiveSameLoginKeys(admin, {
@@ -791,10 +814,13 @@ async function legacyValidateAndEncryptHandler(args: {
         );
       } else {
         const holder = pickSameAccountHolder(rows, venueServer, "fence");
+        if (holder !== null && isWorkingHolder(holder)) {
+          return keyVenueAlreadyConnectedResponse();
+        }
         // A holder that is not working (D-18) gives way to this key, which
         // `validateKey` just proved works: the key is inserted with no identity
         // and takes the slot through `swapAccountSlot` below (T-225-24).
-        if (holder !== null && !isWorkingHolder(holder)) failingHolderId = holder.id;
+        if (holder !== null) failingHolderId = holder.id;
       }
     }
 
@@ -858,14 +884,7 @@ async function legacyValidateAndEncryptHandler(args: {
           { correlationId },
           scrubSeamError(insertError, [api_key, api_secret, passphrase, venueAccountId, venueServer]),
         );
-        return NextResponse.json(
-          {
-            code: "KEY_VENUE_ALREADY_CONNECTED",
-            error:
-              "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
-          },
-          { status: 409, headers: NO_STORE_HEADERS },
-        );
+        return keyVenueAlreadyConnectedResponse();
       }
 
       // Rule 12 / Pitfall 3: the fault is surfaced, and the raw PostgREST
