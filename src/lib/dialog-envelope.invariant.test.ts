@@ -450,14 +450,22 @@ const DIALOGS: readonly DialogUnderTest[] = [
       "KEY_UPDATE_UNSUPPORTED_VENUE",
       "SEAM_MISCONFIGURED",
       "KEY_VENUE_ALREADY_CONNECTED",
+      "UNKNOWN",
     ],
-    // 11 sites, counted by hand off the route at HEAD: signed-out ×1,
+    // 12 sites (11 -> 12 at Phase 225 PR-2 review SF-M1: the same-account
+    // holder read fails closed with a retryable 503 UNKNOWN). 11 sites, counted by hand off the route at HEAD: signed-out ×1,
     // request-invalid ×2 (bad uuid, unparseable json), NEW_SECRET_REQUIRED
     // ×1, write-indeterminate ×3 (ownership-lookup error, zero-rows TOCTOU,
     // genuine updateErr), row-stale ×1, unsupported-venue ×1,
     // seam-misconfigured ×1, venue-already-connected ×1.
-    expectedEmitterSites: 11,
+    expectedEmitterSites: 12,
     deliberatelyNotEnvelope: {
+      UNKNOWN:
+        "Phase 225 SF-M1: the same-account holder read failed, so the route " +
+        "could not classify whether the account is already connected and " +
+        "refuses before any write with a retryable 503. UNKNOWN's 'we could " +
+        "not classify this failure' is literally true, and rostering UNKNOWN " +
+        "is forbidden (rule B).",
       NEW_SECRET_REQUIRED:
         "FIELD-LEVEL, mirrors NAME_REQUIRED. UpdateMt5SecretDialog also " +
         "disables its submit button while the field is empty, so this arm " +
@@ -772,7 +780,8 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     // Hand-typed: NAME_REQUIRED + NAME_TOO_LONG + LIVE_ALLOCATION.
     // 3 -> 5 at Phase 164.5.3 / MT5CREDS Plan 05: NEW_SECRET_REQUIRED +
     // KEY_UPDATE_UNSUPPORTED_VENUE on keys/[id]/rotate-secret.
-    expect(checked).toBe(5);
+    // 5 -> 6 at Phase 225 PR-2 (SF-M1): UNKNOWN on keys/[id]/rotate-secret.
+    expect(checked).toBe(6);
   });
 
   it("A. every TERMINAL-UNKNOWN arm is a listed disposition with a reason", () => {
