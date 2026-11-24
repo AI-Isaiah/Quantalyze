@@ -57,7 +57,7 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Data integrity: MT5 derives (MT5DERIVE2)
 
-- [ ] **MT5D-01**: Every failed attempt of a compute job leaves an append-only record of its cause, written before the re-claim clears `last_error`. The record tells a stall or watchdog reset apart from a real error, and stays readable after a later attempt succeeds. The deliberate `last_error` clear on re-claim stays. (covers: 175-NIGHTLY-MT5-DERIVE-CHECK)
+- [x] **MT5D-01**: Every failed attempt of a compute job leaves an append-only record of its cause, written before the re-claim clears `last_error`. The record tells a stall or watchdog reset apart from a real error, and stays readable after a later attempt succeeds. The deliberate `last_error` clear on re-claim stays. (covers: 175-NIGHTLY-MT5-DERIVE-CHECK)
 - [ ] **MT5D-02**: Once that record has collected real nightly runs, the named cause of MT5 `derive_broker_dailies` second attempts is fixed at its root, so that over seven consecutive nights every MT5 derive ends `done` with `attempts=1`. Raising retries or a watchdog threshold is not a close. (covers: 175-NIGHTLY-MT5-DERIVE-CHECK)
 - [ ] **MT5D-03**: The MT5 derive values that moved without explanation are replayed under both server-clock settings, and each moved value is attributed to the clock switch or to another named cause. (covers: 202-MT5-CLOCK-LEAD-01)
 - [ ] **MT5D-04**: A timed re-funding day with an empty cohort 0 keeps the return chain intact instead of being dropped by a guard. (covers: 164.6.6.2.3-EMPTY-COHORT0-REFUND)
@@ -101,11 +101,11 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Data integrity: no stranded strategy (JOBHEAL)
 
-- [ ] **HEAL-01**: A finalize-wizard strategy whose first `sync_trades` enqueue dropped is re-enqueued, or shown in a named state. This uses its own mechanism, not a second predicate on the reconcile sweep. (covers: L4282)
-- [ ] **HEAL-02**: A `derive_allocator_equity` job queued behind slow batch-mates is never reset and run twice. (covers: 166.5.1-DERIVE-BATCH-RESET-RESIDUAL)
-- [ ] **HEAL-03**: A strategy whose reconcile readmit hits its ceiling emits a readable signal. Whether that is an audit row or an external alert is a founder ruling at plan time. (covers: L2244)
-- [ ] **HEAL-04**: A job reclaimed after a crash keeps its curated error sentence, and the strategy's analytics status follows the reclaim. (covers: 164.2-RECLAIM-PROVENANCE)
-- [ ] **HEAL-05**: The daily positions poll also covers private strategies, so they get position snapshots. The `poll_positions` enqueue stays live (F-8). (covers: FANOUT-COHORT-SIBLING-POLL-01)
+- [x] **HEAL-01**: A finalize-wizard strategy whose first `sync_trades` enqueue dropped is re-enqueued, or shown in a named state. This uses its own mechanism, not a second predicate on the reconcile sweep. (covers: L4282)
+- [x] **HEAL-02**: A `derive_allocator_equity` job queued behind slow batch-mates is never reset and run twice. (covers: 166.5.1-DERIVE-BATCH-RESET-RESIDUAL)
+- [x] **HEAL-03**: A strategy whose reconcile readmit hits its ceiling emits a readable signal. Whether that is an audit row or an external alert is a founder ruling at plan time. (covers: L2244)
+- [x] **HEAL-04**: A job reclaimed after a crash keeps its curated error sentence, and the strategy's analytics status follows the reclaim. (covers: 164.2-RECLAIM-PROVENANCE)
+- [x] **HEAL-05**: The daily positions poll also covers private strategies, so they get position snapshots. The `poll_positions` enqueue stays live (F-8). (covers: FANOUT-COHORT-SIBLING-POLL-01)
 
 ### Data integrity: one figure convention (FIGUREMATH)
 
@@ -299,7 +299,7 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | ONCE-03 | Phase 225 | Pending |
 | ONCE-04 | Phase 225 | Pending |
 | PROOF-01 | Every v1.22 phase, and every v1.23 phase by F-10 (closed at each milestone audit) | Pending |
-| MT5D-01 | Phase 227 | Pending |
+| MT5D-01 | Phase 227 | Complete |
 | MT5D-02 | Phase 230 | Pending |
 | MT5D-03 | Phase 230 | Pending |
 | MT5D-04 | Phase 229 | Pending |
@@ -328,11 +328,11 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | NOCAP-02 | Phase 234 | Pending |
 | NOCAP-03 | Phase 234 | Pending |
 | NOCAP-04 | Phase 234 | Pending |
-| HEAL-01 | Phase 227 | Blocked (PROD go-live pending: first_hop_enqueue_sweep registration) |
-| HEAL-02 | Phase 227 | Pending |
-| HEAL-03 | Phase 227 | Pending |
-| HEAL-04 | Phase 227 | Pending |
-| HEAL-05 | Phase 227 | Pending |
+| HEAL-01 | Phase 227 | Complete |
+| HEAL-02 | Phase 227 | Complete |
+| HEAL-03 | Phase 227 | Complete |
+| HEAL-04 | Phase 227 | Complete |
+| HEAL-05 | Phase 227 | Complete |
 | FIG-01 | Phase 236 | Pending |
 | FIG-02 | Phase 236 | Pending |
 | FIG-03 | Phase 236 | Pending |

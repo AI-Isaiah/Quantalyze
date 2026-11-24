@@ -3782,15 +3782,6 @@ Both were DELIBERATE non-coverages of the JOB-04 dropped-enqueue sweep (the comp
 (`supabase/migrations/20260816140000_reconcile_dropped_enqueue_sweep.sql`), documented in that
 file's header and in `143-CONTEXT.md`. Neither is a bug in the sweep; each needs its own mechanism.
 
-- [ ] **(D-05) The wizard/API first-hop enqueue drop is NOT covered.** A `finalize-wizard` strategy
-  whose `sync_trades` enqueue dropped has **no dailies at all**, and "no dailies AND no jobs" is
-  byte-identical to a brand-new strategy that has not synced yet, and to a key whose first sync
-  legitimately returned nothing. No predicate catches the drop without also catching those, so the
-  sweep would re-enqueue healthy strategies forever. Closing it needs a different signal
-  (`api_key_id` present + no job EVER + a longer grace) with its own false-positive analysis — a
-  separate mechanism, not a second predicate bolted into this migration.
-      ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; REQUIREMENTS.md HEAL-01; tagged 2026-11-23.**
-
 - [ ] **(follow-on, from the 143-04 live tick) `cron.job_run_details.return_message` does NOT carry
   a pg_cron body's RAISE NOTICE text on this Supabase build — it carries the command tag (`DO`).**
   Observed 2026-08-17. This affects **142's reaper too**, whose header relies on the same premise for

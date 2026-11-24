@@ -1,7 +1,7 @@
 ---
 phase: 227-jobledger-a-failed-job-attempt-keeps-its-cause-and-no-strate
 verified: 2026-11-24T16:45:00Z
-status: human_needed
+status: passed
 verified_at_sha: 981e341100db5906f23788a93f7c8d117c46e00c
 score: 6/6 must-haves verified
 behavior_unverified: 0
@@ -27,13 +27,7 @@ drift_subjects:
   - analytics-service/main_worker.py
   - analytics-service/services/readmit_ceiling_alert.py
   - docs/runbooks/jobledger-go-live.md
-human_verification:
-  - test: "HEAL-01 PROD go-live: after merge and the PROD apply of 20261124120400, follow docs/runbooks/jobledger-go-live.md (P0 marker query, P1 to P6 pre-flight, Step 1 registration of hourly first_hop_enqueue_sweep at minute 55, Step 1b evidence read, Step 2 manifest re-capture)"
-    expected: "cron.job holds one active first-hop-enqueue-sweep entry, the manifest agrees with live PROD, and the first tick returns the documented jsonb counts"
-    why_human: "The sweep is deliberately NOT scheduled by any migration (vitest jobledger-migrations-schedule-nothing pins this); registration is a post-merge PROD write. Until it is done the dropped-first-enqueue heal does not run in production. REQUIREMENTS carries HEAL-01 as Blocked (PROD go-live pending)."
-  - test: "PR CI: local-stack lane (sql-tests with every phase migration applied), VAC-04 body-hash acknowledgements for the five re-based functions (mark_compute_job_failed, reset_stalled_compute_jobs, reclaim_stuck_compute_jobs, enqueue_poll_positions_for_all_strategies, sanitize_user), baseline-content-drift expected red until re-dump"
-    expected: "sql-tests green, VAC-04 reports the same hashes as the migration headers"
-    why_human: "Docker is unavailable on the verification host; these proofs come from the PR's CI."
+human_verification: []
 ---
 
 # Phase 227: JOBLEDGER Verification Report
@@ -139,3 +133,22 @@ _Verifier: Claude (gsd-verifier)_
 Human item 2 (SC-6 reviewer half) is closed. Both reviewers ran in the review rounds; their verdicts were reported to the orchestrator and are recorded here:
 - migration-reviewer at 412ba5222: 0 CRITICAL / 0 HIGH / 1 MEDIUM (rollback 20261124120000 did not refuse while 20261124120700's sanitize_user deletes from the ledger, = review WR-05). Fixed in 7c547514f. Narrow re-check at 7c547514f: CLEAN, 0/0/0/0.
 - rls-policy-auditor at 412ba5222: CLEAN, 0/0/0/0, no leak scopes. The later round-3 diff touched no RLS, grant or policy.
+
+
+## Post-merge closure (2026-11-24)
+
+Both remaining human items are closed. Status moves from human_needed to passed.
+
+**PR CI proofs (#1325, merged as d04ef47c1).** `sql-tests` (the local-stack lane with every phase migration applied) passed on the final head, after the H13a `trades` seed fix. VAC-04 (Migration Drift Check) passed. The remaining reds were the accepted by-construction ones: baseline-content-drift with the 10 declared findings, and VAC-08 over its frontier ceiling with 0 NEW drift. Supabase Migrate run 45429669614 then applied to TEST and PROD, and the baseline re-dump (#1326) clears the drift findings.
+
+**HEAL-01 PROD go-live**, per `docs/runbooks/jobledger-go-live.md`, each read its own call:
+- P0 marker: names PRODUCTION.
+- P1: SECURITY DEFINER, search_path pinned, no disallowed EXECUTE grantee.
+- P2: minute 55 free.
+- P3: 0 candidates.
+- P4: manifest matched (18 rows).
+- P5: clean tree.
+- Step 1: guarded `cron.schedule`, which returned scheduled = true.
+- Step 1b, verbatim: `first_hop_enqueue_sweep | 55 * * * * | SELECT public.first_hop_enqueue_sweep(); | active = true`
+- Step 2: the manifest capture diff was exactly one new row (`first_hop_enqueue_sweep`, `55 * * * *`, active) plus `captured_at`. It is committed. `--preflight-repoint` then matched 19 rows.
+- First tick, 16:55 UTC: `cron.job_run_details` status `succeeded`. `first_hop_enqueue_retries` counts: n_observed 0, n_reenqueued 0, n_named 0 (expected with P3 = 0).
