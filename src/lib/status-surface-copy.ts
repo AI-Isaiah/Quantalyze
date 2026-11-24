@@ -462,6 +462,34 @@ const PUBLIC_URL_NOTE =
   "Right now, this strategy's factsheet link shows that the factsheet is not available yet. The numbers appear there once a computation succeeds.";
 
 /**
+ * KCS12-MINT-B-LEAD (Phase 238 FACT-05): the first sentence of a private-link
+ * note for a row that is not available and not computing (state failed,
+ * stalled or never_started). It is the retired `MINT_TOKEN_NOTES.not_available`
+ * sentence with `yet` removed, because `yet` promises a change when nothing is
+ * running. The note is this lead, one space, then the row's action sentence
+ * (`ACTION_SENTENCES`, composed where it renders: the `/strategies` page). Do
+ * not import `degrade-warnings` here: it value-imports this module.
+ */
+export const KCS12_MINT_B_LEAD =
+  "Right now, a private link to this strategy shows that its factsheet is not available.";
+
+/**
+ * KCS12-PUBLIC-LEAD (Phase 238 FACT-05): KCS12-MINT-B-LEAD's counterpart for a
+ * published strategy's public URL. Consumed by plan 238-02.
+ */
+export const KCS12_PUBLIC_LEAD =
+  "Right now, this strategy's factsheet link shows that the factsheet is not available.";
+
+/**
+ * KCS12-PUBLIC-UNKNOWN (Phase 238 FACT-05): the public-URL note for a row whose
+ * compute state was not read. It conditions its action on the one fact it
+ * cannot see, and points at the one remedy open to every shape and viewer.
+ * Consumed by plan 238-02.
+ */
+export const KCS12_PUBLIC_UNKNOWN =
+  "Right now, this strategy's factsheet link shows that the factsheet is not available. If no computation is running, use the contact form to have it checked.";
+
+/**
  * What a recipient of this strategy's link sees right now (KCS12-MINT-A,
  * KCS12-MINT-B, KCS12-UNREADABLE for a private link; KCS12-PUBLIC for a
  * published strategy's public URL, whatever the arm).

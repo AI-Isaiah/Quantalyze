@@ -47,6 +47,7 @@ import {
 import { extractAnalytics, formatDay } from "@/lib/utils";
 import type { Strategy } from "@/lib/types";
 import {
+  KCS12_MINT_B_LEAD,
   ownerRemedy,
   probeUnreadableShareNote,
   recipientShareNoteFor,
@@ -67,7 +68,7 @@ import { contactHref } from "@/lib/contact";
 import { redirect } from "next/navigation";
 import { roleSurfaceHome } from "@/lib/routing/role-home";
 import { apiKeyLabelById } from "@/lib/api-key-label";
-import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { DegradeAction, DegradeLine } from "@/components/degrade/DegradeLine";
 import {
   degradeSegments,
   viewerRemedyAction,
@@ -211,6 +212,20 @@ function jobDayOf(job: ComputeJobRow | null | undefined): string | null {
   const ms = Date.parse(raw);
   return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : null;
 }
+
+/**
+ * Phase 238 FACT-05 — what a row's share note needs to render. A `text` note is a
+ * string every role sees as-is (the existing notes). A `remedy` note is the
+ * private-link lead plus the action the row's remedy names; it is resolved in
+ * `noteFor`, where the row's shape and the viewer's role are known, so the action
+ * always passes through `viewerRemedyAction` and never sends an allocator-only
+ * viewer to a manager-guarded page (199 CD-11). Plan 238-02 adds a published variant.
+ */
+type ShareNoteDescriptor =
+  | { kind: "text"; text: string }
+  | { kind: "remedy"; state: ComputeState; compositeHistory: CompositeHistory };
+
+const textNote = (text: string): ShareNoteDescriptor => ({ kind: "text", text });
 
 async function readRecipientArm(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -789,17 +804,25 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   // ComputeState (`finished`), never from the arm, which `failed`, `stalled` and
   // `never_started` share. `analyticsFailed` wins inside the selector, and the
   // in_progress arm keeps KCS12-MINT-A for every kind (`recipientShareNoteFor`).
+  // Phase 238 FACT-05: an unpublished row whose arm is `not_available` with no
+  // kind (state failed, stalled or never_started: nothing is running) never tells
+  // the owner to wait. It returns a `remedy` descriptor, which `noteFor` renders as
+  // KCS12-MINT-B-LEAD plus the action the row's remedy names. Every other row, and
+  // every published row, keeps its string note.
   const uncomputedNote = async (
     s: NonNullable<typeof strategies>[number],
     mode: ReturnType<typeof shareAffordanceMode>,
     analyticsFailed = false,
-  ): Promise<string> => {
-    const { arm, state } = await armOf(s, mode);
+  ): Promise<ShareNoteDescriptor> => {
+    const { arm, state, compositeHistory } = await armOf(s, mode);
     const kind = unbuildableNoteKindOf("not_computed", {
       ...(analyticsFailed ? { analyticsFailed: true as const } : {}),
       jobsFinished: state?.state === "finished",
     });
-    return recipientShareNoteFor(mode, arm, kind);
+    if (mode === "mint-token" && arm === "not_available" && kind === null && state !== null) {
+      return { kind: "remedy", state, compositeHistory };
+    }
+    return { kind: "text", text: recipientShareNoteFor(mode, arm, kind) };
   };
 
   // WR-01: the probes share one limiter per page load, and a probe that
@@ -811,10 +834,10 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   // once after the fan-out (`captureProbeOutcomes`).
   const probeOutcomes = newProbeOutcomeTally();
 
-  const shareNotes = new Map<string, string>(
+  const shareNotes = new Map<string, ShareNoteDescriptor>(
     (
       await Promise.all(
-        (strategies ?? []).map(async (s): Promise<readonly [string, string | null]> => {
+        (strategies ?? []).map(async (s): Promise<readonly [string, ShareNoteDescriptor | null]> => {
           const mode = shareAffordanceMode(isPublishedStatus(s.status));
           // D-08: an uncomputed row is never probed; it keeps today's path.
           // 237-REVIEW WR-03: a pending or computing row is the exception.
@@ -863,7 +886,7 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
                 deadlineMs: err.deadlineMs,
               });
               probeOutcomes.counts.timeout += 1;
-              return [s.id, probeUnreadableShareNote(mode)] as const;
+              return [s.id, textNote(probeUnreadableShareNote(mode))] as const;
             }
             // D-05: a probe that throws is never read as "buildable".
             // 167.2.1-REVIEW-SFH H-2: nor as "not available". Every failed
@@ -879,7 +902,7 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
               message: err instanceof Error ? err.message : String(err),
             });
             probeThrows.push(err);
-            return [s.id, probeUnreadableShareNote(mode)] as const;
+            return [s.id, textNote(probeUnreadableShareNote(mode))] as const;
           }
           // 167.2.1-REVIEW IN-03: "buildable" means "no null exit", not
           // "renders". A builder throw at the recipient's request (the basis
@@ -898,7 +921,7 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
             // sees is not known. The resolve stage logged this read with its
             // id and code (`resolve(probe)`). 167.2.1-REVIEW-R2 WR-01: it no
             // longer captures it; the count above does, once per page load.
-            return [s.id, probeUnreadableShareNote(mode)] as const;
+            return [s.id, textNote(probeUnreadableShareNote(mode))] as const;
           }
           if (probe.reason === "not_visible") {
             // D-05: the probe found no row. 167.2.1-REVIEW IN-01: on THIS page
@@ -911,7 +934,7 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
               id: s.id,
               reason: probe.reason,
             });
-            return [s.id, probeUnreadableShareNote(mode)] as const;
+            return [s.id, textNote(probeUnreadableShareNote(mode))] as const;
           }
           // D-05: the embed and the admin read disagree (a race): the admin
           // read is the builder's, so the row takes the uncomputed path.
@@ -932,10 +955,10 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
             return [s.id, await uncomputedNote(s, mode, kind === "analytics_failed")] as const;
           }
           // D-02: computed, but the builder refuses it (`kind`, above).
-          return [s.id, recipientShareNoteFor(mode, (await armOf(s, mode)).arm, kind)] as const;
+          return [s.id, textNote(recipientShareNoteFor(mode, (await armOf(s, mode)).arm, kind))] as const;
         }),
       )
-    ).filter((entry): entry is readonly [string, string] => entry[1] !== null),
+    ).filter((entry): entry is readonly [string, ShareNoteDescriptor] => entry[1] !== null),
   );
   captureProbeOutcomes(probeOutcomes);
   captureProbeThrows(probeThrows);
@@ -1255,6 +1278,32 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
       keyLabels,
     );
     const shareNote = shareNotes.get(s.id);
+    // Phase 238 FACT-05: the `remedy` note's action is the Health detail's own rule
+    // (`strategies.stale-no-data`): `ownerRemedy` with no build facts, mapped through
+    // the viewer. Raw `ownerRemedy` is never rendered here (199 CD-11).
+    let shareNoteBody: ReactNode = null;
+    if (shareNote?.kind === "text") {
+      // AD-05: the note's "contact form" phrase links the support topic
+      // with this row's strategy id.
+      shareNoteBody = (
+        <ContactPointerText
+          text={shareNote.text}
+          href={contactHref({ topic: "support", strategy: s.id })}
+        />
+      );
+    } else if (shareNote?.kind === "remedy") {
+      const shape = shapeOf(s, shareNote.compositeHistory);
+      const remedy = ownerRemedy(shareNote.state, shape, s.id);
+      shareNoteBody = (
+        <>
+          {KCS12_MINT_B_LEAD}{" "}
+          <DegradeAction
+            id={viewerRemedyAction({ remedy, managerSurface: isManager, shape })}
+            strategyId={s.id}
+          />
+        </>
+      );
+    }
     const healthDetail = healthDetailFor(s);
     const showFeedback = Boolean(s.review_note) && s.status === "draft";
     if (!showFeedback && keyLines.length === 0 && !healthDetail && !shareNote) return undefined;
@@ -1294,12 +1343,7 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
             data-degrade-id="strategies.share-note"
             className="text-caption font-normal text-text-muted"
           >
-            {/* AD-05: the note's "contact form" phrase links the support topic
-                with this row's strategy id. */}
-            <ContactPointerText
-              text={shareNote}
-              href={contactHref({ topic: "support", strategy: s.id })}
-            />
+            {shareNoteBody}
           </p>
         )}
       </>

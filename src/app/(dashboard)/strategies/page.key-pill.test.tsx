@@ -777,6 +777,17 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.";
   const MINT_B =
     "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.";
+  // Phase 238 FACT-05 (UI-SPEC Copywriting Contract), typed out character for
+  // character, never imported: the unpublished note for a row whose link shows
+  // "not available" while nothing is running names the row's action.
+  const MINT_B_RESYNC_EDIT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Start a new computation with Resync on this strategy's edit page. Use the contact form if it does not complete.";
+  const MINT_B_LINK_KEY_EDIT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Link a key with Change key… on this strategy's edit page (add one on your Profile API keys tab first if you have none) to start a new computation. Use the contact form if it does not complete.";
+  const MINT_B_CONTACT_RESOLVE =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Use the contact form to have it resolved.";
+  const MINT_B_RELOAD =
+    "Right now, a private link to this strategy shows that its factsheet is not available. Reload this page to try again.";
   const UNREADABLE =
     "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
   const PUBLIC =
@@ -1869,6 +1880,89 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     );
     expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
       tags: { route: "strategies/page", stage: "compute-state-window-full" },
+    });
+  });
+
+  // ── Phase 238 FACT-05 (NEVERCOMPUTED): a row that never computed, failed or
+  // stalled never tells its owner to wait. The note names the action the row's
+  // remedy names (founder ruling "FACT-05: the note wording", (a) Reuse the
+  // remedy), one case per state. Each asserts the whole sentence, the exact link
+  // count and href, and the four phrases that promise a wait.
+  describe("NEVERCOMPUTED: an unpublished row whose link shows 'not available' names its action", () => {
+    const FORBIDDEN = ["yet", "once a computation succeeds", "appear there", "no computation is running"];
+    const expectNoWait = (note: string | null) => {
+      for (const phrase of FORBIDDEN) expect(note).not.toContain(phrase);
+    };
+    const linksOf = (container: HTMLElement, name: string) =>
+      [...shareNoteOf(container, name)!.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+
+    it("failed (permanent): the contact form, the one link on `contact form`", async () => {
+      state.strategies = [
+        row("n-fail", { status: "draft", strategy_analytics: { computation_status: "pending" } }),
+      ];
+      state.jobs = {
+        "n-fail": [
+          {
+            kind: "stitch_composite",
+            status: "failed_final",
+            error_kind: "permanent",
+            created_at: "2026-02-01T00:00:00.000Z",
+          },
+        ],
+      };
+
+      const container = await renderPage();
+
+      const note = noteOf(container, "Strategy n-fail");
+      expect(note).toBe(MINT_B_CONTACT_RESOLVE);
+      expect(linksOf(container, "Strategy n-fail")).toEqual(["/contact?topic=support&strategy=n-fail"]);
+      expect(shareNoteOf(container, "Strategy n-fail")!.querySelector("a")!.textContent).toBe("contact form");
+      expectNoWait(note);
+    });
+
+    it("stalled (single key, a stitch heartbeat gone quiet): Resync on the edit page, the one link on `edit page`", async () => {
+      // Stall is stitch-only (`isStitchStalled`): a running stitch whose heartbeat
+      // (claimed_at, no member_progress_at) is older than STALL_THRESHOLD_MS. A
+      // linked key makes the shape `single` whatever the stitch history.
+      state.strategies = [
+        row("n-stall", {
+          status: "draft",
+          api_key_id: "k-n-stall",
+          strategy_analytics: { computation_status: "pending" },
+        }),
+      ];
+      state.jobs = {
+        "n-stall": [
+          {
+            kind: "stitch_composite",
+            status: "running",
+            created_at: isoMinutesAgo(60),
+            claimed_at: isoMinutesAgo(60),
+          },
+        ],
+      };
+
+      const container = await renderPage();
+
+      const note = noteOf(container, "Strategy n-stall");
+      expect(note).toBe(MINT_B_RESYNC_EDIT);
+      expect(linksOf(container, "Strategy n-stall")).toEqual(["/strategies/n-stall/edit"]);
+      expect(shareNoteOf(container, "Strategy n-stall")!.querySelector("a")!.textContent).toBe("edit page");
+      expectNoWait(note);
+    });
+
+    it("never_started (no key, no members, no jobs): Change key on the edit page, one edit link", async () => {
+      state.strategies = [
+        row("n-new", { status: "draft", strategy_analytics: { computation_status: "pending" } }),
+      ];
+      state.jobs = { "n-new": [] };
+
+      const container = await renderPage();
+
+      const note = noteOf(container, "Strategy n-new");
+      expect(note).toBe(MINT_B_LINK_KEY_EDIT);
+      expect(linksOf(container, "Strategy n-new")).toEqual(["/strategies/n-new/edit"]);
+      expectNoWait(note);
     });
   });
 });
