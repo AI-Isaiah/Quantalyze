@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.133.70.0] - 2026-11-24 — Phase 232 OKXTRADES: an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades
+
+Analytics service only (`analytics-service/services/exchange.py`, `services/job_worker.py`, `services/trade_resume.py`, `routers/cron.py`) plus two dated runbook corrections. No migration, no RPC change, no frontend change. Covers VREAD-06, VREAD-07 and VREAD-08. Built from 15 phase commits (four plans of three commits each, the plan-02 merge `0cdf250c5`, and two review fixes), each mapped below by hash.
+
+### Added
+- **The OKX bills walk is window-major (VREAD-07).** `fetch_daily_pnl`'s OKX branch walks UTC-day-aligned 7-day windows, oldest first, with `begin` and `end` on every request. A first window longer than the page cap now completes instead of dropping its oldest days. (`cdf4e87c4`)
+  - New module constants `OKX_BILLS_WINDOW_DAYS = 7`, `OKX_BILLS_REACH_DAYS = 93` and `OKX_LIVE_BILLS_DAYS = 7` sit beside `OKX_BILLS_PAGE_CAP`. Both page caps are unchanged at 100, now counted per (window, instType, endpoint).
+  - Age routing replaces the old 90-day gate: a window that ends after the live floor reads `/account/bills`, one that starts before it reads `/account/bills-archive`, and a straddling window reads both and de-duplicates by `billId`.
+  - A deadline or cap stop drops the window in progress and stops, so the result is a contiguous oldest prefix of whole days. A `since_ms` start is floored to its UTC day, so the first window re-reads that whole day (idempotent: `sync_trades` deletes the payload day span before it inserts).
+  - New typed refusal `OkxBillsWindowIncomplete` (`out_of_window`, `order_drift`). A bill outside the requested window, or `billId`s that are not strictly descending, refuse by name; the text carries no digits and no venue text.
+- **The OKX cron stores a deadline prefix and holds every cursor (VREAD-07).** `_sync_single_key` gives an OKX key a 35 s read deadline (`OKX_CRON_READ_DEADLINE_S`, of the 60 s `KEY_SYNC_TIMEOUT`), stores the whole-day prefix the walk returns, and moves nothing else: `last_sync_at`, the markers, the `trades_fetched_at` stamp and the recompute enqueue are all held. The tick reports status `held` with the result key `fetch_partial_prefix`. A degraded read wins over a prefix. A first window longer than one tick therefore completes across consecutive ticks with no tick degrading the key. (`02b201c91`)
+- **A non-USD OKX bill refuses by name (VREAD-06).** `fetch_daily_pnl` counts a stable coin (USDT, USDC, DAI, any case) at 1.0 and refuses a nonzero bill in any other currency, a blank or missing `ccy` included: it stamps `daily_pnl_non_usd_okx` and returns no rows instead of summing the face value into a USD series. The check sits after the type-8 drop and the finite-number parse. The WARNING carries a per-currency count only, after a code-shape check. (`445131f01`)
+- **Every reader names the new token.** `daily_pnl_read_verdict`, the cron's `_fetch_degradation`, `READ_INCOMPLETE_TOKENS` and `_DAILY_PNL_REFUSAL_ORDER` (permanent on the first attempt) all name `daily_pnl_non_usd_okx`, and the verdict parity matrix doubled from 480 to 960 rows to cover it. (`bf111c75e`)
+
+### Changed
+- **The fills cursor is a stored-through mark (VREAD-08).** `api_keys.last_fetched_trade_timestamp` now takes the ISO timestamp of the newest fill a run persisted, or is left untouched. It no longer takes wall-clock now on a run with no fills, and it holds on every refused, truncated, partial or Phase-1-failed read (any truthy `sync_truncated_*` flag, any failed fill-ingestion phase). (`e33b47829`)
+- **The fills read is clamped to what is stored.** A new fail-open helper, `load_strategy_fill_high_water` in `services/trade_resume.py`, feeds the seed rule `min(cursor, stored fills high-water)`, so a key found with its cursor ahead of its data re-reads the skipped days. A first sync whose read is refused or only partly persisted anchors a NULL column at its read start, so the refused span is re-read on the next run. (`e1b80dae0`)
+- A quiet key's fills window now grows every run from its last stored fill, because the cursor no longer jumps to now. A Bybit key whose last fill is older than two years refuses its fills read each run (`BybitTradeWindowIncomplete`).
+- `test_exchange_harness.py` gained a window-aware fake `_WindowedBills` and a pinned clock; the OKX tests the walk breaks were re-fixtured (old to new expectation recorded in the plan SUMMARYs, none deleted), and `test_90_day_gate_skips_archive` keeps its name but now asserts the archive IS read. (`969f413c5`, `94fd95693`, `fa7d917a6`)
+- Two dated `CORRECTED 2026-11-24` notes in `docs/runbooks/okxhistory-go-live.md` at the pointers to the two closed OKX TODOS ids; the earlier sentences stay as lineage. (`651c683f2`)
+
+### Fixed
+- **CR-01: a truncated fills read at bootstrap no longer skips its dropped span.** A truncated read with a NULL cursor "held" a NULL column, so the next run seeded from a daily high-water that had already moved on. The bootstrap anchor now fires on a truncated or partial-symbol read as well as a failed one. (`516cbf217`)
+- **CR-02: a Binance partial-symbol read no longer stamps the cursor past the failed symbols' unread fills.** `binance_partial_symbols` now holds the cursor the same way truncation does. (`0e700425f`)
+
+### Root cause
+- **`167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD`:** the cursor was written as wall-clock now whenever a run ended, whether or not fills were stored, so a refused or empty read left it ahead of the data it claimed to cover (one key measured 6 days ahead, 2026-10-09). The seed trusted it, so the queued job would skip those days. Both halves are fixed: the writer stamps only what is stored, and the reader clamps to the stored high-water.
+- **`167.1.2.2.2-OKX-PERSISTENT-TRUNCATION`:** the old walk ran one capped loop per (endpoint, instType) over the whole range with `begin` and no `end`, so a long first window spent its 100 pages on the newest bills and silently dropped the oldest days. The `TODOS.md` entry said "measured, not fixed"; plan 02's tracer went RED on the pre-fix walk, confirming it.
+- **`167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY`:** the live aggregation summed `pnl + fee` for every currency at face value, so a non-stable bill would have entered a USD series unconverted. Every OKX bill measured so far is USDT, so this is a latent defect closed before it produced a wrong number.
+
+### Tests
+- New files `test_okxtrades_cursor.py`, `test_okxtrades_walk.py` and `test_okxtrades_ccy.py`; `test_cron_router.py` gained `TestAnOkxPrefixIsStoredAndHeld` (every prefix gate, the empty prefix, the present marker, the venue split, degraded over prefix; `22a3ed3a5`). The walk's whole-window stops, ticks, named self-checks, age routing and window edges are pinned in `80c8f2911`. The `test_ana_recon_audit.py` C-1 test was rewritten in place: its old body re-typed the gate inline and grepped the source, so it could never go RED; the new body drives the real `run_sync_trades_job` with the `sync_trades` RPC raising, plus a control run.
+- Every new gate arm was proven able to fail: each plan neutered the production line from a byte backup, saw RED naming the arm, restored with `cp`, `cmp` clean, then GREEN (PROOF-01, records in the plan SUMMARYs). Plan 02's N2 neuter first did not bite, which led to a 14th arm in plan 01 for the one reachable state where the conjunct matters.
+- Local gates on the composed tree: the phase set (`test_okxtrades_cursor.py`, `test_okxtrades_walk.py`, `test_okxtrades_ccy.py`, `test_cron_router.py`, `test_job_worker.py`) `367 passed, 1 skipped`; the full analytics suite `16294 passed, 93 skipped, 0 failed`; `mypy --strict` over the running-service surface: `Success: no issues found in 143 source files`.
+
+### Removed
+- `TODOS.md` entries `167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD` (a `###` section), `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]` and `[167.1.2.2.2-OKX-PERSISTENT-TRUNCATION]` are deleted, whole, as closed by this ship. The now-empty `## Phase 167.1.2.2.2.1 (OKXHISTORY) — routed items` heading went with the only entry under it. The runbook above is the only live pointer left and carries the dated corrections.
+
+### Notes
+- **Routed review survivors, recorded and not fixed here (MEDIUM, data-integrity, all latent while `USE_RAW_TRADE_INGESTION` is off):**
+  - SFH-02: no anchor when the cursor and the seed are both NULL and Phase 2 raised (a first sync with full reach). Accepted by ruling Q1.
+  - SFH-04: `run_stitch_composite_job` never drains the data-quality buffer, so after a page-cap breach the composite NAV roll can miss the newest days. Out of scope by founder ruling F-2.
+  - R2-01: a Binance symbol that raises `BadSymbol` on every run sets `binance_partial_symbols` every run, so the CR-02 hold keeps the cursor at C indefinitely. The stall is loud (the flag names the symbol); before the fix the skip was silent.
+  - R2-02: a Binance linear key with a set cursor and more than 7 quiet days reads an empty window, `bool(raw_fills)` never stamps, and the cursor never moves again. Silent. The real fix is a window-walking Binance fills read in `exchange.py`; it must be closed before raw ingestion is turned on for Binance.
+  - `BINANCE_PAGE_CAP`: the per-symbol cap stop still records no flag. A flag there needs a resume-past-cap design, because read by the hold it would stall a symbol that is capped on every run.
+- **CR-03 (the OKX archive reader's `_check_live_realized_flags` ignoring `daily_pnl_non_usd_okx`)** was owed by Phase 223. It is already on main: PR #1327 added the `live_realized=non_usd` stop, so this PR merges onto it and the reader names the refusal. Not edited here.
+- **The heartbeat names `held=1` as an `error` row on a catch-up tick.** A prefix tick's `cron_runs` row reads `error` with `held=1` (no `failed=`, no `fetch_degraded=`); the completing tick's row reads `ok`. No key status is `error` on any tick. `_NON_OK_STATUSES` and the heartbeat builder are unchanged.
+- **Assumed, unmeasured:** `OKX_CRON_READ_DEADLINE_S = 35.0` is an unmeasured split of `KEY_SYNC_TIMEOUT`; tune it from the first PROD ticks that report `fetch_partial_prefix`. The deadline is checked before each request, so a request started near the deadline can still run to its timeout. The billId-descending self-check rests on an unmeasured venue assumption (a read-only probe on one key after deploy would settle it). An empty prefix or a present marker re-reads the same span every tick, loudly, until a queued `sync_trades` run completes it.
+- A no-start OKX read goes from about 8 to about 60 requests (about 24 s at the archive's documented rate); a daily cron tick stays at 4. The derivegaps probe reports page counts per window and instType request now, not per instType, under the new walk.
+- Booked for after deploy, NOT done by this PR: a one-time post-merge repair of `last_fetched_trade_timestamp` on PROD (marker query first; set to each key's newest stored fill, NULL where none; a literal key-id list, direct UPDATE because the RPC's CASE cannot lower the column; counts before and after only). The read clamp makes an ahead column harmless at once, so the repair only removes stale values. It does not repair historical interior holes (the clamp sees only a tail gap).
+- Keep `USE_RAW_TRADE_INGESTION` off until this PR is on main.
+
 ## [0.133.69.0] - 2026-11-24 — Phase 229 MT5DERIVE2: an MT5 key's return chain keeps every day it should, and a mismatched re-derive pair is refused by name
 
 Analytics-service only (`nav_twr.py`, `job_worker.py`, `allocator_equity_derive.py`, `transforms.py`, `analytics_runner.py`, `scripts/mt5_soak.py`). No migration, no frontend change. Covers MT5D-04 to MT5D-07 and HOLD-03. Published MT5 returns move for a key that had a re-fund day into an emptied account.
@@ -28,6 +80,7 @@ Analytics-service only (`nav_twr.py`, `job_worker.py`, `allocator_equity_derive.
   - A compose racing a derive can still persist a block on the job's last attempt (the accepted R2-WR-01 residual, T-229-12).
   - A row written before this change carries no stamp and is counted at info level, not compared, until the key's next derive. The 1e-12 tolerance is not measured against live PostgREST.
 - **Founder live soak pending.** `python -m scripts.mt5_soak` on the merged analytics-service tree, with the founder's MT5 credentials.
+
 ## [0.133.68.1] - 2026-11-24 — records: Phase 227 JOBLEDGER phase records, HEAL-01 go-live evidence and the cron manifest re-capture
 
 This is a records PR. It has no source, test, workflow or migration change. The one non-planning file is `scripts/prod-prober/cron-manifest.json`, the re-capture that `docs/runbooks/jobledger-go-live.md` Step 2 requires.
