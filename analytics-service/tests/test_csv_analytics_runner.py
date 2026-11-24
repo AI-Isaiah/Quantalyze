@@ -1862,6 +1862,47 @@ async def test_a_non_true_flow_timing_day_level_large_is_not_carried(bad) -> Non
 
 
 # ===========================================================================
+# 229 (MT5D-05) — `inception_day_pnl_dropped` is an INFORMATIONAL annotation: an inception day
+# with no DayTiming has no return (D-12) but carried P&L, counted by name instead of vanishing
+# into the NaN. Same contract as `flow_timing_day_level_large`: carried present-only through the
+# wholesale rebuild, strictly `is True`, never promotes the status.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_inception_day_pnl_dropped_is_carried_and_never_promotes() -> None:
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "inception_day_pnl_dropped": True}
+    )
+    dq = payload["data_quality_flags"]
+    assert dq.get("inception_day_pnl_dropped") is True, (
+        "the pre-stamped annotation must survive the wholesale rebuild; "
+        f"got {dq!r}"
+    )
+    assert payload["computation_status"] == "complete"
+    assert payload["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+async def test_inception_day_pnl_dropped_beside_a_real_guard_still_warns() -> None:
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "inception_day_pnl_dropped": True, "dust_nav_guard": True}
+    )
+    assert payload["computation_status"] == "complete_with_warnings"
+    dq = payload["data_quality_flags"]
+    assert dq.get("dust_nav_guard") is True and dq.get("inception_day_pnl_dropped") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [False, None, 1, "true", ["x"], {}])
+async def test_a_non_true_inception_day_pnl_dropped_is_not_carried(bad) -> None:  # type: ignore[no-untyped-def]
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "inception_day_pnl_dropped": bad}
+    )
+    assert "inception_day_pnl_dropped" not in payload["data_quality_flags"]
+
+
+# ===========================================================================
 # Phase 186 (D-12, review R3-03) — `daily_pnl_malformed_<venue>` is a FLAG: the venue read
 # dropped a realized row it could not read, and the strategy keeps publishing. The derive
 # pre-stamps it; the wholesale rebuild here would wipe it seconds later unless it is carried,

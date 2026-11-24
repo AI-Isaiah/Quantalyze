@@ -596,9 +596,13 @@ def _walk_cohorts(
     A zero-amount flow is dropped. A P&L entry belongs to cohort ``bisect_right(instants,
     open)``, so a flow AT an open counts first; an overnight open (``None``) is cohort 0. The
     base telescopes: capital starts at ``prev`` and adds the flow that opens cohort ``k`` for
-    ``k > 0``, then the cohort's P&L. ``prev`` is the soak's own level before the day. A cohort
-    with no P&L is skipped when ``k > 0`` or on an inception day, so a judged cohort is one whose
-    P&L tests its base (the one exception is the first cohort of a non-inception day)."""
+    ``k > 0``, then the cohort's P&L. ``prev`` is the soak's own level before the day.
+
+    Which cohorts are judged is the founder's cohort-0 rule (Phase 229 CONTEXT, 2026-11-24, "Empty
+    cohort 0"), taken from its TEXT: a cohort with no P&L is skipped when ``k > 0``, on an
+    inception day, or on any day whose later cohort holds P&L; a cohort with P&L is always judged.
+    So an empty cohort 0 never tests a base when something after it does (a re-fund from zero is
+    measured on the deposit's cohort), and a day nothing else tests keeps its empty cohort 0."""
     flows = [(instant, amount) for instant, amount in timing.flows if amount != 0.0]
     instants = [instant for instant, _ in flows]
     cohort_pnl = [0.0] * (len(flows) + 1)
@@ -610,7 +614,8 @@ def _walk_cohorts(
     for k, pnl in enumerate(cohort_pnl):
         if k > 0:
             capital += flows[k - 1][1]
-        if not ((k > 0 or inception) and pnl == 0.0):
+        later_cohort_has_pnl = any(later != 0.0 for later in cohort_pnl[k + 1 :])
+        if not (pnl == 0.0 and (k > 0 or inception or later_cohort_has_pnl)):
             cohorts.append((capital, pnl))
         capital += pnl
     return cohorts
@@ -802,8 +807,9 @@ def _reconcile_published_returns(
         day is (226 review CR-01, CR-03). Every other class counts days that test a base only.
 
       * ``indeterminate`` — a day whose base (untimed), or any judged cohort base (timed: an empty
-        cohort, and an empty inception cohort 0 whose base is zero by construction, are skipped),
-        sits within float noise (``_LEVEL_NOISE_REL`` of the account's
+        cohort is skipped after the first, an empty cohort 0 is skipped on an inception day or
+        whenever a later cohort holds P&L, so a judged base is one whose P&L tests it; see
+        ``_walk_cohorts``), sits within float noise (``_LEVEL_NOISE_REL`` of the account's
         scale) of zero or of the unit's dust floor. The soak rolls levels forward and production
         backward, so on such a knife edge the two land on opposite sides of the threshold and an
         honest combiner can publish either NaN or the measured value. The day is accepted when the

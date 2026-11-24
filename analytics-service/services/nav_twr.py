@@ -92,6 +92,14 @@ PNL_DOM_RATIO = 10.0
 # its return can be extreme (``flow_timing_day_level_large``).
 FLOW_TIMING_LARGE_RATIO = 1.0
 
+# 229 MT5D-05: the RELATIVE floor under which an inception day's residue is float noise, not
+# P&L. The no-timing inception day has no return (D-12), and its P&L (``cur - prev - flow_t``)
+# used to vanish into that NaN unseen; it is now counted by name when it clears this floor
+# against the day's own scale (``max(|NAV_0|, |F_0|)``). The soak's ``_RETURN_CHECK_TOL`` is the
+# 1e-9 precedent. The absolute ``floors.residual_abs_tol`` is deliberately NOT used: it is a
+# whole currency unit and would let a sub-dollar day-0 P&L drop unflagged.
+_INCEPTION_PNL_NOISE_REL = 1e-9
+
 # Phase 77 FLOW-04 — terminal uPnL wedge materiality (Q5). When the MTM anchor's
 # open-uPnL wedge is |open_unrealized_usd|/anchor_nav > 5%, the realized-basis
 # terminal is materially below the reported (MTM) anchor and the intra-window NAV
@@ -235,6 +243,16 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # BOOL is persisted; ``flow_timing_day_level_large_days`` is an in-process count (T-73-02).
     flow_timing_day_level_large: bool
     flow_timing_day_level_large_days: int
+    # 229 MT5D-05 — an ANNOTATION, never a warning, never a guard: an inception day (day 0 of a
+    # full-history account) with NO ``DayTiming`` has no return (D-12: pre-history capital is
+    # zero, so there is no base to book a return against) but carried real P&L, which is now
+    # counted by name instead of vanishing into the NaN. A deposit-only day (P&L within float
+    # noise) raises nothing. Present only when it fired; same carry as
+    # ``flow_timing_day_level_large`` (deliberately NOT in ``NAV_TWR_GUARD_KEYS``). Only the BOOL
+    # is persisted; ``inception_day_pnl_dropped_days`` is an in-process count and the amount
+    # never leaves ``chain_linked_twr`` (T-73-02).
+    inception_day_pnl_dropped: bool
+    inception_day_pnl_dropped_days: int
     # MT5-12 (D-15/D-16) — the SERIES-COMPLETENESS VERDICT: the producing combiner's
     # judgement of whether the raw venue inputs it consumed were WHOLE. One of
     # ``broker_dailies.SERIES_COMPLETENESS_VALUES``; stamped by the combiner that
@@ -319,6 +337,10 @@ NAV_TWR_ANNOTATION_KEYS: tuple[str, ...] = (
     "flow_timing_timed_days",
     "flow_timing_day_level_large",
     "flow_timing_day_level_large_days",
+    # 229 MT5D-05: the inception day whose P&L the no-timing branch has no return for, counted
+    # by name (a bool and an in-process count, never the amount).
+    "inception_day_pnl_dropped",
+    "inception_day_pnl_dropped_days",
     # 188 D-02: the days the tiny-base guard left out, and their P&L (an amount, in-process
     # only, T-188-06). Deliberately NOT in NAV_TWR_GUARD_KEYS: no loop that persists or lifts
     # guard keys may ever iterate an amount.
@@ -587,9 +609,18 @@ def _judged_cohorts(
     own open time orders the cohorts; no mark-to-market input is read.
 
     A cohort ``k >= 1`` with no P&L is skipped: nothing was opened on that capital, so it
-    has no return and no guard (its flow still enters every later base). Cohort 0 is
-    always measured, except on an inception day whose cohort 0 holds no P&L: a
-    full-history account has no capital before its first deposit (D-12).
+    has no return and no guard (its flow still enters every later base). A cohort 0 with
+    P&L is always measured, on the start-of-day base. A cohort 0 with NO P&L is skipped
+    when it is an inception day's (a full-history account has no capital before its first
+    deposit, D-12) and, on EVERY day, when a later cohort of the same day holds P&L
+    (MT5D-04, CONTEXT 2026-11-24 "Empty cohort 0"): nothing was opened on the start-of-day
+    capital, so judging it would drop a re-funding day into an emptied account on a base
+    of about zero while the money that was measured sits in the later cohort. A day on
+    which no later cohort holds P&L keeps today's behaviour: cohort 0 is judged (a flow-only
+    day keeps its zero return on a healthy base and its base guard on an emptied one).
+    Phase 188's tiny-base test is not decided here: it runs afterwards at the
+    ``chain_linked_twr`` call site on the day's starting NAV, so a re-fund into a sliver
+    under 5% of the 30-day peak is still left out.
 
     Accepted cost (D-17, recorded not hidden): an earlier cohort's P&L that is realized
     only AFTER a later cohort's open still counts as capital in that later base. That is an
@@ -605,15 +636,18 @@ def _judged_cohorts(
     for open_instant, cash, _realized_instant in timing.pnl:
         k = 0 if open_instant is None else bisect.bisect_right(instants, open_instant)
         cohort_pnl[k] += cash
+    # MT5D-04: a later cohort holding P&L means the day has measured capital after its flows.
+    later_judged = any(cohort_pnl[k] != 0.0 for k in range(1, n_cohorts))
     judged: list[tuple[float, float]] = []
     capital = prev  # prev plus the flows of cohorts 1..k plus the P&L of cohorts 0..k-1
     for k in range(n_cohorts):
         if k > 0:
             capital += flows[k - 1][1]
         pnl = cohort_pnl[k]
-        if (k > 0 or inception) and pnl == 0.0:
-            # Nothing was opened on this capital (an inception day's cohort 0 has none
-            # before the first deposit, D-12). Its flow already sits in ``capital``.
+        if pnl == 0.0 and (k > 0 or inception or later_judged):
+            # Nothing was opened on this capital: an inception day's cohort 0 has none
+            # before the first deposit (D-12), and an empty cohort 0 is skipped whenever a
+            # later cohort holds P&L (MT5D-04). Its flow already sits in ``capital``.
             continue
         judged.append((capital, pnl))
         capital += pnl
@@ -731,6 +765,11 @@ def chain_linked_twr(
     extreme return; the day is kept EXACTLY as computed (not a guard: never a drop, never a
     status change) and the factsheet says its return can be extreme.
 
+    229 MT5D-05 (``inception_day_pnl_dropped``): an inception day with no ``DayTiming`` has no
+    return (D-12), but a day-0 P&L above ``_INCEPTION_PNL_NOISE_REL`` is counted by name in
+    ``inception_day_pnl_dropped_days`` and raises the bool ``inception_day_pnl_dropped``, an
+    annotation like the two above (the amount never leaves this function).
+
     Phase 164.6.6.2 D-25 (``small_base_measured``): a day that PASSES every guard and is
     therefore measured, but whose prior NAV is below ``floors.material_equity``, is kept
     EXACTLY as computed and ALSO counted. The flags then carry ``small_base_measured``
@@ -824,6 +863,7 @@ def chain_linked_twr(
     timed_days = 0
     day_level_flow_days = 0
     large_flow_days = 0
+    inception_pnl_dropped_days = 0
     for t in range(n):
         cur = nav_vals[t]
         flow_t = flows[t]
@@ -887,6 +927,12 @@ def chain_linked_twr(
 
         if inception:
             # D-12: with no timestamps day 0 is the inception day: no return, no warning.
+            # MT5D-05: the day still has no return, but its P&L is COUNTED by name when it is
+            # above float noise (a count and never the amount, T-73-02), so it is never
+            # dropped as a silent NaN. A deposit-only day (P&L ~ 0) counts nothing. A NaN level
+            # compares False and is not counted: the day is already NaN and publishes nothing.
+            if abs(cur - prev - flow_t) > _INCEPTION_PNL_NOISE_REL * max(abs(cur), abs(flow_t)):
+                inception_pnl_dropped_days += 1
             continue
         if flow_t != 0.0:
             # D-07: this flow counts at the end of its day, because no time of day was
@@ -946,6 +992,9 @@ def chain_linked_twr(
     if large_flow_days:
         flags["flow_timing_day_level_large"] = True
         flags["flow_timing_day_level_large_days"] = large_flow_days
+    if inception_pnl_dropped_days:
+        flags["inception_day_pnl_dropped"] = True
+        flags["inception_day_pnl_dropped_days"] = inception_pnl_dropped_days
     # 188 D-03/D-08: a quiet day (no index entry) on a near-empty account is left out like a
     # measured tiny day. Nothing happened on it, so its P&L is 0.0; the combiners' gap fill
     # would otherwise write it as a flat r = 0.0 (plan 04 Task 2 leaves it NaN there). It has no
@@ -1132,6 +1181,14 @@ def _build_nav_meta(flags: Mapping[str, Any]) -> NavTWRMeta:
         if "flow_timing_day_level_large_days" in flags:
             meta["flow_timing_day_level_large_days"] = int(
                 flags["flow_timing_day_level_large_days"]
+            )
+    # 229 MT5D-05: an inception day's P&L counted by name. Present-only, outside the guard loop
+    # (an annotation: the status never promotes on it).
+    if flags.get("inception_day_pnl_dropped"):
+        meta["inception_day_pnl_dropped"] = True
+        if "inception_day_pnl_dropped_days" in flags:
+            meta["inception_day_pnl_dropped_days"] = int(
+                flags["inception_day_pnl_dropped_days"]
             )
     # 188 D-02: the tiny-base guard BOOL rode the guard loop above. The day list and the P&L map
     # are annotations on their own present-only carry (the status promoted on the bool, never on

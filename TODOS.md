@@ -2754,15 +2754,7 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 ## Phase 164.6.6.2.3 (FLOWTIMING) — routed items (logged 2026-10-11)
 
 - **[164.6.6.2.3-DERIBIT-INTRADAY-TIMING]** (owner: a future phase; trigger: FLOWTIMING shipped). Deribit's raw log carries deposit and trade timestamps, but its P&L is not attributed to positions, so D-02's "capital at the position's open" cannot be computed and Deribit runs at FLOWTIMING's day-level rule (D-07). Research measured 9 PROD Deribit keys and 79 flow days on 2026-10-11. Done when Deribit P&L is attributed to positions and its flow days use the timed return. Founder decision FLOWTIMING-Q2, 2026-10-11.
-- **[164.6.6.2.3-INCEPTION-DAY0-PNL]** (logged 2026-10-12, FLOWTIMING review round 1, SFH F3, MEDIUM conf 6; owner: a future phase). The day-level inception skip in `chain_linked_twr` drops day-0 P&L as NaN with no flag (the predicate never looks at P&L), and an MT5 day 0 whose `DayTiming` could not be built falls into that skip before the day-level counter. Done when a day-0 with P&L and no timing is counted, or the docstring states the silent drop as D-12's intent.
-      ⭐ **Owned by Phase 229 MT5DERIVE2, v1.22; REQUIREMENTS.md MT5D-05; tagged 2026-11-23.**
-- **[164.6.6.2.3-MT5-BASIS-SILENT-NONE]** (logged 2026-10-12, FLOWTIMING review round 1, SFH F4, MEDIUM conf 5; owner: a future phase). `_native_key_usd_writer_basis` returns None silently (a missing close on a quiet day, a first day absent from the P&L map, a None carried level) and the store gate skips the write without a log, so a timed MT5 key composes on the legacy roll with no signal. Done when a timed MT5 key without a basis logs a counted warning or blocks as the holed-key case does.
-      ⭐ **Owned by Phase 229 MT5DERIVE2, v1.22; REQUIREMENTS.md MT5D-07; tagged 2026-11-23.**
-- **[164.6.6.2.3-EMPTY-COHORT0-REFUND]** (logged 2026-10-12, FLOWTIMING review round 1, review WR-04 conf 5 and SFH F5 conf 5, MEDIUM; owner: a future phase). A timed day that re-funds an emptied account (prev <= 0, a deposit, then a trade) is dropped with `negative_nav_guard`/`dust_nav_guard` because an EMPTY cohort 0 is still judged, and the interior `twr_chain_broken` cuts the headline to the suffix. Done when an empty cohort 0 is skipped whenever a later cohort is judged, with a test that goes RED today.
-      ⭐ **Owned by Phase 229 MT5DERIVE2, v1.22; REQUIREMENTS.md MT5D-04; tagged 2026-11-23.**
 - **[164.6.6.2.3-DRYRUN-VERDICT-ATTRIBUTION]** (logged 2026-10-12, FLOWTIMING review round 1, WR-05, MEDIUM conf 5; owner: none, the dry-run harness is a one-shot measurement tool). `flowtiming_dry_run.py` classifies every unguarded MT5 row as "confirmed day-0" by construction (day 0 is NaN before and after), so "confirmed flow-only" can never print and the reference row's day-1 flow-dominated cause is attributed to day 0; `offset_s` silently defaults to 0. The founder-approved DRYRUN (2026-10-12) carries this limit. Done when the classifier works per stored flag and day, if the harness is reused.
-- **[164.6.6.2.3-D15-THRESHOLD-BAND]** (logged 2026-10-13, FLOWTIMING review round 2, SFH F2, MEDIUM conf 5; owner: a future phase). D-15 annotates a day-level flow day only when `abs(flow) >= prev` (`FLOW_TIMING_LARGE_RATIO = 1.0`), but the inflation factor is about `(prev + F)/prev`, so a flow just under the ratio inflates the day with no flag: prev 1,000 plus an untimed 900 deposit earning 10% publishes +19% against about +10% as a clean `complete`. This follows the founder's D-15 choice. Done when the ratio is lowered with a measured rationale, or the band is recorded as accepted in CONTEXT.
-      ⭐ **Owned by Phase 229 MT5DERIVE2, v1.22; REQUIREMENTS.md MT5D-06; tagged 2026-11-23.**
 - **[164.6.6.2.3-D17-GUARD-DISCONTINUITY]** (logged 2026-10-13, FLOWTIMING review round 3 R3-01, MEDIUM conf 6; owner: a future phase; accepted by founder D-18). A vanishingly small flow on a day whose carried position lost about 90% or more of the account turns a measured day into a guarded NaN and breaks the chain, dropping earlier history. Flagged by the guard key, never silent. Done when a guard rule exists that is continuous in the flow AND refuses a near-zero base, or the limit is re-decided.
 
 ## Phase 167.1.2.2 (DERIVECRON) — routed items (logged 2026-10-07)
@@ -2828,22 +2820,6 @@ the old wedge produced, and no form in the re-baseline runbook reads it by desig
 **Gate (what closes it):** the key's returns are either re-derived from stored inputs or hidden
 behind a stated basis flag, with a test.
 ⛔ **Not a close:** reconnecting the key to re-derive it without the owner's consent.
-
-### 167.1.2.2.1-WRITER-BASIS-VALUES — writer-basis mode checks the calendar, never the values (booked 2026-10-10, PR-2 review WR-01, confidence 5) (owned by Phase 229 MT5DERIVE2, v1.22; REQUIREMENTS.md HOLD-03; tagged 2026-11-23)
-
-**Why it is open.** A `key_inputs` row and a returns set from two derives that share the last NAV
-day pass the gate: the lagging-row check compares last days only. That happens with a same-day
-re-derive after a ledger correction, a retried key or a manual enqueue. Such a pair composes on the
-old day P&L and the new returns with no `key_inputs_mismatch`. The review recommended a cross-check
-`abs(r[d] * L - w_pnl[d]) <= tol` per day and it was not taken.
-
-**Owner:** unrouted; the founder routes it at the next compose phase planning.
-**Trigger:** the first observed same-day re-derive that is followed by a compose, or any phase that
-touches `read_writer_basis` or the writer-basis gate in `replay_key_equity`.
-**Gate (what closes it):** the gate rejects a pair whose day P&L and returns disagree beyond a stated
-tolerance, with a test that fails first when the check is removed.
-⛔ **Not a close:** the determinism test (SC-6), which proves two derives of the same inputs agree,
-not that a stored row and stored returns come from one derive.
 
 ### 167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY — an empty or half-present writer basis reads as a legacy row, including an all-empty stitched account (booked 2026-10-10, SFH-03, SFH-R2-F3)
 

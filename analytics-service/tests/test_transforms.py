@@ -262,6 +262,41 @@ class TestTradesToDailyReturnsWithStatus:
         assert both["computation_status_hint"] == "complete_with_warnings"
         assert both.get("flow_timing_day_level_large") is True
 
+    def test_inception_day_pnl_dropped_carried_as_a_bool_and_never_promotes(self):
+        """229 MT5D-05: the inception-day annotation rides the same present-only
+        ``_merge_status_meta`` carry as the D-15 annotation (the ccxt path), strictly
+        ``is True``, OUTSIDE the guard loop so it can never promote the hint, and the bool only:
+        the in-process day count is never carried (T-73-02). Mutation-honest: removing the carry
+        drops the key -> RED."""
+        import services.transforms as transforms_mod
+
+        meta = transforms_mod._merge_status_meta(
+            {
+                "computation_status_hint": "complete",
+                "inception_day_pnl_dropped": True,
+                "inception_day_pnl_dropped_days": 1,
+            },
+            used_heuristic_capital=False,
+            balance_error=False,
+        )
+        assert meta.get("inception_day_pnl_dropped") is True
+        assert meta["computation_status_hint"] == "complete"
+        assert "inception_day_pnl_dropped_days" not in meta  # in-process count only
+        for bad in (False, None, 1, "true"):
+            m = transforms_mod._merge_status_meta(
+                {"computation_status_hint": "complete", "inception_day_pnl_dropped": bad},
+                used_heuristic_capital=False,
+                balance_error=False,
+            )
+            assert "inception_day_pnl_dropped" not in m, bad
+        both = transforms_mod._merge_status_meta(
+            {"inception_day_pnl_dropped": True, "dust_nav_guard": True},
+            used_heuristic_capital=False,
+            balance_error=False,
+        )
+        assert both["computation_status_hint"] == "complete_with_warnings"
+        assert both.get("inception_day_pnl_dropped") is True
+
     def test_twr_chain_broken_carried_through_merge_status_meta(self):
         """DQ-03 (§6.2): the core's ``twr_chain_broken`` INTERIOR-chain-break flag
         must survive the ``_merge_status_meta`` boundary onto the returned meta so
