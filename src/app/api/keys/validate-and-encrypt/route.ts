@@ -540,6 +540,22 @@ function keyVenueAlreadyConnectedResponse(): NextResponse {
 }
 
 /**
+ * The one retryable 503 UNKNOWN answer for "we could not complete the
+ * same-account check", used by the same-login read fault, the composite-dependents
+ * read fault and a transient swap failure (225 PR-2 round 3, WR-06), so the three
+ * cannot drift. Takes no parameters: no login, server or id can leak into it.
+ */
+function holderReadFailedResponse(): NextResponse {
+  return NextResponse.json(
+    {
+      code: "UNKNOWN",
+      error: "We could not check whether this account is already connected. Please try again.",
+    },
+    { status: 503, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
  * The LEGACY path in the legacy-vs-unified-/process-key sense ONLY (see NOTE
  * (M-9) below, which fixes that meaning) — it is NO LONGER "preserved verbatim
  * from the pre-Phase-19 implementation", as this line used to claim. Two
@@ -824,13 +840,7 @@ async function legacyValidateAndEncryptHandler(args: {
           },
           secrets: holderReadSecrets,
         });
-        return NextResponse.json(
-          {
-            code: "UNKNOWN",
-            error: "We could not check whether this account is already connected. Please try again.",
-          },
-          { status: 503, headers: NO_STORE_HEADERS },
-        );
+        return holderReadFailedResponse();
       } else {
         const holder = pickSameAccountHolder(rows, venueServer, "fence");
         if (holder !== null && isWorkingHolder(holder)) {
@@ -839,7 +849,43 @@ async function legacyValidateAndEncryptHandler(args: {
         // A holder that is not working (D-18) gives way to this key, which
         // `validateKey` just proved works: the key is inserted with no identity
         // and takes the slot through `swapAccountSlot` below (T-225-24).
-        if (holder !== null) failingHolderId = holder.id;
+        if (holder !== null) {
+          // 225 PR-2 round-3 decision 2 (WR-06) — PRE-ADMISSION: a composite
+          // member that depends on the failing holder makes `swap_account_slot`
+          // refuse (ACCOUNT_SLOT_COMPOSITE_DEPENDENT, F-2), every time. Refuse
+          // now, before the insert, with the same body as the working-holder
+          // refusal, instead of inserting a key that could never take the slot.
+          // The predicate is the swap's own. A fault in this read fails closed
+          // like the same-login read above.
+          const holderReadSecrets = [api_key, api_secret, passphrase, venueAccountId, venueServer];
+          const { data: dependent, error: dependentErr } = await admin
+            .from("api_keys")
+            .select("id")
+            .eq("user_id", userId)
+            .eq("account_shared_with_api_key_id", holder.id)
+            .eq("account_share_kind", "composite_member")
+            .limit(1)
+            .maybeSingle();
+          if (dependentErr) {
+            console.error(
+              "[keys/validate-and-encrypt] composite-dependent read failed; refusing the add (nothing was written):",
+              { correlationId },
+              scrubSeamError(dependentErr, holderReadSecrets),
+            );
+            captureToSentry(dependentErr, {
+              tags: {
+                route: "api/keys/validate-and-encrypt",
+                arm: "persist",
+                step: "holder-read",
+                correlation_id: correlationId,
+              },
+              secrets: holderReadSecrets,
+            });
+            return holderReadFailedResponse();
+          }
+          if (dependent) return keyVenueAlreadyConnectedResponse();
+          failingHolderId = holder.id;
+        }
       }
     }
 
@@ -960,6 +1006,9 @@ async function legacyValidateAndEncryptHandler(args: {
         venueServer,
       });
       if (!swap.ok) {
+        // Set only by the zero-row arm below when the re-read finds the key
+        // stamped: the swap landed, so the request continues to its success.
+        let swapLanded = false;
         const swapSecrets = [api_key, api_secret, passphrase, venueAccountId, venueServer];
         console.error(
           "[keys/validate-and-encrypt] holder swap failed; rolling back this request's key:",
@@ -998,17 +1047,61 @@ async function legacyValidateAndEncryptHandler(args: {
             secrets: swapSecrets,
           });
         } else if ((removedKeys ?? []).length === 0) {
+          // 225 PR-2 round-3 decision 1 (SF2-N1 / IN-12) — ZERO ROWS DELETED
+          // MEANS THE KEY IS ALREADY STAMPED OR GONE. Re-read its
+          // `venue_account_id` before answering: stamped means a swap landed on
+          // it (it committed and lost its answer), the key holds the slot, and
+          // "not saved" would be false. That answers this request's normal
+          // success below. Anything else keeps the 409. Paged with its own step
+          // either way.
           console.warn(
             "[keys/validate-and-encrypt] compensating delete removed no key (already stamped or gone); nothing of this request's was undone",
             { correlationId },
           );
+          captureToSentry(swap.error, {
+            tags: {
+              route: "api/keys/validate-and-encrypt",
+              arm: "persist",
+              step: "holder-swap-rollback-noop",
+              correlation_id: correlationId,
+            },
+            secrets: swapSecrets,
+          });
+          const { data: stampedKey, error: stampReadErr } = await admin
+            .from("api_keys")
+            .select("venue_account_id")
+            .eq("id", inserted.id)
+            .eq("user_id", userId)
+            .maybeSingle();
+          if (stampReadErr) {
+            console.error(
+              `[keys/validate-and-encrypt] re-read of the admitted key after a no-op rollback failed: code=${stampReadErr.code}`,
+              { correlationId },
+            );
+          } else if (stampedKey?.venue_account_id != null) {
+            swapLanded = true;
+          }
         } else {
           console.warn(
             "[keys/validate-and-encrypt] holder swap refused; this request's key was rolled back",
             { correlationId },
           );
         }
-        return keyVenueAlreadyConnectedResponse();
+        // 225 PR-2 round-3 decision 2 (WR-06) — SPLIT BY KIND, NO NEW COPY. A
+        // refusal carries an `ACCOUNT_SLOT_` token (the token
+        // `account_identity.py`'s `_SLOT_REFUSAL` reads): the answer is
+        // KEY_VENUE_ALREADY_CONNECTED, as before. A failure with no token (a lock
+        // timeout, a network fault) is transient and a plain retry can succeed,
+        // so it answers the retryable 503 UNKNOWN after the same rollback, which
+        // is `WHERE venue_account_id IS NULL` and so safe.
+        if (!swapLanded) {
+          const swapMessage = (swap.error as { message?: unknown } | null | undefined)?.message;
+          const isSlotRefusal =
+            typeof swapMessage === "string" && /ACCOUNT_SLOT_[A-Z_]+/.test(swapMessage);
+          return isSlotRefusal
+            ? keyVenueAlreadyConnectedResponse()
+            : holderReadFailedResponse();
+        }
       }
     }
 
