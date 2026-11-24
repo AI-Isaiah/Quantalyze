@@ -54,6 +54,16 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { keyRouteFailureHeaders } from "@/lib/api/seam-retry-after";
 import type { User } from "@supabase/supabase-js";
 import { venueLabel } from "@/lib/display-labels";
+// 225-07 (CONN-03, MT5D-08): the server-aware same-account read, the D-18
+// working-holder rule and the slot swap. See `resolveByVenueIdentity`.
+import { isWorkingHolder } from "@/lib/account-share-note";
+import {
+  normaliseVenueServer,
+  pickSameAccountHolder,
+  readLiveSameLoginKeys,
+  swapAccountSlot,
+  type PickMode,
+} from "@/lib/venue-identity";
 
 /**
  * POST /api/strategies/create-with-key — atomic wizard ConnectKeyStep
@@ -176,6 +186,10 @@ function pickPlaceholderCodename(): string {
  *                    one. Returned by `resolveByVenueIdentity` only (the reuse
  *                    arm's resolver never produces it). Refused with the
  *                    venue-neutral KEY_VENUE_ALREADY_CONNECTED.
+ *   · `failing_holder` — 225-07 (Q1, D-18, D-25). The live key that holds the
+ *                    account is not working. It is decided BEFORE any strategy
+ *                    read: a validated new key takes the slot from it (see the
+ *                    member's own comment) whether or not it carries a strategy.
  *   · `unresolved` — genuinely nothing to say: no live key, a read fault, or no
  *                    service-role credential. Fall through.
  *
@@ -207,7 +221,17 @@ type VenueIdentityResolution =
     }
   | { kind: "connected"; strategyName: string | null }
   | { kind: "held" }
-  | { kind: "orphaned" };
+  | { kind: "orphaned" }
+  // 225-07 (Q1, D-18, D-25 / MT5D-08) — the picked live key on this account is
+  // NOT working (`isWorkingHolder` false: inactive, or sync_status revoked,
+  // sign_in_failed or error). A failing key never keeps the account slot, so the
+  // connect is not refused: it is validated, created WITHOUT an identity and
+  // then takes the slot through `swapAccountSlot`, which marks this key a
+  // duplicate of the new one. DECIDED FIRST, before any strategy read, because
+  // Q1 admits a working key even when the failing holder carries a strategy.
+  // Carries the holder id and nothing else: a refusal never needs it and no
+  // response body may echo it.
+  | { kind: "failing_holder"; holderId: string };
 
 const UNRESOLVED: VenueIdentityResolution = { kind: "unresolved" };
 
@@ -222,20 +246,27 @@ async function resolveByVenueIdentity(
   userId: string,
   exchangeNormalized: string,
   venueAccountId: string,
+  // 225-07 (CONN-03, Q2): the normalised broker server, or null. Rides with the
+  // login into the pick and is never logged or returned.
+  venueServer: string | null,
   secrets: readonly unknown[],
+  mode: PickMode,
 ): Promise<VenueIdentityResolution> {
   let liveKeyId: string | null = null;
 
   try {
     const admin = createAdminClient();
-    const { data: liveKey, error: liveKeyErr } = await admin
-      .from("api_keys")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("exchange", exchangeNormalized)
-      .eq("venue_account_id", venueAccountId)
-      .is("disconnected_at", null)
-      .maybeSingle();
+    // 225-07 — A LIST, NOT `.maybeSingle()`. Two live same-login keys on
+    // different servers are legal once the server-aware index ships, and
+    // `maybeSingle` errors on two rows. The owner, exchange, login and
+    // `disconnected_at IS NULL` filters live in `readLiveSameLoginKeys`, which
+    // makes the owner filter mandatory in its signature; the rest of the
+    // docblock above (tenant boundary, live-scoped predicate) applies to it.
+    const { rows, error: liveKeyErr } = await readLiveSameLoginKeys(admin, {
+      userId,
+      exchange: exchangeNormalized,
+      venueAccountId,
+    });
 
     if (liveKeyErr) {
       // Same posture as the session fence's failed read (Rule 12): surface that
@@ -248,10 +279,24 @@ async function resolveByVenueIdentity(
       console.error(
         "[strategies/create-with-key] venue-identity fence SELECT failed; proceeding to RPC (DB index still dedups):",
         scrubSeamError(liveKeyErr, secrets),
-        liveKeyErr.code,
+        typeof liveKeyErr === "object" && liveKeyErr !== null && "code" in liveKeyErr
+          ? (liveKeyErr as { code?: unknown }).code
+          : undefined,
       );
+      return UNRESOLVED;
     }
-    liveKeyId = typeof liveKey?.id === "string" ? liveKey.id : null;
+
+    // The server rule (Q2): an exact server first, then a null-server key; a
+    // same-login key on a different server is not this account at the fence.
+    const picked = pickSameAccountHolder(rows, venueServer, mode);
+    if (picked === null) return UNRESOLVED;
+    // D-18 / Q1: a holder that is not working never keeps the slot. Decided
+    // BEFORE any strategy read, so a failing holder carrying a strategy is
+    // still replaceable by a validated working key.
+    if (!isWorkingHolder(picked)) {
+      return { kind: "failing_holder", holderId: picked.id };
+    }
+    liveKeyId = picked.id;
   } catch (adminErr) {
     // `createAdminClient()` THROWS when SUPABASE_SERVICE_ROLE_KEY is absent.
     // A missing credential must not 500 a connect that would otherwise succeed:
@@ -1322,16 +1367,38 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
    */
   let venueAccountId: string | null = isMt5 ? api_key.trim() : null;
 
+  // 225-07 (CONN-03, Q2) — the broker server rides WITH the login, captured at
+  // the same point: MT5's server is the `passphrase` slot (non-blank for MT5,
+  // the three-credential check above enforces it), normalised to the stored
+  // form (trim, lower-case, 128 cap, blank is null). Like the login it is never
+  // logged or returned, and it joins every per-request secrets array below
+  // because a PostgREST error can echo the normalised value back.
+  const venueServer: string | null = isMt5 ? normaliseVenueServer(passphrase) : null;
+
+  // 225-07 (Q1, D-25 / MT5D-08) — set when the account's live holder is NOT
+  // working: the new credentials are validated below, created with no identity,
+  // and then take the slot through `swapAccountSlot`.
+  let failingHolderId: string | null = null;
+
   if (venueAccountId) {
     const venueMatch = await resolveByVenueIdentity(
       supabase,
       user.id,
       exchangeNormalized,
       venueAccountId,
+      venueServer,
       // The login doubles as a credential SLOT even though the column value is
       // non-secret by definition — err toward scrubbing it out of telemetry.
-      [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId],
+      [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId, venueServer],
+      "fence",
     );
+    if (venueMatch.kind === "failing_holder") {
+      // Q1 — NOT a refusal. The holder is not working, so its slot is
+      // available to a key that proves itself: fall through to `validateKey`
+      // (the new credentials must be proven read-only BEFORE they take a slot,
+      // T-225-19) with the holder id remembered for the swap below.
+      failingHolderId = venueMatch.holderId;
+    }
     if (venueMatch.kind === "draft") {
       // 225-05 / CONN-01 (D-23, "Say so") — REFUSE BY NAME. This account is in
       // one of the caller's OWN unfinished drafts from a DIFFERENT wizard
@@ -1629,7 +1696,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // parameter's own `DEFAULT NULL` supplies the value — the additive
       // guarantee is then a property of the request, not of a serializer
       // dropping `undefined`.
-      ...(venueAccountId === null ? {} : { p_venue_account_id: venueAccountId }),
+      //
+      // 225-07 (CONN-03, MT5D-08) — TWO CASES, BOTH EXPLICIT:
+      //   · an ADMISSION (`failingHolderId` set): NEITHER identity parameter is
+      //     sent. `swap_account_slot` stamps the login and the server itself, in
+      //     the same transaction that demotes the failing holder, and it refuses
+      //     a new key that already carries an identity. Sending the login here
+      //     would trip the live unique index against the very holder being
+      //     replaced.
+      //   · otherwise the login rides as before and the normalised server
+      //     (`p_venue_server`, the 13th parameter) rides beside it when there is
+      //     one. OMITTED rather than null, like the login, so SQL stores NULL
+      //     (a wildcard for every app fence) and an older caller is unchanged.
+      ...(venueAccountId === null || failingHolderId !== null
+        ? {}
+        : { p_venue_account_id: venueAccountId }),
     });
 
     if (error) {
@@ -1676,7 +1757,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
                 user.id,
                 exchangeNormalized,
                 venueAccountId,
-                [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId],
+                venueServer,
+                [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId, venueServer],
+                // Plan 11 moves this call to "after_index_refusal".
+                "fence",
               )
             : UNRESOLVED;
           if (venueMatch.kind === "draft") {
@@ -1698,7 +1782,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // than on the pre-RPC one.
             return venueAlreadyConnectedResponse(venueMatch.strategyName);
           }
-          if (venueMatch.kind === "held") {
+          if (venueMatch.kind === "held" || venueMatch.kind === "failing_holder") {
+            // 225-07 — `failing_holder` can only reach this arm in a race (the
+            // pre-validation arm admits it, and a key created WITHOUT identity
+            // cannot trip the index). The INSERT was refused and rolled back,
+            // so the same venue-neutral refusal is true for it; plan 11 folds
+            // both into the one builder.
             // 167.1.2 REVIEW WR-04 (narrowed by REVIEW-R2 CR-01) — the live key
             // on this account has no strategy row but a composite uses it
             // (`strategy_keys`, read in `resolveOtherKeyUse`), so KEY_ORPHANED's
@@ -1853,6 +1942,59 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         { code: "UNKNOWN", error: "RPC returned no rows" },
         { status: 500, headers: NO_STORE_HEADERS },
       );
+    }
+
+    /**
+     * ⭐ 225-07 (Q1, D-25 / MT5D-08) — THE ADMISSION: A FAILING HOLDER GIVES UP
+     * ITS SLOT TO THIS VALIDATED KEY.
+     *
+     * Reached only when the pre-validation arm found a live key on this account
+     * that is not working (`isWorkingHolder` false) and `validateKey` has since
+     * proven THESE credentials read-only. The draft above was created with no
+     * identity; `swap_account_slot` now stamps the login and the server on it and
+     * marks the failing key a duplicate of it, in one transaction. Nothing is
+     * disconnected, unpublished or re-pointed. The swap itself re-checks D-18 on
+     * the new key (ACCOUNT_SLOT_NEW_KEY_NOT_WORKING), so an unproven key cannot
+     * take a slot even if this call were reached wrongly (T-225-19).
+     *
+     * ⭐ A FAILED SWAP STILL ANSWERS SUCCESS, and that is the honest answer: the
+     * key and its draft exist and are valid. What is missing is only which key
+     * carries the account, and the daily poll's identity stamper retries exactly
+     * that (plan 09). Failing the connect here would discard a validated key
+     * over a bookkeeping step that heals itself, so no response field changes;
+     * it is logged at ERROR and sent to Sentry instead (Rule 12), scrubbed with
+     * this request's secrets, the login and the server included.
+     */
+    if (failingHolderId !== null && venueAccountId !== null) {
+      // @audit-skip: the demotion audit (api_key.account_duplicate_detected) and
+      // the recompose enqueue land inside swapAccountSlot
+      // (src/lib/venue-identity.ts), the one place that calls the RPC.
+      const swap = await swapAccountSlot(rpcAdmin, {
+        userId: user.id,
+        exchange: exchangeNormalized,
+        newKeyId: row.api_key_id,
+        oldHolderId: failingHolderId,
+        venueAccountId,
+        venueServer,
+      });
+      if (!swap.ok) {
+        const swapSecrets = [
+          api_key,
+          apiSecretNormalized,
+          passphraseOrNull,
+          venueAccountId,
+          venueServer,
+        ];
+        console.error(
+          "[strategies/create-with-key] holder swap failed after the draft was created; answering success, the daily poll retries:",
+          scrubSeamError(swap.error, swapSecrets),
+        );
+        captureToSentry(swap.error, {
+          tags: { surface: "strategies-create-with-key", step: "holder-swap" },
+          extra: { exchange: exchangeNormalized },
+          secrets: swapSecrets,
+        });
+      }
     }
 
     // #597 — force-derive the asset class on the freshly-created draft row. The
