@@ -661,14 +661,107 @@ describe("postProcessKey — X-Tenant-Claim (PYAPI-02)", () => {
     expect(claim.split(".")[0]).toBe("public");
   });
 
+  /**
+   * Phase 240 / RLIM-01 (TS half) — the teaser claim carries a keyed per-IP
+   * pseudonym so the Python limiter can give each visitor their own window. The
+   * expected hex is computed HERE with node:crypto over the documented
+   * derivation (HMAC-SHA256 keyed with the internal token over `anon-ip:<ip>`,
+   * first 32 hex characters), never by calling the function under test.
+   */
+  it("mints public:<32 hex> from the Vercel-read client IP on the teaser path (RLIM-01)", async () => {
+    const fetchMock = mockFetchOk();
+
+    await postProcessKey({
+      flow_type: "teaser",
+      source: "binance",
+      context: {},
+      userId: "public",
+      clientIp: "203.0.113.7",
+      correlationId: "c1",
+    });
+
+    const headers = sentHeaders(fetchMock);
+    const [payload, exp, mac] = headers["X-Tenant-Claim"].split(".");
+    const expectedHex = (
+      await hmacHex("internal-test-token", "anon-ip:203.0.113.7")
+    ).slice(0, 32);
+    expect(payload).toBe(`public:${expectedHex}`);
+    // The claim itself still verifies as an ordinary signed claim.
+    expect(mac).toBe(await hmacHex("internal-test-token", `${payload}.${exp}`));
+    // X-User-Id is unsigned and diagnostic: it stays the literal.
+    expect(headers["X-User-Id"]).toBe("public");
+  });
+
+  it("never lets the raw client IP reach a header, the request body or a console call (T-240-20)", async () => {
+    const fetchMock = mockFetchOk();
+    const spies = (["error", "warn", "log", "info", "debug"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => {}),
+    );
+    const rawIp = "203.0.113.7";
+
+    await postProcessKey({
+      flow_type: "teaser",
+      source: "binance",
+      context: {},
+      userId: "public",
+      clientIp: rawIp,
+      correlationId: "c1",
+    });
+
+    const headers = sentHeaders(fetchMock);
+    for (const [name, value] of Object.entries(headers)) {
+      expect(value, `header ${name} must not carry the raw IP`).not.toContain(rawIp);
+    }
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.body as string).not.toContain(rawIp);
+    for (const spy of spies) {
+      expect(JSON.stringify(spy.mock.calls)).not.toContain(rawIp);
+    }
+  });
+
+  it.each([["unknown"], [""], ["   "]])(
+    "mints the bare shared payload 'public' for the unusable client IP %j (RLIM-01)",
+    async (clientIp) => {
+      const fetchMock = mockFetchOk();
+
+      await postProcessKey({
+        flow_type: "teaser",
+        source: "binance",
+        context: {},
+        userId: "public",
+        clientIp,
+        correlationId: "c1",
+      });
+
+      expect(sentHeaders(fetchMock)["X-Tenant-Claim"].split(".")[0]).toBe("public");
+    },
+  );
+
+  it("a clientIp never pseudonymises an authenticated caller (only 'public' is anonymous)", async () => {
+    const fetchMock = mockFetchOk();
+
+    await postProcessKey({
+      flow_type: "onboard",
+      source: "binance",
+      context: {},
+      userId: "u1",
+      clientIp: "203.0.113.7",
+      correlationId: "c1",
+    });
+
+    expect(sentHeaders(fetchMock)["X-Tenant-Claim"].split(".")[0]).toBe("u1");
+  });
+
+  // RLIM-02: the csv flow's payload carries the `csv:` scope; the other three keep
+  // their plain identity. The third column is hand-typed, never derived.
   it.each([
-    ["teaser", "public"],
-    ["onboard", "u1"],
-    ["resync", "u2"],
-    ["csv", "u3"],
+    ["teaser", "public", "public"],
+    ["onboard", "u1", "u1"],
+    ["resync", "u2", "u2"],
+    ["csv", "u3", "csv:u3"],
   ] as const)(
     "attaches X-Tenant-Claim on the %s flow (one shared headers assembly)",
-    async (flowType, userId) => {
+    async (flowType, userId, expectedPayload) => {
       const fetchMock = mockFetchOk();
 
       await postProcessKey({
@@ -680,9 +773,59 @@ describe("postProcessKey — X-Tenant-Claim (PYAPI-02)", () => {
       });
 
       const claim = sentHeaders(fetchMock)["X-Tenant-Claim"];
-      expect(claim.split(".")[0]).toBe(userId);
+      expect(claim.split(".")[0]).toBe(expectedPayload);
     },
   );
+
+  it.each(["teaser", "onboard", "resync"] as const)(
+    "only the csv flow carries the csv: scope; the %s flow never does (T-240-23)",
+    async (flowType) => {
+      const fetchMock = mockFetchOk();
+
+      await postProcessKey({
+        flow_type: flowType,
+        source: "binance",
+        context: {},
+        userId: "11111111-2222-3333-4444-555555555555",
+        correlationId: "c1",
+      });
+
+      expect(sentHeaders(fetchMock)["X-Tenant-Claim"].startsWith("csv:")).toBe(false);
+    },
+  );
+
+  it("the csv scope signs the user id, and X-User-Id stays the bare user id", async () => {
+    const fetchMock = mockFetchOk();
+    const uid = "11111111-2222-3333-4444-555555555555";
+
+    await postProcessKey({
+      flow_type: "csv",
+      source: "csv",
+      context: {},
+      userId: uid,
+      correlationId: "c1",
+    });
+
+    const headers = sentHeaders(fetchMock);
+    const [payload, exp, mac] = headers["X-Tenant-Claim"].split(".");
+    expect(payload).toBe(`csv:${uid}`);
+    expect(mac).toBe(await hmacHex("internal-test-token", `${payload}.${exp}`));
+    expect(headers["X-User-Id"]).toBe(uid);
+  });
+
+  it("flow_type csv with userId 'public' is not a real call shape: the public check runs first", async () => {
+    const fetchMock = mockFetchOk();
+
+    await postProcessKey({
+      flow_type: "csv",
+      source: "csv",
+      context: {},
+      userId: "public",
+      correlationId: "c1",
+    });
+
+    expect(sentHeaders(fetchMock)["X-Tenant-Claim"].split(".")[0]).toBe("public");
+  });
 
   it("CROSS-LANGUAGE FIXTURE: the algorithm matches the string pytest pins", async () => {
     // This exact string is COPY-PASTED (never imported) into

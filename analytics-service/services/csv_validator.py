@@ -21,6 +21,7 @@ Cross-AI revision 2026-04-30 — TWO behavior changes vs iteration 1:
 """
 from __future__ import annotations
 
+import datetime
 import io
 import logging
 import re
@@ -837,6 +838,89 @@ def _date_parse_is_usable(parsed: pd.Series) -> bool:
     return bool(not parsed.isna().any() and parsed.is_monotonic_increasing)
 
 
+# A date written with an English month name (`12 Mar 2024`, `12-Mar-2024`,
+# `12 March 2024`, `Mar 12, 2024`) carries no day/month ambiguity, so it is read
+# inside a column of numeric dates. pandas infers ONE format from the first cell
+# of a column, so such a cell was NaT under both readings and rejected; it is
+# masked out of both readings and parsed on its own here. The month table is
+# this module's own (never `strptime %b`, which follows the process locale), the
+# year is four digits only (a two-digit year would be a guess at the century)
+# and the patterns are ASCII, so a non-English or non-ASCII spelling is never
+# read. Bounded classes and `fullmatch` leave nothing to backtrack on.
+_MONTH_NUMBER: dict[str, int] = {
+    name: number
+    for number, names in enumerate(
+        (
+            ("january", "jan"), ("february", "feb"), ("march", "mar"),
+            ("april", "apr"), ("may",), ("june", "jun"), ("july", "jul"),
+            ("august", "aug"), ("september", "sep"), ("october", "oct"),
+            ("november", "nov"), ("december", "dec"),
+        ),
+        start=1,
+    )
+    for name in names
+}
+_MN_DMY = re.compile(r"(\d{1,2})[ -]([A-Za-z]{3,9})[ -](\d{4})", re.ASCII)
+_MN_MDY = re.compile(r"([A-Za-z]{3,9})[ -](\d{1,2}),?[ -](\d{4})", re.ASCII)
+
+
+def _read_month_name_cell(cell: object) -> datetime.date | None:
+    """The date a month-name cell spells, or None. Never raises (a blank cell
+    reaches here as a missing value, not a string)."""
+    if not isinstance(cell, str):
+        return None
+    text = cell.strip()
+    match = _MN_DMY.fullmatch(text)
+    if match is not None:
+        day, word, year = match.groups()
+    else:
+        match = _MN_MDY.fullmatch(text)
+        if match is None:
+            return None
+        word, day, year = match.groups()
+    month = _MONTH_NUMBER.get(word.lower())
+    if month is None:
+        return None
+    try:
+        return datetime.date(int(year), month, int(day))
+    except ValueError:  # an impossible day such as 31 Feb
+        return None
+
+
+def _month_name_cells(s: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """(mask of the cells spelled with a month name, their dates; NaT elsewhere)."""
+    read = s.map(_read_month_name_cell)
+    mask = read.notna().astype(bool)
+    parsed = pd.to_datetime(read.where(mask), errors="coerce")
+    return mask, parsed
+
+
+def _month_name_flag_sentence(n: int, after_day_first: bool) -> str:
+    """The sentence naming how many month-name dates were read. The example is
+    fixed text, never a cell from the file."""
+    if after_day_first:
+        noun = "date" if n == 1 else "dates"
+        return f"Also read {n:,} {noun} written with a month name (such as 12 Mar 2024)."
+    if n == 1:
+        return (
+            "Read 1 date written with a month name (such as 12 Mar 2024) "
+            "and normalized it to YYYY-MM-DD."
+        )
+    return (
+        f"Read {n:,} dates written with a month name (such as 12 Mar 2024) "
+        "and normalized them to YYYY-MM-DD."
+    )
+
+
+def _month_only_flag(n: int) -> dict[str, Any]:
+    """The info flag for a column whose only normalization was month-name cells."""
+    return {
+        "rule": "date_format_normalized",
+        "detected_format": "month_name",
+        "message": _month_name_flag_sentence(n, False),
+    }
+
+
 def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None:
     """Deduce day-first vs month-first FROM THE DATA and normalize
     df["date"] to datetime64 in-place. Returns a `date_format_normalized`
@@ -886,10 +970,15 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     if iso_like.all():
         return None
 
+    month_named, month_parsed = _month_name_cells(s)
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # silence pandas' per-row inference warnings
-        parsed_mf = _parse_dates(s, dayfirst=False)
-        parsed_df = _parse_dates(s, dayfirst=True)
+        # A month-name cell is masked out of both parses: pandas infers its format
+        # from the FIRST non-null cell, so a month-name first cell would turn every
+        # numeric cell into NaT. The cells are merged back below.
+        parsed_mf = _parse_dates(s.where(~month_named), dayfirst=False)
+        parsed_df = _parse_dates(s.where(~month_named), dayfirst=True)
         # `dayfirst=True` flips a year-first cell (`2024-01-02` is read as
         # 2024-02-01), which made the day-first reading non-monotonic and sent the
         # whole column to month-first. A column that starts `dd/mm/yyyy` reads such
@@ -904,6 +993,8 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
         df["date"] = df["date"].mask(odd_digits, _UNSUPPORTED_ZONE_TOKEN)
         parsed_mf = parsed_mf.where(~iso_like, year_first).mask(odd_digits)
         parsed_df = parsed_df.where(~iso_like, year_first).mask(odd_digits)
+        parsed_mf = parsed_mf.where(~month_named, month_parsed)
+        parsed_df = parsed_df.where(~month_named, month_parsed)
 
     # Identical under both flags → no day/month ambiguity to resolve (e.g.
     # every first component > 12, so pandas can only read it day-first). ISO
@@ -922,12 +1013,15 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     readable = parsed_mf.notna() | parsed_df.notna()
     blank = df["date"].isna() | (df["date"].astype(str).str.strip() == "")
     leftover = df["date"].where(blank, _UNSUPPORTED_ZONE_TOKEN)
+    # How many month-name cells were read. A column written ENTIRELY with month
+    # names stays exactly as it was before month names were read: no flag.
+    n_month = int(month_named.sum()) if bool((~month_named & ~blank).any()) else 0
     if parsed_mf.equals(parsed_df):
         if not parsed_mf.isna().all():
             df["date"] = (
                 parsed_mf if readable.all() else parsed_mf.astype(object).where(readable, leftover)
             )
-        return None
+        return _month_only_flag(n_month) if n_month > 0 else None
 
     # The reading is chosen on the cells at least one reading can read.
     mf_ok = _date_parse_is_usable(parsed_mf[readable])
@@ -938,14 +1032,15 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     day_first_only = bool(parsed_df[readable].notna().all() and parsed_mf[readable].isna().any())
 
     if mf_ok and not df_ok:
-        if not iso_like.any() and readable.all():
+        if not iso_like.any() and readable.all() and not month_named.any():
             return None  # month-first is the only valid reading — unchanged
-        # A year-first or unreadable cell: pandera would infer ONE format from the
-        # first cell and name no row, so hand it the month-first reading. (WR-03.)
+        # A year-first, month-name or unreadable cell: pandera would infer ONE format
+        # from the first cell and name no row (and would re-parse a month-name cell
+        # from its raw text and reject it), so hand it the month-first reading. (WR-03.)
         df["date"] = (
             parsed_mf if readable.all() else parsed_mf.astype(object).where(readable, leftover)
         )
-        return None
+        return _month_only_flag(n_month) if n_month > 0 else None
 
     if day_first_only or (df_ok and not mf_ok):
         # Day-first is the ONLY valid reading (e.g. a day > 12 rules out
@@ -957,14 +1052,31 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
         df["date"] = (
             parsed_df if readable.all() else parsed_df.astype(object).where(readable, leftover)
         )
+        message = (
+            "Detected day-first (DD/MM/YYYY) dates and normalized them "
+            "to YYYY-MM-DD."
+        )
+        if n_month > 0:
+            message += " " + _month_name_flag_sentence(n_month, True)
         return {
             "rule": "date_format_normalized",
             "detected_format": "day_first",
-            "message": (
-                "Detected day-first (DD/MM/YYYY) dates and normalized them "
-                "to YYYY-MM-DD."
-            ),
+            "message": message,
         }
+
+    # The two exits left (ambiguous, or neither reading a clean ascending series)
+    # reject the file. A month-name cell must not be the stated reason: pandera
+    # would re-read its raw text under the numeric cells' one inferred format and
+    # fail it with `coerce_dtype`. Write the month-first reading back, which is the
+    # one pandera infers for the numeric cells, so the file gets exactly the errors
+    # its all-numeric twin gets. (Review WR-01.)
+    if month_named.any():
+        # Keyed on the month-first reading's own cells: a cell only day-first can read
+        # is NaT in it, and would reach pandera as a blank at a non-blank row.
+        mf_read = parsed_mf.notna()
+        df["date"] = (
+            parsed_mf if mf_read.all() else parsed_mf.astype(object).where(mf_read, leftover)
+        )
 
     if mf_ok and df_ok:
         # Both readings yield valid ascending series that DIFFER → the data
@@ -974,7 +1086,9 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
         # day-first series read as consecutive days). A real >=20-day daily
         # series always contains a day > 12 and takes the unambiguous branch
         # above; only short/sparse series reach here. Signal an ambiguity
-        # error for validate_csv to surface and do NOT mutate df["date"].
+        # error for validate_csv to surface. The file is rejected whichever
+        # calendar is stored, so a month-name column is only parsed (above), not
+        # resolved; a numeric-only column is left as written.
         return {
             "rule": "date_format_ambiguous",
             "message": (

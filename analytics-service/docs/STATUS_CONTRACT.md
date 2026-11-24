@@ -65,7 +65,8 @@ flaps: trip → expire → re-probe → trip, forever, with no operator signal (
 ### R-2 — every deliberate 5xx body carries `{code, dependency, retryable}`
 
 - `code` — the stable machine discriminator (PYAPI-10's `code`, generalising the
-  `error_code` vocabulary already proven at `services/exchange.py:978-1021`).
+  `error_code` vocabulary already proven in `services/exchange.py` `validate_key_permissions`, whose
+  `result["error_code"] = ...` assignments are that vocabulary).
 - `dependency` — names **which** dependency failed, so 140.2 can key a breaker
   per-dependency instead of the single global `breaker:railway` that A-01 shows is
   false. Always present; `null` when nothing of ours failed.
@@ -106,10 +107,10 @@ FastAPI's default `HTTPException` handler serialises to `{"detail": <detail>}`, 
 `service_error_response()`, which nests identically — so a consumer never has to know
 which mechanism produced the response.
 
-**Precedent, not invention:** `routers/simulator.py:466` at HEAD (S-18 — §7's row records
-that site's PRE-migration coordinate `:460`, which is a bare `)` today) already raised
-`HTTPException(500, detail={"error": ..., "correlation_id": ...})` before this contract
-existed. The envelope is a superset of that shape, so aligning that site in plan 04 was
+**Precedent, not invention:** `routers/simulator.py`'s simulation-failure arm (S-18; find it
+by the code text `"SIMULATION_FAILED"`, which it now raises through `service_error`) already
+raised `HTTPException(500, detail={"error": ..., "correlation_id": ...})` before this
+contract existed. The envelope is a superset of that shape, so aligning that site in plan 04 was
 a rename of `error` → `detail` plus the machine keys — its `correlation_id` is
 unchanged.
 
@@ -128,15 +129,18 @@ construction time.
 | Shape | Emitted by | Body | Consumer reads |
 |---|---|---|---|
 | **App-global handlers** (§7: `RequestValidationError` 422, `RateLimitExceeded` 429) | `main.py` handlers | `{ok, code, human_message, detail (scalar str), correlation_id, recoverable[, retry_after_seconds]}` | `body.code` |
-| **`VenueTransientHTTPException`** (PYAPIFIX2-01) | `services/error_contract.py:345`, rendered by `main.py:574` | `{detail (scalar str), code, recoverable}` — **exactly three keys, nothing else** | `body.code` |
+| **`VenueTransientHTTPException`** (PYAPIFIX2-01) | class `VenueTransientHTTPException` in `services/error_contract.py`, rendered by `venue_transient_exception_handler` in `services/app_error_handlers.py` | `{detail (scalar str), code, recoverable}` — **exactly three keys, nothing else** | `body.code` |
 
-`VenueTransientHTTPException`'s seven raise sites at HEAD:
-`routers/exchange.py:163` (sFOX 429), `:178` (sFOX 5xx/transport), `:371` (MT5 probe
-timeout), `:387` (MT5 account mismatch), `:409` (MT5 transient client error), `:598`
-(the ccxt verdict collapse) — all on **`POST /api/validate-key`**
-(`routers/exchange.py:447`), the live key-connect path — plus `routers/portfolio.py:2354`
-on **`POST /api/verify-strategy`** (`routers/portfolio.py:2201`), which has no
-TypeScript caller and is closed on class-integrity grounds only. (Re-derive these by
+`VenueTransientHTTPException`'s seven raise sites when this section was written, cited by
+symbol (a coordinate here rots the next time anything above it moves): in
+`routers/exchange.py`, the sFOX 429 and the sFOX 5xx/transport arms of `_validate_sfox_key`,
+the MT5 probe timeout, the MT5 account mismatch and the MT5 transient client error arms
+(now in `_validate_mt5_key_probe` and `_connect_and_probe`), and the ccxt verdict collapse
+(the raise whose `code=result["error_code"]`, in `validate_key`) — all on **`POST
+/api/validate-key`** (`validate_key` in `routers/exchange.py`), the live key-connect path —
+plus the raise whose `code=validation["error_code"]` in `verify_strategy` of
+`routers/portfolio.py`, on **`POST /api/verify-strategy`**, which has no TypeScript caller
+and is closed on class-integrity grounds only. (Re-derive these by
 `grep -n "raise VenueTransientHTTPException"` before trusting them — they move whenever
 anything above them in either router does.)
 
@@ -172,6 +176,19 @@ The class is a **CALLER-class 4xx by construction** and refuses anything outside
 `400 <= status < 500`: it carries no `dependency`, no `Retry-After` and no
 `correlation_id`, so a 5xx in this shape would violate R-2 and mis-key 140.2's
 per-dependency breaker. **Anything needing a `dependency` must use `service_error`.**
+
+**Phase 240 (CONN-05): the flat shape now also carries the permanent validate-key 400s.**
+Since Phase 240 the permanent `POST /api/validate-key` 400 arms (`AUTH_FAILED`,
+`MT5_WRONG_SERVER`, `MT5_MASTER_PASSWORD`, `VENUE_DISABLED`, `INVALID_REQUEST`) and the MT5
+`rotate-secret` go-dark gate (`rotate_key_secret` in `routers/internal.py`, refusing a dark
+venue with `VENUE_DISABLED` before any decrypt or probe) answer the flat
+`{detail, code, recoverable: false}` body through `VenueTransientHTTPException`, so one
+condition has one body on every venue and the wizard verdict is unchanged. The class's 4xx
+range guard already admitted 400. Two 400s keep their shape by design: the `fetch_trades`
+400 (`/api/fetch-trades` has no TypeScript caller, and its bare `HTTPException` is
+enumerated in §7 as not seam-reachable) and the `get_key_permissions` 400s in
+`routers/internal.py` (the nested `service_error` shape, or the bare sFOX 400, which a
+TypeScript caller reads on a different route from validate-key).
 
 ### The discriminator 140.2 must build (SEAMCORE-01)
 
@@ -251,15 +268,16 @@ Note the distinction from PYAPI-07/PYAPI-08: the **422 and 429** handlers emit a
 Deliberate 4xx/5xx from `service_error()` are the object-detail case.
 
 **Added to the object-detail set by PYAPIFIX2-03 (Phase 140.1.2):**
-`routers/internal.py:246` — the `/internal/keys/{key_id}/permissions` per-key throttle
+the `/internal/keys/{key_id}/permissions` per-key throttle in `routers/internal.py` (the
+arm under `if not _consume_rate_limit(key_id):`)
 — now raises `service_error(429, "RATE_LIMITED", …)` where it previously answered a
 bare `{"detail": "<scalar str>"}`. Its consumer
-`src/app/api/keys/[id]/permissions/route.ts:147` does
-`throw new Error(err.detail ?? …)`, so from this change until 140.3 lands, a throttled
-probe logs `Error: [object Object]` at `route.ts:275` instead of the human sentence.
+`src/app/api/keys/[id]/permissions/route.ts`'s `!res.ok` arm did
+`throw new Error(err.detail ?? …)`, so from this change until 140.3 landed, a throttled
+probe logged `Error: [object Object]` from that same `throw` instead of the human sentence.
 
-**Diagnostics only, verified end to end:** the downstream classifier at
-`route.ts:254-268` keys on message substrings (`INTERNAL_API_TOKEN`, `Upstream 5`,
+**Diagnostics only, verified end to end:** the downstream classifier in
+the same `route.ts` (the catch that tests `rawMessage` against `INTERNAL_API_TOKEN` and `Upstream 5`) keys on message substrings (`INTERNAL_API_TOKEN`, `Upstream 5`,
 `ECONNREFUSED`, `not configured`, `aborted`, `timeout`), and the *old* sentence matched
 none of them either — the reply is `PROBE_FAILED` / 502 both before and after. It is
 listed here so 140.3 knows this
@@ -289,8 +307,9 @@ Cluster-D lesson). Since Phase 140.1.1 that is **enforced, not merely stated**:
 **A `429`'s wait is NOT in this table and must not be.** It is a limiter *window*,
 computed per request from the rate-limit configuration — not a property of any
 dependency. Two sites mint one directly and deliberately bypass the helper:
-`routers/internal.py:227` (`str(int(_RATE_LIMIT_WINDOW_S))`) and the app-global
-`RateLimitExceeded` handler at `main.py:526`. This table's scope is **per-dependency
+`routers/internal.py`'s per-key throttle (`retry_after=int(_RATE_LIMIT_WINDOW_S)`, in the
+permissions and rotate-secret handlers) and the app-global
+`RateLimitExceeded` handler (`rate_limit_exceeded_handler` in `services/app_error_handlers.py`). This table's scope is **per-dependency
 `503` waits only**.
 
 | Dependency | Seconds | Why |
@@ -351,7 +370,9 @@ The reasoning, in the order it must survive review:
    during a Binance outage is five 502s, hence a global trip that denies Deribit users,
    the optimizer, admin match and CSV finalize.
 2. **It should not be `400`.** `400` already means "your request was malformed" across
-   `routers/exchange.py:96,114,123,130,143,203,204,385,393,412`. Overloading it destroys
+   the `HTTPException(400, …)` arms of `routers/exchange.py` (`_validate_sfox_key`,
+   `_validate_mt5_key_probe`, `validate_key` and `fetch_trades`; the first three have
+   carried a flat coded body since Phase 240). Overloading it destroys
    the distinction between *"fix your input"* and *"wait for your venue"* — which is the
    single most important thing to tell this user.
 3. **`424` is exact and free.** A registered IANA status (RFC 4918 §11.4); a 4xx, so it
@@ -407,6 +428,14 @@ three remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
 to cite the symbol rather than re-number prose that will drift again. A stale
 anchor in THIS table is worse than in most prose: it is the document a future
 reviewer diffs their assumptions against.
+
+⚠️ **The Site column below is a historical census, and its coordinates are allowed to rot.**
+It records where each site was when the table was built (Phase 140.1) and is kept as that
+census, not re-numbered: re-numbering it would be a promise the next commit above any row
+breaks. Every other `path:line` coordinate in this file was replaced in Phase 240 plan 08
+by a searchable symbol or a quoted code fragment, and a new coordinate outside this table
+is a defect (`grep -anE '[A-Za-z_/.-]+\.(py|ts|tsx):[0-9]+'` over this file, excluding the
+`| S-` rows, must print nothing).
 
 | # | Site | Endpoint | Today | Trigger | Class | Target | Plan | Done |
 |---|---|---|---|---|---|---|---|---|
@@ -517,8 +546,8 @@ numbered into `S-nn` because neither is a *remap of an existing S-row*:
 
 | Site | Endpoint | Trigger | Class | Emits |
 |---|---|---|---|---|
-| `routers/exchange.py:454` (`validate_key`) | `/api/validate-key` | `create_exchange` raised non-`ValueError` | SERVICE-PERMANENT | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, `dependency: null` — was `400 "Failed to initialize exchange connection"` |
-| `routers/portfolio.py:2277` (`verify_strategy`) | `/api/verify-strategy` | `create_exchange` raised non-`ValueError` | SERVICE-PERMANENT | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, `dependency: null` — was `400 "Failed to initiali**s**e exchange connection"` |
+| `routers/exchange.py` `validate_key`, the raise coded `"ADAPTER_INIT_FAILED"` | `/api/validate-key` | `create_exchange` raised non-`ValueError` | SERVICE-PERMANENT | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, `dependency: null` — was `400 "Failed to initialize exchange connection"` |
+| `routers/portfolio.py` `verify_strategy`, the raise coded `"ADAPTER_INIT_FAILED"` | `/api/verify-strategy` | `create_exchange` raised non-`ValueError` | SERVICE-PERMANENT | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, `dependency: null` — was `400 "Failed to initiali**s**e exchange connection"` |
 
 The second row was named by **nobody** — not the code review, not RESEARCH, not CONTEXT.
 It differs from the first only in the **British spelling** of "initialise", which is
@@ -546,12 +575,15 @@ consistency, not for a TS renderer.)
 
 **Not seam-reachable, deliberately excluded** (listed so the enumeration is provably
 complete, not because they were missed): the six deliberate error arms inside the
-`fetch_trades` handler — `routers/exchange.py:660` (503 `get_kek` unavailable), `:670`
-(400 no connected key), `:685` (404 key not found), `:689` (403 key/owner mismatch),
-`:698` (500 decrypt failed), `:760` (500 venue fetch failed) — (`/api/fetch-trades`, no
-TS caller); `routers/csv.py:95`; `routers/portfolio.py:2242,2446`
-(Python `/api/verify-strategy`, no TS caller); `routers/cron.py:613,631`;
-`routers/debug_key_flow.py:56,100`; `services/analytics_runner.py:1725`.
+`fetch_trades` handler of `routers/exchange.py` (503 `Encryption not configured`, 400 `Strategy
+has no connected API key`, 404 `API key not found`, 403 `API key does not belong to strategy
+owner`, 500 `Failed to decrypt credentials`, 500 `Failed to fetch trades from exchange`) —
+(`/api/fetch-trades`, no TS caller); the `HTTPException` arms of `routers/csv.py`
+(`_read_capped`, `csv_validate`); the bare `HTTPException(400, …)` arms of `routers/portfolio.py`'s
+`portfolio_bridge` and `verify_strategy` (Python `/api/verify-strategy`, no TS caller);
+`routers/cron.py`'s `cron_sync` 500 arms; `routers/debug_key_flow.py`'s
+`_verify_internal_token` and `_read_test_creds`. (The `services/analytics_runner.py` entry
+this list once carried is gone: see the CORRECTED note on the hygiene flag in §7.)
 
 **Added by PYAPI-04 (plan 06), and deliberately NOT numbered into the S-table**
 because neither is a *remap* of an existing site — both are new refusals in
@@ -571,13 +603,14 @@ S-22 (any *unhandled* exception on `/process-key` → bodyless `500`) is unchang
 **Added by PYAPI-07 / PYAPI-08 (plan 08) and PYAPIFIX2-01 (plan 140.1.2), and
 likewise NOT numbered into the S-table** — the S-table enumerates 5xx-capable
 sites, and all three of these are 4xx. All three are `app.add_exception_handler`
-registrations in `main.py`, so **every** route inherits them:
+registrations made by `install_app_exception_handlers` in `services/app_error_handlers.py`
+(called from `main.py`, and from `tests/app_factory.py`), so **every** route inherits them:
 
 | Handler | Registered | Status | Body | `Retry-After` |
 |---|---|---|---|---|
-| `RequestValidationError` | `main.py:424` | **422** | `{ok:false, code:"VALIDATION_FAILED", human_message, detail, correlation_id, recoverable:false}` — `detail` is a **scalar string** built from the pydantic error's `type` + `loc` ONLY | never |
-| `RateLimitExceeded` | `main.py:533` | **429** | `{ok:false, code:"RATE_LIMITED", human_message, detail, correlation_id, recoverable:true, retry_after_seconds}` — `detail` is a **scalar string** | **always** |
-| `VenueTransientHTTPException` | `main.py:608` | **400** (class admits any 4xx) | `{detail, code, recoverable}` and **nothing else** — `detail` is a **scalar string**, byte-identical to the copy the site emitted before the machine fields existed | never |
+| `RequestValidationError` | `validation_exception_handler` (`services/app_error_handlers.py`) | **422** | `{ok:false, code:"VALIDATION_FAILED", human_message, detail, correlation_id, recoverable:false}` — `detail` is a **scalar string** built from the pydantic error's `type` + `loc` ONLY | never |
+| `RateLimitExceeded` | `rate_limit_exceeded_handler` (`services/app_error_handlers.py`) | **429** | `{ok:false, code:"RATE_LIMITED", human_message, detail, correlation_id, recoverable:true, retry_after_seconds}` — `detail` is a **scalar string** | **always** |
+| `VenueTransientHTTPException` | `venue_transient_exception_handler` (`services/app_error_handlers.py`) | **400** (class admits any 4xx) | `{detail, code, recoverable}` and **nothing else** — `detail` is a **scalar string**, byte-identical to the copy the site emitted before the machine fields existed | never |
 
 All three are the §2.1 SCALAR-`detail` case, not the object-`detail` case. That
 is deliberate and is why they need **zero** TypeScript change: the three
@@ -588,7 +621,7 @@ render on the two most common error statuses in the service, and on
 `/api/validate-key` it would additionally regress `RATE_LIMITED`,
 `PROBE_FAILED` and `DDOS_PROTECTION` from correct classification to
 `UNKNOWN`/500. The `VenueTransientHTTPException` constructor
-(`services/error_contract.py:399`) refuses a non-scalar `detail`, an empty
+(`VenueTransientHTTPException.__init__` in `services/error_contract.py`) refuses a non-scalar `detail`, an empty
 `code`, a non-`bool` `recoverable` and a non-4xx status, so three of those four
 mistakes cannot reach the wire at all.
 
@@ -612,10 +645,16 @@ S-24's stale-heartbeat `503` is still the only way `/health` goes red, because
 Railway's `healthcheckPath` restarts the pod on a red probe and an unset env var
 must not become a crash-loop.
 
-**Hygiene flag (no code change):** `services/analytics_runner.py:1725` raises
+**Hygiene flag (no code change):** `services/analytics_runner.py` raised
 `HTTPException(500)` from `run_csv_strategy_analytics`, whose only caller is
-`services/job_worker.py:1947` — the **worker**. An `HTTPException` raised outside an HTTP
+the `job_worker.py` CSV compute arm (`services/job_worker.py`) — the **worker**. An `HTTPException` raised outside an HTTP
 request is a category error that can never render. Recorded, not fixed.
+
+⛔ **CORRECTED 2026-11-24 (Phase 240 plan 08) — the flag above is kept as lineage and no
+longer describes HEAD.** `grep -n HTTPException services/analytics_runner.py` finds
+nothing: the raise it named is gone, so the category error it recorded is closed.
+`services/job_worker.py` still classifies an `HTTPException` that other callers raise
+(its `HTTPException` arm), which is unrelated to this flag.
 
 ---
 
@@ -635,7 +674,7 @@ request is a category error that can never render. Recorded, not fixed.
    **3b — the FLAT shape, and ONLY when both of these hold.** The site is a **4xx**
    that names no `dependency`, **and** its consumer is a seam that classifies by
    SUBSTRING over `err.detail` — today that means `POST /api/validate-key` through
-   `src/lib/analytics-client.ts:179` → `classifyKeyValidationError`. There, a
+   `src/lib/analytics-client.ts`'s validate-key error read → `classifyKeyValidationError`. There, a
    `service_error` envelope makes `err.detail` an object, the message becomes
    `"[object Object]"`, and codes that classify correctly today regress to
    `UNKNOWN`/500. Then:

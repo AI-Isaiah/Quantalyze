@@ -387,3 +387,213 @@ class TestPublicPrefixedPayloadIsNotAnonymous:
             )
             == "claimtest:anon"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 240 plan 02 / RLIM-01 -- the per-IP anonymous grammar `public:<32 hex>`.
+#
+# The classifier is the ONE place a verified payload becomes a bucket kind, and
+# both key functions go through it. Every expected bucket below is a literal.
+# ---------------------------------------------------------------------------
+
+_HEX32 = "0123456789abcdef0123456789abcdef"
+
+
+class TestPerIpAnonymousGrammar:
+    """Only EXACTLY `public:` + 32 lowercase hex is a per-IP pseudonym."""
+
+    def test_a_well_formed_per_ip_payload_gets_its_own_bucket_on_process_key(
+        self,
+    ) -> None:
+        claim = _req(_mint(f"public:{_HEX32}"))
+        assert rl.tenant_rate_limit_key(claim, scope=_SCOPE) == f"claimtest:anon:{_HEX32}"
+
+    def test_a_per_ip_payload_shares_the_one_anon_bucket_on_the_single_limit_routes(
+        self,
+    ) -> None:
+        """Phase 240 RLIM-01 review (MEDIUM): only /process-key stacks an
+        aggregate anonymous ceiling over its per-IP buckets. The routes keyed by
+        `tenant_or_platform_key` carry ONE limit each, so a per-IP bucket there
+        would let N addresses spend N windows with no ceiling above them. Every
+        anonymous claim on those routes must fold into the shared bucket."""
+        for hex32 in (_HEX32, "0" * 32, "f" * 32):
+            claim = _req(_mint(f"public:{hex32}"))
+            assert rl.tenant_or_platform_key(claim, scope=_SCOPE) == "claimtest:anon"
+
+    @pytest.mark.parametrize(
+        "suffix",
+        ["a" * 31, "a" * 33, "A" * 32, "g" * 32, ""],
+        ids=["31-hex", "33-hex", "uppercase", "non-hex", "empty"],
+    )
+    def test_a_malformed_suffix_falls_to_the_shared_anon_bucket_never_a_tenant_bucket(
+        self, suffix: str
+    ) -> None:
+        claim = _req(_mint(f"public:{suffix}"))
+        assert rl.tenant_rate_limit_key(claim, scope=_SCOPE) == "claimtest:anon"
+        assert rl.tenant_or_platform_key(claim, scope=_SCOPE) == "claimtest:anon"
+
+    def test_public_enemy_without_a_colon_stays_a_tenant_bucket(self) -> None:
+        claim = _req(_mint("public-enemy"))
+        assert rl.tenant_rate_limit_key(claim, scope=_SCOPE) == "claimtest:t:public-enemy"
+        assert rl.tenant_or_platform_key(claim, scope=_SCOPE) == "claimtest:t:public-enemy"
+
+    def test_the_hex_is_matched_as_a_whole_not_as_a_prefix(self) -> None:
+        """A 32-hex run followed by anything else is malformed, not per-IP."""
+        claim = _req(_mint(f"public:{_HEX32}x"))
+        assert rl.tenant_rate_limit_key(claim, scope=_SCOPE) == "claimtest:anon"
+
+    def test_a_non_ascii_digit_run_is_not_hex(self) -> None:
+        """`re.ASCII`: Arabic-Indic digits are Unicode `\\d` but not hex."""
+        claim = _req(_mint("public:" + "\u0660" * 32))
+        assert rl.tenant_rate_limit_key(claim, scope=_SCOPE) == "claimtest:anon"
+
+    @pytest.mark.parametrize(
+        ("payload", "kind"),
+        [
+            ("public", "anon"),
+            (f"public:{_HEX32}", "anon_ip"),
+            ("public:short", "anon"),
+            ("tenant-a", "tenant"),
+            ("public-enemy", "tenant"),
+        ],
+    )
+    def test_the_classifier_truth_table(self, payload: str, kind: str) -> None:
+        assert rl.classify_tenant_claim(_req(_mint(payload))).kind == kind
+
+    def test_an_unverifiable_claim_classifies_as_unverified(self) -> None:
+        assert rl.classify_tenant_claim(_req(None)).kind == "unverified"
+        assert (
+            rl.classify_tenant_claim(_req(_mint("public", secret="wrong-secret"))).kind
+            == "unverified"
+        )
+
+    def test_every_anonymous_shape_classifies_as_anonymous(self) -> None:
+        """Companion invariant (assumption-delta): a later phase that reintroduces
+        'anonymous means payload == public' turns this red. Bare, well-formed
+        per-IP and malformed per-IP are all anonymous."""
+        for payload in ("public", f"public:{_HEX32}", "public:" + "A" * 32, "public:"):
+            assert rl.classify_tenant_claim(_req(_mint(payload))).kind in {
+                "anon",
+                "anon_ip",
+            }, payload
+
+    def test_the_classifier_never_raises_on_a_hostile_request(self) -> None:
+        class _Boom:
+            @property
+            def headers(self) -> Any:
+                raise RuntimeError("hostile")
+
+        assert rl.classify_tenant_claim(_Boom()).kind == "unverified"  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Phase 240 plan 04 (RLIM-02): the csv scope grammar. Expected bucket strings are
+# typed literals; nothing is imported from the module under test but the functions.
+# ---------------------------------------------------------------------------
+
+_CSV_UUID = "0b8f2c4e-5d1a-4c7b-9e3f-6a2d8c1b7e90"
+
+
+class TestCsvScopeGrammar:
+    """Only EXACTLY `csv:` + a canonical lowercase uuid is csv-scoped."""
+
+    def test_a_well_formed_csv_payload_gets_its_own_bucket_on_both_key_functions(
+        self,
+    ) -> None:
+        claim = _req(_mint(f"csv:{_CSV_UUID}"))
+        assert rl.tenant_rate_limit_key(claim, scope=_SCOPE) == f"claimtest:csv:{_CSV_UUID}"
+        assert rl.tenant_or_platform_key(claim, scope=_SCOPE) == f"claimtest:csv:{_CSV_UUID}"
+        classified = rl.classify_tenant_claim(claim)
+        assert classified.kind == "csv"
+        assert classified.value == _CSV_UUID
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "csv:" + _CSV_UUID.upper(),
+            "csv:not-a-uuid",
+            "csv:",
+            "csv:" + _CSV_UUID + "x",
+            "csv:" + _CSV_UUID + "\n",
+            "csv: " + _CSV_UUID,
+            "csv:" + "٠" * 8 + _CSV_UUID[8:],
+            "csv:" + _CSV_UUID.replace("-", ""),
+        ],
+        ids=[
+            "uppercase",
+            "non-uuid",
+            "empty",
+            "trailing-char",
+            "trailing-newline",
+            "leading-space",
+            "non-ascii-digits",
+            "no-hyphens",
+        ],
+    )
+    def test_a_malformed_csv_payload_is_a_plain_tenant_never_csv_scoped(
+        self, payload: str
+    ) -> None:
+        claim = _req(_mint(payload))
+        assert rl.classify_tenant_claim(claim).kind == "tenant", payload
+        assert rl.tenant_rate_limit_key(claim, scope=_SCOPE) == f"claimtest:t:{payload}"
+        assert rl.tenant_or_platform_key(claim, scope=_SCOPE) == f"claimtest:t:{payload}"
+
+    def test_the_csv_prefix_is_matched_whole_so_csvx_is_a_tenant(self) -> None:
+        claim = _req(_mint(f"csvx:{_CSV_UUID}"))
+        assert rl.classify_tenant_claim(claim).kind == "tenant"
+
+    def test_a_csv_bucket_can_never_be_a_tenant_or_anonymous_bucket(self) -> None:
+        csv_key = rl.tenant_rate_limit_key(_req(_mint(f"csv:{_CSV_UUID}")), scope=_SCOPE)
+        tenant_key = rl.tenant_rate_limit_key(_req(_mint(_CSV_UUID)), scope=_SCOPE)
+        assert csv_key == f"claimtest:csv:{_CSV_UUID}"
+        assert tenant_key == f"claimtest:t:{_CSV_UUID}"
+        assert csv_key != tenant_key
+
+
+class TestCsvCeilingPredicateIsTotal:
+    """The ceiling's `exempt_when` predicate (`routers/process_key.py`) never raises
+    on a hostile claim and answers a bool: only a strict csv claim is exempt."""
+
+    @staticmethod
+    def _predicate() -> Any:
+        # The router module comes from tests.test_process_key, never a direct import:
+        # that module re-imports routers.process_key, so a direct import would be a
+        # second module object registering a second set of limits on the shared limiter.
+        from tests.test_process_key import process_key_router
+
+        return process_key_router._process_key_is_csv_scoped
+
+    def test_a_strict_csv_claim_is_exempt(self) -> None:
+        assert self._predicate()(_req(_mint(f"csv:{_CSV_UUID}"))) is True
+
+    def test_an_absent_claim_is_not_exempt(self) -> None:
+        assert self._predicate()(_req(None)) is False
+
+    def test_a_forged_claim_is_not_exempt(self) -> None:
+        forged = _mint(f"csv:{_CSV_UUID}", secret="wrong-secret")
+        assert self._predicate()(_req(forged)) is False
+
+    def test_an_expired_claim_is_not_exempt(self) -> None:
+        payload = f"csv:{_CSV_UUID}"
+        exp = 1_000_000_000  # 2001: long expired
+        mac = stdlib_hmac.new(
+            _SECRET.encode("utf-8"), f"{payload}.{exp}".encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        assert self._predicate()(_req(f"{payload}.{exp}.{mac}")) is False
+
+    def test_an_oversized_claim_is_not_exempt(self) -> None:
+        oversized = _mint("csv:" + "a" * 600)
+        assert len(oversized) > 512
+        assert self._predicate()(_req(oversized)) is False
+
+    def test_a_bytes_header_is_not_exempt_and_raises_nothing(self) -> None:
+        request = _FakeRequest({"X-Tenant-Claim": _mint(f"csv:{_CSV_UUID}").encode("ascii")})  # type: ignore[dict-item]
+        assert self._predicate()(request) is False
+
+    def test_a_hostile_request_object_answers_false(self) -> None:
+        class _Boom:
+            @property
+            def headers(self) -> Any:
+                raise RuntimeError("hostile")
+
+        assert self._predicate()(_Boom()) is False

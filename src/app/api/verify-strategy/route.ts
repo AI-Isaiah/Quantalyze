@@ -230,7 +230,7 @@ export async function POST(req: NextRequest) {
   // above, before delegation. The former flag-off legacyVerifyStrategyHandler
   // arm was deleted; the kill-switch reader was deleted in 106-10 (backbone
   // permanent-on).
-  return await unifiedVerifyStrategyHandler(body);
+  return await unifiedVerifyStrategyHandler(body, ip);
 }
 
 /**
@@ -286,6 +286,9 @@ function sanitizeMetricsSnapshot(value: unknown): unknown {
  */
 async function unifiedVerifyStrategyHandler(
   body: Record<string, unknown>,
+  // RLIM-01: the Vercel-read client IP `POST` already computed for
+  // `publicIpLimiter`. Never Railway's proxy IP, never logged here.
+  ip: string,
 ): Promise<NextResponse> {
   const exchange = (body.exchange as string) ?? "okx";
 
@@ -416,10 +419,14 @@ async function unifiedVerifyStrategyHandler(
     // end-to-end and returns `verification_id` + `status: "published"`.
     context: teaserContext,
     routeTag: "verify-strategy",
-    // CT-4 (army2) — public/unauthenticated flow: pass literal 'public'
-    // so the upstream rate limiter buckets all anonymous landing-page
-    // traffic to a shared key, isolated from authenticated tenants.
+    // CT-4 (army2) — public/unauthenticated flow: pass literal 'public' so
+    // the call is isolated from authenticated tenants. RLIM-01: `clientIp` is
+    // the Vercel-read address (`getClientIp`, the one `publicIpLimiter` used
+    // above); postProcessKey pseudonymises it with a keyed HMAC so each
+    // anonymous visitor gets their own upstream window and the raw IP never
+    // leaves Vercel.
     userId: "public",
+    clientIp: ip,
   });
   if (!result.ok) return result.response;
 

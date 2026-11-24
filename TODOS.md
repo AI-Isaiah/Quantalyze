@@ -272,9 +272,6 @@ founder can take.
 
 - [ ] **[DEPS-REACT-HOOKS-7.1-LINT]** (logged 2026-10-30, found landing PR #1157, which superseded Dependabot #1122-#1124; owner: unassigned, book a phase when taken up) `eslint-config-next` 16.3.8 to 16.4.2 was LEFT OUT of #1157 because it pulls `eslint-plugin-react-hooks` 7.1.1, which raises 64 new lint errors in `src/` across six rules: `set-state-in-effect`, `refs`, `purity`, `immutability`, `preserve-manual-memoization` and `error-boundaries`. ⛔ Do NOT land it by downgrading those rules to `warn`; fix the sites, then take the bump. Dependabot will re-propose it; that PR stays red until the sites are fixed. Done when `eslint-config-next` is at 16.4.2 or later, `eslint.config.mjs` is unchanged in rule severity, and `npm run lint` exits 0.
 
-- **[170.1-CSV-ODD-SPELLING-REJECTED]** (logged 2026-10-19, Phase 170.1 COPY final silent-failure hunt F2, MEDIUM, user-facing; owner: CSV timezone/header follow-up phase). **Still open (narrowed 2026-10-19 by `317ac4dd1` and 2026-10-20 by `4231f3de7`):** year-first (ISO) cells in a day-first column and ISO cells in a US month-first column are accepted again with the right range. A month-name cell (`12 Mar 2024`) in a numeric-date column stays a loud row rejection by choice (reading it needs a month-name parse). **Closed when:** the founder accepts that as final, or a month-name parse ships with a test.
-      ⭐ **Owned by Phase 240 CONNECTTRUTH, v1.22; REQUIREMENTS.md CONN-06; tagged 2026-11-23.**
-
 - **[170.1.2-VERIFIER-RESIDUALS]** (logged 2026-10-20, Phase 170.1.2 LABELS verification W-1 to W-7, none a FAILED truth; owner: the next phase touching each surface). One line each:
   - W-1 (WARNING): `src/components/strategy/TrustTierLabel.tsx` reads `TRUST_TIER_TOKENS[trustTier]` with no guard and no census on `strategy_verifications_trust_tier_check`, so a new tier would make `/admin/csv-status` throw instead of reading a fallback; unreachable today.
   **Closed when:** each line is fixed or struck by decision.
@@ -2172,56 +2169,6 @@ surgical.
   rewrote, so that audit's verdict is not contradicted. **Do not copy this pattern**; fix by
   typing the expected copy as a literal in the test, the way 140.1.1 fixed the one assertion
   in this file that it did touch.
-- **`analytics-service/docs/STATUS_CONTRACT.md` not-seam-reachable coordinate drift beyond the
-  item 140.1.2 repaired** — `routers/portfolio.py:2242` is a comment line (`# Audit H-0535 —
-  the credential fields are pydantic.SecretStr…`; the 429 raise is at `:2254-2264`, located by
-  the text `if not _check_verify_strategy_email_rate(` at `:2253`) and `:2446` is a comment
-  line too (`# Vectorized matching: build a DataFrame…`), not a deliberate error arm.
-  **Re-derive both by text before fixing — do not trust these numbers either**; the raise
-  shifts whenever anything above it in a 2500-line router moves. 140.1.2 plan 04 corrected
-  the `exchange.py` and
-  `internal.py` coordinates in that bullet plus the S-11 row and the classes heading, and
-  deliberately stopped there. *(Same file, same class: `routers/exchange.py:37` and
-  `services/error_contract.py:6,8` still say "the four classes" in prose — the table has had
-  five rows since 140.1.1 plan 01. One-word comment fix, batch it with the above.)*
-
-### v1.16 Phase-140.1.2 review — findings routed onward (added 2026-07-26) (owned by Phase 240 CONNECTTRUTH, v1.22; REQUIREMENTS.md CONN-05; tagged 2026-11-23)
-
-> From the 140.1.2 code review (0 Critical, 0 High, 7 Medium, 6 Low). The four in-fence items
-> (M-02, M-04, M-05, M-06) plus L-03/L-04/L-05 and W-02 were fixed in that phase. These are the
-> ones deliberately NOT fixed there, each with the reason and the owner. **Every coordinate
-> below was re-derived at HEAD by locating the code text; re-derive again before acting.**
-
-- **→ backlog, beside the four-vocabulary unification.** The provenance channel
-  (`ValidationResult.permanent`) has ONE consumer. `routers/process_key.py`'s `_envelope_error`
-  `recoverable` derivation and the sync-arm 424 venue-transient pre-gate both still key on
-  `_ROUTE_TERMINAL_ERROR_CODES` ∪ `PERMANENT_VALIDATION_ERROR_CODES`, neither of which knows
-  `MT5_WRONG_SERVER` / `MT5_MASTER_PASSWORD` or any pandera-minted CSV code. **Unreachable for
-  MT5 today** — `process_key.py` admits `mt5` to `onboard`/`resync` only and `_is_long_fetch`
-  routes both to the worker — so this is latent, not live. It goes live the moment a second
-  adapter states permanence, or `_is_long_fetch` changes: two contradictory verdicts on two
-  paths for one rejection. Plumbing exists (`_envelope_error` already takes an explicit
-  `recoverable: bool | None`). (Review M-03.)
-- **→ backlog. One route, two body shapes for one condition.** After 140.1.2,
-  `POST /api/validate-key` answers 400 with `{detail, code, recoverable}` for a ccxt
-  `AuthenticationError` but bare `{detail}` — byte-identical `detail`, **no `code` at all** —
-  for an sFOX 401 or an MT5 bad password. Same for `MT5_WRONG_SERVER_DETAIL` and
-  `MT5_MASTER_PASSWORD_DETAIL`, which carry no machine code anywhere on the HTTP path even
-  though the WORKER path now knows they are permanent (PYAPIFIX2-02). A 140.3 consumer
-  branching on `body.code` therefore behaves differently per venue for an identical condition.
-  Pre-existing class (the permanent 400 arms were never in PYAPIFIX2-01's venue-transient
-  scope), but the asymmetry is newly VISIBLE. Close it by giving the permanent 400 arms the
-  same flat shape with `recoverable=false`. (Review M-07.)
-- **→ backlog, adds to the STATUS_CONTRACT coordinate-drift item above.** A mechanical sweep of
-  all 51 `path:line` coordinates in `docs/STATUS_CONTRACT.md` (added while fixing review M-05)
-  found three more pointing at a blank line at HEAD, none of them in M-05's scope:
-  `services/exchange.py:978` (cited as the range start `:978-1021` in R-2), `routers/exchange.py:96`
-  and `routers/exchange.py:215` (the S-02 row). The §7 S-table is a HISTORICAL census — its
-  `Site` column records where each site was when the table was built, alongside a `Today`
-  column describing the pre-migration shape — so a row's coordinate going stale is expected
-  and is not by itself a defect. Prose coordinates outside the table are a different matter.
-  **The durable fix is not another sweep**: cite by searchable code text (or an anchor comment
-  in the source), so a coordinate cannot rot silently. Until then, re-derive before trusting.
 
 ### v1.16 Phase-140.5 (SEAMPROSE) — deferred items (added 2026-07-30)
 
@@ -3874,28 +3821,6 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   first); defense-in-depth sizing only, ×N replicas under memory://. Recommendation: tighten
   to 10/minute per tenant (2× headroom, sibling pattern); the literal pin in
   `analytics-service/tests/test_limiter_identity.py` MUST move in the same commit.
-- [ ] **verify-strategy teaser: per-IP front door cannot see the shared anon bucket.**
-  Measured: Vercel `publicIpLimiter` 10/min per IP = 600/h/IP (`ratelimit.ts:117`;
-  `verify-strategy/route.ts:59`) vs Python `/process-key` anon tier 30/h in ONE platform-wide
-  shared bucket (`rate_limit.py:107`, `:148` "Everything anonymous shares ONE bucket",
-  `:337`). A handful of concurrent anonymous visitors exhaust the platform's teaser capacity;
-  it is also a growth ceiling (~30 verifications/h total). The shared bucket is a deliberate
-  anti-abuse control (docblock: one anon IP once drained the whole platform window,
-  `rate_limit.py:89-91`) — founder call required. Recommendation: key the anon tier per-IP
-  (30/h per IP) to preserve the anti-abuse intent while removing the shared ceiling, or raise
-  the shared tier when teaser traffic warrants.
-      ⭐ **Owned by Phase 240 CONNECTTRUTH, v1.22; REQUIREMENTS.md RLIM-01; tagged 2026-11-23.**
-- [ ] **csv-validate: 12× over the shared `/process-key` tenant tier + stale docblock
-  citation.** Measured: Vercel `csvValidateLimiter` 20/min/user = 1200/h (`ratelimit.ts:206`)
-  vs `/process-key` tenant 100/h (`rate_limit.py:100`) SHARED with keys/sync and
-  finalize-wizard. The docblock's own 3-5/min iteration estimate sustained = 180-300/h >
-  100/h — plausible legitimate exhaustion mid-iteration (softened ×N replicas). Also the
-  `csvValidateLimiter` docblock (`ratelimit.ts:195-206`) still justifies its value against
-  "the upstream 30/hour cap" in `routers/csv.py`, but the route rides `/process-key` at HEAD
-  (`csv-validate/route.ts:6` imports `postProcessKey`; `/csv/validate` has no TS caller).
-  Recommendation: founder call between raising `_PROCESS_KEY_TENANT_LIMIT` or adding a
-  csv-scoped tier; fix the stale docblock citation in the same commit as whichever lands.
-      ⭐ **Owned by Phase 240 CONNECTTRUTH, v1.22; REQUIREMENTS.md RLIM-02; tagged 2026-11-23.**
 
 ## Phase 146 close-out notes (logged 2026-08-18)
 

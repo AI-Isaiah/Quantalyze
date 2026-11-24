@@ -53,6 +53,7 @@ vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: null,
   keysSyncUserLimiter: null,
   csvValidateLimiter: null,
+  csvFinalizeLimiter: null,
   checkLimit: async () => rateLimitResult,
   getClientIp: () => "127.0.0.1",
 }));

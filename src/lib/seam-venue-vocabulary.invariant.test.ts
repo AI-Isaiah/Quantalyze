@@ -225,7 +225,18 @@ const SCAN_EXCLUSIONS: readonly ScanExclusion[] = [
     // (rows CSV_UPSTREAM_FAIL and MONOTONIC_DATES). The code list does NOT move:
     // CSV_UPSTREAM_FAIL is a real csv_adapter emitter already in the population,
     // and MONOTONIC_DATES is already in `removesCodes`.
-    removesSites: 65,
+    //
+    // 65 → 68 (2026-11-24, Phase 240 CONNECTTRUTH plan 08). NOTHING WAS EXCLUDED —
+    // the SUBTREE grew by one file. `test_process_key_permanence_plumbing.py`
+    // tables the stated-permanence plumbing on the sync and validate-only arms,
+    // and its fixture `ValidationResult`s carry three parametrised
+    // `error_code=error_code` constructions. The code list does NOT move: every
+    // literal its rows carry (AUTH_FAILED, PERMISSION_DENIED, TRADE_SCOPE,
+    // WITHDRAW_SCOPE, MISSING_SCOPE, RATE_LIMITED, VALIDATION_UNEXPECTED) and
+    // the MT5 codes it reads from `services/ingestion/mt5.py` are already in
+    // the population from the NON-test tree, so the file
+    // mirrors production and emits to no user.
+    removesSites: 68,
     removesCodes: [
       "COLUMN_IN_DATAFRAME",
       "CSV_PARSE_FAILED",
@@ -809,6 +820,11 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "EXCHANGE_UNAVAILABLE",
   "INTERNAL",
   "INTERNAL_TOKEN_UNCONFIGURED",
+  // 240 / CONNECTTRUTH plan 05 (2026-11-24, Phase 240) - minted by `validate_key`'s
+  // `create_exchange` `except ValueError` arm (routers/exchange.py), a flat
+  // `VenueTransientHTTPException` 400 with `recoverable=False`. Takes a reasoned row
+  // in `VENUE_WIRE_CODES_WITHOUT_VERDICT` (UI-SPEC ruling R2), not a verdict row.
+  "INVALID_REQUEST",
   "KEK_UNAVAILABLE",
   "KEY_MISSING_EXCHANGE",
   "KEY_UNDECRYPTABLE",
@@ -884,6 +900,12 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "UNAUTHENTICATED",
   "UNSUPPORTED_EXCHANGE",
   "VALIDATION_UNEXPECTED",
+  // 240 / CONNECTTRUTH plan 05 (2026-11-24, Phase 240) - minted by `validate_key`'s
+  // two go-dark gates (routers/exchange.py) and by the MT5 gate in `rotate_key_secret`
+  // (routers/internal.py), a flat `VenueTransientHTTPException` 400 with
+  // `recoverable=False`. Takes a reasoned row in `VENUE_WIRE_CODES_WITHOUT_VERDICT`
+  // (UI-SPEC ruling R1), not a verdict row.
+  "VENUE_DISABLED",
   "WITHDRAW_SCOPE",
 ];
 
@@ -963,8 +985,14 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * with it, and the set-equality assertion below agrees with the derived emitter set at 48
  * (the arrival assertion's own failure message was read for the delta, not a hand tally).
  * 0.6 x 48 = 28.8, floored to 28 - same rule, no move.
+ *
+ * 28 -> 30 (2026-11-24, Phase 240 plan 05): `INVALID_REQUEST` and `VENUE_DISABLED` arrive
+ * together. The hand-typed roster holds 50 codes with them, and the set-equality assertion
+ * below agrees with the derived emitter set at 50 (read off that assertion's own failure,
+ * which listed 50 derived against 48 typed, not a hand tally). 0.6 x 50 = 30.0, floored
+ * to 30 - the rule MOVES the floor this time.
  */
-const DERIVED_FLOOR = 28;
+const DERIVED_FLOOR = 30;
 
 /**
  * ⭐ THE REACH PIN — hand-typed, because today nothing else asserts WHERE the

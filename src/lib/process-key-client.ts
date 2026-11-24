@@ -13,7 +13,7 @@ import {
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY as CIRCUIT_OPEN_HUMAN_MESSAGE } from "@/lib/seam-copy";
 import { scrubSeamError } from "@/lib/seam-redaction";
-import { mintTenantClaim } from "@/lib/tenant-claim";
+import { anonymousClaimPayload, mintTenantClaim } from "@/lib/tenant-claim";
 // Phase 141 / SEAM-05+06 — the retry-safety registry, consulted at THIS
 // chokepoint (the belt). A VALUE import of a dependency-free leaf: it carries
 // no runtime edge and survives the wholesale seam mocks (see that file's
@@ -332,20 +332,25 @@ export interface PostProcessKeyArgs {
   /** Optional caller tag used in the 503 log line so failures are grep-able. */
   routeTag?: string;
   /**
-   * CT-4 (army2) — required tenant identifier forwarded as `X-User-Id`
-   * on the upstream POST. The Python rate limiter
-   * (analytics-service/routers/process_key.py:_process_key_rate_limit_key)
-   * keys on `(token_hash, X-User-Id)` so each user gets an isolated
-   * 100/hour window. Pre-fix the header was never sent, so every request
-   * bucketed to the same `process_key:<token_hash>:anon` key — one
-   * tenant's burst could starve every other tenant.
+   * The server-derived tenant identifier. It is forwarded as the UNSIGNED
+   * `X-User-Id` header, which is diagnostic only: the Python limiter ignores it
+   * and buckets on the signed `X-Tenant-Claim` minted below (PYAPI-02).
    *
-   * For unauthenticated public flows (the landing-page teaser) callers
-   * MUST pass the literal string `'public'` so the limiter buckets all
-   * anonymous traffic to a shared `process_key:<token_hash>:public`
-   * window, isolated from any authenticated tenant.
+   * For unauthenticated public flows (the landing-page teaser) callers MUST pass
+   * the literal string `'public'`. The claim payload is then derived through
+   * `anonymousClaimPayload` over `clientIp`, so each anonymous visitor gets their
+   * own window; `'public'` itself is only the X-User-Id value. For `flow_type`
+   * csv the payload is `csv:<userId>` (RLIM-02).
    */
   userId: string;
+  /**
+   * Teaser only (RLIM-01): the client IP read at Vercel by `getClientIp`, never
+   * Railway's proxy IP. It is pseudonymised inside `postProcessKey` by
+   * `anonymousClaimPayload` (keyed HMAC) and the raw value is never put in a
+   * header, a log line or the request body. Absent or `"unknown"` mints the
+   * shared anonymous bucket.
+   */
+  clientIp?: string;
 }
 
 export type PostProcessKeyResult =
@@ -409,7 +414,21 @@ export async function postProcessKey(
     // parameter is a `TenantIdentity` so `mintTenantClaim(internalToken,
     // args.userId)` — the transposition that would ship the platform secret in
     // an outbound header — cannot compile. See that function's docblock.
-    tenantClaim = mintTenantClaim({ userId: args.userId }, internalToken);
+    //
+    // Phase 240 / RLIM-01: the payload is derived HERE, in the one chokepoint,
+    // so no route can forget it. The anonymous teaser (`userId` "public") gets
+    // the keyed per-IP pseudonym. RLIM-02: an authenticated CSV validation
+    // carries the `csv:` scope in the SAME signed payload, so Python selects the
+    // 60/minute CSV tier from the signature, never from an unsigned header. The
+    // scope comes from the closed `FlowType` union, so only `csv` can carry it
+    // and Python validates the uuid strictly. Every other flow keeps its user id.
+    const claimPayload =
+      args.userId === "public"
+        ? anonymousClaimPayload(args.clientIp ?? "unknown", internalToken)
+        : args.flow_type === "csv"
+          ? `csv:${args.userId}`
+          : args.userId;
+    tenantClaim = mintTenantClaim({ userId: claimPayload }, internalToken);
   } catch (err) {
     const tag = args.routeTag ?? "process-key-client";
     console.error(
