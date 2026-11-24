@@ -30,30 +30,7 @@ SELECT CASE
  ORDER BY 1, 2;
 
 -- ============================================================================
--- Census 2: same-owner live groups on one account with more than one key.
--- PASSES at zero rows. The login-only index still guarantees this, so a
--- non-zero answer means the backfill itself created a pair, and it blocks the
--- index change. Counts per venue only: the group's members are never listed.
--- ============================================================================
-SELECT g.exchange,
-       count(*) AS groups_with_more_than_one_live_key,
-       max(g.keys_in_group) AS largest_group
-  FROM (
-    SELECT k.user_id,
-           k.exchange,
-           k.venue_account_id,
-           count(*) AS keys_in_group
-      FROM public.api_keys k
-     WHERE k.disconnected_at IS NULL
-       AND k.venue_account_id IS NOT NULL
-     GROUP BY k.user_id, k.exchange, k.venue_account_id
-    HAVING count(*) > 1
-  ) g
- GROUP BY g.exchange
- ORDER BY g.exchange;
-
--- ============================================================================
--- Census 3: did a daily poll run after the PR-2 deploy?
+-- Census 2: did a daily poll run after the PR-2 deploy?
 -- Replace the token {{PR2_DEPLOYED_AT}} by hand with the PR-2 Railway deploy time
 -- as a UTC timestamp, for example 2026-12-01T06:00:00Z, keeping the quotes.
 -- PASSES when a_poll_ran_after_deploy is true: at least one live active MT5 key

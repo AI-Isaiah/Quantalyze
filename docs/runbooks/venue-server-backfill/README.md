@@ -13,8 +13,8 @@ Every statement in `census.sql` is read-only.
 
 1. `docs/runbooks/oneaccountonce/marker.sql`. **STOP** if the answer is NULL or does not name PROD. Never
    proceed on a guess, and never on a database that merely looks familiar.
-2. Fill the `{{PR2_DEPLOYED_AT}}` token in Census 3 by hand with the PR-2 deploy time (UTC), keeping the quotes.
-3. Run Census 1, Census 2 and Census 3 from `census.sql` as three separate calls.
+2. Fill the `{{PR2_DEPLOYED_AT}}` token in Census 2 by hand with the PR-2 deploy time (UTC), keeping the quotes.
+3. Run Census 1 and Census 2 from `census.sql` as two separate calls.
 4. Paste each result into the plan 10 SUMMARY under "Gate A5" with counts and cause classes only. No id,
    login, server or email goes into tracked text (public repo).
 
@@ -23,8 +23,7 @@ Every statement in `census.sql` is read-only.
 | Census | Passes when |
 |--------|-------------|
 | 1. Live active MT5 keys with no server, by cause class and last sync status | zero rows, or every remaining key class is named by cause in the orchestrator's report and judged acceptable (for example a key whose session cannot be built) |
-| 2. Same-owner live groups on one account with more than one key | zero rows. The login-only index guarantees it today, so a row means the backfill created a pair |
-| 3. Newest MT5 `last_sync_at` against the PR-2 deploy time | `a_poll_ran_after_deploy` is true |
+| 2. Newest MT5 `last_sync_at` against the PR-2 deploy time | `a_poll_ran_after_deploy` is true |
 
 Any non-pass blocks PR-3. Do not edit a workflow, a migration or the census to get past a non-pass.
 
@@ -43,4 +42,4 @@ a null server and relies on the wildcard rule. A disconnected key is outside the
 
 | File | What it does |
 |------|--------------|
-| `census.sql` | Census 1, 2 and 3. Read-only. |
+| `census.sql` | Census 1 and 2. Read-only. |

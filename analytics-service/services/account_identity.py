@@ -600,6 +600,16 @@ def _enqueue_recompose(supabase: Any, key_row: Mapping[str, Any], why: str) -> N
 # DETAIL that carries no login and no server. Only the matched token is ever logged.
 _SLOT_REFUSAL: Final = re.compile(r"ACCOUNT_SLOT_[A-Z_]+")
 
+# SF-M2: these three refusals mean the caller built a wrong request (a missing key,
+# another owner's key, an identity that does not match), which no later poll
+# repairs, so they log at ERROR. The other tokens are races the next poll clears
+# (a recovered holder, a dependent composite, a moved row) and stay at WARNING.
+_SLOT_CONTRACT_REFUSALS: Final = frozenset({
+    "ACCOUNT_SLOT_NOT_FOUND",
+    "ACCOUNT_SLOT_NOT_SAME_OWNER",
+    "ACCOUNT_SLOT_IDENTITY_MISMATCH",
+})
+
 
 def _slot_refusal_token(exc: BaseException) -> str | None:
     """The ``ACCOUNT_SLOT_*`` token of a swap refusal, or ``None``.
@@ -689,12 +699,21 @@ async def _settle_with_holder(
     disjoint windows are a key rotation, not a duplicate, so the pair is read
     BEFORE any swap and stays ``composite_member``, with no duplicate audit).
     A swap the database refuses falls back to the marker too: the slot never
-    moves on a refusal, the token is logged at WARNING and nothing else, and the
-    next poll re-decides. ``working_holder_predicate`` is imported, never copied:
-    the TypeScript parity test reads exactly one status tuple per file.
+    moves on a refusal, the token is logged and nothing else (ERROR for a
+    contract refusal, WARNING for a race), and the next poll re-decides.
+    ``working_holder_predicate`` is imported, never copied: the TypeScript parity
+    test reads exactly one status tuple per file.
     """
     holder_id = str(holder["id"])
-    if not (working_holder_predicate(key_row) and not working_holder_predicate(holder)):
+    # WR-04: ``request_allocator_holdings_sync`` overwrites sync_status with
+    # 'syncing' before this poll, so a key whose last sync failed arrives as
+    # 'syncing' and the D-18 reader rule counts it as working. This stamp runs
+    # before the fetch, so nothing has proven the key yet: for the swap decision
+    # only, 'syncing' is not working. The reader rule itself is unchanged.
+    key_proven_working = (
+        working_holder_predicate(key_row) and key_row.get("sync_status") != "syncing"
+    )
+    if not (key_proven_working and not working_holder_predicate(holder)):
         return await _mark_shared(supabase, key_row, holder_id)
     kind = await _share_kind(supabase, str(key_row["id"]), holder_id)
     if kind != _DUPLICATE:
@@ -706,7 +725,8 @@ async def _settle_with_holder(
     refused = await db_execute(_q)
     if refused is None:
         return "swapped_holder"
-    logger.warning(
+    logger.log(
+        logging.ERROR if refused in _SLOT_CONTRACT_REFUSALS else logging.WARNING,
         "account_identity: api_key %s (venue %s) slot swap refused: %s — the key "
         "is marked against its holder and the next poll re-decides",
         key_row.get("id"), key_row.get("exchange"), refused,
@@ -1096,8 +1116,9 @@ async def stamp_account_identity(
     ``swap_account_slot``; the demoted holder is marked ``duplicate`` and audited,
     and the owner's allocator curve is recomposed. A swap the database refuses
     (an ``ACCOUNT_SLOT_*`` token: the holder recovered, a composite depends on
-    it, the rows moved) is logged at WARNING with the token only and falls back to
-    the marker, today's stable state; the next poll re-decides. ``server_backfilled``
+    it, the rows moved) is logged with the token only, at ERROR for a contract
+    refusal (SF-M2) and WARNING otherwise, and falls back to the marker, today's
+    stable state; the next poll re-decides. ``server_backfilled``
     (Phase 225 plan 12, Q2 / CONN-03) is an already-stamped MT5 key that had no
     broker server and now carries its session's, written only while the column is
     still null and only when the session's login equals the stored login. An
