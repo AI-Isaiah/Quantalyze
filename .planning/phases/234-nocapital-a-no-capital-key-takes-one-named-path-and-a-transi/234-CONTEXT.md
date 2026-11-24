@@ -65,6 +65,13 @@ Out of scope:
 - [Tests] Q: "Where do the tests live?" → Selected: "The existing suites `analytics-service/tests/test_allocator_equity_no_capital_exit.py` and `test_derive_allocator_equity_job.py`, plus the replay tests for the out-of-window case" — test layout, no product effect.
 - [Plans] Q: "How many plans?" → Selected: "Planner's call; one PR (Python only, one seam)" — planning layout only.
 
+- [Post-research] Q: "Is Deribit gated by the ledger proof?" → Selected: "No. Its terminal is reconciled to inception at write time (RESEARCH venue table); only mt5 is in the proof set" — a one-member venue set, cheap to widen.
+- [Post-research] Q: "Lower side of the ledger check?" → Selected: "Only the locked 'at or below DUST_NAV_FLOOR'; a ledger level far below zero is already refused by the replay's zero-start and non-positive checks" — one comparison, cheap to change.
+- [Post-research] Q: "Is a no-capital key with no stored terminal counted as a fallback?" → Selected: "Yes, as its own reason in the closed set, since it takes dropped_key today" — a counts-only token.
+- [Post-research] Q: "Strict or tolerant tiny_base_days reader?" → Selected: "Strict, matching every existing key_inputs read_* helper (Rule 11); a malformed list takes the existing corrupt-input path. An absent list is not an error and reads as no stated days" — reader policy in one helper.
+- [Post-research] Q: "Do departed keys read tiny_base_days?" → Selected: "Yes, the counted and departed branches both read it; stitch sources do not" — one call site each.
+- [Post-research] Q: "Proposed new refusal tokens?" → Selected: "No new DegradeReason or DeriveRefusal member; the reasons live only inside the counts-only field" — avoids moving the three-runtime closed-set pins.
+
 ### Claude's Discretion
 - The exact formula for the MT5 independent proof, within the constraint above, once research has read the MT5 writer.
 
