@@ -2,18 +2,41 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260827130000_sanitize_user_revoke_strategy_shares.sql
--- --------------------------------------------------------------------------
--- STEP 1: sanitize_user + the strategy_shares revoke arm
--- --------------------------------------------------------------------------
--- sanitize_user coverage matrix row (read by scripts/check-gdpr-export-coverage.ts):
--- strategy_shares | ANONYMIZE | revoke-in-place. revoked_at stamped and generation
---   bumped for every live row the subject created, which kills every capability URL
---   derived from the old counter. The row itself is RETAINED deliberately: it holds
---   no PII (uuid + int + timestamps, D-02 guarantees no token at rest) and deleting
---   it would rewind the counter and resurrect the very links this arm just killed.
+-- source migration: 20261124120700_sanitize_user_attempt_failures.sql
+-- Migration: sanitize_user erases compute_job_attempt_failures (GDPR-ERASE).
+-- Phase 227 (JOBLEDGER), review round 1, follow-up to WR-02.
 --
--- Body identical to 20260517013100 EXCEPT the block marked "Phase 164 / B1".
+-- THE DEFECT. compute_job_attempt_failures (20261124120000) carries error_text that can name a
+-- broker account and four owner columns with ON DELETE CASCADE. A cascade fires only when the
+-- owner ROW is deleted. sanitize_user (GDPR Art. 17) DELETEs api_keys but only ANONYMIZES
+-- strategies, portfolios and auth.users in place, so the strategy_id, portfolio_id and
+-- allocator_id cascades never fire on the erasure path and those records, with their
+-- error_text, survived it. This migration re-bases sanitize_user and adds one DELETE.
+--
+-- sanitize_user coverage matrix row (read by scripts/check-gdpr-export-coverage.ts):
+-- compute_job_attempt_failures | PURGE | deleted outright for every owner key the subject has
+--   (allocator_id, strategy_id, portfolio_id, api_key_id). error_text can quote a broker
+--   account, and the table holds no counter whose loss could resurrect anything.
+--
+-- Body identical to 20260827130000_sanitize_user_revoke_strategy_shares.sql (the latest full
+-- definition; no later migration redefines the function, re-grepped on this tree) EXCEPT the
+-- block marked "GDPR-ERASE". CREATE OR REPLACE keeps the existing ACL and COMMENT.
+--
+-- VAC-04 ACKNOWLEDGEMENT. This migration changes ONE existing function body. The pragma below
+-- is the `live` column of the row of
+--   git show origin/main:supabase/schema/functions/sanitize_user.sql > <scratch>
+--   node scripts/sql-body-normalize.mjs --diff-bodies \
+--     supabase/schema/functions/sanitize_user.sql <scratch>
+-- derived LOCALLY, aiming `live` at the committed snapshot origin/main carries. It is
+-- ORIGIN/MAIN'S BODY STANDING IN FOR PROD: the ack is EARNED only if VAC-04 on the PR reports
+-- that SAME hash for PROD. If it reports another, fold the difference into this migration and
+-- re-derive; never edit a pragma to match a gate log.
+--
+-- prod-body-ack: 287e4fd75edd12162d1d78517ab39d2800529377b04b941117675865ff8d7fc9
+--
+-- Rollback: supabase/migrations/down/20261124120700-rollback.sql (manual, never auto-applied).
+-- Catalogue-only self-verify at the foot reads no table row.
+
 CREATE OR REPLACE FUNCTION public.sanitize_user(p_user_id UUID)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -104,6 +127,19 @@ BEGIN
     partner_tag   = NULL
   WHERE id = p_user_id
     AND display_name IS DISTINCT FROM '[deleted]';
+
+  -- GDPR-ERASE (Phase 227 JOBLEDGER review): compute_job_attempt_failures keeps error_text
+  -- that can name a broker account. Its owner FKs cascade only when the OWNER ROW IS DELETED,
+  -- and this function deletes api_keys but only ANONYMIZES strategies, portfolios and
+  -- auth.users, so the strategy_id, portfolio_id and allocator_id cascades never fire here.
+  -- Delete the subject's records explicitly, for all four owner keys, before the api_keys
+  -- delete below (whose cascade would take the api_key_id rows anyway). The ledger holds no
+  -- counter anything depends on, so unlike strategy_shares a DELETE is the right erasure.
+  DELETE FROM compute_job_attempt_failures
+   WHERE allocator_id = p_user_id
+      OR strategy_id  IN (SELECT id FROM strategies WHERE user_id = p_user_id)
+      OR portfolio_id IN (SELECT id FROM portfolios WHERE user_id = p_user_id)
+      OR api_key_id   IN (SELECT id FROM api_keys   WHERE user_id = p_user_id);
 
   DELETE FROM api_keys WHERE user_id = p_user_id;
 

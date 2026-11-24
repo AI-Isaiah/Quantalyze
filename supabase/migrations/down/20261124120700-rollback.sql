@@ -1,0 +1,258 @@
+-- ============================================================================
+-- ROLLBACK for 20261124120700_sanitize_user_attempt_failures.sql
+-- Phase 227 JOBLEDGER review round 1 (GDPR-ERASE).
+-- ============================================================================
+-- Manual, off the auto-apply path. Run as ONE transaction:
+--   psql --single-transaction -v ON_ERROR_STOP=1 -f <this file>
+-- against the database the marker query in CLAUDE.md names. Run that query FIRST:
+--   SELECT shobj_description(oid, 'pg_database') AS which_database
+--     FROM pg_database WHERE datname = current_database();
+-- What this file does: RESTORES public.sanitize_user(uuid) to the 20260827130000 body
+-- (byte for byte, the body without the compute_job_attempt_failures DELETE). CREATE OR
+-- REPLACE keeps its ACL and COMMENT. After it runs, account erasure no longer deletes
+-- failed-attempt records keyed by strategy_id, portfolio_id or allocator_id (only the
+-- api_keys delete's cascade reaches the api_key_id ones); that is the pre-fix gap.
+-- The migration ledger row is left in place (see the other down/ files for the repair step).
+-- ============================================================================
+
+SET LOCAL lock_timeout = '3s';
+
+CREATE OR REPLACE FUNCTION public.sanitize_user(p_user_id UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_already_sanitized BOOLEAN;
+  v_target_email      TEXT;
+  v_orphan_count      INTEGER := 0;
+  v_orphan_org_id     UUID;
+BEGIN
+  IF p_user_id IS NULL THEN
+    RAISE EXCEPTION 'sanitize_user: p_user_id is required'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- audit-2026-05-07 H-0900 (preserved): advisory lock so concurrent admin
+  -- clicks serialize on the same user.
+  PERFORM pg_advisory_xact_lock(hashtext('sanitize_user:' || p_user_id::text));
+
+  -- mig 120 P911 (preserved): signal the sentinel-rejection triggers.
+  PERFORM set_config('quantalyze.sanitize_in_progress', 'on', true);
+
+  SELECT (display_name = '[deleted]') INTO v_already_sanitized
+  FROM profiles WHERE id = p_user_id;
+
+  IF v_already_sanitized IS NULL THEN
+    RETURN FALSE;
+  END IF;
+
+  IF v_already_sanitized THEN
+    RETURN FALSE;
+  END IF;
+
+  SELECT email INTO v_target_email FROM profiles WHERE id = p_user_id;
+
+  -- audit-2026-05-07 H-0908 + H-0909 (preserved): sole-admin organization
+  -- detection with audit emission.
+  BEGIN
+    FOR v_orphan_org_id IN
+      SELECT om1.organization_id
+        FROM organization_members om1
+       WHERE om1.user_id = p_user_id
+         AND om1.role IN ('owner', 'admin')
+         AND NOT EXISTS (
+           SELECT 1 FROM organization_members om2
+            WHERE om2.organization_id = om1.organization_id
+              AND om2.user_id <> p_user_id
+              AND om2.role IN ('owner', 'admin')
+         )
+    LOOP
+      PERFORM public.log_audit_event_service(
+        p_user_id,
+        'organization.orphaned_by_sanitize',
+        'organization',
+        v_orphan_org_id,
+        jsonb_build_object(
+          'reason',           'sole_admin_sanitized',
+          'organization_id',  v_orphan_org_id,
+          'sanitized_user_id', p_user_id
+        )
+      );
+      v_orphan_count := v_orphan_count + 1;
+    END LOOP;
+  EXCEPTION
+    WHEN unique_violation
+      OR check_violation
+      OR string_data_right_truncation
+      OR numeric_value_out_of_range
+      OR insufficient_privilege THEN
+      RAISE NOTICE 'audit-2026-05-07 H-0908/H-0909: orphan-organization audit emission failed for user % (sqlstate=%, msg=%); sanitize continues',
+        p_user_id, SQLSTATE, SQLERRM;
+  END;
+
+  UPDATE profiles SET
+    display_name  = '[deleted]',
+    company       = NULL,
+    description   = NULL,
+    email         = NULL,
+    telegram      = NULL,
+    website       = NULL,
+    linkedin      = NULL,
+    avatar_url    = NULL,
+    bio           = NULL,
+    years_trading = NULL,
+    aum_range     = NULL,
+    partner_tag   = NULL
+  WHERE id = p_user_id
+    AND display_name IS DISTINCT FROM '[deleted]';
+
+  DELETE FROM api_keys WHERE user_id = p_user_id;
+
+  UPDATE strategies SET
+    name                 = '[deleted strategy]',
+    description          = NULL,
+    codename             = NULL,
+    public_contact_email = NULL,
+    partner_tag          = NULL,
+    review_note          = NULL
+  WHERE user_id = p_user_id
+    AND name IS DISTINCT FROM '[deleted strategy]';
+
+  UPDATE trades SET
+    raw_data          = NULL,
+    exchange_order_id = NULL,
+    exchange_fill_id  = NULL
+  WHERE strategy_id IN (SELECT id FROM strategies WHERE user_id = p_user_id)
+    AND (raw_data IS NOT NULL OR exchange_order_id IS NOT NULL OR exchange_fill_id IS NOT NULL);
+
+  -- Phase 164 / B1 (2026-08-27) — kill every share link the subject minted.
+  -- `strategy_shares` (migration 20260827120000) holds a `generation` counter
+  -- from which an anonymous capability URL to an UNPUBLISHED factsheet is
+  -- derived in Node. The anonymize above does NOT empty the factsheet, and
+  -- neither FK cascade fires here because this function deletes neither
+  -- `profiles` nor `auth.users` — so without this statement every link the
+  -- subject ever handed out keeps working forever after their Art. 17 erasure,
+  -- and the `banned_until = 'infinity'` below means they can never log back in
+  -- to revoke it themselves.
+  --
+  -- Bumping `generation` is what actually kills the links: the token is
+  -- HMAC(secret, strategy_id || generation), so +1 invalidates every url ever
+  -- copied, at once. Stamping `revoked_at` alone would be COSMETIC.
+  --
+  -- REVOKE, NEVER DELETE. A delete discards the counter; the next mint for that
+  -- strategy would restart at generation 1 and RESURRECT every token minted at
+  -- generation 1, including ones already revoked. The row holds no PII, so
+  -- retaining it costs the subject nothing.
+  UPDATE strategy_shares
+     SET revoked_at = now(),
+         generation = generation + 1
+   WHERE created_by = p_user_id
+     AND revoked_at IS NULL;
+
+  IF v_target_email IS NOT NULL THEN
+    -- ⛔ verification_requests_legacy IS THE TABLE. `verification_requests` is a
+    -- VIEW (relkind 'v', 13 cols) that 20260620120000_verification_requests_view_shim_apply.sql
+    -- repointed this DELETE away from — MANDATORY, because erasure aimed at the
+    -- view hits its INSTEAD OF trigger instead of the rows. That shim was a
+    -- SURGICAL in-place patch, so it matches no grep for this function and the
+    -- repo held no copy of it; re-basing on the newest FULL body in the repo
+    -- (20260517013100) therefore silently REVERTED it. See DRIFT-02 in root
+    -- TODOS.md. Corrected 2026-08-27 against PROD's live pg_get_functiondef
+    -- (md5 2f4ccf13db95b93464e028e5bce1e0f4) — the diff proved this identifier
+    -- was the ONLY substantive drift in the whole 193-line body.
+    DELETE FROM verification_requests_legacy WHERE email = v_target_email;
+
+    -- audit-2026-05-07 M-0796 + PR #182 retro audit (Task #57): purge
+    -- notification_dispatches rows keyed to the target user's email. The
+    -- retention cron's 180d wall is too slow for GDPR Art. 17 — explicit
+    -- erasure must remove recipient PII immediately. Filter by
+    -- recipient_email (the only PII surface on notification_dispatches)
+    -- instead of user_id (the table has no user_id column per mig
+    -- 20260409002118). v_target_email is captured before the profiles
+    -- UPDATE that nulls profiles.email.
+    --
+    -- Retro fix: case-insensitive LOWER(...) match. Per RFC 5321 email
+    -- domain is always case-insensitive, and the local-part is case-
+    -- insensitive in mainstream MTAs. A case-sensitive match could miss
+    -- rows where profiles.email and notification_dispatches.recipient_email
+    -- differ only in casing — silently breaching the GDPR Art. 17
+    -- invariant this DELETE upholds.
+    DELETE FROM notification_dispatches
+     WHERE LOWER(recipient_email) = LOWER(v_target_email);
+  END IF;
+
+  UPDATE portfolios SET
+    name        = '[deleted portfolio]',
+    description = NULL
+  WHERE user_id = p_user_id
+    AND name IS DISTINCT FROM '[deleted portfolio]';
+
+  DELETE FROM allocator_preferences WHERE user_id = p_user_id;
+  DELETE FROM user_favorites        WHERE user_id = p_user_id;
+  DELETE FROM user_notes            WHERE user_id = p_user_id;
+  DELETE FROM investor_attestations WHERE user_id = p_user_id;
+  DELETE FROM user_app_roles        WHERE user_id = p_user_id;
+  DELETE FROM organization_members  WHERE user_id = p_user_id;
+
+  DELETE FROM match_batches WHERE allocator_id = p_user_id;
+  DELETE FROM organization_invites WHERE invited_by = p_user_id;
+
+  UPDATE organizations
+    SET created_by = NULL
+    WHERE created_by = p_user_id
+      AND created_by IS NOT NULL;
+
+  DELETE FROM auth.refresh_tokens WHERE user_id::text = p_user_id::text;
+  DELETE FROM auth.sessions       WHERE user_id = p_user_id;
+
+  UPDATE auth.users SET
+    email               = NULL,
+    encrypted_password  = NULL,
+    raw_user_meta_data  = '{}'::jsonb,
+    raw_app_meta_data   = '{}'::jsonb,
+    banned_until        = 'infinity'::timestamptz,
+    email_confirmed_at  = NULL,
+    phone               = NULL,
+    phone_confirmed_at  = NULL
+  WHERE id = p_user_id;
+
+  -- audit-2026-05-07 H-0899 + H-0905 (preserved): emit the audit-of-the-sanitize.
+  BEGIN
+    PERFORM public.log_audit_event_service(
+      p_user_id,
+      'gdpr.sanitize_user',
+      'profile',
+      p_user_id,
+      jsonb_build_object(
+        'orphaned_organizations', v_orphan_count,
+        'sanitize_path',          'sanitize_user_rpc',
+        'completed_at',           now()
+      )
+    );
+  EXCEPTION
+    WHEN unique_violation
+      OR check_violation
+      OR string_data_right_truncation
+      OR numeric_value_out_of_range
+      OR insufficient_privilege THEN
+      RAISE NOTICE 'audit-2026-05-07 H-0899/H-0905: sanitize audit emission failed for user % (sqlstate=%, msg=%); sanitize succeeded',
+        p_user_id, SQLSTATE, SQLERRM;
+  END;
+
+  RETURN TRUE;
+END;
+$$;
+
+
+DO $verify$
+DECLARE
+  v_def text := pg_get_functiondef(to_regprocedure('public.sanitize_user(uuid)'));
+BEGIN
+  IF v_def IS NULL OR position('compute_job_attempt_failures' IN v_def) > 0 THEN
+    RAISE EXCEPTION 'Rollback 20261124120700 failed: sanitize_user still deletes the attempt ledger or no longer exists';
+  END IF;
+  RAISE NOTICE 'Rollback 20261124120700: sanitize_user restored to the 20260827130000 body.';
+END
+$verify$;

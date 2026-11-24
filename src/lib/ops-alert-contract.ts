@@ -19,6 +19,8 @@ export const OPS_ALERT_SOURCES = [
   "mt5_relaunch_debt",
   // Phase 155.1 / D-01: a server-clock mismatch refused a derive.
   "mt5_server_clock",
+  // Phase 227 / HEAL-03: a reconcile readmit hit its ceiling.
+  "reconcile_readmit_ceiling",
   "cron_sync",
   "backfill",
   "prod_prober",

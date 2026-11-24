@@ -400,6 +400,145 @@ So double-click is safe. You can also retry a job that is currently
 processing elsewhere — the advisory lock inside the runner prevents
 simultaneous processing of the same job id.
 
+## Phase 227 JOBLEDGER: attempt causes, claim renewal, first-hop sweep, readmit ceiling
+
+Phase 227 changed what an operator can read about a failed job and how the watchdog treats a job
+that is merely waiting. Five things to know, each with where to look.
+
+### (a) Where a failed attempt's cause is read: `public.compute_job_attempt_failures`
+
+`compute_jobs.last_error` and `error_kind` are cleared when a job is re-claimed (the M-1137 clear),
+and the job row itself is pruned at 30 days (done) or 90 days (failed). The cause of a failed
+attempt used to vanish with them. Since migration `20261124120000` every attempt that ends badly
+writes one append-only row to `public.compute_job_attempt_failures`. There is no foreign key to
+`compute_jobs`, so the row outlives the job row and both retention prunes.
+
+Columns: `id`, `job_id`, `kind`, `strategy_id`, `api_key_id`, `portfolio_id`, `allocator_id`,
+`exchange`, `job_created_at`,
+`attempt` (the attempt number that failed), `claim_token`, `cause_class`, `error_kind`,
+`error_text`, `worker_id`, `recorded_at`. Identity is `UNIQUE (job_id, claim_token, cause_class)`,
+so a retried write cannot duplicate a row. All four owner columns are copied from the job row and
+cascade, mirroring `compute_jobs`' own foreign keys: deleting the strategy, the key, the portfolio
+or the allocator (`auth.users`) deletes its records, because `error_text` can name a broker
+account. A `derive_allocator_equity` or `rescore_allocator` job carries only `allocator_id`, and a
+`compute_portfolio` job only `portfolio_id`, so those two columns are what tie their records to an
+owner. `allocator_id` is exported by the GDPR export manifest. Account erasure (`sanitize_user`)
+anonymizes strategies, portfolios and `auth.users` in place, so those cascades do not fire on that
+path; migration `20261124120700` makes `sanitize_user` delete the subject's records for all four
+owner keys.
+
+The four cause classes, and the code path that writes each:
+
+| `cause_class` | What ended the attempt | Written by |
+|---|---|---|
+| `error` | the attempt raised and the worker reported it | `mark_compute_job_failed` (same transaction as the failure); `record_compute_job_attempt_error` when the worker lost its claim before the mark could land (55P03, or a late mark after the watchdog reset the row or the orphan terminalizer reaped it) |
+| `watchdog_reset` | the watchdog found the running row older than its kind's threshold and reset it | `reset_stalled_compute_jobs` |
+| `stall_reclaim` | a reclaim took a stuck running row back (it has no scheduled caller on PROD, so this is a manual call) | `reclaim_stuck_compute_jobs` |
+| `orphan_reaped` | the hourly orphan terminalizer ended a running row as `failed_final` with `error_kind = 'orphaned'` (a worker died holding the claim) | the trigger `compute_jobs_record_orphan_reaped_attempt` (function `record_orphan_reaped_attempt`) |
+
+Read order for one job is `attempt`, then `recorded_at`, then `id`. Read it in Studio (the
+`postgres` role); `service_role` holds SELECT only, and `anon` and `authenticated` hold nothing.
+`error_text` can quote a broker account, so read it in the session and never paste it into a
+tracked file or a ticket. A read-only example by job id, causes and kinds only:
+
+```sql
+SELECT attempt, cause_class, error_kind, worker_id, recorded_at
+FROM public.compute_job_attempt_failures
+WHERE job_id = '<job uuid>'
+ORDER BY attempt, recorded_at, id;
+```
+
+And the daily shape, counts only:
+
+```sql
+SELECT cause_class, count(*) AS attempts
+FROM public.compute_job_attempt_failures
+WHERE recorded_at > now() - interval '24 hours'
+GROUP BY cause_class
+ORDER BY cause_class;
+```
+
+There is no retention cron on this table in Phase 227; retention and the sanitize position are
+routed to `/gsd-secure-phase`.
+
+### (b) `claimed_at` of a waiting job is now renewed
+
+The worker claims up to five jobs in one call and runs them one after another. Every claimed row
+used to keep the `claimed_at` of the claim, so a job waiting in the batch behind slow batch-mates
+aged until the watchdog reset it while the worker still held it in its list (the job then ran a
+second time and its result was thrown away). Now the worker renews the claims of the jobs still
+waiting, through `renew_compute_job_claims` (migration `20261124120200`), in two places: a fence
+before each dispatch, and the heartbeat every 120 seconds while a job runs. The running job's own
+`claimed_at` is never renewed.
+
+What that changes in Query 3 above: `claimed_at` older than the threshold now means a job that is
+**running** for that long, or a worker that stopped renewing (frozen or dead). A waiting job
+behind a long batch-mate no longer shows up there. A row the watchdog took has its `claim_token`
+cleared in the same statement, so its old worker can no longer renew it.
+
+`src/lib/compute-state.ts` still describes `claimed_at` as stamped once at claim time. That
+comment is out of date after this phase and is recorded here rather than edited.
+
+### (c) The first-hop sweep (`public.first_hop_enqueue_sweep()`)
+
+What it catches: a strategy finalized through the wizard whose first `sync_trades` enqueue dropped
+(the finalize route enqueues in an `after()` side effect and nothing retried it). A candidate is a
+strategy with an active connected key, no job of any status of its own and no in-flight job on its
+key (the daily key-scoped derive and holdings-poll jobs the crons leave on every key do not count
+once they have finished), no trades, no daily returns, no composite members and no analytics row
+beyond `pending`.
+
+- The sweep stamps `first_seen_at` in `public.first_hop_enqueue_retries` the first time it sees a
+  candidate, and re-enqueues one `sync_trades` job only once that observation is more than **90
+  minutes** old. Because it ticks hourly, a strategy is re-enqueued between 90 and about 150
+  minutes after it first matches. A healthy new strategy, which has a job within seconds, never
+  matches.
+- **Once only.** A strategy is re-enqueued at most once, ever. A bad key is tried against an
+  exchange once, not every hour.
+- **The named state.** Only if that retry also ends without a result (every job of the strategy
+  `failed_final`, analytics row absent or still `pending`) does the strategy read
+  `computation_status = 'failed'` with the fixed sentence "Analytics has not started for this
+  strategy: its first sync was never queued, and the automatic retry did not complete. Retry the
+  sync, or contact support if this persists." A row already `failed` is never overwritten.
+- **It fires only after registration.** The migration registers nothing. The hourly job is
+  registered by `docs/runbooks/jobledger-go-live.md` Step 1, after merge. Until then a dropped
+  first enqueue strands exactly as before.
+
+### (d) The readmit-ceiling page
+
+The reconcile sweep readmits a strategy that lost its worker and stops at three orphan markers,
+after which the strategy silently drops out of the sweep. Now `record_reconcile_readmit_exhaustions()`
+(migration `20261124120300`) writes one durable row per exhaustion to
+`public.reconcile_readmit_exhaustions` (`strategy_id`, `generation_key`, `marker_count`,
+`detected_at`, `paged_at`), and the worker's watchdog loop pages from it through `ops_alert` with
+source `reconcile_readmit_ceiling` and cause `readmit_ceiling:<strategy uuid>`. It runs at most
+once every five minutes and pages at most 25 rows a pass.
+
+`paged_at` is stamped only after a delivered page, so an undelivered page leaves the row unpaged
+and the next pass pages it again (at least once beats at most once for a stranded strategy). To
+read the rows that have not been paged, counts and ids only:
+
+```sql
+SELECT strategy_id, marker_count, detected_at
+FROM public.reconcile_readmit_exhaustions
+WHERE paged_at IS NULL
+ORDER BY detected_at;
+```
+
+A row that stays unpaged for more than a few minutes means the worker's reader is not running, or
+no `ops_alert` channel is delivering; check the worker first, because the worker is also what runs
+any readmit. A page does not clear itself: read the strategy's causes through (a), fix the cause,
+and re-enqueue by hand.
+
+### (e) The watchdog reset now bridges the strategy's analytics status
+
+`reset_stalled_compute_jobs` used to flip a `running` row back to `pending` without telling the
+analytics status bridge, so a strategy whose curated status sentence had been written was left
+with no provenance, and the next bridge run replaced it with the generic one. Since migration
+`20261124120100` the reset calls the bridge once per distinct (strategy, kind) it reset, and
+`reclaim_stuck_compute_jobs` follows the same path. The reset also records its own
+`watchdog_reset` row (see (a)).
+
 ## Related files
 
 - Queue + watchdog migrations:

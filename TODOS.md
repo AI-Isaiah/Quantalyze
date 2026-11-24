@@ -888,27 +888,6 @@ per-metric decision.
       is dead weight, not a defect.
       ⭐ **Owned by Phase 224 DEADLEFTOVERS, v1.23; REQUIREMENTS.md DEAD-05; tagged 2026-11-23.**
 
-- [ ] **`[164.2-RECLAIM-PROVENANCE]` `reclaim_stuck_compute_jobs` requeues without resetting the
-      provenance markers, so a crash-recovered job can lose its curated sentence (booked
-      2026-09-06, Phase 164.2 ship review).**
-      `supabase/schema/functions/reclaim_stuck_compute_jobs.sql:32` sets `status = 'pending'`
-      directly and **never calls `sync_strategy_analytics_status`**, so the marker reset every
-      other requeue path performs does not happen here. The reachable sequence: a job stamps a
-      curated sentence with `('writer', J)`; it dies before `mark_compute_job_failed`; the
-      reaper reclaims it; on attempt 2 the writer writes a **different** curated sentence while
-      restating `('writer', J)` unchanged. The `BEFORE UPDATE` trigger
-      `strategy_analytics_drop_stale_error_provenance` then reads that as a marker outliving its
-      sentence and silently NULLs both markers, and the next bridge call replaces the curated
-      sentence with the per-kind generic.
-      ⚠️ The trigger's own `COMMENT` at
-      `supabase/migrations/20260906120000_computation_error_provenance.sql:1138-1145` records
-      this cost as though it were theoretical. It is not — the crash-recovery path reaches it.
-      **Fix:** `PERFORM sync_strategy_analytics_status(strategy_id)` for each reclaimed row, plus
-      a lane arm in `supabase/tests/test_sync_status_curated_sentence_survives.sql` that
-      reclaims, re-stamps a DIFFERENT sentence under the SAME job id, and reads the curated
-      sentence back.
-      ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; REQUIREMENTS.md HEAL-04; tagged 2026-11-23.**
-
 - [ ] **`[164.2-SEAMCODE-UNION]` `UPSTREAM_STATUS_TO_SEAM_CODE`'s "every value is a key of
       `SEAM_CODE_TO_WIZARD_CODE`" law is enforced by a source-text scan, not by the compiler
       (booked 2026-09-06, Phase 164.2 ship review).**
@@ -1363,6 +1342,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   **Data integrity:** a derive that needs a retry rewrites the same account's published dailies, and nothing tells us whether the first attempt wrote anything or why it failed.
   **Owner / Trigger:** unrouted, founder to assign. Trigger: now (it recurs daily since 2026-11-20). First make the first attempt's failure readable (the cause is lost when the retry succeeds), then fix it at its root. **Closed when:** seven consecutive nightly MT5 derives are all `done` with `attempts=1`, or the retry cause is named and fixed with a test.
       ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; Phase 230 MT5NIGHTLY, v1.22; REQUIREMENTS.md MT5D-01, MT5D-02; tagged 2026-11-23.**
+  - 2026-11-24: Phase 227 JOBLEDGER shipped the per-attempt record (`compute_job_attempt_failures`, all four cause classes: error, watchdog_reset, stall_reclaim, orphan_reaped). Phase 230 MT5NIGHTLY owns the close: real nights of these records read and explained.
 
 - **[192-ORPHANED-LANDING-VERIFY]** (logged 2026-11-07, Phase 192 PUBLICTRUTH; owner: unrouted, founder to assign). The landing verification section, form, results and progress components under `src/components/landing` are rendered nowhere after Phase 192 turned the home verify band into a sign-up link (no non-test importer outside that directory). `VerificationForm.tsx` still carries its false "never stored" line, and `/api/verify-strategy` stays in `PUBLIC_ROUTES` in `src/proxy.ts` with no caller. The public-truth census does not scan this directory for that reason. **Closed when:** the components are deleted together with their registry entries (`closed-sets.test.ts`, `complete-status-scan.test.ts`) and the public allowlist entry, or reused behind sign-in.
 
@@ -1419,17 +1399,6 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       **Owner:** Phase 164.9 TESTISOLATION built the refusal. ⚠️ The REPAIR of the 83 needs a
       named successor phase booked via `/gsd-phase --edit` — recorded here rather than left
       blank, and surfaced in `164.9-09-SUMMARY.md` as a routed deferral for that booking.
-
-### FANOUT-COHORT-SIBLING-POLL-01 — the April poll-positions fan-out carries the same literal, IS live, and is excluded twice over (booked 2026-09-17) (owned by Phase 227 JOBLEDGER, v1.22; REQUIREMENTS.md HEAL-05; tagged 2026-11-23)
-
-**Still open.** `enqueue_poll_positions_for_all_strategies`
-(`supabase/schema/functions/enqueue_poll_positions_for_all_strategies.sql`) admits only `published` and
-`pending_review` strategies and also requires a `sync_trades` job done in the last 30 days; the Railway
-worker's `daily_enqueue_tick` calls it once per UTC day. So no `private` strategy has ever had a position
-snapshot, while every `published` one is current (PROD measurement, `164.5.1.2-CONTEXT.md` D-02). Phase
-164.5.1.2 refused to widen the lifecycle conjunct alone because the second conjunct excluded the same
-strategies; `/cron-sync` has since admitted `private` (#830), so re-measure the second conjunct first.
-**Trigger:** anyone proposing to widen either conjunct; decide both together, with a fresh measurement.
 
 ### SYNC-DRIFT-PAYLOAD-LOGGED-VERBATIM-01 — the contract-drift log renders the unknown RPC return verbatim with `%r` (booked 2026-09-19)
 
@@ -1991,17 +1960,6 @@ surgical.
   **Fix:** add `username = 'postgres'` + `database = current_database()` equality assertions to
   the STEP-2 self-verify of every cron-registering migration going forward, with a
   consequence-naming message. Evidence of the ratified owner: `20260816140000:375`.
-- **The readmit ceiling is SILENT at exactly the moment it gives up** (found 2026-08-19 by the
-  RLS audit of Phase 146.2 R3; the fix's own new blind spot). At the ceiling the sweep inserts
-  nothing → no `compute_jobs` row → no `{"source":"reconcile-sweep"}` metadata → the worker-side
-  capture at `analytics-service/main_worker.py:754` never fires. **The alert is keyed on the
-  HEAL**, so the transition from "recovering hourly" to "abandoned for ~90 days" emits NO signal,
-  and the strategy's owner has no user surface for it. Not a leak and not a data-integrity
-  defect — filed against Rule 12 (fail loud). **Founder decision needed:** body-side audit row on
-  exhaustion vs. an external exhaustion query/alert. ⚠️ Interacts with the 90-day retention wall,
-  which DELETES the marker rows that ARE the counter — so the bound is "3 per retention window",
-  and a strategy can silently resume cycling after ~90d with no notification at either edge.
-      ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; REQUIREMENTS.md HEAL-03; tagged 2026-11-23.**
 - **Phase-19 hourly cron never decommissioned** (PR-D) — soak gate passed, cron still running.
 - **Match-engine cron health check missing** — no `/api/cron/health-check` route; match-engine
   cron failures are invisible (silent data staleness).
@@ -5030,20 +4988,6 @@ It runs the marker query first and reports counts only.
 **Fix if triggered.** Group the key (stamp or mark it) or hide its rows as superseded. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 WR-03).
 
 **Owner / Trigger:** a departed key with no identity beside a live key on the same exchange (re-measure with a counts-only read before acting).
-
-## Phase 166.5.1 (SENTRYTRIAGE) — routed items (logged 2026-10-21)
-
-### 166.5.1-DERIVE-BATCH-RESET-RESIDUAL — a derive_allocator_equity run behind slow batch-mates can still pass 20 minutes and be reset (booked 2026-10-21, 166.5.1 D-05 / code review WR-01, DATA INTEGRITY) (owned by Phase 227 JOBLEDGER, v1.22; REQUIREMENTS.md HEAL-02; tagged 2026-11-23)
-
-**Reading.** Phase 166.5.1 gave `derive_allocator_equity` a 20-minute watchdog override (`WATCHDOG_PER_KIND_OVERRIDES` in `analytics-service/main_worker.py`). The claim RPC stamps one `claimed_at` on a whole batch of 5 (`p_batch_size` in `_claim_priority`) and `dispatch_tick` runs the batch one job after another, so a job's staleness clock includes its batch-mates' runtime. On the backfill worker the batch-mates are `derive_broker_dailies` jobs, each with a 15-minute handler timeout. A derive job behind two slow ones can pass 20 minutes. The watchdog then returns the row to `pending`, its runner's `mark_compute_job_done` / `mark_compute_job_failed` is refused (P0002, QUANTALYZE-2A / A), and the job can run twice. PROD measurement, read-only 2026-10-21, last 14 days: 110 `derive_allocator_equity` jobs, median claim age 5.8 s, max 604 s; whole 5-job batches containing one finished within 606 s; 2 jobs had attempts=2, both re-runs (2026-10-15 and 2026-10-18). That 606 s is capped by the old 10-minute reset, so it is a floor, not the tail.
-
-**SC-3 status.** ROADMAP 166.5.1 SC-3 ("a finished job is never lost or run twice") is PARTLY met (founder D-05, "Keep 20 min, book gap"): the common case is fixed and its tests can fail, the slow-batch-mate case is not.
-
-**Fix.** A lease or heartbeat that renews `claimed_at` while a runner works, so the staleness clock measures silence and not batch position. The deferred heartbeat/lease work owns it; a batch size of 1 for the backfill role would also close the mechanism but was not chosen.
-
-**Owner / Trigger:** the deferred heartbeat/lease work. Trigger: QUANTALYZE-2A or QUANTALYZE-A fires again after the 166.5.1 deploy, or the 48 h Sentry read (D-04) shows a P0002 on `derive_allocator_equity`. Closed when a long run's claim age is renewed and a test reproduces a batch-mate wait past 20 minutes without a reset.
-
-⭐ **2026-10-26 (Phase 166.5.1 close-out): the trigger was read and is NOT met; stays open.** The post-deploy Sentry readout (T_DEPLOY 2026-10-22T06:32:30Z, read 2026-10-26 about 06:20Z, about 96 h later) found 0 events since T_DEPLOY for all nine groups, QUANTALYZE-2A and A included, and all nine were resolved in Sentry. The slow-batch-mate case is latent, not fixed: no P0002 means it has not fired in that window, not that it cannot.
 
 ## Phase 167.2.1.1 (UPNLVENUES) — routed items (logged 2026-10-22)
 
