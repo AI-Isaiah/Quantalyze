@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.67.1] - 2026-11-24 — BASELINE: automated re-dump after the PROD apply of d04ef47c
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `45429669614`, after the PROD apply of merge `d04ef47c`: sha256 `e5d41466…` → `98821446…`.
+- Shape, old → new: tables 68 → 71, policies 154 → 154, function statements 139 → 144, distinct function names 137 → 142, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261124120000_jobledger_attempt_failures.sql`, `20261124120100_jobledger_reset_ledger_and_bridge.sql`, `20261124120200_compute_job_claim_renewal.sql`, `20261124120300_reconcile_readmit_exhaustions.sql`, `20261124120400_first_hop_enqueue_sweep.sql`, `20261124120500_poll_positions_cohort.sql`, `20261124120600_orphan_reaped_attempt_record.sql`, `20261124120700_sanitize_user_attempt_failures.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-24` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.67.0 → 0.133.67.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=336 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 144 — MATCH 141, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45429669614` succeeded, and this entry was composed by the `redump-pr` job. Run `45429669614` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.67.0] - 2026-11-24 — Phase 227 JOBLEDGER: a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job
 
 Eight migrations (20261124120000 to 20261124120700), worker changes in `analytics-service/main_worker.py` and a new readmit page. Covers MT5D-01 and HEAL-01 to HEAL-05. All eight migrations auto-apply to TEST and then PROD on merge. None schedules a job: HEAL-01's sweep is registered by hand afterwards (see Notes).
