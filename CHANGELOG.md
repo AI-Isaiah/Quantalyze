@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.133.65.1] - 2026-11-24 — records: Phase 226 MT5SOAK phase records (verification passed, threats_open 0)
+
+This is a records PR. It changes no source, test, script, workflow or migration. One commit.
+
+### Added
+- **Phase 226 planning records.** The phase directory holds CONTEXT (decisions D-01 to D-06), DISCUSSION-LOG, RESEARCH, VALIDATION, PATTERNS, plans 01-05 with their SUMMARYs, the REVIEW (three rounds), the REVIEW-DISPOSITION, VERIFICATION and SECURITY.
+  - VERIFICATION is `passed` 4/4 and carries `verified_at_sha` with `drift_subjects` (`mt5_soak.py`, `test_mt5_soak.py`). There is no `covered_files` or `covered_digest`.
+  - SECURITY closes 13 threats, and `threats_open` is 0.
+  - The 11 LOW review findings are recorded in the REVIEW-DISPOSITION only, and none is booked in `TODOS.md`.
+
+### Changed
+- **ROADMAP:** Phase 226's overview bullet is ticked, its five plan rows are listed and ticked, and the progress row reads `5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24`.
+- **REQUIREMENTS:** SOAK-01, SOAK-02 and SOAK-03 are ticked, and their traceability rows read Complete.
+- **STATE:** the progress block gains Phase 226's 5 plans, so it reads 1 of 21 phases, 50 plans and 36 completed. It also gains five performance rows and eight execution-time decisions. Current Position names 226 as complete and shipped. `phase complete 226` moved the position to 155.2, and that was reverted by hand because several phases run in parallel. The handler's `state.json` rewrite was also reverted.
+
+### Notes
+- `226-VALIDATION.md` keeps `status: draft`. `phase complete` warns on this because the Nyquist audit (`/gsd-validate-phase`) was not run. The phase's gates are recorded in its VERIFICATION instead.
+
 ## [0.133.65.0] - 2026-11-24 — Phase 231 BYBITREADS plans 03-05: every Bybit settle type and trade window, or a named refusal
 
 The Bybit reads now cover every settle type and every trade window, or refuse by name. There are two commits: the code, squashed from 27 branch commits, and this release commit. The code commits break down as:
