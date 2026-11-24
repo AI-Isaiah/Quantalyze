@@ -2,7 +2,7 @@
 phase: "234"
 slug: "nocapital-a-no-capital-key-takes-one-named-path-and-a-transient-read-never-drops-a-funded-key"
 status: draft
-nyquist_compliant: false
+nyquist_compliant: true
 wave_0_complete: false
 created: "2026-11-24"
 ---
@@ -36,15 +36,31 @@ created: "2026-11-24"
 
 ## Per-Task Verification Map
 
-Filled by the planner per task. Requirement coverage: NOCAP-01, NOCAP-02, NOCAP-03, NOCAP-04 and the out-of-window ruling, per the RESEARCH map.
+Filled by the planner per task. Requirement coverage: NOCAP-01, NOCAP-02, NOCAP-03, NOCAP-04 and the out-of-window ruling, per the RESEARCH map. Every task's `<automated>` command runs in about 25 to 40 s locally (measured at HEAD: the three-file job set 11 s, the wide allocator set 879 passed in 21 s, strict mypy 10 s). Plans run in waves 1 to 4 strictly in order, because every plan edits `job_worker.py` and a test file another plan also edits.
+
+| Plan-Task | Wave | Requirement | Test type | Automated command (from `analytics-service/`) | Gate it proves (PROOF-01 arm) |
+|---|---|---|---|---|---|
+| 01-T1 (tracer) | 1 | NOCAP-03 | job + compose | `python3 -m pytest tests/test_derive_allocator_equity_job.py tests/test_allocator_equity_no_capital_exit.py tests/test_derive_refusal_rows.py -q -p no:cacheprovider` + strict mypy | `replay_refused` counted in the row and on `compose_empty_blocked` (neuter the compose increment; drop the `_persist_refusal` keyword) |
+| 01-T2 | 1 | NOCAP-03 | job + compose + unit | same as 01-T1 | per-route counts once per key, absence on clean runs, closed set (neuter each job count and the compose blocking count) |
+| 01-T3 | 1 | NOCAP-04 | compose | wide allocator set + strict mypy | missing-terminals candidate equals the no-candidate payload minus the field (restore the unconditional `key_inputs_mismatch`) |
+| 02-T1 (tracer) | 2 | NOCAP-01, NOCAP-03 | job | three-file job set + strict mypy | transient zero over a funded MT5 ledger keeps `dropped_key` (skip the `ledger_level_funded` refusal) |
+| 02-T2 | 2 | NOCAP-01, NOCAP-03 | job + unit | wide allocator set + strict mypy | no basis, negative-terminal pair, "MT5" case, Deribit scope, gate order (neuter each refusal and the venue normalisation) |
+| 03-T1 (tracer) | 3 | NOCAP-02, NOCAP-03 | job | three-file job set + strict mypy | apply-loop `KeyError` reverts across two runs (narrow the handler to `NavReconstructionError`) |
+| 03-T2 | 3 | NOCAP-02, NOCAP-03 | job + dispatch | wide allocator set + strict mypy | compose `ValueError` reverts, dispatch DONE, controls (delete the compose handling; drop the count) |
+| 04-T1 (tracer) | 4 | ruling (PROOF-01) | job | `python3 -m pytest tests/test_allocator_equity_inception.py tests/test_derive_allocator_equity_job.py tests/test_allocator_equity_no_capital_exit.py -q -p no:cacheprovider` + strict mypy | stored tail day reaches the count (drop the `_compose` keyword) |
+| 04-T2 | 4 | ruling (PROOF-01) | replay + reader + job | wide allocator set + strict mypy | exact scope, strict reader, departed key (drop the exemption; make the reader tolerant; drop the departed read) |
+
+"Wide allocator set" is `python3 -m pytest tests/test_allocator_equity_*.py tests/test_e2_*.py tests/test_derive_allocator_equity_job.py tests/test_derive_refusal_rows.py tests/test_nav_marks_compose_roundtrip.py tests/test_tiny_base_marks.py -q -p no:cacheprovider`.
 
 ---
 
 ## Wave 0 Requirements
 
-- [ ] Re-fixture the four MT5 candidate tests that carry no basis (RESEARCH finding 3)
-- [ ] New fixtures: funded-ledger MT5 candidate, no-basis MT5 candidate, negative-terminal candidate, missing-terminals hole candidate, stated-tail-day replay book
-- [ ] Pop-the-field helper for the two whole-payload equality tests
+Each item is written inside the task that needs it, test first, so no separate Wave 0 plan exists.
+
+- [ ] Re-fixture the MT5 candidate tests that carry no basis: five exits get a hand-derived basis, four venue-independent gates move to a Deribit row without a basis (plan 02 Task 1; planning found a fifth exit test and four hollowed tests beyond RESEARCH's list)
+- [ ] New fixtures: funded-ledger MT5 candidate (02-T1), no-basis MT5 candidate and negative-terminal pair (02-T2), missing-terminals hole candidate (01-T3), stated-tail-day replay and job books (04-T1, 04-T2)
+- [ ] Pop-the-field helper `_pop_refusal_field` for the two whole-payload equality tests (01-T1, 01-T2)
 
 ---
 
@@ -56,11 +72,11 @@ All phase behaviors have automated verification.
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 120s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references (none: every task's command runs against existing files)
+- [x] No watch-mode flags
+- [x] Feedback latency < 120s
+- [x] `nyquist_compliant: true` set in frontmatter
 
 **Approval:** pending

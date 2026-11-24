@@ -572,10 +572,20 @@ Python only, no migration. This is the allocator book path, not composite work.
 2. Any exception raised by a no-capital candidate leaves the previous row intact across retries; a test raises an exception that is not a `NavReconstructionError`. (NOCAP-02)
 3. A fallback to `dropped_key` stores a payload flag naming why and is counted per run, not only logged. A refused candidate leaves no residue reason in the stored payload. (NOCAP-03, NOCAP-04)
 4. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [ ] 234-01-PLAN.md — Every no-capital fallback is counted by name in the stored payload, and a refused holed candidate leaves no residue reason (NOCAP-03, NOCAP-04)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 234-02-PLAN.md — An MT5 no-capital exit needs the key's own deal ledger to agree; a negative terminal is never an exit (NOCAP-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 234-03-PLAN.md — Any exception from a candidate reverts once to the stored inputs and keeps the row across retries (NOCAP-02)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 234-04-PLAN.md — A flow on a stated tiny-base tail day after the last return is not out_of_window_flow (founder ruling 2026-11-24)
 
 ### Phase 235: HOLDINGSTRUTH — one account counts once on Holdings, match scoring and the dashboard, and every failing key is named
 
@@ -791,7 +801,7 @@ Plans:
 | 231. BYBITREADS | 6/6 | Complete (plans 01-05 shipped v0.133.61.6 #1314 and v0.133.65.0 #1321; plan 06 shipped v0.133.73.0 #1333 after Phase 229) | 2026-11-25 |
 | 232. OKXTRADES | 4/4 | Complete (shipped v0.133.70.0, #1330) | 2026-11-24 |
 | 233. DERIBITTRUTH | 0/? | Not started | - |
-| 234. NOCAPITAL | 0/? | Not started | - |
+| 234. NOCAPITAL | 0/4 | Planned (4 plans, waves 1 to 4) | - |
 | 235. HOLDINGSTRUTH | 0/? | Not started | - |
 | 236. FIGUREMATH | 0/? | Not started | - |
 | 237. FACTSHEETHONEST | 13/13 | Shipped v0.133.63.0 (#1316); human verification pending (2 visual checks) | - |
