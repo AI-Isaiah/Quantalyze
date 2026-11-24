@@ -219,7 +219,7 @@ const venueStrategyLookupMock = vi.fn(async () => ({ data: null, error: null }) 
   // 225-05 / CONN-01: the draft read now also selects `name`, which the route
   // puts in the VENUE_DRAFT_IN_PROGRESS body. `unknown` so a test can seed a
   // non-string to prove the shape guard.
-  data: { id: string; name?: unknown } | null;
+  data: { id: string; name?: unknown; wizard_session_id?: unknown } | null;
   error: { code?: string; message?: string } | null;
 });
 /**
@@ -325,6 +325,18 @@ function recordWrite(
   writeAttempts.push({ client, table, op });
 }
 
+/**
+ * 225 PR-2 review WR-01 — the compensating rollback's deletes, with the filters
+ * each chain carried, and a per-table answer a test can set (default: one row
+ * removed). Reset with the other per-case state in the describe's `beforeEach`.
+ */
+const deleteCalls: Array<{
+  client: "admin" | "user-scoped";
+  table: string;
+  filters: CapturedFilters;
+}> = [];
+const deleteAnswers: Record<string, { data: unknown; error: unknown }> = {};
+
 /** Write verbs that must never be reachable on `api_keys` from this route. */
 function makeWriteVerbs(client: "admin" | "user-scoped", table: string) {
   const thenable = {
@@ -345,7 +357,34 @@ function makeWriteVerbs(client: "admin" | "user-scoped", table: string) {
     },
     delete: () => {
       recordWrite(client, table, "delete");
-      return thenable;
+      const filters: CapturedFilters = {};
+      deleteCalls.push({ client, table, filters });
+      const chain = {
+        eq: (col: string, val: unknown) => {
+          filters[col] = val;
+          return chain;
+        },
+        is: (col: string, val: unknown) => {
+          filters[col] = val;
+          return chain;
+        },
+        select: () => chain,
+        // A real delete is a network round trip. It resolves on a timer here
+        // because `captureToSentry` reaches Sentry through a lazy
+        // `import("@sentry/nextjs")`, and under vitest's module mock a SECOND
+        // dynamic import that starts before the first has settled is silently
+        // dropped (measured: two back-to-back captures yield one). The swap
+        // capture and the rollback-failure capture are separate calls on
+        // separate round trips in production.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        then: (resolve: any) =>
+          setTimeout(
+            () =>
+              resolve(deleteAnswers[table] ?? { data: [{ id: "deleted" }], error: null }),
+            30,
+          ),
+      };
+      return chain;
     },
   };
 }
@@ -1676,6 +1715,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     adminClientThrows.value = false;
     capturedSelects.length = 0;
     sentryState.captured.length = 0;
+    deleteCalls.length = 0;
+    for (const table of Object.keys(deleteAnswers)) delete deleteAnswers[table];
     validateKeyMock.mockReset();
     encryptKeyMock.mockReset();
     rpcMock.mockReset();
@@ -1888,19 +1929,60 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
-  it("a fence READ FAULT falls through to the RPC and never 500s (the DB index still dedups)", async () => {
+  // 225 PR-2 review SF-M1 / IN-11 (orchestrator decision 2): INVERTED from "a
+  // fence READ FAULT falls through to the RPC and never 500s (the DB index still
+  // dedups)". Once the server-aware index ships it no longer refuses a write
+  // beside a null-server holder, so this read is the only guard: a fault answers
+  // a retryable 503 before validation, encryption and every write.
+  it("a fence READ FAULT FAILS CLOSED: 503 before validate, encrypt and the RPC, captured to Sentry, with neither login nor server in any sink", async () => {
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     venueKeyLookupMock.mockResolvedValue({
       data: null,
-      error: { code: "42501", message: "permission denied for table api_keys" },
+      error: {
+        code: "42501",
+        message: `permission denied reading login ${MT5_LOGIN} on MetaQuotes-Demo`,
+      },
     });
 
     const POST = await importPost();
     const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-    expect(res.status).toBe(200);
-    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(JSON.parse(text).code).toBe("UNKNOWN");
+    expect(text).not.toContain(MT5_LOGIN);
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(sentryState.captured).toHaveLength(1));
+    expect(sentryState.captured[0].options.tags?.step).toBe("holder-read");
+    const sink = JSON.stringify([sentryState.captured, consoleErr.mock.calls]);
+    expect(sink).not.toContain(MT5_LOGIN);
+    expect(sink.toLowerCase()).not.toContain("metaquotes-demo");
     expect(consoleErr).toHaveBeenCalled();
+  });
+
+  it("a POST-validation read fault FAILS CLOSED the same way: 503 before encrypt and the RPC (the pre-validation read was clean)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    venueKeyLookupMock
+      .mockResolvedValueOnce({ data: null, error: null })
+      .mockResolvedValue({
+        data: null,
+        error: { code: "42501", message: "permission denied for table api_keys" },
+      });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(503);
+    expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+    // Validation had run (it is what the post-validation read follows); nothing
+    // after it did.
+    expect(validateKeyMock).toHaveBeenCalledTimes(1);
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(sentryState.captured).toHaveLength(1));
+    expect(sentryState.captured[0].options.tags?.step).toBe("holder-read");
   });
 
   it("the SECOND read faulting degrades the same way — a live key with an unreadable strategy still submits", async () => {
@@ -3165,6 +3247,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(rpcMock.mock.calls[1][0]).toBe("swap_account_slot");
       // The demotion is audited by the helper (venue and holder id only).
       expect(auditMock).toHaveBeenCalledTimes(1);
+      // A swap that lands undoes nothing.
+      expect(deleteCalls).toEqual([]);
 
       // Neither the login nor the server crosses back.
       expect(text).not.toContain(MT5_LOGIN);
@@ -3279,6 +3363,18 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(rpcCalls("swap_account_slot")).toHaveLength(0);
     });
 
+    it("WR-03: a server pasted with no-break-space padding is stored as the value the Python poll captures (str.strip first)", async () => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({ ...MT5_RECONNECT_BODY, passphrase: "\u00a0Broker-Live\u00a0" }),
+      );
+      expect(res.status).toBe(200);
+      expect(rpcCalls("create_wizard_strategy")[0][1]).toMatchObject({
+        p_venue_account_id: MT5_LOGIN,
+        p_venue_server: "broker-live",
+      });
+    });
+
     it("a ccxt connect carries no p_venue_server", async () => {
       const POST = await importPost();
       const res = await POST(makeReq(VALID_BODY));
@@ -3288,51 +3384,147 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       );
     });
 
-    it("a swap that FAILS after the draft exists is logged at ERROR with Sentry (holder-swap) and still answers success, with neither login nor server in any line", async () => {
-      venueKeyLookupMock.mockResolvedValue({
-        data: [{ id: EXISTING_KEY_ID, sync_status: "revoked" }],
-        error: null,
+    // WR-01 + SF-M3 (225 PR-2 review, orchestrator decision 1): INVERTED from "a
+    // swap that FAILS after the draft exists ... still answers success". The
+    // admitted key was created with no identity, so the unique index cannot catch
+    // it: a refused swap left a second live same-owner key and a draft while the
+    // user was told "connected". The route now undoes what this request wrote and
+    // refuses.
+    describe("[WR-01 / SF-M3] a refused or failed swap is rolled back and refused", () => {
+      const KEY_VENUE_ALREADY_CONNECTED_BODY =
+        '{"code":"KEY_VENUE_ALREADY_CONNECTED","error":"This exchange account is already connected on your account. Use the key you already have, or disconnect it first."}';
+
+      function refusedSwap() {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [{ id: EXISTING_KEY_ID, sync_status: "revoked" }],
+          error: null,
+        });
+        routeRpc({
+          data: null,
+          error: {
+            code: "P0001",
+            message: `ACCOUNT_SLOT_REFUSED for login ${MT5_LOGIN} on ${SERVER_NORMALISED}`,
+          },
+        });
+      }
+
+      it("deletes the key then the draft THIS request created, answers 409 KEY_VENUE_ALREADY_CONNECTED byte-exact before the asset-class write, and leaks neither login nor server", async () => {
+        refusedSwap();
+        const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+        const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        const text = await res.text();
+        expect(text).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        expect(text).not.toContain(MT5_LOGIN);
+        expect(text.toLowerCase()).not.toContain(SERVER_NORMALISED);
+
+        // The key FIRST, scoped to this request's key, this owner, and only while
+        // unstamped; then the draft, scoped as the draft route's own delete is.
+        expect(deleteCalls).toEqual([
+          {
+            client: "admin",
+            table: "api_keys",
+            filters: { id: API_KEY_ID, user_id: MOCK_USER.id, venue_account_id: null },
+          },
+          {
+            client: "admin",
+            table: "strategies",
+            filters: {
+              id: STRATEGY_ID,
+              user_id: MOCK_USER.id,
+              source: "wizard",
+              status: "draft",
+            },
+          },
+        ]);
+        // Answered before the asset-class derive: nothing was left to derive for.
+        expect(assetClassUpdateMock).not.toHaveBeenCalled();
+        // No demotion audit for a swap that did not land.
+        expect(auditMock).not.toHaveBeenCalled();
+
+        const logged = JSON.stringify([consoleErr.mock.calls, consoleWarn.mock.calls]);
+        expect(logged).toContain("holder swap failed");
+        expect(logged).toContain("rolled back");
+        expect(logged).not.toContain(MT5_LOGIN);
+        expect(logged.toLowerCase()).not.toContain(SERVER_NORMALISED);
+
+        // The swap failure is still paged (Rule 12) and is the only capture: the
+        // rollback itself succeeded.
+        await vi.waitFor(() => expect(sentryState.captured.length).toBeGreaterThan(0));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual(["holder-swap"]);
+        const sent = JSON.stringify([
+          String((sentryState.captured[0].err as { message?: unknown })?.message),
+          sentryState.captured[0].options,
+        ]).toLowerCase();
+        expect(sent).not.toContain(MT5_LOGIN);
+        expect(sent).not.toContain(SERVER_NORMALISED);
       });
-      routeRpc({
-        data: null,
-        error: {
-          code: "P0001",
-          message: `ACCOUNT_SLOT_REFUSED for login ${MT5_LOGIN} on ${SERVER_NORMALISED}`,
-        },
+
+      it("a key delete that ITSELF fails is a Sentry ERROR (holder-swap-rollback), the draft is left alone, and the response is still the 409", async () => {
+        refusedSwap();
+        deleteAnswers.api_keys = {
+          data: null,
+          error: { code: "XX000", message: `could not delete login ${MT5_LOGIN}` },
+        };
+        const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys"]);
+        await vi.waitFor(() => expect(sentryState.captured).toHaveLength(2));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual([
+          "holder-swap",
+          "holder-swap-rollback",
+        ]);
+        const logged = JSON.stringify(consoleErr.mock.calls);
+        expect(logged).toContain("code=XX000");
+        expect(logged).not.toContain(MT5_LOGIN);
       });
-      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
 
-      const POST = await importPost();
-      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      it("a draft delete that ITSELF fails is a Sentry ERROR (holder-swap-rollback) and the response is still the 409", async () => {
+        refusedSwap();
+        deleteAnswers.strategies = {
+          data: null,
+          error: { code: "XX001", message: "could not delete the draft" },
+        };
+        vi.spyOn(console, "error").mockImplementation(() => {});
 
-      expect(res.status).toBe(200);
-      const text = await res.text();
-      expect(JSON.parse(text)).toEqual({
-        ok: true,
-        strategy_id: STRATEGY_ID,
-        api_key_id: API_KEY_ID,
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+        expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys", "strategies"]);
+        await vi.waitFor(() => expect(sentryState.captured).toHaveLength(2));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual([
+          "holder-swap",
+          "holder-swap-rollback",
+        ]);
       });
-      expect(text).not.toContain(MT5_LOGIN);
-      expect(text.toLowerCase()).not.toContain(SERVER_NORMALISED);
 
-      const logged = JSON.stringify(consoleErr.mock.calls);
-      expect(logged).toContain("holder swap failed");
-      expect(logged).not.toContain(MT5_LOGIN);
-      expect(logged.toLowerCase()).not.toContain(SERVER_NORMALISED);
+      it("a key delete that removes no row (already stamped: the RPC replayed an earlier request's pair, or a swap landed) leaves the DRAFT in place and still answers 409", async () => {
+        refusedSwap();
+        deleteAnswers.api_keys = { data: [], error: null };
+        const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation(() => {});
 
-      await vi.waitFor(() =>
-        expect(sentryState.captured.length).toBeGreaterThan(0),
-      );
-      const capture = sentryState.captured.at(-1);
-      expect(capture?.options.tags?.step).toBe("holder-swap");
-      const sent = JSON.stringify([
-        String((capture?.err as { message?: unknown })?.message),
-        capture?.options,
-      ]).toLowerCase();
-      expect(sent).not.toContain(MT5_LOGIN);
-      expect(sent).not.toContain(SERVER_NORMALISED);
-      // No demotion audit for a swap that did not land.
-      expect(auditMock).not.toHaveBeenCalled();
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        // Deleting the draft here would destroy a pair this request did not mint.
+        expect(deleteCalls.map((c) => c.table)).toEqual(["api_keys"]);
+        expect(JSON.stringify(consoleWarn.mock.calls)).toContain("removed no key");
+        await vi.waitFor(() => expect(sentryState.captured.length).toBeGreaterThan(0));
+        expect(sentryState.captured.map((c) => c.options.tags?.step)).toEqual(["holder-swap"]);
+      });
     });
   });
 
@@ -3516,6 +3708,68 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(rpcMock).not.toHaveBeenCalled();
       expect(writeAttempts).toEqual([]);
       expect(text).not.toContain(MT5_LOGIN);
+    });
+
+    // 225 PR-2 review WR-02 (orchestrator decision 3). The session fence runs
+    // once, BEFORE validation. A same-session resubmit that raced past it (reload,
+    // second tab, double submit during a 120 s validate) meets the FIRST request's
+    // committed draft at the post-validation resolve. The fence read is empty and
+    // so is the pre-validation key read: only the POST-validation reads see it.
+    describe("[WR-02] a same-session draft met at the post-validation resolve", () => {
+      beforeEach(() => {
+        venueKeyLookupMock
+          .mockResolvedValueOnce({ data: null, error: null })
+          .mockResolvedValue({ data: [{ id: EXISTING_KEY_ID }], error: null });
+      });
+
+      it("answers the session fence's deduped body, with no encrypt and no write", async () => {
+        venueStrategyLookupMock.mockResolvedValue({
+          data: {
+            id: EXISTING_STRATEGY_ID,
+            name: EXISTING_DRAFT_NAME,
+            wizard_session_id: OTHER_SESSION_ID,
+          },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq({ ...MT5_RECONNECT_BODY, wizard_session_id: OTHER_SESSION_ID }));
+
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        expect(JSON.parse(text)).toEqual({
+          ok: true,
+          strategy_id: EXISTING_STRATEGY_ID,
+          api_key_id: EXISTING_KEY_ID,
+          deduped: true,
+        });
+        expect(text).not.toContain(EXISTING_DRAFT_NAME);
+        expect(text).not.toContain(MT5_LOGIN);
+        // Validation ran (the resolve follows it); nothing after it did.
+        expect(validateKeyMock).toHaveBeenCalledTimes(1);
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+        expect(writeAttempts).toEqual([]);
+      });
+
+      it("NEGATIVE CONTROL: another session's draft is still refused by name", async () => {
+        venueStrategyLookupMock.mockResolvedValue({
+          data: {
+            id: EXISTING_STRATEGY_ID,
+            name: EXISTING_DRAFT_NAME,
+            wizard_session_id: WIZARD_SESSION_ID,
+          },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq({ ...MT5_RECONNECT_BODY, wizard_session_id: OTHER_SESSION_ID }));
+
+        expect(res.status).toBe(409);
+        const body = JSON.parse(await res.text());
+        expect(body.code).toBe("VENUE_DRAFT_IN_PROGRESS");
+        expect(body.strategy_name).toBe(EXISTING_DRAFT_NAME);
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+      });
     });
 
     it("MT5: a failing holder that is GONE after validation is not swapped: the key is created WITH its identity", async () => {

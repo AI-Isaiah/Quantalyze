@@ -1198,29 +1198,32 @@ describe("PATCH /api/keys/[id]/rotate-secret — Phase 225 plan 08: the login ba
     expect(ADMIN_STATE.updates[0].payload).toHaveProperty("venue_account_id", SYNTHETIC_LOGIN);
   });
 
-  it("a read error keeps today's attempt-then-retry path, with a log line that carries neither the login nor the secret", async () => {
+  // 225 PR-2 review SF-M1 / IN-11 (orchestrator decision 2): INVERTED from "a
+  // read error keeps today's attempt-then-retry path". Once the server-aware
+  // index ships it no longer refuses a second holder, so this read is the only
+  // guard and a fault must fail closed, before the write.
+  it("a read error FAILS CLOSED: 503 before any UPDATE, captured to Sentry, with neither the login nor the secret in any sink", async () => {
     ADMIN_STATE.sameLoginError = {
       message: `permission denied for login ${SYNTHETIC_LOGIN} secret ${SYNTHETIC_NEW_SECRET}`,
       code: "42501",
     };
-    ADMIN_STATE.resultQueue = [
-      {
-        data: null,
-        error: {
-          code: "23505",
-          message:
-            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
-        },
-      },
-      { data: [{ id: KEY_ID }], error: null },
-    ];
+    vi.mocked(captureToSentry).mockClear();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
 
-    expect(res.status).toBe(200);
-    expect(ADMIN_STATE.updates).toHaveLength(2);
-    expect(ADMIN_STATE.updates[0].payload).toHaveProperty("venue_account_id", SYNTHETIC_LOGIN);
-    expect(ADMIN_STATE.updates[1].payload).not.toHaveProperty("venue_account_id");
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(JSON.parse(text).code).toBe("UNKNOWN");
+    expect(text).not.toContain(SYNTHETIC_LOGIN);
+    expect(text).not.toContain(SYNTHETIC_NEW_SECRET);
+    // Nothing was written: the password correction is retried as a whole.
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+    const [, options] = vi.mocked(captureToSentry).mock.calls[0];
+    expect(options.tags?.step).toBe("holder-read");
+    expect(options.secrets).toEqual(
+      expect.arrayContaining([SYNTHETIC_LOGIN, SYNTHETIC_NEW_SECRET]),
+    );
     expect(consoleErr).toHaveBeenCalled();
     const logged = JSON.stringify(consoleErr.mock.calls);
     expect(logged).not.toContain(SYNTHETIC_LOGIN);

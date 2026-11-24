@@ -53,7 +53,7 @@ import { venueLabel } from "@/lib/display-labels";
 // Phase 225 ONEACCOUNTONCE plan 08 — the per-owner, server-aware holder rule
 // shared with the wizard seam (create-with-key) and the daily stamper's twin.
 import {
-  normaliseVenueServer,
+  normaliseConnectedVenueServer,
   pickSameAccountHolder,
   readLiveSameLoginKeys,
   swapAccountSlot,
@@ -781,9 +781,9 @@ async function legacyValidateAndEncryptHandler(args: {
     // server, so the server is stored beside it, normalised (the same
     // normal form the database CHECK and `swap_account_slot` use). A ccxt key
     // has none. The MT5 server is the `passphrase` slot, validated non-blank
-    // above, but `normaliseVenueServer` is total and returns null for an
+    // above, but `normaliseConnectedVenueServer` is total and returns null for an
     // over-length value rather than letting the CHECK refuse the insert.
-    const venueServer = isMt5 ? normaliseVenueServer(passphrase) : null;
+    const venueServer = isMt5 ? normaliseConnectedVenueServer(passphrase) : null;
 
     // Phase 225 (ONCE-01, Q1, D-25, MT5D-08): is this account already held by
     // a live key of THIS owner?
@@ -796,9 +796,11 @@ async function legacyValidateAndEncryptHandler(args: {
     //   - This read, not the unique index, is what refuses a null-server holder
     //     once the server-aware index ships (plan 10): the index alone will not.
     //   - A WORKING holder refuses the add by name before any insert (D-01).
-    //   - A failed read never fails the add: the unique index is still the
-    //     backstop, so it degrades to the behaviour this route had before the
-    //     fence existed.
+    //   - A failed read FAILS CLOSED (225 PR-2 review SF-M1 / IN-11): once the
+    //     server-aware index ships it no longer refuses a write beside a
+    //     null-server holder, so this read is the only thing that does, and a
+    //     fault must not be read as "no holder". 503, retryable, before any
+    //     write.
     let failingHolderId: string | null = null;
     if (venueAccountId !== null) {
       const { rows, error: holderReadError } = await readLiveSameLoginKeys(admin, {
@@ -807,10 +809,27 @@ async function legacyValidateAndEncryptHandler(args: {
         venueAccountId,
       });
       if (holderReadError) {
+        const holderReadSecrets = [api_key, api_secret, passphrase, venueAccountId, venueServer];
         console.error(
-          "[keys/validate-and-encrypt] same-account holder read failed; relying on the unique index:",
+          "[keys/validate-and-encrypt] same-account holder read failed; refusing the add (nothing was written):",
           { correlationId },
-          scrubSeamError(holderReadError, [api_key, api_secret, passphrase, venueAccountId, venueServer]),
+          scrubSeamError(holderReadError, holderReadSecrets),
+        );
+        captureToSentry(holderReadError, {
+          tags: {
+            route: "api/keys/validate-and-encrypt",
+            arm: "persist",
+            step: "holder-read",
+            correlation_id: correlationId,
+          },
+          secrets: holderReadSecrets,
+        });
+        return NextResponse.json(
+          {
+            code: "UNKNOWN",
+            error: "We could not check whether this account is already connected. Please try again.",
+          },
+          { status: 503, headers: NO_STORE_HEADERS },
         );
       } else {
         const holder = pickSameAccountHolder(rows, venueServer, "fence");
@@ -917,8 +936,19 @@ async function legacyValidateAndEncryptHandler(args: {
 
     // Phase 225 (MT5D-08): take the slot from the failing holder. The demotion
     // audit and the recompose enqueue happen inside `swapAccountSlot`
-    // (src/lib/venue-identity.ts). A refused or failed swap never fails the add:
-    // the key is saved, and the daily poll's identity stamper retries it.
+    // (src/lib/venue-identity.ts).
+    // ⭐ A REFUSED OR FAILED SWAP IS A REFUSAL, NOT A SUCCESS (225 PR-2 review
+    // WR-01 + SF-M3, orchestrator decision 1). The key above was inserted with NO
+    // identity, so the unique index cannot back-stop it: leaving it would leave a
+    // second live same-owner key on one account while answering "saved". The
+    // route deletes the key THIS request inserted and answers
+    // `409 KEY_VENUE_ALREADY_CONNECTED`, the same builder as the working-holder
+    // refusal above. Deleting a row this request created is not removing the
+    // user's data. The delete runs only `WHERE venue_account_id IS NULL`: a key a
+    // swap did land on (one that landed and then lost its answer) holds the slot
+    // and must never be deleted, so zero rows deleted means nothing is undone.
+    // Logged with codes only; a delete that itself fails is a Sentry ERROR and the
+    // response is still the 409. No migration, no `p_swap_from_holder`.
     if (failingHolderId !== null && venueAccountId !== null) {
       // @audit-skip: the demotion audit and the recompose land inside swapAccountSlot (src/lib/venue-identity.ts).
       const swap = await swapAccountSlot(admin, {
@@ -932,7 +962,7 @@ async function legacyValidateAndEncryptHandler(args: {
       if (!swap.ok) {
         const swapSecrets = [api_key, api_secret, passphrase, venueAccountId, venueServer];
         console.error(
-          "[keys/validate-and-encrypt] holder swap failed; the key is saved and the daily poll retries it:",
+          "[keys/validate-and-encrypt] holder swap failed; rolling back this request's key:",
           { correlationId },
           scrubSeamError(swap.error, swapSecrets),
         );
@@ -945,6 +975,40 @@ async function legacyValidateAndEncryptHandler(args: {
           },
           secrets: swapSecrets,
         });
+        // @audit-skip: compensating rollback of the key THIS request inserted (the insert it undoes is itself @audit-skip'd above and no user-visible state existed).
+        const { data: removedKeys, error: keyDeleteErr } = await admin
+          .from("api_keys")
+          .delete()
+          .eq("id", inserted.id)
+          .eq("user_id", userId)
+          .is("venue_account_id", null)
+          .select("id");
+        if (keyDeleteErr) {
+          console.error(
+            `[keys/validate-and-encrypt] compensating delete of the new key failed: code=${keyDeleteErr.code}`,
+            { correlationId },
+          );
+          captureToSentry(keyDeleteErr, {
+            tags: {
+              route: "api/keys/validate-and-encrypt",
+              arm: "persist",
+              step: "holder-swap-rollback",
+              correlation_id: correlationId,
+            },
+            secrets: swapSecrets,
+          });
+        } else if ((removedKeys ?? []).length === 0) {
+          console.warn(
+            "[keys/validate-and-encrypt] compensating delete removed no key (already stamped or gone); nothing of this request's was undone",
+            { correlationId },
+          );
+        } else {
+          console.warn(
+            "[keys/validate-and-encrypt] holder swap refused; this request's key was rolled back",
+            { correlationId },
+          );
+        }
+        return keyVenueAlreadyConnectedResponse();
       }
     }
 

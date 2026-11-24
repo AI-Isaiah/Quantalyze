@@ -10,16 +10,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from services.account_identity import (
     MAX_VENUE_SERVER_LENGTH,
+    _mt5_session_server,
     normalise_venue_server,
     pick_same_account_holder,
     same_venue_server,
 )
+from services.mt5_validation import parse_mt5_credentials
 
 _SPEC = json.loads(
     (Path(__file__).parent / "fixtures" / "venue_server_identity.json").read_text(
@@ -30,6 +33,7 @@ _SPEC = json.loads(
 
 def test_the_shared_fixture_is_not_vacuous() -> None:
     assert len(_SPEC["normalise"]) > 0
+    assert len(_SPEC["connect"]) > 0
     assert len(_SPEC["same"]) > 0
     assert len(_SPEC["pick"]) > 0
 
@@ -37,6 +41,17 @@ def test_the_shared_fixture_is_not_vacuous() -> None:
 @pytest.mark.parametrize("case", _SPEC["normalise"], ids=lambda c: repr(c["in"])[:40])
 def test_normalise_venue_server(case: dict[str, Any]) -> None:
     assert normalise_venue_server(case["in"]) == case["out"]
+
+
+@pytest.mark.parametrize("case", _SPEC["connect"], ids=lambda c: repr(c["raw"])[:40])
+def test_connect_raw_passphrase_is_stored_as_the_poll_reads_it(case: dict[str, Any]) -> None:
+    """WR-03, end to end: the RAW connect-time passphrase goes through the real
+    ``parse_mt5_credentials`` (``str.strip()``) and the poll's own session
+    reader, and must equal what the TS connect routes store
+    (``normaliseConnectedVenueServer``)."""
+    _login, _pw, server = parse_mt5_credentials("123456", "pw", case["raw"])
+    session = SimpleNamespace(server=server)
+    assert _mt5_session_server(session) == case["stored"]
 
 
 def test_normalise_counts_code_points_like_the_databases_char_length() -> None:

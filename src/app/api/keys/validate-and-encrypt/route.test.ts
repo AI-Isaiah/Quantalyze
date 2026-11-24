@@ -95,6 +95,13 @@ const {
     rpcCalls: [] as { name: string; args: Record<string, unknown> }[],
     /** The `{ data, error }` every rpc resolves to (null = success). */
     rpcResult: null as { data: unknown; error: unknown } | null,
+    /**
+     * 225 PR-2 review WR-01 — every `.from(table).delete()` chain the route
+     * issued (the compensating rollback of a refused swap), with its filters.
+     */
+    deletes: [] as { table: string; filters: Record<string, unknown> }[],
+    /** The `{ data, error }` a delete resolves to (null = one row removed). */
+    deleteResult: null as { data: unknown; error: unknown } | null,
   },
 }));
 
@@ -161,6 +168,32 @@ vi.mock("@/lib/supabase/admin", () => ({
                   };
               return Promise.resolve(result).then(resolve, reject);
             },
+          };
+          return builder;
+        },
+        delete: () => {
+          const filters: Record<string, unknown> = {};
+          PERSIST_STATE.deletes.push({ table, filters });
+          const builder = {
+            eq: (col: string, val: unknown) => {
+              filters[col] = val;
+              return builder;
+            },
+            is: (col: string, val: unknown) => {
+              filters[`${col}:is`] = val;
+              return builder;
+            },
+            select: (_cols?: string) => builder,
+            then: (
+              resolve: (v: unknown) => unknown,
+              reject: (e: unknown) => unknown,
+            ) =>
+              Promise.resolve(
+                PERSIST_STATE.deleteResult ?? {
+                  data: [{ id: "persisted-key-id" }],
+                  error: null,
+                },
+              ).then(resolve, reject),
           };
           return builder;
         },
@@ -2947,6 +2980,8 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     PERSIST_STATE.sameLoginReads.length = 0;
     PERSIST_STATE.rpcCalls.length = 0;
     PERSIST_STATE.rpcResult = null;
+    PERSIST_STATE.deletes.length = 0;
+    PERSIST_STATE.deleteResult = null;
     process.env.MT5_ENABLED = "true";
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
@@ -2981,6 +3016,8 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     // so the unique index never sees two holders (the failing one still has it).
     expect(PERSIST_STATE.inserts[0].venue_account_id).toBeNull();
     expect(PERSIST_STATE.inserts[0].venue_server).toBeNull();
+    // A swap that lands undoes nothing.
+    expect(PERSIST_STATE.deletes).toEqual([]);
 
     const swaps = PERSIST_STATE.rpcCalls.filter((c) => c.name === "swap_account_slot");
     expect(swaps).toEqual([
@@ -3065,6 +3102,15 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
   });
 
+  it("WR-03: an MT5 add whose server carries no-break-space padding stores the value the Python poll captures (str.strip first)", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add({ passphrase: "\u00a0MetaQuotes-Demo\u00a0" }));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
+  });
+
   it("an okx add carries venue_server null", async () => {
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true, venue_account_id: OKX_UID });
     const { POST } = await import("./route");
@@ -3104,7 +3150,11 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
   });
 
   // ── the dark fence ─────────────────────────────────────────────────────────
-  it("a same-login read that errors still inserts, and the logged line contains neither the login nor the server", async () => {
+  // 225 PR-2 review SF-M1 / IN-11 (orchestrator decision 2): INVERTED from "a
+  // same-login read that errors still inserts". Once the server-aware index
+  // ships it no longer refuses a write beside a null-server holder, so this read
+  // is the only thing that does and a fault must fail closed.
+  it("a same-login read that errors FAILS CLOSED: 503 before any insert, captured to Sentry, and neither the login nor the server in any sink", async () => {
     PERSIST_STATE.sameLoginError = {
       message: `permission denied reading login ${LOGIN} on ${SERVER_RAW}`,
       code: "42501",
@@ -3113,9 +3163,21 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const { POST } = await import("./route");
     const res = await POST(mt5Add());
 
-    expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(LOGIN);
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(JSON.parse(text).code).toBe("UNKNOWN");
+    expect(text).not.toContain(LOGIN);
+    expect(text).not.toContain(SERVER_RAW);
+    // Nothing was written: no insert, no swap.
+    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    expect(captureSpy.mock.calls[0][1].tags.step).toBe("holder-read");
+    // The login and the server ride the scrub list, so the real leaf removes
+    // them from the Sentry payload.
+    expect(captureSpy.mock.calls[0][1].secrets).toEqual(
+      expect.arrayContaining([LOGIN, SERVER_RAW]),
+    );
     expect(consoleErr).toHaveBeenCalled();
     const logged = JSON.stringify(consoleErr.mock.calls);
     expect(logged).not.toContain(LOGIN);
@@ -3124,25 +3186,91 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     consoleErr.mockRestore();
   });
 
-  // ── D-25: a failed swap is loud and never a failed add ─────────────────────
-  it("a failed holder swap is logged at ERROR with a holder-swap Sentry step, and the key is still saved", async () => {
+  // ── WR-01 + SF-M3 (225 PR-2 review, orchestrator decision 1): a refused or
+  // failed swap is a refusal, undone in code. INVERTED from "a failed holder
+  // swap ... and the key is still saved", which answered 200 over a second live
+  // same-owner key the unique index could not catch (the admitted insert carries
+  // no identity).
+  function refusedSwap() {
     PERSIST_STATE.sameLoginRows = [holderRow({ sync_status: "sign_in_failed" })];
     PERSIST_STATE.rpcResult = {
       data: null,
       error: { message: `ACCOUNT_SLOT_HOLDER_WORKING for ${LOGIN} on ${SERVER_RAW}`, code: "55000" },
     };
+  }
+  const KEY_VENUE_ALREADY_CONNECTED_BODY =
+    '{"code":"KEY_VENUE_ALREADY_CONNECTED","error":"This exchange account is already connected on your account. Use the key you already have, or disconnect it first."}';
+
+  it("a refused swap rolls back the key THIS request inserted and answers 409 KEY_VENUE_ALREADY_CONNECTED, byte-exact, never 200", async () => {
+    refusedSwap();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+    expect(text).not.toContain("persisted-key-id");
+    // The delete targets exactly the inserted key, for this owner, and only
+    // while it is still unstamped (a key a swap landed on is never deleted).
+    expect(PERSIST_STATE.deletes).toEqual([
+      {
+        table: "api_keys",
+        filters: { id: "persisted-key-id", user_id: TEST_USER.id, "venue_account_id:is": null },
+      },
+    ]);
+    // The swap failure is still captured (Rule 12) and is the ONLY capture: the
+    // rollback itself succeeded.
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    expect(captureSpy.mock.calls[0][1].tags.step).toBe("holder-swap");
+    // No login or server in any sink; the rollback line carries codes only.
+    const logged = JSON.stringify([consoleErr.mock.calls, consoleWarn.mock.calls]);
+    expect(logged).toContain("holder swap failed");
+    expect(logged).toContain("rolled back");
+    expect(logged).not.toContain(LOGIN);
+    expect(logged).not.toContain(SERVER_RAW);
+    expect(logged).not.toContain(SERVER_NORMALISED);
+    consoleErr.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("a compensating delete that ITSELF fails is a Sentry ERROR (holder-swap-rollback) and the response is still the 409", async () => {
+    refusedSwap();
+    PERSIST_STATE.deleteResult = {
+      data: null,
+      error: { message: `could not delete login ${LOGIN} on ${SERVER_RAW}`, code: "XX000" },
+    };
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     const { POST } = await import("./route");
     const res = await POST(mt5Add());
 
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ api_key_id: "persisted-key-id", valid: true, read_only: true });
-    expect(captureSpy).toHaveBeenCalledTimes(1);
-    expect(captureSpy.mock.calls[0][1].tags.step).toBe("holder-swap");
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
+    expect(captureSpy.mock.calls.map((c) => c[1].tags.step)).toEqual([
+      "holder-swap",
+      "holder-swap-rollback",
+    ]);
     const logged = JSON.stringify(consoleErr.mock.calls);
-    expect(logged).toContain("holder swap failed");
+    expect(logged).toContain("code=XX000");
     expect(logged).not.toContain(LOGIN);
     expect(logged).not.toContain(SERVER_RAW);
     consoleErr.mockRestore();
+  });
+
+  it("a compensating delete that removes no row (the key was already stamped by a swap that landed) deletes nothing more and still answers 409", async () => {
+    refusedSwap();
+    PERSIST_STATE.deleteResult = { data: [], error: null };
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(409);
+    expect(PERSIST_STATE.deletes).toHaveLength(1);
+    expect(JSON.stringify(consoleWarn.mock.calls)).toContain("removed no key");
+    // Not a rollback failure: nothing was paged beyond the swap itself.
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    consoleWarn.mockRestore();
   });
 });

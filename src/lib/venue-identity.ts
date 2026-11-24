@@ -19,7 +19,8 @@ import { logAuditEventAsUser } from "@/lib/audit";
  * toward REFUSING a connect, which is the safe side: a missed duplicate is the
  * failure this phase exists to prevent, a refused look-alike is a retry.
  *
- * NORMAL FORM, agreed by three implementations. Space, tab, CR and LF are
+ * NORMAL FORM, agreed by three implementations (the FUNCTIONS; their INPUT at
+ * connect time is `normaliseConnectedVenueServer`'s, below). Space, tab, CR and LF are
  * trimmed from both ends, then the text is lower-cased, and blank becomes null.
  * That is the SQL `NULLIF(lower(btrim(x, E' \t\r\n')), '')` of
  * `swap_account_slot` and the CHECK `api_keys_venue_server_valid`, NOT
@@ -47,6 +48,11 @@ export const MAX_VENUE_SERVER_LENGTH = 128;
 
 const EDGE_WHITESPACE = /^[ \t\r\n]+|[ \t\r\n]+$/g;
 
+// Python's `str.strip()` whitespace, enumerated from `chr(c).isspace()` over every
+// code point (29 of them). It is NOT JavaScript's `\s`/`trim()`: Python also strips
+// U+001C-U+001F and U+0085, and JavaScript also strips U+FEFF, which Python keeps.
+const PYTHON_EDGE_WHITESPACE = /^[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+
 /**
  * Normalise a raw broker server to the stored form, or null. Total: never
  * throws, never stringifies a non-string.
@@ -58,6 +64,22 @@ export function normaliseVenueServer(raw: unknown): string | null {
   // Spread counts code points, as the database's char_length does.
   if ([...text].length > MAX_VENUE_SERVER_LENGTH) return null;
   return text;
+}
+
+/**
+ * The stored server for a raw connect-time broker server (the MT5 `passphrase`
+ * slot). The Python seam strips the raw value with `str.strip()` before it
+ * validates it (`parse_mt5_credentials`), and the daily poll normalises that
+ * stripped value, so the connect routes strip the same set first and then
+ * normalise. Without it a server pasted with a trailing no-break space is stored
+ * as `srv<NBSP>` here and read as `srv` by every poll, so the two writers treat
+ * one broker server as two. ONE rule, stated once: this function, replayed
+ * end to end by the `connect` cases of the shared fixture. Never stringifies a
+ * non-string.
+ */
+export function normaliseConnectedVenueServer(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  return normaliseVenueServer(raw.replace(PYTHON_EDGE_WHITESPACE, ""));
 }
 
 /** Two servers are the same account when equal or when either is null. */
