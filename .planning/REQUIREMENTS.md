@@ -338,14 +338,14 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | FIG-03 | Phase 236 | Pending |
 | FIG-04 | Phase 236 | Pending |
 | FIG-05 | Phase 236 | Pending |
-| FACT-01 | Phase 237 | Pending |
-| FACT-02 | Phase 237 | Pending |
+| FACT-01 | Phase 237 | Shipped (#1316), human verification pending |
+| FACT-02 | Phase 237 | Shipped (#1316), human verification pending |
 | FACT-03 | Phase 238 | Pending |
-| FACT-04 | Phase 237 | Pending |
+| FACT-04 | Phase 237 | Shipped (#1316), human verification pending |
 | FACT-05 | Phase 238 | Pending |
-| CACHE-01 | Phase 237 | Pending |
+| CACHE-01 | Phase 237 | Shipped (#1316), human verification pending |
 | CACHE-02 | Phase 239 | Pending |
-| CACHE-03 | Phase 237 | Pending |
+| CACHE-03 | Phase 237 | Shipped (#1316), human verification pending |
 | CACHE-04 | Phase 239 | Pending |
 | CONN-01 | Phase 225 | Pending |
 | CONN-02 | Phase 228 | Pending |
