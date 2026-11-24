@@ -55,6 +55,7 @@ class _Call:
     op: str  # "select" | "update"
     payload: dict[str, Any] | None
     filters: list[tuple[str, str, Any]] = field(default_factory=list)
+    cols: str | None = None
 
 
 class _Query:
@@ -62,8 +63,9 @@ class _Query:
         self._sb = sb
         self._call = _Call(table=table, op="select", payload=None)
 
-    def select(self, _cols: str) -> _Query:
+    def select(self, cols: str) -> _Query:
         self._call.op = "select"
+        self._call.cols = cols
         return self
 
     def update(self, payload: dict[str, Any]) -> _Query:
@@ -179,7 +181,30 @@ def _key_row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
-def _collision_responder(holder_id: str | None = HOLDER_ID) -> Callable[[_Call], Any]:
+def _holder_row(holder_id: str = HOLDER_ID, **overrides: Any) -> dict[str, Any]:
+    """A same-owner holder as the look-up now returns it: the FULL row.
+
+    Phase 225 plan 09. ``working_holder_predicate`` treats a missing field as NOT
+    working, so a holder row of ``{"id": ...}`` only would read as failing and be
+    swapped out. The default is a WORKING, unmarked, server-less holder, which
+    keeps every pre-existing collision case meaning what it always meant.
+    """
+    row: dict[str, Any] = {
+        "id": holder_id,
+        "venue_server": None,
+        "is_active": True,
+        "sync_status": "complete",
+        "disconnected_at": None,
+        "account_shared_with_api_key_id": None,
+        "account_share_kind": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _collision_responder(
+    holder_id: str | None = HOLDER_ID, **holder_overrides: Any
+) -> Callable[[_Call], Any]:
     """The stamp UPDATE hits the index; the holder look-up finds ``holder_id``."""
 
     def _r(call: _Call) -> Any:
@@ -188,7 +213,9 @@ def _collision_responder(holder_id: str | None = HOLDER_ID) -> Callable[[_Call],
         ).get("venue_account_id") is not None:
             return _unique_violation()
         if call.table == "api_keys" and call.op == "select":
-            return MagicMock(data=[{"id": holder_id}] if holder_id else [])
+            return MagicMock(
+                data=[_holder_row(holder_id, **holder_overrides)] if holder_id else []
+            )
         return None
 
     return _r
@@ -1456,7 +1483,7 @@ def _mt5_collision_responder() -> Callable[[_Call], Any]:
         ).get("venue_account_id") is not None:
             return _mt5_unique_violation()
         if call.table == "api_keys" and call.op == "select":
-            return MagicMock(data=[{"id": HOLDER_ID}])
+            return MagicMock(data=[_holder_row()])
         return None
 
     return _r
@@ -2098,3 +2125,54 @@ async def test_a_slow_mt5_poll_still_stamps_its_key(monkeypatch: pytest.MonkeyPa
 
     assert result.outcome == jw.DispatchOutcome.DONE
     assert _MT5_STAMP in sb.updates()
+
+
+# ---------------------------------------------------------------------------
+# Phase 225 plan 09 (D-25, MT5D-08, Q1) — a working key takes the slot from a
+# failing holder
+# ---------------------------------------------------------------------------
+#
+# The connect routes fence a NEW key; they never see a pair that already exists.
+# The daily poll's stamper does: a key whose stamp the identity index refuses
+# meets the live key that holds the account. When that holder is NOT working
+# (D-18) and this key IS, the account moves to the key that works through the one
+# database function ``swap_account_slot``, so a failing key beside a working one
+# for the same account ends with the working key holding the slot whichever of
+# the two was stamped first. Nothing is disconnected or deleted.
+
+FAILING_STATUS = "sign_in_failed"
+
+
+async def test_a_working_key_takes_the_slot_from_the_owners_failing_holder(
+    audit_mock: MagicMock,
+) -> None:
+    sb = FakeSupabase(_collision_responder(sync_status=FAILING_STATUS))
+
+    outcome = await _stamp(sb, _key_row(), _okx_exchange())
+
+    assert outcome == "swapped_holder"
+    # Exactly one swap, naming the stamped key, the holder and the account.
+    swaps = [(n, p) for n, p in sb.rpc_calls if n == "swap_account_slot"]
+    assert swaps == [(
+        "swap_account_slot",
+        {"p_new_key": KEY_ID, "p_old_holder": HOLDER_ID, "p_venue_account_id": ACCOUNT_ID},
+    )]
+    # The holder read is one owner's: a holder of another owner is never read
+    # (T-225-28), and it carries every field the D-18 predicate needs.
+    (look,) = [c for c in sb.calls if c.table == "api_keys" and c.op == "select"]
+    assert ("eq", "user_id", OWNER_ID) in look.filters
+    assert look.cols is not None
+    for col in ("is_active", "sync_status", "disconnected_at", "venue_server"):
+        assert col in look.cols
+    # The demoted key is the audited one, naming the stamped key as its holder.
+    audit_mock.assert_called_once()
+    kwargs = audit_mock.call_args.kwargs
+    assert kwargs["action"] == ai.DUPLICATE_DETECTED_AUDIT_ACTION
+    assert kwargs["entity_id"] == HOLDER_ID
+    assert kwargs["user_id"] == OWNER_ID
+    assert kwargs["metadata"] == {"venue": "okx", "holder_api_key_id": KEY_ID}
+    # One recompose, after the swap.
+    assert [n for n, _p in sb.rpc_calls] == ["swap_account_slot", "enqueue_compute_job"]
+    assert sb.rpc_calls[1] == _RECOMPOSE
+    # The RPC writes the marker: the stamper itself writes no share kind.
+    assert [u for u in sb.updates() if u.get("account_share_kind") is not None] == []
