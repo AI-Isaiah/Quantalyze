@@ -3113,7 +3113,11 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
   });
 
   // ── the dark fence ─────────────────────────────────────────────────────────
-  it("a same-login read that errors still inserts, and the logged line contains neither the login nor the server", async () => {
+  // 225 PR-2 review SF-M1 / IN-11 (orchestrator decision 2): INVERTED from "a
+  // same-login read that errors still inserts". Once the server-aware index
+  // ships it no longer refuses a write beside a null-server holder, so this read
+  // is the only thing that does and a fault must fail closed.
+  it("a same-login read that errors FAILS CLOSED: 503 before any insert, captured to Sentry, and neither the login nor the server in any sink", async () => {
     PERSIST_STATE.sameLoginError = {
       message: `permission denied reading login ${LOGIN} on ${SERVER_RAW}`,
       code: "42501",
@@ -3122,9 +3126,21 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const { POST } = await import("./route");
     const res = await POST(mt5Add());
 
-    expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(LOGIN);
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(JSON.parse(text).code).toBe("UNKNOWN");
+    expect(text).not.toContain(LOGIN);
+    expect(text).not.toContain(SERVER_RAW);
+    // Nothing was written: no insert, no swap.
+    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    expect(captureSpy.mock.calls[0][1].tags.step).toBe("holder-read");
+    // The login and the server ride the scrub list, so the real leaf removes
+    // them from the Sentry payload.
+    expect(captureSpy.mock.calls[0][1].secrets).toEqual(
+      expect.arrayContaining([LOGIN, SERVER_RAW]),
+    );
     expect(consoleErr).toHaveBeenCalled();
     const logged = JSON.stringify(consoleErr.mock.calls);
     expect(logged).not.toContain(LOGIN);

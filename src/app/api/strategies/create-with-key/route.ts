@@ -198,8 +198,14 @@ function pickPlaceholderCodename(): string {
  *                    move back is MT5D-08 itself (plan 09), and a demoted key that
  *                    still carries its own strategy is the shape Q1 accepts.
  *
- *   · `unresolved` — genuinely nothing to say: no live key, a read fault, or no
- *                    service-role credential. Fall through.
+ *   · `unresolved` — genuinely nothing to say: no live key, a strategy-read
+ *                    fault, or no service-role credential. Fall through.
+ *
+ *   · `read_failed` — 225 PR-2 review SF-M1 / IN-11. The same-login `api_keys`
+ *                    read itself failed: NOT "nothing to say", because that read
+ *                    is what refuses a same-owner duplicate once the server-aware
+ *                    index ships. The pre- and post-validation fences answer a
+ *                    retryable 503 before any write.
  *
  * ⭐ PER OWNER, ONLY (225-11, ONCE-02, Q3). Every member is decided from keys the
  * CALLER owns: `readLiveSameLoginKeys` filters on `user_id`, so another owner's
@@ -245,7 +251,14 @@ type VenueIdentityResolution =
   // Q1 admits a working key even when the failing holder carries a strategy.
   // Carries the holder id and nothing else: a refusal never needs it and no
   // response body may echo it.
-  | { kind: "failing_holder"; holderId: string };
+  | { kind: "failing_holder"; holderId: string }
+  // 225 PR-2 review SF-M1 / IN-11 (orchestrator decision 2) — the same-login
+  // `api_keys` read itself FAILED, so nothing is known about whether the owner
+  // already holds this account. It is NOT `unresolved`: once the server-aware
+  // index ships a null-server holder no longer collides, so proceeding on a read
+  // fault could admit a second live same-owner key. The pre- and post-validation
+  // fences answer a retryable 503 before any write. Carries nothing.
+  | { kind: "read_failed" };
 
 const UNRESOLVED: VenueIdentityResolution = { kind: "unresolved" };
 
@@ -283,21 +296,28 @@ async function resolveByVenueIdentity(
     });
 
     if (liveKeyErr) {
-      // Same posture as the session fence's failed read (Rule 12): surface that
-      // the cheap pre-Railway short-circuit went dark, then fall through.
+      // FAIL CLOSED (225 PR-2 review SF-M1 / IN-11). This read is what refuses a
+      // same-owner duplicate once the server-aware index ships, so a read fault
+      // must not be read as "no holder". The callers answer a retryable 503
+      // before any write; the race arm, which runs only after the index refused
+      // the INSERT, keeps its refusal fall-through.
       // ⛔ The error is scrubbed WITH this request's secrets because a PostgREST
       // error can echo the filter values back — and one of those filter values
       // is the login. Per-request candidates are redacted regardless of length
       // (the MIN_REDACTABLE_SECRET_LENGTH floor applies to ENV candidates only),
       // so a 6-digit MT5 login is genuinely removed and not merely reported.
       console.error(
-        "[strategies/create-with-key] venue-identity fence SELECT failed; proceeding to RPC (DB index still dedups):",
+        "[strategies/create-with-key] venue-identity fence SELECT failed; refusing the submit (nothing was written):",
         scrubSeamError(liveKeyErr, secrets),
         typeof liveKeyErr === "object" && liveKeyErr !== null && "code" in liveKeyErr
           ? (liveKeyErr as { code?: unknown }).code
           : undefined,
       );
-      return UNRESOLVED;
+      captureToSentry(liveKeyErr, {
+        tags: { surface: "strategies-create-with-key", step: "holder-read" },
+        secrets,
+      });
+      return { kind: "read_failed" };
     }
 
     // The server rule (Q2): an exact server first, then a null-server key; a
@@ -646,6 +666,23 @@ function keyVenueAlreadyConnectedResponse(): NextResponse {
         "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
     },
     { status: 409, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
+ * 225 PR-2 review SF-M1 / IN-11 — THE ONE "WE COULD NOT CHECK THIS ACCOUNT" BODY,
+ * answered by the pre- and post-validation fences when the same-login read
+ * failed. 503, retryable, and returned before any write. `UNKNOWN` is the
+ * recoverable catch-all the wizard already maps; no new code is minted. It takes
+ * no parameters, so no login, server or id can leak into it.
+ */
+function holderReadFailedResponse(): NextResponse {
+  return NextResponse.json(
+    {
+      code: "UNKNOWN",
+      error: "We could not check whether this account is already connected. Please try again.",
+    },
+    { status: 503, headers: NO_STORE_HEADERS },
   );
 }
 
@@ -1435,6 +1472,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId, venueServer],
       "fence",
     );
+    if (venueMatch.kind === "read_failed") return holderReadFailedResponse();
     if (venueMatch.kind === "failing_holder") {
       // Q1 — NOT a refusal. The holder is not working, so its slot is
       // available to a key that proves itself: fall through to `validateKey`
@@ -1596,6 +1634,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         "fence",
       );
       failingHolderId = postMatch.kind === "failing_holder" ? postMatch.holderId : null;
+      if (postMatch.kind === "read_failed") return holderReadFailedResponse();
       if (postMatch.kind === "draft") {
         return venueDraftInProgressResponse(postMatch.strategyName);
       }

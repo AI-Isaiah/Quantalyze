@@ -796,9 +796,11 @@ async function legacyValidateAndEncryptHandler(args: {
     //   - This read, not the unique index, is what refuses a null-server holder
     //     once the server-aware index ships (plan 10): the index alone will not.
     //   - A WORKING holder refuses the add by name before any insert (D-01).
-    //   - A failed read never fails the add: the unique index is still the
-    //     backstop, so it degrades to the behaviour this route had before the
-    //     fence existed.
+    //   - A failed read FAILS CLOSED (225 PR-2 review SF-M1 / IN-11): once the
+    //     server-aware index ships it no longer refuses a write beside a
+    //     null-server holder, so this read is the only thing that does, and a
+    //     fault must not be read as "no holder". 503, retryable, before any
+    //     write.
     let failingHolderId: string | null = null;
     if (venueAccountId !== null) {
       const { rows, error: holderReadError } = await readLiveSameLoginKeys(admin, {
@@ -807,10 +809,27 @@ async function legacyValidateAndEncryptHandler(args: {
         venueAccountId,
       });
       if (holderReadError) {
+        const holderReadSecrets = [api_key, api_secret, passphrase, venueAccountId, venueServer];
         console.error(
-          "[keys/validate-and-encrypt] same-account holder read failed; relying on the unique index:",
+          "[keys/validate-and-encrypt] same-account holder read failed; refusing the add (nothing was written):",
           { correlationId },
-          scrubSeamError(holderReadError, [api_key, api_secret, passphrase, venueAccountId, venueServer]),
+          scrubSeamError(holderReadError, holderReadSecrets),
+        );
+        captureToSentry(holderReadError, {
+          tags: {
+            route: "api/keys/validate-and-encrypt",
+            arm: "persist",
+            step: "holder-read",
+            correlation_id: correlationId,
+          },
+          secrets: holderReadSecrets,
+        });
+        return NextResponse.json(
+          {
+            code: "UNKNOWN",
+            error: "We could not check whether this account is already connected. Please try again.",
+          },
+          { status: 503, headers: NO_STORE_HEADERS },
         );
       } else {
         const holder = pickSameAccountHolder(rows, venueServer, "fence");

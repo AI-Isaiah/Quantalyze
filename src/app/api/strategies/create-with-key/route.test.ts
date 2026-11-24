@@ -1888,19 +1888,60 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
-  it("a fence READ FAULT falls through to the RPC and never 500s (the DB index still dedups)", async () => {
+  // 225 PR-2 review SF-M1 / IN-11 (orchestrator decision 2): INVERTED from "a
+  // fence READ FAULT falls through to the RPC and never 500s (the DB index still
+  // dedups)". Once the server-aware index ships it no longer refuses a write
+  // beside a null-server holder, so this read is the only guard: a fault answers
+  // a retryable 503 before validation, encryption and every write.
+  it("a fence READ FAULT FAILS CLOSED: 503 before validate, encrypt and the RPC, captured to Sentry, with neither login nor server in any sink", async () => {
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     venueKeyLookupMock.mockResolvedValue({
       data: null,
-      error: { code: "42501", message: "permission denied for table api_keys" },
+      error: {
+        code: "42501",
+        message: `permission denied reading login ${MT5_LOGIN} on MetaQuotes-Demo`,
+      },
     });
 
     const POST = await importPost();
     const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-    expect(res.status).toBe(200);
-    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(JSON.parse(text).code).toBe("UNKNOWN");
+    expect(text).not.toContain(MT5_LOGIN);
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(sentryState.captured).toHaveLength(1));
+    expect(sentryState.captured[0].options.tags?.step).toBe("holder-read");
+    const sink = JSON.stringify([sentryState.captured, consoleErr.mock.calls]);
+    expect(sink).not.toContain(MT5_LOGIN);
+    expect(sink.toLowerCase()).not.toContain("metaquotes-demo");
     expect(consoleErr).toHaveBeenCalled();
+  });
+
+  it("a POST-validation read fault FAILS CLOSED the same way: 503 before encrypt and the RPC (the pre-validation read was clean)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    venueKeyLookupMock
+      .mockResolvedValueOnce({ data: null, error: null })
+      .mockResolvedValue({
+        data: null,
+        error: { code: "42501", message: "permission denied for table api_keys" },
+      });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(503);
+    expect(JSON.parse(await res.text()).code).toBe("UNKNOWN");
+    // Validation had run (it is what the post-validation read follows); nothing
+    // after it did.
+    expect(validateKeyMock).toHaveBeenCalledTimes(1);
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(sentryState.captured).toHaveLength(1));
+    expect(sentryState.captured[0].options.tags?.step).toBe("holder-read");
   });
 
   it("the SECOND read faulting degrades the same way — a live key with an unreadable strategy still submits", async () => {

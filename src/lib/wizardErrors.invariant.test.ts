@@ -503,12 +503,16 @@ const ROUTES: readonly RouteUnderTest[] = [
     // REQUIRED_FIELD` is now emitted THREE times on this route. No new code:
     // the distinct-code count and the roster are unchanged, and `rosterFloor`
     // stays 4.
+    // 13 -> 14 (225 PR-2 review SF-M1 / IN-11): one more `UNKNOWN` emitter, the
+    // retryable 503 answered when the same-login holder read fails, before any
+    // write. `UNKNOWN` is already emitted here and is already in the roster: no
+    // new code, so the distinct-code count and `rosterFloor` are unchanged.
     label: "keys/validate-and-encrypt",
     route: join(REPO, "src/app/api/keys/validate-and-encrypt/route.ts"),
     rosterFile: join(REPO, "src", "lib", "wizardErrors.ts"),
     rosterName: "KNOWN_VALIDATE_AND_ENCRYPT_CODES",
     statusRe: "[45]\\d\\d",
-    expectedSites: 13,
+    expectedSites: 14,
     // 8 measured members as of 164.5.3-02 (7 until then; 6 until 164.2-05
     // admitted `RATE_LIMITED`); ~60% of 8 is 4.8, which still floors at 4 — the
     // SAME literal this row was already pinned at, unmoved on purpose. This
