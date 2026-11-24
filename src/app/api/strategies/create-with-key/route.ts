@@ -315,9 +315,6 @@ async function resolveByVenueIdentity(
       console.error(
         "[strategies/create-with-key] venue-identity fence SELECT failed; refusing the submit (nothing was written):",
         scrubSeamError(liveKeyErr, secrets),
-        typeof liveKeyErr === "object" && liveKeyErr !== null && "code" in liveKeyErr
-          ? (liveKeyErr as { code?: unknown }).code
-          : undefined,
       );
       captureToSentry(liveKeyErr, {
         tags: { surface: "strategies-create-with-key", step: "holder-read" },
