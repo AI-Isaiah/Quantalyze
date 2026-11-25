@@ -207,6 +207,27 @@ export async function swapAccountSlot(
     return { ok: false, error };
   }
 
+  await afterSlotSwap(admin, args);
+  return { ok: true };
+}
+
+/**
+ * The follow-up of a slot swap that landed: audit the demoted key as a
+ * duplicate and queue a recompose. `swapAccountSlot` runs it on a clean RPC
+ * answer; the two persist routes run it when the RPC errored yet the key is
+ * found stamped (a swap that committed and lost its answer, 225 N3-1), so that
+ * path does not skip the audit and the recompose. Neither step can undo a swap
+ * that landed.
+ */
+export async function afterSlotSwap(
+  admin: SupabaseClient,
+  args: {
+    userId: string;
+    exchange: string;
+    newKeyId: string;
+    oldHolderId: string;
+  },
+): Promise<void> {
   logAuditEventAsUser(admin, args.userId, {
     action: "api_key.account_duplicate_detected",
     entity_type: "api_key",
@@ -233,5 +254,4 @@ export async function swapAccountSlot(
       `[venue-identity] recompose enqueue after a slot swap threw for api_key ${args.oldHolderId}: code=${errorCode(error)}`,
     );
   }
-  return { ok: true };
 }

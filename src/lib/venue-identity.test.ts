@@ -15,6 +15,7 @@ vi.mock("@/lib/audit", () => auditMock);
 
 import {
   MAX_VENUE_SERVER_LENGTH,
+  afterSlotSwap,
   normaliseConnectedVenueServer,
   normaliseVenueServer,
   pickSameAccountHolder,
@@ -256,6 +257,28 @@ describe("swapAccountSlot", () => {
       fn: "enqueue_compute_job",
       args: { p_strategy_id: null, p_allocator_id: OWNER, p_kind: "derive_allocator_equity" },
     });
+  });
+
+  it("afterSlotSwap alone audits the demoted key and asks for a recompose, with no swap RPC (the routes call it for a swap that landed and lost its answer)", async () => {
+    const { admin, rpcCalls } = rpcAdmin({});
+    await afterSlotSwap(admin, {
+      userId: OWNER,
+      exchange: "mt5",
+      newKeyId: NEW_KEY,
+      oldHolderId: OLD_HOLDER,
+    });
+    expect(auditMock.logAuditEventAsUser).toHaveBeenCalledWith(admin, OWNER, {
+      action: "api_key.account_duplicate_detected",
+      entity_type: "api_key",
+      entity_id: OLD_HOLDER,
+      metadata: { venue: "mt5", holder_api_key_id: NEW_KEY },
+    });
+    expect(rpcCalls).toEqual([
+      {
+        fn: "enqueue_compute_job",
+        args: { p_strategy_id: null, p_allocator_id: OWNER, p_kind: "derive_allocator_equity" },
+      },
+    ]);
   });
 
   it("returns { ok: false, error } on an RPC error and neither audits nor enqueues", async () => {

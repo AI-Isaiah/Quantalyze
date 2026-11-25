@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.133.74.1] - 2026-11-25 — Phase 225 ONEACCOUNTONCE N3-1: a slot swap that landed but lost its answer still audits and recomposes
+
+Vercel edge only (`src/lib/venue-identity.ts`, the `validate-and-encrypt` and `create-with-key` routes). No migration, no visual change. Built from two commits: `fix(225): N3-1 audit and recompose a slot swap that landed and lost its answer` and a comment-only follow-up naming both shapes the arm covers.
+
+### Fixed
+- **A slot swap whose RPC committed but whose answer was lost now runs the same follow-up as a clean swap.** Before, the two persist routes' zero-row rollback re-read the key, found it stamped and answered success (`swapLanded`) without the demotion audit row (`api_key.account_duplicate_detected`) or the `derive_allocator_equity` enqueue. The composed curve could then count the account under the demoted key until some later compose. The follow-up moved out of `swapAccountSlot` into a new exported `afterSlotSwap`, which `swapAccountSlot` calls on a clean answer and both routes call on the `swapLanded` arm. Allocator-scoped in-flight dedup absorbs a double enqueue. Neither step can undo a swap that landed.
+
+### Notes
+- **The `swapLanded` arm is also reached by a same-session replay** (a double submit whose first request already swapped and audited). There the recompose enqueue is deduped but the `api_key.account_duplicate_detected` audit row is written a second time for the same demotion. This is the accepted cost of the coordinator's decision to audit on that arm; nothing reads that audit action today. The comment at both call sites names both shapes (silent-failure review, MEDIUM, accepted).
+
+### Tests
+- One route test per persist route, where the RPC errors, the rollback delete removes zero rows and the re-read finds the key stamped, asserts the audit and the enqueue. A `venue-identity.test.ts` case pins `afterSlotSwap` directly. Each was proven able to fail (PROOF-01) in the phase records.
+
+### Removed
+- `TODOS.md` entry `[225-SWAPLANDED-NO-RECOMPOSE]` deleted, whole, as closed by this ship (PR-2 review round 3, SFH N3-1 / IN-18). No live pointer outside `.planning/` named it.
+
 ## [0.133.74.0] - 2026-11-24 — Phase 240 CONNECTTRUTH: validating a key or a CSV gets a true answer, and anonymous and CSV traffic get their own rate tiers
 
 Analytics service (`routers/process_key.py`, `routers/exchange.py`, `routers/internal.py`, `services/rate_limit.py`, `services/csv_validator.py`, `services/error_contract.py`, `services/app_error_handlers.py`, `docs/STATUS_CONTRACT.md`) and the Vercel edge (`src/lib/tenant-claim.ts`, `process-key-client.ts`, `ratelimit.ts`, `wizardErrors.ts`, the `verify-strategy` and `csv-finalize` routes). No migration, no visual change. Covers CONN-05, CONN-06, RLIM-01 and RLIM-02, per the founder rulings of 2026-11-24. Built from 30 phase commits (eight plans, their five merge commits, two docs fixes, one test pin, one security fix and two review fixes), each mapped below by hash.
