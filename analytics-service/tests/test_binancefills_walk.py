@@ -159,3 +159,219 @@ class TestBinanceFillsWindowWalk:
         assert calls[0]["startTime"] == REACH_START_MS
         assert all(request["startTime"] >= REACH_START_MS for request in calls), calls
         assert _ids(fills) == {"2"}
+
+    async def test_no_request_spans_more_than_one_window(
+        self, open_exchanges: list[Any]
+    ) -> None:
+        """SC-1 (CONTEXT [Window walk, R2-02] "Shape of the fix?"): the venue refuses a span
+        over 7 days (futures), so every request carries both bounds and spans at most
+        7 days - 1 ms (604799999). The seed is 2026-10-21T12:00:00Z, 30 days before the
+        clock, so the read is several windows long; the venue fake raises on a longer span, which
+        would hold the symbol, so the assertion is on the calls the venue actually received."""
+        c_ms = 1792584000000  # 2026-10-21T12:00:00Z
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [
+                    venue_fill("linear", "BTCUSDT", 1, c_ms),
+                    venue_fill("linear", "BTCUSDT", 2, NOW_MS - 3 * DAY_MS),
+                ]
+            }
+        )
+
+        fills, flags = await _read(open_exchanges, venue, ["BTCUSDT"], c_ms)
+
+        calls = venue.calls_for("linear")
+        assert len(calls) >= 4, "a 30-day read must take several 7-day windows"
+        for request in calls:
+            assert "startTime" in request and "endTime" in request, request
+            assert 0 < request["endTime"] - request["startTime"] <= 604799999, request
+        assert _ids(fills) == {"1", "2"}
+        assert "binance_partial_symbols" not in flags
+
+    async def test_a_fill_on_a_window_boundary_is_read_with_an_exclusive_end(
+        self, open_exchanges: list[Any]
+    ) -> None:
+        """SC-1: whether the venue's `endTime` is inclusive is UNMEASURED. With an exclusive
+        end, a fill exactly on the first window's last millisecond belongs to no window unless
+        the next window starts at (not after) the previous end, the 1 ms overlap the trades
+        unique index absorbs. The first window starts one overlap hour before the seed
+        (2026-10-21T11:00:00Z = 1792580400000), so it ends at
+        1792580400000 + 604799999 = 1793185199999 (2026-10-28T10:59:59.999Z)."""
+        c_ms = 1792584000000  # 2026-10-21T12:00:00Z
+        first_end_ms = 1793185199999  # 2026-10-28T10:59:59.999Z
+        venue = BinanceFillsVenue(
+            {("linear", "BTCUSDT"): [venue_fill("linear", "BTCUSDT", 7, first_end_ms)]},
+            exclusive_end=True,
+        )
+
+        fills, flags = await _read(open_exchanges, venue, ["BTCUSDT"], c_ms)
+
+        calls = venue.calls_for("linear")
+        assert calls[0]["endTime"] == first_end_ms, "the first window ends where the fixture says"
+        assert "7" in _ids(fills), "the fill on the first window's end was never read"
+        assert "binance_partial_symbols" not in flags
+
+    async def test_a_spot_only_symbol_walks_one_day_windows(
+        self, open_exchanges: list[Any]
+    ) -> None:
+        """SC-1 (research N17): a stored spot-only name (`ETHBTC`, resolved by the existing
+        reverse map to the spot market `ETH/BTC`) is read in 24-hour windows, because the spot
+        `myTrades` endpoint refuses a span over 24 hours. A 7-day window sent to it would be
+        refused (and hold the symbol), and a start-only request serves one 24-hour window, so
+        the later of two fills 3 days apart would be lost."""
+        venue = BinanceFillsVenue(
+            {
+                ("spot", "ETHBTC"): [
+                    venue_fill("spot", "ETHBTC", 11, NOW_MS - 5 * DAY_MS),
+                    venue_fill("spot", "ETHBTC", 12, NOW_MS - 2 * DAY_MS),
+                ]
+            }
+        )
+
+        fills, flags = await _read(open_exchanges, venue, ["ETHBTC"], NOW_MS - 6 * DAY_MS)
+
+        assert _ids(fills) == {"11", "12"}
+        assert "binance_partial_symbols" not in flags
+        assert venue.calls_for("linear") == [] and venue.calls_for("inverse") == []
+        calls = venue.calls_for("spot")
+        assert len(calls) >= 6, "6 days of 24-hour windows"
+        for request in calls:
+            assert "startTime" in request and "endTime" in request, request
+            assert 0 < request["endTime"] - request["startTime"] <= 86399999, request
+
+    async def test_a_row_outside_its_window_is_refused_by_name(
+        self,
+        open_exchanges: list[Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """SC-1 / T-250-01: a venue that ignores `endTime` serves BTCUSDT [startTime, now]
+        whatever window was asked for, so the first window's reply holds a fill 3 days before
+        the clock, long past that window's end. The walk must not trust it: the symbol fails
+        inside its own task, is named in the HOLDING `binance_partial_symbols`, and none of
+        its rows is returned. The healthy ETHUSDT symbol is read in full."""
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [
+                    venue_fill("linear", "BTCUSDT", 21, NOW_MS - 19 * DAY_MS),
+                    venue_fill("linear", "BTCUSDT", 22, NOW_MS - 3 * DAY_MS),
+                ],
+                ("linear", "ETHUSDT"): [
+                    venue_fill("linear", "ETHUSDT", 31, NOW_MS - 19 * DAY_MS),
+                    venue_fill("linear", "ETHUSDT", 32, NOW_MS - 3 * DAY_MS),
+                ],
+            },
+            ignore_end_for=frozenset({"BTCUSDT"}),
+        )
+
+        with caplog.at_level("WARNING"):
+            fills, flags = await _read(
+                open_exchanges, venue, ["BTCUSDT", "ETHUSDT"], NOW_MS - 20 * DAY_MS
+            )
+
+        assert flags["binance_partial_symbols"] == ["BTCUSDT"]
+        assert {"21", "22"} & _ids(fills) == set(), "a refused symbol's rows must never be returned"
+        assert _ids(fills) == {"31", "32"}
+        assert any(
+            "BTCUSDT" in record.getMessage() and record.levelname == "WARNING"
+            for record in caplog.records
+        ), "the refusal must be named in a WARNING"
+
+    async def test_a_reconcile_window_is_one_request_per_symbol_ending_now(
+        self, open_exchanges: list[Any]
+    ) -> None:
+        """T-250-03 (research N1 at the reconcile arm): the nightly reconcile reads
+        `since = now - 24 h`, which is LIVE in PROD. After the one overlap hour that is a start
+        of NOW_MS - 25 h = 1795086000000 (2026-11-19T11:00:00Z) and the whole read fits one
+        7-day window, so each symbol costs exactly ONE request, now carrying an explicit
+        `endTime` = the read's one clock instant (1795176000000, 2026-11-20T12:00:00Z). Without
+        the explicit end the request depends on ccxt's implicit cap."""
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [venue_fill("linear", "BTCUSDT", 1, NOW_MS - 3 * HOUR_MS)],
+                ("linear", "ETHUSDT"): [venue_fill("linear", "ETHUSDT", 2, NOW_MS - 2 * HOUR_MS)],
+            }
+        )
+
+        fills, flags = await _read(
+            open_exchanges, venue, ["BTCUSDT", "ETHUSDT"], 1795089600000  # NOW_MS - 24 h
+        )
+
+        assert _ids(fills) == {"1", "2"}
+        assert "binance_partial_symbols" not in flags
+        for venue_id in ("BTCUSDT", "ETHUSDT"):
+            requests = [r for r in venue.calls_for("linear") if r["symbol"] == venue_id]
+            assert len(requests) == 1, (venue_id, requests)
+            assert requests[0]["startTime"] == 1795086000000, requests
+            assert requests[0]["endTime"] == 1795176000000, requests
+
+    async def test_a_same_millisecond_cluster_across_pages_is_read_in_full(
+        self, open_exchanges: list[Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NEW-C13-03: the cursor advances to the last row's timestamp WITHOUT +1, so two fills
+        sharing one millisecond are never lost when the page boundary falls between them. With
+        a page of 3 the first page ends on the first of the two fills on T, the second page
+        restarts at T and re-serves it. Every page after the first re-serves its boundary row,
+        so the assertion is on the SET of fill ids.
+
+        T = 1795089600000 (2026-11-19T12:00:00Z, NOW_MS - 24 h), inside the walk's one window."""
+        monkeypatch.setattr(ex, "BINANCE_FILLS_PAGE_LIMIT", 3)
+        t_ms = 1795089600000
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [
+                    venue_fill("linear", "BTCUSDT", 51, t_ms - 2000),
+                    venue_fill("linear", "BTCUSDT", 52, t_ms - 1000),
+                    venue_fill("linear", "BTCUSDT", 53, t_ms),
+                    venue_fill("linear", "BTCUSDT", 54, t_ms),
+                    venue_fill("linear", "BTCUSDT", 55, t_ms + 1000),
+                ]
+            }
+        )
+
+        fills, flags = await _read(open_exchanges, venue, ["BTCUSDT"], NOW_MS - 2 * DAY_MS)
+
+        assert _ids(fills) == {"51", "52", "53", "54", "55"}
+        assert "binance_partial_symbols" not in flags
+        assert len(venue.calls_for("linear")) >= 3, "the cluster must straddle a page boundary"
+
+    async def test_a_full_page_on_one_millisecond_steps_past_it(
+        self, open_exchanges: list[Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """red-team/H-4: a full page lying entirely on the window's first millisecond leaves the
+        cursor where it was, so the walk takes the +1 step to get past it instead of asking for
+        the same page again until the page cap. The step is recorded as
+        `binance_fill_cursor_advance_plus1`, and it must reach the DRAIN: the per-symbol reads
+        run in gathered tasks that hold a copy of the context, so only the parent can record it.
+
+        The window starts at W = 1794999600000 (2026-11-18T11:00:00Z: the seed
+        NOW_MS - 2 days, one overlap hour back). Three fills sit on W, two follow."""
+        monkeypatch.setattr(ex, "BINANCE_FILLS_PAGE_LIMIT", 3)
+        w_ms = 1794999600000
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [
+                    venue_fill("linear", "BTCUSDT", 41, w_ms),
+                    venue_fill("linear", "BTCUSDT", 42, w_ms),
+                    venue_fill("linear", "BTCUSDT", 43, w_ms),
+                    venue_fill("linear", "BTCUSDT", 44, w_ms + 1000),
+                    venue_fill("linear", "BTCUSDT", 45, w_ms + 2000),
+                ]
+            }
+        )
+
+        fills, flags = await _read(open_exchanges, venue, ["BTCUSDT"], NOW_MS - 2 * DAY_MS)
+
+        assert venue.calls_for("linear")[0]["startTime"] == w_ms
+        assert _ids(fills) == {"41", "42", "43", "44", "45"}
+        assert flags.get("binance_fill_cursor_advance_plus1") is True
+        assert "binance_partial_symbols" not in flags
+
+    def test_the_walk_constants_are_pinned(self) -> None:
+        """CONTEXT [Page cap stop]: "BINANCE_PAGE_CAP stays 20". Raising a cap is not a close
+        of the page-cap survivor (Phase 232 precedent), and the window and reach constants are
+        the venue rules the walk was derived from."""
+        assert ex.BINANCE_PAGE_CAP == 20
+        assert ex.BINANCE_FILLS_PAGE_LIMIT == 1000
+        assert ex.BINANCE_FILLS_WINDOW_DAYS == 7
+        assert ex.BINANCE_SPOT_FILLS_WINDOW_HOURS == 24
+        assert ex.BINANCE_FILLS_REACH_DAYS == 85
