@@ -892,24 +892,28 @@ async def test_budget_one_rpc_error_per_acquisition_is_a_warning_with_the_class_
     assert _events(caplog, "mt5_xlease_unavailable") == [], "a non-missing error is not a missing RPC"
 
 
-async def test_bounded_caller_keeps_polling_through_errors_and_gets_busy_at_its_bound(
+async def test_bounded_caller_keeps_polling_through_errors_and_gets_unavailable_at_its_bound(
     monkeypatch, fast_poll
 ) -> None:
+    """A bounded caller ignores the error budget and polls to ITS OWN deadline. What it is
+    then told depends on whether the database ever ANSWERED (SF-M1): errors only means an
+    outage, which is a busy SUBCLASS (every busy arm still skips) the heal and the
+    liveness probe can tell apart from 'somebody holds the terminal'."""
     fake = FakeXLeaseBackend()
     fake.raises["acquire"] = RuntimeError("blip")
     _install(fake)
     _small_budget(monkeypatch, 0.1)  # a bounded caller must ignore the budget
     started = time.monotonic()
 
-    with pytest.raises(mt5_concurrency.Mt5TerminalBusyError) as raised:
+    with pytest.raises(mt5_concurrency.Mt5TerminalLeaseUnavailableError) as raised:
         async with mt5_concurrency.mt5_terminal_lease(_KEY, wait_s=0.3):
             pytest.fail("the body must never run while the lease database errors")
     elapsed = time.monotonic() - started
 
-    assert type(raised.value) is mt5_concurrency.Mt5TerminalBusyError, (
-        "a bounded caller got the batch-job classification instead of the busy answer"
+    assert isinstance(raised.value, mt5_concurrency.Mt5TerminalBusyError), (
+        "a lease outage must stay a busy subclass so every existing busy arm skips"
     )
-    assert elapsed >= 0.3, f"the busy answer came at {elapsed:.2f}s, before the 0.3s bound"
+    assert elapsed >= 0.3, f"the answer came at {elapsed:.2f}s, before the 0.3s bound"
     assert fake.count("acquire") > 1
     assert not mt5_concurrency._mt5_terminal_lock_for(_KEY).locked()
 
@@ -1185,3 +1189,62 @@ async def test_sf_m3_budget_exhaustion_logs_one_error_with_the_last_class_site_a
         "mt5_xlease_release_failed", "mt5_xlease_renew_failed", "mt5_xlease_lost",
     }
     assert "mt5_xlease_acquire_gave_up" not in existing
+
+
+# --------------------------------------------------------------------------- #
+# Round-1 review fixes (SF-M1): a bounded caller's outage is not "busy".
+# --------------------------------------------------------------------------- #
+async def test_sf_m1_a_bounded_deadline_with_no_answer_at_all_raises_unavailable(
+    monkeypatch, caplog, fast_poll
+) -> None:
+    fake = FakeXLeaseBackend()
+    fake.before["acquire"] = sleep_forever  # a hang: no answer, no error either
+    _install(fake)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_MIN_ATTEMPT_S", 0.01)
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+
+    with pytest.raises(mt5_xlease.XLeaseUnavailable):
+        await asyncio.wait_for(
+            mt5_xlease.acquire_terminal_xlease(
+                _KEY, holder=None, site=SITE_DERIVE, bound_s=0.2, on_lost=lambda: None
+            ),
+            timeout=5.0,
+        )
+    assert len(_events(caplog, "mt5_xlease_acquire_gave_up")) == 1, (
+        "a bounded outage must be as loud as an unbounded one"
+    )
+
+
+async def test_sf_m1_a_genuine_refusal_stays_plain_busy(fast_poll) -> None:
+    """The database ANSWERED False for the whole bound: that is somebody else holding the
+    terminal, and the existing busy behaviour is unchanged for it (exact type)."""
+    fake = FakeXLeaseBackend()
+    _install(fake)
+    await _another_process_holds(fake)
+
+    with pytest.raises(mt5_concurrency.Mt5TerminalBusyError) as raised:
+        async with mt5_concurrency.mt5_terminal_lease(_KEY, wait_s=0.2):
+            pytest.fail("the body must never run when another process holds the terminal")
+    assert type(raised.value) is mt5_concurrency.Mt5TerminalBusyError, (
+        f"a genuine refusal was reclassified as {type(raised.value).__name__}"
+    )
+
+
+async def test_sf_m1_one_refusal_then_errors_is_still_busy_at_the_bound(fast_poll) -> None:
+    """'No answer at all' is strict: once the database has said False the terminal WAS
+    held a moment ago, so a later outage does not turn the answer into 'unavailable'."""
+    calls = {"n": 0}
+
+    async def _refuse_once_then_error() -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False
+        raise RuntimeError("blip")
+
+    mt5_xlease.set_xlease_backend_for_tests(_ScriptedBackend([_refuse_once_then_error]))
+    with pytest.raises(mt5_xlease.XLeaseBoundExpired):
+        await mt5_xlease.acquire_terminal_xlease(
+            _KEY, holder=None, site=None, bound_s=0.2, on_lost=lambda: None
+        )
+    assert calls["n"] > 1

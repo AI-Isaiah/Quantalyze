@@ -613,12 +613,14 @@ async def acquire_terminal_xlease(
     One ``uuid4`` token per acquisition, the SAME token on every poll, so a grant that
     landed after its caller gave up is idempotent for the retry and releasable by
     token. ``bound_s=None`` polls until granted; a float polls to its deadline and then
-    raises ``XLeaseBoundExpired``; ``bound_s <= 0`` makes exactly one attempt. A
+    raises ``XLeaseBoundExpired`` (or ``XLeaseUnavailable`` when the database never
+    answered at all); ``bound_s <= 0`` makes exactly one attempt. A
     backend exception that is a MISSING RPC returns a local-only hold (``cross_process``
     False, logged by ``_note_unavailable``). Any other backend exception fails closed:
     an unbounded caller keeps polling for ``_MT5_XLEASE_ERROR_BUDGET_S`` of consecutive
     errors and then raises ``XLeaseUnavailable``; a bounded caller keeps polling to its
-    deadline and gets ``XLeaseBoundExpired``. Either way it never proceeds
+    deadline and gets ``XLeaseBoundExpired``, or ``XLeaseUnavailable`` if every attempt
+    errored or timed out. Either way it never proceeds
     unserialized. ``on_lost`` is called by the renew task if the lease is
     lost while held (the self-fence)."""
     backend = _BACKEND
@@ -636,6 +638,10 @@ async def acquire_terminal_xlease(
     first_error_at: float | None = None
     error_logged = False
     attempts = 0
+    #: True once the database has answered at all (True or False). A bounded caller that
+    #: reaches its deadline with NO answer met an outage, not a busy terminal (SF-M1).
+    answered = False
+    last_failure = ""
 
     try:
         while True:
@@ -686,6 +692,7 @@ async def acquire_terminal_xlease(
                     # caller never proceeds unserialized.
                     failure = type(exc).__name__
                 else:
+                    answered = True
                     first_error_at = None  # the database answered: the window restarts
                     if granted:
                         break
@@ -695,6 +702,7 @@ async def acquire_terminal_xlease(
                 # error window exactly like a raised error (DEC-04-C) (CR-01).
                 failure = "TimeoutError"
             if failure is not None:
+                last_failure = failure
                 error_now = time.monotonic()
                 if first_error_at is None:
                     first_error_at = error_now
@@ -721,6 +729,11 @@ async def acquire_terminal_xlease(
                     raise XLeaseUnavailable() from None
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0.0:
+                if not answered:
+                    # Every attempt errored or timed out: the database never said the
+                    # terminal was held, so this is an outage and not "busy" (SF-M1).
+                    _log_gave_up(site_n, last_failure, started, attempts)
+                    raise XLeaseUnavailable() from None
                 raise XLeaseBoundExpired() from None
             if pending:
                 continue  # the in-flight call is awaited next; no new poll to space out
