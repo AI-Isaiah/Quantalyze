@@ -56,7 +56,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any, Final, Protocol
 
-from services.db import db_execute, get_supabase
+from services.db import db_execute, get_supabase, is_missing_rpc
 from services.mt5_handover import normalize_mt5_holder, normalize_mt5_site
 
 __all__ = [
@@ -132,6 +132,12 @@ _MT5_XLEASE_LOST_AFTER_S: Final[float] = (
 #: ``wait_s`` would time out before the RPC future even started, turning a free
 #: lease into "busy". It overshoots the caller's bound by at most this much, once.
 _MT5_XLEASE_MIN_ATTEMPT_S: Final[float] = 0.5
+
+#: Re-log the "lease RPC is missing" ERROR at most this often (the 227
+#: ``_RENEW_UNAVAILABLE_RELOG_S`` cadence). Never latched: PGRST202 also fires on a
+#: parameter-signature drift, so one line per process would hide a persistent fault
+#: (DEC-04-B).
+_MT5_XLEASE_UNAVAILABLE_RELOG_S: Final[float] = 900.0
 
 _validate_xlease_timing(
     _MT5_XLEASE_POLL_S,
@@ -317,8 +323,53 @@ def _late_grant_callback(
     return _on_done
 
 
+# --------------------------------------------------------------------------- #
+# The missing-RPC fallback (plan 230-04, DEC-04-A/B).
+#
+# A lease RPC that does not exist (the worker deployed before the migration applied, or
+# after a rollback) must not turn into a night of refused MT5 work, so the caller falls
+# back to the in-process lock ALONE. That is exactly today's pre-230 behaviour and the
+# one path where two processes may share the terminal, so it is LOUD and NEVER LATCHED.
+# Only the structured codes in ``services.db.is_missing_rpc`` take this path; every
+# other backend error fails closed.
+# --------------------------------------------------------------------------- #
+#: Seam for the relog clock. Tests patch THIS, never ``time.monotonic``, because
+#: asyncio's own scheduler reads ``time.monotonic``.
+_relog_clock: Callable[[], float] = time.monotonic
+#: ``_relog_clock()`` at the last "RPC missing" line, None before the first. One clock
+#: for acquire, renew and release: they share one fault and one line.
+_UNAVAILABLE_LAST_LOGGED: float | None = None
+
+
+def _note_unavailable(rpc_name: str, site: str) -> None:
+    """Log that a lease RPC is missing, at most once per relog window.
+
+    ⭐ ``mt5_xlease_unavailable`` IS A CONTRACT. Plan 09 counts this event in BOTH
+    services' logs each night, and a night that carries one does not count toward the
+    seven (its terminal was serialized in-process only). Neither the event name nor its
+    ``rpc`` and ``site`` keys may change without that plan. Carries the RPC name and the
+    site only: never the exception text (a PostgREST message can echo a URL), a key, a
+    host or a port.
+
+    Never raises: it runs inside the renew task and the release path, where a raise
+    would escape into ``main.lifespan``'s crash handler or mask the body's exception."""
+    global _UNAVAILABLE_LAST_LOGGED
+    now = _relog_clock()
+    last = _UNAVAILABLE_LAST_LOGGED
+    if last is not None and now - last < _MT5_XLEASE_UNAVAILABLE_RELOG_S:
+        return
+    _UNAVAILABLE_LAST_LOGGED = now
+    logger.error(
+        "mt5_xlease: the terminal lease RPC %s is missing from the database; this "
+        "terminal is serialized in-process only until it exists (site=%s)",
+        rpc_name,
+        site,
+        extra={"event_type": "mt5_xlease_unavailable", "rpc": rpc_name, "site": site},
+    )
+
+
 def _reset_xlease_state_for_tests() -> None:
-    """Cancel and forget the cleanup tasks. Called from
+    """Cancel and forget the cleanup tasks and the relog clock. Called from
     ``mt5_concurrency.reset_terminal_state_for_tests``. Never touches the installed
     backend, which ``tests/conftest.py`` owns. Safe after the test's loop closed: a
     task on a closed loop is only dropped, never cancelled."""
@@ -329,6 +380,8 @@ def _reset_xlease_state_for_tests() -> None:
         except RuntimeError:
             pass
     _CLEANUP_TASKS.clear()
+    global _UNAVAILABLE_LAST_LOGGED
+    _UNAVAILABLE_LAST_LOGGED = None
 
 
 # --------------------------------------------------------------------------- #
@@ -346,6 +399,7 @@ class XLeaseHold:
         site: str,
         pending: set[asyncio.Future[bool]],
         on_lost: Callable[[], None],
+        cross_process: bool = True,
     ) -> None:
         self._backend = backend
         self._digest = digest
@@ -356,6 +410,14 @@ class XLeaseHold:
         #: Acquire calls that timed out client-side and may still land (Pitfall 2).
         self._pending = pending
         self._renew_task: asyncio.Task[None] | None = None
+        #: False for the missing-RPC fallback (DEC-04-A): the caller holds the
+        #: in-process lock only, so there is nothing to renew or release.
+        self._cross_process = cross_process
+
+    @property
+    def cross_process(self) -> bool:
+        """True when a database lease row backs this hold; False for the fallback."""
+        return self._cross_process
 
     @property
     def lost(self) -> bool:
@@ -441,7 +503,10 @@ class XLeaseHold:
 
     async def release(self) -> None:
         """Release the row. NEVER raises ``Exception``; ``CancelledError`` passes
-        through and the shielded RPC still lands."""
+        through and the shielded RPC still lands. The local-only fallback hold has no
+        row, so it makes no call."""
+        if not self._cross_process:
+            return
         self.stop_renewing()
         fut: asyncio.Future[bool] = asyncio.ensure_future(
             self._backend.release(self._digest, self._token)
@@ -486,8 +551,9 @@ async def acquire_terminal_xlease(
     landed after its caller gave up is idempotent for the retry and releasable by
     token. ``bound_s=None`` polls until granted; a float polls to its deadline and then
     raises ``XLeaseBoundExpired``; ``bound_s <= 0`` makes exactly one attempt. A
-    backend exception raises ``XLeaseUnavailable`` (fail closed: the caller never
-    proceeds unserialized). ``on_lost`` is called by the renew task if the lease is
+    backend exception that is a MISSING RPC returns a local-only hold (``cross_process``
+    False, logged by ``_note_unavailable``); any other backend exception raises
+    ``XLeaseUnavailable`` (fail closed: the caller never proceeds unserialized). ``on_lost`` is called by the renew task if the lease is
     lost while held (the self-fence)."""
     backend = _BACKEND
     digest = terminal_lease_digest(terminal_key)
@@ -520,7 +586,23 @@ async def acquire_terminal_xlease(
                 pending.discard(fut)
                 try:
                     granted = fut.result()
-                except Exception:  # noqa: BLE001 — any backend failure fails closed
+                except Exception as exc:  # noqa: BLE001 — see below
+                    if is_missing_rpc(exc):
+                        # DEC-04-A: the RPC is not deployed. Loud, never latched
+                        # (the next acquisition asks again). An earlier poll still in
+                        # flight may land after this; release it as on any abandon.
+                        _note_unavailable(XLEASE_ACQUIRE_RPC, site_n)
+                        _release_late_grants(pending, backend, digest, token)
+                        return XLeaseHold(
+                            backend=backend,
+                            digest=digest,
+                            token=token,
+                            site=site_n,
+                            pending=pending,
+                            on_lost=on_lost,
+                            cross_process=False,
+                        )
+                    # Any OTHER backend failure fails closed.
                     raise XLeaseUnavailable() from None
                 if granted:
                     break

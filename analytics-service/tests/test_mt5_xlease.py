@@ -20,6 +20,7 @@ import uuid
 from contextvars import ContextVar
 
 import pytest
+from postgrest.exceptions import APIError
 
 from services import mt5_client, mt5_concurrency, mt5_xlease
 from services.mt5_client import HOLDER_UNATTRIBUTED, _mt5_epoch_for, mt5_terminal_holder
@@ -605,3 +606,164 @@ async def test_reset_clears_the_clients_cleanup_task_set() -> None:
     assert mt5_xlease._CLEANUP_TASKS == set()
     await asyncio.sleep(0)
     assert task.cancelled()
+
+
+# --------------------------------------------------------------------------- #
+# Plan 04 Task 1 — a MISSING lease RPC degrades loudly to the in-process lock.
+#
+# A deploy-order gap (the worker runs before the migration applies, or after a
+# rollback) must not turn into a night of refused MT5 work, but it is also the ONE path
+# where two processes may share the terminal, so it is loud (an ERROR event, re-logged
+# on a clock) and never latched (the next acquisition asks the database again).
+# --------------------------------------------------------------------------- #
+_MISSING_TEXT = "Could not find the function gateway-host.example:8001/rpc/acquire"
+
+
+def _missing_rpc_error() -> APIError:
+    """What PostgREST raises while the function is absent from its schema cache."""
+    return APIError({"message": _MISSING_TEXT, "code": "PGRST202", "details": None})
+
+
+def _events(caplog, event_type: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if getattr(r, "event_type", "") == event_type]
+
+
+class _ScriptedBackend:
+    """A backend whose acquire answers from a script, one step per call (the last step
+    repeats). A step is an async callable returning the answer or raising. Renew and
+    release answer True and are recorded, so a test can assert which RPCs were called."""
+
+    def __init__(self, acquire_script) -> None:
+        self._script = list(acquire_script)
+        self.calls: list[str] = []
+        self.tokens: list[uuid.UUID] = []
+
+    async def acquire(self, digest, token, holder, site, ttl_s) -> bool:
+        self.calls.append("acquire")
+        self.tokens.append(token)
+        step = self._script.pop(0) if len(self._script) > 1 else self._script[0]
+        return await step()
+
+    async def renew(self, digest, token, ttl_s) -> bool:
+        self.calls.append("renew")
+        return True
+
+    async def release(self, digest, token) -> bool:
+        self.calls.append("release")
+        return True
+
+
+def _raises(exc: BaseException):
+    async def _step() -> bool:
+        raise exc
+
+    return _step
+
+
+def _answers(value: bool, delay_s: float = 0.0):
+    async def _step() -> bool:
+        if delay_s:
+            await asyncio.sleep(delay_s)
+        return value
+
+    return _step
+
+
+async def test_missing_rpc_falls_back_to_the_local_lock_and_relogs_every_900s(
+    monkeypatch, caplog
+) -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["acquire"] = _missing_rpc_error()
+    _install(fake)
+    clock = [5000.0]
+    monkeypatch.setattr(mt5_xlease, "_relog_clock", lambda: clock[0])
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+    ran: list[int] = []
+
+    async def _one_acquisition() -> None:
+        async with mt5_concurrency.mt5_terminal_lease(_KEY, site=SITE_DERIVE):
+            ran.append(1)
+            assert mt5_concurrency._mt5_terminal_lock_for(_KEY).locked(), (
+                "the fallback must still hold the in-process lock"
+            )
+
+    await _one_acquisition()
+    assert ran == [1], "a missing RPC refused the body instead of falling back"
+    first = _events(caplog, "mt5_xlease_unavailable")
+    assert len(first) == 1, f"expected exactly one unavailable record, got {len(first)}"
+    record = first[0]
+    assert record.levelno == logging.ERROR
+    assert record.rpc == mt5_xlease.XLEASE_ACQUIRE_RPC
+    assert record.site == SITE_DERIVE
+    assert "in-process" in record.getMessage(), "the line must say the terminal is serialized in-process only"
+    assert record.exc_info is None
+    assert _MISSING_TEXT not in record.getMessage() and _KEY not in record.getMessage()
+
+    clock[0] += 10.0
+    await _one_acquisition()
+    assert len(_events(caplog, "mt5_xlease_unavailable")) == 1, (
+        "a second acquisition 10 s later must not re-log"
+    )
+
+    clock[0] += 891.0  # 901 s after the first line
+    await _one_acquisition()
+    assert len(_events(caplog, "mt5_xlease_unavailable")) == 2, (
+        "901 s after the first line the fault must be told again (never one line per process)"
+    )
+    assert ran == [1, 1, 1]
+
+
+async def test_missing_rpc_is_never_latched_the_next_acquisition_leases_again() -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["acquire"] = _missing_rpc_error()
+    _install(fake)
+
+    async with mt5_concurrency.mt5_terminal_lease(_KEY):
+        assert not fake.holds(_digest()), "nothing is leased while the RPC is missing"
+
+    del fake.raises["acquire"]  # the migration applied
+    fake.calls.clear()
+    async with mt5_concurrency.mt5_terminal_lease(_KEY):
+        assert fake.count("acquire") >= 1, "the fallback was latched: the RPC was never tried again"
+        assert fake.holds(_digest()), "the lease did not become cross-process once the RPC answered"
+    assert not fake.holds(_digest())
+
+
+async def test_the_fallback_hold_makes_no_renew_and_no_release_call(quick_renew) -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["acquire"] = _missing_rpc_error()
+    _install(fake)
+    lost: list[int] = []
+
+    hold = await _grant(lost)
+    assert hold.cross_process is False
+    assert hold._renew_task is None, "the fallback hold started a renew task"
+    await asyncio.sleep(0.3)  # six renew intervals, past LOST_AFTER: nothing may fire
+    await hold.release()
+
+    assert [c[0] for c in fake.calls] == ["acquire"], (
+        f"the fallback hold called the backend again: {[c[0] for c in fake.calls]}"
+    )
+    assert lost == [] and not hold.lost
+
+
+async def test_a_late_grant_from_an_earlier_poll_is_released_when_the_fallback_is_taken(
+    monkeypatch, fast_poll
+) -> None:
+    """Poll 1 outlives its RPC bound and is granted AFTER poll 2 learns the RPC is
+    missing (the migration rolled back mid-acquisition). Without releasing the pending
+    future that late grant would hold the row for a whole TTL."""
+    backend = _ScriptedBackend([_answers(True, delay_s=0.3), _raises(_missing_rpc_error())])
+    mt5_xlease.set_xlease_backend_for_tests(backend)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.05)
+
+    hold = await _grant([])
+    assert hold.cross_process is False
+    await asyncio.sleep(0.6)
+
+    assert backend.calls.count("acquire") == 2
+    assert backend.calls.count("release") == 1, (
+        f"the late grant of the abandoned poll was never released (calls={backend.calls})"
+    )
+    await hold.release()
+    assert backend.calls.count("release") == 1
