@@ -4363,6 +4363,160 @@ async def test_no_capital_exit_mt5_transient_zero_over_a_funded_ledger_keeps_dro
     assert _nc_curve(payload) == {x: pytest.approx(100_000.0, abs=1e-9) for x in d}
 
 
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_without_its_own_basis_is_refused_as_ledger_basis_absent() -> None:
+    """NOCAP-01. An MT5 key whose own row carries no writer basis has no independent proof the
+    account is empty: its stored terminal is the live balance read. This is the old withdrawal
+    shape (returns d1 to d3, terminal 0.0 on day 4, a -20000.0 withdrawal on day 4, no basis) that
+    exited before this phase. It now keeps ``dropped_key`` and is counted ``ledger_basis_absent``;
+    where no proof exists the candidate is refused."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload(
+                "nonpositive", "mt5", 0.0, d[3],
+                flows={d[3]: -20_000.0}, dropped_pnl={d[3]: 0.0},
+            ),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"ledger_basis_absent": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_venue_is_gated_whatever_its_case() -> None:
+    """NOCAP-01, T-234-07. ``api_keys.exchange`` is stored by hand in places, and an ``'MT5'`` that
+    slips past the set check would exit a funded key unproved. The venue is stripped and
+    lower-cased before the set check, the expression ``full_history_keys`` already uses, so the
+    funded-ledger shape on ``'MT5'`` is refused exactly as on ``'mt5'``."""
+    payload = await _compose_no_capital_book(_nc_mt5_funded_ledger_book(api_exchange="MT5"))
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"ledger_level_funded": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_ledger_proof_is_scoped_to_ledger_proof_venues() -> None:
+    """NOCAP-01, DEC-02-C. The same funded-ledger shape on a Deribit key is NOT refused by the
+    ledger gate, because ``LEDGER_PROOF_VENUES`` is ``{'mt5'}``: Deribit's terminal is reconciled
+    to inception at write time, so its stored terminal is real evidence. The key exits as today,
+    trustworthy, and stores no refusal field. (The gate is per venue, not a general rule.)"""
+    d = _BTC_DAYS
+    payload = await _compose_no_capital_book(_nc_mt5_funded_ledger_book(venue="deribit"))
+
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "dropped_key" not in payload["degrade_reasons"]
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-C", "reason": "nonpositive", "day": d[2]}
+    ]
+    assert "no_capital_exit_refused" not in payload["inputs"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_proved_empty_ledger_still_meets_the_d10_bound() -> None:
+    """NOCAP-01, DEC-02-B gate order. A key that passes the ledger proof is not thereby cleared:
+    the D-10 bound still applies. An MT5 margin call whose own ledger proves it empty (flows
+    +4550.0 on day 1 and +10000.0 on day 4, P&L -14500.0 on day 4: 4550 + 10000 - 14500 = 50.0,
+    under the dust floor) walks back 14500.0 of material P&L over (L, P], and is refused as
+    ``consumes_more_than_dust``, never as a ledger refusal."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload(
+                "dust", "mt5", 50.0, d[3],
+                flows={d[0]: 4_550.0, d[3]: 10_000.0}, dropped_pnl={d[3]: -14_500.0},
+                basis_flows={d[0]: 4_550.0, d[3]: 10_000.0},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: -14_500.0},
+            ),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
+
+
+def _nc_negative_terminal_book(terminal: float) -> dict:
+    """A Deribit ``nonpositive`` candidate (outside ``LEDGER_PROOF_VENUES``, so only the sign gate
+    is in play): flat returns on days 1 to 3, a stored terminal of ``terminal`` on day 3, and a
+    day-3 withdrawal of ``terminal - 1000.0`` (a negative flow). Hand derivation: the level before
+    the withdrawal is ``terminal - flow = 1000.0``, so a negative terminal sits far below zero
+    against it, the shape ``_nc_replay_refused_book`` uses."""
+    d = _BTC_DAYS
+    return _nc_assemble([
+        _nc_candidate(
+            "key-B", "deribit", d[:3],
+            _nc_payload(
+                "nonpositive", "deribit", terminal, d[2], flows={d[2]: terminal - 1_000.0}
+            ),
+        )
+    ])
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_terminal_one_cent_below_minus_the_dust_floor_is_refused() -> None:
+    """NOCAP-01 negative equity, the boundary pair (below). A stored terminal of
+    ``-(DUST_NAV_FLOOR + 0.01)`` is negative equity, not an empty account: ``nonpositive`` would
+    otherwise carry it out of the book with no sign recorded. On any venue it is refused at
+    selection as ``negative_terminal``, and the key keeps ``dropped_key``."""
+    payload = await _compose_no_capital_book(_nc_negative_terminal_book(-(DUST_NAV_FLOOR + 0.01)))
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"negative_terminal": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_terminal_exactly_at_minus_the_dust_floor_is_not_a_negative_terminal() -> None:
+    """NOCAP-01 negative equity, the boundary pair (at). ``-DUST_NAV_FLOOR`` itself passes the sign
+    gate (it is ``<``, mirroring A2's ``<=``), so ``negative_terminal`` is NOT counted. It is still
+    not an exit here: a -100.0 terminal over a 1000.0 level is further below zero than the replay
+    allows, so it is refused by a LATER route and the field holds exactly one other count."""
+    payload = await _compose_no_capital_book(_nc_negative_terminal_book(-DUST_NAV_FLOOR))
+
+    counts = _nc_refused(payload)
+    assert counts is not None and "negative_terminal" not in counts
+    assert sum(counts.values()) == 1
+    assert "no_capital_exited_keys" not in payload
+    assert "dropped_key" in payload["degrade_reasons"]
+
+
+def test_no_capital_ledger_level_is_pure_over_the_stored_basis() -> None:
+    """NOCAP-01 (DEC-02-A). The level is the sum of the basis' flows and P&L over the key's own
+    row: None for no basis, 0.0 for an empty one, 80000.0 - 20000.0 + 0.0 = 60000.0 for the tracer
+    shape, and None (no proof) for a non-finite total, so an unreadable number never proves an
+    account empty."""
+    from services.job_worker import _no_capital_ledger_level
+
+    d = _BTC_DAYS
+    assert _no_capital_ledger_level(None) is None
+    assert _no_capital_ledger_level(({}, {})) == 0.0
+    assert _no_capital_ledger_level(({d[0]: 80_000.0, d[3]: -20_000.0}, {d[3]: 0.0})) == 60_000.0
+    assert _no_capital_ledger_level(({d[0]: float("inf")}, {d[3]: 0.0})) is None
+    assert _no_capital_ledger_level(({d[0]: 1.0}, {d[3]: float("nan")})) is None
+
+
+def test_no_capital_ledger_proof_venues_are_mt5_only_and_full_history() -> None:
+    """NOCAP-01 (DEC-02-C). The proof set is exactly ``{'mt5'}`` and sits inside
+    ``FULL_HISTORY_VENUES``: a proof read from a deal ledger is only an independent proof where
+    the ledger reaches inception, and a venue added here without that would be a silent bypass."""
+    from services.allocator_equity_derive import FULL_HISTORY_VENUES, LEDGER_PROOF_VENUES
+
+    assert LEDGER_PROOF_VENUES == frozenset({"mt5"})
+    assert LEDGER_PROOF_VENUES <= FULL_HISTORY_VENUES
+
+
 # --- guards: the rule may only make a book better (166.3.1 plan 09, Task 2) --------------------
 
 
