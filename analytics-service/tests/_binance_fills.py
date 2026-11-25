@@ -59,6 +59,7 @@ import copy
 import functools
 import json
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -367,3 +368,18 @@ def symbols_supabase(
     supabase = MagicMock()
     supabase.table.side_effect = _table
     return supabase
+
+
+def column_after_advance(column: str | None, stamp: str | None) -> str | None:
+    """The ``api_keys.last_fetched_trade_timestamp`` an ``advance_sync_cursor`` call leaves.
+
+    The Supabase fake of ``tests/test_okxtrades_cursor.py`` only RECORDS the RPC's params, so a
+    two-run arm that took run 2's column from run 1's stamp unchanged could never see a stamp the
+    RPC drops. This applies the forward-only rule of migration 20260602173710, ``CASE WHEN
+    p_last_fetched_ts IS NOT NULL AND (column IS NULL OR column < p_last_fetched_ts) THEN
+    p_last_fetched_ts ELSE column END``, on the parsed instants."""
+    if stamp is None:
+        return column
+    if column is None or datetime.fromisoformat(column) < datetime.fromisoformat(stamp):
+        return stamp
+    return column

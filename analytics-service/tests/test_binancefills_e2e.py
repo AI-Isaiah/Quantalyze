@@ -31,6 +31,9 @@ and checked with `cmp`; later plans extend this list):
      test_the_sync_job_passes_the_long_read_budget goes RED.
   N28 (250-07) give `run_reconcile_strategy_job`'s `fetch_raw_trades(` call the sync budget:
      test_the_reconcile_job_keeps_the_default_read_budget goes RED.
+  N-CR01 (round-1 fix, review CR-01) replace the Binance branch of the no-seed anchor in
+     `run_sync_trades_job` (`elif ctx.key_row.get("exchange") == "binance":` becomes
+     `elif False:`): test_a_stopped_cold_read_is_re_read_from_the_reach_on_the_next_run goes RED.
   (N13 and N27 live in tests/test_binancefills_walk.py.)
 
 READ BUDGET PER CALLER (250-07, founder ruling 2026-11-25 UTC). The sync job owns a cursor and
@@ -59,6 +62,7 @@ from tests._binance_fills import (
     HOUR_MS,
     NOW_MS,
     BinanceFillsVenue,
+    column_after_advance,
     real_binance,
     recorded_markets,
     symbols_supabase,
@@ -106,19 +110,38 @@ async def _run_live(
     stored_fills: list[str],
     symbols: list[str],
     flags: dict[str, Any] | None = None,
+    daily_trades: list[dict[str, Any]] | None = None,
+    stored_daily: list[str] | None = None,
+    synced: list[dict[str, Any]] | None = None,
 ) -> tuple[_Recorder, AsyncMock]:
     """Drive the REAL `run_sync_trades_job` with the REAL `fetch_raw_trades` on a
     venue-faked real ccxt.binance. `stored_fills` are the ISO timestamps of fills already
     stored, so the job's seed is min(cursor, newest stored fill). `flags` is shared across
     runs, so a second run reads what the first wrote. Returns the recorder and the fills
-    read mock (its `since_ms` is what the job asked for)."""
+    read mock (its `since_ms` is what the job asked for). `daily_trades` is what the daily read
+    returns (Phase 1 hands it to the `sync_trades` RPC), `synced` collects the rows of every
+    `sync_trades` call, and `stored_daily` are the ISO timestamps of daily rows already stored,
+    so a second run can be seeded from what the first run actually wrote."""
     supabase, rec = _make_supabase(
         trades_rows=[
             {"strategy_id": STRATEGY_ID, "is_fill": True, "timestamp": ts}
             for ts in stored_fills
+        ]
+        + [
+            {"strategy_id": STRATEGY_ID, "is_fill": False, "timestamp": ts}
+            for ts in stored_daily or []
         ],
         flags=flags,
     )
+    if synced is not None:
+        _inner_rpc = supabase.rpc.side_effect
+
+        def _recording_rpc(name: str, payload: dict[str, Any]) -> Any:
+            if name == "sync_trades":
+                synced.extend(payload["p_trades"])
+            return _inner_rpc(name, payload)
+
+        supabase.rpc.side_effect = _recording_rpc
 
     mock_exchange = AsyncMock()
     mock_exchange.close = AsyncMock()
@@ -159,7 +182,10 @@ async def _run_live(
             "services.job_worker._exchange_preflight",
             new=AsyncMock(return_value=mock_ctx),
         ),
-        patch("services.job_worker.fetch_all_trades", new=AsyncMock(return_value=[])),
+        patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=daily_trades or []),
+        ),
         patch(
             "services.job_worker.fetch_usdt_balance",
             new=AsyncMock(return_value=10000.0),
@@ -658,6 +684,74 @@ class TestBinanceFillsThroughTheSyncJob:
             2026, 11, 19, 19, 0, tzinfo=timezone.utc
         )
         assert set(persisted) == set(time_by_id), "a venue fill was never persisted"
+
+
+    async def test_a_stopped_cold_read_is_re_read_from_the_reach_on_the_next_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SC-3, review CR-01: a NULL column and no stored daily row seed nothing, so the fills
+        read walks from the venue's reach. Stopped by its deadline over a quiet prefix, the read
+        stores no fill, so there is nothing to stamp, and Phase 1 of the SAME run stores the daily
+        rows. Without an anchor at the walk's real start the column stays NULL and run 2 seeds
+        from the daily high-water, which run 1 just moved to a recent day: the stopped span is
+        never read again. Run 2's whole state (the daily rows and the column) is taken from what
+        run 1 wrote: the `sync_trades` payload, and the column after the RPC's forward-only rule.
+
+        Instants (hand-typed): the walk starts at the reach, NOW - 85 d = 1787832000000
+        (2026-08-27T12:00:00Z); the one venue fill is NOW - 5 d (2026-11-15T12:00:00Z); the daily
+        row run 1 stores is NOW - 3 d (2026-11-17T12:00:00Z), so run 2's daily seed would be
+        2026-11-17T00:00:00Z. The clock is one tick of 280 s per venue request (840 / 3), so the
+        run sends 3 requests, covers 21 days of the 85 and stops before the fill."""
+        reach_ms = 1787832000000  # 2026-08-27T12:00:00Z
+        venue = BinanceFillsVenue(
+            {("linear", "BTCUSDT"): [venue_fill("linear", "BTCUSDT", 1, NOW_MINUS_5D_MS)]}
+        )
+        monkeypatch.setattr(ex, "_monotonic", lambda: float(len(venue.calls)) * 280.0)
+        daily = [
+            {
+                "exchange": "binance",
+                "symbol": "BTCUSDT",
+                "side": "buy",
+                "price": 1,
+                "quantity": 1,
+                "fee": 0,
+                "timestamp": NOW_MINUS_3D_ISO,
+                "is_fill": False,
+            }
+        ]
+
+        synced: list[dict[str, Any]] = []
+        rec1, fetch1 = await _run_live(
+            venue,
+            column=None,
+            stored_fills=[],
+            symbols=["BTCUSDT"],
+            daily_trades=daily,
+            synced=synced,
+        )
+
+        assert fetch1.await_args is not None and fetch1.await_args.kwargs["since_ms"] is None
+        assert venue.calls[0][1]["startTime"] == reach_ms, "the cold read did not start at the reach"
+        flags1 = rec1.analytics_upserts[-1]["data_quality_flags"]
+        assert flags1.get("binance_deadline_symbols") == ["BTCUSDT"], flags1
+        assert not rec1.upserted_batches, "the stopped prefix held a fill, nothing to anchor"
+        assert synced, "Phase 1 stored no daily row, so the premise of the arm is gone"
+
+        column2 = column_after_advance(None, _the_advance(rec1)["p_last_fetched_ts"])
+        _rec2, fetch2 = await _run_live(
+            venue,
+            column=column2,
+            stored_fills=[],
+            stored_daily=[str(row["timestamp"]) for row in synced],
+            symbols=["BTCUSDT"],
+        )
+
+        assert fetch2.await_args is not None
+        since2 = fetch2.await_args.kwargs["since_ms"]
+        assert since2 is not None and since2 <= reach_ms, (
+            f"run 2 seeded at {since2}, past run 1's walk start {reach_ms}: the span run 1 "
+            "stopped over is never read again"
+        )
 
 
 class TestBinanceFillsReadBudgetPerCaller:

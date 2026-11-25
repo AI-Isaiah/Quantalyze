@@ -90,6 +90,7 @@ if TYPE_CHECKING:
     # it. `_make_mt5_session` imports the class lazily at RUNTIME (see below), which
     # keeps the module-import-does-not-require-mt5linux contract intact.
 
+from services import exchange as _exchange
 from services import ops_alert
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
@@ -116,6 +117,7 @@ from services.db import (
 )
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
+    BINANCE_FILLS_REACH_DAYS,
     BINANCE_SYNC_FILLS_READ_DEADLINE_S,
     BybitTradeWindowIncomplete,
     aclose_exchange,
@@ -2272,6 +2274,20 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 if daily_since_ms is not None:
                     fills_anchor_iso = datetime.fromtimestamp(
                         daily_since_ms / 1000, tz=timezone.utc
+                    ).isoformat()
+                elif ctx.key_row.get("exchange") == "binance":
+                    # Phase 250 BINANCEFILLS review CR-01: no seed at all, so the read walks
+                    # from the venue's reach and the walk's start IS the reach. Anchor there,
+                    # taken BEFORE the read so it is never past the walk's own start (the read
+                    # takes its clock after this). Without it a stopped or held read that
+                    # stamps nothing leaves the column NULL, and Phase 1 of this very run moves
+                    # the daily high-water the next run seeds from past the unread span.
+                    fills_anchor_iso = (
+                        datetime(1970, 1, 1, tzinfo=timezone.utc)
+                        + timedelta(
+                            milliseconds=_exchange._now_ms()
+                            - BINANCE_FILLS_REACH_DAYS * 86_400_000
+                        )
                     ).isoformat()
             else:
                 _fill_hw_iso, _fill_hw_err = await db_execute(
