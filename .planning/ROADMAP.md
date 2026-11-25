@@ -322,6 +322,8 @@ Plans:
 **Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 225-10-PLAN.md — migration B: the index gains the server member and reconnect agrees, after the backfill census passes (PR-3)
 
+**No MT5 key without a server, founder ruling 2026-11-25:** "Delete keys without Server, dont accept keys without Server". This replaces the CONTEXT Q6 agent decision for keys with no server. It applies to MT5 only: connect refuses an MT5 key with an empty server, and existing MT5 keys without a server are deleted through the product path, with the coordinator confirming the scope first. Recorded in `225-CONTEXT.md` Q6.
+
 **Plan 13 founder ruling, 2026-11-25:** "Owner-only read (Recommended)": SELECT on `api_keys.venue_server` is granted to `authenticated`, owner-only through the existing RLS, like `venue_account_id`. Recorded in `225-CONTEXT.md` Q6.
 
 **Gap closure for CR-01 (founder ruling 2026-11-25, `225-CONTEXT.md` Q6): plans 13-18 and 20 ship as PR-2b-1, PR-2b-2, PR-2c0 and PR-2c from origin/main before PR-3; plan 19 re-bases plan 10. Gap waves below are numbered within the gap set.**
