@@ -28,6 +28,7 @@ and checked with `cmp`; later plans extend this list):
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -417,3 +418,90 @@ class TestBinanceFillsThroughTheSyncJob:
         assert _the_advance(rec2)["p_last_fetched_ts"] == f7_iso
         for upsert in rec2.analytics_upserts:
             assert "binance_page_cap_symbols" not in upsert["data_quality_flags"]
+
+    async def test_a_cap_stamp_whose_overlap_hour_is_full_resumes_past_the_cap(self) -> None:
+        """SC-3 with no exception (orchestrator decision 2026-11-25, T-250-15), REAL constants,
+        REAL job, two runs. Pages that re-read the 1 h overlap below the caller's pre-overlap seed
+        do NOT count toward `BINANCE_PAGE_CAP`, so a cap stamp B whose overlap hour holds more
+        fills than 20 pages can serve is still passed on the next run.
+
+        Venue: BTCUSDT holds 21,000 fills f(k) 150 ms apart, f(k) = 1792587600000 + 150 x (k - 1)
+        (f(1) = 1792587600000, 2026-10-21T13:00:00Z), ids 1..21000; the stored fill at C is not
+        served by the venue. Run 1 (column C): every page ends after C, so 20 pages count under
+        either counting: 20 calls, the cap named, the bound B = f(19981) = 1792590597000
+        (2026-10-21T13:49:57Z), the stamp B. Between the runs 100 late fills g(m) = f(9000 + m)
+        + 75 ms (ids 21001..21100, 1792588950075 = 2026-10-21T13:22:30.075Z to 1792588964925)
+        appear at the venue INSIDE the hour below B, so that hour [B - 1 h, B] holds 20,081 fills,
+        more than 20 pages' 20,000 rows serve (RESEARCH Pitfall 4's corner). Run 2 is seeded at B
+        (column B, stored fills = run 1's persisted fills plus the fill at C): its walk starts at
+        B - 1 h = 1792586997000, before f(1). Pages 1-20 end before B (exempt, uncounted), page
+        21 ends at f(20880) = 1792590731850 (counted: 1), page 22 serves the last 121 rows and
+        ends the window. Run 2 persists every late fill, names no cap, and stamps f(21000) =
+        1792590749850 (2026-10-21T13:52:29.850Z), strictly later than B. Counting every page
+        instead caps run 2 at f(19881) = 1792590582000, before B, and never persists
+        f(19882)..f(21000).
+
+        Instants are compared PARSED (the fills sit 75 to 150 ms apart), and set sizes and the
+        first missing id are asserted, so a RED run prints one short line."""
+        t1 = 1792587600000
+
+        def _f(k: int) -> dict[str, Any]:
+            return venue_fill("linear", "BTCUSDT", k, t1 + 150 * (k - 1))
+
+        base_fills = [_f(k) for k in range(1, 21001)]
+        late_fills = [
+            venue_fill("linear", "BTCUSDT", 21000 + m, t1 + 150 * (9000 + m - 1) + 75)
+            for m in range(1, 101)
+        ]
+        assert late_fills[0]["time"] == 1792588950075 and late_fills[-1]["time"] == 1792588964925
+        b_instant = datetime(2026, 10, 21, 13, 49, 57, tzinfo=timezone.utc)  # f(19981)
+        last_instant = datetime(2026, 10, 21, 13, 52, 29, 850000, tzinfo=timezone.utc)  # f(21000)
+
+        venue1 = BinanceFillsVenue({("linear", "BTCUSDT"): base_fills})
+        rec1, fetch1 = await _run_live(
+            venue1, column=C_ISO, stored_fills=[C_ISO], symbols=["BTCUSDT"]
+        )
+
+        assert fetch1.await_args is not None
+        assert fetch1.await_args.kwargs["since_ms"] == C_MS
+        assert len(venue1.calls_for("linear")) == 20
+        assert rec1.analytics_upserts, "the job wrote no data_quality_flags"
+        flags1 = rec1.analytics_upserts[-1]["data_quality_flags"]
+        assert flags1.get("binance_page_cap_symbols") == ["BTCUSDT"]
+        assert flags1.get("binance_read_through_ms") == 1792590597000
+        stamp1 = _the_advance(rec1)["p_last_fetched_ts"]
+        assert stamp1 is not None and datetime.fromisoformat(stamp1) == b_instant
+        persisted1 = {
+            str(f["exchange_fill_id"]): f["timestamp"]
+            for batch in rec1.upserted_batches
+            for f in batch
+        }
+        assert len(persisted1) == 19_981, f"run 1 persisted {len(persisted1)} distinct fills"
+
+        venue2 = BinanceFillsVenue({("linear", "BTCUSDT"): [*base_fills, *late_fills]})
+        rec2, fetch2 = await _run_live(
+            venue2,
+            column=stamp1,
+            stored_fills=[C_ISO, *persisted1.values()],
+            symbols=["BTCUSDT"],
+        )
+
+        assert fetch2.await_args is not None
+        assert fetch2.await_args.kwargs["since_ms"] == 1792590597000
+        persisted2 = {
+            str(f["exchange_fill_id"]) for batch in rec2.upserted_batches for f in batch
+        }
+        late_ids = {str(21000 + m) for m in range(1, 101)}
+        assert late_ids <= persisted2, f"{len(late_ids - persisted2)} late fills were not persisted"
+        for upsert in rec2.analytics_upserts:
+            assert "binance_page_cap_symbols" not in upsert["data_quality_flags"], (
+                "run 2 capped again"
+            )
+        stamp2 = _the_advance(rec2)["p_last_fetched_ts"]
+        assert stamp2 is not None, "run 2 stamped nothing"
+        assert datetime.fromisoformat(stamp2) == last_instant, f"run 2 stamped {stamp2}"
+        assert datetime.fromisoformat(stamp2) > b_instant
+        union = set(persisted1) | persisted2
+        assert len(union) == 21_100, f"{len(union)} of 21100 venue fills persisted"
+        first_missing = next((k for k in range(1, 21_101) if str(k) not in union), None)
+        assert first_missing is None, f"first venue fill never persisted: {first_missing}"

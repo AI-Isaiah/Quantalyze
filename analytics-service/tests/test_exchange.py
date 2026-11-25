@@ -3006,6 +3006,12 @@ class TestG12BBinancePaginationLoop:
         ``params=None``, ``since_ms`` pinned; the cap is now per WINDOW, and the 20
         pages' rows (up to 1700020000999) all lie inside the one window, so it is still
         exactly 20 calls and 20000 fills.
+
+        Phase 250 plan 06: Old: no assertion on the cap flags. New: it also asserts
+        ``binance_page_cap_symbols == ["BTCUSDT"]`` and that ``binance_read_through_ms`` is the
+        last row timestamp of the 20th page (1700020000999). Every fixture row is at or after
+        ``since_ms`` (none lies in the overlap hour below it), so the overlap exemption leaves all
+        20 pages counted and the call count stays exactly 20.
         """
         import asyncio
         import logging
@@ -3081,6 +3087,12 @@ class TestG12BBinancePaginationLoop:
         # Exactly 20 fetch calls — the BINANCE_PAGE_CAP.
         assert call_count["n"] == 20
         assert len(result) == 20 * 1000
+        # Phase 250 plan 06: the cap is named, with the 20th page's last row as its bound.
+        from services.exchange import get_and_clear_last_dq_flags
+
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("binance_page_cap_symbols") == ["BTCUSDT"]
+        assert flags.get("binance_read_through_ms") == 1700000000999 + 20 * 1_000_000
         # Page-cap warning must fire.
         assert any(
             "page cap" in str(call) and "BTCUSDT" in str(call)

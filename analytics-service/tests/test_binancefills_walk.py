@@ -50,6 +50,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import ccxt
 import pytest
@@ -586,6 +587,9 @@ class TestBinanceFillsStops:
       N25 delete the `_record_dq_flag` call for `binance_untimed_page_symbols` and drop the
           untimed kind from the bounds list:
           test_a_page_it_cannot_page_past_is_named_with_a_bound goes RED.
+      N29 count every full page toward the cap (the overlap exemption always false):
+          tests/test_binancefills_e2e.py
+          test_a_cap_stamp_whose_overlap_hour_is_full_resumes_past_the_cap goes RED.
     """
 
     async def test_a_capped_window_is_named_with_its_read_through_bound(
@@ -637,3 +641,170 @@ class TestBinanceFillsStops:
             and "BTCUSDT" in record.getMessage()
         ]
         assert len(cap_warnings) == 1, "exactly one cap WARNING must name the symbol"
+
+    async def test_two_stopped_symbols_record_the_smaller_bound_once(
+        self, open_exchanges: list[Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RESEARCH Pitfall 7 (T-250-11): two symbols cap at DIFFERENT instants beside a healthy
+        third. `binance_read_through_ms` is the SMALLER bound and is recorded by exactly ONE
+        `_record_dq_flag` call: `_record_dq_flag` SUMS two ints, so a record per symbol would
+        stamp the sum, an instant after BOTH bounds, past the older symbol's unread fills.
+
+        Lowered caps (3 rows a page, 2 pages: a symbol caps at its fifth fill in a window; the
+        healthy symbol carries two). Every fill is after the `since_ms` passed, so no page is
+        exempt. S = 1794916800000 (2026-11-17T12:00:00Z). BTCUSDT: one fill an hour for seven
+        hours from S + 1 h, so it caps at S + 5 h = 1794934800000 (2026-11-17T17:00:00Z).
+        ETHUSDT: one fill an hour from S + 10 h, so it caps at S + 14 h = 1794967200000
+        (2026-11-18T02:00:00Z). BTCUSDCC (stored name of the BTC/USDC:USDC swap, venue id
+        BTCUSDC): two fills, never stopped."""
+        monkeypatch.setattr(ex, "BINANCE_FILLS_PAGE_LIMIT", 3)
+        monkeypatch.setattr(ex, "BINANCE_PAGE_CAP", 2)
+        seed_ms = 1794916800000
+        smaller_bound_ms = 1794934800000
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [
+                    venue_fill("linear", "BTCUSDT", i, seed_ms + i * HOUR_MS) for i in range(1, 8)
+                ],
+                ("linear", "ETHUSDT"): [
+                    venue_fill("linear", "ETHUSDT", 20 + i, seed_ms + (9 + i) * HOUR_MS)
+                    for i in range(1, 8)
+                ],
+                ("linear", "BTCUSDC"): [
+                    venue_fill("linear", "BTCUSDC", 40, seed_ms + 2 * HOUR_MS),
+                    venue_fill("linear", "BTCUSDC", 41, seed_ms + 3 * HOUR_MS),
+                ],
+            }
+        )
+        recorded: list[tuple[str, Any]] = []
+        real_record = ex._record_dq_flag
+
+        def _spy(key: str, value: Any) -> None:
+            recorded.append((key, value))
+            real_record(key, value)
+
+        monkeypatch.setattr(ex, "_record_dq_flag", _spy)
+
+        _fills, flags = await _read(
+            open_exchanges, venue, ["BTCUSDT", "ETHUSDT", "BTCUSDCC"], seed_ms
+        )
+
+        assert sorted(flags.get("binance_page_cap_symbols", [])) == ["BTCUSDT", "ETHUSDT"]
+        assert flags.get("binance_read_through_ms") == smaller_bound_ms
+        assert [v for k, v in recorded if k == "binance_read_through_ms"] == [smaller_bound_ms], (
+            "the bound must be recorded once, as the minimum"
+        )
+        assert "binance_untimed_page_symbols" not in flags
+        assert "binance_partial_symbols" not in flags
+
+    @pytest.mark.parametrize(
+        ("capped_beside", "bound_ms"),
+        [
+            pytest.param(False, 1794924000000, id="untimed-alone"),
+            pytest.param(True, 1794917100000, id="beside-a-capped-symbol"),
+        ],
+    )
+    async def test_a_page_it_cannot_page_past_is_named_with_a_bound(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        capped_beside: bool,
+        bound_ms: int,
+    ) -> None:
+        """T-250-16: a FULL page whose last row has no numeric timestamp cannot be paged past (no
+        cursor to advance to). The symbol's walk stops, it is named in
+        `binance_untimed_page_symbols` (not the holding partial flag), and its bound is the newest
+        numeric timestamp read in that window, folded into the ONE `binance_read_through_ms`; a
+        healthy symbol's newer fills cannot move it, and with a capped symbol beside it the bound
+        is the smaller of the two.
+
+        This arm uses a NON-ccxt double on purpose: real ccxt's `parse_trades` DROPS a row without
+        a timestamp whenever `since` is set (measured in 250-03), so the branch is unreachable
+        through `real_binance`. The double is an AsyncMock with `markets = {}` (so the awaited
+        `load_markets()` is a no-op) and a `fetch_my_trades` that honours `since`, `until` and
+        `limit`; a row without a timestamp sorts last.
+
+        S = 1794916800000 (2026-11-17T12:00:00Z), page of 3. BTCUSDT's one page holds fills at
+        S + 1 h and S + 2 h = 1794924000000 (2026-11-17T14:00:00Z) and a row with no timestamp,
+        so the bound is 1794924000000 and it is asked ONCE. ETHUSDT (healthy, two fills at
+        S + 5 h and S + 6 h, newer than BTCUSDT's rows). With a capped symbol beside it, ETHUSDT
+        instead holds seven fills a minute apart from S + 1 min and caps at its fifth,
+        S + 5 min = 1794917100000 (2026-11-17T12:05:00Z), the smaller bound."""
+        monkeypatch.setattr(ex, "_now_ms", lambda: NOW_MS)
+        monkeypatch.setattr(ex, "BINANCE_FILLS_PAGE_LIMIT", 3)
+        monkeypatch.setattr(ex, "BINANCE_PAGE_CAP", 2)
+        seed_ms = 1794916800000
+
+        def _row(fill_id: int, ts: int | None) -> dict[str, Any]:
+            row: dict[str, Any] = {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 60000.0,
+                "amount": 0.1,
+                "order": f"ord-{fill_id}",
+                "id": f"fill-{fill_id}",
+                "fee": {"cost": 0.6, "currency": "USDT"},
+                "takerOrMaker": "taker",
+                "info": {},
+            }
+            if ts is not None:
+                row["timestamp"] = ts
+            return row
+
+        eth_times = (
+            [seed_ms + i * 60_000 for i in range(1, 8)]
+            if capped_beside
+            else [seed_ms + 5 * HOUR_MS, seed_ms + 6 * HOUR_MS]
+        )
+        rows_by_symbol = {
+            "BTCUSDT": [
+                _row(1, seed_ms + HOUR_MS),
+                _row(2, seed_ms + 2 * HOUR_MS),
+                _row(3, None),
+            ],
+            "ETHUSDT": [_row(10 + i, t) for i, t in enumerate(eth_times)],
+        }
+        calls: list[tuple[str, int | None]] = []
+
+        async def _fetch_my_trades(
+            symbol: str,
+            since: int | None = None,
+            limit: int | None = None,
+            params: dict[str, Any] | None = None,
+        ) -> list[dict[str, Any]]:
+            assert since is not None and params is not None
+            calls.append((symbol, since))
+            served = [
+                r
+                for r in rows_by_symbol[symbol]
+                if "timestamp" not in r or since <= r["timestamp"] <= params["until"]
+            ]
+            served.sort(key=lambda r: r.get("timestamp", float("inf")))
+            return served[:limit]
+
+        double = AsyncMock()
+        double.id = "binance"
+        double.markets = {}
+        double.fetch_my_trades = _fetch_my_trades
+
+        with caplog.at_level("WARNING"):
+            await ex.fetch_raw_trades(
+                double, STRATEGY_ID, symbols_supabase(["BTCUSDT", "ETHUSDT"]), since_ms=seed_ms
+            )
+        flags = ex.get_and_clear_last_dq_flags()
+
+        assert flags.get("binance_untimed_page_symbols") == ["BTCUSDT"]
+        assert flags.get("binance_read_through_ms") == bound_ms
+        assert [c for c in calls if c[0] == "BTCUSDT"] == [("BTCUSDT", seed_ms - HOUR_MS)], (
+            "no later page or window may be asked for the untimed symbol"
+        )
+        assert any(
+            "BTCUSDT" in record.getMessage() and "missing 'timestamp'" in record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+        ), "the missing-timestamp WARNING must name the symbol"
+        assert "binance_partial_symbols" not in flags
+        if capped_beside:
+            assert flags.get("binance_page_cap_symbols") == ["ETHUSDT"]
+        else:
+            assert "binance_page_cap_symbols" not in flags

@@ -2524,7 +2524,8 @@ async def fetch_raw_trades(
     try:
         if exchange.id == "binance":
             fills = await _fetch_raw_trades_binance(
-                exchange, strategy_id, supabase, effective_since
+                exchange, strategy_id, supabase, effective_since,
+                pre_overlap_seed_ms=since_ms,
             )
         elif exchange.id == "okx":
             fills = await _fetch_raw_trades_okx(exchange, effective_since)
@@ -2555,6 +2556,8 @@ async def _fetch_raw_trades_binance(
     strategy_id: str,
     supabase: Client,
     since_ms: int | None,
+    *,
+    pre_overlap_seed_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     """Binance: per-symbol iteration using fetch_my_trades.
 
@@ -2569,6 +2572,9 @@ async def _fetch_raw_trades_binance(
     ``_BinanceSymbolRead.stop`` with a ``read_through_ms`` bound: ``cap`` (``BINANCE_PAGE_CAP``
     pages inside one window) and ``untimed`` (a full page whose last row has no timestamp).
     Flags are recorded here in the parent, never inside the gathered per-symbol tasks.
+    ``pre_overlap_seed_ms`` is the caller's seed before ``OVERLAP_WINDOW_MS`` was subtracted: a
+    full page that re-reads the hour below it does not count toward ``BINANCE_PAGE_CAP`` (None
+    counts every page).
     """
     from services.db import db_execute, paginated_select
 
@@ -2726,7 +2732,8 @@ async def _fetch_raw_trades_binance(
             window_newest: int | None = None
             # H-0662: Binance caps fetch_my_trades at 1000 rows per call. Paginate by
             # advancing ``since`` until a short page returns or the per-WINDOW page cap.
-            for _page in range(BINANCE_PAGE_CAP):
+            counted_pages = 0
+            while counted_pages < BINANCE_PAGE_CAP:
                 # Hold the semaphore only across the network call so one
                 # heavy symbol can't monopolize a slot for 20 sequential RTTs
                 # while sibling symbols block.
@@ -2796,6 +2803,23 @@ async def _fetch_raw_trades_binance(
                         symbol, next_since,
                     )
                     next_since = current_since + 1
+                # Phase 250 BINANCEFILLS (orchestrator decision 2026-11-25): a full page that
+                # re-reads the 1 h overlap below the caller's pre-overlap seed (its last row is at
+                # or after the page's request ``since`` and strictly before the seed) is NOT
+                # counted toward the cap, so a cap stamp whose overlap hour holds more fills than
+                # the cap's pages serve is still passed on the next run. Two derived facts,
+                # hand-checked: an exempt page hands the next page a strictly later ``since`` (its
+                # last row is at or after the request ``since``, and the same-ms step above adds 1
+                # when they are equal), so exempt pages advance through the one overlap hour and
+                # cannot repeat; a page whose last row is older than its request ``since`` counts.
+                # With BINANCE_PAGE_CAP at least 3, at most two counted pages can end exactly at
+                # the seed, so a cap's bound is strictly later than the seed and the next run
+                # resumes past the cap. The cap value stays 20.
+                if not (
+                    pre_overlap_seed_ms is not None
+                    and current_since <= last_ts < pre_overlap_seed_ms
+                ):
+                    counted_pages += 1
                 current_since = next_since
                 if current_since > window_end:
                     break  # the window is complete: nothing left to ask for in it
