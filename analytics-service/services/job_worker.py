@@ -7810,6 +7810,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             _mt5_session,
                             now=_mt5_now,
                             settle_history=_mt5_fresh,
+                            # 225-20: attribution for the verdict line only.
+                            holder=ctx.key_row.get("id"),
                         ),
                         timeout=mt5_derive_read_bound_s(
                             read_s=_MT5_DERIVE_READ_TIMEOUT_S,
