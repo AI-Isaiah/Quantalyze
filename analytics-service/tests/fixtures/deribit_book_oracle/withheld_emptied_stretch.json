@@ -1,5 +1,5 @@
 {
-  "_comment": "Every value here is synthetic. Book A, counted keys k1 and k2, eight union days 2025-01-01 .. 2025-01-08 (d1..d8). HAND DERIVATION. k1 terminal 1070 on d8, no flow, P by day = 0,10,10,10,10,10,10,10: L8 = 1070, L7 = 1060, L6 = 1050, L5 = 1040, L4 = 1030, L3 = 1020, L2 = 1010, L1 = 1000. k2 terminal 0.5 on d8, no flow, P = 0 on every day except d6 = -199.5: L8 = 0.5, L7 = 0.5, L6 = 0.5, L5 = L6 - P6 = 0.5 + 199.5 = 200, L4 = L3 = L2 = L1 = 200. Every stamp is consistent with P over the previous level (k1 10/L(prev); k2 0 except d6 = -199.5/200 = -0.9975), so no key-basis reason can fire. THE EMPTIED BAND BY CONSTRUCTION: k2's prior peak is 200 (d1..d5), the band is below the smaller of 1% of that peak (2) and 100, so k2's levels of 0.5 on d6, d7 and d8 are emptied. The PUBLISHED book zero-weights an emptied key, so it holds k1 alone on d7 and d8: d7 10/1050 and d8 10/1060. The oracle's raw arithmetic adds k2's 0.5 to the denominator (10/1050.5, 10/1060.5), which differs by about 5e-4, far above the equality tolerance: d7 and d8 are not reproduced and k2's previous level is inside the band, so both are withheld emptied_stretch. d2..d5 are two-key days with plain levels: 10/(1000+200), 10/(1010+200), 10/(1020+200), 10/(1030+200). d6 is the loss day, with the previous levels still live: (10 - 199.5)/(1040 + 200) = -189.5/1240. Published 7 (d2..d8), explained 5 (d2..d6), withheld 2 (d7, d8), omitted 1 (d1 no_stored_base_level). Verdict STOP, exit 1.",
+  "_comment": "Every value here is synthetic. Book A, counted keys k1 and k2, eight union days 2025-01-01 .. 2025-01-08 (d1..d8). HAND DERIVATION. k1 terminal 1070 on d8, no flow, P by day = 0,10,10,10,10,10,10,10: L8 = 1070, L7 = 1060, L6 = 1050, L5 = 1040, L4 = 1030, L3 = 1020, L2 = 1010, L1 = 1000. k2 terminal 0.5 on d8, no flow, P = 0 on every day except d6 = -199.5: L8 = 0.5, L7 = 0.5, L6 = 0.5, L5 = L6 - P6 = 0.5 + 199.5 = 200, L4 = L3 = L2 = L1 = 200. Every stamp is consistent with P over the previous level (k1 10/L(prev); k2 0 except d6 = -199.5/200 = -0.9975), so no key-basis reason can fire. THE EMPTIED BAND BY CONSTRUCTION: k2's prior peak is 200 (d1..d5), the band is below the smaller of 1% of that peak (2) and 100, so k2's levels of 0.5 on d6, d7 and d8 are emptied. The last day is emptied and the effective anchor (anchor_usd is null, so the realized terminal 0.5) is inside the band of the prior peak, so the book level on d8 is 0.0 as well. THE COMPOSE COUNTS AN EMPTIED LEVEL AS ZERO CAPITAL (replay_key_equity zeroes it, portfolio_returns then adds nothing for a participant whose previous level is 0.0), so the corrected oracle reproduces 10/1050 on d7 and 10/1060 on d8 (k1 alone). THE PUBLISHED values here are instead those of a book composed WITHOUT the zero-capital rule, which keeps k2's 0.5 in the denominator: d7 10/1050.5 and d8 10/1060.5. They differ from the oracle's by about 5e-4, far above the equality tolerance, so d7 and d8 are not reproduced; k2's previous level is emptied on both days, so both are withheld emptied_stretch, which keeps a producer. d2..d5 are two-key days with plain levels: 10/(1000+200), 10/(1010+200), 10/(1020+200), 10/(1030+200). d6 is the loss day, with the previous levels still live: (10 - 199.5)/(1040 + 200) = -189.5/1240. Published 7 (d2..d8), explained 5 (d2..d6), withheld 2 (d7, d8), omitted 1 (d1 no_stored_base_level). Verdict STOP, exit 1.",
   "book": {
     "label": "A",
     "returns": [
@@ -25,11 +25,11 @@
       },
       {
         "date": "2025-01-07",
-        "r": 0.009523809523809525
+        "r": 0.00951927653498334
       },
       {
         "date": "2025-01-08",
-        "r": 0.009433962264150943
+        "r": 0.00942951438000943
       }
     ],
     "flags": {},

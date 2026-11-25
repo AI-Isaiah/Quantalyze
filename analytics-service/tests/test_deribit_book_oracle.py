@@ -30,10 +30,24 @@ Why each test matters (Rule 9):
      reproduced day exits 3. REVERT-PROOF: removing the VACUOUS check exits 1 instead.
   8. ``test_loader_*``: the strict loader refuses an unknown key, a non-ISO day and a
      non-finite number by field path, never by value.
+  Plan 233-07 Task 1 (an emptied level is zero capital, as the compose counts it):
+  19. ``test_emptied_level_is_zero_capital``: an emptied (dust) level is 0.0 in the levels the
+      book sums, and a participant whose previous level is 0.0 adds 0.0 to the numerator AND the
+      denominator, never its stored P&L. REVERT-PROOF: keeping the raw level on an emptied day, or
+      letting that participant's P into the numerator, moves d4 off the hand value 10/1020.
+  20. ``test_emptied_sole_key_and_carried_zero``: a day whose only participant carries zero capital
+      is omitted ``skipped_nonpositive_denominator``, a carried emptied last level stays 0.0, and a
+      day where a participant sat out and the denominator is exactly 0.0 is omitted
+      ``missing_return_inside_coverage``. REVERT-PROOF: deleting the sat-out zero-denominator
+      branch reads d7 as ``skipped_nonpositive_denominator``.
+  21. ``test_emptied_last_day_anchor_decides``: an emptied last day stays 0.0 when the effective
+      anchor is inside the band of the prior peak and takes the anchor otherwise.
+      REVERT-PROOF: always taking the anchor on an emptied last day reads 1.5 as 1.5, not 0.0.
 """
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 import re
 import uuid
@@ -603,3 +617,65 @@ def test_export_with_id_shaped_value_is_refused(tmp_path: Path, capsys: pytest.C
         assert code == 2
         assert expect in captured.err
         assert an_id not in captured.err and an_id not in captured.out
+
+
+# ── plan 233-07 Task 1: an emptied level is zero capital in both sums ──────────────────────────
+
+
+def test_emptied_level_is_zero_capital(capsys: pytest.CaptureFixture[str]) -> None:
+    # Hand derivation in the fixture's _comment: k2 is emptied on d3, d4 and d5, so the book sums
+    # it at 0.0 there and the dust P of 0.25 on d4 never enters the numerator.
+    code, lines = _run("emptied_zero_capital.json", capsys)
+    assert code == 0
+    assert _lines(lines, "oracle-book:") == [
+        "oracle-book: book=A published=7 explained=7 withheld=0 omitted=1 annotated=2"
+    ]
+    assert _lines(lines, "oracle-withheld:") == []
+    assert _lines(lines, "oracle-omitted:") == [
+        "oracle-omitted: date=2025-01-01 reason=no_stored_base_level"
+    ]
+    assert _lines(lines, "oracle-verdict:") == [
+        "oracle-verdict: verdict=CLEAN withheld_published=0 omission_unexplained=0 key_set=reproduced"
+    ]
+    k2 = oracle.roll_key_levels(oracle.load_export(str(_FIXTURES / "emptied_zero_capital.json")).keys["k2"])
+    assert k2.emptied == frozenset({"2025-01-03", "2025-01-04", "2025-01-05"})
+    assert k2.level is not None
+    assert [k2.level[f"2025-01-0{n}"] for n in range(1, 9)] == [
+        200.0, 200.0, 0.0, 0.0, 0.0, 300.75, 303.75, 306.75
+    ]
+
+
+def test_emptied_sole_key_and_carried_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    code, lines = _run("emptied_sole_and_carried.json", capsys)
+    assert code == 0
+    assert _lines(lines, "oracle-book:") == [
+        "oracle-book: book=A published=5 explained=5 withheld=0 omitted=3 annotated=2"
+    ]
+    assert _lines(lines, "oracle-withheld:") == []
+    assert _lines(lines, "oracle-omitted:") == [
+        "oracle-omitted: date=2025-01-01 reason=no_stored_base_level",
+        "oracle-omitted: date=2025-01-04 reason=skipped_nonpositive_denominator",
+        "oracle-omitted: date=2025-01-07 reason=missing_return_inside_coverage",
+    ]
+    assert _analysis("emptied_sole_and_carried.json").classification.annotations == {
+        "2025-01-03": ("capital_outside_base_flow_day",),
+        "2025-01-07": ("key_sat_out",),
+    }
+    assert _lines(lines, "oracle-verdict:") == [
+        "oracle-verdict: verdict=CLEAN withheld_published=0 omission_unexplained=0 key_set=reproduced"
+    ]
+
+
+def test_emptied_last_day_anchor_decides() -> None:
+    base = oracle.load_export(str(_FIXTURES / "emptied_sole_and_carried.json")).keys["k2"]
+    emptied = frozenset({"2025-01-03", "2025-01-04", "2025-01-05"})
+    # null: the job's no-capital exit anchors at the realized terminal (0.75, in band); 1.5 is
+    # inside the band of the prior peak 200 (ceiling 2); 50 is at or above the ceiling.
+    for anchor, last in ((None, 0.0), (1.5, 0.0), (50.0, 50.0)):
+        lv = oracle.roll_key_levels(dataclasses.replace(base, anchor_usd=anchor))
+        assert lv.emptied == emptied, anchor
+        assert lv.level is not None
+        assert lv.level["2025-01-05"] == last, anchor
+        assert lv.level["2025-01-03"] == 0.0 and lv.level["2025-01-04"] == 0.0, anchor
+        assert lv.level["2025-01-01"] == 200.0 and lv.level["2025-01-02"] == 200.0, anchor
+        assert lv.stamp_bad_days == frozenset(), anchor  # the identity ran on the raw levels

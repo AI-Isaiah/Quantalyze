@@ -9,7 +9,11 @@ from the STORED inputs only: for each published book return it recomputes
 
 with the levels rolled back from ``realized_terminal_usd`` through ``composed_day_pnl`` and
 ``composed_flows``, and compares it with the stored ``equity_curve.returns`` value under a numeric
-equality tolerance. The tolerance is NOT a plausibility bound (Phase 194 D-05): nothing here
+equality tolerance. An emptied (dust) level is zero capital in BOTH sums and as a carried level
+(DERIBITWEDGE D-01: ``replay_key_equity`` zeroes it after the raw self-check, then
+``portfolio_returns`` adds ``equity_prev * ret`` and ``equity_prev``), so a key whose previous-day
+level is 0.0 adds nothing to the numerator or the denominator; the emptied scan and the per-key
+stamp identity still run on the raw writer-basis levels. The tolerance is NOT a plausibility bound (Phase 194 D-05): nothing here
 decides that a return is too large to be real. A day it does not reproduce is withheld under one
 name from a closed set; a day it reproduces is "explained".
 
@@ -58,9 +62,10 @@ follows is the compose job's key read in ``job_worker.run_derive_allocator_equit
 oracle only checks that the declared set counts to ``inputs.n_keys``.
 
 Known limits of this version (named, not silent): a stitched child is modelled as its own key
-series with its join and the next day treated as a boundary; the emptied band is classified on
-each key's raw writer-basis levels (the terminal level before the live anchor replaces it), so a
-live anchor inside the band is not itself classified; ``nonfinite_return`` is named and produced
+series with its join and the next day treated as a boundary; the emptied band is scanned on each
+key's raw writer-basis levels (the terminal level before the live anchor replaces it) and an
+emptied last day keeps 0.0 only when the effective anchor is inside the band of the prior peak,
+otherwise it takes the anchor; ``nonfinite_return`` is named and produced
 by the loop but no fixture reaches it (the loader refuses non-finite numbers, so only an overflow
 sum could); an ``omitted`` day outside the first-to-last published day is named
 ``outside_published_window`` and still printed day by day.
@@ -478,7 +483,11 @@ def load_export(path: str) -> Export:
 
 @dataclass(frozen=True)
 class KeyLevels:
-    """A key's level days and, when the writer basis reproduces, its levels."""
+    """A key's level days and, when the writer basis reproduces, its BOOK levels.
+
+    ``level`` is what the book sums and carries: the writer-basis level with every emptied day at
+    0.0 (an emptied level is zero capital, as the compose counts it) and the last day decided by
+    the live anchor. ``emptied`` names the emptied days, scanned on the RAW levels."""
 
     label: str
     days: tuple[str, ...]
@@ -487,16 +496,22 @@ class KeyLevels:
     writer_mode: bool
     stamp_available: bool
     stamp_bad_days: frozenset[str]
+    emptied: frozenset[str] = frozenset()
 
 
 def roll_key_levels(key: KeyInputs) -> KeyLevels:
-    """The writer-basis backward roll, plus the per-key stamp identity check.
+    """The writer-basis backward roll, the per-key stamp identity check, then the book levels.
 
     Level days are the union of P&L, flow, dropped and stamped days. The terminal level sits on
     the last P&L day and ``level(prev) = level(day) - F(day) - P(day)``. The stored return on a
     day with a return is ``P(day) / level(prev)``, checked against the stamp under the book
-    tolerances. The live anchor replaces the last level only after the roll (it is a step on
-    that one day and matters only as the carried base past the key's own end)."""
+    tolerances. Both the identity and the emptied scan run on these RAW levels (the SPEC's
+    Pitfall 6); only then does the book level zero every emptied day, as ``replay_key_equity``
+    does. The last day follows the SPEC's anchor block: when it is emptied and the effective
+    anchor (``anchor_usd``, or the realized terminal when that is null, the job's no-capital
+    exit) is inside the two-sided band of the prior peak at that day, the level stays 0.0;
+    otherwise a positive live anchor replaces it. A last day that is not emptied takes a positive
+    ``anchor_usd`` as before (a step on that one day, the carried base past the key's own end)."""
     stamp = key.stamp or {}
     days = tuple(sorted(set(key.pnl) | set(key.flows) | set(key.dropped) | set(stamp)))
     has_basis = bool(key.pnl) and key.terminal_day is not None and key.terminal_usd is not None
@@ -528,9 +543,22 @@ def roll_key_levels(key: KeyInputs) -> KeyLevels:
             expected = key.pnl.get(day, 0.0) / prev_level
             if not _close(stamp.get(day, 0.0), expected):
                 bad.add(day)
-    if key.anchor_usd is not None and key.anchor_usd > 0.0:
-        level[days[-1]] = key.anchor_usd
-    return KeyLevels(key.label, days, level, True, True, stamp_available, frozenset(bad))
+    emptied, peak_at_last_day = emptied_scan(days, level, key.flows)
+    book = dict(level)
+    for day in emptied:
+        book[day] = 0.0
+    last = days[-1]
+    if last in emptied:
+        anchor = key.anchor_usd if key.anchor_usd is not None else key.terminal_usd
+        in_band = (
+            peak_at_last_day is not None
+            and -_EMPTIED_NEGATIVE_FRACTION * peak_at_last_day <= anchor < _emptied_ceiling(peak_at_last_day)
+        )
+        if not in_band and anchor > 0.0:
+            book[last] = anchor
+    elif key.anchor_usd is not None and key.anchor_usd > 0.0:
+        book[last] = key.anchor_usd
+    return KeyLevels(key.label, days, book, True, True, stamp_available, frozenset(bad), emptied)
 
 
 def _last_le(sorted_days: Sequence[str], day: str) -> str | None:
@@ -604,43 +632,47 @@ def _emptied_ceiling(peak: float) -> float:
     return min(_EMPTIED_FRACTION * peak, _EMPTIED_RESTART_FLOOR_USD)
 
 
-def emptied_days(key: KeyInputs, levels: KeyLevels) -> frozenset[str]:
-    """The key's level days whose raw writer-basis level sits inside the emptied band.
+def emptied_scan(
+    days: Sequence[str], level: Mapping[str, float], flows: Mapping[str, float]
+) -> tuple[frozenset[str], float | None]:
+    """The emptied level days of a key's RAW writer-basis levels, and the prior peak at its last day.
 
     The SPEC's chronological scan: the prior peak is the maximum over EARLIER non-emptied
     positive levels (an emptied day never lifts it); a level is emptied when it is from
     ``_EMPTIED_NEGATIVE_FRACTION`` of the prior peak below zero up to the smaller of
     ``_EMPTIED_FRACTION`` of the prior peak and ``_EMPTIED_RESTART_FLOOR_USD``; a day with a
     positive flow right after an emptied day ends the stretch when it lifts the level out of the
-    band (the peak restarts at that level). The last day uses the raw terminal level, before the
-    live anchor replaced it."""
-    if levels.level is None:
-        return frozenset()
+    band (the peak restarts at that level). The last day is scanned on the raw terminal level,
+    before any live anchor; the peak recorded for it is the one BEFORE that day is scanned
+    (``peak_at_last_day``), which decides the anchor band."""
     peak: float | None = None
+    peak_at_last_day: float | None = None
     prev_emptied = False
     out: set[str] = set()
-    last = levels.days[-1]
-    for index, day in enumerate(levels.days):
-        level = key.terminal_usd if day == last and key.terminal_usd is not None else levels.level[day]
+    last_index = len(days) - 1
+    for index, day in enumerate(days):
+        value = level[day]
+        if index == last_index:
+            peak_at_last_day = peak
         ends_stretch = (
             index > 0
             and prev_emptied
-            and key.flows.get(day, 0.0) > 0.0
+            and flows.get(day, 0.0) > 0.0
             and peak is not None
-            and level >= _emptied_ceiling(peak)
+            and value >= _emptied_ceiling(peak)
         )
         if ends_stretch:
-            if level > 0.0:
-                peak = level
+            if value > 0.0:
+                peak = value
             prev_emptied = False
-        elif peak is not None and -_EMPTIED_NEGATIVE_FRACTION * peak <= level < _emptied_ceiling(peak):
+        elif peak is not None and -_EMPTIED_NEGATIVE_FRACTION * peak <= value < _emptied_ceiling(peak):
             out.add(day)
             prev_emptied = True
         else:
-            if level > 0.0:
-                peak = level if peak is None else max(peak, level)
+            if value > 0.0:
+                peak = value if peak is None else max(peak, value)
             prev_emptied = False
-    return frozenset(out)
+    return frozenset(out), peak_at_last_day
 
 
 # ── the book ───────────────────────────────────────────────────────────────────────────────────
@@ -673,10 +705,13 @@ def reproduce_book(
 
     A key participates on a day when it has a level on the previous union day and on the day. A
     participating key whose day is a dropped day with no stored return sits out of both sums. The
-    numerator is the participating keys' booked P&L on the day and the denominator their levels on
-    the previous union day. A day with no previous union day, no participant, no positive
-    denominator or a non-finite sum is omitted under a name; a day on which every participant sat
-    out is absent from the compose and omitted as ``missing_return_inside_coverage``."""
+    numerator is the participating keys' booked P&L on the day and the denominator their book
+    levels on the previous union day; a participant whose previous book level is 0.0 (an emptied
+    level is zero capital) adds 0.0 to BOTH sums, whatever its P&L (``portfolio_returns`` adds
+    ``equity_prev * ret`` and ``equity_prev``). A day with no previous union day, no participant,
+    no positive denominator or a non-finite sum is omitted under a name; a day on which a
+    participant sat out and the denominator is exactly 0.0 is absent from the compose and omitted
+    as ``missing_return_inside_coverage``, a branch that precedes the non-positive skip."""
     union = tuple(sorted({day for lv in levels.values() for day in lv.days}))
     # A declared departure and a disjoint coverage handoff both rotate a key out; an overlapping
     # key that ended early is neither, so its last level carries with no P&L.
@@ -718,12 +753,18 @@ def reproduce_book(
             assert lv.level is not None
             carry_prev = _carry_day(lv, label in rotated, prev)
             assert carry_prev is not None
+            prev_level = lv.level[carry_prev]
             pnl = keys[label].pnl.get(day, 0.0) if day in lv.days else 0.0
+            if prev_level == 0.0:
+                pnl = 0.0  # zero capital adds nothing to either sum, never its stored P&L
             contributions[label] = pnl
             numer += pnl
-            denom += lv.level[carry_prev]
+            denom += prev_level
         if not math.isfinite(numer) or not math.isfinite(denom):
             out[day] = DayRepro(day, None, "nonfinite_return", tuple(parts), tuple(sat_out), contributions)
+            continue
+        if sat_out and denom == 0.0:
+            out[day] = DayRepro(day, None, "missing_return_inside_coverage", tuple(parts), tuple(sat_out), contributions)
             continue
         if not (denom > 0.0):
             out[day] = DayRepro(day, None, "skipped_nonpositive_denominator", tuple(parts), tuple(sat_out), contributions)
@@ -824,7 +865,7 @@ def classify_days(
     (capital outside the base, a key that sat out) are named per day and never change a class."""
     published = export.book.returns
     boundary = _boundary_days(export, repro, levels)
-    emptied = {label: emptied_days(export.keys[label], lv) for label, lv in levels.items()}
+    emptied = {label: lv.emptied for label, lv in levels.items()}
     window = (min(published), max(published)) if published else None
     out: list[DayClass] = []
     for day in sorted(set(repro.union) | set(published)):

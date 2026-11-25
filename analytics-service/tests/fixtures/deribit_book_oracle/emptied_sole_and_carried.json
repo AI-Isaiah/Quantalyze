@@ -1,0 +1,74 @@
+{
+  "_comment": "Every value here is synthetic. Book A, counted keys k1 and k2, eight union days 2025-01-01 .. 2025-01-08 (d1..d8). HAND DERIVATION. k2 (d1..d5): terminal 0.75 on d5, anchor_usd null, P by day = 0, 0, 0, 0, 0.25, one composed flow of -199.5 on d3 (a P row of 0). L5 = 0.75, L4 = 0.75 - 0.25 = 0.5, L3 = 0.5, L2 = 0.5 + 199.5 = 200, L1 = 200. Stamps (P over the raw previous level): d2 0, d3 0, d4 0, d5 0.25/0.5 = 0.5. k1 (d4..d8): terminal 1035 on d8, P by day = 0, 10, 10, 5, 10 with d7 a DROPPED day (5 in both composed_day_pnl and dropped_day_pnl, no stamp): L8 = 1035, L7 = 1025, L6 = 1025 - 5 = 1020, L5 = 1010, L4 = 1000. Stamps d5 10/1000, d6 10/1010, d8 10/1025. EMPTIED SCAN on k2's raw levels: peak 200 after d1 and d2; d3 (0.5), d4 (0.5) and d5 (0.75) are inside the band (below the smaller of 1% of 200 = 2 and 100). The last day is emptied, the prior peak at the last day is 200 and the effective anchor is the realized terminal 0.75 (anchor_usd is null, the job's no-capital exit), which is inside the band, so the book level on d5 stays 0.0 and the carried level past d5 is 0.0. COVERAGE: d1-d3 {k2}, d4-d5 {k1, k2}, d6-d8 {k1}; every transition shares a key, so no rotation and k2 carries past d5. DAYS: d1 has no previous union day, omitted no_stored_base_level. d2 and d3: k2 alone on live levels with P 0, published 0.0 each. d4: k1 has no previous level yet, so k2 is the only participant and its previous level (d3) is 0.0: the denominator is 0.0 and nobody sat out, omitted skipped_nonpositive_denominator (the book lacks d4). d5: k1 P 10 over its previous level 1000, k2 adds 0 to both sums: published 10/1000. d6: k1 10/1010 with k2 carried at 0.0: published 10/1010. d7: k1 sat out (dropped day, no stored return) and k2's carried level is 0.0, so the denominator is exactly 0.0 with a participant excluded: omitted missing_return_inside_coverage (the compose's excluded-and-zero-denominator branch comes before the non-positive skip), annotated key_sat_out. d8: 10/1025 (k1's previous level is d7's 1025). Published 5 (d2, d3, d5, d6, d8), explained 5, withheld 0, omitted 3 (d1, d4, d7), annotated 2 (the flow day d3 and the sat-out day d7). Verdict CLEAN, exit 0.",
+  "book": {
+    "label": "A",
+    "returns": [
+      {"date": "2025-01-02", "r": 0.0},
+      {"date": "2025-01-03", "r": 0.0},
+      {"date": "2025-01-05", "r": 0.01},
+      {"date": "2025-01-06", "r": 0.009900990099009901},
+      {"date": "2025-01-08", "r": 0.00975609756097561}
+    ],
+    "flags": {},
+    "degrade_reasons": [],
+    "inputs": {
+      "n_keys": 2
+    }
+  },
+  "keys": {
+    "k1": {
+      "composed_day_pnl": [
+        {"utc_day_iso": "2025-01-04", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-05", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-06", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-07", "pnl_usd": 5},
+        {"utc_day_iso": "2025-01-08", "pnl_usd": 10}
+      ],
+      "composed_flows": [],
+      "dropped_day_pnl": [
+        {"utc_day_iso": "2025-01-07", "pnl_usd": 5}
+      ],
+      "returns_stamp": [
+        {"utc_day_iso": "2025-01-05", "return": 0.01},
+        {"utc_day_iso": "2025-01-06", "return": 0.009900990099009901},
+        {"utc_day_iso": "2025-01-08", "return": 0.00975609756097561}
+      ],
+      "realized_terminal_day": "2025-01-08",
+      "realized_terminal_usd": 1035,
+      "anchor_usd": null,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    },
+    "k2": {
+      "composed_day_pnl": [
+        {"utc_day_iso": "2025-01-01", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-02", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-03", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-04", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-05", "pnl_usd": 0.25}
+      ],
+      "composed_flows": [
+        {"utc_day_iso": "2025-01-03", "flow_usd": -199.5}
+      ],
+      "dropped_day_pnl": [],
+      "returns_stamp": [
+        {"utc_day_iso": "2025-01-02", "return": 0.0},
+        {"utc_day_iso": "2025-01-03", "return": 0.0},
+        {"utc_day_iso": "2025-01-04", "return": 0.0},
+        {"utc_day_iso": "2025-01-05", "return": 0.5}
+      ],
+      "realized_terminal_day": "2025-01-05",
+      "realized_terminal_usd": 0.75,
+      "anchor_usd": null,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    }
+  },
+  "declared": {
+    "counted": ["k1", "k2"]
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "_comment": "Every value here is synthetic. Book A, counted keys k1 and k2, eight union days 2025-01-01 .. 2025-01-08 (d1..d8). HAND DERIVATION. k1: no flow, P by day = 0, 10, 10, 10, 10, 10, 10, 10, terminal 1070 on d8, so L8 = 1070, L7 = 1060, L6 = 1050, L5 = 1040, L4 = 1030, L3 = 1020, L2 = 1010, L1 = 1000. k2: terminal 306.75 on d8, anchor_usd null; P by day = 0, 0, 0, 0.25, 0, 0, 3, 3; a composed flow of -199.5 on d3 and one of +300 on d6 (each flow day carries a P row of 0). Rolled back with level(prev) = level(day) - F(day) - P(day): L8 = 306.75, L7 = 306.75 - 3 = 303.75, L6 = 303.75 - 3 = 300.75, L5 = 300.75 - 300 - 0 = 0.75, L4 = 0.75 - 0 = 0.75, L3 = 0.75 - 0.25 = 0.5, L2 = 0.5 + 199.5 - 0 = 200, L1 = 200. Every stamp is P over the raw previous level (k1 10/L(prev); k2 d2 0, d3 0, d4 0.25/0.5 = 0.5, d5 0, d6 0, d7 3/300.75, d8 3/303.75), so no key-basis reason can fire. THE EMPTIED SCAN on the RAW levels: k2's prior peak is 200 after d1 and d2; the band runs from -0.02 up to the smaller of 1% of the peak (2) and 100, so d3 (0.5), d4 (0.75) and d5 (0.75) are emptied; d6 carries a positive flow that lifts the level to 300.75, at or above the ceiling of 2, so the stretch ends and the peak restarts there; d7 and d8 are live. The compose zeroes the emptied days AFTER the raw self-check (replay_key_equity), so the book sums k2 at 0.0 on d3, d4 and d5. PUBLISHED, by portfolio_returns (numer += equity_prev * ret, denom += equity_prev, so a participant whose previous-day level is 0.0 adds nothing to either sum, the dust P of 0.25 on d4 included): d2 10/(1000 + 200) = 10/1200; d3 10/(1010 + 200) = 10/1210 (k2's previous level on d2 is live and its P is 0); d4 10/1020 (k2's previous level on d3 is 0.0); d5 10/1030; d6 10/1040 (k2's previous level on d5 is 0.0, so the deposit day that ends the stretch contributes nothing); d7 (10 + 3)/(1050 + 300.75) = 13/1350.75; d8 (10 + 3)/(1060 + 303.75) = 13/1363.75. d1 has no previous union day: omitted no_stored_base_level. Published 7, explained 7, withheld 0, omitted 1, annotated 2 (the flow days d3 and d6). Verdict CLEAN, exit 0. Under an oracle that keeps k2's emptied level in the sums, d4, d5 and d6 read 10/1020.5, 10/1030.75 and 10/1040.75 and are withheld emptied_stretch.",
+  "book": {
+    "label": "A",
+    "returns": [
+      {"date": "2025-01-02", "r": 0.008333333333333333},
+      {"date": "2025-01-03", "r": 0.008264462809917356},
+      {"date": "2025-01-04", "r": 0.00980392156862745},
+      {"date": "2025-01-05", "r": 0.009708737864077669},
+      {"date": "2025-01-06", "r": 0.009615384615384616},
+      {"date": "2025-01-07", "r": 0.009624282805848603},
+      {"date": "2025-01-08", "r": 0.009532538955087076}
+    ],
+    "flags": {},
+    "degrade_reasons": [],
+    "inputs": {
+      "n_keys": 2
+    }
+  },
+  "keys": {
+    "k1": {
+      "composed_day_pnl": [
+        {"utc_day_iso": "2025-01-01", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-02", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-03", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-04", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-05", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-06", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-07", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-08", "pnl_usd": 10}
+      ],
+      "composed_flows": [],
+      "dropped_day_pnl": [],
+      "returns_stamp": [
+        {"utc_day_iso": "2025-01-02", "return": 0.01},
+        {"utc_day_iso": "2025-01-03", "return": 0.009900990099009901},
+        {"utc_day_iso": "2025-01-04", "return": 0.00980392156862745},
+        {"utc_day_iso": "2025-01-05", "return": 0.009708737864077669},
+        {"utc_day_iso": "2025-01-06", "return": 0.009615384615384616},
+        {"utc_day_iso": "2025-01-07", "return": 0.009523809523809525},
+        {"utc_day_iso": "2025-01-08", "return": 0.009433962264150943}
+      ],
+      "realized_terminal_day": "2025-01-08",
+      "realized_terminal_usd": 1070,
+      "anchor_usd": null,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    },
+    "k2": {
+      "composed_day_pnl": [
+        {"utc_day_iso": "2025-01-01", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-02", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-03", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-04", "pnl_usd": 0.25},
+        {"utc_day_iso": "2025-01-05", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-06", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-07", "pnl_usd": 3},
+        {"utc_day_iso": "2025-01-08", "pnl_usd": 3}
+      ],
+      "composed_flows": [
+        {"utc_day_iso": "2025-01-03", "flow_usd": -199.5},
+        {"utc_day_iso": "2025-01-06", "flow_usd": 300}
+      ],
+      "dropped_day_pnl": [],
+      "returns_stamp": [
+        {"utc_day_iso": "2025-01-02", "return": 0.0},
+        {"utc_day_iso": "2025-01-03", "return": 0.0},
+        {"utc_day_iso": "2025-01-04", "return": 0.5},
+        {"utc_day_iso": "2025-01-05", "return": 0.0},
+        {"utc_day_iso": "2025-01-06", "return": 0.0},
+        {"utc_day_iso": "2025-01-07", "return": 0.00997506234413965},
+        {"utc_day_iso": "2025-01-08", "return": 0.009876543209876543}
+      ],
+      "realized_terminal_day": "2025-01-08",
+      "realized_terminal_usd": 306.75,
+      "anchor_usd": null,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    }
+  },
+  "declared": {
+    "counted": ["k1", "k2"]
+  }
+}
