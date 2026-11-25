@@ -2,10 +2,11 @@
 -- ROLLBACK for 20261125083433_api_keys_venue_server_index.sql
 -- Phase 225 ONEACCOUNTONCE, plan 10 (CONN-03, founder ruling Q2, decision D-01).
 -- ============================================================================
--- Manual, off the auto-apply path. Run it as ONE transaction, so it either happens
--- whole or not at all (this file carries no transaction statements, like a migration):
+-- Manual, off the auto-apply path. This file is ONE transaction of its own (BEGIN ... COMMIT
+-- below), so it either happens whole or not at all however it is invoked; do not add
+-- --single-transaction, which would nest a second BEGIN:
 --
---   psql --single-transaction -v ON_ERROR_STOP=1 -f <this file>
+--   psql -v ON_ERROR_STOP=1 -f <this file>
 --
 -- against the database the marker query in CLAUDE.md names. Run that query FIRST:
 --
@@ -36,6 +37,8 @@
 -- The DO block before the change is a catalogue-only PRECONDITION and the DO block after
 -- it is a catalogue-only verify. Neither reads a row.
 -- ============================================================================
+
+BEGIN;
 
 SET LOCAL lock_timeout = '3s';
 
@@ -183,3 +186,5 @@ BEGIN
   RAISE NOTICE 'Rollback 20261125083433: the login-only api_keys_user_exchange_venue_account_uniq and the 20260925120000 reconnect_allocator_api_key are restored. The migration ledger row is left in place (see the header).';
 END
 $verify$;
+
+COMMIT;
