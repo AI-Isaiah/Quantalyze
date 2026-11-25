@@ -521,11 +521,16 @@ Plans:
 **Plans:** 6 plans
 
 Plans:
+**Wave 1**
 - [ ] 233-01-PLAN.md — DBOOK-02: a correction is trading only when it names an instrument; one fixture per shape
 - [ ] 233-02-PLAN.md — FRESH-02 tracer (and FRESH-01's reader): fifth prod-prober arm `freshness` end to end, floor 5
 - [ ] 233-03-PLAN.md — DBOOK-01 tracer: independent book attribution oracle, withheld classes, key-set check and verdict order
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 233-04-PLAN.md — FRESH-02 expansion: silent-green guards, day-by-day and boundary fixtures, SQL names bound to their writers
 - [ ] 233-05-PLAN.md — DBOOK-01 expansion: remaining classes and annotations, leak guards and --print-sql, then the orchestrator's PROD reading
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 233-06-PLAN.md — FRESH-01: the 2026-11-26 PROD confirmation reading and the A5 record; diagnosis record resolved
 
 ### Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key
