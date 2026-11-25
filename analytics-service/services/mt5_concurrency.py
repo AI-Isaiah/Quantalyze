@@ -328,6 +328,20 @@ async def _mt5_bounded_restart(
 # fenced at RUNTIME by the per-terminal epoch this lease bumps on release, checked
 # in `Mt5Client.restart` immediately before the `stale.shutdown()`. Two guards, two
 # questions — ⛔ do not try to make the ast roster answer the runtime one.
+#
+# ⭐ CORRECTED 2026-11-25 (Phase 230 MT5NIGHTLY, MT5D-02) — the REPLICAS / cross-process
+# gap this block documents is now CLOSED, and the paragraphs above are kept as lineage.
+# `mt5_terminal_lease` takes a database lease row (`services.mt5_xlease`) after this
+# in-process lock, so the backfill worker and the API process, each with its own event
+# loop and its own registry, no longer log the one terminal into different accounts at
+# once (the cause of the 2026-11 derive second attempts). Three things did NOT change:
+#   * this in-process lock still orders callers INSIDE one process, and it is still the
+#     one registry;
+#   * the MT5CONC-02 login bracket (`account_info().login == expected`, asserted pre and
+#     post the read) stays as the last-resort net and is NOT weakened by the lease;
+#   * the per-process holder and history-settled registries are still per process
+#     (230-RESEARCH, Runtime State Inventory): the lease serializes access but does not
+#     make those registries cross-process.
 _MT5_TERMINAL_LOCKS: dict[str, asyncio.Lock] = {}
 
 

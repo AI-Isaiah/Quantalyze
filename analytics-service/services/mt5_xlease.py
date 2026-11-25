@@ -343,14 +343,94 @@ class XLeaseHold:
         backend: XLeaseBackend,
         digest: str,
         token: uuid.UUID,
+        site: str,
         pending: set[asyncio.Future[bool]],
+        on_lost: Callable[[], None],
     ) -> None:
         self._backend = backend
         self._digest = digest
         self._token = token
+        self._site = site
+        self._on_lost = on_lost
+        self._lost = False
         #: Acquire calls that timed out client-side and may still land (Pitfall 2).
         self._pending = pending
         self._renew_task: asyncio.Task[None] | None = None
+
+    @property
+    def lost(self) -> bool:
+        """True once the renew task declared the lease lost (the self-fence ran)."""
+        return self._lost
+
+    def start_renewing(self) -> None:
+        """Start the renew task on the running loop (called once, on grant)."""
+        self._renew_task = asyncio.get_running_loop().create_task(self._renew_loop())
+
+    async def _renew_loop(self) -> None:
+        """Keep the row while the body runs; declare it lost when it cannot be kept.
+
+        Each tick sleeps one renew interval, then renews under the RPC bound. A False
+        answer (the database no longer recognises the token) or no SUCCESSFUL renew
+        for ``_MT5_XLEASE_LOST_AFTER_S`` (``ttl - renew``, measured on the monotonic
+        clock so it fires while the lease is still ours) is a loss: one ERROR line,
+        the ``on_lost`` self-fence, and the loop ends.
+
+        ⛔ A RAISING BACKGROUND TASK REACHES ``main.lifespan``'s crash handler, which
+        stops dispatch behind a green ``/health`` (the reason the handover recorder
+        never raises either). So the body is one ``try/except Exception`` that logs the
+        exception CLASS only and keeps looping; ``CancelledError`` is not an
+        ``Exception`` and passes through."""
+        last_success = time.monotonic()
+        while True:
+            await asyncio.sleep(_MT5_XLEASE_RENEW_INTERVAL_S)
+            try:
+                renewed: bool | None = None
+                try:
+                    renewed = await asyncio.wait_for(
+                        self._backend.renew(
+                            self._digest, self._token, int(_MT5_XLEASE_TTL_S)
+                        ),
+                        _MT5_XLEASE_RPC_TIMEOUT_S,
+                    )
+                except Exception as exc:  # noqa: BLE001 — no success is counted
+                    logger.warning(
+                        "mt5_xlease: a lease renew failed (exc_class=%s); the "
+                        "lease is lost if none succeeds within %.0fs",
+                        type(exc).__name__,
+                        _MT5_XLEASE_LOST_AFTER_S,
+                        extra={"event_type": "mt5_xlease_renew_failed"},
+                    )
+                now = time.monotonic()
+                if renewed is True:
+                    last_success = now
+                    continue
+                if renewed is False or now - last_success >= _MT5_XLEASE_LOST_AFTER_S:
+                    self._declare_lost()
+                    return
+            except Exception as exc:  # noqa: BLE001 — see the docstring
+                try:
+                    logger.warning(
+                        "mt5_xlease: the renew loop hit an error (exc_class=%s)",
+                        type(exc).__name__,
+                    )
+                except BaseException:  # noqa: BLE001 — never let the task raise
+                    pass
+
+    def _declare_lost(self) -> None:
+        self._lost = True
+        logger.error(
+            "mt5_xlease: the terminal lease was lost while its holder was still "
+            "running (site=%s); fencing the holder's session",
+            self._site,
+            extra={"event_type": "mt5_xlease_lost", "site": self._site},
+        )
+        try:
+            self._on_lost()
+        except Exception as exc:  # noqa: BLE001 — the loss is already recorded
+            logger.error(
+                "mt5_xlease: the self-fence callback failed (exc_class=%s)",
+                type(exc).__name__,
+            )
 
     def stop_renewing(self) -> None:
         """Cancel the renew task. Synchronous on purpose: it is called first in the
@@ -479,4 +559,13 @@ async def acquire_terminal_xlease(
                 "refusals": refusals,
             },
         )
-    return XLeaseHold(backend=backend, digest=digest, token=token, pending=pending)
+    hold = XLeaseHold(
+        backend=backend,
+        digest=digest,
+        token=token,
+        site=site_n,
+        pending=pending,
+        on_lost=on_lost,
+    )
+    hold.start_renewing()
+    return hold
