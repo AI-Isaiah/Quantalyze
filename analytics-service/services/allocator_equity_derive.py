@@ -238,6 +238,9 @@ class DeriveRefusal(str, Enum):
     COMPOSE_EMPTY_BLOCKED = "compose_empty_blocked"
     # The compose refused a structural input (the core's loud asserts).
     COMPOSE_REFUSED = "compose_refused"
+    # 225 CONN-03 (CONTEXT Q6): a key with no broker server reads a login whose keys carry two
+    # or more servers, so its account cannot be placed.
+    ACCOUNT_SERVER_AMBIGUOUS = "account_server_ambiguous"
 
 
 # 234 NOCAP-03: the CLOSED set of routes by which a no-capital key takes ``dropped_key``, the

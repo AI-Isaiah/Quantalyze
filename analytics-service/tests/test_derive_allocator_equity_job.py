@@ -6532,3 +6532,77 @@ async def test_two_live_keys_on_one_login_and_two_servers_compose_as_two_account
     assert any(
         name == "api_keys" and "venue_server" in str(cols) for name, cols in fake.selects
     ), "the derive's key select must read venue_server"
+
+
+def _ambiguous_book(alloc: str, *, null_key_disconnected: bool) -> _ProjectingSupabase:
+    """Live srv-a and srv-b keys on login L-1 plus a key with NO server on the same login,
+    live or disconnected. All three hold returns, so nothing but the identity rule can
+    stop the compose."""
+    null_extra: dict[str, Any] = (
+        {"disconnected_at": "2026-05-01T00:00:00Z"} if null_key_disconnected else {}
+    )
+    return _server_book(
+        alloc,
+        [
+            _mt5_key("key-A", alloc, "srv-a"),
+            _mt5_key("key-B", alloc, "srv-b"),
+            _mt5_key("key-N", alloc, None, **null_extra),
+        ],
+        ("key-A", "key-B", "key-N"),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("null_key_disconnected", [False, True], ids=["live", "disconnected"])
+async def test_a_key_with_no_server_on_a_two_server_login_is_refused_by_name(
+    caplog: pytest.LogCaptureFixture, null_key_disconnected: bool
+) -> None:
+    """CONTEXT Q6 agent decision (overrides CR-01 test (ii)'s 'still composes'). A key with
+    no server on a login that carries two servers may read either, so it joins neither and
+    the book cannot be placed: the derive refuses with its own token, live or disconnected.
+    Not ``account_identity_collision``: that line tells the owner to disconnect a key, which
+    would not clear a key that is already disconnected. The log and the Sentry event carry
+    the token and a count only."""
+    import logging
+    from unittest.mock import patch
+
+    alloc = "alloc-ambiguous"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _ambiguous_book(alloc, null_key_disconnected=null_key_disconnected)
+    with patch("services.job_worker.sentry_sdk") as sentry:
+        assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    _assert_refusal_recorded(fake, alloc, "account_server_ambiguous")
+    assert sentry.capture_message.call_count == 1
+    args, kwargs = sentry.capture_message.call_args
+    assert "account_server_ambiguous" in args[0]
+    assert kwargs.get("level") == "warning"
+    scope = sentry.new_scope.return_value.__enter__.return_value
+    tags = {call.args[0]: call.args[1] for call in scope.set_tag.call_args_list}
+    assert tags.get("compute_job_id") == "j-gate"
+    assert tags.get("derive_refusal") == "account_server_ambiguous"
+    refusals = [r for r in caplog.records if "account_server_ambiguous" in r.getMessage()]
+    assert refusals, caplog.text
+    assert all(r.levelno == logging.WARNING for r in refusals)
+    for secret in ("key-A", "key-B", "key-N", "L-1", "srv-a", "srv-b"):
+        assert secret not in caplog.text
+        assert secret not in args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_disconnected_key_with_no_server_beside_one_live_server_composes() -> None:
+    """CR-01 test (iii): the login carries ONE set server, so a key with no server joins it
+    (today's behaviour) and nothing is ambiguous. The departed key is the same account as
+    the live key, and the live key's book composes with no refusal."""
+    from services.allocator_equity_derive import account_identity_tokens
+
+    alloc = "alloc-one-server"
+    keys = [
+        _mt5_key("key-A", alloc, "srv-a"),
+        _mt5_key("key-N", alloc, None, disconnected_at="2026-05-01T00:00:00Z"),
+    ]
+    fake = _server_book(alloc, keys, ("key-A",))
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    assert _refusal_upserts(fake) == []
+    assert _composed_payload(fake)["inputs"]["n_keys"] == 1
+    tokens = account_identity_tokens(keys)
+    assert tokens["key-N"] == tokens["key-A"] == "account:key-A"

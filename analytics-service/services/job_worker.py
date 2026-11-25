@@ -16804,6 +16804,7 @@ async def run_derive_allocator_equity_job(
         DegradeReason,
         DeriveRefusal,
         account_groups,
+        ambiguous_server_key_ids,
         blocking_degrade_tokens,
         eligible_key_predicate,
         identity_pending_venues,
@@ -17168,6 +17169,34 @@ async def run_derive_allocator_equity_job(
     # account still do.
     # The account is the identity token (venue id OR marker link), so a
     # departed holder and the live key marked against it are one account here.
+    # 225 CONN-03 (CONTEXT Q6 agent decision): a key with no server on a login that carries
+    # two or more servers cannot be placed, live or disconnected. It runs BEFORE the collision
+    # check so the named cause wins over a collision the ambiguity could also produce, and it
+    # has its own token because the collision's line ("disconnect one of them") would not
+    # clear a key that is already disconnected. Token, allocator id and a count only
+    # (T-167.1.2-22): no key id, login, server or USD.
+    ambiguous_keys = ambiguous_server_key_ids(key_rows)
+    if ambiguous_keys:
+        reason = DeriveRefusal.ACCOUNT_SERVER_AMBIGUOUS.value
+        await _persist_refusal(reason)
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("derive_refusal", reason)
+            sentry_sdk.capture_message(
+                f"derive_allocator_equity: {reason} — a key with no broker server "
+                "reads a login that carries two or more servers; the equity curve "
+                "was refused and recorded",
+                level="warning",
+            )
+        logger.warning(
+            "derive_allocator_equity: %s for allocator %s (ambiguous_keys=%d) — "
+            "recorded the refusal in the equity_curve row; the book shows the "
+            "rebuilding panel until the key's server is known",
+            reason,
+            allocator_id,
+            len(ambiguous_keys),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
     identity_tokens = account_identity_tokens(key_rows)
     collisions = account_identity_collisions(
         [
