@@ -164,15 +164,15 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [x] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit (completed 2026-11-24)
 - [x] **Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job** - Seam S3 owner: per-attempt failure record, first-hop drop, batch-mate reset, readmit ceiling signal, reclaim provenance, private strategies polled; migrations (completed 2026-11-24)
 - [ ] **Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key** - Sibling of 225 on seam S4, right after it: the rotated MT5 password reconnect and the KEY_ORPHANED copy for allocators
-- [ ] **Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently** - nav_twr.py empty-cohort refund, day-0 P&L and the D-15 band, basis-silent keys, writer-basis values; moves MT5 numbers (155.2 freeze)
+- [x] **Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently** - nav_twr.py empty-cohort refund, day-0 P&L and the D-15 band, basis-silent keys, writer-basis values; moves MT5 numbers (155.2 freeze) (completed 2026-11-25)
 - [ ] **Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason** - Data-gated on the JOBLEDGER records: the second-attempt cause fixed at its root, seven clean nights, the clock-switch replay
 - [x] **Phase 231: BYBITREADS — a Bybit read covers every coin, settle type, window and deposit exactly once, or refuses by name** - Census first; all-coin anchor, USDC and inverse positions, full trade window, on-chain deposit verdict; the static egress IP is a founder action (completed 2026-11-25)
 - [x] **Phase 232: OKXTRADES — an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades** - Mixed-currency daily bills, page-cap truncation, the trade cursor (completed 2026-11-24)
 - [ ] **Phase 233: DERIBITTRUTH — a Deribit key's returns reach its newest flow, every book day is explained or withheld, and stale series page on every venue** - From the wave-0 diagnosis: stale-returns root fix, per-venue freshness check, correction classifier, book cumulative
-- [ ] **Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key** - Seam S2 owner: transient-zero MT5 keys, any exception reverts, counted fallback flag, no residue reason
+- [x] **Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key** - Seam S2 owner: transient-zero MT5 keys, any exception reverts, counted fallback flag, no residue reason (completed 2026-11-25)
 - [ ] **Phase 235: HOLDINGSTRUTH — one account counts once on Holdings, match scoring and the dashboard, and every failing key is named** - Reads the identity value 225 settles: identity misses fail loud, per-account unpriced marker, dashboard marker read, shared-account keys named
 - [ ] **Phase 236: FIGUREMATH — every engine annualizes one way, CVaR is historical, and moved figures are re-derived and announced** - F-5 "365, ddof 1 everywhere", F-6 historical CVaR, quantstats 0.0.86, one CAGR span rule, fleet re-derive; moves published figures
-- [ ] **Phase 237: FACTSHEETHONEST — every surface shows a strategy's true state, and no cache re-serves a stale or failed one** - Owner of the OG route and payload builder: withheld residue, re-run holding on every surface, OG not-found cache, BTC price failure cache, owner data source
+- [x] **Phase 237: FACTSHEETHONEST — every surface shows a strategy's true state, and no cache re-serves a stale or failed one** - Owner of the OG route and payload builder: withheld residue, re-run holding on every surface, OG not-found cache, BTC price failure cache, owner data source (completed 2026-11-25)
 - [ ] **Phase 238: NEVERCOMPUTED — a strategy that never computed, failed or stalled never claims a compute time or tells its owner to wait** - computed_at on never-computed rows (founder ruling) and the /strategies note wording
 - [x] **Phase 239: SURFACECACHE — the composer range and the Discovery ranking reflect the current truth** - Composer range stored as dates; BTC-unit and USD returns ranked together as pure performance (founder ruling 2026-11-24) (completed 2026-11-24)
 - [x] **Phase 240: CONNECTTRUTH — validating a key or a CSV gets a true answer, and anonymous limits are fair** - One error code on every venue, CSV month-name cells, anonymous bucket fairness, edge and upstream CSV limits agree (completed 2026-11-25)
@@ -438,7 +438,7 @@ Plans:
 3. A day-level flow just under the previous day's NAV carries the large-flow annotation, or the founder's acceptance of the D-15 band is recorded with its reason. `FLOW_TIMING_LARGE_RATIO` is not widened to make a check pass. (MT5D-06)
 4. A timed MT5 key with no writer basis is counted or blocked with a named signal, never composed silently on the legacy roll. The writer-basis gate refuses a same-day re-derive pair whose per-day P&L does not match, as well as a calendar mismatch. (MT5D-07, HOLD-03) ⭐ NOTE 2026-11-24 (planning, recorded in 229-CONTEXT.md): the per-day comparison is a compose-side `returns_stamp` (each derive stores the per-day returns it wrote in its `key_inputs` row; the compose compares it per raw key before the stitch and refuses a differing pair as the blocking `key_inputs_mismatch`). `read_writer_basis` stays byte-unchanged, because editing it fires the open entry `167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY` and a post-stitch check reads the stitched series. Known limit: a correction confined to a day with no stored return that moves no other return leaves the pair content-consistent and is not refused; a row written before this change carries no stamp and is counted, not refused. ⭐ SCOPE NOTE 2026-11-24 (founder ruling on review MR-01 / SFH-229-01, recorded in 229-CONTEXT.md): "Exempt departed keys". Live keys still block. A departed key whose last `key_inputs` row carries `writer_basis_withheld` or a stale returns stamp stays out of `withheld_by_key` and `stamp_mismatch_days_by_key`; it is counted into a non-blocking benign flag with a counts-only log, in the spirit of D-22, because a departed key never re-derives and the block could never self-heal.
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy of `nav_twr.py` / the writer-basis symbols, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Money-math oracles import no production helper. The frozen spine is never re-baselined by re-running `regen_golden.py`. 226's soak, run against the changed derive, is recorded beside the merge.
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans complete
 
 Plans:
 **Wave 1**
@@ -453,7 +453,7 @@ Plans:
 - [x] 229-05-PLAN.md — A per-day `returns_stamp` in key_inputs; the compose refuses a same-terminal re-derive pair whose returns differ, never a healthy pair (HOLD-03)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 229-06-PLAN.md — Phase gate on the merged head, PROOF-01 ledger, and the founder's live soak recorded as verdict lines (closing)
+- [x] 229-06-PLAN.md — Phase gate on the merged head, PROOF-01 ledger, and the founder's live soak recorded as verdict lines (closing)
 
 ### Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason
 
@@ -572,10 +572,20 @@ Python only, no migration. This is the allocator book path, not composite work.
 2. Any exception raised by a no-capital candidate leaves the previous row intact across retries; a test raises an exception that is not a `NavReconstructionError`. (NOCAP-02)
 3. A fallback to `dropped_key` stores a payload flag naming why and is counted per run, not only logged. A refused candidate leaves no residue reason in the stored payload. (NOCAP-03, NOCAP-04)
 4. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 234-01-PLAN.md — Every no-capital fallback is counted by name in the stored payload, and a refused holed candidate leaves no residue reason (NOCAP-03, NOCAP-04)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 234-02-PLAN.md — An MT5 no-capital exit needs the key's own deal ledger to agree; a negative terminal is never an exit (NOCAP-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 234-03-PLAN.md — Any exception from a candidate reverts once to the stored inputs and keeps the row across retries (NOCAP-02)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 234-04-PLAN.md — A flow on a stated tiny-base tail day after the last return is not out_of_window_flow (founder ruling 2026-11-24)
 
 ### Phase 235: HOLDINGSTRUTH — one account counts once on Holdings, match scoring and the dashboard, and every failing key is named
 
@@ -639,7 +649,7 @@ DBACC-01 (v1.23) edits this seam's whole-column select later and re-bases on it.
 3. A strategy published after its OG card was first requested shows its real card on the next request, and a not-found card is never long-cached. A failed BTC price read is not cached as a normal payload, and the next view retries it. Each case is driven by a good-after-bad-within-TTL test on the real cache wrapper. (CACHE-01, CACHE-03)
 4. The owner's private factsheet shows the data source of their own key-backed strategy, never "Data source —", while anon still reads only the published tier; owner and anon are tested per surface. (FACT-04)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 13 plans
+**Plans:** 13/13 plans complete
 **UI hint**: yes
 
 Plans:
@@ -795,15 +805,15 @@ Plans:
 | 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
 | 227. JOBLEDGER | 11/11 | Complete (shipped v0.133.67.0, #1325; HEAL-01 sweep registered on PROD) | 2026-11-24 |
 | 228. KEYANSWERS | 0/? | Not started | - |
-| 229. MT5DERIVE2 | 5/6 | Shipped v0.133.69.0 (#1328); human verification pending (229-06 Task 2, the founder's live soak) | - |
+| 229. MT5DERIVE2 | 6/6 | Complete (shipped v0.133.69.0, #1328; founder's live soak exit 0 and the 155.2 freeze check recorded 2026-11-25) | 2026-11-25 |
 | 230. MT5NIGHTLY | 0/? | Not started | - |
 | 231. BYBITREADS | 6/6 | Complete (plans 01-05 shipped v0.133.61.6 #1314 and v0.133.65.0 #1321; plan 06 shipped v0.133.73.0 #1333 after Phase 229) | 2026-11-25 |
 | 232. OKXTRADES | 4/4 | Complete (shipped v0.133.70.0, #1330) | 2026-11-24 |
 | 233. DERIBITTRUTH | 0/? | Not started | - |
-| 234. NOCAPITAL | 0/? | Not started | - |
+| 234. NOCAPITAL | 4/4 | Complete (shipped v0.133.76.0, #1339; verification passed, SECURITY 15/15 closed) | 2026-11-25 |
 | 235. HOLDINGSTRUTH | 0/? | Not started | - |
 | 236. FIGUREMATH | 0/? | Not started | - |
-| 237. FACTSHEETHONEST | 13/13 | Shipped v0.133.63.0 (#1316); human verification pending (2 visual checks) | - |
+| 237. FACTSHEETHONEST | 13/13 | Complete (shipped v0.133.63.0, #1316; both visual checks passed 2026-11-25) | 2026-11-25 |
 | 238. NEVERCOMPUTED | 0/? | Not started | - |
 | 239. SURFACECACHE | 3/3 | Complete (shipped v0.133.72.0, #1332) | 2026-11-24 |
 | 240. CONNECTTRUTH | 8/8 | Complete (shipped v0.133.74.0, #1334) | 2026-11-25 |

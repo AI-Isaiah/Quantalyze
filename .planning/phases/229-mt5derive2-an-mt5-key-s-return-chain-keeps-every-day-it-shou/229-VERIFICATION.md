@@ -1,8 +1,8 @@
 ---
 phase: 229-mt5derive2-an-mt5-key-s-return-chain-keeps-every-day-it-shou
 verified: 2026-11-24T21:00:00Z
-status: human_needed
-score: 4/5 must-haves verified
+status: passed
+score: 5/5 must-haves verified
 verified_at_sha: 2761b04be94904d07f56e560515dfcc9dbf4c25a
 drift_subjects:
   - analytics-service/services/nav_twr.py
@@ -19,22 +19,18 @@ drift_subjects:
   - analytics-service/tests/test_csv_analytics_runner.py
 behavior_unverified: 0
 overrides_applied: 0
-human_verification:
-  - test: "229-06 Task 2: run 226's live soak (python -m scripts.mt5_soak, from analytics-service/) against the changed derive, on a checkout whose analytics-service tree hash is 4d6d1b215, with MT5_SOAK_LOG_DIR outside the repository"
-    expected: "exit 0; parity verdict and return_check lines (checked, timed_verified, guarded, indeterminate, mismatch_count, certified_share, ok) pasted into the 229-06 SUMMARY beside the merge. Any other exit is recorded red."
-    why_human: "Needs the founder's private MT5 gateway and broker credentials (five MT5_SPIKE_* env vars). The verifier confirmed only that the entry point refuses cleanly (exit 3) without them. ROADMAP SC-5 requires the soak to be recorded beside the merge."
-  - test: "At ship: re-check the 155.2 freeze"
-    expected: "155.2-12-SUMMARY.md is absent on origin/main (merge is before plan 12's recapture) or plan 14 is merged (after it). This phase moves published MT5 returns."
-    why_human: "A timing decision on merge order against another phase, not a code property."
+human_verification: []
 ---
 
 > **verified_at_sha rebound 2026-11-25 (records PR).** The verdict was issued on phase-branch commit `0771f1f3f`, which is not reachable from `main` after the squash merge. It is rebound to the merge commit `2761b04be` (#1328) so that `scripts/verification-drift-report.mjs` can diff from a reachable commit. None of the files listed in `drift_subjects` differs between the two commits (`git diff --name-only 0771f1f3f 2761b04be -- <drift_subjects>` is empty), so the rebind changes nothing about what was verified.
+>
+> ⛔ **CORRECTED 2026-11-25 (229 close records PR).** The parenthetical above is wrong as written. `git diff --name-only 0771f1f3f 2761b04be -- <drift_subjects>` prints `analytics-service/services/job_worker.py` and `analytics-service/tests/test_job_worker.py`, because `main` gained Phase 231 plans 03-05 (#1321) and Phase 223 (#1327) after the phase branch's base `e5759fa76`, and both touched those files. The phase's own change is identical on both sides: `git diff e5759fa76 0771f1f3f -- <file> | git patch-id --stable` equals `git diff 6e8df792a 2761b04be -- <file> | git patch-id --stable` for both files (`0eb24672…` and `29cd8c07…`). So the conclusion stands (the rebind changes nothing about what was verified); only the "is empty" claim was false. The sentence above is kept as lineage.
 
 # Phase 229: MT5DERIVE2 Verification Report
 
 **Phase Goal:** An MT5 key's return chain keeps every day it should, and a timed key with no writer basis never composes silently: the seam-S1 money-math gaps are fixed at their root, which moves published MT5 returns.
 **Verified:** 2026-11-24 (re-verified at 0771f1f3f after the departed-key exemption 5839f0f8b and b3b034f8b; earlier readings at b43f4c786 and 5584b07b9)
-**Status:** human_needed
+**Status:** passed (human_needed until the post-merge closure of 2026-11-25 at the end of this report)
 **Re-verification:** Yes, after the founder ruling "Exempt departed keys" (source commits 5839f0f8b and b3b034f8b). No gaps were open, so this is a regression and SC-4 re-check, not a gap closure.
 
 All code-side truths hold. The one open item is the founder's live soak (ROADMAP SC-5, last sentence), which needs private MT5 credentials and was not run. No gaps found.
@@ -169,3 +165,22 @@ None. The five seam fixes exist, are wired, and are pinned by tests that I saw g
 
 _Verified: 2026-11-24_
 _Verifier: Claude (gsd-verifier)_
+
+
+## Post-merge closure (2026-11-25)
+
+Both human items are closed. Status moves from human_needed to passed, and SC-5 moves from PARTIAL to VERIFIED: score 5/5. The two items as they stood are kept here as lineage:
+
+1. "229-06 Task 2: run 226's live soak (python -m scripts.mt5_soak, from analytics-service/) against the changed derive, on a checkout whose analytics-service tree hash is 4d6d1b215, with MT5_SOAK_LOG_DIR outside the repository." Expected: "exit 0; parity verdict and return_check lines (checked, timed_verified, guarded, indeterminate, mismatch_count, certified_share, ok) pasted into the 229-06 SUMMARY beside the merge. Any other exit is recorded red."
+2. "At ship: re-check the 155.2 freeze." Expected: "155.2-12-SUMMARY.md is absent on origin/main (merge is before plan 12's recapture) or plan 14 is merged (after it)."
+
+**Item 1, the live soak: CLOSED, exit 0.** The founder ran the soak on 2026-11-25 (`soak_run_at` 12:17:10Z) inside the deployed `quantalyze-analytics` Railway container, at deployed commit `549f3d9775cb517f54f9317cf62255b74043a125` (v0.133.74.0, #1334), which contains this phase's merge `2761b04be`, with `MT5_SOAK_LOG_DIR=/tmp/mt5soak` in the container. Result: `exit=0`. Parity: `parity_ok` true, `recon_ok` true, `recon_level_ok` true, `return_check_ok` true, account unit USD. `return_check`: ok true, vacuous false, checked 26, timed 0, timed_verified 0, guarded 0, flat 48, flow_only 10, indeterminate 0, mismatch_count 0, certified_share 1.0 (min 0.5), max_abs_err 1.006e-16 at tolerance 1e-9. `attribution_check` ok over 36 days, 0 mismatches. Wedge within materiality. The full reading is in `229-06-SUMMARY.md`, "Task 2". It is the coordinator's relay of the founder's run (counts only), not pasted stdout; no login, server string or balance is recorded.
+
+Three points against the expected outcome, each judged:
+- **The tree hash is not `4d6d1b215`.** The deployed analytics-service tree is `91161c544`. The plan's letter says a different hash voids the run; I judge it does not here, and record the deviation. The pin's purpose is that the soak judges this phase's code. The soak's full import closure (measured from `sys.modules` after importing it and its function-level imports from a `git archive` of `549f3d97`) is byte-identical between `4d6d1b215`, the final verified tree `4e05033e3`, the merge tree `4b87fec4f` and the deployed tree `91161c544`: `git diff --stat` over those files is empty for all three pairs. The files that differ (232, 231-06 and 240's `job_worker.py`, `exchange.py`, `rate_limit.py` and others) are not loaded by the soak. `4d6d1b215` itself was the Task 1 tree and already stale on the phase branch, which later moved `job_worker.py` (not in the soak's closure either).
+- **The top-level spike verdict is INCONCLUSIVE.** It comes only from `server_time_offset`, which `_leg4_server_time_offset` in `scripts/mt5_spike.py` marks `founder_confirmation_required` on every run and which "never reads GO" by construction. The soak's exit-0 contract excludes NO-GO, not INCONCLUSIVE, so exit 0 here is the soak's pass. The expected outcome names the exit code and the parity and return_check lines; all are present. The offset reading (`raw_offset_minutes` -2435 against `server_utc_offset_min_assumed` 180) reflects a latest deal about 40 hours old, not a clock fault.
+- **`timed` is 0 on this account, so the live run did not exercise the timed-key branches** (MT5D-04's timed refund day, MT5D-07's writer-basis token on a timed key). That is a limit of this reading, not a failure of the expected outcome: neither SC-5 nor 229-06 asks the live run for a timed day. The timed branches remain proven by the PROOF-01 RED/GREEN records in 229-01 to 229-05 (re-checked in this report) and the frozen fixtures.
+
+**Item 2, the 155.2 freeze: CLOSED, satisfied.** `git ls-tree -r --name-only 2761b04be -- .planning/phases` lists `155.2-10-SUMMARY.md` and no `155.2-12-SUMMARY.md`, so plan 12's recapture had not landed when 229 merged as #1328. The same listing on `origin/main` (`8507564ef`, 2026-11-25) still has no `155.2-12-SUMMARY.md`, so the merge is before plan 12's recapture, which the freeze allows.
+
+_Closure recorded: 2026-11-25 (records PR; orchestrator evidence, not a re-run of the verifier)._
