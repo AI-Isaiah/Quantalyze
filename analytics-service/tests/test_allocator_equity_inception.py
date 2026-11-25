@@ -366,3 +366,58 @@ async def test_job_reads_the_venue_from_api_keys(exchange: str, blocked_by_posit
     payload = _extract_payload(upserts[0][1])
     assert ("out_of_window_flow" in payload["degrade_reasons"]) is blocked_by_position
     assert payload["is_trustworthy"] is (not blocked_by_position)
+
+
+def _job_inputs_post_window_flow(stated: bool, exchange: str = "deribit") -> dict[str, list[dict]]:
+    """``_job_inputs`` with a 5000 deposit the day AFTER the last return day, the anchor
+    carrying it (r = 0 on that extra day), and, when ``stated``, the day listed in the row's
+    ``tiny_base_days`` (234 founder ruling 2026-11-24)."""
+    inputs = _job_inputs(exchange)
+    flows = {-1: 100_000.0}
+    start = _start_for_share(0.5e-4, 100_000.0)
+    _, anchor_before = _exact_book(start, flows)
+    row = inputs["derived"] if "derived" in inputs else None  # placeholder, replaced below
+    del row
+    from tests.test_derive_allocator_equity_job import DERIVED_TABLE
+
+    payload = inputs[DERIVED_TABLE][0]["payload"]
+    payload["flows"] = [
+        {"utc_day_iso": _iso(-1), "usd_signed": 100_000.0},
+        {"utc_day_iso": _iso(_N_WINDOW), "usd_signed": 5_000.0},
+    ]
+    payload["anchor_usd"] = anchor_before + 5_000.0
+    payload["anchor_asof"] = _iso(_N_WINDOW)
+    if stated:
+        payload["tiny_base_days"] = [_iso(_N_WINDOW)]
+    return inputs
+
+
+async def _run_job(inputs: dict[str, list[dict]]):  # type: ignore[no-untyped-def]
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+    from tests.test_derive_allocator_equity_job import (
+        DERIVED_TABLE,
+        _extract_payload,
+        _FakeSupabase,
+        _is_equity_curve_upsert,
+    )
+
+    fake = _FakeSupabase(inputs)
+    job = {"id": "j-open", "kind": "derive_allocator_equity", "allocator_id": "alloc-open"}
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+    upserts = [u for u in fake.upserts if u[0] == DERIVED_TABLE and _is_equity_curve_upsert(u[1])]
+    return result, fake, [_extract_payload(u[1]) for u in upserts]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stated", [True, False], ids=["stated-day", "no-list-control"])
+async def test_job_threads_tiny_base_days_to_the_out_of_window_count(stated: bool) -> None:
+    result, fake, payloads = await _run_job(_job_inputs_post_window_flow(stated))
+
+    assert result.outcome.name == "DONE"
+    assert len(payloads) == 1, fake.upserts
+    payload = payloads[0]
+    assert ("out_of_window_flow" in payload["degrade_reasons"]) is (not stated)
+    assert payload["is_trustworthy"] is stated

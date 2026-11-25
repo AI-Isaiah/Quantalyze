@@ -445,6 +445,7 @@ def compose_allocator_equity(
     segment_terminals_by_key: Mapping[str, Mapping[str, float]] | None = None,
     no_capital_exit_by_key: Mapping[str, tuple[str, str]] | None = None,
     failing_key_exit_by_key: Mapping[str, tuple[str, str | None]] | None = None,
+    tiny_base_days_by_key: Mapping[str, Collection[str]] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -510,6 +511,12 @@ def compose_allocator_equity(
     are the writer's composed flows, the ones its levels were rolled through; a key that fell
     back (``writer_basis_mismatch``) keeps its event-time flows everywhere. A key with no entry
     is composed exactly as before.
+
+    ``tiny_base_days_by_key`` (234 founder ruling 2026-11-24) maps a key to the days its own
+    ``key_inputs.tiny_base_days`` states. ``replay_key_equity`` does not count a flow after the
+    key's last return day on one of them as ``out_of_window_flow``; nothing else about the key
+    changes. A key with no entry is composed exactly as before. A segment unit ``k#holeN`` has no
+    entry, correctly: an earlier segment cannot have a day past its own end.
 
     ``unpriced_close_day_by_key`` (164.6.6.2.1 D-09 / D-20) maps a BTC key whose live balance
     could not be priced (the latest completed UTC day has no stored close) to that day's ISO
@@ -850,6 +857,7 @@ def compose_allocator_equity(
                 realized_terminal=realized_terminal.get(k),
                 writer_flows=writer_basis[k][0] if k in writer_basis else None,
                 writer_day_pnl=writer_basis[k][1] if k in writer_basis else None,
+                tiny_base_days=(tiny_base_days_by_key or {}).get(k),
             )
         except NavReconstructionError:
             if owner not in no_capital_exit:

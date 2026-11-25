@@ -75,7 +75,7 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
@@ -1365,6 +1365,7 @@ def replay_key_equity(
     realized_terminal: tuple[str, float] | None = None,
     writer_day_pnl: Mapping[str, float] | None = None,
     writer_flows: Sequence[Any] | None = None,
+    tiny_base_days: Collection[str] | None = None,
 ) -> KeyEquity:
     """Reconstruct one key's $-equity series BACKWARD from ``anchor`` (STITCH-04).
 
@@ -1459,6 +1460,15 @@ def replay_key_equity(
     would explain every collapse). A stretch must still begin on a withdrawal, a stored
     dropped-day P&L or a stored non-zero return that left a positive level (an ordinary
     trading loss, CR-01 of the PR-2 review).
+
+    234 founder ruling 2026-11-24 — STATED TAIL DAYS. ``tiny_base_days`` is the key's own stored
+    ``key_inputs.tiny_base_days`` (the days the derive stated it left out of the returns). A flow
+    dated AFTER the last return day on one of those days is a stated day's flow, not a flow
+    outside the window, and is not counted in ``out_of_window_flows``. The scope is exactly that:
+    a flow before the first return day, a flow after the last return day on an unlisted day, and
+    a listed day inside the return window all keep today's behaviour. It applies to the event
+    flows in the legacy roll and to the writer's composed flows in writer-basis mode (``fbd``
+    holds whichever the replay runs on). ``None`` or empty behaves exactly as before.
 
     Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
     ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
@@ -1568,7 +1578,13 @@ def replay_key_equity(
         lo, hi = ret_days[0], ret_days[-1]
         if history_reaches_inception:
             opening_run = _opening_flow_run(fbd, lo)
-        out_of_window_flows = sum(1 for fd in fbd if fd < lo or fd > hi) - len(opening_run)
+        # 234 founder ruling 2026-11-24: a flow AFTER the last return day, on a day the
+        # key's own row states in ``tiny_base_days``, belongs to a stated day and is
+        # not an out-of-window flow. Both conditions are required; nothing else moves.
+        stated = frozenset(tiny_base_days or ())
+        out_of_window_flows = sum(
+            1 for fd in fbd if fd < lo or (fd > hi and fd not in stated)
+        ) - len(opening_run)
 
     equity = [0.0] * n
     # CR-01: start from the writer's realized terminal when it is on the series' last
@@ -1820,6 +1836,35 @@ def read_dropped_day_pnl(payload: Mapping[str, Any]) -> dict[str, float]:
             raise ValueError("key_inputs dropped_day_pnl: duplicate day")
         out[day] = amount
     return out
+
+
+def read_tiny_base_days(payload: Mapping[str, Any]) -> frozenset[str]:
+    """The ISO days a ``key_inputs`` payload states in ``tiny_base_days``; ``frozenset()``
+    when the row predates the field or carries none (absent or null is the old row, not an
+    error). STRICT, like every neighbouring ``key_inputs`` reader (234 CONTEXT post-research;
+    RESEARCH A5 had suggested a tolerant reader and was not taken): a present but malformed
+    list (not a list, a non-string item, a non-canonical or impossible day) raises
+    ``TypeError``/``ValueError`` so the job disposes it as a corrupt input instead of reading
+    a guess. The list relaxes one gate, so a guess is never acceptable. Messages name the
+    field and never the stored value; each item is checked against ``_ISO_DAY_RE`` before
+    ``date.fromisoformat``."""
+    raw = payload.get("tiny_base_days")
+    if raw is None:
+        return frozenset()
+    if not isinstance(raw, list):
+        raise TypeError("key_inputs tiny_base_days: not a list")
+    out: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            raise TypeError("key_inputs tiny_base_days: non-string day")
+        if not _ISO_DAY_RE.match(item):
+            raise ValueError("key_inputs tiny_base_days: day is not a canonical YYYY-MM-DD")
+        try:
+            date.fromisoformat(item)
+        except ValueError:
+            raise ValueError("key_inputs tiny_base_days: day is not a real calendar day") from None
+        out.add(item)
+    return frozenset(out)
 
 
 def realized_terminal_payload(day: Any, usd: float) -> dict[str, Any]:

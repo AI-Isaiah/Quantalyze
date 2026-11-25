@@ -16799,6 +16799,7 @@ async def run_derive_allocator_equity_job(
         read_dropped_day_pnl,
         read_realized_terminal,
         read_returns_stamp,
+        read_tiny_base_days,
         read_writer_basis,
         read_writer_basis_withheld,
         refusal_payload,
@@ -17306,6 +17307,9 @@ async def run_derive_allocator_equity_job(
     # 167.1.2.2 D-15: the P&L of the days each key's TWR left out of its stored
     # returns ({ISO day: USD}). An older row has none and composes as before.
     dropped_pnl_by_key: dict[str, dict[str, float]] = {}
+    # 234 founder ruling 2026-11-24: each counted or departed key's own stated tail days.
+    # A stitch source never fills this (its tail days belong to the kept member's list).
+    tiny_base_days_by_key: dict[str, frozenset[str]] = {}
     source_dropped_pnl: dict[str, dict[str, float]] = {}
     # CR-01: ``(ISO day, USD)`` — the level each key's NAV was rolled back from by its
     # writer. An older row has none and is replayed from its live anchor as before. A
@@ -17406,6 +17410,7 @@ async def run_derive_allocator_equity_job(
                     ]
                     anchors_by_key[api_key_id] = float(departed_payload["anchor_usd"])
                     dropped_pnl_by_key[api_key_id] = read_dropped_day_pnl(departed_payload)
+                    tiny_base_days_by_key[api_key_id] = read_tiny_base_days(departed_payload)
                     _departed_terminal = read_realized_terminal(departed_payload)
                     if _departed_terminal is not None:
                         realized_terminal_by_key[api_key_id] = _departed_terminal
@@ -17467,6 +17472,7 @@ async def run_derive_allocator_equity_job(
                 for _f in (payload.get("flows") or [])
             ]
             dropped_pnl_by_key[api_key_id] = read_dropped_day_pnl(payload)
+            tiny_base_days_by_key[api_key_id] = read_tiny_base_days(payload)
             _terminal = read_realized_terminal(payload)
             if _terminal is not None:
                 realized_terminal_by_key[api_key_id] = _terminal
@@ -18248,6 +18254,9 @@ async def run_derive_allocator_equity_job(
             # D-15: the P&L of the days the TWR left out of the stored returns. An
             # older key_inputs row has none, and its key composes as before.
             dropped_day_pnl_by_key=inputs.dropped_pnl,
+            # 234 founder ruling 2026-11-24: a flow after a key's last return day on a day its
+            # own row states in tiny_base_days is a stated day's flow, not out_of_window_flow.
+            tiny_base_days_by_key=tiny_base_days_by_key or None,
             # CR-01: the level each writer rolled its NAV back from. The replay rolls
             # the stored returns back from it, so the open position at the moment of the
             # derive neither shifts a level nor moves the zero-start verdict.
