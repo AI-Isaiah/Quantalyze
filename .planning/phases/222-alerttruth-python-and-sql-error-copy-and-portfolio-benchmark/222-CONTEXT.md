@@ -30,6 +30,13 @@ Every Python and SQL error sentence a user can read names the real cause and off
 - `job_worker.py` "or contact support to raise the limit" becomes "use the contact form to ask for a higher limit".
 - Every census the migration moves (schema snapshot `supabase/schema/functions/computation_error_copy.sql`, mutation floors, pins, parity SQL tests) moves in the same PR; migration-reviewer and rls-policy-auditor clean before merge.
 
+### Founder rulings on the RESEARCH open questions (AskUserQuestion, 2026-11-25)
+- **OQ2 (ERRC-03 error_kind):** "transient (Recommended)". When the sync-trades handler fails on a never-published strategy, it returns error_kind transient.
+- **OQ4 (ERRC-03 published oracle):** "Yes, count it (Recommended)". A strategy at computing with metrics_json counts as published. For published strategies, skip the failed write that clears computation_warned.
+- **OQ1 (ERRC-02 / SC-2):** "Yes, value + rule + test (Recommended)". SC-2 is met by the stored value with stale=false, the amber-only-when-stale rule, and an adapter-level test that pins both. No card rebuild.
+- **OQ3 (scope):** "Leave it, book a TODOS entry (Recommended)". first_hop_enqueue_sweep stays out of this migration; book a TODOS entry in the ship PR.
+- These supersede, where they differ, the "page renders it" wording in ERRC-02 above and the status-pair-only wording in ERRC-03 above.
+
 ### Write scope (symbol-limited; 232 OKXTRADES and 240 CONNECTTRUTH have merged)
 - `job_worker.py`: only the enqueue-failure block at the tail of `run_sync_trades_job` and the two copy strings. Not the Phase-1 store, the phase2 flag block, cursor read or `advance_fetched_cursor`.
 - `csv_validator.py`: only the one copy string. `routers/portfolio.py`: the benchmark note block in `_compute_portfolio_analytics`, the constants, and `_fail_vr` copy.
