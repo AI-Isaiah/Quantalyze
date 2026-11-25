@@ -261,3 +261,116 @@ REVOKE ALL ON FUNCTION public.release_mt5_terminal_lease(text, uuid)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.release_mt5_terminal_lease(text, uuid)
   TO service_role;
+
+-- ───────────── self-verify: CATALOGUE ONLY, passes on an empty database.
+-- No mt5_terminal_leases row is read or written. Asserted: each of the three
+-- functions resolves under its exact signature and RETURNS boolean; each is
+-- SECURITY DEFINER with the exact search_path pin; EXECUTE is held by neither PUBLIC,
+-- anon nor authenticated and is held by service_role; the comment-stripped body of
+-- release clears the owner token (DEC-01-A); the table has RLS on, no policy, no
+-- privilege for a browser role, no write privilege for service_role, and the three
+-- named CHECK constraints. The argument guards are deliberately NOT asserted here: the
+-- gate's arms L5 and L8 own them behaviourally. Each clause that a mutated copy of
+-- this file would trip has its own `IF ... THEN` line so the gate's mutation twins can
+-- stand exactly that clause down and let the apply succeed, which is what lets the
+-- gate, not the apply, go RED with the arm named.
+DO $verify$
+DECLARE
+  v_sigs        text[] := ARRAY[
+    'public.acquire_mt5_terminal_lease(text,uuid,text,text,integer)',
+    'public.renew_mt5_terminal_lease(text,uuid,integer)',
+    'public.release_mt5_terminal_lease(text,uuid)'
+  ];
+  v_sig         text;
+  v_oid         oid;
+  v_secdef      boolean;
+  v_rettype     oid;
+  v_cfg         text[];
+  v_public_exec boolean;
+  v_open_exec   boolean;
+  v_body        text;
+  v_tbl         oid := to_regclass('public.mt5_terminal_leases');
+  v_rls         boolean;
+  v_policies    integer;
+  v_browser     boolean;
+  v_svc_write   boolean;
+  v_checks      integer;
+BEGIN
+  FOREACH v_sig IN ARRAY v_sigs LOOP
+    v_oid := to_regprocedure(v_sig);
+    IF v_oid IS NULL THEN
+      RAISE EXCEPTION 'Migration 20261126120000 failed: % is missing', v_sig;
+    END IF;
+
+    SELECT p.prosecdef, p.prorettype, p.proconfig
+      INTO v_secdef, v_rettype, v_cfg
+      FROM pg_proc p WHERE p.oid = v_oid;
+
+    IF v_rettype IS DISTINCT FROM 'boolean'::regtype::oid THEN
+      RAISE EXCEPTION 'Migration 20261126120000 failed: % does not RETURN boolean, so the caller cannot read granted or refused', v_sig;
+    END IF;
+    IF v_secdef IS DISTINCT FROM TRUE THEN
+      RAISE EXCEPTION 'Migration 20261126120000 failed: % is not SECURITY DEFINER, so the worker role could not reach the lease table through it', v_sig;
+    END IF;
+    IF v_cfg IS NULL OR NOT ('search_path=public, pg_catalog' = ANY (v_cfg)) THEN
+      RAISE EXCEPTION 'Migration 20261126120000 failed: % does not pin search_path to public, pg_catalog (proconfig=%), so a SECURITY DEFINER body is search-path-hijackable', v_sig, v_cfg;
+    END IF;
+
+    v_public_exec := EXISTS (
+      SELECT 1
+        FROM pg_proc p, aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+       WHERE p.oid = v_oid AND a.grantee = 0 AND a.privilege_type = 'EXECUTE');
+    IF v_public_exec THEN
+      RAISE EXCEPTION 'Migration 20261126120000 failed: PUBLIC holds EXECUTE on %', v_sig;
+    END IF;
+    v_open_exec := has_function_privilege('anon', v_oid, 'EXECUTE')
+                OR has_function_privilege('authenticated', v_oid, 'EXECUTE');
+    IF v_open_exec THEN
+      RAISE EXCEPTION 'Migration 20261126120000 failed: anon or authenticated holds EXECUTE on %, so a browser role could take, extend or free a terminal lease', v_sig;
+    END IF;
+    IF NOT has_function_privilege('service_role', v_oid, 'EXECUTE') THEN
+      RAISE EXCEPTION 'Migration 20261126120000 failed: service_role does not hold EXECUTE on %, so the workers cannot take the lease', v_sig;
+    END IF;
+  END LOOP;
+
+  v_body := regexp_replace(regexp_replace(
+              pg_get_functiondef(to_regprocedure('public.release_mt5_terminal_lease(text,uuid)')),
+              '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+  IF v_body IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261126120000 failed: the comment-stripped body came back NULL, so the body check below would pass without reading anything';
+  END IF;
+  IF v_body !~* '\yowner_token\s*=\s*NULL\y' THEN
+    RAISE EXCEPTION 'Migration 20261126120000 failed: release_mt5_terminal_lease no longer clears owner_token, so a renew landing after the release could resurrect the lease (DEC-01-A)';
+  END IF;
+
+  IF v_tbl IS NULL THEN
+    RAISE EXCEPTION 'Migration 20261126120000 failed: public.mt5_terminal_leases is missing';
+  END IF;
+  SELECT c.relrowsecurity INTO v_rls FROM pg_class c WHERE c.oid = v_tbl;
+  IF v_rls IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'Migration 20261126120000 failed: row level security is not enabled on public.mt5_terminal_leases';
+  END IF;
+  SELECT count(*)::integer INTO v_policies FROM pg_policy WHERE polrelid = v_tbl;
+  IF v_policies <> 0 THEN
+    RAISE EXCEPTION 'Migration 20261126120000 failed: public.mt5_terminal_leases carries % policy row(s); it must carry none', v_policies;
+  END IF;
+  v_browser := has_table_privilege('anon', v_tbl, 'SELECT, INSERT, UPDATE, DELETE')
+            OR has_table_privilege('authenticated', v_tbl, 'SELECT, INSERT, UPDATE, DELETE');
+  IF v_browser THEN
+    RAISE EXCEPTION 'Migration 20261126120000 failed: anon or authenticated holds a privilege on public.mt5_terminal_leases';
+  END IF;
+  v_svc_write := has_table_privilege('service_role', v_tbl, 'INSERT, UPDATE, DELETE');
+  IF v_svc_write THEN
+    RAISE EXCEPTION 'Migration 20261126120000 failed: service_role holds a write privilege on public.mt5_terminal_leases; writes go through the RPCs only';
+  END IF;
+  SELECT count(*)::integer INTO v_checks
+    FROM pg_constraint
+   WHERE conrelid = v_tbl AND contype = 'c'
+     AND conname IN ('mt5_terminal_leases_digest_chk', 'mt5_terminal_leases_holder_chk', 'mt5_terminal_leases_site_chk');
+  IF v_checks <> 3 THEN
+    RAISE EXCEPTION 'Migration 20261126120000 failed: % of the 3 named CHECK constraints exist on public.mt5_terminal_leases', v_checks;
+  END IF;
+
+  RAISE NOTICE 'Migration 20261126120000: mt5_terminal_leases (RLS on, no policy, no browser privilege, SELECT only for service_role, three CHECKs) and acquire/renew/release_mt5_terminal_lease (boolean, SECURITY DEFINER, pinned search_path) exist with EXECUTE for service_role only.';
+END
+$verify$;

@@ -30,7 +30,12 @@
 --       NULL); a release by a token that lost the lease is refused.
 --   L4  Renew is token-fenced and extends expires_at; a renew after the release is
 --       false and leaves the row free.
+--   L5  Bad digest, ttl and token raise 22023 and write no row.
+--   L6  anon and authenticated reach neither the RPCs nor the table; service_role
+--       reaches the RPCs and SELECT only; RLS is on; search_path is pinned.
 --   L7  Distinct terminals are independent.
+--   L8  The holder is one of four literals or a canonical lower-case UUID, refused
+--       otherwise by the RPC (22023) and by the table CHECK (23514).
 --
 -- LAYERING NOTE. The migration's self-verify block asserts catalogue facts that
 -- later arms also prove behaviourally. A twin that breaks one of them therefore
@@ -285,6 +290,151 @@ END $$;
 ROLLBACK;
 
 -- --------------------------------------------------------------------------
+-- L5 - bad input raises invalid_parameter_value (22023) and writes no row.
+-- RED-UNDER: stand down the digest-shape validation of acquire_mt5_terminal_lease in
+--            20261126120000_mt5_terminal_lease.sql (`IF FALSE THEN`). A host:port-shaped
+--            digest then reaches the table and is refused there by the CHECK with
+--            23514 instead of by the RPC with 22023: this arm's first raise. ttl, token
+--            and digest are each refused by the RPC itself, so a bad call never
+--            depends on the table to be turned away.
+-- RED-UNDER-M: {"arm":"L5","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"  IF p_terminal_digest IS NULL OR p_terminal_digest !~ '^[0-9a-f]{64}$' THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_terminal_digest","replace":"  IF FALSE THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_terminal_digest","occurrences":1}]}
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_digest text := encode(sha256(convert_to('230-L5', 'UTF8')), 'hex');
+  v_hostly text := 'terminal-example:0000';
+  v_tok    uuid := gen_random_uuid();
+  e_host   text;
+  e_ttl0   text;
+  e_ttl901 text;
+  e_tok    text;
+  v_rows   integer;
+BEGIN
+  BEGIN
+    PERFORM public.acquire_mt5_terminal_lease(v_hostly, v_tok, 'house', 'derive_broker_dailies', 60);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS e_host = RETURNED_SQLSTATE;
+  END;
+  BEGIN
+    PERFORM public.acquire_mt5_terminal_lease(v_digest, v_tok, 'house', 'derive_broker_dailies', 0);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS e_ttl0 = RETURNED_SQLSTATE;
+  END;
+  BEGIN
+    PERFORM public.acquire_mt5_terminal_lease(v_digest, v_tok, 'house', 'derive_broker_dailies', 901);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS e_ttl901 = RETURNED_SQLSTATE;
+  END;
+  BEGIN
+    PERFORM public.acquire_mt5_terminal_lease(v_digest, NULL::uuid, 'house', 'derive_broker_dailies', 60);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS e_tok = RETURNED_SQLSTATE;
+  END;
+
+  IF e_host IS DISTINCT FROM '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (L5): a host:port-shaped digest raised SQLSTATE % (expected 22023 from the RPC); a raw terminal address could reach a row.', e_host;
+  END IF;
+  IF e_ttl0 IS DISTINCT FROM '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (L5): ttl 0 raised SQLSTATE % (expected 22023); a lease that expires at once would be granted.', e_ttl0;
+  END IF;
+  IF e_ttl901 IS DISTINCT FROM '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (L5): ttl 901 raised SQLSTATE % (expected 22023); a crashed holder could wedge the terminal past the bound.', e_ttl901;
+  END IF;
+  IF e_tok IS DISTINCT FROM '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (L5): a NULL owner token raised SQLSTATE % (expected 22023); a lease nobody could release would be granted.', e_tok;
+  END IF;
+  SELECT count(*) INTO v_rows FROM public.mt5_terminal_leases
+   WHERE terminal_digest IN (v_hostly, v_digest);
+  IF v_rows <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (L5): % row(s) exist for the refused calls; a refused acquire still wrote.', v_rows;
+  END IF;
+  RAISE NOTICE 'L5 OK: bad digest, ttl and token were refused with 22023 and wrote nothing.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
+-- L6 - no browser role reaches the lease; service_role reaches only the RPCs.
+-- RED-UNDER: add authenticated to the GRANT EXECUTE on acquire_mt5_terminal_lease in
+--            20261126120000_mt5_terminal_lease.sql. A signed-in browser role can then
+--            take any terminal's lease: this arm's first raise. LAYERED: the
+--            migration's self-verify clause on anon/authenticated EXECUTE would abort
+--            the apply, so it is stood down in the same mutation.
+-- RED-UNDER-M: {"arm":"L6","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"GRANT EXECUTE ON FUNCTION public.acquire_mt5_terminal_lease(text, uuid, text, text, integer)\n  TO service_role;","replace":"GRANT EXECUTE ON FUNCTION public.acquire_mt5_terminal_lease(text, uuid, text, text, integer)\n  TO service_role, authenticated;","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"IF v_open_exec THEN","replace":"IF FALSE AND v_open_exec THEN","occurrences":1}]}
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_digest text := encode(sha256(convert_to('230-L6', 'UTF8')), 'hex');
+  v_tok    text := gen_random_uuid()::text;
+  v_roles  text[] := ARRAY['anon', 'authenticated', 'service_role'];
+  v_rpcs   text[];
+  v_dml    text[];
+  v_role   text;
+  v_stmt   text;
+  v_err    text;
+  v_bad    text := '';
+  v_rls    boolean;
+  v_sig    text;
+  v_cfg    text[];
+BEGIN
+  v_rpcs := ARRAY[
+    format('SELECT public.acquire_mt5_terminal_lease(%L, %L::uuid, ''house'', ''derive_broker_dailies'', 60)', v_digest, v_tok),
+    format('SELECT public.renew_mt5_terminal_lease(%L, %L::uuid, 60)', v_digest, v_tok),
+    format('SELECT public.release_mt5_terminal_lease(%L, %L::uuid)', v_digest, v_tok)
+  ];
+  v_dml := ARRAY[
+    'SELECT count(*) FROM public.mt5_terminal_leases',
+    format('INSERT INTO public.mt5_terminal_leases (terminal_digest, owner_token, holder, site, acquired_at, expires_at) VALUES (%L, %L::uuid, ''house'', ''derive_broker_dailies'', now(), now())', v_digest, v_tok),
+    'UPDATE public.mt5_terminal_leases SET holder = holder',
+    'DELETE FROM public.mt5_terminal_leases'
+  ];
+
+  -- The role is set INSIDE each inner block, so a refusal rolls it back with the block;
+  -- RESET ROLE after each covers the statement that succeeds.
+  FOREACH v_role IN ARRAY v_roles LOOP
+    FOREACH v_stmt IN ARRAY (v_rpcs || v_dml) LOOP
+      v_err := NULL;
+      BEGIN
+        EXECUTE 'SET LOCAL ROLE ' || quote_ident(v_role);
+        EXECUTE v_stmt;
+      EXCEPTION WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE;
+      END;
+      RESET ROLE;
+      IF v_role IN ('anon', 'authenticated') AND v_err IS DISTINCT FROM '42501' THEN
+        v_bad := v_bad || format(' [%s: %s -> %s]', v_role, left(v_stmt, 48), coalesce(v_err, 'allowed'));
+      ELSIF v_role = 'service_role' AND v_stmt = ANY (v_rpcs) AND v_err IS NOT NULL THEN
+        v_bad := v_bad || format(' [service_role refused %s -> %s]', left(v_stmt, 48), v_err);
+      ELSIF v_role = 'service_role' AND v_stmt = v_dml[1] AND v_err IS NOT NULL THEN
+        v_bad := v_bad || format(' [service_role SELECT refused -> %s]', v_err);
+      ELSIF v_role = 'service_role' AND v_stmt = ANY (v_dml[2:4]) AND v_err IS DISTINCT FROM '42501' THEN
+        v_bad := v_bad || format(' [service_role %s -> %s]', left(v_stmt, 30), coalesce(v_err, 'allowed'));
+      END IF;
+    END LOOP;
+  END LOOP;
+  IF v_bad <> '' THEN
+    RAISE EXCEPTION 'TEST FAILED (L6): access is not as designed (anon and authenticated refused 42501 on every RPC and table statement; service_role admitted to the RPCs and SELECT, refused INSERT, UPDATE and DELETE):%', v_bad;
+  END IF;
+
+  SELECT c.relrowsecurity INTO v_rls FROM pg_class c WHERE c.oid = 'public.mt5_terminal_leases'::regclass;
+  IF v_rls IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'TEST FAILED (L6): row level security is not enabled on public.mt5_terminal_leases.';
+  END IF;
+
+  FOREACH v_sig IN ARRAY ARRAY['public.acquire_mt5_terminal_lease(text,uuid,text,text,integer)',
+                               'public.renew_mt5_terminal_lease(text,uuid,integer)',
+                               'public.release_mt5_terminal_lease(text,uuid)'] LOOP
+    SELECT p.proconfig INTO v_cfg FROM pg_proc p WHERE p.oid = v_sig::regprocedure;
+    IF v_cfg IS NULL OR NOT ('search_path=public, pg_catalog' = ANY (v_cfg)) THEN
+      RAISE EXCEPTION 'TEST FAILED (L6): % does not pin search_path to public, pg_catalog (proconfig=%).', v_sig, v_cfg;
+    END IF;
+  END LOOP;
+  RAISE NOTICE 'L6 OK: browser roles refused everywhere, service_role admitted to the RPCs and SELECT only, RLS on, search_path pinned.';
+END $$;
+ROLLBACK;
+
+-- --------------------------------------------------------------------------
 -- L7 - distinct terminals are independent: releasing one never frees another.
 -- RED-UNDER: replace the digest predicate of the UPDATE in
 --            release_mt5_terminal_lease in 20261126120000_mt5_terminal_lease.sql with
@@ -336,6 +486,83 @@ BEGIN
 END $$;
 ROLLBACK;
 
+-- --------------------------------------------------------------------------
+-- L8 - the holder is a closed literal or a canonical UUID, never an account-number-shaped string.
+-- RED-UNDER: stand down the holder validation of acquire_mt5_terminal_lease in
+--            20261126120000_mt5_terminal_lease.sql (`IF FALSE THEN`). A digit-only holder
+--            then reaches the table and is refused there by the CHECK with 23514
+--            instead of by the RPC with 22023: this arm's first raise.
+-- RED-UNDER-M: {"arm":"L8","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"  IF p_holder IS NULL\n     OR NOT (\n       p_holder IN ('house', 'validation', 'unknown', 'unattributed')\n       OR p_holder ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'\n     ) THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_holder","replace":"  IF FALSE THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_holder","occurrences":1}]}
+-- --------------------------------------------------------------------------
+BEGIN;
+DO $$
+DECLARE
+  v_base    text := '230-L8-';
+  v_tok     uuid := gen_random_uuid();
+  v_holders text[] := ARRAY['house', 'validation', 'unknown', 'unattributed', 'a1b2c3d4-0000-4000-8000-0123456789ab'];
+  v_h       text;
+  v_granted boolean;
+  v_bad     text := '';
+  e_digits  text;
+  e_hostly  text;
+  e_upper   text;
+  e_direct  text;
+  v_cons    text;
+BEGIN
+  FOREACH v_h IN ARRAY v_holders LOOP
+    v_granted := NULL;
+    BEGIN
+      v_granted := public.acquire_mt5_terminal_lease(
+        encode(sha256(convert_to(v_base || v_h, 'UTF8')), 'hex'), v_tok, v_h, 'derive_broker_dailies', 60);
+    EXCEPTION WHEN OTHERS THEN
+      v_granted := NULL;
+    END;
+    IF v_granted IS DISTINCT FROM TRUE THEN
+      v_bad := v_bad || format(' [%s]', left(v_h, 12));
+    END IF;
+  END LOOP;
+
+  BEGIN
+    PERFORM public.acquire_mt5_terminal_lease(encode(sha256(convert_to(v_base || 'digits', 'UTF8')), 'hex'), v_tok, '1234567890', 'derive_broker_dailies', 60);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS e_digits = RETURNED_SQLSTATE;
+  END;
+  BEGIN
+    PERFORM public.acquire_mt5_terminal_lease(encode(sha256(convert_to(v_base || 'hostly', 'UTF8')), 'hex'), v_tok, 'terminal-example:0000', 'derive_broker_dailies', 60);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS e_hostly = RETURNED_SQLSTATE;
+  END;
+  BEGIN
+    PERFORM public.acquire_mt5_terminal_lease(encode(sha256(convert_to(v_base || 'upper', 'UTF8')), 'hex'), v_tok, 'A1B2C3D4-0000-4000-8000-0123456789AB', 'derive_broker_dailies', 60);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS e_upper = RETURNED_SQLSTATE;
+  END;
+  BEGIN
+    INSERT INTO public.mt5_terminal_leases (terminal_digest, owner_token, holder, site, acquired_at, expires_at)
+    VALUES (encode(sha256(convert_to(v_base || 'direct', 'UTF8')), 'hex'), v_tok, '1234567890', 'derive_broker_dailies', now(), now());
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS e_direct = RETURNED_SQLSTATE, v_cons = CONSTRAINT_NAME;
+  END;
+
+  IF v_bad <> '' THEN
+    RAISE EXCEPTION 'TEST FAILED (L8): an acquire with a closed literal or a canonical UUID holder was not granted:%; the real callers would be refused.', v_bad;
+  END IF;
+  IF e_digits IS DISTINCT FROM '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (L8): a digit-only holder raised SQLSTATE % (expected 22023 from the RPC); an account-number-shaped holder could reach a row.', e_digits;
+  END IF;
+  IF e_hostly IS DISTINCT FROM '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (L8): a host:port-shaped holder raised SQLSTATE % (expected 22023 from the RPC).', e_hostly;
+  END IF;
+  IF e_upper IS DISTINCT FROM '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (L8): an upper-case UUID holder raised SQLSTATE % (expected 22023; only the canonical lower-case form is a holder).', e_upper;
+  END IF;
+  IF e_direct IS DISTINCT FROM '23514' OR v_cons IS DISTINCT FROM 'mt5_terminal_leases_holder_chk' THEN
+    RAISE EXCEPTION 'TEST FAILED (L8): a direct insert of a digit-only holder raised SQLSTATE % on constraint % (expected 23514 on mt5_terminal_leases_holder_chk); the table does not defend itself.', e_direct, v_cons;
+  END IF;
+  RAISE NOTICE 'L8 OK: the four literals and a canonical UUID are granted; digit-only, host:port and upper-case holders are refused by the RPC and by the table.';
+END $$;
+ROLLBACK;
+
 DO $$ BEGIN
-  RAISE NOTICE 'ALL 5 ARMS EXECUTED (L1,L2,L3,L4,L7): a terminal an unexpired token holds refuses a second token and re-grants the holder (L1); an expired lease is taken over and the old token cannot renew it (L2); a foreign release changes nothing, the own release frees the row and a stale release is refused (L3); renew is token-fenced and a late renew cannot resurrect a released lease (L4); distinct terminals are independent (L7). Phase 230 MT5D-02.';
+  RAISE NOTICE 'ALL 8 ARMS EXECUTED (L1,L2,L3,L4,L5,L6,L7,L8): a terminal an unexpired token holds refuses a second token and re-grants the holder (L1); an expired lease is taken over and the old token cannot renew it (L2); a foreign release changes nothing, the own release frees the row and a stale release is refused (L3); renew is token-fenced and a late renew cannot resurrect a released lease (L4); bad digest, ttl, token and holder input raises 22023 and writes nothing (L5); no browser role reaches the lease and service_role reaches only the RPCs and SELECT (L6); distinct terminals are independent (L7); the holder is a closed literal or a canonical UUID, enforced by the RPC and the table (L8). Phase 230 MT5D-02.';
 END $$;
