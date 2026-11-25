@@ -268,6 +268,10 @@ NO_CAPITAL_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
         "ledger_basis_absent",
         # apply loop: a ``LEDGER_PROOF_VENUES`` key whose own deal ledger sums above the dust floor
         "ledger_level_funded",
+        # job (NOCAP-02): an exception that is not a ``NavReconstructionError`` was raised while a
+        # candidate was in play, from the apply loop or the compose call; every candidate was
+        # reverted once to its inputs exactly as stored
+        "candidate_exception",
     }
 )
 

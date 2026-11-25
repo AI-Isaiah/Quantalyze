@@ -5155,7 +5155,7 @@ async def test_no_capital_exit_refused_counts_each_key_once_on_its_own_route() -
     assert "no_capital_exited_keys" not in payload
 
 
-def test_no_capital_refusal_reasons_are_the_ten_plan_01_and_02_tokens() -> None:
+def test_no_capital_refusal_reasons_are_the_eleven_plan_01_to_03_tokens() -> None:
     """NOCAP-03 closed set. The set is pinned whole so a token cannot be added or renamed without
     its writer and its test moving with it (each plan of phase 234 adds its tokens together with
     their writers and updates this pin in the same task). It is deliberately NOT a ``DegradeReason``
@@ -5170,6 +5170,7 @@ def test_no_capital_refusal_reasons_are_the_ten_plan_01_and_02_tokens() -> None:
         "funded_terminal", "no_stored_terminal", "consumes_more_than_dust", "replay_refused",
         "blocking_reason", "segment_terminals_missing", "compose_reverted",
         "negative_terminal", "ledger_basis_absent", "ledger_level_funded",
+        "candidate_exception",
     })
     assert not NO_CAPITAL_REFUSAL_REASONS & {m.value for m in DegradeReason}
     assert not NO_CAPITAL_REFUSAL_REASONS & {m.value for m in DeriveRefusal}
@@ -5893,3 +5894,96 @@ async def test_sc6_a_book_that_is_not_a_pair_of_unknown_working_keys_raises_noth
     assert (await _run_gate(fake, "alloc-pending")).outcome.name == "DONE"
     payload = _composed_payload(fake)
     assert "account_identity_pending" not in payload["degrade_reasons"]
+
+
+# --- 234 NOCAP-02: a candidate's fault never costs the book its stored row -----------------------
+
+
+def _nc_stale_curve_row() -> dict[str, Any]:
+    return {"allocator_id": _NOCAP_ALLOC, "kind": "equity_curve",
+            "payload": {"curve": [{"date": "2026-05-01", "equity_usd": 1.0}],
+                        "is_trustworthy": True, "degrade_reasons": []}}
+
+
+def _nc_without_run_stamps(payload: dict) -> dict:
+    """A copy of ``payload`` without the two fields a candidate fault legitimately changes."""
+    out = {**payload, "inputs": dict(payload["inputs"])}
+    out["inputs"].pop("composed_at", None)
+    out["inputs"].pop("no_capital_exit_refused", None)
+    return out
+
+
+def _nc_job() -> dict[str, Any]:
+    return {"id": "j-nocap-fault", "kind": "derive_allocator_equity", "allocator_id": _NOCAP_ALLOC}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_candidate_fault_in_the_apply_loop_reverts_and_keeps_the_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """NOCAP-02 / ROADMAP SC-2 (T-234-09). An exception that is NOT a ``NavReconstructionError``,
+    raised while the apply loop works on a candidate (here a ``KeyError`` whose text is a key id),
+    used to escape the job: ``classify_exception`` filed it as ``unknown``, the dispatcher retried,
+    and the stale ``equity_curve`` row stayed on every attempt. The candidate reverts to its inputs
+    exactly as stored and the job carries on: DONE on BOTH runs against one fake, the stale row
+    replaced (never deleted), the stored payload equal to the same book with the key's token read
+    as a read failure (``balance_error``, never a candidate) apart from the run stamp and the
+    NOCAP-03 count. The log names the class and the counts, never the exception's text."""
+    import logging
+    from unittest.mock import patch
+
+    import services.allocator_equity_compose as compose_module
+    from services.job_worker import run_derive_allocator_equity_job
+
+    real = compose_module.compose_allocator_equity
+    calls: list[dict[str, Any]] = []
+
+    def _spy(*args: Any, **kwargs: Any) -> dict:
+        calls.append({"args": args, **kwargs})
+        return real(*args, **kwargs)
+
+    seed = _nc_deribit_a3_book()
+    seed[DERIVED_TABLE].append(_nc_stale_curve_row())
+    fake = _FakeSupabase(seed)
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch("services.allocator_equity_compose.compose_allocator_equity", _spy),
+        patch(
+            "services.job_worker._no_capital_exit_consumes_only_dust",
+            side_effect=KeyError("key-B-SECRET"),
+        ),
+        caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"),
+    ):
+        results = [await run_derive_allocator_equity_job(_nc_job()) for _ in range(2)]
+
+    assert [r.outcome.name for r in results] == ["DONE", "DONE"], [
+        (r.error_kind, r.error_message) for r in results
+    ]
+    assert not [
+        x for x in fake.deletes if x[0] == DERIVED_TABLE and x[1].get("kind") == "equity_curve"
+    ], fake.deletes
+    curve = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve) == 2
+    assert len(calls) == 2 and not any(c.get("no_capital_exit_by_key") for c in calls)
+
+    reference_seed = _nc_deribit_a3_book()
+    for row in reference_seed[DERIVED_TABLE]:
+        if row["kind"] == "key_inputs:key-B":
+            row["payload"]["anchor_null_reason"] = "balance_error"
+    reference = await _compose_no_capital_book(reference_seed)
+    assert _nc_refused(reference) is None
+
+    for upsert in curve:
+        payload = _extract_payload(upsert[1])
+        assert "dropped_key" in payload["degrade_reasons"]
+        assert "no_anchor" in payload["degrade_reasons"]
+        assert "no_capital_exited_keys" not in payload
+        assert _nc_refused(payload) == {"candidate_exception": 1}
+        assert _nc_without_run_stamps(payload) == _nc_without_run_stamps(reference)
+
+    warned = [r.getMessage() for r in caplog.records if "KeyError" in r.getMessage()]
+    assert len(warned) == 2, [r.getMessage() for r in caplog.records]
+    assert not [
+        r for r in caplog.records
+        if "key-B-SECRET" in r.getMessage() or "65.0" in r.getMessage() or r.exc_info
+    ]
