@@ -37,6 +37,13 @@ imports only ``services.db`` (itself free of in-tree imports) and the holder
 literals from ``services.mt5_client``, so the leaf invariant below still holds:
 nothing here reaches ``services.job_worker``.
 
+⭐ ONE further in-tree import since Phase 230 (MT5NIGHTLY, MT5D-02):
+``services.mt5_xlease``, the cross-process half of the lease (a database row taken
+after the in-process lock). It imports only ``services.db`` and
+``services.mt5_handover``, so the leaf invariant still holds. It raises its own
+plain exceptions, which ``mt5_terminal_lease`` translates here, and it never
+imports the epoch registry: the self-fence is a callback this module passes in.
+
 ⛔ The DIRECTION is unchanged and must stay so. The epoch registry and the
 occupancy ContextVar live in ``mt5_client`` and are imported HERE, never the
 reverse: ``mt5_client`` importing this module would be a circular import, and
@@ -66,6 +73,11 @@ from services.mt5_client import (
     mt5_terminal_holder,
 )
 from services.mt5_handover import record_mt5_terminal_handover
+from services.mt5_xlease import (
+    XLeaseBoundExpired,
+    XLeaseUnavailable,
+    acquire_terminal_xlease,
+)
 
 if TYPE_CHECKING:  # annotation only — deliberately NOT a runtime import
     from services.mt5_client import Mt5Client
@@ -367,6 +379,21 @@ class Mt5TerminalBusyError(Exception):
     """
 
 
+class Mt5TerminalLeaseUnavailableError(Mt5TerminalBusyError):
+    """Phase 230 (MT5D-02) — the cross-process lease could not be reached, so the
+    terminal could not be taken safely. Failing closed: the caller never proceeds
+    unserialized.
+
+    A plain ``Exception`` lineage, never ``Mt5ClientError``, for the same structural
+    reason as its parent: a lease outage is OUR infrastructure and must not be
+    absorbed into a user-attributed credential verdict. It SUBCLASSES the busy error
+    on purpose, so every existing busy arm (wizard, heal, liveness) treats a lease
+    outage as busy with no edit.
+
+    ⛔ It carries no host, port, terminal key, digest or queue depth.
+    """
+
+
 @asynccontextmanager
 async def mt5_terminal_lease(
     terminal_key: str,
@@ -426,6 +453,17 @@ async def mt5_terminal_lease(
     row naming the displaced and the incoming holder is written, tagged with
     ``site`` (``services.mt5_handover``). A caller that never held the terminal
     (the busy raise) records nothing.
+
+    ⭐ Phase 230 (MT5D-02) — the lease is TWO-STAGE. After the in-process lock it takes
+    a database row (``services.mt5_xlease``) that serializes this terminal across
+    PROCESSES, because the backfill worker and the API process each own their own
+    event loop and their own lock registry. ``wait_s`` is ONE deadline across both
+    stages; a bounded caller that finds another process holding the terminal raises
+    the same ``Mt5TerminalBusyError``, an unbounded caller waits, and a lease the
+    database cannot answer raises ``Mt5TerminalLeaseUnavailableError`` (a busy
+    subclass). While the body runs the row is renewed in the background; a holder
+    that loses it is fenced through the epoch bump. The database release runs inside
+    the local hold, before ``lock.release()`` (DEC-02-A).
     """
     lock = _mt5_terminal_lock_for(terminal_key)
     queued_at = time.monotonic()
@@ -448,9 +486,57 @@ async def mt5_terminal_lease(
                 "the MT5 terminal was still in use when the acquisition bound expired"
             ) from None
 
-    # ONE call, reached only when one of the two acquisition arms above SUCCEEDED
-    # (the bounded arm's expiry raises rather than falling through), so the stamp
-    # covers both arms without a second, drift-prone copy of it.
+    # Phase 230 (MT5D-02) — the CROSS-PROCESS half. We hold the in-process lock; now
+    # take the database lease, so the backfill worker and the API process never log the
+    # one terminal into different accounts at once. ONE deadline covers both stages:
+    # the database stage gets what is left of `wait_s`.
+    #
+    # ⛔ Every arm below releases the LOCAL lock and stamps, bumps and records NOTHING:
+    # a caller that never held the terminal cannot fence the one that does, and the
+    # unreleased lock would wedge every later caller in this process.
+    remaining = (
+        None if wait_s is None else max(0.0, wait_s - (time.monotonic() - queued_at))
+    )
+
+    def _lost_the_lease() -> None:
+        # The self-fence (DEC-02-C). Called by the renew task when the database lease
+        # is lost while the body runs: bumping the epoch makes the body's NEXT session
+        # touch refuse (`Mt5SessionAbandoned`).
+        bump_mt5_terminal_epoch(terminal_key)
+
+    try:
+        hold = await acquire_terminal_xlease(
+            terminal_key,
+            holder=holder,
+            site=site,
+            bound_s=remaining,
+            on_lost=_lost_the_lease,
+        )
+    except XLeaseBoundExpired:
+        lock.release()
+        # Names the bound only — never the terminal key, the host, the port or the
+        # queue depth (T-153.3-20).
+        logger.warning(
+            "mt5_terminal_lease: gave up waiting for the terminal after %.1fs "
+            "— the terminal is busy in another process; refusing rather than "
+            "queueing further (D-29)",
+            wait_s if wait_s is not None else 0.0,
+        )
+        raise Mt5TerminalBusyError(
+            "the MT5 terminal was still in use when the acquisition bound expired"
+        ) from None
+    except XLeaseUnavailable:
+        lock.release()
+        raise Mt5TerminalLeaseUnavailableError(
+            "the MT5 terminal lease could not be reached"
+        ) from None
+    except BaseException:
+        lock.release()
+        raise
+
+    # ONE call, reached only when the acquisition arms above ALL succeeded (the
+    # bounded arms' expiry raises rather than falling through), so the stamp covers
+    # both without a second, drift-prone copy of it.
     token = begin_mt5_lease_occupancy(terminal_key)
     holder_token = begin_mt5_lease_holder(holder)
     before = mt5_terminal_holder(terminal_key)
@@ -468,7 +554,10 @@ async def mt5_terminal_lease(
             )
         yield
     finally:
-        # ORDER IS LOAD-BEARING (WIZFORM-ABANDON / D-36).
+        # ORDER IS LOAD-BEARING (WIZFORM-ABANDON / D-36, Phase 230 DEC-02-A).
+        #  0. STOP RENEWING first, synchronously (`task.cancel()`): a renew that fired
+        #     after the bump below would be a renew for a lease this holder has
+        #     already given up.
         #  1. BUMP BEFORE RELEASE. It makes "no successor can hold the terminal
         #     while the outgoing generation is still current" true BY
         #     CONSTRUCTION: the next holder cannot even be scheduled until the
@@ -478,9 +567,15 @@ async def mt5_terminal_lease(
         #     construction and by this comment, not by a red test.
         #  2. Un-stamp SECOND, so the stamp is live for the whole hold (the
         #     holder stamp with it — Phase 164.6.6).
-        #  3. Release LAST.
+        #  3. Release the DATABASE row, then the LOCAL lock LAST, in a nested
+        #     try/finally so a cancellation during the RPC cannot strand the local
+        #     lock for every other caller in this process. The row goes FIRST (the
+        #     deliberate difference from RESEARCH Pattern 1): an in-process successor
+        #     then never meets its own predecessor's row, which keeps the
+        #     `mt5_xlease_waited` event a clean cross-process signal. The cost is at
+        #     most one bounded RPC added to the local hold.
         #  4. Phase 164.6.6 — only AFTER the release, the handover diff. The
-        #     read follows the release with NO `await` between them, so no
+        #     read follows `lock.release()` with NO `await` between them, so no
         #     successor can have run yet and the read still sees THIS hold's
         #     final holder. The record is AWAITED here, deliberately not spawned
         #     as a background task: a raising background task reaches
@@ -489,11 +584,15 @@ async def mt5_terminal_lease(
         #     ⛔ It is the recorder's NEVER-RAISES contract (pinned by the shared
         #     predicate in `tests/test_mt5_session_episodes.py`) that keeps the
         #     body's own exception intact through this `finally`: a raise here
-        #     would replace it.
+        #     would replace it. The same holds for `hold.release()`.
+        hold.stop_renewing()
         bump_mt5_terminal_epoch(terminal_key)
         end_mt5_lease_holder(holder_token)
         end_mt5_lease_occupancy(token)
-        lock.release()
+        try:
+            await hold.release()
+        finally:
+            lock.release()
         after = mt5_terminal_holder(terminal_key)
         if after is not None and after != before:
             await record_mt5_terminal_handover(

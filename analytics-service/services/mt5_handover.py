@@ -105,6 +105,7 @@ __all__ = [
     "SITE_VALIDATE_WORKER",
     "SITE_VALIDATION_LIVENESS",
     "normalize_mt5_holder",
+    "normalize_mt5_site",
     "record_mt5_terminal_handover",
 ]
 
@@ -199,6 +200,17 @@ def normalize_mt5_holder(value: object) -> str:
 
 def _normalize_site(value: object) -> str:
     return value if isinstance(value, str) and value in _SITES else HOLDER_UNATTRIBUTED
+
+
+def normalize_mt5_site(value: object) -> str:
+    """A lease site as it may reach a row or a log line: one of the closed
+    ``SITE_*`` literals, anything else ``unattributed``.
+
+    The public name of ``_normalize_site`` (Phase 230 MT5D-02): the cross-process
+    lease client (``services.mt5_xlease``) needs the same closed set and must not
+    import an underscore name across modules. ``_normalize_site`` is kept for this
+    module's own caller; both return exactly the same value."""
+    return _normalize_site(value)
 
 
 async def _insert_handover_row(
