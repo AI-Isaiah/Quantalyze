@@ -355,7 +355,7 @@ PARTITION_COLUMNS: Final[tuple[str, ...]] = (
 # never be re-read. The run names it with the data-quality flag
 # `binance_stop_below_cursor` and a WARNING naming the strategy, the column and the
 # bound; it does not hold the cursor and does not close the gap. Closing it needs an RPC
-# change, outside this phase, and has no owner yet. A third known gap is recorded the
+# change, outside this phase, booked as `[250-BINANCE-STOP-BELOW-CURSOR]` in TODOS.md. A third known gap is recorded the
 # same way (round-1 review WR-03, T-250-19), the sync handler tail: a
 # fill-heavy read that also runs to its 840 s deadline can overrun the 900 s
 # handler while it persists (one amendment SELECT and one upsert per 100 fills,
