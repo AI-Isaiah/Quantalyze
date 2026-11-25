@@ -21,6 +21,10 @@ import {
   usesLastSuccessSnapshot,
 } from "./stored-analytics-result";
 import { figureRecord, isReadableDay, type FigureRecord } from "@/lib/figure-gate";
+import {
+  isOptionsCashWalletReason,
+  OPTIONS_CASH_WALLET_CAUSE,
+} from "@/lib/factsheet/headline-basis";
 import { NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
 import {
   curveMethodFromFlags,
@@ -246,6 +250,26 @@ const PERCENTILE_SPAN_COLUMNS: string =
   "series_start:returns_series->0->>date, series_end:returns_series->-1->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations";
 
 /**
+ * Phase 252 plan 04 (revision round 1, W5) - the six generation alias inputs `effectiveListFlag`
+ * reads on an alias row, so the percentile reads judge the options-book reason with the SAME
+ * snapshot-aware rule as the list shaper (`shapeRowAnalytics`) and Compare: `computed_at` and the
+ * success marker (`cumulative_method`) with its last-success twin and the snapshot's
+ * `computed_at` decide WHICH flags generation the stored figures belong to, and the reason pair
+ * is the value read from it. Spelled exactly as `CATEGORY_RANKING_ANALYTICS_COLUMNS` spells them.
+ * Closed-vocabulary and instant scalars only; the flags blob and the snapshot object are never
+ * projected (T-194-35).
+ *
+ * Like `PERCENTILE_GATE_COLUMN` it rides BESIDE the byte-frozen KPI list and is never appended to
+ * `PERCENTILE_METRICS` (the scorer ranks every member of that array), and it is a SEPARATE const
+ * from `PERCENTILE_SPAN_COLUMNS`, which is pinned equal to `RECORD_SCALAR_ALIASES` and
+ * `RECORD_SPAN_SELECT` and so must not change. `isRankableAnalyticsRow` reads `computation_status`
+ * only, so these extra aliases change no row's rankability. Typed `string` for the reason
+ * `PERCENTILE_SPAN_COLUMNS` is.
+ */
+const PERCENTILE_WITHHOLD_COLUMNS: string =
+  "computed_at, cumulative_method:data_quality_flags->>cumulative_method, last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method, last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at, mtm_gated_reason:data_quality_flags->>mtm_gated_reason, last_success_mtm_gated_reason:data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason";
+
+/**
  * 194.2 D-01 (194-PERCENTILE-SENTRY-DEDUP): one Sentry report per unreadable record, not one per
  * read. `percentileRecord` runs for every row of every percentile read, so one bad record would
  * otherwise report on every page view. Keyed `op|strategyId|seriesStart|seriesEnd|headlineSince`.
@@ -333,7 +357,7 @@ function kpiRecord(a: Record<string, unknown>): Record<string, number | null> {
  * `queries.percentile-columns.test.ts`).
  */
 function percentileSelect(embedPrefix = ""): string {
-  return `id, asset_class, ${embedPrefix}strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}, ${PERCENTILE_SPAN_COLUMNS})`;
+  return `id, asset_class, ${embedPrefix}strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}, ${PERCENTILE_SPAN_COLUMNS}, ${PERCENTILE_WITHHOLD_COLUMNS})`;
 }
 
 /** One row of either percentile read: the strategy's id and class and its analytics embed. */
@@ -397,6 +421,12 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
     // Dropping it here — before `rows` — is what makes the floor below count the
     // honest denominator, mirroring the RPC's gated min-N cohort.
     if (!isRankableAnalyticsRow(a)) continue;
+    // Phase 252 (CONTEXT Decided at planning): an options book is measured on the cash wallet, so it
+    // neither RECEIVES a percentile nor adds a value to anyone's population. Skipped whole, because
+    // `withholdShortRecordRanks` below nulls the five annualised metrics only and max drawdown and
+    // cumulative return are cash-wallet figures here too. Judged on the effective flags generation,
+    // the same rule the list shaper applies (W5). The SQL cohort RPC is deliberately unchanged.
+    if (isOptionsCashWalletReason(effectiveListFlag(a, "mtm_gated_reason"))) continue;
     // 194 D-11 / D-15: a strategy whose TOTAL record fails the minimum has its five
     // annualised metrics nulled BEFORE scoring, so it neither receives a rank for them
     // nor adds a value to anyone else's population. Max drawdown and cumulative return
@@ -594,6 +624,14 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * exact set and the allowed `->>` forms. A non-rankable row is blanked by
  * `shapeRowAnalytics` and loses all three, like the other scalars.
  *
+ * Phase 252 (D-02) — TWO more scalar aliases over the same column, so the list can judge the
+ * options-book withhold on the generation of the figures it shows: `mtm_gated_reason` (the live
+ * flags' reason) and `last_success_mtm_gated_reason` (the reason in the derive hop's
+ * `computed_at`-bound snapshot). Both are `->>` text scalars of a closed vocabulary, never the
+ * flags blob, the snapshot object or its `flags` object (T-194-35). `shapeRowAnalytics` reads them
+ * through `effectiveListFlag` and `shapeStoredAnalytics` deletes both, so they never reach a client
+ * component. `queries.test.ts` pins the exact set.
+ *
  * Phase 170.7 (D-09) — exported for a SECOND consumer, the manager's
  * `/strategies` owner list (plan 06), which embeds the same columns so its
  * rows are shaped by `shapeRowAnalytics` exactly like Discovery's. It stays an
@@ -601,7 +639,7 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * (RANK-02): a wildcard would put the private blobs above on the wire.
  */
 export const CATEGORY_RANKING_ANALYTICS_COLUMNS =
-  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, series_start:returns_series->0->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations, native_unit:data_quality_flags->>native_unit, cumulative_method:data_quality_flags->>cumulative_method, last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method, last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at, last_success_native_unit:data_quality_flags->last_success_snapshot->flags->>native_unit, trades_fetched_at";
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, series_start:returns_series->0->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations, native_unit:data_quality_flags->>native_unit, cumulative_method:data_quality_flags->>cumulative_method, last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method, last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at, last_success_native_unit:data_quality_flags->last_success_snapshot->flags->>native_unit, mtm_gated_reason:data_quality_flags->>mtm_gated_reason, last_success_mtm_gated_reason:data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason, trades_fetched_at";
 
 /**
  * Phase 170.6.1.1 (ANONKEYID) review round 1 (WR-01, SFH-1, SFH-2). The three
@@ -876,18 +914,40 @@ function withResolvedSeriesEnd(a: StrategyAnalytics): StrategyAnalytics {
  * never reaches the render as label text.
  */
 function shapedNativeUnit(a: StrategyAnalytics) {
-  if (usesLastSuccessSnapshot(a)) {
-    const effective = effectiveDataQualityFlags(a);
-    return parseReturnsUnit(
-      effective.source === "snapshot" ? effective.flags?.native_unit : a.last_success_native_unit,
-    );
+  // Always passes `parseReturnsUnit`, so a malformed string never reaches the render as label text.
+  return parseReturnsUnit(effectiveListFlag(a, "native_unit"));
+}
+
+/**
+ * Phase 252 (D-02) — the two flags a list row reads from the SAME flags generation as its figures:
+ * `native_unit` (the unit chip) and `mtm_gated_reason` (the options-book withhold). One rule, so a
+ * row's unit and its withhold can never come from different runs.
+ *
+ * When the row's success marker is satisfied only through the derive hop's snapshot, the live alias
+ * is gone with the live flags (the prestamp replaces them), so the value is the snapshot's: the
+ * effective flags' value on a blob row, the matching `last_success_*` alias on an alias row. Every
+ * other row reads the live alias, then the live blob, exactly as it always has. This is the one
+ * generation pick in the file: it holds the one snapshot-use test and the one effective-flags read
+ * that the unit pick held before it was generalised (the recompute-verdict census pins both counts).
+ * Returns the raw value; the caller parses or compares it strictly.
+ */
+type ListFlagKey = "native_unit" | "mtm_gated_reason";
+function effectiveListFlag(
+  a: StrategyAnalytics | Record<string, unknown> | null | undefined,
+  key: ListFlagKey,
+): unknown {
+  const row = a as Record<string, unknown> | null | undefined;
+  if (usesLastSuccessSnapshot(row)) {
+    const effective = effectiveDataQualityFlags(row);
+    return effective.source === "snapshot"
+      ? effective.flags?.[key]
+      : row?.[`last_success_${key}`];
   }
-  // Phase 164.6.6.2.1 (D-05, D-12): the unit the StrategyTable chip reads. The
-  // anon ranked read projects the scalar alias; the owner's wildcard embed
-  // carries the flags blob instead. Either way the unit leaves here as a parsed
-  // code or null, and only that ONE scalar is derived: the blob is never copied
-  // into the shape.
-  return parseReturnsUnit(a.native_unit ?? a.data_quality_flags?.native_unit);
+  // Phase 164.6.6.2.1 (D-05, D-12): the anon ranked read projects the scalar alias; the owner's
+  // wildcard embed carries the flags blob instead. Only the ONE scalar is read: the blob is never
+  // copied into the shape.
+  const live = (row?.data_quality_flags ?? null) as Record<string, unknown> | null;
+  return row?.[key] ?? live?.[key];
 }
 
 /**
@@ -943,6 +1003,10 @@ function shapeStoredAnalytics(a: StrategyAnalytics): StrategyAnalytics {
   delete out.last_success_cumulative_method;
   delete out.last_success_computed_at;
   delete out.last_success_native_unit;
+  // Phase 252: the two options-book reason inputs are read by `shapeRowAnalytics` before this
+  // shaper runs; neither leaves queries.ts, so a non-flagged row is shaped as it always was.
+  delete out.mtm_gated_reason;
+  delete out.last_success_mtm_gated_reason;
   return out;
 }
 
@@ -953,6 +1017,25 @@ export function shapeRowAnalytics(
   // No `strategy_analytics` row at all — the pre-existing crash-free fallback,
   // byte-identical to what this line has always done.
   if (a === null) return { ...EMPTY_ANALYTICS, strategy_id: strategyId };
+
+  // Phase 252 (CONTEXT Wave 1) — an options book's stored figures are measured on the cash wallet,
+  // which leaves out the market value of open option positions, so the row leaves here blank and
+  // MARKED, whatever its status. Judged on the EFFECTIVE flags generation (`effectiveListFlag`), so
+  // a derive prestamp that dropped the live reason cannot un-withhold a held row, and checked before
+  // the terminal-success and held-re-run arms so a held flagged row is blank too. The marker is the
+  // named cause `rowRecord` turns into the cell sentence, and the one fact the table and the
+  // percentile reads key on. Absence is the convention: no other row carries it (RESEARCH Pitfall 8).
+  // Only `isOptionsCashWalletReason` compares the flag string. Same blank shape as the failed arm
+  // below: the real status and the trade-fetch time are kept, every figure is dropped.
+  if (isOptionsCashWalletReason(effectiveListFlag(a, "mtm_gated_reason"))) {
+    return {
+      ...EMPTY_ANALYTICS,
+      strategy_id: strategyId,
+      computation_status: a.computation_status,
+      trades_fetched_at: a.trades_fetched_at ?? null,
+      headline_withheld_cause: OPTIONS_CASH_WALLET_CAUSE,
+    };
+  }
 
   // Terminal SUCCESS (`complete` / `complete_with_warnings`) — the values
   // describe a run that finished. Handed through with `series_end` resolved
@@ -1433,6 +1516,8 @@ export async function getOwnRowPercentiles(
     // helper and not a local predicate, so the owner surface and the public
     // surface can never disagree about who is in the comparison set.
     if (!isRankableAnalyticsRow(a)) continue;
+    // Phase 252: the SAME options-book skip getPercentiles applies, for the same reason.
+    if (isOptionsCashWalletReason(effectiveListFlag(a, "mtm_gated_reason"))) continue;
     // 194 D-11 / D-15: the SAME helper getPercentiles applies, so a published row that
     // fails the total-record minimum neither ranks nor counts for the five annualised
     // metrics here either, and an own row that is also published (resolved below by
@@ -1461,7 +1546,10 @@ export async function getOwnRowPercentiles(
     // just excluded from, i.e. as a non-member, and shown to its owner as a
     // real percentile. Rows dropped here simply have no `ownMap` entry, which
     // /my-strategies already renders as "no rank".
-    .filter((r) => isRankableAnalyticsRow(r.analytics))
+    // Phase 252: a subject `shapeRowAnalytics` blanked for the options-book withhold receives no
+    // percentile either (its shaped analytics carries the marker), judged in the same callback so no
+    // second rankability call is added.
+    .filter((r) => isRankableAnalyticsRow(r.analytics) && !r.analytics.headline_withheld_cause)
     .map(
       (r) =>
         populationById.get(r.id) ?? {
@@ -2007,6 +2095,14 @@ export interface OwnCapitalStrategy {
    * withholds the Holdings Sharpe on it, whatever the span and count say.
    */
   figure_unreadable: boolean;
+  /**
+   * Phase 252: `"options_cash_wallet"` when the strategy's stored figures are measured on the cash
+   * wallet (the flags carry the options-book reason, judged on the effective generation), else
+   * `null`. The same marker the returns route serves as `figure_withheld_by`; `gatedSharpe`
+   * withholds the Holdings Sharpe on it and the Scenario composer's book leg withholds its CAGR
+   * and Sharpe, each with the named sentence.
+   */
+  figure_withheld_by: typeof OPTIONS_CASH_WALLET_CAUSE | null;
   strategy_analytics: Pick<
     StrategyAnalytics,
     "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -2037,9 +2133,19 @@ function figureRecordScalars(input: {
   recordObservations: unknown;
   assetClass: string | null | undefined;
   strategyId: string;
+  /**
+   * Phase 252: the options-book reason, read by the CALLER through `effectiveListFlag` so both
+   * producers apply one generation rule. The producer judges it with `isOptionsCashWalletReason`
+   * and nothing else.
+   */
+  mtmGatedReason?: unknown;
 }): Pick<
   OwnCapitalStrategy,
-  "figure_span_days" | "figure_observations" | "figure_crypto" | "figure_unreadable"
+  | "figure_span_days"
+  | "figure_observations"
+  | "figure_crypto"
+  | "figure_unreadable"
+  | "figure_withheld_by"
 > {
   const { series, dataQualityFlags, recordObservations, assetClass, strategyId } = input;
   const seriesStartDate = input.recordSeriesStart ?? series[0]?.date ?? null;
@@ -2071,6 +2177,7 @@ function figureRecordScalars(input: {
     figure_observations: record.observations,
     figure_crypto: record.crypto,
     figure_unreadable: record.unreadable === true,
+    figure_withheld_by: isOptionsCashWalletReason(input.mtmGatedReason) ? OPTIONS_CASH_WALLET_CAUSE : null,
   };
 }
 
@@ -2139,6 +2246,7 @@ export async function getOwnCapitalStrategies(
         max_drawdown,
         returns_series,
         data_quality_flags,
+        computed_at,
         record_observations:metrics_json->record_observations
       )
       `,
@@ -2225,6 +2333,9 @@ export async function getOwnCapitalStrategies(
         data_quality_flags: _dqf,
         // 194 D-15: read below for `figure_observations`, then dropped like the flags.
         record_observations: _ro,
+        // Phase 252: selected ONLY so a bound `last_success_snapshot` can apply to the reason below;
+        // dropped so the payload shape is unchanged (MT5 parity surfaces share this projection).
+        computed_at: _ca,
         ...analyticsRest
       } = analyticsObj;
       // Phase 164.6.6.2.1 D-11: the MTD below is in USD for a native-unit row,
@@ -2246,6 +2357,10 @@ export async function getOwnCapitalStrategies(
         recordObservations: analyticsObj.record_observations,
         assetClass: assetClass as string | null | undefined,
         strategyId: String(rowObj.id),
+        // Phase 252 (review SFH-HIGH-1): the projection carries `computed_at`, so a snapshot bound to
+        // it applies and the reason resolves on the EFFECTIVE flags generation, as in
+        // `getMyAllocationDashboard`. `computed_at` is stripped above, so the payload shape is unchanged.
+        mtmGatedReason: effectiveListFlag(analyticsObj, "mtm_gated_reason"),
       });
       mtd = computeMtd(
         returns_unit != null
@@ -2690,6 +2805,14 @@ export interface MyAllocationDashboardPayload {
       figure_observations?: number | null;
       figure_crypto?: boolean;
       figure_unreadable?: boolean;
+      /**
+       * Phase 252: `"options_cash_wallet"` when the strategy's figures are measured on an options
+       * book's cash wallet (judged on the effective flags generation), else `null`. Same meaning as
+       * on `OwnCapitalStrategy`; the Scenario composer's book leg (`constituentFigure`) and the
+       * Holdings Sharpe (`gatedSharpe`) withhold on it. Optional only so legacy hand-built fixtures
+       * compile; `getMyAllocationDashboard` ALWAYS sets it.
+       */
+      figure_withheld_by?: typeof OPTIONS_CASH_WALLET_CAUSE | null;
       strategy_analytics: Pick<
         StrategyAnalytics,
         "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -6512,6 +6635,8 @@ export const getMyAllocationDashboard = cache(
               recordObservations: analyticsObj?.record_observations,
               assetClass: strategy.asset_class,
               strategyId: row.strategy_id as string,
+              // Phase 252: judged on the effective generation, like `dqf` above.
+              mtmGatedReason: effectiveListFlag(analyticsObj, "mtm_gated_reason"),
             }),
             strategy_analytics: strategyAnalyticsForPayload,
           },

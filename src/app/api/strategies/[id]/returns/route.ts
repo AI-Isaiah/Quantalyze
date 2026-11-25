@@ -186,6 +186,16 @@ export interface ReturnsResponse {
    */
   figure_unreadable: boolean;
   /**
+   * Phase 252 plan 03 (CONTEXT Wave 1) — always present. `"options_cash_wallet"` only when the run is
+   * rankable AND the figure record carries the options-book marker: the strategy's stored figures are
+   * measured on the cash wallet, which leaves out the market value of open option positions. The
+   * values (`cagr`, `sharpe`, the series) still reach the consumer and its gate withholds them, the
+   * way `figure_unreadable` works; the route never nulls them. The reason is read from the EFFECTIVE
+   * flags generation (`effectiveFlags`), so a held re-run is judged on the flags of the numbers it
+   * shows. A closed literal or null: the raw flags blob is never forwarded. `null` otherwise.
+   */
+  figure_withheld_by: "options_cash_wallet" | null;
+  /**
    * Phase 164.6.6.2 (D-18, D-22, D-23) — the unit this strategy's OWN
    * `daily_returns` are recorded in: `"BTC"` for a BTC-native account, `null` for
    * USD. Strictly coerced through `parseReturnsUnit` (anything that is not a
@@ -550,7 +560,10 @@ export async function GET(
       // `figure_unreadable` (R2 WR-01): the values still reach the consumer and its gate withholds
       // them, rather than the route nulling them and the panel claiming "no computed metrics". It is
       // reported once at the producer, never from a render path.
-      const record = recordFromScalars(analyticsRow, asset_class);
+      const record = recordFromScalars(
+        analyticsRow ? { ...analyticsRow, mtm_gated_reason: effectiveFlags?.mtm_gated_reason } : analyticsRow,
+        asset_class,
+      );
       const figureUnreadable = analyticsRankable && !!record.unreadable;
       if (figureUnreadable) {
         captureToSentry(new Error("strategy record unreadable"), {
@@ -645,6 +658,7 @@ export async function GET(
         figure_observations: analyticsRankable ? record.observations : null,
         figure_crypto: analyticsRankable ? record.crypto : false,
         figure_unreadable: figureUnreadable,
+        figure_withheld_by: analyticsRankable && record.withheldBy ? record.withheldBy : null,
         returns_unit,
         daily_returns_usd,
         native_unpriced,

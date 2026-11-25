@@ -417,3 +417,75 @@ describe("194.1 B5 · an unreadable or missing asset class fails closed", () => 
     expect(message).not.toContain(B_ID);
   });
 });
+
+// Phase 252 plan 03 (revision round 1, W5): a recommended options book prints no cash-wallet
+// figures. WHY: its stored CAGR, Sharpe and drawdown are measured on the cash wallet, which leaves
+// out open option positions, so a card showing them beside a withheld factsheet is the exact
+// disagreement the phase exists to remove. The reason is read from the EFFECTIVE flags generation
+// (a held re-run's prestamped live flags carry no reason, its snapshot does), never from a live
+// alias, so a derive prestamp cannot un-withhold a held card. Sentences are hand-typed.
+describe("252 W5 · /recommendations - an options book's card shows no cash-wallet figures", () => {
+  const CELL_SENTENCE = "Withheld: measured on the cash wallet, which leaves out open option positions.";
+  const COMPUTED_AT = "2026-08-25T09:15:00.000Z";
+  const OPTIONS = { cumulative_method: "simple", mtm_gated_reason: "unsmoothed_options_book" };
+
+  function flagged(data_quality_flags: unknown) {
+    // cumulative_return is the stored success's headline: `analyticsHold` admits a held re-run only over one.
+    return { ...status(A_ID, 400, 400), cumulative_return: 0.42, computed_at: COMPUTED_AT, data_quality_flags };
+  }
+
+  it("live flags carrying the success marker and the reason: dashes for CAGR, Sharpe and Max DD, with the options sentence", async () => {
+    seeded.statusRows = [flagged(OPTIONS)];
+    await renderPage();
+    const card = cardFor("Orpheus");
+    for (const label of ["CAGR", "Sharpe"]) {
+      const c = cell(card, label);
+      expect(c.textContent, `${label} printed a cash-wallet figure`).toMatch(/^—/);
+      expect(c.textContent).not.toMatch(/50|2\.10/);
+      expect(titleOf(c)).toBe(CELL_SENTENCE);
+      expect(c.querySelector(".sr-only")?.textContent).toBe(CELL_SENTENCE);
+    }
+    expect(cell(card, "Max DD").textContent).toMatch(/^—/);
+    expect(cell(card, "Max DD").textContent).not.toMatch(/20/);
+  });
+
+  it("a held re-run: prestamped live flags (no marker, no reason) over a snapshot bound to computed_at that carries the reason is withheld the same way", async () => {
+    seeded.statusRows = [
+      {
+        ...flagged({ last_success_snapshot: { computed_at: COMPUTED_AT, flags: OPTIONS } }),
+        computation_status: "pending",
+      },
+    ];
+    await renderPage();
+    const card = cardFor("Orpheus");
+    expect(cell(card, "CAGR").textContent).toMatch(/^—/);
+    expect(titleOf(cell(card, "CAGR"))).toBe(CELL_SENTENCE);
+    expect(cell(card, "Sharpe").textContent).toMatch(/^—/);
+    expect(cell(card, "Max DD").textContent).toMatch(/^—/);
+  });
+
+  it("a snapshot bound to another success, live flags without the reason: not withheld", async () => {
+    seeded.statusRows = [
+      flagged({
+        cumulative_method: "simple",
+        last_success_snapshot: { computed_at: "2026-01-01T00:00:00.000Z", flags: OPTIONS },
+      }),
+    ];
+    await renderPage();
+    const card = cardFor("Orpheus");
+    expect(cell(card, "CAGR").textContent).toContain("+50.00%");
+    expect(cell(card, "Sharpe").textContent).toContain("2.10");
+    expect(cell(card, "Max DD").textContent).toBe("-20.00%");
+  });
+
+  it("a card without the flag renders as before, and the select string gained no alias", async () => {
+    seeded.statusRows = [flagged({ cumulative_method: "simple" })];
+    await renderPage();
+    const card = cardFor("Orpheus");
+    expect(cell(card, "CAGR").textContent).toContain("+50.00%");
+    expect(cell(card, "Max DD").textContent).toBe("-20.00%");
+    const sel = seeded.calls.find((c) => c.table === "strategy_analytics" && c.op === "select")?.args[0] as string;
+    expect(sel).not.toContain("mtm_gated_reason");
+    expect(sel).toContain("data_quality_flags,");
+  });
+});

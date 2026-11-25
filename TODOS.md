@@ -183,6 +183,19 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   that point the merge-time guarantee starts protecting someone other than us.
   **Trigger:** the first paying client lands.
 
+### Phase 252 (DERIBITOPTIONS) — routed items (logged 2026-11-25, the execution date; the ship CHANGELOG carries the ship date)
+
+0.016. **`[252-SINGLEKEY-OPTIONS-CASH]` A single-key key-mode Deribit options strategy still headlines on
+   the cash wallet and carries no options-book reason.** Phase 252's wave-1 withhold keys on
+   `mtm_gated_reason = unsmoothed_options_book`, which only the composite stitch stamps. A single-key
+   Deribit strategy whose mark-to-market pass succeeds never goes through the stitch, carries no such
+   reason, and publishes the cash-wallet figures that leave out open option positions, so the withhold
+   does not reach it. Three facts: **PROD has no single-key Deribit strategy** (census 2026-11-25), so
+   nothing is published on this path today; the remedy for any series it touches is a **RE-DERIVE, never
+   a backfill `UPDATE`** (see item 9 of the DEF-142.2 list); and the date logged is the ship date.
+   **Trigger:** any published single-key Deribit options strategy.
+   **Owner:** the Phase 252 wave-2 promotion (a `/gsd-plan-phase 252 --gaps` plan) or a follow-up phase.
+
 ---
 
 ## 👤 FOUNDER OPS — founder actions, not phase work
@@ -2363,15 +2376,6 @@ None of these clears the founder blast-radius bar as blocking. Each names its so
    a venue property. The TypeScript mirror was the trust judgement, and that one is gone. Turning
    the ingestion set into a property on the adapter that already knows the answer would remove the
    last venue literal; it is cheap, and **not required by the MT5-12 invariant**.
-7. **`DEF-142.2-07` — Deribit `twr_chain_broken` tightening: FOUNDER DECISION, with the census
-   number attached.** Plan 03 shipped the **behaviour-preserving** default — deribit keeps
-   `ledger_complete` on **both** return paths even when `meta` carries `twr_chain_broken`.
-   Tightening it (stamp a non-admissible verdict when the chain is broken) is a real option, and the
-   read-only PROD census that governs it was run in plan 04: **deribit rows carrying
-   `twr_chain_broken` = 0 — total AND published** (1 row carries the flag on a non-deribit venue).
-   **So tightening would affect nothing today.** ⚠️ Not decided by the phase, on purpose — it is a
-   trust-policy call, not an implementation detail. **Remedy rule if it is ever tightened: affected
-   series get a RE-DERIVE, never a backfill `UPDATE`** (see item 9 for why).
 8. **`DEF-142.2-08` — renaming `csv_daily_returns`.** The table is the canonical daily series for
    **every** producer (keyed derive, composite stitch, CSV upload), so the `csv_` prefix now names
    only one of three producers. Cosmetic relative to the MT5-12 invariant, which is satisfied by the

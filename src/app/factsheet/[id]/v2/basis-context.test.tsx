@@ -136,8 +136,12 @@ describe("basis-context", () => {
     // Phase 102 (MTM-01) honest reason copy — character-exact pins (DESIGN.md
     // voice: factual, institutional, no contractions, never fabricating).
     // The dropped daily-mark smoothing framing on the options-book reason is GONE.
+    // Phase 252 (DERIBITOPTIONS): the options reason no longer says the strategy "reports its cash
+    // basis" (false beside a withheld headline); it says the cash-wallet headline is withheld. It
+    // names no flag, job or chain wording.
+    expect(mtmDisabledReasonCopy("unsmoothed_options_book")).not.toMatch(/unsmoothed|mtm_|_/);
     expect(mtmDisabledReasonCopy("unsmoothed_options_book")).toBe(
-      "Mark-to-market unavailable: composites that include options positions report cash settlement only.",
+      "Mark-to-market unavailable: this strategy's open option positions are not valued at market prices, so its headline figures measured on the cash wallet are withheld.",
     );
     // Unchanged — the venue reason keeps its byte-identical copy.
     expect(mtmDisabledReasonCopy("mtm_basis_unavailable_for_venue")).toBe(

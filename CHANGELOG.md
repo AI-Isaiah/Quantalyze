@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.133.80.0] - 2026-11-25 — Phase 252 DERIBITOPTIONS: a Deribit options book's cash-wallet figures are withheld by name on every surface
+
+A Deribit composite that trades options was publishing headline figures measured against the cash wallet alone. Its cumulative return, CAGR and Calmar were artefacts, because the cash wallet leaves out the market value of open option positions: a long option prints a loss on the buy day and a gain on the close day, measured against a premium-shrunk wallet. The root cause is in the debug session `deribit-implausible-returns` (mechanism B). The founder ruled "Withhold first, then MTM" on 2026-11-25. Wave 1, this PR, withholds those figures under a named reason. Wave 2 ships only the measurement tool for market-price valuation; the headline switches to it later, and only if the measurement passes. The ruling extends Phase 194 D-05 by this one named, structural withhold. It applies no numeric plausibility bound.
+
+### Added
+- **One trigger owner.** `isOptionsCashWalletBook` in `src/lib/factsheet/headline-basis.ts` decides from strict equality `data_quality_flags.mtm_gated_reason === "unsmoothed_options_book"`, the reason the composite stitch already stamps for an options member. It never fires on `twr_chain_broken` alone, on an MT5 row, or on any other `mtm_gated_reason` value. A table-driven negative set pins each of these.
+- **A named withhold cause, `options_cash_wallet`.** `headlineVerdict` checks it first, so it beats a Dated headline and needs no chain break. The seven stored cash scalars are nulled on the factsheet read path, and the strip, Main Metrics and rail panels show a muted structural note.
+- **The share card names the reason** beside its dashes.
+- **The D-15 figure record carries a `withheldBy` marker.** `recordClears` refuses on it, and the reason sentences name the cash-wallet measurement instead of a record length. This covers recommendations, the returns route (`figure_withheld_by`) and the Scenario composer's constituents and book legs.
+- **Discovery and owner lists.** A flagged row is blank and named. The flag is read through `effectiveListFlag`, which takes the same snapshot-aware flags generation as the list shaper. Percentile reads drop the row from every peer set. The Discovery table takes it out of the ranking and names the reason in its rank cell.
+- **Compare** shows no figure and draws no curve for a flagged column, and the overlay note says why.
+- **`analytics-service/scripts/deribit_options_smoothed_probe.py`, a read-only measurement probe.** It builds each Deribit member of a composite on the smoothed mark-to-market basis and on the cash basis. It judges the smoothed basis on structural criteria only: the build completes, every held option has daily marks, no day falls in the pre-retention bucket, `combine_native_ledger` returns, there is option activity, and the series is non-empty. Its output is closed-vocabulary with no floats, ids or balances. It never calls the stitch job and never flips `SMOOTHED_MTM_ENABLED`. Running it needs the keys' credentials in the worker and is a founder-gated step after this ship.
+- **A census test, `src/__tests__/options-cash-wallet-withhold.census.test.ts`.** It holds every reader of `strategy_analytics` to the one predicate or to a closed exclusion reason. It also pins the TS literal against `MTM_REASON_OPTIONS` in `stitch_composite.py`.
+
+### Changed
+- **A selected range or zoomed window on a flagged strategy withholds its figures too, with the same named reason.** The chain-break pattern, which re-derives range figures, is not carried over to this cause. The rail, the KPI strip, the trailing windows, the benchmark cells and the rolling charts' avg label all follow it. The equity and rolling charts still draw the series beside the named note.
+- **The leverage what-if excludes a withheld headline,** and the mark-to-market toggle copy now says the cash-wallet headline is withheld.
+- **The `Withheld` gates key on `headlineWithheld`, not on `twrChainBroken`.** Chain-broken rows behave as before.
+- **The factsheet payload cache key moves to `factsheet-v2-payload-v28`.**
+
+### Fixed (review rounds)
+- The own-capital Holdings query selects `computed_at`, so the options reason binds on the effective flags generation. `computed_at` is stripped before the payload is built, so the payload shape is unchanged.
+- Holdings withholds a flagged strategy's cash-wallet MTD and Max DD as well as its Sharpe.
+- The probe cannot pass on no evidence: it requires option activity and a non-empty series. A missing strategy now hits the documented exit-2 refusal (`maybe_single`).
+
+### Removed
+- `TODOS.md` `DEF-142.2-07` is closed and deleted. PROD census, read 2026-11-25 with the marker first: Deribit strategy rows carrying `twr_chain_broken` = 2 total, 0 published, both private composites stamped `composite_stitched`. Rows of the entry's own subject (Deribit `ledger_complete` with a broken chain) = 0, because PROD has no single-key Deribit strategy. The 2 composites are this phase's withhold population.
+
+### Notes
+- Moved published figures: none. Ship-time PROD read, marker first: rows carrying any `mtm_gated_reason` = 2, both `unsmoothed_options_book`, both private. Composite member venues are Deribit only, with 0 MT5 members, so no MT5 figure moves (the 155.2 freeze is not engaged). The withhold reads flags already stored, so no re-derive is needed. Nothing was backfilled.
+- A mixed composite (a Deribit options member plus another venue) is withheld by definition, because `mark_to_market_available` checks options first.
+- New `TODOS.md` entry `[252-SINGLEKEY-OPTIONS-CASH]`: a single-key Deribit options strategy still headlines on cash and carries no trigger. Trigger: any published single-key Deribit options strategy. PROD has none today.
+- Deferred, by recorded decision: the peer-set RPC `get_verified_cohort_rank` (needs a migration if a flagged strategy is ever published), allocation blends with a flagged leg, and the monthly heatmap cells.
+- No migration.
+
 ## [0.133.79.1] - 2026-11-25 — BASELINE: automated re-dump after the PROD apply of 2636fb1e
 
 ### Changed

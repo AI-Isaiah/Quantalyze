@@ -658,3 +658,71 @@ describe("Style Drift on a Withheld row: the Kolmogorov-Smirnov line and the fai
     expect(sectionHeads(container).join("|")).toMatch(/§III Style/);
   });
 });
+
+/**
+ * Phase 252 plan 02 (W3, orchestrator decision 2026-11-25): the options-book cause is withheld
+ * inside a selected range too, on the SAME one rail gate (`wholeRecordWithheld`), with the muted
+ * options sentence. A chain-broken Withheld row of another cause keeps its slice figures.
+ */
+describe("252: an options book inside a selected range (the rail's one gate)", () => {
+  const OPTIONS_DQ: DQ = { composite: true, headlineWithheld: true, headlineWithheldCause: "options_cash_wallet" };
+  /** HAND-TYPED options panel sentence (muted, no glyph). */
+  const PANEL_OPTIONS =
+    "Withheld: this panel is measured on the cash wallet, which leaves out the market value of open option positions.";
+  const ZOOM: [number, number] = [100, 299];
+  const optionsRow = () => withHeadlineNaN(payloadWith(OPTIONS_DQ));
+
+  /** The strategy value cell (second td) of a rail row. Fails loud. */
+  function strat(container: HTMLElement, title: string, label: string): string {
+    const h = [...container.querySelectorAll("h3")].find((el) => el.textContent === title);
+    if (!h) throw new Error(`no panel titled "${title}"`);
+    const tr = [...(h.closest("section") as HTMLElement).querySelectorAll("tr")].find((r) => r.querySelector("td")?.textContent === label);
+    if (!tr) throw new Error(`no row "${label}" in "${title}"`);
+    return tr.querySelectorAll("td")[1]?.textContent ?? "";
+  }
+
+  it("premise: the same series on a clean row inside the range prints figures in Main Metrics", async () => {
+    const { container } = await mount(payloadWith(CLEAN), { zoom: ZOOM });
+    for (const label of ["Cumulative Return", "Sharpe", "Ann. Volatility"]) {
+      expect(strat(container, "Main Metrics", label), label).not.toBe("—");
+    }
+  });
+
+  it("Main Metrics: the figures the rail dashes at full history read the em-dash inside a range", async () => {
+    const full = await mount(optionsRow());
+    const fullCells = ["Cumulative Return", "CAGR", "Sharpe", "Sortino"].map((l) => strat(full.container, "Main Metrics", l));
+    expect(fullCells, "premise: at full history they are dashed").toEqual(["—", "—", "—", "—"]);
+    full.unmount();
+    const { container } = await mount(optionsRow(), { zoom: ZOOM });
+    for (const label of ["Cumulative Return", "CAGR", "Sharpe", "Sortino", "Calmar", "Ann. Volatility"]) {
+      expect(strat(container, "Main Metrics", label), label).toBe("—");
+    }
+    expect(strat(container, "Max Drawdown", "Max Drawdown"), "Max Drawdown").toBe("—");
+  });
+
+  it.each(PARTS)("Worst 10 Drawdowns inside a range, part=%s: the muted options note replaces the table", async (part) => {
+    const { container } = await mount(optionsRow(), { part, zoom: ZOOM });
+    const panel = readPanel(container);
+    if (panel === null) throw new Error("premise: the Worst 10 panel mounts");
+    expect(panel.notes).toHaveLength(1);
+    expect(panel.notes[0].textContent).toBe(PANEL_OPTIONS);
+    expect(panel.notes[0].getAttribute("style")).toContain("var(--color-text-muted, #64748B)");
+    expect(panel.tables).toBe(0);
+    expect(panel.rowCount).toBe(0);
+  });
+
+  it("a chain-broken Withheld row of another cause keeps its windowed slice inside a range (control)", async () => {
+    const { container } = await mount(withheldRow(), { zoom: ZOOM });
+    const panel = readPanel(container);
+    expect(panel?.rowCount ?? 0).toBeGreaterThan(0);
+    expect(strat(container, "Main Metrics", "Sharpe")).not.toBe("—");
+  });
+
+  it("the same options payload under mark-to-market keeps its table and figures (the basis carve-out)", async () => {
+    const row = { ...withheldWithMtm(), dataQuality: OPTIONS_DQ } as FactsheetPayload;
+    const { container } = await mount(row, { basis: "mark_to_market", zoom: ZOOM });
+    const panel = readPanel(container);
+    expect(panel?.notes ?? []).toHaveLength(0);
+    expect(panel?.rowCount ?? 0).toBeGreaterThan(0);
+  });
+});

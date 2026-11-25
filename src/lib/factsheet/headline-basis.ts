@@ -126,6 +126,58 @@ export function readHeadlineBasis(dqf: unknown): HeadlineBasis {
 }
 
 /**
+ * Phase 252 DERIBITOPTIONS — the value of `data_quality_flags.mtm_gated_reason` that
+ * says a composite holds an options book whose return series is measured on the
+ * CASH wallet, which leaves out the market value of open option positions. Its
+ * producer is `MTM_REASON_OPTIONS` in `analytics-service/services/stitch_composite.py`,
+ * stamped by `run_stitch_composite_job` when a member has option activity. A vitest
+ * pins the pair across the two languages (plan 252-05 adds it).
+ */
+export const OPTIONS_CASH_WALLET_REASON = "unsmoothed_options_book";
+
+/**
+ * Strict equality, nothing else: no trim, no case fold, no prefix match. The flag is
+ * an untrusted JSONB value, so a case variant, a padded string, a boolean, an array
+ * or null is NOT the reason (T-252-01).
+ */
+export function isOptionsCashWalletReason(value: unknown): boolean {
+  return value === OPTIONS_CASH_WALLET_REASON;
+}
+
+/**
+ * The ONE owner of the options-book trigger. Every surface (the verdict, the read
+ * path, the card, the list gates) asks this and never compares the string itself.
+ * It takes the raw `data_quality_flags` blob with the same record-or-null guard
+ * {@link readHeadlineBasis} applies, so a non-object blob is simply "not the book".
+ * There is no numeric input: it never looks at a figure, a balance or a threshold.
+ */
+export function isOptionsCashWalletBook(dqf: unknown): boolean {
+  if (dqf === null || typeof dqf !== "object" || Array.isArray(dqf)) return false;
+  return isOptionsCashWalletReason((dqf as Record<string, unknown>).mtm_gated_reason);
+}
+
+/** The withhold cause the options-book verdict carries (see {@link HeadlineWithholdCause}). */
+export const OPTIONS_CASH_WALLET_CAUSE = "options_cash_wallet";
+
+/** Where the options-book sentence prints: headline strip and Main Metrics, a rail panel, a selected range, the share card. */
+export type OptionsCashWalletSlot = "headline" | "panel" | "range" | "card";
+
+/**
+ * The only text the options-book cause ever becomes. A slot with no sentence is a
+ * compile error. The sentences name the reason a reader can act on and never a flag,
+ * a job, a balance or a chain break (T-252-04).
+ */
+export const OPTIONS_CASH_WALLET_PHRASES = {
+  headline:
+    "Headline figures withheld: this strategy trades options, and its returns are measured on the cash wallet, which leaves out the market value of open option positions.",
+  panel:
+    "Withheld: this panel is measured on the cash wallet, which leaves out the market value of open option positions.",
+  range:
+    "Figures for this range are withheld: the record is measured on the cash wallet, which leaves out the market value of open option positions.",
+  card: "Figures withheld: measured on the cash wallet, which leaves out open option positions.",
+} as const satisfies Record<OptionsCashWalletSlot, string>;
+
+/**
  * Phase 164.6.6.3.3 round 2 (SFH-R2-01, D-03, D-06) — the ONE decision about a
  * row's headline, shared by the factsheet read path
  * (`composite-read-path.ts` `applyHeadlineBasis`, reached by
@@ -156,8 +208,20 @@ export function readHeadlineBasis(dqf: unknown): HeadlineBasis {
  *     a chain-broken row with no valid `headline_since` (checked FIRST, so it
  *     stays `unmeasured` while computing or failed), and the `no_row`,
  *     `raw_cash_settlement` and `missing_keys` refusals, which D-14 does not cover.
+ *
+ * Phase 252 DERIBITOPTIONS (founder ruling 2026-11-25, "Withhold first, then MTM"):
+ *   - `options_cash_wallet`: the row's `mtm_gated_reason` is the options-book reason
+ *     ({@link isOptionsCashWalletBook}). This is checked FIRST, before the chain
+ *     break and before the gate, for two reasons. It must beat `dated`: a Dated
+ *     reading would publish the very cash-wallet figures the reason says leave out
+ *     the market value of open option positions. And it must not need a chain
+ *     break or an applicable gate: with a not-applicable gate the page would
+ *     otherwise compute whole-record figures from the cash series, which is the
+ *     artefact itself. It EXTENDS Phase 194 D-05 by one named, structural,
+ *     non-numeric withhold: no magnitude, threshold or plausibility input exists
+ *     anywhere in it.
  */
-export type HeadlineWithholdCause = "unmeasured" | "recomputing" | "failed";
+export type HeadlineWithholdCause = "unmeasured" | "recomputing" | "failed" | typeof OPTIONS_CASH_WALLET_CAUSE;
 
 export type HeadlineVerdict =
   | { kind: "clean" }
@@ -169,6 +233,7 @@ export function headlineVerdict(
   gate: StoredCashHeadlineGate,
   computationStatus?: unknown,
 ): HeadlineVerdict {
+  if (isOptionsCashWalletBook(dqf)) return { kind: "withheld", cause: OPTIONS_CASH_WALLET_CAUSE };
   const basis = readHeadlineBasis(dqf);
   if (!basis.twrChainBroken) return { kind: "clean" };
   if (basis.headlineSince === null) return { kind: "withheld", cause: "unmeasured" };

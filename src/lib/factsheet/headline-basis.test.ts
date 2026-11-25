@@ -1,15 +1,26 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// `composite-read-path` imports `server-only` (a Next.js RSC build guard); the 252 MT5 pins below
+// call its `applyHeadlineBasis`.
+vi.mock("server-only", () => ({}));
+
 import {
   GUARD_REASON_PHRASES,
+  OPTIONS_CASH_WALLET_CAUSE,
+  OPTIONS_CASH_WALLET_PHRASES,
+  OPTIONS_CASH_WALLET_REASON,
   headlineVerdict,
+  isOptionsCashWalletBook,
+  isOptionsCashWalletReason,
   isStoredResultReadable,
   joinGuardPhrases,
   readHeadlineBasis,
   storedCashHeadlineGate,
 } from "./headline-basis";
 import type { GuardReason, StoredCashHeadlineGate } from "./headline-basis";
+import { applyHeadlineBasis } from "./composite-read-path";
+import { computeOgHeadline } from "./og-metrics";
 
 /**
  * Phase 164.6.6.3.3 (D-01, D-03) — the pure reader that turns a row's
@@ -369,5 +380,161 @@ describe("storedCashHeadlineGate recompute argument (phase 190)", () => {
     expect(storedCashHeadlineGate(ROW, null, "computing", true)).toEqual({ applicable: true });
     expect(storedCashHeadlineGate(ROW, null, "pending", true)).toEqual({ applicable: true });
     expect(storedCashHeadlineGate(ROW, null, "failed", true)).toEqual({ applicable: false, reason: "not_rankable" });
+  });
+});
+
+/**
+ * Phase 252 DERIBITOPTIONS plan 01 (founder ruling 2026-11-25, "Withhold first, then MTM"):
+ * one named, structural withhold. The trigger is strict equality on one closed string and
+ * nothing else; it never reads a figure. Every oracle below is typed by hand from the
+ * producer's closed set (`MTM_REASON_*` in `analytics-service/services/stitch_composite.py`),
+ * never imported from the code under test, so a widened trigger fails here.
+ */
+describe("252 the options-book withhold", () => {
+  const DATED = { twr_chain_broken: true, headline_since: "2025-12-16" };
+  const OK = { applicable: true } as const;
+  const OPTIONS = { composite: true, mtm_gated_reason: "unsmoothed_options_book" };
+
+  /** The other six producer reasons: the closed oracle, hand-typed. */
+  const OTHER_SIX_REASONS = [
+    "mtm_basis_unavailable_for_venue",
+    "mtm_summary_coverage_incomplete",
+    "mtm_series_uncomputable",
+    "mtm_second_pass_timeout",
+    "mtm_anchor_race",
+    "mtm_option_row_field_missing",
+  ];
+
+  it("pins the flag value and the cause literal the producer and the notes depend on", () => {
+    expect(OPTIONS_CASH_WALLET_REASON).toBe("unsmoothed_options_book");
+    expect(OPTIONS_CASH_WALLET_CAUSE).toBe("options_cash_wallet");
+  });
+
+  it("the predicate is true only for the exact string behind a plain object", () => {
+    expect(isOptionsCashWalletReason("unsmoothed_options_book")).toBe(true);
+    expect(isOptionsCashWalletBook(OPTIONS)).toBe(true);
+    expect(isOptionsCashWalletBook({ mtm_gated_reason: "unsmoothed_options_book" })).toBe(true);
+  });
+
+  describe("precedence: it beats dated and needs neither a chain break nor an applicable gate", () => {
+    const withheld = { kind: "withheld", cause: "options_cash_wallet" };
+
+    it("beats dated (today's reading of the evidence row)", () => {
+      expect(headlineVerdict({ ...DATED, composite: true, mtm_gated_reason: "unsmoothed_options_book" }, OK, "complete")).toEqual(withheld);
+    });
+
+    it("needs no chain break (today's reading of the intact-chain row is clean)", () => {
+      expect(headlineVerdict(OPTIONS, OK, "complete")).toEqual(withheld);
+    });
+
+    it.each<[string, StoredCashHeadlineGate]>([
+      ["applicable", { applicable: true }],
+      ["no_row", { applicable: false, reason: "no_row" }],
+      ["not_rankable", { applicable: false, reason: "not_rankable" }],
+      ["raw_cash_settlement", { applicable: false, reason: "raw_cash_settlement" }],
+      ["missing_keys", { applicable: false, reason: "missing_keys", missing: ["cagr"] }],
+    ])("is independent of the gate (%s) and of the computation status", (_n, gate) => {
+      for (const status of ["complete", "computing", "pending", "failed", undefined, null, "archived"]) {
+        expect(headlineVerdict(OPTIONS, gate, status)).toEqual(withheld);
+        expect(headlineVerdict({ ...DATED, ...OPTIONS }, gate, status)).toEqual(withheld);
+      }
+    });
+  });
+
+  describe("NOT_TRIGGERS: each reads exactly as the same flags with mtm_gated_reason removed", () => {
+    const BASES: Array<[string, Record<string, unknown>, unknown]> = [
+      ["an intact composite", { composite: true }, { kind: "clean" }],
+      ["a dated chain-broken composite", { composite: true, ...DATED }, { kind: "dated", since: "2025-12-16" }],
+      ["an undated chain-broken composite", { composite: true, twr_chain_broken: true }, { kind: "withheld", cause: "unmeasured" }],
+    ];
+    const VALUES: Array<[string, unknown]> = [
+      ...OTHER_SIX_REASONS.map((r): [string, unknown] => [r, r]),
+      ["a case variant", "UNSMOOTHED_OPTIONS_BOOK"],
+      ["a mixed case variant", "Unsmoothed_Options_Book"],
+      ["a leading-space variant", " unsmoothed_options_book"],
+      ["a trailing-space variant", "unsmoothed_options_book "],
+      ["a prefix of the reason", "unsmoothed_options"],
+      ["the reason with a suffix", "unsmoothed_options_book_v2"],
+      ["boolean true", true],
+      ["an array holding the reason", ["unsmoothed_options_book"]],
+      ["an object holding the reason", { reason: "unsmoothed_options_book" }],
+      ["null", null],
+      ["the empty string", ""],
+      ["a number", 1],
+    ];
+
+    for (const [baseName, base, expected] of BASES) {
+      it.each(VALUES)(`${baseName} with mtm_gated_reason = %s`, (_n, value) => {
+        const without = headlineVerdict(base, OK, "complete");
+        expect(without, "the hand-typed oracle for the base").toEqual(expected);
+        expect(headlineVerdict({ ...base, mtm_gated_reason: value }, OK, "complete")).toEqual(without);
+        expect(isOptionsCashWalletBook({ ...base, mtm_gated_reason: value })).toBe(false);
+      });
+    }
+
+    it.each<[string, unknown]>([
+      ["undefined", undefined],
+      ["null", null],
+      ["a string", "unsmoothed_options_book"],
+      ["a number", 42],
+      ["an array", ["unsmoothed_options_book"]],
+      ["an array carrying the key", Object.assign([], { mtm_gated_reason: "unsmoothed_options_book" })],
+    ])("a non-object data_quality_flags (%s) is clean and not the book", (_n, dqf) => {
+      expect(isOptionsCashWalletBook(dqf)).toBe(false);
+      expect(headlineVerdict(dqf, OK, "complete")).toEqual({ kind: "clean" });
+    });
+  });
+
+  describe("MT5 shapes: the verdict, the applier and the card equal the same shape without the key", () => {
+    const SEVEN = { cumulative_return: 0.4, volatility: 0.12, max_drawdown: -0.1, cagr: 0.6, sharpe: 1.5, sortino: 2.1, calmar: 3 };
+    const HEADLINE = { ...SEVEN };
+    const DAY = 86_400_000;
+    const SERIES = Array.from({ length: 400 }, (_, i) => ({
+      date: new Date(Date.parse("2023-01-01") + i * DAY).toISOString().slice(0, 10),
+      value: i % 2 === 0 ? 0.002 : -0.001,
+    }));
+    const card = (dqf: Record<string, unknown>) =>
+      computeOgHeadline(SERIES, "crypto", { ...SEVEN, computation_status: "complete", metrics_json_by_basis: null, data_quality_flags: dqf });
+
+    it.each<[string, Record<string, unknown>, Record<string, unknown>]>([
+      ["a native-unit MT5 account with no reason", { native_unit: "USD" }, { native_unit: "USD" }],
+      [
+        "an MT5 composite whose reason is the venue reason",
+        { composite: true, mtm_gated_reason: "mtm_basis_unavailable_for_venue" },
+        { composite: true },
+      ],
+    ])("%s", (_n, dqf, withoutKey) => {
+      expect(headlineVerdict(dqf, OK, "complete")).toEqual({ kind: "clean" });
+      expect(headlineVerdict(dqf, OK, "complete")).toEqual(headlineVerdict(withoutKey, OK, "complete"));
+      // The applier: the headline comes back untouched and the quality object is empty.
+      const applied = applyHeadlineBasis(HEADLINE, dqf, { composite: true });
+      expect(applied).toEqual({ headline: SEVEN, redacted: false, quality: {} });
+      expect(applied).toEqual(applyHeadlineBasis(HEADLINE, withoutKey, { composite: true }));
+      // The card: the stored figures print, with and without the key.
+      expect(card(dqf)).toEqual({ sharpe: 1.5, cagr: 0.6, maxDd: -0.1 });
+      expect(card(dqf)).toEqual(card(withoutKey));
+    });
+  });
+
+  describe("the public sentences", () => {
+    const FORBIDDEN = ["mtm_gated_reason", "unsmoothed", "flag", "chain", "job"];
+
+    it("pins the four sentences verbatim (typed by hand) and none names a flag, a job or a chain break", () => {
+      const expected = {
+        headline:
+          "Headline figures withheld: this strategy trades options, and its returns are measured on the cash wallet, which leaves out the market value of open option positions.",
+        panel:
+          "Withheld: this panel is measured on the cash wallet, which leaves out the market value of open option positions.",
+        range:
+          "Figures for this range are withheld: the record is measured on the cash wallet, which leaves out the market value of open option positions.",
+        card: "Figures withheld: measured on the cash wallet, which leaves out open option positions.",
+      };
+      expect(OPTIONS_CASH_WALLET_PHRASES).toEqual(expected);
+      for (const [slot, text] of Object.entries(OPTIONS_CASH_WALLET_PHRASES)) {
+        for (const token of FORBIDDEN) {
+          expect(text.toLowerCase(), `${slot} must not contain "${token}"`).not.toContain(token);
+        }
+      }
+    });
   });
 });

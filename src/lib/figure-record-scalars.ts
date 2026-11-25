@@ -16,9 +16,16 @@
  * `returns_series`, `metrics_json` or `data_quality_flags` whole (194 T-194-19/21/35).
  * `src/lib/figure-record-scalars.test.ts` pins it equal to `RECORD_SPAN_SELECT`'s inner list
  * and to `PERCENTILE_SPAN_COLUMNS` in `queries.ts`.
+ *
+ * Phase 252 (CONTEXT Wave 1): a row may also carry `mtm_gated_reason`. It is NOT one of the four
+ * aliases (the alias list stays four, so that pin and the admin and wizard callers are unchanged):
+ * a caller that wants the options-book marker reads the reason from its OWN effective flags
+ * generation (`effectiveDataQualityFlags`) and puts it on the row it passes here. The marker is
+ * set only for the exact options-book reason, through the plan 252-01 predicate.
  */
 import { figureRecord, type FigureRecord } from "@/lib/figure-gate";
 import { annualizationPeriods } from "@/lib/closed-sets";
+import { OPTIONS_CASH_WALLET_CAUSE, isOptionsCashWalletReason } from "@/lib/factsheet/headline-basis";
 
 // Typed `string` on purpose, NOT a literal: postgrest-js parses a select string at the type
 // level and its parser cannot read the `->-1` index of the `series_end` alias, so a literal
@@ -33,6 +40,8 @@ export type RecordScalarRow = {
   series_end?: unknown;
   headline_since?: unknown;
   record_observations?: unknown;
+  /** Phase 252: the effective flags' `mtm_gated_reason`, put on the row by the caller (not an alias). */
+  mtm_gated_reason?: unknown;
 };
 
 // Local twins of `asString` / `asCount` in record-span-read.ts (that module is server-only).
@@ -59,5 +68,6 @@ export function recordFromScalars(
     headlineSince: asString(row?.headline_since),
     observations: asCount(row?.record_observations),
     periodsPerYear: annualizationPeriods(assetClass),
+    ...(isOptionsCashWalletReason(row?.mtm_gated_reason) ? { withheldBy: OPTIONS_CASH_WALLET_CAUSE } : {}),
   });
 }
