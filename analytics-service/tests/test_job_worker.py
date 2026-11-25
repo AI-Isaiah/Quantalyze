@@ -3052,13 +3052,17 @@ class TestDeriveBrokerDailies:
         assert captured["csv_rows"], "expected a reconstructed daily-return series"
 
     @pytest.mark.asyncio
-    async def test_sync_trades_enqueue_failure_does_not_fail_job(
+    async def test_sync_trades_enqueue_failure_with_nothing_published_fails_transient(
         self,
     ) -> None:
-        """The enqueue is best-effort. If it raises (e.g., RPC unavailable),
-        run_sync_trades_job MUST still return DONE so the job doesn't
-        retry-loop on a transient infra issue. The cron-driven daily sync
-        will re-enqueue cleanly on the next tick."""
+        """Phase 222 ERRC-03 (founder rulings OQ2 and OQ4, 2026-11-25): when the
+        follow-on enqueue raises and the strategy has NOTHING published,
+        run_sync_trades_job returns FAILED / ``transient``. Returning DONE let the
+        status bridge take branch (c) and read ``complete`` with no analytics
+        (ROADMAP SC-3). Transient because an enqueue fault is not a property of
+        the strategy: the retry re-runs the sync, the row reads ``computing``
+        between attempts and ``failed`` at the last. The message is a constant
+        operator sentence; it carries no exception text."""
         from services.job_worker import run_sync_trades_job
 
         mock_exchange = AsyncMock()
@@ -3092,6 +3096,10 @@ class TestDeriveBrokerDailies:
         mock_eq.execute.return_value = MagicMock(data=[])
         mock_update.eq.return_value = mock_eq
         mock_ctx.supabase.table.return_value.update.return_value = mock_update
+        # The publish read: no strategy_analytics row -> nothing published. Scripted
+        # explicitly because a bare MagicMock chain returns a truthy MagicMock.
+        mock_ctx.supabase.table.return_value.select.return_value.eq.return_value \
+            .maybe_single.return_value.execute.return_value = MagicMock(data=None)
 
         job = {
             "id": "job-degraded",
@@ -3116,15 +3124,21 @@ class TestDeriveBrokerDailies:
         ):
             result = await run_sync_trades_job(job)
 
-        # Job must succeed — enqueue is best-effort.
-        assert result.outcome == DispatchOutcome.DONE
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient"
+        assert result.error_message, "FAILED must carry an operator-readable cause"
+        assert "simulated transient enqueue failure" not in result.error_message, (
+            "T-222-11: the exception text must not reach compute_jobs.last_error"
+        )
+        assert result.trade_count is None
 
     @pytest.mark.asyncio
-    async def test_enqueue_failure_marks_strategy_analytics_failed(
+    async def test_enqueue_failure_with_nothing_published_writes_the_five_key_failed_row(
         self,
     ) -> None:
-        """Wizard-hang regression: when the enqueue_compute_job RPC fails,
-        run_sync_trades_job MUST upsert strategy_analytics with
+        """Wizard-hang regression: when the enqueue_compute_job RPC fails and
+        NOTHING is published (Phase 222 ERRC-03: the handler now returns FAILED /
+        transient rather than DONE), run_sync_trades_job MUST upsert strategy_analytics with
         computation_status='failed' + a clear computation_error so the
         wizard's poll loop (SyncPreviewStep.tsx) surfaces a
         GATE_ANALYTICS_FAILED envelope instead of hanging at 'computing'
@@ -3176,6 +3190,9 @@ class TestDeriveBrokerDailies:
                 return stub
 
             mock_t.upsert.side_effect = _upsert
+            # The publish read: no row -> nothing published.
+            mock_t.select.return_value.eq.return_value.maybe_single.return_value \
+                .execute.return_value = MagicMock(data=None)
 
             # Keep the existing update().eq().execute() chain for the
             # api_keys cursor advance — same as the other tests.
@@ -3212,8 +3229,9 @@ class TestDeriveBrokerDailies:
         ):
             result = await run_sync_trades_job(job)
 
-        # Job must still succeed — best-effort for the job, not for the UI.
-        assert result.outcome == DispatchOutcome.DONE
+        # Nothing published -> FAILED / transient (CONTEXT ERRC-03, OQ2).
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient"
 
         # Find the upsert into strategy_analytics with the failed status.
         failed_upserts = [
@@ -3240,6 +3258,21 @@ class TestDeriveBrokerDailies:
         assert payload.get("computation_error"), (
             "computation_error must be a non-empty string so the wizard "
             "renders a meaningful GATE_ANALYTICS_FAILED envelope"
+        )
+        # Exactly the five keys, and NO provenance marker: the payload stays
+        # deliberately unstamped (founder ruling 2026-11-25, Phase 222), so the
+        # bridge's branch (b) stores the curated kind sentence over it.
+        assert set(payload) == {
+            "strategy_id",
+            "computation_status",
+            "computation_warned",
+            "computing_started_at",
+            "computation_error",
+        }, f"the enqueue-failure payload must keep its five keys; got {sorted(payload)}"
+        assert payload["computation_error"] == (
+            "Analytics enqueue failed during sync. "
+            "The next scheduled sync will retry \u2014 "
+            "use the contact form if this persists."
         )
         # The on_conflict kwarg must be present so this is an upsert,
         # not an insert that crashes on PK conflict for re-runs.

@@ -2894,6 +2894,31 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             exc,
         )
 
+        # Phase 222 ERRC-03: read the publish state BEFORE any write. Local twin of
+        # `_published_numbers_exist` in run_derive_broker_dailies_job (same select, same
+        # `getattr(res, "data", None) or {}` read, same OQ4 predicate); that closure is
+        # out of this handler's write scope, so it is mirrored here, not shared. Published
+        # means a success status, or a 'computing' row that already carries its headline
+        # ``metrics_json`` (founder ruling OQ4, 2026-11-25).
+        def _strategy_has_published_numbers() -> bool:
+            res = (
+                ctx.supabase.table("strategy_analytics")
+                .select("computation_status, metrics_json")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            row = getattr(res, "data", None) or {}
+            return isinstance(row, dict) and (
+                row.get("computation_status") in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
+                or (
+                    row.get("computation_status") == "computing"
+                    and row.get("metrics_json") is not None
+                )
+            )
+
+        _published = await db_read_with_retry(_strategy_has_published_numbers)
+
         # Mark strategy_analytics.computation_status='failed' so the
         # wizard's poller (SyncPreviewStep.tsx) breaks out of its
         # waiting_for_complete state and renders an error envelope.
@@ -2984,6 +3009,33 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 "may still hang. Error: %s",
                 strategy_id,
                 mark_exc,
+            )
+
+        # Phase 222 ERRC-03 (CONTEXT ruling, option a; founder rulings OQ2 and OQ4,
+        # 2026-11-25). With NOTHING published the handler fails the job instead of
+        # returning DONE. DONE let `mark_compute_job_done` run the status bridge, which
+        # found every job done and took branch (c): the row read 'complete' with a NULL
+        # error and no analytics (ROADMAP SC-3).
+        #   * FAILED only when nothing is published: the 161.1 F1 remedy (an
+        #     unconditional FAILED) does not transfer, because `sync_trades` is not in
+        #     the bridge's `is_protected` kind list, so an unconditional FAILED would
+        #     land every live strategy on the loud branch (b) and unpublish it.
+        #   * transient (OQ2): an enqueue fault is not a property of the strategy. The
+        #     retry re-runs the sync, so the row reads 'computing' while retries remain
+        #     (branch (a)) and 'failed' with the retries-exhausted sentence at the last
+        #     attempt (branch (b)).
+        #   * the payload above stays UNSTAMPED by founder ruling (the provenance census
+        #     keeps EXPECTED_INERT_SITES), so branch (b) stores the curated kind sentence
+        #     over it rather than keeping the handler's own.
+        # The message is a constant operator sentence: no exception text, no ids.
+        if not _published:
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_kind="transient",
+                error_message=(
+                    "sync_trades: the follow-on analytics enqueue failed and the "
+                    "strategy has nothing published"
+                ),
             )
 
     return DispatchResult(
