@@ -569,3 +569,13 @@ _Round 2 reviewed: 2026-11-26 · Reviewer: Claude (gsd-code-reviewer) · Depth: 
 ## Round 2 (silent-failure hunter, 2026-11-26)
 
 All six round-1 SF findings confirmed closed. CRITICAL 0, HIGH 0, MEDIUM 0, LOW 7 (recorded only): late grant fenced before a renew (same as WR2-01 above, graded LOW here); short bound plus slow RPC reads as outage; wizard telemetry outcome still "lease_busy" for the subclass; heal lease-unavailable arm skips the relaunch-debt page; a broken lease contract retried as transient (exc_class only in the log); `_note_unavailable` text stale for renew; log-accuracy nits (attempts counts waits, refused release unlogged).
+
+## Round-2 fixes (2026-11-26, gsd-code-fixer)
+
+| Finding | Commit | What changed |
+|---|---|---|
+| CR2-01 | `6902fa6bc` | After a timed-out acquire wait a FRESH call (same token) is sent, capped at `_MT5_XLEASE_MAX_INFLIGHT = 5` calls in flight. The wait is `FIRST_COMPLETED` over all pending calls; abandoned calls stay in `pending` until the acquisition ends (late grants are released then, never at a timeout); the renew deadline is seeded by the granting call's own send time. The two late-grant tests rewritten in round 1 are restored and the `count == 1` assertions now check the cap. |
+| WR2-01 | `e37067f43` | The first renew sleep is `max(0, min(RENEW, lost_at - now - RPC_TIMEOUT))`, so a stale grant renews at once. Only the first sleep, so a failing renew gets no instant-retry loop. The `_validate_xlease_timing` docstring is narrowed to a prompt grant. |
+| IN2-02 | `e37067f43` | The WR-01 first-tick hang test uses an RPC bound of 0.19 and now fails on the pre-WR-01 loop (fence at 0.79 against the 0.7 deadline). |
+
+Recorded only, not fixed: the round-2 LOW and INFO items.
