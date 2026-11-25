@@ -419,7 +419,7 @@ def _maybe_auto_normalize_percent_form(
             f"Detected percent-form daily_return (median |non-zero| = "
             f"{median_abs:.2f}). Auto-normalized to decimal by dividing "
             f"every row by 100. If your file was already in decimal "
-            f"form, contact support."
+            f"form, use the contact form."
         ),
     }
 

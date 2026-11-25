@@ -481,11 +481,11 @@ describe("[H-0195/H-0197/H-0198] SyncPreviewStep — polling loop dispositions",
   });
 
   // T-164.6.6.3.2-11 — the card must not appear for any other failure. The generic
-  // transient sentence is copied verbatim from 20260826120000_computation_error_curated_copy.sql
+  // transient sentence is copied verbatim from 20261125212222_computation_error_copy_contact_form.sql
   // (the sentence a final transient failure carries today), and the near-miss cases prove the
   // match is exact equality: a substring, prefix or whitespace variant is not the cause stamp.
   const GENERIC_TRANSIENT_SENTENCE =
-    "Analytics could not complete after several automatic retries. Retry the sync, or contact support if it keeps failing.";
+    "Analytics could not complete after several automatic retries. Retry the sync, or use the contact form if it keeps failing.";
   it.each([
     ["the generic transient sentence", GENERIC_TRANSIENT_SENTENCE],
     ["no computation_error at all", null],
