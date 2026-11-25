@@ -1,0 +1,21 @@
+{
+  "_comment": "RED bound plus one. One key, one cause: newest return 2026-11-20, newest flow and terminal day 2026-11-23, a gap of exactly 3 (the bound is 2), no anchor reason and no stated left-out days. ok.json carries the gap-equal-to-bound key that stays fresh. Expect exactly one freshness-stale. Every value here is synthetic.",
+  "scope": {
+    "derived": 1,
+    "withInputs": 1,
+    "withTerminal": 1
+  },
+  "rows": [
+    {
+      "venue": "binance",
+      "tag": "eeee0001",
+      "newestReturn": "2026-11-20",
+      "anchorNullReason": "",
+      "newestFlow": "2026-11-23",
+      "terminalDay": "2026-11-23",
+      "markDay": "",
+      "tinyDays": [],
+      "hasInputs": true
+    }
+  ]
+}

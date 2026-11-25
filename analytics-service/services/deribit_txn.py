@@ -921,6 +921,41 @@ def _reason_contains_any(reason_lower: str, keywords: tuple[str, ...]) -> bool:
     return any(kw in reason_lower for kw in keywords)
 
 
+# Phase 233 DBOOK-02: the STRUCTURAL half of the correction gate. A trading
+# correction must name an instrument, either as a structured ``instrument_name`` or
+# as an anchored upper-case token in the reason. The four Deribit shapes accepted:
+#   BTC-PERPETUAL              (inverse perpetual)
+#   BTC_USDC-PERPETUAL         (linear perpetual, quote after the underscore)
+#   BTC_USDC-27MAR26           (dated future)
+#   BTC_USDC-27MAR26-50000-C   (option, strike then C or P)
+# NOT ``classify_instrument``: that classifier is lenient on purpose (market data)
+# and accepts any name ending ``-C``, ``-P`` or ``-PERPETUAL``, so a structural test
+# on free text built on it would accept a name like ``SUB-C``. Upper-case is
+# required on purpose: the observed token is upper-case, and a lower-case one fails
+# loud (the safe direction).
+_CORRECTION_INSTRUMENT_TOKEN_RE: re.Pattern[str] = re.compile(
+    r"(?<![A-Z0-9_-])[A-Z]{2,6}(?:_[A-Z]{3,5})?-"
+    r"(?:PERPETUAL|\d{1,2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}"
+    r"(?:-\d+(?:\.\d+)?-[CP])?)"
+    r"(?![A-Z0-9_-])"
+)
+
+
+def _correction_names_instrument(row: Mapping[str, Any], reason_raw: str) -> bool:
+    """True iff the correction names an instrument: the row's ``instrument_name`` is
+    a non-blank string that fullmatches :data:`_CORRECTION_INSTRUMENT_TOKEN_RE`, or
+    the pattern is found in the RAW (un-lowered) reason.
+
+    CONTEXT DBOOK-02 reading, recorded: "a non-null ``instrument_name``" is
+    implemented as a non-blank STRUCTURED instrument string. That is narrower than
+    non-null (a value like ``n/a``, a number or a dict is not an instrument), which
+    is the safe direction: a narrower gate only adds a fail-loud."""
+    name = row.get("instrument_name")
+    if isinstance(name, str) and _CORRECTION_INSTRUMENT_TOKEN_RE.fullmatch(name.strip()):
+        return True
+    return _CORRECTION_INSTRUMENT_TOKEN_RE.search(reason_raw) is not None
+
+
 def correction_is_trading(row: Mapping[str, Any]) -> bool:
     """True iff a ``type == "correction"`` row is a TRADING/PnL correction (realized
     cash — summed like settlement/funding) per its ``info.reason``.
@@ -933,11 +968,23 @@ def correction_is_trading(row: Mapping[str, Any]) -> bool:
     The denylist is matched by SUBSTRING (catches plurals — "transfers"/"withdrawals",
     BL-01); the allow-list by WORD BOUNDARY (a short token can't collide inside a
     larger word). False for a capital / unrecognized / missing reason (the caller must
-    then FAIL LOUD via :func:`assert_correction_classifiable`). Pure / never raises."""
-    reason = _correction_reason_raw(row).lower()
+    then FAIL LOUD via :func:`assert_correction_classifiable`). Pure / never raises.
+
+    Phase 233 DBOOK-02: after the denylist, a correction is trading only when a
+    trading word matches AND an instrument is named (a structured
+    ``instrument_name`` or an anchored upper-case token in the reason, see
+    :func:`_correction_names_instrument`). A trading word alone is not enough:
+    ``funding account correction`` is a capital adjustment with a trading token and
+    no instrument. The conjunction (RESEARCH A6) is the narrower reading, so every
+    shape that was non-trading before stays non-trading. False means the caller
+    fails loud."""
+    reason_raw = _correction_reason_raw(row)
+    reason = reason_raw.lower()
     if _reason_contains_any(reason, _CORRECTION_CAPITAL_REASON_KEYWORDS):
         return False  # capital denylist (substring) beats ANY trading token (WR-01/BL-01)
-    return _reason_matches_any(reason, _CORRECTION_TRADING_REASON_KEYWORDS)
+    return _reason_matches_any(
+        reason, _CORRECTION_TRADING_REASON_KEYWORDS
+    ) and _correction_names_instrument(row, reason_raw)
 
 
 def assert_correction_classifiable(row: Mapping[str, Any]) -> None:
@@ -953,7 +1000,9 @@ def assert_correction_classifiable(row: Mapping[str, Any]) -> None:
         "possibly-capital reason; classify against fresh evidence before ingesting "
         "(do NOT silently count a capital adjustment as trading performance). Only a "
         "trading/PnL correction (reason matching one of "
-        f"{list(_CORRECTION_TRADING_REASON_KEYWORDS)}) is realized cash."
+        f"{list(_CORRECTION_TRADING_REASON_KEYWORDS)} AND naming an instrument, "
+        "either a structured instrument_name or an instrument token such as "
+        "BTC-PERPETUAL in the reason) is realized cash."
     )
 
 

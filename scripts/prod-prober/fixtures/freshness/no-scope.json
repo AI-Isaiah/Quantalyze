@@ -1,0 +1,9 @@
+{
+  "_comment": "RED empty scope. One cause: the scope read answers zero derived keys (no derive_broker_dailies job in the last 3 days). Expect exactly one freshness-no-scope, and the scope log line reads derived=0. Every value here is synthetic.",
+  "scope": {
+    "derived": 0,
+    "withInputs": 0,
+    "withTerminal": 0
+  },
+  "rows": []
+}

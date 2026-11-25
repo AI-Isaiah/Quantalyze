@@ -1,0 +1,200 @@
+{
+  "_comment": "Every value here is synthetic. Book A, counted keys k1 and k2, eight union days 2025-01-01 .. 2025-01-08 (d1..d8). HAND DERIVATION. k1 terminal 1070 on d8, no flow, P by day = 0,10,10,10,10,10,10,10: L8 = 1070, L7 = 1060, L6 = 1050, L5 = 1040, L4 = 1030, L3 = 1020, L2 = 1010, L1 = 1000. k2 terminal 0.5 on d8, no flow, P = 0 on every day except d6 = -199.5: L8 = 0.5, L7 = 0.5, L6 = 0.5, L5 = L6 - P6 = 0.5 + 199.5 = 200, L4 = L3 = L2 = L1 = 200. Every stamp is consistent with P over the previous level (k1 10/L(prev); k2 0 except d6 = -199.5/200 = -0.9975), so no key-basis reason can fire. THE EMPTIED BAND BY CONSTRUCTION: k2's prior peak is 200 (d1..d5), the band is below the smaller of 1% of that peak (2) and 100, so k2's levels of 0.5 on d6, d7 and d8 are emptied. The last day is emptied and the effective anchor (anchor_usd is null, so the realized terminal 0.5) is inside the band of the prior peak, so the book level on d8 is 0.0 as well. THE COMPOSE COUNTS AN EMPTIED LEVEL AS ZERO CAPITAL (replay_key_equity zeroes it, portfolio_returns then adds nothing for a participant whose previous level is 0.0), so the corrected oracle reproduces 10/1050 on d7 and 10/1060 on d8 (k1 alone). THE PUBLISHED values here are instead those of a book composed WITHOUT the zero-capital rule, which keeps k2's 0.5 in the denominator: d7 10/1050.5 and d8 10/1060.5. They differ from the oracle's by about 5e-4, far above the equality tolerance, so d7 and d8 are not reproduced; k2's previous level is emptied on both days, so both are withheld emptied_stretch, which keeps a producer. d2..d5 are two-key days with plain levels: 10/(1000+200), 10/(1010+200), 10/(1020+200), 10/(1030+200). d6 is the loss day, with the previous levels still live: (10 - 199.5)/(1040 + 200) = -189.5/1240. Published 7 (d2..d8), explained 5 (d2..d6), withheld 2 (d7, d8), omitted 1 (d1 no_stored_base_level). Verdict STOP, exit 1.",
+  "book": {
+    "label": "A",
+    "n_returns": 7,
+    "returns": [
+      {
+        "date": "2025-01-02",
+        "r": 0.008333333333333333
+      },
+      {
+        "date": "2025-01-03",
+        "r": 0.008264462809917356
+      },
+      {
+        "date": "2025-01-04",
+        "r": 0.00819672131147541
+      },
+      {
+        "date": "2025-01-05",
+        "r": 0.008130081300813009
+      },
+      {
+        "date": "2025-01-06",
+        "r": -0.1528225806451613
+      },
+      {
+        "date": "2025-01-07",
+        "r": 0.00951927653498334
+      },
+      {
+        "date": "2025-01-08",
+        "r": 0.00942951438000943
+      }
+    ],
+    "flags": {},
+    "degrade_reasons": [],
+    "inputs": {
+      "n_keys": 2
+    }
+  },
+  "keys": {
+    "k1": {
+      "composed_day_pnl": [
+        {
+          "utc_day_iso": "2025-01-01",
+          "pnl_usd": 0
+        },
+        {
+          "utc_day_iso": "2025-01-02",
+          "pnl_usd": 10
+        },
+        {
+          "utc_day_iso": "2025-01-03",
+          "pnl_usd": 10
+        },
+        {
+          "utc_day_iso": "2025-01-04",
+          "pnl_usd": 10
+        },
+        {
+          "utc_day_iso": "2025-01-05",
+          "pnl_usd": 10
+        },
+        {
+          "utc_day_iso": "2025-01-06",
+          "pnl_usd": 10
+        },
+        {
+          "utc_day_iso": "2025-01-07",
+          "pnl_usd": 10
+        },
+        {
+          "utc_day_iso": "2025-01-08",
+          "pnl_usd": 10
+        }
+      ],
+      "composed_flows": [],
+      "dropped_day_pnl": [],
+      "returns_stamp": [
+        {
+          "utc_day_iso": "2025-01-02",
+          "return": 0.01
+        },
+        {
+          "utc_day_iso": "2025-01-03",
+          "return": 0.009900990099009901
+        },
+        {
+          "utc_day_iso": "2025-01-04",
+          "return": 0.00980392156862745
+        },
+        {
+          "utc_day_iso": "2025-01-05",
+          "return": 0.009708737864077669
+        },
+        {
+          "utc_day_iso": "2025-01-06",
+          "return": 0.009615384615384616
+        },
+        {
+          "utc_day_iso": "2025-01-07",
+          "return": 0.009523809523809525
+        },
+        {
+          "utc_day_iso": "2025-01-08",
+          "return": 0.009433962264150943
+        }
+      ],
+      "realized_terminal_day": "2025-01-08",
+      "realized_terminal_usd": 1070,
+      "anchor_usd": null,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    },
+    "k2": {
+      "composed_day_pnl": [
+        {
+          "utc_day_iso": "2025-01-01",
+          "pnl_usd": 0
+        },
+        {
+          "utc_day_iso": "2025-01-02",
+          "pnl_usd": 0
+        },
+        {
+          "utc_day_iso": "2025-01-03",
+          "pnl_usd": 0
+        },
+        {
+          "utc_day_iso": "2025-01-04",
+          "pnl_usd": 0
+        },
+        {
+          "utc_day_iso": "2025-01-05",
+          "pnl_usd": 0
+        },
+        {
+          "utc_day_iso": "2025-01-06",
+          "pnl_usd": -199.5
+        },
+        {
+          "utc_day_iso": "2025-01-07",
+          "pnl_usd": 0
+        },
+        {
+          "utc_day_iso": "2025-01-08",
+          "pnl_usd": 0
+        }
+      ],
+      "composed_flows": [],
+      "dropped_day_pnl": [],
+      "returns_stamp": [
+        {
+          "utc_day_iso": "2025-01-02",
+          "return": 0.0
+        },
+        {
+          "utc_day_iso": "2025-01-03",
+          "return": 0.0
+        },
+        {
+          "utc_day_iso": "2025-01-04",
+          "return": 0.0
+        },
+        {
+          "utc_day_iso": "2025-01-05",
+          "return": 0.0
+        },
+        {
+          "utc_day_iso": "2025-01-06",
+          "return": -0.9975
+        },
+        {
+          "utc_day_iso": "2025-01-07",
+          "return": 0.0
+        },
+        {
+          "utc_day_iso": "2025-01-08",
+          "return": 0.0
+        }
+      ],
+      "realized_terminal_day": "2025-01-08",
+      "realized_terminal_usd": 0.5,
+      "anchor_usd": null,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    }
+  },
+  "declared": {
+    "counted": [
+      "k1",
+      "k2"
+    ]
+  }
+}
