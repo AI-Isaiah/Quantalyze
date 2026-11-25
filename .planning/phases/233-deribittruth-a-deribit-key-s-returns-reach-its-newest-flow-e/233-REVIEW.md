@@ -2,7 +2,7 @@
 phase: 233-deribittruth-a-deribit-key-s-returns-reach-its-newest-flow-e
 reviewed: 2026-11-25T00:00:00Z
 depth: standard
-files_reviewed: 10
+files_reviewed: 25
 files_reviewed_list:
   - analytics-service/scripts/deribit_book_oracle.py
   - analytics-service/services/deribit_txn.py
@@ -14,11 +14,26 @@ files_reviewed_list:
   - src/__tests__/prod-prober-wiring.test.ts
   - scripts/prod-prober/fixtures/freshness/ok.json
   - scripts/prod-prober/fixtures/freshness/tail-edge-uncovered.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/capital_outside_base.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/carry_and_rotation.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/counted_key_without_basis.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/emptied_sole_and_carried.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/emptied_zero_capital.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/explained_two_keys.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/key_set_mismatch.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/omission_unexplained.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/omitted_days.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/production_shapes.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/vacuous.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/withheld_attribution_mismatch.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/withheld_emptied_stretch.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/withheld_key_basis.json
+  - analytics-service/tests/fixtures/deribit_book_oracle/withheld_no_base_level.json
 findings:
   critical: 0
-  warning: 3
-  info: 10
-  total: 13
+  warning: 1
+  info: 13
+  total: 14
   necessity: 0
 status: issues_found
 ---
@@ -413,3 +428,80 @@ Success: no issues found in 143 source files
 ```
 
 **Not covered here:** the per-venue guard and the `n_returns` check are exercised by fixtures and in-memory scenarios only, not against PROD. No prober reading with a `no_returns=` count exists yet (plan 233-06). The WR-03 decision is reversible in one branch of `judgeFreshness`; options (a) and (b) in the Round 2 text remain available if PROD shows idle keys that should page.
+
+## Round 3
+
+**Reviewed:** 2026-11-25
+**Depth:** standard
+**Scope:** fix round 2 only, `git diff 916ed3c17 HEAD -- . ':!.planning'` (commits `71892f8f6`, `bd28a768a`, `c91d447a5`), and the code those commits touch directly. WR-03 was settled by a reversible orchestrator decision recorded in `233-CONTEXT.md` ([FRESH-02], review round 2): a key with no stored return is not judged, and a per-venue guard measure-fails a venue none of whose keys was judged. This round reviews how that decision was implemented, not the decision. The necessity rubric was loaded, and no finding in this round is a necessity finding.
+
+### Summary
+
+What I ran myself:
+- `node scripts/prod-prober/run.mjs --self-test`, on a byte copy of `scripts/prod-prober` in the scratchpad with the rest of the repo symlinked in, printed `SELF-TEST PASSED: 108/108 scenarios`.
+- `npx vitest run src/__tests__/prod-prober-wiring.test.ts src/__tests__/critical-regressions.test.ts`: 2 files, 305 tests passed.
+- `pytest tests/test_deribit_book_oracle.py`: 36 passed.
+- WR-04 neuter, run in memory through a throwaway pytest plugin that monkeypatches `services.deribit_txn._correction_names_instrument` to `isinstance(name, str) and name.strip()`. No source file was touched. `pytest tests/test_deribit_txn.py -k correction_blank` printed `4 failed, 4 passed`. The four failures were exactly `[n-a]`, `[sub-c]`, `[lower-perpetual]` and `[truncated-perp]`.
+- A neuter of the per-venue guard, run on the scratch copy only (WR-06 below).
+
+Fix verification:
+- **WR-03: closed as decided.** `judgeFreshness` (`freshness.mjs:316-322`) counts a no-return key as `noReturns` against its venue and raises no defect. The per-venue loop (`freshness.mjs:471-486`) counts fresh, covered_stated, stale and covered_anchor as judged, and it never counts no_returns, no_reference or no_inputs as judged. A newly connected funded key that shares its venue with a judged key no longer pages. The header (`:30-42`), the `ok.json` comment and the scenario text describe the code. IN-08 is resolved by the same change: an all-anchor scope exits 0, and the new scenario at `run.mjs:1861` pins that. The decision has one consequence nobody has written down (IN-12), and the guard's no-return half is not pinned (WR-06).
+- **WR-04: closed.** The four new parameters are non-blank strings that do not fullmatch `_CORRECTION_INSTRUMENT_TOKEN_RE`. The reason `funding calculation correction` carries a trading word, no capital word and no instrument token, so the structured branch alone decides each case. My in-memory neuter turned exactly those four red. `deribit_txn.py` is unchanged.
+- **WR-05: closed.** `_load_book` compares `len(returns)` with `_count("book.n_returns", ...)` (`deribit_book_oracle.py:514-515`). The comparison is sound because `_day_values` rejects duplicate days (`:363-364`), so the dict length equals the flattened row count. An all-null slice list still fails as `book.returns: expected an array`. An invalid `n_returns` fails on its own field path. `n_returns` is required in `_obj`. In all 15 fixtures the flattened row count equals the `n_returns` they carry (I checked each). `key_array_by_year`'s path filter can only drop rows. A row with no string day therefore makes the count disagree and the export is refused, which is the safe direction. The `book_curve` SQL is unchanged.
+
+### Warnings
+
+#### WR-06: The no-return half of the per-venue guard can be removed and every test stays green
+
+**File:** `scripts/prod-prober/arms/freshness.mjs:475` (the judged sum) and `:321` (`count("noReturns", r.venue)`); scenarios at `scripts/prod-prober/run.mjs:1808-1825` and `:1844-1859`
+**Issue:** Under the WR-03 decision, the per-venue guard is the only thing that stops a venue whose keys have all lost their returns from reading green. The header (`:36-41`) says the guard covers a venue "whose keys all fall to `no_reference` / `no_returns`". Only the `no_reference` half is tested:
+- The `binance` scenario at `:1844` uses a `no_reference` key.
+- The no-return scenario at `:1808` puts its idle key on the same venue as a fresh key. It therefore pins only the green side, "not paged when the venue has a judged key".
+- No scenario has a venue whose only keys are no-return keys.
+
+Measured neuter, on the scratch copy only: I changed the judged sum to `v("fresh") + v("coveredStated") + v("stale") + v("coveredAnchor") + v("noReturns") === 0`, which counts no-return keys as judged. The self-test still printed `=== SELF-TEST PASSED: 108/108 scenarios ... ===`. Dropping the venue argument from `count("noReturns", r.venue)` has the same effect: a no-return-only venue never enters `byVenue`. No test pins that either.
+
+Since WR-03 stopped paging individual no-return keys, this half of the guard is the safety net for the WR-02 case: a venue whose series were all emptied, for example by a reconcile delete, or a derive that writes `key_inputs` but no returns. Under the repo rule, a data-integrity gate must be able to fail.
+**Fix:** Add one `freshness:` scenario: a lone no-return key on its own venue beside a fresh key on another venue. Expect `onlyFrMeasureFail(r, ..., "freshness <venue>")`, with a detail that includes `no_returns=1` and `no <venue> key was judged`. Record the neuter above as its RED line, and bump `SELF_TEST_SCENARIOS` and its `toBe` pin to 109.
+
+### Info
+
+#### IN-11: The summary line's `judged=` excludes covered_anchor, but the guard and the header count it as judged
+
+**File:** `scripts/prod-prober/arms/freshness.mjs:467` against `:475` and `:36-37`
+**Issue:** The outcome line prints `judged=${fresh + coveredStated + stale}`. The per-venue guard and the header now treat covered_anchor as judged. An all-anchor scope therefore logs `judged=0` and exits 0. The line's shape comes from 233-02-PLAN, and plan 233-06 reads only the scope line, so nothing reads this token wrongly today. A future reader of `judged=0` would still be misled.
+**Fix:** Either include `coveredAnchor` in `judged=`, or rename the token to state what it counts.
+
+#### IN-12: A venue whose only keys are new or idle no-return keys raises a measure-fail on every hourly run, and the header and CONTEXT do not say so
+
+**File:** `scripts/prod-prober/arms/freshness.mjs:30-41`, `:471-486`; `233-CONTEXT.md` [FRESH-02]
+**Issue:** The header gives the reason for not paging a no-return key as "paging it would be a false alarm every hour". A newly connected funded key that is the first key of its venue still produces an hourly `measure-fail` on `freshness <venue>`. That lasts until it has two return days, and forever for an idle sole key. It is the same cadence, under a different kind. This follows from the recorded decision, so it is not disputed here. It is simply not written down. The header line "A derived key that cannot be judged is never silent" also sits above a bullet that describes a silent case.
+**Fix:** Add one sentence to the header and to [FRESH-02] naming this case. If PROD shows it after plan 233-06, the option (a) age condition from Round 2 applies here too.
+
+#### IN-13: The per-venue message's `no_inputs=` is always 0
+
+**File:** `scripts/prod-prober/arms/freshness.mjs:301` (`count("noInputs")` has no venue) and `:481`
+**Issue:** Fix round 2 records this choice. The field is dead text in every message it appears in.
+**Fix:** Drop `no_inputs=` from the per-venue detail.
+
+#### IN-14: `byVenue` is a plain object, and the venue regex accepts `__proto__`
+
+**File:** `scripts/prod-prober/arms/freshness.mjs:288-295`; regex at `:236`
+**Issue:** I measured this with `judgeFreshness` in node on a scratch script. A row with venue `__proto__` writes `fresh` onto `Object.prototype`. A second venue, `bybit`, whose only key is `noReference`, then reads an inherited `fresh: 1`, so its guard is silenced, and `__proto__` never shows up in `Object.entries`. The venue values come from the writer's exchange set, so PROD cannot reach this.
+**Fix:** Use `Object.create(null)` or a `Map` for `byVenue` and its inner objects.
+
+### Round 3 counts
+
+The frontmatter counts open items after round 3:
+- WR-03, WR-04 and WR-05 are closed. IN-08 is closed by fix round 2's per-venue guard.
+- WR-06 is open.
+- IN-01 to IN-07, IN-09, IN-10 and IN-11 to IN-14 are open (13 Info). Per the repo rule, they are recorded here and not fixed.
+- Open Critical/Warning: **0 Critical, 1 Warning.**
+
+_Reviewed: 2026-11-25_
+_Reviewer: Claude (gsd-code-reviewer), round 3_
+_Depth: standard_
+
+### Silent-failure-hunter lane, round 3
+
+Same finding as WR-06, reached independently: adding `+ v("noReturns")` to the guard sum kept the self-test at 108/108. The lane found no other MEDIUM+ in fix round 2.
