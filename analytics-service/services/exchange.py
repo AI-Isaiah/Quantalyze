@@ -2835,6 +2835,9 @@ async def _fetch_raw_trades_binance(
     fills: list[dict[str, Any]] = []
     failed_symbols: list[str] = []
     unlisted_symbols: list[str] = []
+    cap_symbols: list[str] = []
+    untimed_symbols: list[str] = []
+    stop_bounds: list[int] = []
     first_error: BaseException | None = None
     for idx, item in enumerate(results):
         if isinstance(item, ccxt.BadSymbol):
@@ -2864,6 +2867,16 @@ async def _fetch_raw_trades_binance(
                 "Binance fetch_my_trades failed for %s: %s", symbol, str(item)
             )
             continue
+        # Phase 250 BINANCEFILLS (SC-3): a read that STOPPED early carries its kind and a
+        # bound (250-03 sets one on every stop). Collected here, after both failure branches,
+        # and recorded once below; a stop with no bound is left out and reads as a HOLD in the
+        # cursor gate.
+        if item.stop == "cap":
+            cap_symbols.append(item.symbol)
+        elif item.stop == "untimed":
+            untimed_symbols.append(item.symbol)
+        if item.stop in ("cap", "untimed") and item.read_through_ms is not None:
+            stop_bounds.append(item.read_through_ms)
         trades = item.trades
         for t in trades:
             normalized = _normalize_fill(t, exchange.id)
@@ -2903,6 +2916,18 @@ async def _fetch_raw_trades_binance(
     # automatically, and that is deliberate (the flag is non-holding by design).
     if unlisted_symbols:
         _record_dq_flag("binance_unlisted_symbols", list(unlisted_symbols))
+
+    # Phase 250 BINANCEFILLS (SC-3, CONTEXT [Page cap stop]): a symbol whose walk stopped early is
+    # named, and the cursor gate stamps no later than the EARLIEST bound among the stopped symbols,
+    # so it never passes any stopped symbol's unread fills. The bound is recorded ONCE, as the
+    # minimum: ``_record_dq_flag`` SUMS two ints (RESEARCH Pitfall 7), so a record per symbol
+    # would stamp past the older symbol's unread fills.
+    if cap_symbols:
+        _record_dq_flag("binance_page_cap_symbols", list(cap_symbols))
+    if untimed_symbols:
+        _record_dq_flag("binance_untimed_page_symbols", list(untimed_symbols))
+    if stop_bounds:
+        _record_dq_flag("binance_read_through_ms", min(stop_bounds))
 
     # Total failure with no successful symbols mirrors the ColdStartSymbolDiscoveryError
     # contract: every fill is silently dropped, so the sync looks empty. Raise so the worker

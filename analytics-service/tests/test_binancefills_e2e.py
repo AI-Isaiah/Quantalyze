@@ -331,3 +331,89 @@ class TestBinanceFillsThroughTheSyncJob:
         # holding flag must not be re-recorded.
         for upsert in rec2.analytics_upserts:
             assert "binance_partial_symbols" not in upsert["data_quality_flags"]
+
+    async def test_a_capped_symbol_resumes_past_the_cap_on_the_next_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SC-3 end to end (CONTEXT [Page cap stop] "How is a capped symbol flagged and
+        resumed?"), lowered caps (3 rows a page, 2 pages: two full pages read 5 DISTINCT fills,
+        because the walk advances `since` to the last row's timestamp without +1 and the second
+        page re-serves its boundary row).
+
+        Run 1 (column C): BTCUSDT holds seven fills, all later than C, two hours apart, so it
+        caps at its fifth fill B; ETHUSDT (never caps) holds two fills NEWER than B. The cap is
+        named with the bound B, so the REAL gate stamps B and not ETHUSDT's newer fill (a stamp
+        past B would skip BTCUSDT's sixth and seventh fills for good). Run 2 is seeded by the
+        real job at B: stored fills are run 1's persisted fills plus the one at C, the column is
+        B. Its walk starts at B - 1 h (BTCUSDT's fourth fill is two hours before B, outside it),
+        reads BTCUSDT's fifth to seventh fills in one full page and one short page, persists the
+        sixth and seventh, and stamps the newest fill. The union persisted over both runs is
+        every venue fill.
+
+        Instants (hand-typed): C = 1792584000000 (2026-10-21T12:00:00Z); BTCUSDT f1..f7 at
+        14:00, 16:00, 18:00, 20:00, 22:00 on the 21st and 00:00, 02:00 on the 22nd:
+        f1 = 1792591200000, f5 = B = 1792620000000 (2026-10-21T22:00:00Z), f6 = 1792627200000,
+        f7 = 1792634400000 (2026-10-22T02:00:00Z); ETHUSDT 1792623600000 (23:00Z) and
+        1792630800000 (2026-10-22T01:00:00Z)."""
+        monkeypatch.setattr(ex, "BINANCE_FILLS_PAGE_LIMIT", 3)
+        monkeypatch.setattr(ex, "BINANCE_PAGE_CAP", 2)
+        b_iso = "2026-10-21T22:00:00+00:00"
+        f7_iso = "2026-10-22T02:00:00+00:00"
+        btc_times = [
+            1792591200000,
+            1792598400000,
+            1792605600000,
+            1792612800000,
+            1792620000000,
+            1792627200000,
+            1792634400000,
+        ]
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [
+                    venue_fill("linear", "BTCUSDT", i + 1, t) for i, t in enumerate(btc_times)
+                ],
+                ("linear", "ETHUSDT"): [
+                    venue_fill("linear", "ETHUSDT", 11, 1792623600000),
+                    venue_fill("linear", "ETHUSDT", 12, 1792630800000),
+                ],
+            }
+        )
+
+        rec1, fetch1 = await _run_live(
+            venue, column=C_ISO, stored_fills=[C_ISO], symbols=["BTCUSDT", "ETHUSDT"]
+        )
+
+        assert fetch1.await_args is not None
+        assert fetch1.await_args.kwargs["since_ms"] == C_MS
+        persisted1 = {
+            str(f["exchange_fill_id"]): f["timestamp"]
+            for batch in rec1.upserted_batches
+            for f in batch
+        }
+        assert {"1", "2", "3", "4", "5", "11", "12"} <= set(persisted1), persisted1
+        assert "6" not in persisted1 and "7" not in persisted1, "the capped symbol read past its cap"
+        assert _the_advance(rec1)["p_last_fetched_ts"] == b_iso, (
+            "the stamp passed the capped symbol's newest read fill"
+        )
+        assert rec1.analytics_upserts, "the job wrote no data_quality_flags"
+        flags1 = rec1.analytics_upserts[-1]["data_quality_flags"]
+        assert flags1.get("binance_page_cap_symbols") == ["BTCUSDT"]
+
+        rec2, fetch2 = await _run_live(
+            venue,
+            column=b_iso,
+            stored_fills=[C_ISO, *persisted1.values()],
+            symbols=["BTCUSDT", "ETHUSDT"],
+        )
+
+        assert fetch2.await_args is not None
+        assert fetch2.await_args.kwargs["since_ms"] == 1792620000000
+        persisted2 = {
+            str(f["exchange_fill_id"]) for batch in rec2.upserted_batches for f in batch
+        }
+        assert {"6", "7"} <= persisted2, persisted2
+        assert set(persisted1) | persisted2 == {"1", "2", "3", "4", "5", "6", "7", "11", "12"}
+        assert _the_advance(rec2)["p_last_fetched_ts"] == f7_iso
+        for upsert in rec2.analytics_upserts:
+            assert "binance_page_cap_symbols" not in upsert["data_quality_flags"]

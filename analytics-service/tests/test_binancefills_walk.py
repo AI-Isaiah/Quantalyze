@@ -562,3 +562,78 @@ class TestBinanceFillsSymbols:
             assert venue.calls_for(other) == [], (stored, other)
         assert "binance_partial_symbols" not in flags
         assert "binance_unlisted_symbols" not in flags
+
+
+class TestBinanceFillsStops:
+    """Phase 250 BINANCEFILLS plan 06 (SC-3, SC-5): every early stop of a symbol's walk is named
+    with ONE read-through bound the cursor gate stamps at.
+
+    A symbol whose window holds more fills than `BINANCE_PAGE_CAP` pages serve stops its walk
+    and is named in `binance_page_cap_symbols`; a full page whose last row has no timestamp is
+    named in `binance_untimed_page_symbols`. Both carry a bound (the newest fill the walk read)
+    and `binance_read_through_ms` is recorded ONCE, as the minimum over every stopped symbol
+    (RESEARCH Pitfall 7: `_record_dq_flag` SUMS two ints, so a per-symbol record would stamp
+    past the older symbol's unread fills).
+
+    PROOF-01 NEUTER (each recorded verbatim in the 250-06 SUMMARY, restored from a byte backup
+    of `services/exchange.py` with `cp` and checked with `cmp`):
+      N9  delete the `_record_dq_flag` call for `binance_page_cap_symbols`:
+          test_a_capped_window_is_named_with_its_read_through_bound goes RED.
+      N21 delete the cap branch's WARNING call in `_fetch_one`:
+          test_a_capped_window_is_named_with_its_read_through_bound goes RED (caplog).
+      N16 record `binance_read_through_ms` once per stopped symbol instead of once as the min:
+          test_two_stopped_symbols_record_the_smaller_bound_once goes RED.
+      N25 delete the `_record_dq_flag` call for `binance_untimed_page_symbols` and drop the
+          untimed kind from the bounds list:
+          test_a_page_it_cannot_page_past_is_named_with_a_bound goes RED.
+    """
+
+    async def test_a_capped_window_is_named_with_its_read_through_bound(
+        self, open_exchanges: list[Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """SC-3 producer, REAL constants (20 pages x 1000): one linear symbol holds 21,000 fills
+        one second apart inside ONE window, every one at or after the `since_ms` passed (so no
+        page re-reads the overlap). The walk reads exactly 20 pages in that window and asks for
+        no later window. The walk advances `since` to the last row's timestamp without +1, so
+        every page after the first re-serves its boundary row: 20 x 1000 = 20,000 rows hold the
+        oldest 19,981 DISTINCT fills (ids 1..19981). The symbol is named, the bound is the
+        19,981st fill's timestamp (the newest it read), and the cap WARNING names it.
+
+        f(k) = 1792587600000 + 1000 x (k - 1): f(1) = 1792587600000 (2026-10-21T13:00:00Z),
+        f(19981) = 1792607580000 (2026-10-21T18:33:00Z), f(21000) = 1792608599000. The seed is
+        f(1); the walk starts one overlap hour back at 1792584000000 (2026-10-21T12:00:00Z) and
+        its one window ends at 1793188799999 (2026-10-28T11:59:59.999Z)."""
+        first_ms = 1792587600000  # f(1) 2026-10-21T13:00:00Z
+        bound_ms = 1792607580000  # f(19981) 2026-10-21T18:33:00Z
+        window_end_ms = 1793188799999  # 2026-10-28T11:59:59.999Z
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [
+                    venue_fill("linear", "BTCUSDT", k, first_ms + 1000 * (k - 1))
+                    for k in range(1, 21001)
+                ]
+            }
+        )
+
+        with caplog.at_level("WARNING"):
+            fills, flags = await _read(open_exchanges, venue, ["BTCUSDT"], first_ms)
+
+        requests = venue.calls_for("linear")
+        assert len(requests) == 20, f"expected exactly 20 pages, got {len(requests)}"
+        assert {r["endTime"] for r in requests} == {window_end_ms}, "a later window was asked for"
+        assert len(fills) == 20_000
+        ids = _ids(fills)
+        assert len(ids) == 19_981, f"{len(ids)} distinct fills"
+        missing = [k for k in range(1, 19_982) if str(k) not in ids]
+        assert not missing, f"first missing oldest fill id: {missing[0]}"
+        assert flags.get("binance_page_cap_symbols") == ["BTCUSDT"]
+        assert flags.get("binance_read_through_ms") == bound_ms
+        assert "binance_partial_symbols" not in flags
+        cap_warnings = [
+            record
+            for record in caplog.records
+            if record.levelname == "WARNING"
+            and "page cap" in record.getMessage()
+            and "BTCUSDT" in record.getMessage()
+        ]
+        assert len(cap_warnings) == 1, "exactly one cap WARNING must name the symbol"
