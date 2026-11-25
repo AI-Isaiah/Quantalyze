@@ -579,3 +579,153 @@ All six round-1 SF findings confirmed closed. CRITICAL 0, HIGH 0, MEDIUM 0, LOW 
 | IN2-02 | `e37067f43` | The WR-01 first-tick hang test uses an RPC bound of 0.19 and now fails on the pre-WR-01 loop (fence at 0.79 against the 0.7 deadline). |
 
 Recorded only, not fixed: the round-2 LOW and INFO items.
+
+## Round 3 (code reviewer)
+
+**Reviewed:** 2026-11-26, at `34cc1c3ed`. Scope: `git diff 095785dfe 34cc1c3ed -- analytics-service/`, which is
+`services/mt5_xlease.py` and `tests/test_mt5_xlease.py`. Read against `230-CONTEXT.md` and DEC-04-A to DEC-04-D in
+`230-04-PLAN.md`.
+**Counts:** HIGH 0, MEDIUM 0, LOW 2, INFO 5.
+
+### How this was verified
+
+- **Trees.** I exported `095785dfe` (before the round-2 fixes), `34cc1c3ed` (after them) and `db7fd1316` (before WR-01)
+  with `git archive` into a scratch directory outside the repo, and copied the new `test_mt5_xlease.py` into the old trees.
+  `xlease_fakes.py` is byte-identical across the three.
+- **New tree.** `test_mt5_xlease.py`: 62 passed. `test_mt5_concurrency.py`: 36 passed.
+- **Pre-fix tree (`095785dfe`).** 8 failed, 54 passed. I read every failure message:
+  - `test_cr2_01_one_lost_response_…[None]` and `[0.2]` raise `XLeaseUnavailable`, after 0.756 s and 0.201 s. That is
+    the CR2-01 symptom.
+  - `test_late_grant_after_a_normal_hold_…` fails `assert 1 == 2` (the acquire count), and
+    `test_a_late_grant_from_an_earlier_poll_…_fallback_…` fails `True is False`. Both are right for single-in-flight.
+  - `test_wr2_01_…` fails with "a late grant was fenced at [0.701] without being given a renew". That is the WR2-01 symptom.
+  - `test_cr2_01_the_renew_deadline_is_seeded_…` fails because the old code never grants at all. Mutation M2 below is
+    what pins the seed.
+  - `test_cr2_01_a_hung_database_…cap…` and `test_cr01_a_hung_acquire_…` fail only with `AttributeError` on
+    `_MT5_XLEASE_MAX_INFLIGHT`. That is no evidence about behaviour (IN3-04). Mutation M3 is what pins the cap.
+- **Mutations** on a scratch copy of the new tree, restored from a byte copy after each run. Every one went RED:
+  - M1: the first-sleep lead set to 0. `test_wr2_01_…` fails.
+  - M2: the deadline seeded from `started`. `test_cr2_01_the_renew_deadline_is_seeded_…` fails.
+  - M3: the cap removed (`if True:`). `test_cr2_01_a_hung_database_…cap…` fails.
+  - M4: the late-grant callback attached to every pending call at a timed-out wait. Three tests fail:
+    - `test_late_grant_after_a_normal_hold_…`, with three releases;
+    - `test_a_late_grant_…_fallback_…`;
+    - `test_wr2_01_…`, fenced at 0.551 s, because the straggler's cleanup released the live hold's row.
+    So "late grants are released only at the end, never at a timeout" is pinned.
+- **IN2-02.** `test_wr01_a_renew_that_hangs_from_the_first_tick_…` now fails on `db7fd1316`, with a fence at 0.785 s
+  against the 0.75 s bound. The test discriminates.
+- **Probes.** Scratch scripts, using `FakeXLeaseBackend` with a 0.9 s scaled TTL and the 1:100 `scaled_stuck`
+  constants. Each was run on both trees:
+
+| Scenario | new (`34cc1c3ed`) | old (`095785dfe`) |
+|---|---|---|
+| DB stall, every call blocked, gate opens at 0.50 s | granted 0.502 s, 4 calls, no fence, 3 renews | granted 0.502 s, fenced 0.702 s, 0 renews |
+| same, gate opens at 0.66 s | granted 0.661 s, 5 calls, no fence, 3 renews | fenced 0.701 s, 0 renews |
+| same, gate opens at 0.72 s | granted 0.721 s, **fenced 0.722 s, 0 renews** (LR3-01) | fenced 0.721 s, 0 renews |
+| cancelled at 0.5 s with calls in flight, all then land True | 4 in flight, 4 cleanup releases, row free | 1 in flight, 1 release, row free |
+| three hung calls land True in one wait | granted, 1 release, row free | n/a |
+| bounded 2.0 s (20x the RPC bound), every call hangs | `XLeaseUnavailable` at 2.00 s, exactly 5 calls (the cap) | n/a |
+| first call commits on the DB after the hold released, then its response errors | **row still held** (LR3-02) | n/a |
+
+- **Not run:** the full suites, the mutation runner and Docker. I also did not re-run the relogin and liveness SF-M1
+  tests, because the round-2 diff touches only the two files above. I did not consult the MT5 docs; no finding depends
+  on terminal behaviour.
+
+### Round-2 findings: verdicts
+
+| Finding | Verdict |
+|---|---|
+| CR2-01 | **Fixed.** After a timed-out wait a fresh same-token call follows, so one lost response is granted by the next call, for an unbounded caller and for a bounded one. In-flight calls are capped at 5. `FIRST_COMPLETED` handles every future in `done`. Stragglers stay in `pending`, go to the hold, and are released only at the end (pinned by M4). The deadline is seeded from the granting call's send (pinned by M2). |
+| WR2-01 | **Fixed for a grant that lands 50 to 70 s after its send** (probe rows 0.50 and 0.66). **Not beyond that:** a grant that lands at or after `send + LOST_AFTER` is still fenced with zero renews (LR3-01). |
+| IN2-02 | Fixed; it discriminates on `db7fd1316`. |
+
+### Round-1 fixes: no regression
+
+- **CR-01, a hung database stays visible.** One `mt5_xlease_rpc_error` WARNING (`error_logged`), and every timed-out wait
+  counts toward the budget (`:767-796`). `test_cr01_a_hung_acquire_…` passes, and the bounded-probe log shows a single
+  give-up ERROR.
+- **A bounded pending set.** `len(pending) < _MT5_XLEASE_MAX_INFLIGHT` (`:706`). With every call hung, the next call
+  only follows the end of a wait, so `asyncio.wait` is never handed an empty set.
+- **SF-M1.** `answered` is still set only on a True or False answer (`:742`). The bounded probe with every call hung
+  ends `XLeaseUnavailable`, not busy.
+- **WR-01, the deadline.** `lead_s` applies to the first sleep only (`:510-518`), and every later sleep and renew is
+  still bounded by `lost_at`. A prompt grant still sleeps the full renew interval. All the WR-01 tests pass.
+
+### Checked, no defect
+
+- **A stuck old call lands True after the hold is released.** `release()`'s `finally` attaches the callback to every
+  straggler (`:611`), and a done-True straggler fires its callback at once (an extra release, which is idempotent). No
+  orphan, provided the response arrives. When it does not arrive, see LR3-02.
+- **A straggler lands during the hold.** A same-token acquire only extends `expires_at` (the acquire SQL
+  `ON CONFLICT … WHERE l.owner_token = EXCLUDED.owner_token`). A straggler that lands after the fence, on an expired
+  row, re-takes it for our own token, and `release()` frees it.
+- **Several calls grant in one wait.** `min(granted_sends)` (`:748-750`) is the conservative base. Every granting call
+  rewrote `expires_at` from its own transaction start, which is at or after its send. The probe confirms a single
+  release frees the row.
+- **The cap reached with every call hung.** Each wait times out, counts toward the budget and is followed by the poll
+  sleep. No new call is sent until one finishes. Thread use is at most 5 per acquisition, out of the 48 in
+  `_DB_EXECUTOR`.
+- **The poll sleep between fresh calls.** It replaces the removed `continue`, so calls are spaced at least
+  `RPC bound + poll` apart. An answer that arrives during the sleep is read at the next wait (IN3-03).
+- **The missing-RPC branch with other calls still pending.** A True in the same wait wins (`:748` precedes `:752`). The
+  remaining stragglers get the callback, and the fallback hold receives an empty set (`:757`). This is pinned by
+  `test_a_late_grant_…_fallback_…`.
+- **Cancellation mid-wait or mid-sleep.** `except BaseException` hands every still-pending call to
+  `_release_late_grants`. Futures already taken out of `done` were non-True, because a True breaks first. There is no
+  `await` between the `break` and `start_renewing`, or between the return and `mt5_terminal_lease`'s `try`.
+
+### LOW
+
+- **LR3-01: a grant that lands at or after `send + LOST_AFTER` is fenced with zero renews, and the docstring says it
+  never is.**
+  - Where: `mt5_xlease.py:97-99` (the claim) and `:511-523` (the behaviour).
+  - The validator docstring says a late grant "gets its first renew at once … never a fence with no attempt". Once
+    `lost_at - now <= 0`, the first sleep is 0 and `sent_at >= lost_at` fences before any renew. The probe's 0.72 row
+    shows this. The same row on `095785dfe` also fences, so this is a residual, not a regression.
+  - Why not MEDIUM: an unbounded caller can only receive such a grant if every call stalls for 70 s or more and the
+    database recovers before the budget gives up at about 75-77 s. A stall a few seconds longer burns the attempt by
+    `XLeaseUnavailable` anyway. Bounded callers top out well under 70 s at the defaults: the relogin ceiling is 30 s (`MT5_REQUEST_TIMEOUT_S`), the wizard waits 20 s (`MT5_LEASE_WAIT_S`) and liveness 2 s. Only an env override above 70 s would reach the window. The other route, one old request queued on the
+    server for 70 s or more while newer ones are answered, does not fit a FIFO pool.
+  - Fix: narrow the docstring to "a grant that lands before its deadline gets one renew with whatever time is left".
+    To close the window instead, do the renew inside `acquire_terminal_xlease` before it returns when
+    `lost_at - now < _MT5_XLEASE_RPC_TIMEOUT_S`. That is safe because the body has not started: a True re-seeds the
+    deadline from the renew's send, and a False or a timeout carries on polling.
+- **LR3-02: a straggler that commits after the release but whose response errors leaves the row held for one TTL.**
+  - Where: `_late_grant_callback`, `mt5_xlease.py:362`, which returns on `fut.exception() is not None`.
+  - This shape has existed on every abandon path since plan 02. Round 2 makes it reachable on the grant path too,
+    because stragglers now ride into `XLeaseHold._pending`.
+  - It needs the database to execute the request after the hold's release, plus a client-side error (for example
+    httpx's 120 s read timeout). It heals on the 90 s TTL.
+  - Side effect: the next acquisition by any process meets a refusal, which emits `mt5_xlease_waited`, the event plan
+    09 counts as a cross-process collision, with no second holder behind it.
+  - Fix: release on an unknown outcome too, and skip only a clean False:
+    `if fut.cancelled() or (fut.exception() is None and fut.result() is False): return`. It is safe: the callback is
+    only attached once the acquisition or the hold has ended, and the release is token-scoped and idempotent.
+
+### INFO
+
+- **IN3-01: max versus min of `granted_sends`.** Each same-token acquire rewrites `expires_at = now() + ttl`, so the
+  latest granting send would also be a safe base, except under a row-lock queue that reorders a transaction with an
+  earlier start. `min` avoids that. In the stall case it changes nothing, because the oldest call tends to finish
+  first.
+- **IN3-02 (migration, out of this diff): a same-token acquire sets `expires_at` unconditionally.** A straggler whose
+  transaction began more than 20 s before our last successful renew, and writes after it, could lower the expiry below
+  the renew loop's assumption. That needs a stall between `BEGIN` and the row write. `GREATEST(l.expires_at,
+  EXCLUDED.expires_at)` on the same-token arm would close it.
+- **IN3-03: an extra call after the poll sleep.** The loop top sends a fresh call even when a straggler finished
+  during the sleep (`:706`). The extra call joins the hold's `pending`, adding one more straggler (see LR3-02). Checking
+  `any(f.done() for f in pending)` first avoids it.
+- **IN3-04: `test_cr01_a_hung_acquire_…` pins neither shape now.** Its loosened `1 <= count <= cap` passes with or
+  without fresh calls. On `095785dfe` it fails only by `AttributeError`. The pin is carried by the cap test and the
+  lost-response test.
+- **IN3-05: tight timing margins.** `test_cr2_01_the_renew_deadline_is_seeded_…` expects a fence at about 0.857 s
+  against `< 0.9`, about 43 ms of headroom. `test_wr01_…first_tick…` expects about 0.70 s against `< 0.75`. Scheduling
+  delay only ever makes a fence later, so these can flake on a loaded runner (the same class as IN2-01).
+
+_Round 3 reviewed: 2026-11-26 · Reviewer: Claude (gsd-code-reviewer) · Depth: standard, with mutation and probe evidence on both trees_
+
+## Round 3 (silent-failure hunter, 2026-11-26)
+
+CRITICAL 0, HIGH 0, MEDIUM 0, LOW 4 (recorded only): a grant older than LOST_AFTER is fenced with no renew (same as LR3-01); the in-flight cap is per acquisition, not per process (pool amplification on a sick database, logged by db_execute's saturation warning); a late call ending in an exception releases nothing (pre-existing, same as LR3-02); attempts counts waits (LR2-04 repeat).
+
+Review loop verdict: round 3 has no MEDIUM+ finding from either reviewer. The LOW and INFO items stay recorded here only (CLAUDE.md rule (a)).
