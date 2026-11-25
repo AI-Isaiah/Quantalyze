@@ -13827,7 +13827,7 @@ COMMENT ON COLUMN "public"."api_keys"."history_reconstruct_attempts" IS 'Phase 1
 
 
 
-COMMENT ON COLUMN "public"."api_keys"."venue_server" IS 'Phase 225 ONEACCOUNTONCE (CONN-03, founder ruling Q2). The normalised broker server of an MT5 key (trimmed, lower-cased), stored beside the bare login in venue_account_id so the same login on two different brokers is two different accounts. PLAINTEXT by founder ruling: a broker server name is not a credential. NULL means "not captured yet" and every app fence treats NULL as a wildcard that matches any server; a blank or over-128-character value is refused by api_keys_venue_server_valid. MT5 only. NOT granted to anon or authenticated, and not part of the browser column allowlist.';
+COMMENT ON COLUMN "public"."api_keys"."venue_server" IS 'Phase 225 ONEACCOUNTONCE (CONN-03, founder ruling Q2). The normalised broker server of an MT5 key (trimmed, lower-cased), stored beside the bare login in venue_account_id so the same login on two different brokers is two different accounts. PLAINTEXT by founder ruling: a broker server name is not a credential. NULL means "not captured yet" and every app fence treats NULL as a wildcard that matches any server; a blank or over-128-character value is refused by api_keys_venue_server_valid. MT5 only. READABLE BY authenticated through a column grant (20261125132334, plan 13, founder answer "Owner-only read" 2026-11-25), scoped to the key''s owner by the existing owner-only RLS on api_keys, so the TypeScript identity twin reads the server the way it reads venue_account_id. anon holds NO privilege on it, and no browser role may write it: the analytics worker and the service-role connect writers are its only writers.';
 
 
 
@@ -19842,6 +19842,10 @@ GRANT SELECT("history_reconstructed_at") ON TABLE "public"."api_keys" TO "authen
 
 
 GRANT SELECT("history_reconstruct_attempts") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
+GRANT SELECT("venue_server") ON TABLE "public"."api_keys" TO "authenticated";
 
 
 

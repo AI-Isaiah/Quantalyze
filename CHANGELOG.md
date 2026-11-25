@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.77.1] - 2026-11-25 — BASELINE: automated re-dump after the PROD apply of 205653b0
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `45654413951`, after the PROD apply of merge `205653b0`: sha256 `98821446…` → `3629afc7…`.
+- Shape, old → new: tables 71 → 71, policies 154 → 154, function statements 144 → 144, distinct function names 142 → 142, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261125132334_api_keys_venue_server_owner_read.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-25` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.77.0 → 0.133.77.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=337 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 144 — MATCH 141, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45654413951` succeeded, and this entry was composed by the `redump-pr` job. Run `45654413951` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.77.0] - 2026-11-25 — Phase 225 ONEACCOUNTONCE PR-2b-1: an owner can read their own key's broker server
 
 This is the first of the gap-closure PRs for review finding CR-01 on PR-3 (migration B). It ships alone because a later PR selects `api_keys.venue_server` from the browser, and that read needs this grant live on PROD first. It holds one migration and no app code.
