@@ -30,8 +30,8 @@ key-decisions:
 metrics:
   duration: "not measured (start time was not captured; most wall clock was machine-load-bound pytest runs)"
   completed: 2026-11-25
-status: partial
-estimate_actuals_note: "Task 3 is the orchestrator's PROD re-reading and is pending; status stays partial until it is appended."
+status: complete
+estimate_actuals_note: "Task 3 (the orchestrator's PROD re-reading) was appended 2026-11-25 and the founder answered q-dbook01 the same day."
 plan_head_before: 0e13e10f2bc5b4ed395f4e3b55b5992b733c4c26
 plan_head_after: 252e37c67d753c3149048fbf0997451ae5e1f0a7
 commits: 2
@@ -625,3 +625,12 @@ oracle-degrade: kind=exit_list name=failing_key_exits count=1
 oracle-verdict: verdict=STOP withheld_published=114 omission_unexplained=0 key_set=reproduced
 ```
 
+## Founder answer, 2026-11-25
+
+The coordinator put q-dbook01 to the founder (AskUserQuestion, 2026-11-25). The answer, verbatim:
+
+q-dbook01: Accept (Recommended)
+
+The 114 withheld days stay published and are named withheld in this reading. DBOOK-01 closes as a reading. The ship PR deletes the `TODOS.md` entry `[185-BOOK-CUMULATIVE-UNEXPLAINED]`.
+
+closes-todos: 185-BOOK-CUMULATIVE-UNEXPLAINED (DBOOK-01)
