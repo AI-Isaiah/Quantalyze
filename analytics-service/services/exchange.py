@@ -729,7 +729,10 @@ BINANCE_FILLS_READ_DEADLINE_S: float = 240.0
 #: round-trip time from the worker is UNMEASURED, so 60 s holds a sparse read and not a fill-heavy
 #: read that also runs to its deadline (the SYNC HANDLER TAIL known limit): ``wait_for`` then
 #: cancels the handler before the cursor RPC, the upserted fills are kept, the job fails loudly as
-#: a timeout and the next run starts from the same cursor.
+#: a timeout and the next run starts from the same cursor. That next run re-reads the same span to
+#: the same frontier, persists the same fills and times out again, so the stall repeats on every
+#: run (loud, and permanent until the account's fills thin out), not one failed run; there is no
+#: fill-count stop (round-1 review WR-03).
 BINANCE_SYNC_FILLS_READ_DEADLINE_S: float = 840.0
 
 
