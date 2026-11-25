@@ -1081,8 +1081,11 @@ async function legacyValidateAndEncryptHandler(args: {
             );
           } else if (stampedKey?.venue_account_id != null) {
             swapLanded = true;
-            // The swap committed and lost its answer, so `swapAccountSlot`
-            // never ran its audit and recompose: run them here (225 N3-1).
+            // The key is stamped although this request's swap errored. Either
+            // the swap committed and lost its answer, so `swapAccountSlot` never
+            // ran its audit and recompose, or a same-session replay already
+            // swapped and audited it. Run both here (225 N3-1): the recompose
+            // enqueue is deduped, but the audit row can repeat in the replay case.
             // @audit-skip: the demotion audit lands inside afterSlotSwap (src/lib/venue-identity.ts).
             await afterSlotSwap(admin, {
               userId,
