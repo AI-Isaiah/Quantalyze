@@ -25,7 +25,7 @@
 
 ### Notes
 - **Booked, not fixed:** `[222-FIRST-HOP-SWEEP-CONTACT-SUPPORT]` (the first-hop enqueue sweep still says "contact support"; the founder kept it out of this migration, OQ3) and `[222-SYNCTRADES-REREAD-FAILED]` (review SFH-R3-01, a triple-fault window where a failed re-read returns FAILED; disputed by the round-3 reviewer; owned by Phase 251 SYNCSTORE).
-- **Reviews:** gsd-code-reviewer and silent-failure-hunter over three rounds; migration-reviewer and rls-policy-auditor clean at MEDIUM+. The migration was re-stamped from `20261127120000` to `20261125212222` at ship so it sorts after main's latest migration; nothing else in it changed.
+- **Reviews:** gsd-code-reviewer and silent-failure-hunter over three rounds; migration-reviewer and rls-policy-auditor clean at MEDIUM+. The migration was re-stamped from `20261127120000` to `20261125212222` at ship so it sorts after main's latest migration. The only other ship-time edit is a comment: a `prod-body-ack` pragma for VAC-04, whose PROD hash for `computation_error_copy/1` equals the committed baseline body (PROD carries the `20260826120000` body, so the drift is this migration's own change).
 - **Merge order:** the phase CONTEXT queues this migration behind Phase 225's PR-3 (migration B). Whichever lands second must re-stamp after the other.
 - **Expected drift:** `baseline-content-drift` reports `computation_error_copy` until the re-dump after the PROD apply. The migration auto-applies to TEST, then PROD, on merge.
 

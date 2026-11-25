@@ -65,6 +65,15 @@
 -- invariant 14; Supabase wraps each migration). SET LOCAL lock_timeout applies to
 -- that wrap. The self-verify reads the catalogue only and no application table.
 --
+-- VAC-04 acknowledgment: the hash below is the one VAC-04 reported for PROD's live
+-- computation_error_copy/1 on this PR. It equals the body in the committed
+-- supabase/schema/baseline.sql (re-dumped from PROD at v0.133.79.1), which
+-- baseline-content-drift reports as the same hash on this PR, so PROD carries the
+-- 20260826120000 body and no out-of-band patch. The drift is this migration's own
+-- change.
+--
+-- prod-body-ack: 905e9d0ff1a01260c9b0c5324925dcb028860f2cf6dc4f7b7b38955ffdf2854d
+--
 -- Rollback (manual, off the auto-apply path; no data is touched):
 -- supabase/migrations/down/20261125212222-rollback.sql.
 
