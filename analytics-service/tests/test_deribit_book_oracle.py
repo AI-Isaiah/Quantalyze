@@ -43,6 +43,26 @@ Why each test matters (Rule 9):
   21. ``test_emptied_last_day_anchor_decides``: an emptied last day stays 0.0 when the effective
       anchor is inside the band of the prior peak and takes the anchor otherwise.
       REVERT-PROOF: always taking the anchor on an emptied last day reads 1.5 as 1.5, not 0.0.
+  Plan 233-07 Task 2 (a counted key with no stored basis, and PROD's payload shapes):
+  22. ``test_counted_key_without_basis_is_withheld``: a counted key whose key_inputs row carries
+      none of the four writer-basis arrays takes its level days from ``stored_return_days`` and
+      withholds every published day it participates on as ``no_stored_base_level``.
+      REVERT-PROOF: a roll that ignores ``stored_return_days`` leaves the key absent and d5 reads a
+      plain mismatch or is reproduced without it.
+  23. ``test_counted_key_with_no_day_is_refused``: a counted key with no day anywhere is refused
+      by its ``declared.counted`` path, never silently absent. REVERT-PROOF: removing the refusal
+      reads the export and the day as a plain ``attribution_mismatch``.
+  24. ``test_production_shapes_load``: an export in PROD's own shapes (flags array, exit-list
+      objects, full inputs, null slices) reads CLEAN. REVERT-PROOF: refusing the flags array
+      exits 2 on the first PROD export.
+  25. ``test_null_field_and_null_slice_read_as_absent``: null fields and null year slices are
+      ABSENT, distinct from a present empty array. REVERT-PROOF: raising on a null slice exits 2.
+  26. ``test_exit_lists_and_departures_must_agree``: an exit list and the declared departures must
+      agree, by field path. REVERT-PROOF: removing the no-capital departure check lets a book whose
+      exited key was never declared departed read as if it had been.
+  27. ``test_exit_reason_copies_match_production``: the oracle's literal copies of the closed exit
+      reasons equal production's (the only place production is imported besides the emptied
+      constants).
 """
 from __future__ import annotations
 
@@ -228,8 +248,10 @@ def test_withheld_names_come_from_the_closed_set(capsys: pytest.CaptureFixture[s
 # ── the reading beyond the classes (hand-derived) ──────────────────────────────────────────────
 
 
-def _variant(tmp_path: Path, mutate: Callable[[dict[str, Any]], None]) -> str:
-    doc = json.loads((_FIXTURES / "explained_two_keys.json").read_text(encoding="utf-8"))
+def _variant(
+    tmp_path: Path, mutate: Callable[[dict[str, Any]], None], name: str = "explained_two_keys.json"
+) -> str:
+    doc = json.loads((_FIXTURES / name).read_text(encoding="utf-8"))
     mutate(doc)
     path = tmp_path / "variant.json"
     path.write_text(json.dumps(doc), encoding="utf-8")
@@ -267,7 +289,8 @@ def test_big_day_and_degrade_lines(tmp_path: Path, capsys: pytest.CaptureFixture
         doc["book"]["returns"][-1]["r"] = 540 / 1620
         doc["book"]["flags"] = {"skipped_nonpositive_denominator": 2, "emptied_stretch": True}
         doc["book"]["degrade_reasons"] = ["window_truncated"]
-        doc["book"]["no_capital_exited_keys"] = ["k2"]
+        doc["book"]["no_capital_exited_keys"] = [{"api_key_id": "k2", "reason": "dust", "day": "2025-01-05"}]
+        doc["declared"]["departed"] = {"k2": "2025-01-05"}
 
     code = oracle.main(["--input", _variant(tmp_path, mutate)])
     lines = [line for line in capsys.readouterr().out.splitlines() if line]
@@ -562,6 +585,7 @@ def test_print_sql_is_read_only_and_id_free(capsys: pytest.CaptureFixture[str]) 
         "key_scalars",
         "key_array_by_year",
         "book_key_rows",
+        "key_return_days",
     )
     assert oracle.main(["--print-sql"]) == 0
     text = capsys.readouterr().out
@@ -570,7 +594,7 @@ def test_print_sql_is_read_only_and_id_free(capsys: pytest.CaptureFixture[str]) 
     assert tuple(headers) == oracle.SQL_LABELS
     blocks = [b for b in text.split("\n\n") if b.strip()]
     assert len(blocks) == len(oracle.SQL_LABELS)
-    placeholders = {"book_id", "key_kind", "kind", "field", "from_day", "to_day"}
+    placeholders = {"book_id", "key_kind", "key_id", "kind", "field", "from_day", "to_day"}
     for block in blocks:
         body = "\n".join(line for line in block.splitlines() if not line.startswith("--")).strip()
         assert re.match(r"(?i)^(select|with)\b", body), body
@@ -679,3 +703,139 @@ def test_emptied_last_day_anchor_decides() -> None:
         assert lv.level["2025-01-03"] == 0.0 and lv.level["2025-01-04"] == 0.0, anchor
         assert lv.level["2025-01-01"] == 200.0 and lv.level["2025-01-02"] == 200.0, anchor
         assert lv.stamp_bad_days == frozenset(), anchor  # the identity ran on the raw levels
+
+
+# ── plan 233-07 Task 2: a counted key with no stored basis, and PROD's payload shapes ──────────
+
+
+def test_counted_key_without_basis_is_withheld(capsys: pytest.CaptureFixture[str]) -> None:
+    # Hand derivation in the fixture's _comment: k2 joins on d4 and participates on d5 only, with
+    # no writer basis, so d5 is withheld no_stored_base_level and d2..d4 (k1 alone) are explained.
+    code, lines = _run("counted_key_without_basis.json", capsys)
+    assert code == 1
+    assert _lines(lines, "oracle-book:") == [
+        "oracle-book: book=A published=4 explained=3 withheld=1 omitted=1 annotated=1"
+    ]
+    assert _lines(lines, "oracle-withheld:") == [
+        "oracle-withheld: date=2025-01-05 reason=no_stored_base_level"
+    ]
+    assert _lines(lines, "oracle-omitted:") == [
+        "oracle-omitted: date=2025-01-01 reason=no_stored_base_level"
+    ]
+    assert _lines(lines, "oracle-verdict:") == [
+        "oracle-verdict: verdict=STOP withheld_published=1 omission_unexplained=0 key_set=reproduced"
+    ]
+
+
+def test_counted_key_with_no_day_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    arrays = ("composed_day_pnl", "composed_flows", "dropped_day_pnl", "returns_stamp")
+
+    def null_arrays(doc: dict[str, Any]) -> None:
+        del doc["keys"]["k2"]["stored_return_days"]
+
+    def absent_arrays(doc: dict[str, Any]) -> None:
+        del doc["keys"]["k2"]["stored_return_days"]
+        for name in arrays:
+            del doc["keys"]["k2"][name]
+
+    for mutate in (null_arrays, absent_arrays):
+        code = oracle.main(["--input", _variant(tmp_path, mutate, "counted_key_without_basis.json")])
+        captured = capsys.readouterr()
+        assert code == 2
+        assert captured.out == ""
+        assert "declared.counted[1]: counted key has no level day" in captured.err
+        assert "525" not in captured.err
+
+    def with_arrays(doc: dict[str, Any]) -> None:
+        doc["keys"]["k2"]["stored_return_days"] = ["2025-01-02"]
+
+    code = oracle.main(["--input", _variant(tmp_path, with_arrays)])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "keys.k2.stored_return_days" in captured.err
+
+
+def test_production_shapes_load(capsys: pytest.CaptureFixture[str]) -> None:
+    code, lines = _run("production_shapes.json", capsys)
+    assert code == 0
+    assert _lines(lines, "oracle-book:") == [
+        "oracle-book: book=A published=4 explained=4 withheld=0 omitted=1 annotated=1"
+    ]
+    assert _lines(lines, "oracle-omitted:") == [
+        "oracle-omitted: date=2025-01-01 reason=no_stored_base_level"
+    ]
+    assert _lines(lines, "oracle-cumulative:") == [
+        "oracle-cumulative: published=x1.05 explained=x1.05 explained_unannotated=x1.03 "
+        "published_without_big_days=x1.05"
+    ]
+    assert _lines(lines, "oracle-degrade:") == [
+        "oracle-degrade: kind=degrade_reason name=window_truncated",
+        "oracle-degrade: kind=flag name=departed_history_included state=true",
+        "oracle-degrade: kind=flag name=no_capital_key_exited state=true",
+        "oracle-degrade: kind=flag name=writer_basis state=true",
+        "oracle-degrade: kind=exit_list name=unpriced_native_keys count=1",
+        "oracle-degrade: kind=exit_list name=no_capital_exited_keys count=1",
+        "oracle-degrade: kind=exit_list name=failing_key_exits count=1",
+    ]
+    assert _lines(lines, "oracle-verdict:") == [
+        "oracle-verdict: verdict=CLEAN withheld_published=0 omission_unexplained=0 key_set=reproduced"
+    ]
+
+
+def test_null_field_and_null_slice_read_as_absent(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def nulls(doc: dict[str, Any]) -> None:
+        doc["keys"]["k1"]["dropped_day_pnl"] = None
+        doc["keys"]["k2"]["tiny_base_days"] = [None]
+        rows = doc["book"]["returns"]
+        doc["book"]["returns"] = [None, rows[:2], None, rows[2:]]
+
+    code = oracle.main(["--input", _variant(tmp_path, nulls)])
+    lines = [line for line in capsys.readouterr().out.splitlines() if line]
+    assert code == 0
+    assert _lines(lines, "oracle-verdict:")[0].startswith("oracle-verdict: verdict=CLEAN")
+    # Absent is not empty: a null stamp (or a list of null slices) is "unavailable", an empty one
+    # is present and has no day.
+    assert oracle._load_key("k1", {"returns_stamp": [None]}).stamp is None
+    assert oracle._load_key("k1", {"returns_stamp": None}).stamp is None
+    assert oracle._load_key("k1", {"returns_stamp": [[]]}).stamp == {}
+    assert oracle._load_key("k1", {"returns_stamp": []}).stamp == {}
+
+
+def test_exit_lists_and_departures_must_agree(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def no_departure(doc: dict[str, Any]) -> None:
+        del doc["declared"]["departed"]
+
+    def failing_day_disagrees(doc: dict[str, Any]) -> None:
+        doc["book"]["failing_key_exits"] = [{"api_key_id": "k1", "reason": "read_incomplete", "day": "2025-01-03"}]
+        doc["declared"]["departed"]["k1"] = "2025-01-04"
+
+    def failing_null_day_names_counted(doc: dict[str, Any]) -> None:
+        doc["book"]["failing_key_exits"] = [{"api_key_id": "k1", "reason": "read_incomplete", "day": None}]
+
+    def reason_outside_set(doc: dict[str, Any]) -> None:
+        doc["book"]["failing_key_exits"][0]["reason"] = "dust"
+
+    def bare_label(doc: dict[str, Any]) -> None:
+        doc["book"]["failing_key_exits"] = ["k3"]
+
+    for mutate, needle in (
+        (no_departure, "book.no_capital_exited_keys[0]: "),
+        (failing_day_disagrees, "book.failing_key_exits[0]: "),
+        (failing_null_day_names_counted, "book.failing_key_exits[0]: "),
+        (reason_outside_set, "book.failing_key_exits[0].reason: "),
+        (bare_label, "book.failing_key_exits[0]: expected an object"),
+    ):
+        code = oracle.main(["--input", _variant(tmp_path, mutate, "production_shapes.json")])
+        captured = capsys.readouterr()
+        assert code == 2, needle
+        assert captured.out == ""
+        assert needle in captured.err, captured.err
+        assert "read_incomplete" not in captured.err and "2025-01-0" not in captured.err
+
+
+def test_exit_reason_copies_match_production() -> None:
+    from services import allocator_equity_compose as compose
+    from services import equity_reconstruction as reconstruction
+
+    assert oracle._FAILING_KEY_EXIT_REASONS == compose.FAILING_KEY_EXIT_REASONS
+    assert oracle._NO_CAPITAL_EXIT_REASONS == reconstruction._NO_CAPITAL_ANCHOR_REASONS

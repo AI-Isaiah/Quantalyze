@@ -37,22 +37,30 @@ Export format (a JSON object; the file is produced outside the repo and never en
 
     {
       "_comment": "optional string, ignored",
-      "book":  {"label": "A", "returns": [{"date", "r"}, ...], "flags": {...},
-                "degrade_reasons": [...], "inputs": {"n_keys": 2},
-                "unpriced_native_keys": [...], "no_capital_exited_keys": [...],
-                "failing_key_exits": [...]},
+      "book":  {"label": "A", "returns": [{"date", "r"}, ...],
+                "flags": ["token", ...], "degrade_reasons": [...],
+                "inputs": {"n_keys": 2, "anchor_asof": "<day or null>", "composed_at": "<text>"},
+                "unpriced_native_keys": [{"api_key_id": "k4", "day": "<day or null>",
+                                          "reason": "day_unknown", "hole_days": [...]}],
+                "no_capital_exited_keys": [{"api_key_id": "k2", "reason": "dust", "day": "<day>"}],
+                "failing_key_exits": [{"api_key_id": "k3", "reason": "read_incomplete",
+                                       "day": "<day or null>"}]},
       "keys":  {"k1": {"composed_day_pnl": [{"utc_day_iso", "pnl_usd"}], "composed_flows":
                 [{"utc_day_iso", "flow_usd"}], "dropped_day_pnl": [...], "returns_stamp":
                 [{"utc_day_iso", "return"}], "realized_terminal_day", "realized_terminal_usd",
                 "anchor_usd", "anchor_null_reason", "options_cash_basis",
-                "writer_basis_withheld", "tiny_base_days"}},
+                "writer_basis_withheld", "tiny_base_days", "stored_return_days": ["<day>", ...]}},
       "declared": {"counted": ["k1", "k2"], "stitch_parent": {"k2": "k1"},
                    "departed": {"k1": "<last day>"}}
     }
 
-An array may also arrive as a list of year slices; the loader flattens it and fails on a
-duplicate day. Any unknown key, wrong type, non-ISO day or non-finite number raises
-``ExportError`` naming the field path, never the value.
+These are PROD's payload shapes: ``flags`` is a sorted array of tokens (the object form
+``{"token": true}`` stays readable), the three exit lists are objects, and ``inputs`` is the full
+object. An array may also arrive as a list of year slices; the loader flattens it and fails on a
+duplicate day. A field whose value is null, or a list of year slices that are all null, is ABSENT,
+which is distinct from a present empty array; a null slice beside other slices is skipped. Any
+unknown key, wrong type, non-ISO day or non-finite number raises ``ExportError`` naming the field
+path, never the value.
 
 The counted key set is a DECLARED input. The compose job picks one login per shared account
 (``account_groups``, ``working_holder_predicate``, first return day, read-incomplete markers) and
@@ -60,6 +68,21 @@ applies stitch, departed and exit rules at compose time; none of that is in the 
 ``inputs.n_keys`` and the exit lists. The orchestrator therefore declares the set (the rule it
 follows is the compose job's key read in ``job_worker.run_derive_allocator_equity_job``) and the
 oracle only checks that the declared set counts to ``inputs.n_keys``.
+
+The counted-key rule. A counted key with none of the four writer-basis arrays
+(``composed_day_pnl``, ``composed_flows``, ``dropped_day_pnl``, ``returns_stamp``) is still counted:
+the compose replays it on the legacy roll from its ``csv_daily_returns`` (for example a key that
+exited ``read_incomplete``). It carries ``stored_return_days``, its ``csv_daily_returns`` days
+(dates only, from ``--print-sql=key_return_days``), and every published day it participates on is
+withheld ``no_stored_base_level``. A counted key with no day in any array is refused (exit 2,
+``declared.counted[<i>]``), never silently absent. A key with a null anchor, ``anchor_null_reason``
+``dust`` and no stored return series is omitted silently by the compose
+(``null_anchor_without_returns``) and is NOT counted. How each exit list maps to
+``declared.departed``: a ``no_capital_exited_keys`` entry departs on its listed day, so a counted
+key named there must be declared departed on that day; a ``failing_key_exits`` entry departs on its
+listed day only when that day is before the book's last day (a marked key named with the book's last
+day stays in), so a declared departure of such a key must fall on the exit day, and an entry with
+day null names a key that was never counted. The loader checks both.
 
 Known limits of this version (named, not silent): a stitched child is modelled as its own key
 series with its join and the next day treated as a boundary; the emptied band is scanned on each
@@ -81,8 +104,10 @@ carries labels (``A``, ``k1``), ISO dates, counts, closed names and 3-significan
 only, through a closed-vocabulary emitter that refuses anything else. No id, no USD amount, no
 venue text. An exception prints its type only (a message can carry an id).
 
-Run recipe: plan 233-05 Task 3 (the orchestrator exports through the MCP read path, one statement
-per call, into its session scratchpad, then runs ``python3 deribit_book_oracle.py --input <file>``).
+Run recipe: plan 233-07 Task 3 (the orchestrator exports through the MCP read path first, one
+statement per call, and falls back to psql, one statement per call, for an array too large for MCP,
+with the marker query first on every connection; the export lives in its session scratchpad; then
+``python3 deribit_book_oracle.py --input <file>``).
 ``python3 deribit_book_oracle.py --print-sql[=<label>]`` prints the read-only statements, with
 placeholders only, that produce the export. The script holds no connection and no DSN.
 """
@@ -155,6 +180,13 @@ _EMPTIED_FRACTION: Final[float] = 0.01
 _EMPTIED_NEGATIVE_FRACTION: Final[float] = 1e-4
 _EMPTIED_RESTART_FLOOR_USD: Final[float] = 100.0
 
+# The closed exit reasons, literal COPIES of ``allocator_equity_compose.FAILING_KEY_EXIT_REASONS``
+# and ``equity_reconstruction._NO_CAPITAL_ANCHOR_REASONS`` (the test pins them equal), and the one
+# reason an unpriced native key may carry.
+_FAILING_KEY_EXIT_REASONS: Final[frozenset[str]] = frozenset({"sync_failing", "read_incomplete"})
+_NO_CAPITAL_EXIT_REASONS: Final[frozenset[str]] = frozenset({"dust", "nonpositive"})
+_UNPRICED_REASON: Final[str] = "day_unknown"
+
 # ── errors and small helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -199,6 +231,11 @@ class KeyInputs:
     options_cash_basis: bool | None
     writer_basis_withheld: str | None
     tiny_base_days: tuple[str, ...]
+    stored_return_days: tuple[str, ...] = ()
+
+
+# One exit-list entry: (key label, reason or None, day or None).
+ExitEntry = tuple[str, str | None, str | None]
 
 
 @dataclass(frozen=True)
@@ -208,9 +245,9 @@ class Book:
     flags: dict[str, Any]
     degrade_reasons: tuple[str, ...]
     n_keys: int
-    unpriced_native_keys: tuple[str, ...]
-    no_capital_exited_keys: tuple[str, ...]
-    failing_key_exits: tuple[str, ...]
+    unpriced_native_keys: tuple[ExitEntry, ...]
+    no_capital_exited_keys: tuple[ExitEntry, ...]
+    failing_key_exits: tuple[ExitEntry, ...]
 
 
 @dataclass(frozen=True)
@@ -291,20 +328,31 @@ def _bool_or_none(path: str, raw: Any) -> bool | None:
     return raw
 
 
-def _flatten(path: str, raw: Any) -> list[Any]:
-    """An array, or a list of year slices flattened into one array."""
+def _flatten(path: str, raw: Any) -> list[Any] | None:
+    """An array, or a list of year slices flattened into one array; ``None`` when ABSENT.
+
+    A null value, or a list of year slices that are all null, is absent. A present empty array is
+    present and empty. A null slice beside other slices is skipped."""
+    if raw is None:
+        return None
     if not isinstance(raw, list):
         raise ExportError(f"{path}: expected an array")
-    if raw and all(isinstance(item, list) for item in raw):
-        return [item for part in raw for item in part]
-    if any(isinstance(item, list) for item in raw):
+    if raw and all(item is None or isinstance(item, list) for item in raw):
+        parts = [item for item in raw if item is not None]
+        if not parts:
+            return None
+        return [item for part in parts for item in part]
+    if any(item is None or isinstance(item, list) for item in raw):
         raise ExportError(f"{path}: mixed rows and slices")
     return list(raw)
 
 
-def _day_values(path: str, raw: Any, day_key: str, value_key: str) -> dict[str, float]:
+def _day_values(path: str, raw: Any, day_key: str, value_key: str) -> dict[str, float] | None:
+    rows = _flatten(path, raw)
+    if rows is None:
+        return None
     out: dict[str, float] = {}
-    for index, row in enumerate(_flatten(path, raw)):
+    for index, row in enumerate(rows):
         row_path = f"{path}[{index}]"
         fields = _obj(row_path, row, (day_key, value_key), (day_key, value_key))
         day = _day(f"{row_path}.{day_key}", fields[day_key])
@@ -314,9 +362,12 @@ def _day_values(path: str, raw: Any, day_key: str, value_key: str) -> dict[str, 
     return out
 
 
-def _day_list(path: str, raw: Any) -> tuple[str, ...]:
+def _day_list(path: str, raw: Any) -> tuple[str, ...] | None:
+    items = _flatten(path, raw)
+    if items is None:
+        return None
     out: list[str] = []
-    for index, item in enumerate(_flatten(path, raw)):
+    for index, item in enumerate(items):
         day = _day(f"{path}[{index}]", item)
         if day in out:
             raise ExportError(f"{path}[{index}]: duplicate day")
@@ -347,6 +398,7 @@ _KEY_FIELDS: Final = (
     "options_cash_basis",
     "writer_basis_withheld",
     "tiny_base_days",
+    "stored_return_days",
 )
 _BOOK_FIELDS: Final = (
     "label",
@@ -363,16 +415,18 @@ _BOOK_FIELDS: Final = (
 def _load_key(label: str, raw: Any) -> KeyInputs:
     path = f"keys.{label}"
     f = _obj(path, raw, _KEY_FIELDS)
-    stamp = (
-        None
-        if f.get("returns_stamp") is None
-        else _day_values(f"{path}.returns_stamp", f["returns_stamp"], "utc_day_iso", "return")
-    )
+    pnl = _day_values(f"{path}.composed_day_pnl", f.get("composed_day_pnl"), "utc_day_iso", "pnl_usd")
+    flows = _day_values(f"{path}.composed_flows", f.get("composed_flows"), "utc_day_iso", "flow_usd")
+    dropped = _day_values(f"{path}.dropped_day_pnl", f.get("dropped_day_pnl"), "utc_day_iso", "pnl_usd")
+    stamp = _day_values(f"{path}.returns_stamp", f.get("returns_stamp"), "utc_day_iso", "return")
+    stored = _day_list(f"{path}.stored_return_days", f.get("stored_return_days"))
+    if stored is not None and any(part is not None for part in (pnl, flows, dropped, stamp)):
+        raise ExportError(f"{path}.stored_return_days: only a key with no writer-basis array carries stored return days")
     return KeyInputs(
         label=label,
-        pnl=_day_values(f"{path}.composed_day_pnl", f.get("composed_day_pnl", []), "utc_day_iso", "pnl_usd"),
-        flows=_day_values(f"{path}.composed_flows", f.get("composed_flows", []), "utc_day_iso", "flow_usd"),
-        dropped=_day_values(f"{path}.dropped_day_pnl", f.get("dropped_day_pnl", []), "utc_day_iso", "pnl_usd"),
+        pnl=pnl or {},
+        flows=flows or {},
+        dropped=dropped or {},
         stamp=stamp,
         terminal_day=_day_or_none(f"{path}.realized_terminal_day", f.get("realized_terminal_day")),
         terminal_usd=_num_or_none(f"{path}.realized_terminal_usd", f.get("realized_terminal_usd")),
@@ -380,8 +434,61 @@ def _load_key(label: str, raw: Any) -> KeyInputs:
         anchor_null_reason=_str_or_none(f"{path}.anchor_null_reason", f.get("anchor_null_reason")),
         options_cash_basis=_bool_or_none(f"{path}.options_cash_basis", f.get("options_cash_basis")),
         writer_basis_withheld=_str_or_none(f"{path}.writer_basis_withheld", f.get("writer_basis_withheld")),
-        tiny_base_days=_day_list(f"{path}.tiny_base_days", f.get("tiny_base_days", [])),
+        tiny_base_days=_day_list(f"{path}.tiny_base_days", f.get("tiny_base_days")) or (),
+        stored_return_days=stored or (),
     )
+
+
+def _exit_list(path: str, raw: Any, reasons: frozenset[str] | None) -> tuple[ExitEntry, ...]:
+    """One of the three exit lists: objects with a k-label, a closed reason and a day or null.
+
+    ``reasons`` is the closed set for ``failing_key_exits`` / ``no_capital_exited_keys``; ``None``
+    reads ``unpriced_native_keys`` (an optional ``reason`` equal to ``day_unknown`` and optional
+    ``hole_days``). A null list is absent; a bare label is refused."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ExportError(f"{path}: expected an array")
+    unpriced = reasons is None
+    allowed = ("api_key_id", "day", "reason", "hole_days") if unpriced else ("api_key_id", "day", "reason")
+    required = ("api_key_id", "day") if unpriced else ("api_key_id", "day", "reason")
+    out: list[ExitEntry] = []
+    for index, item in enumerate(raw):
+        entry_path = f"{path}[{index}]"
+        e = _obj(entry_path, item, allowed, required)
+        label = e["api_key_id"]
+        if not isinstance(label, str) or not _KEY_LABEL_RE.match(label):
+            raise ExportError(f"{entry_path}.api_key_id: expected a key label")
+        day = _day_or_none(f"{entry_path}.day", e["day"])
+        reason = e.get("reason")
+        if reasons is not None:
+            if not isinstance(reason, str) or reason not in reasons:
+                raise ExportError(f"{entry_path}.reason: expected a closed exit reason")
+        elif reason is not None and reason != _UNPRICED_REASON:
+            raise ExportError(f"{entry_path}.reason: expected a closed exit reason")
+        if unpriced:
+            _day_list(f"{entry_path}.hole_days", e.get("hole_days"))
+        out.append((label, reason, day))
+    return tuple(out)
+
+
+def _load_flags(raw: Any) -> dict[str, Any]:
+    """``book.flags``: PROD's sorted array of tokens (each stored as true) or the object form."""
+    if raw is None:
+        return {}
+    if isinstance(raw, list):
+        flags: dict[str, Any] = {}
+        for index, token in enumerate(raw):
+            if not isinstance(token, str) or not _TOKEN_RE.match(token) or token in flags:
+                raise ExportError(f"book.flags[{index}]: expected a unique lower-case token")
+            flags[token] = True
+        return flags
+    if not isinstance(raw, dict):
+        raise ExportError("book.flags: expected an array or an object")
+    for value in raw.values():
+        if value is not None and not isinstance(value, (bool, int, float, str)):
+            raise ExportError("book.flags: expected scalar values")
+    return dict(raw)
 
 
 def _load_book(raw: Any) -> Book:
@@ -389,25 +496,26 @@ def _load_book(raw: Any) -> Book:
     label = f["label"]
     if not isinstance(label, str) or not _BOOK_LABEL_RE.match(label):
         raise ExportError("book.label: expected one capital letter")
-    inputs = _obj("book.inputs", f["inputs"], ("n_keys",), ("n_keys",))
-    flags_raw = f.get("flags", {})
-    if not isinstance(flags_raw, dict):
-        raise ExportError("book.flags: expected an object")
-    for value in flags_raw.values():
-        if value is not None and not isinstance(value, (bool, int, float, str)):
-            raise ExportError("book.flags: expected scalar values")
-    reasons_raw = f.get("degrade_reasons", [])
+    inputs = _obj("book.inputs", f["inputs"], ("n_keys", "anchor_asof", "composed_at"), ("n_keys",))
+    _day_or_none("book.inputs.anchor_asof", inputs.get("anchor_asof"))
+    _str_or_none("book.inputs.composed_at", inputs.get("composed_at"))
+    reasons_raw = f.get("degrade_reasons") or []
     if not isinstance(reasons_raw, list) or not all(isinstance(r, str) for r in reasons_raw):
         raise ExportError("book.degrade_reasons: expected an array of strings")
+    returns = _day_values("book.returns", f["returns"], "date", "r")
+    if returns is None:
+        raise ExportError("book.returns: expected an array")
     return Book(
         label=label,
-        returns=_day_values("book.returns", f["returns"], "date", "r"),
-        flags=dict(flags_raw),
+        returns=returns,
+        flags=_load_flags(f.get("flags")),
         degrade_reasons=tuple(reasons_raw),
         n_keys=_count("book.inputs.n_keys", inputs["n_keys"]),
-        unpriced_native_keys=_label_list("book.unpriced_native_keys", f.get("unpriced_native_keys", [])),
-        no_capital_exited_keys=_label_list("book.no_capital_exited_keys", f.get("no_capital_exited_keys", [])),
-        failing_key_exits=_label_list("book.failing_key_exits", f.get("failing_key_exits", [])),
+        unpriced_native_keys=_exit_list("book.unpriced_native_keys", f.get("unpriced_native_keys"), None),
+        no_capital_exited_keys=_exit_list(
+            "book.no_capital_exited_keys", f.get("no_capital_exited_keys"), _NO_CAPITAL_EXIT_REASONS
+        ),
+        failing_key_exits=_exit_list("book.failing_key_exits", f.get("failing_key_exits"), _FAILING_KEY_EXIT_REASONS),
     )
 
 
@@ -419,6 +527,11 @@ def _load_declared(raw: Any, keys: Mapping[str, KeyInputs]) -> Declared:
     for index, label in enumerate(counted):
         if label not in keys:
             raise ExportError(f"declared.counted[{index}]: no such key")
+        k = keys[label]
+        if not (k.pnl or k.flows or k.dropped or k.stamp or k.stored_return_days):
+            # A counted key the compose replays has at least one day somewhere; none means the
+            # export lost it, and a silent absence would read as an unattributed book.
+            raise ExportError(f"declared.counted[{index}]: counted key has no level day")
     stitch_raw = f.get("stitch_parent", {})
     if not isinstance(stitch_raw, dict):
         raise ExportError("declared.stitch_parent: expected an object")
@@ -459,6 +572,23 @@ def _refuse_id_shaped(path: str, raw: Any) -> None:
             _refuse_id_shaped(f"{path}[{index}]", value)
 
 
+def _check_exit_agreement(book: Book, declared: Declared) -> None:
+    """The exit lists and ``declared.departed`` must agree (the job's departure rule)."""
+    for index, (label, _reason, day) in enumerate(book.no_capital_exited_keys):
+        if label in declared.counted and (day is None or declared.departed.get(label) != day):
+            raise ExportError(
+                f"book.no_capital_exited_keys[{index}]: a counted key's no-capital exit must be declared departed on its day"
+            )
+    for index, (label, _reason, day) in enumerate(book.failing_key_exits):
+        if day is None:
+            if label in declared.counted:
+                raise ExportError(
+                    f"book.failing_key_exits[{index}]: an exit with no day must not name a counted key"
+                )
+        elif label in declared.departed and declared.departed[label] != day:
+            raise ExportError(f"book.failing_key_exits[{index}]: the declared departure and the exit day disagree")
+
+
 def load_export(path: str) -> Export:
     """Read and strictly validate an export file."""
     with open(path, encoding="utf-8") as handle:
@@ -475,7 +605,10 @@ def load_export(path: str) -> Export:
         if not isinstance(label, str) or not _KEY_LABEL_RE.match(label):
             raise ExportError("keys: expected key labels")
         keys[label] = _load_key(label, record)
-    return Export(_load_book(top["book"]), keys, _load_declared(top["declared"], keys))
+    book = _load_book(top["book"])
+    declared = _load_declared(top["declared"], keys)
+    _check_exit_agreement(book, declared)
+    return Export(book, keys, declared)
 
 
 # ── levels ─────────────────────────────────────────────────────────────────────────────────────
@@ -502,7 +635,8 @@ class KeyLevels:
 def roll_key_levels(key: KeyInputs) -> KeyLevels:
     """The writer-basis backward roll, the per-key stamp identity check, then the book levels.
 
-    Level days are the union of P&L, flow, dropped and stamped days. The terminal level sits on
+    Level days are the union of P&L, flow, dropped, stamped and stored-return days (a key with no
+    writer basis has only the last, and no level). The terminal level sits on
     the last P&L day and ``level(prev) = level(day) - F(day) - P(day)``. The stored return on a
     day with a return is ``P(day) / level(prev)``, checked against the stamp under the book
     tolerances. Both the identity and the emptied scan run on these RAW levels (the SPEC's
@@ -513,7 +647,7 @@ def roll_key_levels(key: KeyInputs) -> KeyLevels:
     otherwise a positive live anchor replaces it. A last day that is not emptied takes a positive
     ``anchor_usd`` as before (a step on that one day, the carried base past the key's own end)."""
     stamp = key.stamp or {}
-    days = tuple(sorted(set(key.pnl) | set(key.flows) | set(key.dropped) | set(stamp)))
+    days = tuple(sorted(set(key.pnl) | set(key.flows) | set(key.dropped) | set(stamp) | set(key.stored_return_days)))
     has_basis = bool(key.pnl) and key.terminal_day is not None and key.terminal_usd is not None
     stamp_available = key.stamp is not None
     if not days or not has_basis or key.terminal_usd is None:
@@ -1310,6 +1444,14 @@ _SQL_STATEMENTS: Final[tuple[tuple[str, str, str], ...]] = (
         "  FROM api_keys\n"
         " WHERE user_id = :'book_id'\n"
         " ORDER BY account_group, id;",
+    ),
+    (
+        "key_return_days",
+        "one key's csv_daily_returns days in [:'from_day', :'to_day'), as one JSON array of ISO days (NULL when none)",
+        "SELECT jsonb_agg(to_char(date, 'YYYY-MM-DD') ORDER BY date) AS days\n"
+        "  FROM csv_daily_returns\n"
+        " WHERE allocator_id = :'book_id' AND api_key_id = :'key_id'\n"
+        "   AND date >= :'from_day'::date AND date < :'to_day'::date;",
     ),
 )
 SQL_LABELS: Final[tuple[str, ...]] = tuple(label for label, _what, _sql in _SQL_STATEMENTS)

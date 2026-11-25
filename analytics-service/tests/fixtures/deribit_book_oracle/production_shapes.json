@@ -1,0 +1,75 @@
+{
+  "_comment": "Every value here is synthetic. explained_two_keys.json's keys and published values, in the payload shapes the PROD compose stores: flags a sorted array of tokens; degrade_reasons an array; inputs the full object (n_keys, anchor_asof, composed_at); the three exit lists as objects with a k-label, a closed reason and a day or null; the book's returns as year slices with a null slice first; k1's dropped_day_pnl null (a null field is ABSENT). k2 exits no-capital (dust) on 2025-01-05, its last day, so it is declared departed on that day; k3 failed read_incomplete with no return day and was never counted (not in keys); k4 is an unpriced native key with an unknown day. HAND DERIVATION is explained_two_keys.json's: published 4, explained 4, withheld 0, omitted 1 (d1 no_stored_base_level), annotated 1 (k1's flow day d4), verdict CLEAN, exit 0; k2's departure on d5 changes no explained day.",
+  "book": {
+    "label": "A",
+    "returns": [null, [{"date": "2025-01-02", "r": 0.01}, {"date": "2025-01-03", "r": -0.0165016501650165}, {"date": "2025-01-04", "r": 0.020134228187919462}, {"date": "2025-01-05", "r": 0.040123456790123455}]],
+    "flags": ["departed_history_included", "no_capital_key_exited", "writer_basis"],
+    "degrade_reasons": ["window_truncated"],
+    "inputs": {
+      "n_keys": 2,
+      "anchor_asof": "2025-01-05",
+      "composed_at": "2025-01-06T05:31:00+00:00"
+    },
+    "no_capital_exited_keys": [{"api_key_id": "k2", "reason": "dust", "day": "2025-01-05"}],
+    "failing_key_exits": [{"api_key_id": "k3", "reason": "read_incomplete", "day": null}],
+    "unpriced_native_keys": [{"api_key_id": "k4", "day": null, "reason": "day_unknown"}]
+  },
+  "keys": {
+    "k1": {
+      "composed_day_pnl": [
+        {"utc_day_iso": "2025-01-01", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-02", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-03", "pnl_usd": -20},
+        {"utc_day_iso": "2025-01-04", "pnl_usd": 30},
+        {"utc_day_iso": "2025-01-05", "pnl_usd": 40}
+      ],
+      "composed_flows": [
+        {"utc_day_iso": "2025-01-04", "flow_usd": 100}
+      ],
+      "dropped_day_pnl": null,
+      "returns_stamp": [
+        {"utc_day_iso": "2025-01-02", "return": 0.01},
+        {"utc_day_iso": "2025-01-03", "return": -0.019801980198019802},
+        {"utc_day_iso": "2025-01-04", "return": 0.030303030303030304},
+        {"utc_day_iso": "2025-01-05", "return": 0.03571428571428571}
+      ],
+      "realized_terminal_day": "2025-01-05",
+      "realized_terminal_usd": 1160,
+      "anchor_usd": 1170,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    },
+    "k2": {
+      "composed_day_pnl": [
+        {"utc_day_iso": "2025-01-01", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-02", "pnl_usd": 5},
+        {"utc_day_iso": "2025-01-03", "pnl_usd": -5},
+        {"utc_day_iso": "2025-01-04", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-05", "pnl_usd": 25}
+      ],
+      "composed_flows": [],
+      "dropped_day_pnl": [],
+      "returns_stamp": [
+        {"utc_day_iso": "2025-01-02", "return": 0.01},
+        {"utc_day_iso": "2025-01-03", "return": -0.009900990099009901},
+        {"utc_day_iso": "2025-01-04", "return": 0.0},
+        {"utc_day_iso": "2025-01-05", "return": 0.05}
+      ],
+      "realized_terminal_day": "2025-01-05",
+      "realized_terminal_usd": 525,
+      "anchor_usd": 525,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    }
+  },
+  "declared": {
+    "counted": ["k1", "k2"],
+    "departed": {
+      "k2": "2025-01-05"
+    }
+  }
+}
