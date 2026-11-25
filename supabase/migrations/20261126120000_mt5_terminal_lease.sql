@@ -165,3 +165,99 @@ REVOKE ALL ON FUNCTION public.acquire_mt5_terminal_lease(text, uuid, text, text,
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.acquire_mt5_terminal_lease(text, uuid, text, text, integer)
   TO service_role;
+
+-- ==========================================================================
+-- STEP 4: renew_mt5_terminal_lease
+-- ==========================================================================
+-- Matches on the token alone, regardless of expiry: an expired lease nobody has taken
+-- is still renewable by its holder, and once anyone else takes the row the token no
+-- longer matches. Because release NULLs the token (DEC-01-A), a renew that lands after
+-- the release matches nothing.
+CREATE FUNCTION public.renew_mt5_terminal_lease(
+  p_terminal_digest text,
+  p_owner_token     uuid,
+  p_ttl_s           integer
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $function$
+DECLARE
+  v_rows integer;
+BEGIN
+  IF p_terminal_digest IS NULL OR p_terminal_digest !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'renew_mt5_terminal_lease: p_terminal_digest must be 64 lower-case hex characters'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_owner_token IS NULL THEN
+    RAISE EXCEPTION 'renew_mt5_terminal_lease: p_owner_token must not be NULL'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_ttl_s IS NULL OR p_ttl_s < 1 OR p_ttl_s > 900 THEN
+    RAISE EXCEPTION 'renew_mt5_terminal_lease: p_ttl_s must be between 1 and 900'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  UPDATE public.mt5_terminal_leases
+     SET expires_at = now() + make_interval(secs => p_ttl_s)
+   WHERE terminal_digest = p_terminal_digest
+     AND owner_token = p_owner_token;
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END
+$function$;
+
+COMMENT ON FUNCTION public.renew_mt5_terminal_lease(text, uuid, integer) IS
+  'Phase 230 MT5D-02. Moves expires_at to now() plus p_ttl_s seconds (1 to 900) for the row whose owner_token equals p_owner_token, and returns true iff a row matched. It matches regardless of expiry, but a row another token has taken, and a row its holder released (owner_token NULL), match nothing and return false. Bad input raises invalid_parameter_value (22023). service_role only.';
+
+REVOKE ALL ON FUNCTION public.renew_mt5_terminal_lease(text, uuid, integer)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.renew_mt5_terminal_lease(text, uuid, integer)
+  TO service_role;
+
+-- ==========================================================================
+-- STEP 5: release_mt5_terminal_lease
+-- ==========================================================================
+-- DEC-01-A: release clears the owner token and ages the row out, and keeps the row. A
+-- foreign token matches nothing, so it changes nothing and returns false.
+CREATE FUNCTION public.release_mt5_terminal_lease(
+  p_terminal_digest text,
+  p_owner_token     uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $function$
+DECLARE
+  v_rows integer;
+BEGIN
+  IF p_terminal_digest IS NULL OR p_terminal_digest !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'release_mt5_terminal_lease: p_terminal_digest must be 64 lower-case hex characters'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_owner_token IS NULL THEN
+    RAISE EXCEPTION 'release_mt5_terminal_lease: p_owner_token must not be NULL'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  UPDATE public.mt5_terminal_leases
+     SET owner_token = NULL,
+         expires_at  = now()
+   WHERE terminal_digest = p_terminal_digest
+     AND owner_token = p_owner_token;
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END
+$function$;
+
+COMMENT ON FUNCTION public.release_mt5_terminal_lease(text, uuid) IS
+  'Phase 230 MT5D-02. Frees the lease for p_terminal_digest when p_owner_token holds it: sets owner_token NULL and expires_at now(), keeps the row, and returns true. A token that does not hold the lease changes nothing and gets false. Because the token is cleared, a renew that lands after the release can never match. Bad input raises invalid_parameter_value (22023). service_role only.';
+
+REVOKE ALL ON FUNCTION public.release_mt5_terminal_lease(text, uuid)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.release_mt5_terminal_lease(text, uuid)
+  TO service_role;
