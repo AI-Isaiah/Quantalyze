@@ -407,10 +407,19 @@ Plans:
 2. After the fix, seven consecutive nights show every MT5 derive `done` with `attempts=1`, read from stored job rows and recorded with their dates. No retry budget or watchdog threshold was raised. (MT5D-02)
 3. Each MT5 derive value that moved without explanation is replayed under both server-clock settings and attributed to the clock switch or to another named cause. The repo's record of the setting alone is not a replay. (MT5D-03)
 4. PROOF-01: a test that drives the named cause goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 0 plans
+**Plans:** 10 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [ ] 230-01-PLAN.md — the terminal lease table and its three token-fenced RPCs, proven on the pg-lane (MT5D-02)
+- [ ] 230-02-PLAN.md — mt5_terminal_lease takes the database lease; two processes never share the terminal, PROOF-01 on production code (MT5D-02)
+- [ ] 230-03-PLAN.md — the dry run's --days-out flag and the clock-replay runbook with the capture contract (MT5D-03)
+- [ ] 230-04-PLAN.md — a missing lease RPC degrades loudly, every other database error fails closed (MT5D-02)
+- [ ] 230-05-PLAN.md — the transient classify arm, the holdings sync-error arm and the two validate arms (MT5D-02)
+- [ ] 230-06-PLAN.md — the SQL, function and gate-file censuses moved to measured values (MT5D-02)
+- [ ] 230-07-PLAN.md — [BLOCKING] the migration on the local-stack lane, the live PostgREST test, every suite green (MT5D-02)
+- [ ] 230-08-PLAN.md — re-stamp rehearsal, the lease runbook, the corrected single-replica note, ship records (MT5D-02, MT5D-03)
+- [ ] 230-09-PLAN.md — the nightly evidence proven on the lane, then seven nights after both deploys (MT5D-02, human-gated)
+- [ ] 230-10-PLAN.md — the capture hand-off proven offline, then the coordinator's replay and the per-scope attribution (MT5D-03, human-gated)
 
 ### Phase 231: BYBITREADS — a Bybit read covers every coin, settle type, window and deposit exactly once, or refuses by name
 
