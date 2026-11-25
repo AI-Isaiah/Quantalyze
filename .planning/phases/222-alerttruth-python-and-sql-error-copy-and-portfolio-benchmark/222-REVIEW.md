@@ -28,10 +28,15 @@ files_reviewed_list:
   - supabase/schema/functions/computation_error_copy.sql
   - supabase/tests/test_sync_status_curated_sentence_survives.sql
   - supabase/tests/test_sync_status_marked_refresh_protected.sql
+# Counts and status below are the OPEN set after round 2 (see "## Round 2").
+# Round 1 counted warning 2 / info 2; its two MEDIUMs (WR-01, SFH-01) were taken by the fixer.
+round: 2
+round_2_reviewed: 2026-11-25T15:10:00Z
+round_2_scope: "git diff 84d7ce330..HEAD -- . ':!.planning' (8e82ab636, 1d5f488ff)"
 findings:
   critical: 0
-  warning: 2
-  info: 2
+  warning: 1
+  info: 3
   total: 4
   necessity: 0
 status: issues_found
@@ -172,3 +177,123 @@ The publish read (`_strategy_has_published_numbers`) and the `failed` upsert (`c
 **Fix direction:** make the write itself conditional on "nothing published" (for example an update filtered to rows that are not at a success status and not `computing` with `metrics_json`, falling back to insert only when no row exists), or another minimal mechanism that closes the window. Keep the payload's five keys and the founder rulings unchanged.
 
 SFH LOW/INFO findings (not fixed, per repo rule): stale "wizard may still hang" log text; `benchmarkNoteTone` has no caller (accepted by OQ1); migration self-verify does not assert volatility/search_path/canary; parity test ties to the snapshot, not the migration.
+
+## Round 2
+
+**Reviewed:** 2026-11-25T15:10:00Z
+**Scope:** `git diff 84d7ce330..HEAD -- . ':!.planning'`, which covers `8e82ab636` (WR-01 tests) and `1d5f488ff` (SFH-01's conditional UPDATE plus the re-pointed tests). Four files:
+- `analytics-service/services/job_worker.py`
+- `analytics-service/tests/test_job_worker.py`
+- `analytics-service/tests/test_failed_status_logged.py`
+- `analytics-service/tests/test_sync_trades_enqueue_failure_bridge_live.py`
+
+**Status:** issues_found. One MEDIUM (data-integrity) remains.
+
+**Evidence base.** The offline gates ran here and passed (`14 passed, 7 skipped`). The 7 skips are the live module: no local-stack lane was booted for this round. Every live RED and GREEN result quoted below comes from the fixer (222-REVIEW-FIX.md), not from this round. The SQL claims below come from reading `supabase/schema/functions/*.sql`.
+
+### What holds
+
+1. **The filter is the exact inverse of `_strategy_has_published_numbers`.**
+   - The predicate (job_worker.py:2903-2918) is `status IN success OR (status = 'computing' AND metrics_json IS NOT NULL)`.
+   - Its negation is `status NOT IN success AND (status <> 'computing' OR metrics_json IS NULL)`, and that is what `.not_.in_(...)` and `.or_(...)` express.
+   - `computation_status` is `NOT NULL DEFAULT 'pending'` (baseline.sql:14718; initial_schema.sql:74), so no NULL-status row can fall through the `neq`.
+   - Syntax was built with the pinned postgrest-py 2.33.0. The chain serialises to `computation_status=not.in.(complete,complete_with_warnings)&or=(computation_status.neq.computing,metrics_json.is.null)`, which is valid PostgREST. `update()` defaults to `returning=representation`.
+   - One parity edge, a JSON `null` stored in `metrics_json`, is recorded as R2-IN-02.
+2. **With no row, the bridge creates one.**
+   - `mark_compute_job_failed` always runs `sync_strategy_analytics_status(strategy, job)` (mark_compute_job_failed.sql:270-283).
+   - `v_job_count >= 1`, because the `sync_trades` job itself counts. `sync_trades` is not in `v_side_kinds`, so neither side-trigger early return fires.
+   - On `failed_retry`, the job is nonterminal and branch (a) INSERTs `computing`. On `failed_final`, the job is a live, unprotected failure and branch (b) INSERTs `failed` with `computation_error_copy('transient')`. Both branches use `INSERT … ON CONFLICT`, so a strategy with no row does get one.
+   - The only window that differs is a mark-RPC failure, recorded as R2-IN-03.
+3. **WR-01 is closed.**
+   - The offline `test_a_non_success_row_with_old_figures_is_not_published` (failed or pending, with figures) goes RED under the review's mutation: DONE != FAILED.
+   - The live `failed-figures` case goes RED on the resurrection (`'complete' == 'failed'`), per the fixer's log.
+   - Both assert the FAILED/transient outcome, which is what the mutation changes.
+4. **The new chain pin can fail.**
+   - `test_failed_write_is_conditional_on_nothing_published` pins the method sequence and every argument string.
+   - Dropping `not_`, dropping `.or_`, changing a column, changing a status list or reverting to `upsert` each turns it RED. The fixer's log shows the upsert revert as `['upsert'] == ['update', …]`.
+5. **The census is unchanged.** There is still one payload-shaped statement, `EXPECTED_INERT_SITES = 1`, the payload is unstamped, and the five keys are as before. This matches the 222-CONTEXT.md rulings.
+
+### Warnings
+
+#### R2-WR-01: SFH-01 is only half closed. The outcome is still decided from the stale read, so on the last attempt the bridge writes `failed` over the row published in between (MEDIUM, data-integrity)
+
+**Files:**
+- `analytics-service/services/job_worker.py:2922`: the publish read.
+- `job_worker.py:3009-3021`: the conditional UPDATE, whose result is discarded.
+- `job_worker.py:3034-3041`: the unconditional `FAILED` return.
+- `supabase/schema/functions/sync_strategy_analytics_status.sql:744-754`: branch (b).
+- `analytics-service/tests/test_sync_trades_enqueue_failure_bridge_live.py:447-476`: the race test.
+
+**Issue:** The conditional UPDATE stops the handler's own overwrite. That is the half that is fixed: `computation_warned` and the status survive the handler. But the handler still returns `FAILED/transient` whenever the read said "nothing published", even when the UPDATE matched no row because a concurrent writer had just published. What follows comes from reading the SQL:
+
+- **Last attempt.** `mark_compute_job_failed` sets the job to `failed_final` and runs the bridge. `sync_trades` is not a protected kind, nothing newer of the same kind is `done`, and once the concurrent publisher has finished `v_nonterminal_count = 0`. Branch (b) then runs, and its `SET computation_status = EXCLUDED.computation_status` writes `failed` with the curated transient sentence over the freshly published row. The figures stay, `computation_warned` is kept, and the strategy now reads `failed`. That is SFH-01's stated harm ("a published strategy can read `failed`"), one RPC later instead of in the handler.
+- **Earlier attempts.** The job is `failed_retry`, which is unmarked and nonterminal, so `v_refresh_keep` is false. Branch (a) turns a published `complete` row into `computing` until the retry. The retry reads it as published, returns DONE, and branch (c) writes `complete` again. This part self-heals.
+- **Why the gate cannot see it.** The race test uses `attempts_before_claim=0`, a non-final attempt, and asserts on `after_handler`, which is the row before the mark RPC and the bridge run. Its seeded row is `complete_with_warnings`, which branch (a) keeps. So it covers neither the bridge nor the last attempt.
+- **Overclaims.** The code comment at :3000-3008 says a row published in between "is left untouched". 222-REVIEW-FIX.md says SFH-01 is fixed. Both hold for the handler's write only.
+
+The window is still a single round trip plus the last attempt, which is narrower than before. It is the same harm SFH-01 was routed for, and the fix is small and stays inside the same statement.
+
+**Fix:** decide the return from the write's result. A zero-row UPDATE means one of two things: no row (keep FAILED, and the bridge creates the row) or a row published in between (take the published path). Only a read is added, so it is still one payload-shaped write statement and the census is unaffected:
+
+```python
+def _mark_analytics_failed() -> bool:
+    _enqueue_failed_payload = {...}  # unchanged, five keys, unstamped
+    res = (
+        ctx.supabase.table("strategy_analytics")
+        .update(_enqueue_failed_payload)
+        .eq("strategy_id", strategy_id)
+        .not_.in_("computation_status", sorted(STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES))
+        .or_("computation_status.neq.computing,metrics_json.is.null")
+        .execute()
+    )
+    return bool(getattr(res, "data", None))
+
+wrote = await db_execute(_mark_analytics_failed)
+if not wrote and await db_read_with_retry(_strategy_has_published_numbers):
+    logger.error("sync_trades: ... published between the read and the write — writing nothing, returning DONE")
+    _nothing_published = False  # fall through to the DONE return
+```
+
+Extend the live race test to the last attempt (`attempts_before_claim=None`) and assert the row after the mark RPC (`row` from `_drive`) still reads `complete_with_warnings`. Neuter the re-check and confirm the test goes RED with `'failed'`.
+
+### Info (LOW; recorded here only, per the repo rule)
+
+#### R2-IN-01: No live case observes the UPDATE positively matching, and the race test stays green if the UPDATE errors
+
+**File:** `test_sync_trades_enqueue_failure_bridge_live.py:447-476`, with the swallowing `except` at `job_worker.py:3022`.
+
+**Issue:** The write sits inside the `except Exception` that logs and swallows. A PostgREST 400 would leave the row untouched, and the race test would still pass. So the fix report's statement that this test is "the live proof that the PostgREST `not_.in_` and `or_` syntax is accepted" does not hold.
+
+No live case shows the UPDATE writing a non-published row either:
+- `failed-figures` ends where branch (b) puts it anyway.
+- The no-row cases match nothing.
+
+The match is load-bearing on a `failed` row with `computation_warned = true`, a real state because branch (b) keeps `warned`. If the UPDATE missed that row, branch (a) would resurrect it to `complete_with_warnings`.
+
+Rated LOW because the offline chain pin fixes every string, and the serialised query was verified here, so no plausible code mutation survives.
+
+**Fix (if taken):** add a live case seeded with `failed` + `computation_warned: True` + `metrics_json`, using `attempts_before_claim=0` and `after_handler`. Assert `computation_warned is False` and that the handler's own sentence is stored.
+
+#### R2-IN-02: A JSON `null` in `metrics_json` splits the Python read from the filter
+
+**File:** `job_worker.py:2916` against `:3017`.
+
+**Issue:** Python treats both a SQL NULL and a jsonb `'null'` as `None`, so a `computing` row holding jsonb `'null'` counts as "not published". The PostgREST `metrics_json.is.null` filter and the bridge's `v_has_figures` (`IS NOT NULL`) treat that row as carrying figures. The result is that the UPDATE skips the row while the handler returns FAILED. This only matters if some writer stores a jsonb `'null'`; none was found.
+
+**Fix:** none needed now.
+
+#### R2-IN-03: With no row and a failed mark RPC, the strategy stays row-less until the reaper requeues
+
+**File:** `job_worker.py:2996-3021`.
+
+**Issue:** The old upsert created a `failed` row. The UPDATE creates nothing, so if `mark_compute_job_failed` also fails, nothing writes the row until the reaper reclaims the job. The fixer flagged this as needing the founder's confirmation (222-REVIEW-FIX.md, "requires human verification"). It is recorded here so that confirmation is not lost. The trigger is a double fault.
+
+### Round 2 verdict
+
+- **WR-01:** closed.
+- **SFH-01:** half closed. The handler no longer overwrites the row, but its FAILED return still lets bridge branch (b) mark the row published in between as `failed` on the last attempt (R2-WR-01).
+- **Open MEDIUM+:** 1 (R2-WR-01, data-integrity). Status: `issues_found`.
+
+_Round 2 reviewed: 2026-11-25T15:10:00Z_
+_Reviewer: Claude (gsd-code-reviewer)_
+_Depth: standard_
