@@ -245,6 +245,16 @@ founder can take.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[222-FIRST-HOP-SWEEP-CONTACT-SUPPORT]` The first-hop enqueue sweep's sentence still says "contact support", a channel that does not exist** (logged 2026-11-25, Phase 222 ALERTTRUTH ship; user-facing; owner: the next phase that writes a migration touching `first_hop_enqueue_sweep` or analytics error copy)
+  - **What:** `supabase/migrations/20261124120400_first_hop_enqueue_sweep.sql` writes "Analytics has not started for this strategy: its first sync was never queued, and the automatic retry did not complete. Retry the sync, or contact support if this persists." Phase 222 moved every `computation_error_copy` arm and five Python sentences to the contact form, and the founder kept this sweep out of that migration (222 CONTEXT, OQ3).
+  - **Fix direction:** a migration that re-bases the sweep on its latest definition and names the contact form, with the same wording as the `computation_error_copy` arms.
+  - **Gate:** a SQL gate that reads the sweep's body and fails on "contact support", shown RED before the fix.
+
+- [ ] **`[222-SYNCTRADES-REREAD-FAILED]` A failed re-read after a zero-row write in `run_sync_trades_job`'s enqueue-failure tail returns FAILED** (logged 2026-11-25, Phase 222 ALERTTRUTH review SFH-R3-01, MEDIUM per the silent-failure hunter and disputed by the round-3 reviewer; data-integrity; owner: Phase 251 SYNCSTORE)
+  - **What:** triple fault. The follow-on enqueue fails, a concurrent job publishes between the publish read and the conditional write (so the write matches 0 rows), and the re-read then raises. The handler returns FAILED, so on the last attempt bridge branch (b) can write `failed` over the published row. The log line says "wizard may still hang", which is misleading.
+  - **Why not fixed in 222:** treating an unreadable re-read as DONE would bring back the `complete`-with-no-analytics outcome for the far more common no-row case, so the reviewer holds FAILED as the right default and only the log line wrong. The two readings conflict and the window needs three faults together.
+  - **Gate:** a live-lane test in `test_sync_trades_enqueue_failure_bridge_live.py` that makes the re-read raise after a zero-row write over a published row, and pins the decided outcome.
+
 - [ ] **`[225-SWAP-LOCKSET-PIN]` The `swap_account_slot` lock-set fix has no arm that fails on revert** (logged 2026-11-23, Phase 225 ONEACCOUNTONCE PR-1 review round 2, MEDIUM, not user-facing; owner: the next phase that touches `swap_account_slot`)
   - **What:** the WR-01 fix adds `OR account_shared_with_api_key_id = p_old_holder` to the id-ordered `FOR UPDATE` pass, so two swaps on sibling duplicates queue instead of deadlocking. The SQL lane runs one session, so reverting that clause brings back a raw 40P01 without any gate going red. The fix was proven with a two-session harness that is not in the repo.
   - **Fix direction:** a static twinned arm that asserts the function source carries the dependent clause inside the lock query, or a two-session lane test.
@@ -255,16 +265,6 @@ founder can take.
   - **Fix direction:** log the `error_code` value only, sliced to a short length, in that branch. Never log `error_description`, which GoTrue fills with free text.
   - **Gate:** a callback test that sends `error_code=otp_expired` with the marker and asserts the console line carries the code and not the description, shown RED before the fix.
       ⭐ **Owned by Phase 221 SENTRYSCRUB2, v1.23; REQUIREMENTS.md SCRB-03; tagged 2026-11-23.**
-
-- [ ] **`[212-CONTACT-SUPPORT-SURVIVORS]` The SQL error copy and five Python strings still say "contact support", a channel that does not exist** (logged 2026-11-14, Phase 212 WIZTRUTH ship; user-facing)
-  - **What:** Phase 212 replaced every in-app "contact support" pointer in `src` with the contact form. Two places sit outside that census:
-    the `computation_error_copy` arms in `supabase/schema/functions/computation_error_copy.sql` (the permanent, transient, unknown and ELSE arms),
-    and five Python strings: `services/exchange.py` (the `VALIDATION_UNEXPECTED` message), `services/csv_validator.py`,
-    `services/job_worker.py` (two), and `routers/portfolio.py` (`_fail_vr` "Verification failed").
-  - **Why open:** the SQL change needs a migration, which Phase 212's SC7 ruled out. So csv-finalize's `ENQUEUE_LOST_RACE_USER_COPY` and the SQL ELSE arm are deliberately NOT in byte parity now
-    (`csv-finalize/route.test.ts` uses a hand-typed oracle). When the migration lands, restore the parity test against the SQL arm.
-  - **Owner:** a later migration phase (not yet booked). Trigger: the next phase that writes a migration touching analytics error copy.
-      ⭐ **Owned by Phase 222 ALERTTRUTH, v1.22; REQUIREMENTS.md ERRC-01; tagged 2026-11-23.**
 
 - [ ] **[209-SENTRY-DIRECT-CAPTURE-DETAILS]** (logged 2026-11-14, Phase 209 SCRUBLEAKS review residual, CONTEXT `<deferred>`; MEDIUM, security/data-integrity; owner: unassigned, book a phase when taken up) **Direct `Sentry.captureException` call sites bypass `scrubCaptureInput`, so a plain PostgREST error object captured there still carries `details` and `hint` to Sentry under `extra.__serialized__`.**
   - **Why:** Phase 209 scrubbed the `captureToSentry` chokepoint and made `beforeSend` total; the SDK serialises a non-Error capture into `extra.__serialized__`, which `scrubSentryEvent` scrubs for share tokens only. Measured in review: `alert-digest` (two sites) ships `details`/`hint` this way.
@@ -615,26 +615,6 @@ per-metric decision.
       reader and a test that fails on today's `isoformat()`), or the list of readers is enumerated and
       each is shown to normalise.
 
-- [ ] **`[166.4.1-BENCHMARK-OUTAGE-LABEL]` A total benchmark source failure is labelled "stale", so an
-      outage reads as stale data (booked 2026-10-09, Phase 166.4.1 silent-failure review, MEDIUM M1).**
-      `get_benchmark_returns` (`analytics-service/services/benchmark.py`) returns `(None, True)` when
-      every price source failed and no recent cached day exists. `_compute_portfolio_analytics`
-      (`analytics-service/routers/portfolio.py`) tests `benchmark_rets is None or benchmark_stale` and
-      writes `BENCHMARK_NOTE_STALE` ("benchmark unavailable: stale") with `stale: true`. The page
-      therefore shows the stale wording where there is no benchmark data at all, and a reader cannot
-      tell a lagging cache from an outage. The comparison is honestly shown as unavailable and no
-      figure is wrong; the cause it names is the weaker of the two.
-      **Why not fixed in 166.4.1:** the worst finding of the review was MEDIUM, so by the founder's
-      rule there was no fixer round. The fix adds a fourth fixed sentence on both sides (the Python
-      constant and the page's colour rule), which is a wording call.
-      **Owner:** the founder, to route. **Trigger:** the next edit of the benchmark block in
-      `_compute_portfolio_analytics`, or the first report of a "stale" portfolio comparison that was
-      in fact an outage.
-      **Closed when:** the `(None, True)` exit writes its own named note, distinct from the stale-cache
-      note; the card renders it in the muted treatment, not amber; and a test that fails on today's
-      single label pins both exits.
-      ⭐ **Owned by Phase 222 ALERTTRUTH, v1.22; REQUIREMENTS.md ERRC-02; tagged 2026-11-23.**
-
 - [ ] **`[STRATTABLE-DESC-01]` The strategy list shows only the NAME, so two strategies
       with the same name are indistinguishable — the `description` that disambiguates them is
       already fetched and simply not rendered (founder-reported 2026-09-11 from the /browse
@@ -667,38 +647,6 @@ per-metric decision.
         founder feature request, not a review finding. No phase owns strategy-list presentation
         today; per the severity rule this entry IS the complete routing unless one appears.
 
-- [ ] **`[SYNCTRADES-ENQUEUE-DONE]` `run_sync_trades_job` returns DONE after recording an
-      analytics failure, so the bridge erases the record one RPC later — and the F1 remedy
-      does NOT transfer to this handler (booked 2026-09-06, 164.2-REVIEW WR-01).**
-      `analytics-service/services/job_worker.py` `run_sync_trades_job._mark_analytics_failed`
-      writes `computation_status='failed'` plus a curated sentence when the follow-on
-      `enqueue_compute_job` fails, then the handler returns `DispatchOutcome.DONE` (the trades
-      DID persist). `main_worker.py:929` maps DONE to `mark_compute_job_done`, whose in-RPC
-      `PERFORM sync_strategy_analytics_status` finds every job for the strategy terminal-done —
-      no analytics job was enqueued, that being the failure — and takes branch (c):
-      `computation_status='complete'`, `computation_error=NULL`, both provenance markers NULL,
-      `computed_at=now()`. **The user's row reads 'complete' with no analytics and a fresh
-      vintage**, and the wizard poller is handed a success for a strategy with no factsheet.
-      The erasure is PRE-EXISTING — the 161.1 F1 class, whose comment at `job_worker.py:5082`
-      describes it exactly and fixes it for the derive path by returning FAILED/permanent.
-      ⛔ **Do not simply copy that remedy here.** MEASURED: the bridge's `is_protected` predicate
-      is scoped to kinds `derive_broker_dailies`, `compute_analytics_from_csv` and
-      `stitch_composite` (`supabase/schema/functions/sync_strategy_analytics_status.sql:258-263`).
-      F1 is applied at a `derive_broker_dailies` job, so on a marked recurring refresh over a
-      healthy published row it lands on branch (b-prime), which PRESERVES the publish state.
-      `sync_trades` is not in that list and can never be protected, so the same edit here always
-      lands on the LOUD branch (b): a routine cron sync whose follow-on enqueue hiccups would
-      unpublish a live funded factsheet to 'failed' until the next tick's `done` supersedes it,
-      and a SYSTEMATIC enqueue fault (a bad kind, an RLS change) would take every live strategy
-      dark within one cron tick. **The work:** scope the FAILED return to the case with nothing
-      published to lose (no `strategy_analytics` row at `complete`/`complete_with_warnings`), or
-      give the dropped-enqueue readmit sweep a path that covers live-API strategies — either is
-      a founder-facing behaviour decision, which is why the review fix pass corrected the false
-      claims instead. Until it lands, P1's payload is deliberately UNSTAMPED and
-      `tests/test_computation_error_provenance_census.py` carves it out by exact key set with
-      `EXPECTED_INERT_SITES = 1`, so re-stamping it takes that count to 0 and reddens the gate.
-      ⭐ **Owned by Phase 222 ALERTTRUTH, v1.22; REQUIREMENTS.md ERRC-03; tagged 2026-11-23.**
-
 - [ ] **`[PROV-WRITER-23514]` The provenance markers sit on the FAILURE-RECORDING path, so a
       writer bug must cost the provenance and NOT the failure record (booked 2026-09-06,
       Phase 164.2 plan 06 three-reviewer gate, silent-failure-hunter).**
@@ -706,8 +654,8 @@ per-metric decision.
       `upsert_or_drop_provenance` (`analytics-service/services/strategy_analytics_provenance.py`)
       carries the degrade at every stamped site — NINE of them, the count pinned as
       `EXPECTED_STAMPED_SITES` in `test_computation_error_provenance_census.py`; the tenth
-      candidate, `run_sync_trades_job`, is deliberately unstamped per
-      `[SYNCTRADES-ENQUEUE-DONE]` — narrowed by constraint NAME at the review's
+      candidate, `run_sync_trades_job`, is deliberately unstamped (Phase 222 ALERTTRUTH kept its
+      enqueue-failure payload at its exact five keys; `EXPECTED_INERT_SITES = 1` pins it) — narrowed by constraint NAME at the review's
       WR-03, and plan 08 made a half-stamp inexpressible by deriving both markers from one
       `provenance_source(job_id)` expression. It stays OPEN because **implemented ≠ proven**: the
       retry arm is unreachable from today's writers and is exercised only against a mocked

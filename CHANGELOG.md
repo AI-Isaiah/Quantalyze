@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.133.81.0] - 2026-11-25 — Phase 222 ALERTTRUTH: error copy names the contact form, a benchmark outage is not "stale", and a failed sync_trades enqueue is no longer erased to complete
+
+### Changed
+- **Error copy names a channel that exists (ERRC-01).** Migration `20261125212222_computation_error_copy_contact_form.sql` re-bases `computation_error_copy` on `20260826120000` and rewrites the permanent, transient, unknown and ELSE arms to point at the contact form instead of "contact support". Signature, IMMUTABLE, NOT STRICT, `SET search_path = pg_catalog`, the stripper CANARY comment and the service_role-only ACL are re-issued as they were; the orphaned arm is byte-identical. The self-verify reads only the catalogue. A manual rollback is in `down/`, and the function snapshot is regenerated.
+- Five Python sentences follow the same rule: `services/exchange.py` `validate_key_permissions`, `services/csv_validator.py` `_maybe_auto_normalize_percent_form`, the enqueue-failure payload and the member-cap stamp in `services/job_worker.py`, and `routers/portfolio.py` `_fail_vr`. The wizard's quote of the `exchange.py` message in `src/lib/wizardErrors.ts` is corrected to match.
+- csv-finalize's `ENQUEUE_LOST_RACE_USER_COPY` is byte-equal to the SQL ELSE arm again, which Phase 212 had to leave apart because it could not ship a migration.
+- **A total benchmark outage is not "stale" (ERRC-02, narrowed by founder decision OQ1).** When every price source failed and no recent cached day exists, `_compute_portfolio_analytics` now stores `BENCHMARK_NOTE_NO_SOURCE` ("benchmark unavailable: no price source") with `stale: false`, distinct from the stale-cache note. `portfolio-analytics-adapter.ts` colours the note amber only when `stale` is true. `services/benchmark.py` is unchanged and there is no card rebuild.
+
+### Fixed
+- **`run_sync_trades_job` no longer returns DONE after recording an analytics failure that the bridge then erases to `complete` (ERRC-03, narrowed by founder decisions OQ2 and OQ4).** On a failed follow-on enqueue the handler first reads the strategy's publish state. When nothing is published it writes the failure with a conditional UPDATE and returns FAILED with `error_kind="transient"` and a constant, id-free operator sentence, so the row reads `computing` while retries remain and `failed` after the last one. A strategy at `complete`, `complete_with_warnings`, or `computing` with `metrics_json` keeps its publish state and gets no failed write. If the conditional write matches no row, the handler re-reads and returns DONE when the strategy was published in between. The payload keeps its exact five keys and stays unstamped, so `EXPECTED_INERT_SITES` stays 1.
+- Review-fix rounds on the same tail: WR-01 treats a `failed` or pending row that still carries an old `metrics_json` as nothing published; SFH-01 makes the failed write conditional on nothing published; R2-WR-01 adds the re-read after a zero-row write.
+
+### Tests
+- `test_no_contact_support_copy.py`: an AST scan of `analytics-service` with an anti-vacuity self-test, plus five per-function pins.
+- `csv-finalize/route.test.ts` parses the ELSE arm out of `supabase/schema/functions/computation_error_copy.sql` instead of using a hand-typed oracle, and a snapshot-wide pin refuses "contact support" in any arm.
+- `test_portfolio_benchmark_pairing.py::TestBenchmarkOutageIsNotStale` drives both real exits of `get_benchmark_returns` through `_compute_portfolio_analytics`, patching only the source layer. The adapter tests round-trip the no-source payload and pin its tone.
+- `test_sync_trades_enqueue_failure_bridge_live.py` (8 tests, local-stack lane): the real handler, the real mark RPCs and the real status bridge for the nothing-published, published, `complete_with_warnings` and race cases. The offline enqueue-failure tests in `test_job_worker.py`, the provenance census, `test_failed_status_logged.py` and the live-DB reach roster are updated.
+- The two SQL gates that pin the curated sentence (`test_sync_status_curated_sentence_survives.sql`, `test_sync_status_marked_refresh_protected.sql`) carry the new text and list the new migration last in `RED-UNDER-SETUP`. No mutation floor moved.
+- Every gate was shown RED on pre-fix or neutered code and GREEN after restore from a byte backup; the records are in the plan SUMMARYs.
+
+### Removed
+- `TODOS.md` entries closed by this phase: `[212-CONTACT-SUPPORT-SURVIVORS]`, `[166.4.1-BENCHMARK-OUTAGE-LABEL]` and `[SYNCTRADES-ENQUEUE-DONE]`. The one other `TODOS.md` entry that cited `[SYNCTRADES-ENQUEUE-DONE]` (`[PROV-WRITER-23514]`) now states the reason itself.
+
+### Notes
+- **Booked, not fixed:** `[222-FIRST-HOP-SWEEP-CONTACT-SUPPORT]` (the first-hop enqueue sweep still says "contact support"; the founder kept it out of this migration, OQ3) and `[222-SYNCTRADES-REREAD-FAILED]` (review SFH-R3-01, a triple-fault window where a failed re-read returns FAILED; disputed by the round-3 reviewer; owned by Phase 251 SYNCSTORE).
+- **Reviews:** gsd-code-reviewer and silent-failure-hunter over three rounds; migration-reviewer and rls-policy-auditor clean at MEDIUM+. The migration was re-stamped from `20261127120000` to `20261125212222` at ship so it sorts after main's latest migration; nothing else in it changed.
+- **Merge order:** the phase CONTEXT queues this migration behind Phase 225's PR-3 (migration B). Whichever lands second must re-stamp after the other.
+- **Expected drift:** `baseline-content-drift` reports `computation_error_copy` until the re-dump after the PROD apply. The migration auto-applies to TEST, then PROD, on merge.
+
 ## [0.133.80.0] - 2026-11-25 — Phase 252 DERIBITOPTIONS: a Deribit options book's cash-wallet figures are withheld by name on every surface
 
 A Deribit composite that trades options was publishing headline figures measured against the cash wallet alone. Its cumulative return, CAGR and Calmar were artefacts, because the cash wallet leaves out the market value of open option positions: a long option prints a loss on the buy day and a gain on the close day, measured against a premium-shrunk wallet. The root cause is in the debug session `deribit-implausible-returns` (mechanism B). The founder ruled "Withhold first, then MTM" on 2026-11-25. Wave 1, this PR, withholds those figures under a named reason. Wave 2 ships only the measurement tool for market-price valuation; the headline switches to it later, and only if the measurement passes. The ruling extends Phase 194 D-05 by this one named, structural withhold. It applies no numeric plausibility bound.
