@@ -28,7 +28,7 @@ key-decisions:
   - "No closed set changed: a no-basis counted key's days take the existing name no_stored_base_level (test_closed_sets_are_exact untouched and green)."
   - "emptied_stretch keeps a producer: withheld_emptied_stretch.json was re-derived so its published d7 and d8 are the values a book composed without the zero-capital rule would carry."
 metrics:
-  duration: "about 1 h 40 min wall clock, most of it machine-load-bound pytest runs"
+  duration: "not measured (start time was not captured; most wall clock was machine-load-bound pytest runs)"
   completed: 2026-11-25
 status: partial
 estimate_actuals_note: "Task 3 is the orchestrator's PROD re-reading and is pending; status stays partial until it is appended."
