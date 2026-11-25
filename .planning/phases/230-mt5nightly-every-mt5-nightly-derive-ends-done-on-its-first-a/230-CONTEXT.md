@@ -44,6 +44,8 @@ Out of scope: raising retries, the watchdog or any timeout (ROADMAP); moving or 
   - the two `process_key` validate arms must answer a retryable busy, never a bodyless 500.
 
   `Mt5TerminalLeaseUnavailableError` subclasses `Mt5TerminalBusyError`, so the wizard, heal and liveness arms need no edit.
+  - ⛔ CORRECTED 2026-11-26 (Phase 230 review round 1, SF-M1): the heal and liveness arms DID need an edit. A bounded acquire whose attempts got no answer at all now raises lease-unavailable, and `mt5_relogin`'s boot heal and `mt5_validation_liveness` catch it ahead of their busy arm (a lease-database outage is not "the terminal is in use"). The wizard arm is unchanged. The sentence above is kept as lineage.
+  - ⛔ CORRECTED 2026-11-26 (review round 1, SF-M4): a missing renew RPC mid-hold no longer ends the renew loop unfenced. It is logged loudly and counted as a failed renew, so the holder self-fences at the loss deadline. This supersedes plan 04's "renew stops without bumping the epoch". The acquire's missing-RPC fallback (DEC-04-A) is unchanged.
 - [Missing RPC] `is_missing_rpc` goes in `services/db.py`, because `mt5_concurrency` is a pinned leaf, with a parity test against `main_worker._is_missing_rpc`. It relogs every 900 s (the 227 cadence) and never latches. This replaces "logs once per process" above.
 - [Night 1] CORRECTS the night count above. Night 1 is the first 00:40Z derive after BOTH the backfill worker and the API service deploys carry the lease, because the holdings poll runs in the API process.
   - Each night also records three checks: the cross-process wait log count (the positive signal), that `poll_allocator_positions` attempts did not rise, and that the lease table holds one row per terminal.
