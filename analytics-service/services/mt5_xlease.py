@@ -256,6 +256,82 @@ class XLeaseUnavailable(Exception):
 
 
 # --------------------------------------------------------------------------- #
+# Late grants (RESEARCH Pitfall 2, Pattern 2).
+#
+# `db_execute` runs the RPC on a thread. When a caller gives up (its bound expires, it
+# is cancelled, or one call outlives `_MT5_XLEASE_RPC_TIMEOUT_S`) the thread keeps
+# running and the acquire may COMMIT afterwards, leaving a row held by a token nobody
+# owns for a full TTL. So every acquire call is a future that outlives its awaiter,
+# and a future abandoned in flight gets a done-callback that releases the token if the
+# call turns out to have been granted. Release is idempotent: a release that finds no
+# row held by the token is a no-op.
+# --------------------------------------------------------------------------- #
+#: Strong references to the scheduled cleanup releases, so the loop cannot garbage
+#: collect one mid-flight. Each task discards itself on completion.
+_CLEANUP_TASKS: set[asyncio.Task[None]] = set()
+
+
+async def _cleanup_release(backend: XLeaseBackend, digest: str, token: uuid.UUID) -> None:
+    """Release a late grant. NEVER raises ``Exception``: it runs detached, and a
+    raising detached task would reach ``main.lifespan``'s crash handler, which stops
+    dispatch (the reason the handover recorder never raises either)."""
+    try:
+        await asyncio.wait_for(backend.release(digest, token), _MT5_XLEASE_RPC_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — the row expires on its own TTL
+        logger.warning(
+            "mt5_xlease: releasing a late-landing grant failed (exc_class=%s); the "
+            "row expires on its own TTL",
+            type(exc).__name__,
+            extra={"event_type": "mt5_xlease_release_failed"},
+        )
+
+
+def _release_late_grants(
+    pending: set[asyncio.Future[bool]],
+    backend: XLeaseBackend,
+    digest: str,
+    token: uuid.UUID,
+) -> None:
+    """Attach the late-grant callback to every still-pending acquire future and empty
+    the set. A future that already finished True fires its callback at once, which
+    only costs one idempotent extra release."""
+    futures = list(pending)
+    pending.clear()
+    for fut in futures:
+        fut.add_done_callback(_late_grant_callback(backend, digest, token))
+
+
+def _late_grant_callback(
+    backend: XLeaseBackend, digest: str, token: uuid.UUID
+) -> Callable[[asyncio.Future[bool]], None]:
+    def _on_done(fut: asyncio.Future[bool]) -> None:
+        # Check cancelled() first, then exception(): both consume the outcome so
+        # asyncio never logs "exception was never retrieved" for a call nobody
+        # awaits any more.
+        if fut.cancelled() or fut.exception() is not None or fut.result() is not True:
+            return
+        task = fut.get_loop().create_task(_cleanup_release(backend, digest, token))
+        _CLEANUP_TASKS.add(task)
+        task.add_done_callback(_CLEANUP_TASKS.discard)
+
+    return _on_done
+
+
+def _reset_xlease_state_for_tests() -> None:
+    """Cancel and forget the cleanup tasks. Called from
+    ``mt5_concurrency.reset_terminal_state_for_tests``. Never touches the installed
+    backend, which ``tests/conftest.py`` owns. Safe after the test's loop closed: a
+    task on a closed loop is only dropped, never cancelled."""
+    for task in list(_CLEANUP_TASKS):
+        try:
+            if not task.done() and not task.get_loop().is_closed():
+                task.cancel()
+        except RuntimeError:
+            pass
+    _CLEANUP_TASKS.clear()
+
+
+# --------------------------------------------------------------------------- #
 # The hold.
 # --------------------------------------------------------------------------- #
 class XLeaseHold:
@@ -267,10 +343,13 @@ class XLeaseHold:
         backend: XLeaseBackend,
         digest: str,
         token: uuid.UUID,
+        pending: set[asyncio.Future[bool]],
     ) -> None:
         self._backend = backend
         self._digest = digest
         self._token = token
+        #: Acquire calls that timed out client-side and may still land (Pitfall 2).
+        self._pending = pending
         self._renew_task: asyncio.Task[None] | None = None
 
     def stop_renewing(self) -> None:
@@ -297,6 +376,10 @@ class XLeaseHold:
                 type(exc).__name__,
                 extra={"event_type": "mt5_xlease_release_failed"},
             )
+        finally:
+            # An acquire that timed out client-side may land AFTER this release and
+            # re-take the row for this token; release it again when it does.
+            _release_late_grants(self._pending, self._backend, self._digest, self._token)
 
 
 def _consume_future(fut: asyncio.Future[Any]) -> None:
@@ -334,24 +417,66 @@ async def acquire_terminal_xlease(
     ttl_s = int(_MT5_XLEASE_TTL_S)
     started = time.monotonic()
     deadline = None if bound_s is None else started + max(0.0, bound_s)
+    pending: set[asyncio.Future[bool]] = set()
+    refusals = 0
 
-    while True:
-        remaining = None if deadline is None else deadline - time.monotonic()
-        rpc_bound = _MT5_XLEASE_RPC_TIMEOUT_S
-        if remaining is not None:
-            rpc_bound = min(rpc_bound, max(remaining, _MT5_XLEASE_MIN_ATTEMPT_S))
-        try:
-            granted = await asyncio.wait_for(
-                backend.acquire(digest, token, holder_n, site_n, ttl_s), rpc_bound
+    try:
+        while True:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            rpc_bound = _MT5_XLEASE_RPC_TIMEOUT_S
+            if remaining is not None:
+                rpc_bound = min(rpc_bound, max(remaining, _MT5_XLEASE_MIN_ATTEMPT_S))
+            # The call is a FUTURE that outlives this await: `asyncio.wait` neither
+            # cancels it on a timeout nor when this task is cancelled, so the RPC's
+            # outcome stays observable (Pitfall 2). It joins `pending` BEFORE the
+            # await, so a cancellation mid-call is covered too.
+            fut: asyncio.Future[bool] = asyncio.ensure_future(
+                backend.acquire(digest, token, holder_n, site_n, ttl_s)
             )
-        except Exception:  # noqa: BLE001 — any backend failure fails closed
-            raise XLeaseUnavailable() from None
-        if granted:
-            return XLeaseHold(backend=backend, digest=digest, token=token)
-        remaining = None if deadline is None else deadline - time.monotonic()
-        if remaining is not None and remaining <= 0.0:
-            raise XLeaseBoundExpired() from None
-        sleep_s = _MT5_XLEASE_POLL_S + random.uniform(0.0, _MT5_XLEASE_POLL_JITTER_S)
-        if remaining is not None:
-            sleep_s = min(sleep_s, remaining)
-        await asyncio.sleep(sleep_s)
+            fut.add_done_callback(_consume_future)
+            pending.add(fut)
+            done, _ = await asyncio.wait({fut}, timeout=rpc_bound)
+            if fut in done:
+                pending.discard(fut)
+                try:
+                    granted = fut.result()
+                except Exception:  # noqa: BLE001 — any backend failure fails closed
+                    raise XLeaseUnavailable() from None
+                if granted:
+                    break
+                refusals += 1
+            # else: the call outlived its RPC bound. It stays in `pending`; the next
+            # poll reuses the same token, so a late grant is idempotent for it.
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0.0:
+                raise XLeaseBoundExpired() from None
+            sleep_s = _MT5_XLEASE_POLL_S + random.uniform(0.0, _MT5_XLEASE_POLL_JITTER_S)
+            if remaining is not None:
+                sleep_s = min(sleep_s, remaining)
+            await asyncio.sleep(sleep_s)
+    except BaseException:
+        # Abandoned (bound expiry, cancellation, an unreachable database): whatever is
+        # still in flight must release itself if it is granted after all.
+        _release_late_grants(pending, backend, digest, token)
+        raise
+
+    if refusals:
+        # ⭐ `mt5_xlease_waited` IS A CONTRACT. Plan 09's seven nights count this event
+        # as the positive signal that a cross-process collision happened and was
+        # serialized, so neither its name nor its extra keys may change without that
+        # plan. Counts and the site only: never the key, the host, the digest or the
+        # holder.
+        duration_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "mt5_xlease: waited for another process to release the terminal "
+            "(site=%s duration_ms=%d)",
+            site_n,
+            duration_ms,
+            extra={
+                "event_type": "mt5_xlease_waited",
+                "site": site_n,
+                "duration_ms": duration_ms,
+                "refusals": refusals,
+            },
+        )
+    return XLeaseHold(backend=backend, digest=digest, token=token, pending=pending)

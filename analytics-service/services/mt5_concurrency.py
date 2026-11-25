@@ -76,6 +76,7 @@ from services.mt5_handover import record_mt5_terminal_handover
 from services.mt5_xlease import (
     XLeaseBoundExpired,
     XLeaseUnavailable,
+    _reset_xlease_state_for_tests,
     acquire_terminal_xlease,
 )
 
@@ -334,8 +335,9 @@ def reset_terminal_state_for_tests() -> None:
     """Clear ALL process-wide per-terminal state — the ONE reset every test module
     should call, rather than a sixth hand-rolled ``.clear()``.
 
-    Today that is two registries: the ``asyncio.Lock`` registry here and the
-    WIZFORM-ABANDON / D-36 epoch registry in ``services.mt5_client``. Five test
+    Today that is two registries plus one task set: the ``asyncio.Lock`` registry
+    here, the WIZFORM-ABANDON / D-36 epoch registry in ``services.mt5_client``, and
+    the cross-process lease client's late-grant cleanup tasks (Phase 230). Five test
     modules already hand-cleared the first one; adding the epoch registry to each
     of them independently is how one of them ends up missing the third registry
     somebody adds next year. Test modules call THIS; new per-terminal state is
@@ -352,6 +354,7 @@ def reset_terminal_state_for_tests() -> None:
     """
     _MT5_TERMINAL_LOCKS.clear()
     _reset_mt5_epochs_for_tests()
+    _reset_xlease_state_for_tests()
 
 
 def _mt5_terminal_lock_for(terminal_key: str) -> asyncio.Lock:
