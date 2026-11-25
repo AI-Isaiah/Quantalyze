@@ -315,7 +315,8 @@ Written by plan 10 of Phase 230 before the coordinator runs anything.
 
 - **Date:** 2026-11-25 (UTC).
 - **Branch head sha (code reviewed and proven):** `e588332ab552dea5a78f4a9e8be87399654c838f`, branch
-  `gsd/phase-230-mt5nightly`. Use this as `<reviewed sha>` in step (0).
+  `gsd/phase-230-mt5nightly`. ⛔ CORRECTED 2026-11-26: use `8dbe2a60d878479c724882bb1a77f22635267bc9` (below) as `<reviewed sha>` in
+  step (0) instead; the review fixes after this sha changed `mt5_xlease.py`.
 - **Script sha256 (`mt5_capture_230.py`, 4083 bytes):**
   `36aa23fe598ec485791204ec546c5e077e9f610660541a423f8cf62fc1f674e0`. Check it with `shasum -a 256` on the
   saved copy before step (3).
@@ -344,3 +345,9 @@ Written by plan 10 of Phase 230 before the coordinator runs anything.
   no abort, no close, the message recorded instead of the class, a `holder` argument, an insert, an import of
   `mt5_terminal_lease`) were each caught by the harness or the AST check.
 - **The script text reaches the coordinator only in plan 10's checkpoint message.** It is in no tracked path.
+- **Write review re-confirmed 2026-11-26 at `8dbe2a60d878479c724882bb1a77f22635267bc9`** (after the phase's review rounds 1 to 3). Over the
+  nine step (0) files, `git diff --stat e588332ab 8dbe2a60d` touches only `services/mt5_xlease.py` (the acquire's
+  in-flight cap, the timeout accounting and the renew deadline). Its one write-shaped hit is still the `.rpc(`
+  inside `_PostgrestXLeaseBackend._call`, reachable only through `mt5_terminal_lease`, which the script never
+  calls. Import time still only defines names and constants and validates the timing. The script, its sha256
+  and the offline proof are unchanged. Use this sha as `<reviewed sha>` in step (0).
