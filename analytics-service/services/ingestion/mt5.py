@@ -353,6 +353,7 @@ class Mt5Adapter:
                             investor_pw=investor_pw,
                             server=server,
                             log_prefix="mt5.validate",
+                            site=SITE_VALIDATE_WORKER,
                         )
                     finally:
                         # Set by THIS thread when `run_probe` exits, however it

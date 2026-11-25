@@ -443,7 +443,12 @@ def test_run_probe_short_circuits_order_check_on_an_undetermined_terminal():
     )
 
     info, probe, terminal = run_probe(
-        client, login=42, investor_pw="pw", server="Broker-Demo", log_prefix="unit"
+        client,
+        login=42,
+        investor_pw="pw",
+        server="Broker-Demo",
+        log_prefix="unit",
+        site="validate_wizard",
     )
 
     assert "order_check" not in client.calls, client.calls
@@ -452,6 +457,95 @@ def test_run_probe_short_circuits_order_check_on_an_undetermined_terminal():
     assert info["login"] == 42
     # POST bracket: account_info is read a SECOND time and re-asserted.
     assert client.calls.count("account_info") == 2, client.calls
+
+
+_VERDICT_MSG = "mt5 poll server verdict"
+_REQUESTED = "Broker-Live"
+_OTHER = "Broker-Demo-7"
+_ACCT_LOGIN = 4242424
+
+
+def _verdict_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if _VERDICT_MSG in r.getMessage()]
+
+
+@pytest.mark.parametrize("site", ["validate_wizard", "validate_worker"])
+@pytest.mark.parametrize(
+    ("reported", "label"),
+    [
+        (_REQUESTED, "True"),
+        (_OTHER, "False"),
+        (None, "not_captured"),
+    ],
+    ids=["matching", "other-server", "no-server"],
+)
+def test_run_probe_writes_one_log_only_server_verdict_on_the_validation_terminal(
+    caplog, site, reported, label
+):
+    """225-20 WR-01 — PR-2c enforces the server check on the VALIDATION terminal
+    inside ``run_probe``, so the measurement that gates it must come from there too,
+    not only from the poll terminal. One INFO line per probe (the POST bracket
+    re-reads ``account_info`` and must not write a second), keyed by the validate
+    site and ``holder=validation``, and it never changes what ``run_probe`` returns
+    or refuses: a False and a not_captured probe return what a True one does.
+    """
+    import logging
+
+    from services.mt5_probe import run_probe
+
+    account = {"login": _ACCT_LOGIN, "trade_allowed": False}
+    if reported is not None:
+        account["server"] = reported
+    client = _FakeProbeClient(
+        account_info=account,
+        terminal_info={"connected": True, "trade_allowed": False},
+    )
+
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.mt5_read"):
+        info, probe, _terminal = run_probe(
+            client,
+            login=_ACCT_LOGIN,
+            investor_pw="pw",
+            server=_REQUESTED,
+            log_prefix="unit",
+            site=site,
+        )
+
+    assert info["login"] == _ACCT_LOGIN and probe == {}
+    lines = _verdict_lines(caplog)
+    assert lines == [
+        f"{_VERDICT_MSG} site={site} holder=validation "
+        f"session_server_matches_requested={label}"
+    ], lines
+    for secret in (_REQUESTED, _OTHER, str(_ACCT_LOGIN), "pw"):
+        assert secret.casefold() not in lines[0].casefold()
+
+
+def test_run_probe_on_a_login_mismatch_writes_no_server_verdict(caplog):
+    """The verdict is judged only on the snapshot whose login the PRE bracket
+    accepted; a wrong-account snapshot refuses first and logs nothing."""
+    import logging
+
+    from services.mt5_client import Mt5AccountMismatchError
+    from services.mt5_probe import run_probe
+
+    client = _FakeProbeClient(
+        account_info={"login": _ACCT_LOGIN + 1, "server": _REQUESTED},
+        terminal_info={"connected": True, "trade_allowed": False},
+    )
+
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.mt5_read"):
+        with pytest.raises(Mt5AccountMismatchError):
+            run_probe(
+                client,
+                login=_ACCT_LOGIN,
+                investor_pw="pw",
+                server=_REQUESTED,
+                log_prefix="unit",
+                site="validate_wizard",
+            )
+
+    assert _verdict_lines(caplog) == []
 
 
 @pytest.mark.parametrize(
