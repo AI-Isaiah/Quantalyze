@@ -19,7 +19,8 @@
  * most likely to arrive in a planning record, and a planning-only push skips
  * the vitest shards. The `frontend-lint` job is deliberately unfiltered, so
  * `npm run lint` runs on every event, docs-only included. The vitest test
- * `check-demo-credential-digests.test.ts` imports this module for named arms.
+ * `check-demo-credential-digests.test.ts` imports this module for named arms
+ * and gets the live-tree result from this CLI's `--json` mode.
  *
  * FAILURE OUTPUT IS ROLE, PATH AND LINE ONLY. The matched window never leaves
  * `scanBuffer`: the output is pasted into CI logs and tracked records that
@@ -248,6 +249,17 @@ export function verdict(result: ScanResult): string[] {
 function main(): void {
   const result = scanTree(REPO_ROOT);
   const problems = verdict(result);
+  // `--json` prints the scan result and verdict as one JSON object instead of
+  // the human lines, with the same exit code. The vitest file reads it from a
+  // child process, so the whole-tree scan never runs under v8 coverage there.
+  // The payload carries role, path and line only, like the human output.
+  // `exitCode` and not `exit()`: an exit right after a large write to a pipe
+  // truncates it, and a red tree with thousands of matches is a large write.
+  if (process.argv.includes("--json")) {
+    console.log(JSON.stringify({ result, problems }));
+    process.exitCode = problems.length > 0 ? 1 : 0;
+    return;
+  }
   if (problems.length > 0) {
     console.error(`[check-demo-credential-digests] ${problems.length} match(es):`);
     for (const p of problems.slice(0, 50)) console.error(`  - ${p}`);

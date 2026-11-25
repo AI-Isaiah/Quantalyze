@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -64,10 +64,32 @@ function swapCase(s: string): string {
 }
 
 describe("demo credential digest guard", () => {
+  // The live-tree scan runs in a child process through the script's `--json`
+  // mode, exactly as `npm run lint` invokes it plus that one flag. Scanning
+  // in-process put every byte of the tree through v8-instrumented code on the
+  // CI coverage shards, which took past 120 s and timed the hook out.
   let live: ScanResult;
+  let liveProblems: string[];
+  let liveStatus: number | null;
 
   beforeAll(() => {
-    live = scanTree();
+    const run = spawnSync("npx", ["tsx", "scripts/check-demo-credential-digests.ts", "--json"], {
+      cwd: REPO_ROOT,
+      encoding: "utf-8",
+      maxBuffer: 1 << 26,
+    });
+    if (run.error) throw run.error;
+    let parsed: { result: ScanResult; problems: string[] };
+    try {
+      parsed = JSON.parse(run.stdout) as { result: ScanResult; problems: string[] };
+    } catch {
+      throw new Error(
+        `the guard's --json run printed no JSON (exit ${run.status}). stderr:\n${run.stderr}`,
+      );
+    }
+    live = parsed.result;
+    liveProblems = parsed.problems;
+    liveStatus = run.status;
   }, 120_000);
 
   for (const role of [
@@ -110,15 +132,12 @@ describe("demo credential digest guard", () => {
     expect(pkg.scripts.lint).not.toMatch(/check-demo-credential-digests\.ts\s*(?:\|\||;)/);
   });
 
-  it("CLI: the script run as npm run lint runs it exits 0 and prints the OK line", () => {
-    // execFileSync throws on a non-zero exit, so a red tree fails here too.
-    const out = execFileSync("npx", ["tsx", "scripts/check-demo-credential-digests.ts"], {
-      cwd: REPO_ROOT,
-      encoding: "utf-8",
-      maxBuffer: 1 << 24,
-    });
-    expect(out).toMatch(/^\[check-demo-credential-digests\] OK — \d+ tracked files, \d+ bytes scanned against 4 digest rows; 0 matches\.$/m);
-  }, 120_000);
+  it("CLI: the script npm run lint runs exits 0 with an empty verdict on the live tree", () => {
+    // The same child run as the per-role arms. Its exit code is the one lint
+    // sees, so a red tree, an unreadable path or a floor miss fails here.
+    expect(liveProblems).toEqual([]);
+    expect(liveStatus).toBe(0);
+  });
 
   it("verdict: every failure kind fails the run, and only a clean full scan passes", () => {
     const clean: ScanResult = {
