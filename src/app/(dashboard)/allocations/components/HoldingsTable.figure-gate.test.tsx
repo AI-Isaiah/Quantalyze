@@ -56,6 +56,9 @@ function marked(over: {
   span: number | null;
   crypto?: boolean;
   observations?: number | null;
+  mtd?: number | null;
+  maxDd?: number | null;
+  withheldBy?: "options_cash_wallet" | null;
 }): OwnCapitalStrategy {
   return {
     id: over.id,
@@ -64,16 +67,17 @@ function marked(over: {
     disclosure_tier: "exploratory",
     status: "private",
     capital_ownership: "own_capital",
-    mtd: null,
+    mtd: over.mtd ?? null,
     figure_span_days: over.span,
     figure_observations: over.observations ?? null,
     figure_crypto: over.crypto ?? true,
     figure_unreadable: false,
+    figure_withheld_by: over.withheldBy ?? null,
     strategy_analytics: {
       cagr: null,
       sharpe: over.sharpe,
       volatility: null,
-      max_drawdown: null,
+      max_drawdown: over.maxDd ?? null,
     },
   };
 }
@@ -92,6 +96,36 @@ function sharpeCell(container: HTMLElement, id: string): HTMLElement {
   const row = container.querySelector(`[data-strategy-row="${id}"]`)!;
   return row.querySelectorAll("td")[5] as HTMLElement;
 }
+
+describe("HoldingsTable StrategyRowsTable: MTD and Max DD of an options book (252 WR-01)", () => {
+  const cell = (container: HTMLElement, id: string, index: number) =>
+    container.querySelector(`[data-strategy-row="${id}"]`)!.querySelectorAll("td")[index] as HTMLElement;
+
+  it("a flagged row withholds MTD and Max DD with the named sentence, as it does its Sharpe; the same row unflagged shows both figures", () => {
+    const { container } = renderStrategies([
+      marked({ id: "flagged", sharpe: 1.8, span: 400, mtd: 0.07, maxDd: -0.12, withheldBy: "options_cash_wallet" }),
+      marked({ id: "plain", sharpe: 1.8, span: 400, mtd: 0.07, maxDd: -0.12 }),
+    ]);
+    const reason = withheldCellTitle({
+      spanDays: 400,
+      observations: null,
+      crypto: true,
+      withheldBy: "options_cash_wallet",
+    });
+    expect(reason).toMatch(/cash wallet/);
+    for (const index of [4, 6]) {
+      const flagged = cell(container, "flagged", index);
+      expect(flagged.textContent?.startsWith("—")).toBe(true);
+      expect(flagged.textContent).not.toMatch(/7\.0|12\.0|0\.07|0\.12/);
+      expect(flagged.querySelector(`[title="${reason}"]`), "the reason is the cell's title").not.toBeNull();
+      expect(flagged.querySelector(".sr-only")?.textContent).toBe(reason);
+    }
+    expect(cell(container, "plain", 4).textContent).toContain("7.0");
+    expect(cell(container, "plain", 6).textContent).toContain("12.0");
+    expect(cell(container, "plain", 4).querySelector("[title]")).toBeNull();
+    expect(cell(container, "plain", 6).querySelector("[title]")).toBeNull();
+  });
+});
 
 describe("HoldingsTable StrategyRowsTable: Sharpe cell (194 D-04 / D-15)", () => {
   it("a withheld row prints a toneless dash, the reason as title, and the same reason as sr-only text", () => {

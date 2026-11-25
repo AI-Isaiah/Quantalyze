@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { annualizationPeriods } from "@/lib/closed-sets";
+import { OPTIONS_CASH_WALLET_CAUSE } from "@/lib/factsheet/headline-basis";
 import {
   figureRecord,
   withheldCellTitle,
@@ -18,7 +19,8 @@ import type { Strategy, StrategyAnalytics } from "@/lib/types";
 type RowWithAnalytics = Pick<Strategy, "asset_class"> & { analytics: StrategyAnalytics };
 
 // Phase 194 plan 06 (D-15) — the row's TOTAL record, built once from the three
-// scalar aliases beside `series_end` and the strategy's asset class. The verdict is
+// scalar aliases beside `series_end` and the strategy's asset class (and, Phase 252, the
+// options-book marker). The verdict is
 // `gateAnnualized(record)` with no window: a list row shows the strategy's full
 // history, and only the total record can withhold (a window never does).
 export function rowRecord(s: RowWithAnalytics): FigureRecord {
@@ -28,6 +30,11 @@ export function rowRecord(s: RowWithAnalytics): FigureRecord {
     headlineSince: s.analytics.headline_since,
     observations: s.analytics.record_observations ?? null,
     periodsPerYear: annualizationPeriods(s.asset_class),
+    // Phase 252: a row `shapeRowAnalytics` blanked for the options-book withhold carries the named
+    // marker; the record then never clears, so every cell built from it dashes with the sentence.
+    ...(s.analytics.headline_withheld_cause === OPTIONS_CASH_WALLET_CAUSE
+      ? { withheldBy: OPTIONS_CASH_WALLET_CAUSE }
+      : {}),
   });
 }
 

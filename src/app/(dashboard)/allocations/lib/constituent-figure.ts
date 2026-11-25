@@ -19,6 +19,7 @@
 import type { ReactNode } from "react";
 import { gateAnnualized, gatedValue, type FigureRecord, type FigureState } from "@/lib/figure-gate";
 import { annualizedCell } from "@/components/strategy/annualized-cell";
+import { OPTIONS_CASH_WALLET_CAUSE } from "@/lib/factsheet/headline-basis";
 
 /**
  * A settled lazy-fetch entry: the stored pair, plus the record the route served beside it.
@@ -52,8 +53,10 @@ function finiteOrNull(v: unknown): number | null {
 /**
  * The lazy route's body at the client boundary: finite numbers, and crypto and unreadable only for
  * boolean true. `figure_unreadable` (R2 WR-01) is the route's one way to say the record's dates
- * could not be read; it makes `gateAnnualized` answer "withheld". Takes the body as an open record
- * so the composer's fetch-time cast needs no new keys.
+ * could not be read; it makes `gateAnnualized` answer "withheld". `figure_withheld_by` (Phase 252) is
+ * the route's one way to say the strategy's figures are measured on an options book's cash wallet;
+ * only the exact `options_cash_wallet` literal marks the record, which then never clears. Takes the
+ * body as an open record so the composer's fetch-time cast needs no new keys.
  */
 export function parseConstituentRecord(body: Readonly<Record<string, unknown>>): FigureRecord {
   return {
@@ -61,6 +64,7 @@ export function parseConstituentRecord(body: Readonly<Record<string, unknown>>):
     observations: finiteOrNull(body.figure_observations),
     crypto: body.figure_crypto === true,
     ...(body.figure_unreadable === true ? { unreadable: true as const } : {}),
+    ...(body.figure_withheld_by === OPTIONS_CASH_WALLET_CAUSE ? { withheldBy: OPTIONS_CASH_WALLET_CAUSE } : {}),
   };
 }
 
@@ -69,6 +73,8 @@ type BookScalars = {
   figure_observations?: number | null;
   figure_crypto?: boolean;
   figure_unreadable?: boolean;
+  /** Phase 252: `"options_cash_wallet"` for a book strategy measured on an options book's cash wallet. */
+  figure_withheld_by?: typeof OPTIONS_CASH_WALLET_CAUSE | null;
 };
 
 /**
@@ -87,6 +93,9 @@ export function constituentFigure(
       observations: bookStrategy.figure_observations ?? null,
       crypto: bookStrategy.figure_crypto ?? false,
       ...(bookStrategy.figure_unreadable === true ? { unreadable: true as const } : {}),
+      ...(bookStrategy.figure_withheld_by === OPTIONS_CASH_WALLET_CAUSE
+        ? { withheldBy: OPTIONS_CASH_WALLET_CAUSE }
+        : {}),
     };
   } else if (lazyEntry !== undefined && lazyEntry !== "unavailable" && lazyEntry.record !== undefined) {
     record = lazyEntry.record;

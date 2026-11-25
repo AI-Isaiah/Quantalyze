@@ -26,9 +26,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  * array or flags blob is projected: a `returns_series`, `data_quality_flags` or
  * `metrics_json` WITHOUT a `->` path would be a leak (T-194-35) and is asserted absent
  * below.
+ *
+ * 2026-11-25, Phase 252 plan 04 (revision round 1, W5) - THE PIN MOVED AGAIN, on purpose. The KPI
+ * list, the gate column and the four span aliases are byte for byte what they were. The six
+ * aliases appended after them (`PERCENTILE_WITHHOLD_COLUMNS`) are the generation inputs the
+ * options-book skip needs to judge the reason on the SAME flags generation as the list shaper:
+ * `computed_at`, the success marker and its last-success twin, the snapshot's `computed_at`, and
+ * the live and snapshot reasons. All scalar text or instant paths; none is a KPI, so none enters
+ * `PERCENTILE_METRICS`.
  */
 const PINNED_KPI_PROJECTION =
-  "strategy_analytics (cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return, computation_status, series_start:returns_series->0->>date, series_end:returns_series->-1->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations)";
+  "strategy_analytics (cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return, computation_status, series_start:returns_series->0->>date, series_end:returns_series->-1->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations, computed_at, cumulative_method:data_quality_flags->>cumulative_method, last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method, last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at, mtm_gated_reason:data_quality_flags->>mtm_gated_reason, last_success_mtm_gated_reason:data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason)";
 
 const recorded = vi.hoisted(() => ({ selects: [] as string[] }));
 
@@ -77,6 +85,21 @@ describe("percentile KPI projection — byte pin (Phase 159 D-03, Phase 166 D-18
   it("getOwnRowPercentiles() projects the same pinned KPI list byte-for-byte", async () => {
     await getOwnRowPercentiles([]);
     expect(recorded.selects).toEqual([`id, asset_class, ${PINNED_KPI_PROJECTION}`]);
+  });
+
+  it("the six withhold generation aliases follow the four span aliases and are scalar paths (Phase 252 W5)", async () => {
+    await getPercentiles();
+    const [select] = recorded.selects;
+    const tail = select.slice(select.indexOf("record_observations:metrics_json->record_observations") + 1);
+    const after = tail.slice(tail.indexOf(",") + 1).replace(/\)$/, "").split(",").map((c) => c.trim());
+    expect(after).toEqual([
+      "computed_at",
+      "cumulative_method:data_quality_flags->>cumulative_method",
+      "last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method",
+      "last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at",
+      "mtm_gated_reason:data_quality_flags->>mtm_gated_reason",
+      "last_success_mtm_gated_reason:data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason",
+    ]);
   });
 
   it("the span aliases are scalar JSON paths: no series array, flags blob or metrics blob rides along", async () => {

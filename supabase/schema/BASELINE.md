@@ -86,8 +86,8 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 |---|---|
 | Taken | 2026-11-25 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
-| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `45654413951`) |
-| sha256 | `3629afc7732041fc759429370c7bbe411a23cdceea052ed8dd3343c4ea08d435` |
+| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `45678391811`) |
+| sha256 | `60db287a496e68df5e710ab771c1cd7f165acd974d70182e17f2467de6a4fe6f` |
 | Shape | 71 tables, 154 policies, 144 function statements (142 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -95,6 +95,26 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-11-25 — automated re-dump after Supabase Migrate run 45678391811
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `45678391811`, after that run's `apply` job applied merge `2636fb1e` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20261125151936_commit_scenario_batch_venue_server_identity.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-11-25 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 71 → 71, policies 154 → 154, function statements 144 → 144, distinct function names 142 → 142 |
+| Data statements | 0 → 0 |
+| sha256 | `3629afc7…` → `60db287a…` |
+| Currency gate | `baseline-currency: carried=338 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 144 — MATCH 141, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
 
 ### Regenerated 2026-11-25 — automated re-dump after Supabase Migrate run 45654413951
 

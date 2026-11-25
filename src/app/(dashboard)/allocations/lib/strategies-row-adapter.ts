@@ -37,6 +37,7 @@ import type { DisclosureTier } from "@/lib/types";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { OWN_CAPITAL, isAllocatable } from "@/lib/capital-ownership";
+import { OPTIONS_CASH_WALLET_CAUSE } from "@/lib/factsheet/headline-basis";
 import {
   gateAnnualized,
   gatedValue,
@@ -174,6 +175,8 @@ function gatedSharpe(
     figure_observations?: number | null;
     figure_crypto?: boolean;
     figure_unreadable?: boolean;
+    /** Phase 252: `"options_cash_wallet"` marks a strategy measured on an options book's cash wallet. */
+    figure_withheld_by?: typeof OPTIONS_CASH_WALLET_CAUSE | null;
   },
 ): Pick<StrategyRow, "sharpe" | "sharpeState" | "sharpeSpanDays" | "sharpeRecord"> {
   const record: FigureRecord = {
@@ -183,6 +186,11 @@ function gatedSharpe(
     // 194.2 D-01: a record whose dates could not be read is withheld, exactly as on the
     // factsheet and the lazy route (`parseConstituentRecord`).
     ...(scalars.figure_unreadable === true ? { unreadable: true as const } : {}),
+    // Phase 252: the marker never clears, so the Holdings Sharpe is withheld with the named
+    // sentence, exactly as the Scenario composer's book leg is (`constituentFigure`).
+    ...(scalars.figure_withheld_by === OPTIONS_CASH_WALLET_CAUSE
+      ? { withheldBy: OPTIONS_CASH_WALLET_CAUSE }
+      : {}),
   };
   const state = gateAnnualized(record);
   return {
@@ -261,9 +269,17 @@ export function toStrategyRows(inputs: StrategyRowAdapterInputs): StrategyRow[] 
         : null,
       weight: null, // derived in the post-pass below
       allocation: ps.allocated_amount,
-      mtd: computeMtd(s.strategy_analytics?.daily_returns),
+      // Phase 252 (review WR-01): MTD and Max DD are cash-wallet figures too, so the marker nulls
+      // them with the Sharpe; `HoldingsTable` names the reason in those cells.
+      mtd:
+        s.figure_withheld_by === OPTIONS_CASH_WALLET_CAUSE
+          ? null
+          : computeMtd(s.strategy_analytics?.daily_returns),
       ...gatedSharpe(s.strategy_analytics?.sharpe, s),
-      maxDd: s.strategy_analytics?.max_drawdown ?? null,
+      maxDd:
+        s.figure_withheld_by === OPTIONS_CASH_WALLET_CAUSE
+          ? null
+          : (s.strategy_analytics?.max_drawdown ?? null),
       age,
     });
     seen.add(ps.strategy_id);
@@ -311,9 +327,12 @@ export function toStrategyRows(inputs: StrategyRowAdapterInputs): StrategyRow[] 
       // crosses the RSC boundary. Half 1 above still calls it inline: that half
       // reads the dashboard payload's own embed, which is not this phase's to
       // change.
-      mtd: s.mtd,
+      mtd: s.figure_withheld_by === OPTIONS_CASH_WALLET_CAUSE ? null : s.mtd,
       ...gatedSharpe(s.strategy_analytics?.sharpe, s),
-      maxDd: s.strategy_analytics?.max_drawdown ?? null,
+      maxDd:
+        s.figure_withheld_by === OPTIONS_CASH_WALLET_CAUSE
+          ? null
+          : (s.strategy_analytics?.max_drawdown ?? null),
       age: null, // no added_at — NOT 0 ("added today" would be invented)
     });
   }

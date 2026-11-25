@@ -39,6 +39,7 @@ function makeStrategy(over: {
       figure_span_days: over.strategy?.figure_span_days ?? null,
       figure_observations: over.strategy?.figure_observations ?? null,
       figure_crypto: over.strategy?.figure_crypto ?? false,
+      figure_withheld_by: over.strategy?.figure_withheld_by ?? null,
       strategy_analytics:
         over.strategy?.strategy_analytics !== undefined
           ? over.strategy.strategy_analytics
@@ -303,7 +304,12 @@ function makeMarked(over: {
    */
   mtd?: number | null;
   /** 194 D-15: the server-computed record scalars (default: unknown record). */
-  figure?: { span?: number | null; observations?: number | null; crypto?: boolean };
+  figure?: {
+    span?: number | null;
+    observations?: number | null;
+    crypto?: boolean;
+    withheldBy?: "options_cash_wallet" | null;
+  };
   analytics?: {
     sharpe?: number | null;
     max_drawdown?: number | null;
@@ -323,6 +329,7 @@ function makeMarked(over: {
     figure_observations: over.figure?.observations ?? null,
     figure_crypto: over.figure?.crypto ?? false,
     figure_unreadable: false,
+    figure_withheld_by: over.figure?.withheldBy ?? null,
     strategy_analytics:
       over.analytics === undefined || over.analytics === null
         ? null
@@ -796,6 +803,111 @@ describe("toStrategyRows: Sharpe gated on the total record (194 D-04 / D-15)", (
       }
     });
   }
+
+  describe("Phase 252: the options-book marker withholds the Holdings Sharpe on both halves", () => {
+    // A 400-day crypto record that would be shown in full; only the marker withholds it.
+    const LONG = { span: 400, crypto: true };
+
+    function positionedWith(withheldBy: "options_cash_wallet" | null | undefined) {
+      const [row] = toStrategyRows({
+        strategies: [],
+        positions: [
+          makeStrategy({
+            strategy: {
+              figure_span_days: LONG.span,
+              figure_observations: null,
+              figure_crypto: LONG.crypto,
+              ...(withheldBy === undefined ? {} : { figure_withheld_by: withheldBy }),
+              strategy_analytics: {
+                daily_returns: null,
+                cagr: null,
+                sharpe: 1.8,
+                volatility: null,
+                max_drawdown: null,
+              },
+            },
+          }),
+        ],
+        now: NOW,
+      });
+      return row;
+    }
+
+    it("a positioned row marked options_cash_wallet answers sharpe null, state withheld and a record carrying withheldBy", () => {
+      const row = positionedWith("options_cash_wallet");
+      expect(row.sharpe).toBeNull();
+      expect(row.sharpeState).toBe("withheld");
+      expect(row.sharpeRecord).toMatchObject({ withheldBy: "options_cash_wallet" });
+    });
+
+    it("a marked-only row (own-capital half) is withheld the same way", () => {
+      const [row] = toStrategyRows({
+        strategies: [
+          makeMarked({ figure: { ...LONG, withheldBy: "options_cash_wallet" }, analytics: { sharpe: 1.8 } }),
+        ],
+        positions: [],
+        now: NOW,
+      });
+      expect(row.sharpe).toBeNull();
+      expect(row.sharpeState).toBe("withheld");
+      expect(row.sharpeRecord).toMatchObject({ withheldBy: "options_cash_wallet" });
+    });
+
+    it("WR-01: the marker also nulls MTD and Max DD on both halves, and an unmarked row keeps them", () => {
+      const analytics = { sharpe: 1.8, max_drawdown: -0.12 };
+      const [markedOnly, unmarked] = toStrategyRows({
+        strategies: [
+          makeMarked({ id: "m-flag", mtd: 0.07, figure: { ...LONG, withheldBy: "options_cash_wallet" }, analytics }),
+          makeMarked({ id: "m-plain", mtd: 0.07, figure: LONG, analytics }),
+        ],
+        positions: [],
+        now: NOW,
+      });
+      expect(markedOnly.mtd).toBeNull();
+      expect(markedOnly.maxDd).toBeNull();
+      expect(unmarked.mtd).toBe(0.07);
+      expect(unmarked.maxDd).toBe(-0.12);
+
+      const daily = [{ date: "2026-06-01", value: 0.01 }];
+      const positioned = (withheldBy: "options_cash_wallet" | null) =>
+        toStrategyRows({
+          strategies: [],
+          positions: [
+            makeStrategy({
+              strategy: {
+                figure_span_days: LONG.span,
+                figure_observations: null,
+                figure_crypto: LONG.crypto,
+                figure_withheld_by: withheldBy,
+                strategy_analytics: {
+                  daily_returns: daily as never,
+                  cagr: null,
+                  sharpe: 1.8,
+                  volatility: null,
+                  max_drawdown: -0.12,
+                },
+              },
+            }),
+          ],
+          now: NOW,
+        })[0];
+      const flagged = positioned("options_cash_wallet");
+      expect(flagged.mtd).toBeNull();
+      expect(flagged.maxDd).toBeNull();
+      // Anti-vacuity: the same row without the marker does carry both figures.
+      expect(positioned(null).mtd).not.toBeNull();
+      expect(positioned(null).maxDd).toBe(-0.12);
+    });
+
+    it("without the marker (null or absent) the same record is unchanged: the Sharpe shows in full and the record has no withheldBy key", () => {
+      for (const marker of [null, undefined] as const) {
+        const row = positionedWith(marker);
+        expect(row.sharpe).toBe(1.8);
+        expect(row.sharpeState).toBe("full");
+        expect("withheldBy" in row.sharpeRecord!).toBe(false);
+      }
+    });
+  });
 
   it("a legacy payload row with no record scalars keeps its stored Sharpe and carries no marker", () => {
     const [row] = toStrategyRows({

@@ -5,7 +5,13 @@ import { MTM_DAILY_RETURNS_SERIES_KIND, SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND }
 import { deriveSegmentMarkers } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { BASIS_KPI_MAP, hasBasisHeadline } from "./basis-metrics";
-import { headlineVerdict, isStoredResultReadable, readHeadlineBasis, storedCashHeadlineGate } from "./headline-basis";
+import {
+  headlineVerdict,
+  isOptionsCashWalletBook,
+  isStoredResultReadable,
+  readHeadlineBasis,
+  storedCashHeadlineGate,
+} from "./headline-basis";
 import type { StoredCashHeadlineGate } from "./headline-basis";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
@@ -520,7 +526,9 @@ export async function readCompositeFactsheet(
  *   - an absent or malformed one → Withheld: a COPY of the headline has each
  *     {@link BASIS_KPI_MAP} server key set to null (the strict overlay renders a
  *     stored null "—"), and `quality` carries `headlineWithheld: true`.
- * `quality` always carries `twrChainBroken: true` on a chain-broken row, and
+ * `quality` carries `twrChainBroken: true` whenever the row's own flags carry it
+ * (always, on a chain-broken row; Phase 252: a row withheld only for the options-book
+ * reason need not be chain-broken, and then the key is absent), and
  * carries exactly one of `headlineWithheld` or `headlineCoversFrom`: the third
  * arm (neither) cannot come out of this function. It CAN arise in the caller,
  * though: a chain-broken single-key row whose stored headline is not applied
@@ -571,7 +579,10 @@ export function applyHeadlineBasis(
   const basis = readHeadlineBasis(dqf);
   const withheld = verdict.kind === "withheld";
   const quality: ReturnType<typeof applyHeadlineBasis>["quality"] = {
-    twrChainBroken: true,
+    // The row's own chain flag, not a constant: every verdict that existed before
+    // Phase 252 is chain-broken (so this is the same `true`); only the options-book
+    // cause can reach here on an intact chain.
+    ...(basis.twrChainBroken ? { twrChainBroken: true as const } : {}),
     ...(basis.reasons.length > 0 && options.composite !== true ? { headlineGuardReasons: basis.reasons } : {}),
     ...(verdict.kind === "dated" ? { headlineCoversFrom: verdict.since } : {}),
     ...(withheld ? { headlineWithheld: true as const } : {}),
@@ -1030,7 +1041,11 @@ export async function readSingleKeyBasisOpts(
     const applied = applyHeadlineBasis(cashHeadline, dqf);
     shownHeadline = applied.headline;
     Object.assign(addedQuality, applied.quality);
-  } else if (dqf?.twr_chain_broken === true) {
+  } else if (dqf?.twr_chain_broken === true || isOptionsCashWalletBook(dqf)) {
+    // Phase 252: the options-book reason joins the chain break here. The producer is
+    // composite-only, so a single-key row cannot carry it today (a composite-to-single
+    // transition drops the reason), but a row that does must never fall through to the
+    // whole-record cash computation, which is the artefact the reason names.
     // SFH-01 (D-03): the row is chain-broken but its stored headline is NOT applied
     // (a raw `cash_settlement` object, unprojected keys, or a row that is not
     // rankable). The page would then build the TypeScript whole-record headline,
@@ -1050,7 +1065,7 @@ export async function readSingleKeyBasisOpts(
     // an expected state (a run in flight or failed) that the status surfaces
     // already show, so neither logs again. Only a caller that passed NO row is a
     // defect nothing else has reported.
-    if (!gate.applicable && gate.reason === "no_row") {
+    if (dqf?.twr_chain_broken === true && !gate.applicable && gate.reason === "no_row") {
       console.error(
         "[factsheet] readSingleKeyBasisOpts — a chain-broken single-key row was read without its analytics row; withholding the headline figures (D-03)",
         { strategyId, reason: "chain_broken_no_row" },
