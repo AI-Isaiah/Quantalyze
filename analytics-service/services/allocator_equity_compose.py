@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import math
 from bisect import bisect_right
+from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from datetime import date, datetime, timezone
 from typing import Any, NamedTuple
@@ -50,6 +51,7 @@ from services.allocator_equity_derive import (
     blend_concurrent_returns,
     build_allocator_ledger,
     mwr_and_dietz_from_ledger,
+    no_capital_refusal_field,
     replay_key_equity,
     segment_coverage,
 )
@@ -443,6 +445,7 @@ def compose_allocator_equity(
     segment_terminals_by_key: Mapping[str, Mapping[str, float]] | None = None,
     no_capital_exit_by_key: Mapping[str, tuple[str, str]] | None = None,
     failing_key_exit_by_key: Mapping[str, tuple[str, str | None]] | None = None,
+    tiny_base_days_by_key: Mapping[str, Collection[str]] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -508,6 +511,12 @@ def compose_allocator_equity(
     are the writer's composed flows, the ones its levels were rolled through; a key that fell
     back (``writer_basis_mismatch``) keeps its event-time flows everywhere. A key with no entry
     is composed exactly as before.
+
+    ``tiny_base_days_by_key`` (234 founder ruling 2026-11-24) maps a key to the days its own
+    ``key_inputs.tiny_base_days`` states. ``replay_key_equity`` does not count a flow after the
+    key's last return day on one of them as ``out_of_window_flow``; nothing else about the key
+    changes. A key with no entry is composed exactly as before. A segment unit ``k#holeN`` has no
+    entry, correctly: an earlier segment cannot have a day past its own end.
 
     ``unpriced_close_day_by_key`` (164.6.6.2.1 D-09 / D-20) maps a BTC key whose live balance
     could not be priced (the latest completed UTC day has no stored close) to that day's ISO
@@ -718,6 +727,17 @@ def compose_allocator_equity(
     hole_exit_units: set[str] = set()
     reentry_units: list[str] = []
     history_first = set(full_history)
+    # 234 NOCAP-04: the candidate set and its fall-back list live here, above the segment loop, because
+    # a candidate whose hole lacks its stored terminals falls back from INSIDE that loop (below).
+    # The set of candidates actually composed is ``no_capital_exit``.
+    no_capital_exit = dict(no_capital_exit_by_key or {})
+    # WR-02 / F4: a candidate is a KEY. A key replayed in segments (``k#hole0 ... k``) is offered
+    # and taken back as one: ``owner`` is the key a unit belongs to, so any of its units that is
+    # refused or flagged blocking takes the whole key back out, not just the last unit that
+    # carries the key's own id.
+    fell_back: list[str] = []
+    # 234 NOCAP-03: one count per owner key and route, written into ``payload["inputs"]`` below.
+    no_capital_refused: Counter[str] = Counter()
     unpriced_days_in = {
         k: frozenset(str(d) for d in days)
         for k, days in (unpriced_days_by_key or {}).items()
@@ -737,6 +757,14 @@ def compose_allocator_equity(
             continue
         terminals = (segment_terminals_by_key or {}).get(k, {})
         if any(e not in terminals for e in ends):
+            if k in no_capital_exit:
+                # 234 NOCAP-04: a candidate exists only because the job offered it, so it falls
+                # back to ``dropped_key`` like every other refused candidate instead of composing
+                # unsplit under a ``key_inputs_mismatch`` that would outlive the refusal. No reason
+                # and no warning here: the fall-back block below names it, once, by count.
+                no_capital_refused["segment_terminals_missing"] += 1
+                fell_back.append(k)
+                continue
             # The writer should have stored the level on each of these days. Without it the
             # levels before the hole are unknowable, so it is NOT guessed: the key composes
             # unsplit (the pre-fix roll) and the book says it cannot be trusted.
@@ -811,15 +839,10 @@ def compose_allocator_equity(
     # candidate the replay refuses (``NavReconstructionError``) or flags with a blocking reason is
     # taken back out and composed exactly as today: ``NO_ANCHOR`` plus ``DROPPED_KEY``. Every other
     # key keeps raising. The set of candidates actually composed is ``no_capital_exit``.
-    no_capital_exit = dict(no_capital_exit_by_key or {})
+    # (``no_capital_exit``, ``fell_back`` and ``no_capital_refused`` are declared above the
+    # interior-hole segment loop, which is the first place a candidate can fall back.)
     per_key_equity: dict[str, KeyEquity] = {}
-    fell_back_refused = 0
     fell_back_blocking: set[DegradeReason] = set()
-    # WR-02 / F4: a candidate is a KEY. A key replayed in segments (``k#hole0 ... k``) is offered
-    # and taken back as one: ``owner`` is the key a unit belongs to, so any of its units that is
-    # refused or flagged blocking takes the whole key back out, not just the last unit that
-    # carries the key's own id.
-    fell_back: list[str] = []
     for k in anchored_keys:
         owner = parent.get(k, k)
         if owner in fell_back:
@@ -834,17 +857,19 @@ def compose_allocator_equity(
                 realized_terminal=realized_terminal.get(k),
                 writer_flows=writer_basis[k][0] if k in writer_basis else None,
                 writer_day_pnl=writer_basis[k][1] if k in writer_basis else None,
+                tiny_base_days=(tiny_base_days_by_key or {}).get(k),
             )
         except NavReconstructionError:
             if owner not in no_capital_exit:
                 raise
-            fell_back_refused += 1
+            no_capital_refused["replay_refused"] += 1
             fell_back.append(owner)
             continue
         if owner in no_capital_exit and (
             key_equity.equity is None or not _is_trustworthy(key_equity.degrade_reasons)
         ):
             fell_back_blocking |= key_equity.degrade_reasons
+            no_capital_refused["blocking_reason"] += 1
             fell_back.append(owner)
             continue
         per_key_equity[k] = key_equity
@@ -876,13 +901,14 @@ def compose_allocator_equity(
         # Counts and reason classes only: no key id, no day, no USD (T-166.3.1-34).
         logger.warning(
             "compose: %d no-capital candidate(s) fell back to %s (%d refused by the replay, %d "
-            "carried a blocking reason: %s); each is composed as an unanchored key and the book "
-            "is untrustworthy",
+            "carried a blocking reason: %s, %d lacked a stored segment level); each is composed "
+            "as an unanchored key and the book is untrustworthy",
             len(fell_back),
             DegradeReason.DROPPED_KEY.value,
-            fell_back_refused,
-            len(fell_back) - fell_back_refused,
+            no_capital_refused["replay_refused"],
+            no_capital_refused["blocking_reason"],
             ",".join(sorted(r.value for r in fell_back_blocking)) or "none",
+            no_capital_refused["segment_terminals_missing"],
         )
     for k in anchored_keys:
         if per_key_equity[k].flags.get("writer_basis") is True:
@@ -1159,6 +1185,13 @@ def compose_allocator_equity(
             "composed_at": datetime.now(timezone.utc).isoformat(),
         },
     }
+    if no_capital_refused:
+        # 234 NOCAP-03: benign counts of the no-capital candidates this compose took back out, by
+        # route. Closed tokens and integers only (``no_capital_refusal_field`` checks both); it
+        # never enters ``reasons`` or ``flag_tokens``, so ``is_trustworthy`` is untouched.
+        payload["inputs"]["no_capital_exit_refused"] = no_capital_refusal_field(
+            no_capital_refused
+        )
     if unpriced_native:
         # Additive, present only when a key was left out (an older reader never sees it).
         payload["unpriced_native_keys"] = unpriced_native

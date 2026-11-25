@@ -4001,6 +4001,8 @@ async def test_no_capital_exit_deribit_dust_key_composes_through_its_terminal_an
     assert payload["no_capital_exited_keys"] == [
         {"api_key_id": "key-B", "reason": "dust", "day": _BTC_DAYS[2]}
     ]
+    # 234 NOCAP-03: a clean exit is not a fallback, so the run writes no refusal counts.
+    assert "no_capital_exit_refused" not in payload["inputs"]
 
 
 @pytest.mark.asyncio
@@ -4017,6 +4019,8 @@ async def test_no_capital_exit_a_dust_token_over_a_funded_terminal_stays_dropped
     assert "dropped_key" in payload["degrade_reasons"]
     assert "no_capital_key_exited" not in payload["flags"]
     assert "no_capital_exited_keys" not in payload
+    # 234 NOCAP-03: the A2 refusal is named at selection, once for the one key.
+    assert _nc_refused(payload) == {"funded_terminal": 1}
 
 
 @pytest.mark.asyncio
@@ -4037,6 +4041,7 @@ async def test_no_capital_exit_a2_a_terminal_exactly_at_the_dust_floor_exits() -
     assert payload["no_capital_exited_keys"] == [
         {"api_key_id": "key-B", "reason": "dust", "day": _BTC_DAYS[2]}
     ]
+    assert "no_capital_exit_refused" not in payload["inputs"]
 
 
 @pytest.mark.asyncio
@@ -4052,6 +4057,7 @@ async def test_no_capital_exit_a2_a_terminal_one_cent_over_the_dust_floor_stays_
     assert "dropped_key" in payload["degrade_reasons"]
     assert "no_capital_key_exited" not in payload["flags"]
     assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"funded_terminal": 1}
 
 
 def test_no_capital_fixture_terminals_are_dust_under_the_current_floor() -> None:
@@ -4091,13 +4097,15 @@ def _nc_candidate(
 
 
 def _nc_assemble(
-    candidates: list[dict[str, Any]], *, a_days: list[str] | None = None
+    candidates: list[dict[str, Any]], *, a_days: list[str] | None = None, with_a: bool = True
 ) -> dict[str, list[dict]]:
+    """``with_a=False`` leaves key-A out entirely (no api key, no returns, no key_inputs row), so
+    the candidates are the book's only keys (234 NOCAP-03: a sole key that falls back)."""
     a_days = a_days or _BTC_DAYS
     api_keys = [
         {"id": "key-A", "user_id": _NOCAP_ALLOC, "is_active": True, "exchange": "binance",
          "sync_status": "connected", "disconnected_at": None}
-    ] + [
+    ] * with_a + [
         {"id": c["id"], "user_id": _NOCAP_ALLOC, "is_active": True, "exchange": c["exchange"],
          "sync_status": "connected", "disconnected_at": None}
         for c in candidates
@@ -4105,7 +4113,7 @@ def _nc_assemble(
     csv = [
         {"api_key_id": "key-A", "allocator_id": _NOCAP_ALLOC, "date": day, "daily_return": 0.0}
         for day in a_days
-    ]
+    ] * with_a
     for c in candidates:
         csv += [
             {"api_key_id": c["id"], "allocator_id": _NOCAP_ALLOC, "date": day,
@@ -4116,7 +4124,7 @@ def _nc_assemble(
         {"allocator_id": _NOCAP_ALLOC, "kind": "key_inputs:key-A",
          "payload": {"flows": [], "anchor_usd": 100_000.0, "venue": "binance",
                      "realized_terminal_usd": 100_000.0, "realized_terminal_day": a_days[-1]}}
-    ] + [
+    ] * with_a + [
         {"allocator_id": _NOCAP_ALLOC, "kind": f"key_inputs:{c['id']}", "payload": c["payload"]}
         for c in candidates
     ]
@@ -4188,7 +4196,9 @@ def _nc_mt5_withdrawal_book() -> dict[str, list[dict]]:
             "key-C", "mt5", d[:3],
             _nc_payload(
                 "nonpositive", "mt5", 0.0, d[3],
-                flows={d[3]: -20_000.0}, dropped_pnl={d[3]: 0.0},
+                flows={d[0]: 20_000.0, d[3]: -20_000.0}, dropped_pnl={d[3]: 0.0},
+                basis_flows={d[0]: 20_000.0, d[3]: -20_000.0},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: 0.0},
             ),
         )
     ])
@@ -4206,7 +4216,12 @@ async def test_no_capital_exit_mt5_nonpositive_key_emptied_by_a_final_withdrawal
     book = _nc_assemble([
         _nc_candidate(
             "key-C", "mt5", d[:4],
-            _nc_payload("nonpositive", "mt5", 0.0, d[3], flows={d[3]: -20_000.0}),
+            _nc_payload(
+                "nonpositive", "mt5", 0.0, d[3],
+                flows={d[0]: 20_000.0, d[3]: -20_000.0},
+                basis_flows={d[0]: 20_000.0, d[3]: -20_000.0},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: 0.0},
+            ),
         )
     ])
     payload = await _compose_no_capital_book(book)
@@ -4231,7 +4246,12 @@ async def test_no_capital_exit_mt5_dust_key_with_a_small_positive_terminal() -> 
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
-            "key-D", "mt5", d[:3], _nc_payload("dust", "mt5", 80.0, d[2]),
+            "key-D", "mt5", d[:3],
+            _nc_payload(
+                "dust", "mt5", 80.0, d[2],
+                flows={d[0]: 4000.0}, basis_flows={d[0]: 4000.0},
+                basis_pnl={d[0]: 0.0, d[1]: -3200.0, d[2]: -720.0},
+            ),
             returns={d[1]: -0.8, d[2]: -0.9},
         )
     ])
@@ -4274,6 +4294,7 @@ async def test_no_capital_exit_a3_deribit_dust_deposit_after_last_return() -> No
     assert payload["no_capital_exited_keys"] == [
         {"api_key_id": "key-B", "reason": "dust", "day": d[2]}
     ]
+    assert "no_capital_exit_refused" not in payload["inputs"]
 
 
 @pytest.mark.asyncio
@@ -4295,6 +4316,299 @@ async def test_no_capital_exit_a3_mt5_withdrawal_after_last_return() -> None:
     assert payload["no_capital_exited_keys"] == [
         {"api_key_id": "key-C", "reason": "nonpositive", "day": d[2]}
     ]
+
+
+def _nc_mt5_funded_ledger_book(*, venue: str = "mt5", api_exchange: str | None = None) -> dict:
+    """234 NOCAP-01: a FUNDED MT5 key whose live balance read zero for one tick. The stored
+    terminal copies that read (0.0 on day 4, token ``nonpositive``), so A2 on it is circular; the
+    key's OWN deal ledger says otherwise. Hand derivation of the ledger level over its own basis:
+    +80000.0 (day 1 deposit) - 20000.0 (day 4 withdrawal) + 0.0 of P&L = 60000.0, far above
+    DUST_NAV_FLOOR, so the account is not empty and the key may not exit. ``venue`` is the payload
+    venue, ``api_exchange`` the ``api_keys.exchange`` the job gates on (defaults to ``venue``)."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", venue, d[:3],
+            _nc_payload(
+                "nonpositive", venue, 0.0, d[3],
+                flows={d[0]: 80_000.0, d[3]: -20_000.0}, dropped_pnl={d[3]: 0.0},
+                basis_flows={d[0]: 80_000.0, d[3]: -20_000.0},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: 0.0},
+            ),
+        )
+    ])
+    if api_exchange is not None:
+        for row in book["api_keys"]:
+            if row["id"] == "key-C":
+                row["exchange"] = api_exchange
+    return book
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_transient_zero_over_a_funded_ledger_keeps_dropped_key() -> None:
+    """NOCAP-01 tracer, ROADMAP SC-1. For MT5 the stored realized terminal IS the live balance
+    read, so a funded account that reads zero for one tick stores a terminal of 0.0 and A2 passes
+    on its own echo. Written off as no-capital, the key would leave the book while the book reads
+    trustworthy (166.3.1 A2 was circular). The key's own deal ledger (+80000 deposit, -20000
+    withdrawal, 0 P&L = 60000.0) says the account holds money, so the key keeps ``dropped_key``:
+    untrustworthy, not named as exited, counted ``ledger_level_funded``. A is untouched."""
+    d = _BTC_DAYS
+    payload = await _compose_no_capital_book(_nc_mt5_funded_ledger_book())
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"ledger_level_funded": 1}
+    assert _nc_curve(payload) == {x: pytest.approx(100_000.0, abs=1e-9) for x in d}
+
+
+def _nc_mt5_ledger_book(*, flows: dict[str, float], basis_pnl: dict[str, float] | None = None) -> dict:
+    """An MT5 ``nonpositive`` key whose terminal is 0.0 on day 4 and whose OWN basis is exactly
+    ``flows`` plus zero P&L on days 1 to 4, so its ledger level is ``sum(flows.values())``."""
+    d = _BTC_DAYS
+    return _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload(
+                "nonpositive", "mt5", 0.0, d[3],
+                flows=flows, dropped_pnl={d[3]: 0.0},
+                basis_flows=flows,
+                basis_pnl=(
+                    {d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: 0.0} if basis_pnl is None else basis_pnl
+                ),
+            ),
+        )
+    ])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("withdrawal", [-20_000.0, -500_000.0])
+async def test_no_capital_exit_mt5_ledger_far_below_zero_is_refused_as_ledger_level_negative(
+    withdrawal: float,
+) -> None:
+    """NOCAP-01 review CR-01. The stored deals miss the funding (a withdrawal with no deposit), so
+    the ledger sums to ``withdrawal`` (-20000.0 / -500000.0 by hand), far below -DUST_NAV_FLOOR,
+    against a live terminal of 0.0. A far-negative ledger is not an empty account, it is a ledger
+    that cannot be trusted: the one-sided gate let it prove the key empty and the book read
+    trustworthy. The gate is two-sided: the key keeps ``dropped_key``, counted
+    ``ledger_level_negative``."""
+    payload = await _compose_no_capital_book(
+        _nc_mt5_ledger_book(flows={_BTC_DAYS[3]: withdrawal})
+    )
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"ledger_level_negative": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_ledger_exactly_at_minus_the_dust_floor_still_exits() -> None:
+    """NOCAP-01 review CR-01, the boundary (at). A ledger of exactly ``-DUST_NAV_FLOOR`` (-100.0: a
+    -100.0 withdrawal and nothing else) is inside the band, mirroring A2's ``<=``: the key is not
+    refused as ``ledger_level_negative`` and exits as before."""
+    d = _BTC_DAYS
+    payload = await _compose_no_capital_book(
+        _nc_mt5_ledger_book(flows={d[3]: -DUST_NAV_FLOOR})
+    )
+
+    assert "ledger_level_negative" not in (_nc_refused(payload) or {})
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-C", "reason": "nonpositive", "day": d[2]}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ledger", "refused"),
+    [
+        # Upper edge, inclusive: the ledger gate does not refuse +DUST_NAV_FLOOR. A +100.0 ledger
+        # against a 0.0 terminal implies a negative start, so the replay then refuses it instead.
+        # The arm pins that the LEDGER gate did not (a ``>=`` would count it ledger_level_funded).
+        (DUST_NAV_FLOOR, {"replay_refused": 1}),
+        (DUST_NAV_FLOOR + 0.01, {"ledger_level_funded": 1}),
+        (-DUST_NAV_FLOOR - 0.01, {"ledger_level_negative": 1}),
+    ],
+)
+async def test_no_capital_exit_mt5_ledger_band_edges(ledger: float, refused: dict[str, int]) -> None:
+    """NOCAP-01 review round 2 WR-01. The band is the whole NOCAP-01 proof on MT5 and it is
+    ``-DUST_NAV_FLOOR <= level <= DUST_NAV_FLOOR``. The other arms pin the lower edge from inside
+    and the far sides, so a 10x wider band on either side, or ``>=`` on the upper edge, passed them
+    all. These three pin both edges from just outside (a cent past the floor) and the upper edge's
+    inclusion, each against a 0.0 terminal."""
+    payload = await _compose_no_capital_book(
+        _nc_mt5_ledger_book(flows={_BTC_DAYS[3]: ledger})
+    )
+
+    assert _nc_refused(payload) == refused
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_empty_basis_lists_are_refused_as_ledger_basis_absent() -> None:
+    """NOCAP-01 review WR-01. A row carrying ``composed_flows: []`` and ``composed_day_pnl: []`` reads
+    as an empty pair that sums to 0.0, which the gate would take for a proved-empty ledger. The job's
+    own rule treats an empty day P&L as no basis, so it is refused as ``ledger_basis_absent``."""
+    payload = await _compose_no_capital_book(_nc_mt5_ledger_book(flows={}, basis_pnl={}))
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"ledger_basis_absent": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_without_its_own_basis_is_refused_as_ledger_basis_absent() -> None:
+    """NOCAP-01. An MT5 key whose own row carries no writer basis has no independent proof the
+    account is empty: its stored terminal is the live balance read. This is the old withdrawal
+    shape (returns d1 to d3, terminal 0.0 on day 4, a -20000.0 withdrawal on day 4, no basis) that
+    exited before this phase. It now keeps ``dropped_key`` and is counted ``ledger_basis_absent``;
+    where no proof exists the candidate is refused."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload(
+                "nonpositive", "mt5", 0.0, d[3],
+                flows={d[3]: -20_000.0}, dropped_pnl={d[3]: 0.0},
+            ),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"ledger_basis_absent": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_venue_is_gated_whatever_its_case() -> None:
+    """NOCAP-01, T-234-07. ``api_keys.exchange`` is stored by hand in places, and an ``'MT5'`` that
+    slips past the set check would exit a funded key unproved. The venue is stripped and
+    lower-cased before the set check, the expression ``full_history_keys`` already uses, so the
+    funded-ledger shape on ``'MT5'`` is refused exactly as on ``'mt5'``."""
+    payload = await _compose_no_capital_book(_nc_mt5_funded_ledger_book(api_exchange="MT5"))
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"ledger_level_funded": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_ledger_proof_is_scoped_to_ledger_proof_venues() -> None:
+    """NOCAP-01, DEC-02-C. The same funded-ledger shape on a Deribit key is NOT refused by the
+    ledger gate, because ``LEDGER_PROOF_VENUES`` is ``{'mt5'}``: Deribit's terminal is reconciled
+    to inception at write time, so its stored terminal is real evidence. The key exits as today,
+    trustworthy, and stores no refusal field. (The gate is per venue, not a general rule.)"""
+    d = _BTC_DAYS
+    payload = await _compose_no_capital_book(_nc_mt5_funded_ledger_book(venue="deribit"))
+
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "dropped_key" not in payload["degrade_reasons"]
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-C", "reason": "nonpositive", "day": d[2]}
+    ]
+    assert "no_capital_exit_refused" not in payload["inputs"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_proved_empty_ledger_still_meets_the_d10_bound() -> None:
+    """NOCAP-01, DEC-02-B gate order. A key that passes the ledger proof is not thereby cleared:
+    the D-10 bound still applies. An MT5 margin call whose own ledger proves it empty (flows
+    +4550.0 on day 1 and +10000.0 on day 4, P&L -14500.0 on day 4: 4550 + 10000 - 14500 = 50.0,
+    under the dust floor) walks back 14500.0 of material P&L over (L, P], and is refused as
+    ``consumes_more_than_dust``, never as a ledger refusal."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload(
+                "dust", "mt5", 50.0, d[3],
+                flows={d[0]: 4_550.0, d[3]: 10_000.0}, dropped_pnl={d[3]: -14_500.0},
+                basis_flows={d[0]: 4_550.0, d[3]: 10_000.0},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: -14_500.0},
+            ),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
+
+
+def _nc_negative_terminal_book(terminal: float) -> dict:
+    """A Deribit ``nonpositive`` candidate (outside ``LEDGER_PROOF_VENUES``, so only the sign gate
+    is in play): flat returns on days 1 to 3, a stored terminal of ``terminal`` on day 3, and a
+    day-3 withdrawal of ``terminal - 1000.0`` (a negative flow). Hand derivation: the level before
+    the withdrawal is ``terminal - flow = 1000.0``, so a negative terminal sits far below zero
+    against it, the shape ``_nc_replay_refused_book`` uses."""
+    d = _BTC_DAYS
+    return _nc_assemble([
+        _nc_candidate(
+            "key-B", "deribit", d[:3],
+            _nc_payload(
+                "nonpositive", "deribit", terminal, d[2], flows={d[2]: terminal - 1_000.0}
+            ),
+        )
+    ])
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_terminal_one_cent_below_minus_the_dust_floor_is_refused() -> None:
+    """NOCAP-01 negative equity, the boundary pair (below). A stored terminal of
+    ``-(DUST_NAV_FLOOR + 0.01)`` is negative equity, not an empty account: ``nonpositive`` would
+    otherwise carry it out of the book with no sign recorded. On any venue it is refused at
+    selection as ``negative_terminal``, and the key keeps ``dropped_key``."""
+    payload = await _compose_no_capital_book(_nc_negative_terminal_book(-(DUST_NAV_FLOOR + 0.01)))
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"negative_terminal": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_terminal_exactly_at_minus_the_dust_floor_is_not_a_negative_terminal() -> None:
+    """NOCAP-01 negative equity, the boundary pair (at). ``-DUST_NAV_FLOOR`` itself passes the sign
+    gate (it is ``<``, mirroring A2's ``<=``), so ``negative_terminal`` is NOT counted. It is still
+    not an exit here: a -100.0 terminal over a 1000.0 level is further below zero than the replay
+    allows, so it is refused by a LATER route and the field holds exactly one other count."""
+    payload = await _compose_no_capital_book(_nc_negative_terminal_book(-DUST_NAV_FLOOR))
+
+    counts = _nc_refused(payload)
+    assert counts is not None and "negative_terminal" not in counts
+    assert sum(counts.values()) == 1
+    assert "no_capital_exited_keys" not in payload
+    assert "dropped_key" in payload["degrade_reasons"]
+
+
+def test_no_capital_ledger_level_is_pure_over_the_stored_basis() -> None:
+    """NOCAP-01 (DEC-02-A). The level is the sum of the basis' flows and P&L over the key's own
+    row: None for no basis or an empty day P&L (the job's own rule: no day P&L is no basis),
+    80000.0 - 20000.0 + 0.0 = 60000.0 for the tracer shape, and None (no proof) for a non-finite
+    total, so an unreadable number never proves an account empty."""
+    from services.job_worker import _no_capital_ledger_level
+
+    d = _BTC_DAYS
+    assert _no_capital_ledger_level(None) is None
+    assert _no_capital_ledger_level(({}, {})) is None
+    assert _no_capital_ledger_level(({d[0]: 80_000.0, d[3]: -20_000.0}, {d[3]: 0.0})) == 60_000.0
+    assert _no_capital_ledger_level(({d[0]: float("inf")}, {d[3]: 0.0})) is None
+    assert _no_capital_ledger_level(({d[0]: 1.0}, {d[3]: float("nan")})) is None
+
+
+def test_no_capital_ledger_proof_venues_are_mt5_only_and_full_history() -> None:
+    """NOCAP-01 (DEC-02-C). The proof set is exactly ``{'mt5'}`` and sits inside
+    ``FULL_HISTORY_VENUES``: a proof read from a deal ledger is only an independent proof where
+    the ledger reaches inception, and a venue added here without that would be a silent bypass."""
+    from services.allocator_equity_derive import FULL_HISTORY_VENUES, LEDGER_PROOF_VENUES
+
+    assert LEDGER_PROOF_VENUES == frozenset({"mt5"})
+    assert LEDGER_PROOF_VENUES <= FULL_HISTORY_VENUES
 
 
 # --- guards: the rule may only make a book better (166.3.1 plan 09, Task 2) --------------------
@@ -4354,6 +4668,9 @@ async def test_no_capital_exit_read_failures_stay_dropped(token: str | None) -> 
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    # 234 NOCAP-03 (RESEARCH Pitfall 3): a failed read is not a no-capital fallback, so it is
+    # never counted. The key is dropped for the read failure, not because of the rule.
+    assert "no_capital_exit_refused" not in payload["inputs"]
 
 
 @pytest.mark.asyncio
@@ -4371,6 +4688,7 @@ async def test_no_capital_exit_no_stored_terminal_stays_dropped() -> None:
     assert "dropped_key" in payload["degrade_reasons"]
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"no_stored_terminal": 1}
 
 
 @pytest.mark.asyncio
@@ -4449,19 +4767,25 @@ async def test_no_capital_exit_anything_dated_after_the_terminal_day_stays_dropp
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
 async def test_no_capital_exit_anything_dated_after_the_terminal_day_stays_dropped_without_a_basis() -> None:
     """D-10 (1), the return-factor roll (no writer basis, the MT5 shape): the same refusal for a
     flow and a dropped-day P&L dated after the terminal day (day 3). Superseded by D-10 from the
-    pre-D-10 T-166.3.1-33 expectation that these were trimmed and the key exited."""
+    pre-D-10 T-166.3.1-33 expectation that these were trimmed and the key exited.
+    234 NOCAP-01 re-aim: this was an MT5 row with no writer basis. MT5 is in ``LEDGER_PROOF_VENUES``,
+    so such a row is now refused earlier as ``ledger_basis_absent`` and would never reach the D-10 bound.
+    The gate under test is venue-independent, so the key is a Deribit row written before D-06 (no
+    basis, outside the proof set, a full-history venue); every number is unchanged and the test
+    asserts ``consumes_more_than_dust`` again."""
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
-            "key-C", "mt5", d[:3],
+            "key-C", "deribit", d[:3],
             _nc_payload(
-                "dust", "mt5", _NC_DUST_TERMINAL, d[2],
+                "dust", "deribit", _NC_DUST_TERMINAL, d[2],
                 flows={d[3]: 40.0, d[4]: 30.0}, dropped_pnl={d[3]: 10.0},
             ),
         )
@@ -4472,6 +4796,7 @@ async def test_no_capital_exit_anything_dated_after_the_terminal_day_stays_dropp
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4481,13 +4806,18 @@ async def test_no_capital_exit_margin_call_then_liquidation_stays_dropped() -> N
     terminal is 50.0, under the dust floor, so A2 passes. The walk-back would put 4550.0 on L and
     book the 14500 loss as nothing: a TRUSTWORTHY book with the loss erased and the key leaving as
     a 4550 withdrawal. The consumed P&L is far above the dust floor, so the key keeps
-    ``dropped_key``, which is the honest answer."""
+    ``dropped_key``, which is the honest answer.
+    234 NOCAP-01 re-aim: this was an MT5 row with no writer basis. MT5 is in ``LEDGER_PROOF_VENUES``,
+    so such a row is now refused earlier as ``ledger_basis_absent`` and would never reach the D-10 bound.
+    The gate under test is venue-independent, so the key is a Deribit row written before D-06 (no
+    basis, outside the proof set, a full-history venue); every number is unchanged and the test
+    asserts ``consumes_more_than_dust`` again."""
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
-            "key-C", "mt5", d[:3],
+            "key-C", "deribit", d[:3],
             _nc_payload(
-                "dust", "mt5", 50.0, d[3],
+                "dust", "deribit", 50.0, d[3],
                 flows={d[3]: 10_000.0}, dropped_pnl={d[3]: -14_500.0},
             ),
         )
@@ -4498,6 +4828,7 @@ async def test_no_capital_exit_margin_call_then_liquidation_stays_dropped() -> N
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4505,12 +4836,17 @@ async def test_no_capital_exit_a_deposit_after_the_terminal_day_stays_blocked() 
     """D-10 (1), CR-01 reviewer Run 2. A dust key has its terminal day P == its last return day L
     (day 3), a stored terminal of 60.0 and a +50000 flow dated on day 5. On ``origin/main`` that
     flow is a blocking ``out_of_window_flow``; the exit trim turned it into nothing, so the book
-    read trustworthy with 50000 of capital gone. It keeps ``dropped_key`` and stays untrustworthy."""
+    read trustworthy with 50000 of capital gone. It keeps ``dropped_key`` and stays untrustworthy.
+    234 NOCAP-01 re-aim: this was an MT5 row with no writer basis. MT5 is in ``LEDGER_PROOF_VENUES``,
+    so such a row is now refused earlier as ``ledger_basis_absent`` and would never reach the D-10 bound.
+    The gate under test is venue-independent, so the key is a Deribit row written before D-06 (no
+    basis, outside the proof set, a full-history venue); every number is unchanged and the test
+    asserts ``consumes_more_than_dust`` again."""
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
-            "key-C", "mt5", d[:3],
-            _nc_payload("dust", "mt5", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
+            "key-C", "deribit", d[:3],
+            _nc_payload("dust", "deribit", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
         )
     ])
     payload = await _compose_no_capital_book(book)
@@ -4519,6 +4855,7 @@ async def test_no_capital_exit_a_deposit_after_the_terminal_day_stays_blocked() 
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4542,6 +4879,7 @@ async def test_no_capital_exit_a_flow_day_without_a_stored_pnl_stays_dropped() -
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4567,6 +4905,7 @@ async def test_no_capital_exit_an_empty_window_after_the_last_return_stays_dropp
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"consumes_more_than_dust": 1}
 
 
 @pytest.mark.asyncio
@@ -4587,7 +4926,10 @@ async def test_no_capital_exit_dust_sized_final_days_still_exit() -> None:
             "key-C", "mt5", d[:3],
             _nc_payload(
                 "dust", "mt5", terminal, d[3],
-                flows={d[3]: deposit}, dropped_pnl={d[3]: -DUST_NAV_FLOOR},
+                flows={d[0]: 1.5 * DUST_NAV_FLOOR, d[3]: deposit},
+                dropped_pnl={d[3]: -DUST_NAV_FLOOR},
+                basis_flows={d[0]: 1.5 * DUST_NAV_FLOOR, d[3]: deposit},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: -DUST_NAV_FLOOR},
             ),
         )
     ])
@@ -4615,12 +4957,18 @@ async def test_no_capital_exit_inception_residual_stays_dropped() -> None:
     PROD book 1's MT5 key before the 164.6.6.2.3 recompute; it was re-measured clean on PROD on
     2026-10-16 (no equity-curve row carries ``inception_unreconciled``, book 1 is trustworthy,
     every connected MT5 key replays clean on its stored writer basis, far inside the band), and SC-9
-    is closed by recorded decision (D-11, founder 2026-10-16), not by a code change."""
+    is closed by recorded decision (D-11, founder 2026-10-16), not by a code change.
+
+    234 NOCAP-01 re-aim: this was an MT5 row with no writer basis. MT5 is in ``LEDGER_PROOF_VENUES``,
+    so such a row is now refused earlier as ``ledger_basis_absent`` and would never reach the zero-start check.
+    The gate under test is venue-independent, so the key is a Deribit row written before D-06 (no
+    basis, outside the proof set, a full-history venue); every number is unchanged and the test
+    asserts ``blocking_reason`` again."""
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
-            "key-D", "mt5", d[2:],
-            _nc_payload("dust", "mt5", 80.0, d[4], flows={d[1]: 79.88}),
+            "key-D", "deribit", d[2:],
+            _nc_payload("dust", "deribit", 80.0, d[4], flows={d[1]: 79.88}),
         )
     ])
     payload = await _compose_no_capital_book(book)
@@ -4631,6 +4979,7 @@ async def test_no_capital_exit_inception_residual_stays_dropped() -> None:
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
     assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"blocking_reason": 1}
 
 
 @pytest.mark.asyncio
@@ -4647,6 +4996,7 @@ async def test_no_capital_exit_a3_never_pads_a_writer_basis_over_a_real_return()
     assert "key_inputs_mismatch" not in payload["degrade_reasons"]
     assert payload["is_trustworthy"] is False
     assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"blocking_reason": 1}
 
 
 # --- job level: a candidate must never cost the book its stored row (166.3.1 plan 09, Task 3) ---
@@ -4705,6 +5055,9 @@ async def test_no_capital_exit_compose_refusal_reverts_the_candidates_and_keeps_
     assert "dropped_key" in payload["degrade_reasons"]
     assert "no_anchor" in payload["degrade_reasons"]
     assert "no_capital_exited_keys" not in payload
+    # 234 NOCAP-03: the first compose's own counts left with its payload; the stored-input compose
+    # has no candidate, so the one count on the row is the job's revert, one per candidate in play.
+    assert _nc_refused(payload) == {"compose_reverted": 1}
 
     first, second = calls
     assert first["no_capital_exit_by_key"] == {"key-B": ("dust", _BTC_DAYS[2])}
@@ -4777,7 +5130,12 @@ async def test_no_capital_exit_two_candidates_each_leave_on_their_own_day() -> N
                 ),
             ),
             _nc_candidate(
-                "key-D", "mt5", d[:5], _nc_payload("dust", "mt5", 80.0, d[4]),
+                "key-D", "mt5", d[:5],
+                _nc_payload(
+                    "dust", "mt5", 80.0, d[4],
+                    flows={d[0]: 4000.0}, basis_flows={d[0]: 4000.0},
+                    basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: -3200.0, d[4]: -720.0},
+                ),
                 returns={d[3]: -0.8, d[4]: -0.9},
             ),
         ],
@@ -4798,6 +5156,161 @@ async def test_no_capital_exit_two_candidates_each_leave_on_their_own_day() -> N
         {"api_key_id": "key-B", "reason": "dust", "day": d[2]},
         {"api_key_id": "key-D", "reason": "dust", "day": d[4]},
     ]
+    assert "no_capital_exit_refused" not in payload["inputs"]
+
+
+# --- 234 NOCAP-03: every route a no-capital key takes to dropped_key is counted by name ----------
+
+
+def _nc_refused(payload: dict) -> dict[str, int] | None:
+    """The NOCAP-03 field of a stored payload, or None when the run wrote none."""
+    return payload["inputs"].get("no_capital_exit_refused")
+
+
+def _nc_replay_refused_book(*, with_a: bool = True) -> dict[str, list[dict]]:
+    """A Deribit candidate whose replay REFUSES. No writer basis; flat returns on days 1 to 3, a
+    -1050.0 withdrawal on day 3 and a stored terminal of -50.0 on day 3. The terminal is under the
+    dust floor (A2 passes) and P == L (D-10 passes), but -50.0 is further below zero than
+    EMPTIED_NEGATIVE_FRACTION of the 1000.0 level before the withdrawal, so the replay raises.
+    Hand derivation: L1 = L0 = (-50.0 + 1050.0) / 1 = 1000.0."""
+    d = _BTC_DAYS
+    return _nc_assemble(
+        [
+            _nc_candidate(
+                "key-B", "deribit", d[:3],
+                _nc_payload("nonpositive", "deribit", -50.0, d[2], flows={d[2]: -1_050.0}),
+            )
+        ],
+        with_a=with_a,
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_refused_counts_a_replay_refusal_in_the_row_and_on_the_refusal_record() -> None:
+    """NOCAP-03 tracer. Today a candidate the compose takes back out leaves a log line and nothing
+    else, so a regression in the no-capital rule looks like an ordinary ``dropped_key`` book. The
+    stored row now carries ``inputs.no_capital_exit_refused`` naming the route, counts only. Arm (a):
+    beside key-A the row stores ``{"replay_refused": 1}``, the field is NOT a degrade reason or a
+    flag (it must never move ``is_trustworthy``), and A's curve is intact. Arm (b): when the
+    candidate is the book's ONLY key the compose is empty and blocked, and the
+    ``compose_empty_blocked`` refusal record carries the same counts."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    payload = await _compose_no_capital_book(_nc_replay_refused_book())
+    assert _nc_refused(payload) == {"replay_refused": 1}
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_anchor" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_exit_refused" not in payload["degrade_reasons"]
+    assert "no_capital_exit_refused" not in payload["flags"]
+    assert _nc_curve(payload) == {d: pytest.approx(100_000.0, abs=1e-9) for d in _BTC_DAYS}
+
+    fake = _FakeSupabase(_nc_replay_refused_book(with_a=False))
+    job = {"id": "j-nocap-sole", "kind": "derive_allocator_equity", "allocator_id": _NOCAP_ALLOC}
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    _assert_refusal_recorded(fake, _NOCAP_ALLOC, "compose_empty_blocked")
+    (_, row, _), = _refusal_upserts(fake)
+    assert row["payload"]["inputs"]["no_capital_exit_refused"] == {"replay_refused": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_refused_counts_each_key_once_on_its_own_route() -> None:
+    """NOCAP-03 cardinality. One book with three no-capital keys that each keep ``dropped_key`` by
+    a DIFFERENT route stores exactly one count per route and nothing else: key-F's live read says
+    empty over a funded 60000.0 terminal (A2), key-G has returns and a token but no stored terminal,
+    and key-H's terminal is on day 3 with a 50000.0 flow on day 5 (D-10; a Deribit row, because an
+    MT5 row with no basis is refused earlier as ``ledger_basis_absent``, 234 NOCAP-01). A count that doubled (a key
+    counted at selection AND again in the apply loop or the compose) would show here."""
+    d = _BTC_DAYS
+    no_terminal = _nc_payload("dust", "mt5", 0.0, d[2])
+    del no_terminal["realized_terminal_usd"]
+    del no_terminal["realized_terminal_day"]
+    book = _nc_assemble([
+        _nc_candidate("key-F", "mt5", d[:3], _nc_payload("dust", "mt5", 60_000.0, d[2])),
+        _nc_candidate("key-G", "mt5", d[:3], no_terminal),
+        _nc_candidate(
+            "key-H", "deribit", d[:3],
+            _nc_payload("dust", "deribit", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
+        ),
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert _nc_refused(payload) == {
+        "consumes_more_than_dust": 1, "funded_terminal": 1, "no_stored_terminal": 1,
+    }
+    assert list(_nc_refused(payload) or {}) == sorted(_nc_refused(payload) or {})
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+
+
+def test_no_capital_refusal_reasons_are_the_eleven_plan_01_to_03_tokens() -> None:
+    """NOCAP-03 closed set. The set is pinned whole so a token cannot be added or renamed without
+    its writer and its test moving with it (each plan of phase 234 adds its tokens together with
+    their writers and updates this pin in the same task). It is deliberately NOT a ``DegradeReason``
+    or a ``DeriveRefusal`` member: ``test_derive_refusal_rows`` pins both for three runtimes."""
+    from services.allocator_equity_derive import (
+        NO_CAPITAL_REFUSAL_REASONS,
+        DegradeReason,
+        DeriveRefusal,
+    )
+
+    assert NO_CAPITAL_REFUSAL_REASONS == frozenset({
+        "funded_terminal", "no_stored_terminal", "consumes_more_than_dust", "replay_refused",
+        "blocking_reason", "segment_terminals_missing", "compose_reverted",
+        "negative_terminal", "ledger_basis_absent", "ledger_level_funded", "ledger_level_negative",
+        "candidate_exception",
+    })
+    assert not NO_CAPITAL_REFUSAL_REASONS & {m.value for m in DegradeReason}
+    assert not NO_CAPITAL_REFUSAL_REASONS & {m.value for m in DeriveRefusal}
+
+
+def test_no_capital_refusal_field_is_a_closed_counts_only_validator() -> None:
+    """NOCAP-03 / T-234-02. The one place a token or a count is checked: an unknown token, a bool, a
+    non-integer and a negative count are refused (a stored payload must never carry a bogus count
+    or an unknown name), a zero count is dropped, and the keys come out sorted."""
+    from services.allocator_equity_derive import no_capital_refusal_field
+
+    assert no_capital_refusal_field({}) == {}
+    out = no_capital_refusal_field({"replay_refused": 2, "blocking_reason": 1, "funded_terminal": 0})
+    assert out == {"blocking_reason": 1, "replay_refused": 2}
+    assert list(out) == ["blocking_reason", "replay_refused"]
+    for bad in ({"not_a_route": 1}, {"replay_refused": True}, {"replay_refused": 1.5},
+                {"replay_refused": -1}):
+        with pytest.raises(ValueError):
+            no_capital_refusal_field(bad)  # type: ignore[arg-type]
+    # an unknown token is never echoed (it may have been read from storage)
+    with pytest.raises(ValueError) as excinfo:
+        no_capital_refusal_field({"KEY-ID-SECRET": 1})
+    assert "KEY-ID-SECRET" not in str(excinfo.value)
+
+
+def test_refusal_payload_carries_the_counts_only_when_there_are_some() -> None:
+    """NOCAP-03. ``refusal_payload`` without the keyword, with None and with ``{}`` are the same
+    dict (the shared three-runtime fixture row is untouched); with counts the sorted field sits in
+    ``inputs`` and nowhere else."""
+    from services.allocator_equity_derive import refusal_payload
+
+    base = refusal_payload("compose_empty_blocked", composed_at="t")
+    assert refusal_payload("compose_empty_blocked", composed_at="t", no_capital_exit_refused=None) == base
+    assert refusal_payload("compose_empty_blocked", composed_at="t", no_capital_exit_refused={}) == base
+    assert "no_capital_exit_refused" not in base["inputs"]
+
+    with_counts = refusal_payload(
+        "compose_empty_blocked", composed_at="t",
+        no_capital_exit_refused={"replay_refused": 1, "blocking_reason": 2},
+    )
+    assert with_counts["inputs"]["no_capital_exit_refused"] == {"blocking_reason": 2, "replay_refused": 1}
+    assert list(with_counts["inputs"]["no_capital_exit_refused"]) == ["blocking_reason", "replay_refused"]
+    assert {k: v for k, v in with_counts.items() if k != "inputs"} == {
+        k: v for k, v in base.items() if k != "inputs"
+    }
+    assert with_counts["degrade_reasons"] == base["degrade_reasons"]
 
 
 # ---------------------------------------------------------------------------
@@ -5475,3 +5988,457 @@ async def test_sc6_a_book_that_is_not_a_pair_of_unknown_working_keys_raises_noth
     assert (await _run_gate(fake, "alloc-pending")).outcome.name == "DONE"
     payload = _composed_payload(fake)
     assert "account_identity_pending" not in payload["degrade_reasons"]
+
+
+# --- 234 NOCAP-02: a candidate's fault never costs the book its stored row -----------------------
+
+
+def _nc_stale_curve_row() -> dict[str, Any]:
+    return {"allocator_id": _NOCAP_ALLOC, "kind": "equity_curve",
+            "payload": {"curve": [{"date": "2026-05-01", "equity_usd": 1.0}],
+                        "is_trustworthy": True, "degrade_reasons": []}}
+
+
+def _nc_without_run_stamps(payload: dict) -> dict:
+    """A copy of ``payload`` without the two fields a candidate fault legitimately changes."""
+    out = {**payload, "inputs": dict(payload["inputs"])}
+    out["inputs"].pop("composed_at", None)
+    out["inputs"].pop("no_capital_exit_refused", None)
+    return out
+
+
+def _nc_job() -> dict[str, Any]:
+    return {"id": "j-nocap-fault", "kind": "derive_allocator_equity", "allocator_id": _NOCAP_ALLOC}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_candidate_fault_in_the_apply_loop_reverts_and_keeps_the_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """NOCAP-02 / ROADMAP SC-2 (T-234-09). An exception that is NOT a ``NavReconstructionError``,
+    raised while the apply loop works on a candidate (here a ``KeyError`` whose text is a key id),
+    used to escape the job: ``classify_exception`` filed it as ``unknown``, the dispatcher retried,
+    and the stale ``equity_curve`` row stayed on every attempt. The candidate reverts to its inputs
+    exactly as stored and the job carries on: DONE on BOTH runs against one fake, the stale row
+    replaced (never deleted), the stored payload equal to the same book with the key's token read
+    as a read failure (``balance_error``, never a candidate) apart from the run stamp and the
+    NOCAP-03 count. The log names the class and the counts, never the exception's text."""
+    import logging
+    from unittest.mock import patch
+
+    import services.allocator_equity_compose as compose_module
+    from services.job_worker import run_derive_allocator_equity_job
+
+    real = compose_module.compose_allocator_equity
+    calls: list[dict[str, Any]] = []
+
+    def _spy(*args: Any, **kwargs: Any) -> dict:
+        calls.append({"args": args, **kwargs})
+        return real(*args, **kwargs)
+
+    seed = _nc_deribit_a3_book()
+    seed[DERIVED_TABLE].append(_nc_stale_curve_row())
+    fake = _FakeSupabase(seed)
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch("services.allocator_equity_compose.compose_allocator_equity", _spy),
+        patch(
+            "services.job_worker._no_capital_exit_consumes_only_dust",
+            side_effect=KeyError("key-B-SECRET"),
+        ),
+        caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"),
+    ):
+        results = [await run_derive_allocator_equity_job(_nc_job()) for _ in range(2)]
+
+    assert [r.outcome.name for r in results] == ["DONE", "DONE"], [
+        (r.error_kind, r.error_message) for r in results
+    ]
+    assert not [
+        x for x in fake.deletes if x[0] == DERIVED_TABLE and x[1].get("kind") == "equity_curve"
+    ], fake.deletes
+    curve = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve) == 2
+    assert len(calls) == 2 and not any(c.get("no_capital_exit_by_key") for c in calls)
+
+    reference_seed = _nc_deribit_a3_book()
+    for row in reference_seed[DERIVED_TABLE]:
+        if row["kind"] == "key_inputs:key-B":
+            row["payload"]["anchor_null_reason"] = "balance_error"
+    reference = await _compose_no_capital_book(reference_seed)
+    assert _nc_refused(reference) is None
+
+    for upsert in curve:
+        payload = _extract_payload(upsert[1])
+        assert "dropped_key" in payload["degrade_reasons"]
+        assert "no_anchor" in payload["degrade_reasons"]
+        assert "no_capital_exited_keys" not in payload
+        assert _nc_refused(payload) == {"candidate_exception": 1}
+        assert _nc_without_run_stamps(payload) == _nc_without_run_stamps(reference)
+
+    warned = [r.getMessage() for r in caplog.records if "KeyError" in r.getMessage()]
+    assert len(warned) == 2, [r.getMessage() for r in caplog.records]
+    assert not [
+        r for r in caplog.records
+        if "key-B-SECRET" in r.getMessage() or "65.0" in r.getMessage() or r.exc_info
+    ]
+
+
+def _nc_compose_that_raises(
+    exc_with_candidate: BaseException,
+    exc_without: BaseException | None = None,
+    calls: list[dict[str, Any]] | None = None,
+) -> Any:
+    """A stand-in for ``compose_allocator_equity`` that raises ``exc_with_candidate`` only while the
+    call names a no-capital candidate (a single stored row cannot make the real compose do that),
+    raises ``exc_without`` (when given) on a call that names none, and is the real compose
+    otherwise. ``calls`` records the keyword arguments of every call."""
+    import services.allocator_equity_compose as compose_module
+
+    real = compose_module.compose_allocator_equity
+
+    def _wrapper(*args: Any, **kwargs: Any) -> dict:
+        if calls is not None:
+            calls.append({"args": args, **kwargs})
+        if kwargs.get("no_capital_exit_by_key"):
+            raise exc_with_candidate
+        if exc_without is not None:
+            raise exc_without
+        return real(*args, **kwargs)
+
+    return _wrapper
+
+
+def _nc_with_stale_row(seed: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    seed[DERIVED_TABLE].append(_nc_stale_curve_row())
+    return seed
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_candidate_fault_in_the_compose_reverts_and_keeps_the_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """NOCAP-02 / ROADMAP SC-2, the compose call. A ``ValueError`` (text: a key id) raised by the
+    compose while a candidate is named reverts every candidate once and composes on the inputs
+    exactly as stored: DONE on both runs against one fake, the stale row replaced and never
+    deleted, one count per candidate in play, the second compose call naming no candidate, and no
+    log record carrying the exception's text."""
+    import logging
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    calls: list[dict[str, Any]] = []
+    fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(ValueError("key-B-SECRET"), calls=calls),
+        ),
+        caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"),
+    ):
+        results = [await run_derive_allocator_equity_job(_nc_job()) for _ in range(2)]
+
+    assert [r.outcome.name for r in results] == ["DONE", "DONE"]
+    assert not [
+        x for x in fake.deletes if x[0] == DERIVED_TABLE and x[1].get("kind") == "equity_curve"
+    ], fake.deletes
+    curve = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve) == 2
+    assert len(calls) == 4
+    for first, second in (calls[0:2], calls[2:4]):
+        assert first["no_capital_exit_by_key"] == {"key-B": ("dust", _BTC_DAYS[2])}
+        assert not second.get("no_capital_exit_by_key")
+    for upsert in curve:
+        payload = _extract_payload(upsert[1])
+        assert "dropped_key" in payload["degrade_reasons"]
+        assert "no_capital_exited_keys" not in payload
+        assert _nc_refused(payload) == {"candidate_exception": 1}
+    warned = [r.getMessage() for r in caplog.records if "ValueError" in r.getMessage()]
+    assert len(warned) == 2, [r.getMessage() for r in caplog.records]
+    assert not [
+        r for r in caplog.records
+        if "key-B-SECRET" in r.getMessage() or "65.0" in r.getMessage() or r.exc_info
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_dispatch_ends_done_where_it_used_to_end_failed_unknown() -> None:
+    """NOCAP-02 through the dispatcher. The same compose fault used to leave ``dispatch`` with
+    FAILED / ``unknown`` (a retryable class) on every attempt while the previous row stayed stale;
+    now the job ends DONE and the row is the no-candidate payload. The control beside it: with NO
+    candidate in play the same ``ValueError`` still reaches the dispatcher as FAILED / ``unknown``,
+    so the catch hides nothing that is not a candidate's."""
+    from unittest.mock import patch
+
+    from services.job_worker import dispatch
+
+    fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(ValueError("key-B-SECRET")),
+        ),
+    ):
+        result = await dispatch(_nc_job())
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    curve = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve) == 1
+    assert _nc_refused(_extract_payload(curve[0][1])) == {"candidate_exception": 1}
+
+    # control: no candidate in play (book of one ordinary key), same fault -> today's path
+    control = _FakeSupabase(_nc_with_stale_row(_nc_assemble([])))
+    with (
+        patch("services.job_worker.get_supabase", return_value=control),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            side_effect=ValueError("key-B-SECRET"),
+        ),
+    ):
+        refused = await dispatch(_nc_job())
+    assert refused.outcome.name == "FAILED" and refused.error_kind == "unknown"
+    assert not [u for u in control.upserts if _is_equity_curve_upsert(u[1])]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["apply_loop", "compose"])
+async def test_no_capital_exit_a_candidate_fault_reaches_sentry_as_one_class_only_event(
+    site: str,
+) -> None:
+    """NOCAP-02 review IN-01 / SFH M1. A WARNING log reaches Sentry only as a breadcrumb, so a
+    programming bug in the candidate path (from the apply loop or from the compose) would downgrade a
+    book with no event. Each handler captures ONE warning event whose tags are the job and the
+    exception class only; the message is static and carries neither the exception's text (a
+    ``KeyError``'s text is a key id) nor any key id or amount."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fault = (
+        patch(
+            "services.job_worker._no_capital_exit_consumes_only_dust",
+            side_effect=KeyError("key-B-SECRET"),
+        )
+        if site == "apply_loop"
+        else patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(KeyError("key-B-SECRET")),
+        )
+    )
+    fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch("services.job_worker.sentry_sdk") as sentry,
+        fault,
+    ):
+        result = await run_derive_allocator_equity_job(_nc_job())
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+
+    assert sentry.capture_message.call_count == 1
+    args, kwargs = sentry.capture_message.call_args
+    assert kwargs.get("level") == "warning"
+    for secret in ("key-B", "SECRET", "65.0"):
+        assert secret not in args[0]
+    scope = sentry.new_scope.return_value.__enter__.return_value
+    tags = {call.args[0]: call.args[1] for call in scope.set_tag.call_args_list}
+    assert tags == {"compute_job_id": "j-nocap-fault", "exception_class": "KeyError"}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_fault_with_no_candidate_in_play_propagates_unchanged() -> None:
+    """NOCAP-02 outcome table, row 3 (T-234-10). With no candidate in play a compose ``ValueError``
+    is not the rule's: ``run_derive_allocator_equity_job`` raises it exactly as before."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_nc_with_stale_row(_nc_assemble([])))
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            side_effect=ValueError("injected"),
+        ),
+        pytest.raises(ValueError, match="injected"),
+    ):
+        await run_derive_allocator_equity_job(_nc_job())
+    assert not [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_cancellation_is_never_caught_in_the_apply_loop_or_the_compose() -> None:
+    """NOCAP-02 edge (BaseException). ``asyncio.CancelledError`` is not an ``Exception``; raised from
+    the apply loop (the patched D-10 helper) or from the compose with a candidate in play it leaves
+    ``run_derive_allocator_equity_job`` untouched and nothing is upserted."""
+    import asyncio
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    loop_fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=loop_fake),
+        patch(
+            "services.job_worker._no_capital_exit_consumes_only_dust",
+            side_effect=asyncio.CancelledError(),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_derive_allocator_equity_job(_nc_job())
+    assert not [u for u in loop_fake.upserts if _is_equity_curve_upsert(u[1])]
+
+    compose_fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=compose_fake),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(asyncio.CancelledError()),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_derive_allocator_equity_job(_nc_job())
+    assert not [u for u in compose_fake.upserts if _is_equity_curve_upsert(u[1])]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_fault_in_the_stored_input_compose_keeps_todays_path() -> None:
+    """NOCAP-02 outcome table, rows 5 and 6. The compose on the inputs exactly as stored is not a
+    candidate's fault. A ``ValueError`` raised by every call propagates; a ``ValueError`` first and
+    a ``NavReconstructionError`` on the stored-input compose ends FAILED / permanent with the
+    ``compose_refused`` refusal record, the same as a refusal that is not the rule's."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+    from services.nav_twr import NavReconstructionError
+
+    fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            side_effect=ValueError("every call"),
+        ),
+        pytest.raises(ValueError, match="every call"),
+    ):
+        await run_derive_allocator_equity_job(_nc_job())
+    assert not [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+
+    refused = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=refused),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(
+                ValueError("first"), NavReconstructionError("allocator equity replay: injected")
+            ),
+        ),
+    ):
+        result = await run_derive_allocator_equity_job(_nc_job())
+    assert result.outcome.name == "FAILED" and result.error_kind == "permanent"
+    _assert_refusal_recorded(refused, _NOCAP_ALLOC, "compose_refused")
+    # NOCAP-03 review SFH M2: the refusal written after the fallback carries the run's counts, here the
+    # one candidate whose compose raised the ``ValueError`` (hand-derived: one candidate in play).
+    (_, refusal_row, _), = _refusal_upserts(refused)
+    assert refusal_row["payload"]["inputs"]["no_capital_exit_refused"] == {"candidate_exception": 1}
+
+    # control: no candidate in play, the same refusal record has no such field
+    control = _FakeSupabase(_nc_with_stale_row(_nc_assemble([])))
+    with (
+        patch("services.job_worker.get_supabase", return_value=control),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(
+                ValueError("unused"), NavReconstructionError("allocator equity replay: injected")
+            ),
+        ),
+    ):
+        control_result = await run_derive_allocator_equity_job(_nc_job())
+    assert control_result.outcome.name == "FAILED" and control_result.error_kind == "permanent"
+    _assert_refusal_recorded(control, _NOCAP_ALLOC, "compose_refused")
+    (_, control_row, _), = _refusal_upserts(control)
+    assert "no_capital_exit_refused" not in control_row["payload"]["inputs"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_compose_revert_keeps_the_counts_of_the_other_keys() -> None:
+    """NOCAP-02 edge (cardinality). A book with a Deribit key whose live read says empty over a funded
+    60000.0 terminal (refused at selection, ``funded_terminal``) and the A3 candidate key-B, whose
+    compose faults: the revert adds one ``candidate_exception`` for the one candidate in play and
+    keeps the selection count of the other key, so the field reads exactly
+    ``{'candidate_exception': 1, 'funded_terminal': 1}`` (no ``compose_reverted``, which is the
+    ``NavReconstructionError`` route)."""
+    from unittest.mock import patch
+
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate("key-F", "deribit", d[:3], _nc_payload("dust", "deribit", 60_000.0, d[2])),
+        _nc_candidate(
+            "key-B", "deribit", d[:3],
+            _nc_payload(
+                "dust", "deribit", _NC_A3_TERMINAL, d[3],
+                flows={d[3]: 40.0}, dropped_pnl={d[3]: 10.0},
+                basis_flows={d[3]: 40.0}, basis_pnl={d[0]: 0.0, d[1]: 0.0, d[3]: 10.0},
+            ),
+        ),
+    ])
+    with patch(
+        "services.allocator_equity_compose.compose_allocator_equity",
+        _nc_compose_that_raises(ValueError("key-B-SECRET")),
+    ):
+        payload = await _compose_no_capital_book(book)
+    assert _nc_refused(payload) == {"candidate_exception": 1, "funded_terminal": 1}
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_capital_exited_keys" not in payload
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_an_apply_loop_fault_replaces_the_loops_own_counts() -> None:
+    """NOCAP-02 edge (cardinality, apply loop). The loop counts its own refusals into a loop-local
+    counter that joins the run's only when the loop completes, and a fault reverts EVERY candidate,
+    including one the loop had already applied. Key-F is refused at selection (before the loop; that
+    count is kept). In the loop key-B is refused by D-10 (a count the fault must discard), key-C
+    applies cleanly (the fault must revert it) and key-D's apply raises. The field then reads the
+    selection count and one ``candidate_exception`` per candidate in play, three, and never the
+    D-10 count of a loop that did not finish; no key leaves the book."""
+    from unittest.mock import patch
+
+    import services.job_worker as job_module
+
+    d = _BTC_DAYS
+    real = job_module._no_capital_exit_consumes_only_dust
+    seen: list[str] = []
+
+    def _fault_on_the_third_candidate(*args: Any, **kwargs: Any) -> bool:
+        seen.append(args[0])
+        if len(seen) == 3:
+            raise KeyError("key-D-SECRET")
+        return real(*args, **kwargs)
+
+    def _a3(key: str) -> dict[str, Any]:
+        return _nc_candidate(
+            key, "deribit", d[:3],
+            _nc_payload(
+                "dust", "deribit", _NC_A3_TERMINAL, d[3],
+                flows={d[3]: 40.0}, dropped_pnl={d[3]: 10.0},
+                basis_flows={d[3]: 40.0}, basis_pnl={d[0]: 0.0, d[1]: 0.0, d[3]: 10.0},
+            ),
+        )
+
+    book = _nc_assemble([
+        _nc_candidate("key-F", "deribit", d[:3], _nc_payload("dust", "deribit", 60_000.0, d[2])),
+        _nc_candidate(
+            "key-B", "deribit", d[:3],
+            _nc_payload("dust", "deribit", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
+        ),
+        _a3("key-C"),
+        _a3("key-D"),
+    ])
+    with patch(
+        "services.job_worker._no_capital_exit_consumes_only_dust", _fault_on_the_third_candidate
+    ):
+        payload = await _compose_no_capital_book(book)
+    assert len(seen) == 3
+    assert _nc_refused(payload) == {"candidate_exception": 3, "funded_terminal": 1}
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_capital_exited_keys" not in payload
