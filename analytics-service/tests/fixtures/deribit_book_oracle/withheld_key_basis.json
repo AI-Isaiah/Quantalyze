@@ -2,6 +2,7 @@
   "_comment": "Every value here is synthetic. Same keys, levels and published book returns as explained_two_keys.json, and every published value equals the oracle's own. ONE stamp is altered by hand: k2's stored return on d3 is -0.02, while P over the previous level is -5/505 = -0.009900990099009901. Only that stamp is wrong, so the per-key identity fails on k2 d3 alone and d3 is withheld key_basis_not_reproducible even though its published value equals the oracle's -25/1515. Published 4, explained 3 (d2, d4, d5), withheld 1, omitted 1 (d1). Verdict STOP, exit 1.",
   "book": {
     "label": "A",
+    "n_returns": 4,
     "returns": [
       {
         "date": "2025-01-02",

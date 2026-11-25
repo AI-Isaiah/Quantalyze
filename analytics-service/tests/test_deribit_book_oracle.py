@@ -344,6 +344,36 @@ def test_loader_refuses_by_field_path_never_by_value(
         assert "2025-13-45" not in captured.err
 
 
+def test_a_book_that_lost_a_returns_row_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """WR-05. A lost first or last year slice falls outside the published window and would
+    read as "omitted", so the loader compares the flattened row count with the database's own
+    ``n_returns``. Dropping the LAST row (and, separately, the first) must exit 2, and a missing
+    ``n_returns`` is refused as well.
+
+    REVERT-PROOF: remove the count comparison in ``_load_book`` and the trailing-row variant reads
+    CLEAN with exit 0, reddening the first assertion."""
+
+    def drop_last(doc: dict[str, Any]) -> None:
+        del doc["book"]["returns"][-1]
+
+    def drop_first(doc: dict[str, Any]) -> None:
+        del doc["book"]["returns"][0]
+
+    def missing_count(doc: dict[str, Any]) -> None:
+        del doc["book"]["n_returns"]
+
+    for mutate, needle in (
+        (drop_last, "book.returns: row count disagrees with book.n_returns"),
+        (drop_first, "book.returns: row count disagrees with book.n_returns"),
+        (missing_count, "book.n_returns: missing"),
+    ):
+        code = oracle.main(["--input", _variant(tmp_path, mutate)])
+        captured = capsys.readouterr()
+        assert code == 2
+        assert captured.out == ""
+        assert needle in captured.err
+
+
 def test_year_slices_flatten_and_a_comment_is_ignored(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

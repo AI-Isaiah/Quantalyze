@@ -2,6 +2,7 @@
   "_comment": "Every value here is synthetic. explained_two_keys.json's keys and published values, in the payload shapes the PROD compose stores: flags a sorted array of tokens; degrade_reasons an array; inputs the full object (n_keys, anchor_asof, composed_at); the three exit lists as objects with a k-label, a closed reason and a day or null; the book's returns as year slices with a null slice first; k1's dropped_day_pnl null (a null field is ABSENT). k2 exits no-capital (dust) on 2025-01-05, its last day, so it is declared departed on that day; k3 failed read_incomplete with no return day and was never counted (not in keys); k4 is an unpriced native key with an unknown day. HAND DERIVATION is explained_two_keys.json's: published 4, explained 4, withheld 0, omitted 1 (d1 no_stored_base_level), annotated 1 (k1's flow day d4), verdict CLEAN, exit 0; k2's departure on d5 changes no explained day.",
   "book": {
     "label": "A",
+    "n_returns": 4,
     "returns": [null, [{"date": "2025-01-02", "r": 0.01}, {"date": "2025-01-03", "r": -0.0165016501650165}, {"date": "2025-01-04", "r": 0.020134228187919462}, {"date": "2025-01-05", "r": 0.040123456790123455}]],
     "flags": ["departed_history_included", "no_capital_key_exited", "writer_basis"],
     "degrade_reasons": ["window_truncated"],

@@ -2,6 +2,7 @@
   "_comment": "Every value here is synthetic. Same keys as explained_two_keys.json and n_keys 2 (key set reproduced). The published returns d2..d5 are replaced by 0.11, 0.12, 0.13, 0.14, none of which equals the oracle's 0.01, -25/1515, 30/1490, 65/1620. Explained 0 of 4 published: a run that explains nothing is VACUOUS (exit 3), never green and never a STOP on its withheld days.",
   "book": {
     "label": "A",
+    "n_returns": 4,
     "returns": [
       {
         "date": "2025-01-02",

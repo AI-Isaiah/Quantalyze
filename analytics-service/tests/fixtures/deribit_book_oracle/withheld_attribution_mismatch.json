@@ -2,6 +2,7 @@
   "_comment": "Every value here is synthetic. Same two keys, levels and stamps as explained_two_keys.json (derivation there): the oracle's own book returns are d2 15/1500 = 0.01, d3 -25/1515, d4 30/1490 = 0.020134228187919462, d5 65/1620. ONE published value is altered by hand: d4 is published 0.021 instead of 0.020134228187919462. The per-key stamps all still equal P over the previous level, so no structural cause applies and d4 is withheld attribution_mismatch. Published 4, explained 3 (d2, d3, d5), withheld 1, omitted 1 (d1, no_stored_base_level). Verdict STOP, exit 1.",
   "book": {
     "label": "A",
+    "n_returns": 4,
     "returns": [
       {
         "date": "2025-01-02",

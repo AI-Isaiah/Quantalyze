@@ -2,6 +2,7 @@
   "_comment": "Every value here is synthetic. Same keys, levels, stamps and published book as explained_two_keys.json (every published day reproduces: 0.01, -25/1515, 30/1490, 65/1620), with ONE field added by hand: k2 options_cash_basis is true. The annotations (capital outside the base, named and never nulled): k2 participates on d2..d5, so capital_outside_base_options_cash is named on 4 days; k1 carries the only composed flow, 100 on d4, so capital_outside_base_flow_day is named on 1 day (d4). Annotated days: d2, d3, d4, d5 (4). They stay explained: published 4, explained 4, withheld 0, omitted 1 (d1). Published and explained cumulatives are equal (1520 * 1685 / (1500 * 1620) = 1.0540, x1.05); the explained cumulative over the days with no annotation is the empty product, x1. Verdict CLEAN, exit 0.",
   "book": {
     "label": "A",
+    "n_returns": 4,
     "returns": [
       {
         "date": "2025-01-02",

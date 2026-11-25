@@ -37,7 +37,7 @@ Export format (a JSON object; the file is produced outside the repo and never en
 
     {
       "_comment": "optional string, ignored",
-      "book":  {"label": "A", "returns": [{"date", "r"}, ...],
+      "book":  {"label": "A", "returns": [{"date", "r"}, ...], "n_returns": 4,
                 "flags": ["token", ...], "degrade_reasons": [...],
                 "inputs": {"n_keys": 2, "anchor_asof": "<day or null>", "composed_at": "<text>"},
                 "unpriced_native_keys": [{"api_key_id": "k4", "day": "<day or null>",
@@ -61,6 +61,11 @@ duplicate day. A field whose value is null, or a list of year slices that are al
 which is distinct from a present empty array; a null slice beside other slices is skipped. Any
 unknown key, wrong type, non-ISO day or non-finite number raises ``ExportError`` naming the field
 path, never the value.
+
+``book.n_returns`` is required: the ``n_returns`` column of the ``book_curve`` statement (the
+database's own count of the stored returns). The loader refuses a ``book.returns`` whose flattened
+row count differs, so an export that lost its first or last year slice cannot read CLEAN (a lost
+slice at either end falls outside the published window and would otherwise only be "omitted").
 
 The counted key set is a DECLARED input. The compose job picks one login per shared account
 (``account_groups``, ``working_holder_predicate``, first return day, read-incomplete markers) and
@@ -403,6 +408,7 @@ _KEY_FIELDS: Final = (
 _BOOK_FIELDS: Final = (
     "label",
     "returns",
+    "n_returns",
     "flags",
     "degrade_reasons",
     "inputs",
@@ -492,7 +498,7 @@ def _load_flags(raw: Any) -> dict[str, Any]:
 
 
 def _load_book(raw: Any) -> Book:
-    f = _obj("book", raw, _BOOK_FIELDS, ("label", "returns", "inputs"))
+    f = _obj("book", raw, _BOOK_FIELDS, ("label", "returns", "n_returns", "inputs"))
     label = f["label"]
     if not isinstance(label, str) or not _BOOK_LABEL_RE.match(label):
         raise ExportError("book.label: expected one capital letter")
@@ -505,6 +511,8 @@ def _load_book(raw: Any) -> Book:
     returns = _day_values("book.returns", f["returns"], "date", "r")
     if returns is None:
         raise ExportError("book.returns: expected an array")
+    if len(returns) != _count("book.n_returns", f["n_returns"]):
+        raise ExportError("book.returns: row count disagrees with book.n_returns")
     return Book(
         label=label,
         returns=returns,

@@ -2,6 +2,7 @@
   "_comment": "Every value here is synthetic. Book A, one counted key k1, nine union days 2025-01-01 .. 2025-01-09 (d1..d9). HAND DERIVATION. k1 terminal 732.05 on d9, no flow, P = 0,100,-1100,0,500,50,55,60.5,66.55; level(prev) = level(day) - P(day): L9 = 732.05, L8 = 665.5, L7 = 605, L6 = 550, L5 = 500, L4 = 0, L3 = 0, L2 = 1100, L1 = 1000. Stored returns exist on d2 (100/1000 = 0.1), d3 (-1100/1100 = -1), d7 (55/550 = 0.1), d8 (60.5/605 = 0.1) and d9 (66.55/665.5 = 0.1). d5 has P 500 over a previous level of 0 (the writer left no return) and d6 is a dropped day (50 recorded in dropped_day_pnl, no stored return). THE OMITTED DAYS, each under its name: d1 has no previous union day, no_stored_base_level; d4 has previous level L3 = 0, so its denominator is 0, skipped_nonpositive_denominator; d5 has previous level L4 = 0, skipped_nonpositive_denominator; d6 is the only participant and it sat out (dropped day with no return), so no key has a defined return, missing_return_inside_coverage, carrying the key_sat_out annotation; d9 is computed (0.1) but the book published only d2..d8, so it is outside the published window, outside_published_window. No day is non-finite (the loader refuses non-finite numbers). Published 4 (d2, d3, d7, d8), all explained (0.1, -1, 0.1, 0.1), withheld 0, omitted 5, one annotated day (d6). Verdict CLEAN, exit 0.",
   "book": {
     "label": "A",
+    "n_returns": 4,
     "returns": [
       {
         "date": "2025-01-02",

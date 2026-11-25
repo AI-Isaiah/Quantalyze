@@ -2,6 +2,7 @@
   "_comment": "Every value here is synthetic. k1 is as in explained_two_keys.json (L1..L4 = 1000, 1010, 990, 1120). k2 is a key with NO writer basis (no composed_day_pnl, no realized terminal) that joins late: its level days are its flow day d4 (a funding flow of 500) and its stamped day d5, so it has no level on d3 and does not participate on d4, and it participates on d5 only (level on d4 and on d5). d2, d3, d4 have k1 alone: d2 10/1000 = 0.01, d3 -20/1010 = -0.019801980198019802, d4 30/990 = 0.030303030303030304, each published exactly. d5 is published 65/1620 = 0.040123456790123455 (k1 P 40 plus k2 P 25 over 1120 + 500) but k2 has no stored base level, so d5 is withheld no_stored_base_level. Published 4, explained 3 (d2, d3, d4), withheld 1, omitted 1 (d1). Verdict STOP, exit 1.",
   "book": {
     "label": "A",
+    "n_returns": 4,
     "returns": [
       {
         "date": "2025-01-02",

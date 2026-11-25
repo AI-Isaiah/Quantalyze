@@ -2,6 +2,7 @@
   "_comment": "Every value here is synthetic. Same keys, levels and stamps as explained_two_keys.json. The published book row for 2025-01-04 (d4) is REMOVED by hand. The oracle still computes d4 = 30/1490 from the stored inputs, and d4 sits between the first published day (d2) and the last (d5), so the compose should have published it: omitted omission_unexplained. Published 3 (d2, d3, d5), explained 3, withheld 0, omitted 2 (d1 no_stored_base_level, d4 omission_unexplained). Verdict STOP, exit 1.",
   "book": {
     "label": "A",
+    "n_returns": 3,
     "returns": [
       {
         "date": "2025-01-02",

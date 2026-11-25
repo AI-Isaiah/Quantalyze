@@ -2,6 +2,7 @@
   "_comment": "Every value here is synthetic. Same book as explained_two_keys.json, every published value reproducible, but the declared counted set k1, k2 counts to 2 distinct parents and the book states inputs.n_keys = 3. The key set is not reproduced, so every one of the 4 published days is withheld key_set_not_reproducible. Explained is 0 yet the verdict is STOP (exit 1), not VACUOUS, because the key-set rule is decided first. Omitted 1 (d1).",
   "book": {
     "label": "A",
+    "n_returns": 4,
     "returns": [
       {
         "date": "2025-01-02",

@@ -2,6 +2,7 @@
   "_comment": "Every value here is synthetic. Book A, counted keys k1, k2, k3, nine consecutive union days 2025-01-01 .. 2025-01-09 (d1..d9). HAND DERIVATION. k1 covers d1..d6, terminal 1050 on d6, P = 0,10,10,10,10,10: L6 = 1050, L5 = 1040, L4 = 1030, L3 = 1020, L2 = 1010, L1 = 1000. k2 covers d1..d4, terminal 515 on d4, P = 0,5,5,5: L4 = 515, L3 = 510, L2 = 505, L1 = 500. k3 covers d7..d9, terminal 2040 on d9, P = 0,20,20: L9 = 2040, L8 = 2020, L7 = 2000. COVERING SETS: {k1,k2} on d1..d4, {k1} on d5..d6, {k3} on d7..d9. {k1,k2} to {k1} shares k1, so k2, which ended early while overlapped, is NOT rotated out: it carries its last level 515 with no P&L on d5..d9. {k1} to {k3} is disjoint with no window overlap, so k1 is rotated out: no level after d6. Book return = sum of P over sum of previous levels: d2 (10 + 5)/(1000 + 500) = 15/1500; d3 15/(1010 + 505) = 15/1515; d4 15/(1020 + 510) = 15/1530; d5 (10 + 0)/(1030 + 515) = 10/1545 (k2 carries 515, P 0); d6 10/(1040 + 515) = 10/1555; d7 k1 has left, k3 has no previous level, k2 carries: 0/515 = 0; d8 (0 + 20)/(515 + 2000) = 20/2515 (k3 joined d7); d9 20/(515 + 2020) = 20/2535. d1 has no previous union day: omitted no_stored_base_level. Published 8 (d2..d9), explained 8, withheld 0, omitted 1. Verdict CLEAN, exit 0.",
   "book": {
     "label": "A",
+    "n_returns": 8,
     "returns": [
       {
         "date": "2025-01-02",
