@@ -152,7 +152,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 5;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 104;
+export const SELF_TEST_SCENARIOS = 107;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1801,6 +1801,74 @@ export async function selfTest() {
         expect(
           r.defects[0] && r.defects[0].subject === "binance#eeee0002",
           `the subject is Y, not X (got ${r.defects[0] && r.defects[0].subject})`,
+        ) &&
+        pass;
+    }
+
+    scenario("freshness: a derived key with a key_inputs row and NO stored return day pages as freshness-stale, never reads healthy");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const base = frOk.data.rows[0];
+      const fresh = { ...clone(base), tag: "dddd0003" };
+      const blind = { ...clone(base), venue: "bybit", tag: "dddd0004", newestReturn: "", newestFlow: "2026-11-20", terminalDay: "", markDay: "", tinyDays: [] };
+      const r = await runFresh({ scope: { derived: 2, withInputs: 2, withTerminal: 2 }, rows: [fresh, blind] });
+      pass =
+        expect(r.exitCode === 1, `a key with no stored return exits 1 (got ${r.exitCode})`) &&
+        expect(
+          r.defects.length === 1 && r.defects[0].kind === "freshness-stale",
+          `exactly one freshness-stale (got ${r.defects.map((d) => d.kind).join(", ") || "nothing"})`,
+        ) &&
+        expect(
+          r.defects[0] && r.defects[0].subject === "bybit#dddd0004",
+          `the subject is the blind key's venue#tag (got ${r.defects[0] && r.defects[0].subject})`,
+        ) &&
+        expect(
+          r.defects[0] && r.defects[0].detail.includes("no stored return day"),
+          `the detail names the missing series (got ${r.defects[0] && r.defects[0].detail})`,
+        ) &&
+        pass;
+    }
+
+    scenario("freshness: a derived key with NO key_inputs row is a measure-fail naming its venue#tag, never a quiet skip");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const base = frOk.data.rows[0];
+      const fresh = { ...clone(base), tag: "dddd0005" };
+      const bare = { venue: "unknown", tag: "dddd0006", newestReturn: "2026-11-10", anchorNullReason: "", newestFlow: "", terminalDay: "", markDay: "", tinyDays: [], hasInputs: false };
+      const r = await runFresh({ scope: { derived: 2, withInputs: 1, withTerminal: 1 }, rows: [fresh, bare] });
+      pass =
+        onlyFrMeasureFail(r, "no key_inputs row", "unknown#dddd0006") &&
+        expect(
+          r.defects[0] && r.defects[0].detail.includes("no key_inputs row"),
+          `no key_inputs row: the detail names the cause (got ${r.defects[0] && r.defects[0].detail})`,
+        ) &&
+        pass;
+    }
+
+    scenario("freshness: a scope of one anchor-covered key plus one key with no inputs judges nothing, so it exits non-zero with the not-judged counts named");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const base = frOk.data.rows[0];
+      const anchored = { ...clone(base), venue: "okx", tag: "dddd0007", newestReturn: "2026-10-01", anchorNullReason: "nonpositive", newestFlow: "2026-11-20", terminalDay: "2026-11-23", markDay: "", tinyDays: [] };
+      const bare = { venue: "unknown", tag: "dddd0008", newestReturn: "", anchorNullReason: "", newestFlow: "", terminalDay: "", markDay: "", tinyDays: [], hasInputs: false };
+      const r = await runFresh({ scope: { derived: 2, withInputs: 1, withTerminal: 1 }, rows: [anchored, bare] });
+      const guard = r.defects.find((d) => d.subject === "freshness keys");
+      pass =
+        expect(r.exitCode === 1, `a run that judged nothing exits 1 (got ${r.exitCode})`) &&
+        expect(
+          r.defects.length === 2 && r.defects.every((d) => d.kind === "measure-fail" && d.arm === "freshness"),
+          `exactly two measure-fails, one per cause (got ${r.defects.map((d) => d.kind).join(", ") || "nothing"})`,
+        ) &&
+        expect(
+          r.defects.some((d) => d.subject === "unknown#dddd0008"),
+          "the key with no inputs is named by its venue#tag",
+        ) &&
+        expect(
+          guard !== undefined && guard.detail.includes("none was judged") && guard.detail.includes("covered_anchor=1") && guard.detail.includes("no_inputs=1"),
+          `the judged-zero defect names the not-judged counts (got ${guard && guard.detail})`,
         ) &&
         pass;
     }

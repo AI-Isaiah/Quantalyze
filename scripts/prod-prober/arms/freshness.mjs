@@ -27,6 +27,14 @@
  *       its own words, that it could not anchor the series).
  * No other reason exists. This arm never invents one.
  *
+ * A derived key that cannot be judged never reads healthy:
+ *   - a key with a `key_inputs` row, no anchor reason and NO stored return day
+ *     pages as `freshness-stale` (its gap is the whole series);
+ *   - a derived key with NO `key_inputs` row raises a `measure-fail`;
+ *   - a run that read rows and judged none of them (judged means fresh, covered
+ *     by stated days, or stale) raises a `measure-fail` naming the not-judged
+ *     counts.
+ *
  * ============================================================================
  * WHY IT LIVES IN THE PROBER AND NOT IN seam S5 (`ops_staleness_check`)
  * ============================================================================
@@ -73,8 +81,9 @@ export const FRESHNESS_BOUND_DAYS = 2;
 /**
  * The scope read: ONE row of three integers. `derived` keys have a derive job
  * in the last 3 days; `with_inputs` of them have a `key_inputs` row;
- * `with_terminal` of those carry `realized_terminal_day`. The third count is
- * what stops a renamed writer field from reading green for every key.
+ * `with_terminal` of those carry `realized_terminal_day` as a JSON string (a key
+ * that is present with a null value does not count). The third count is what
+ * stops a renamed writer field from reading green for every key.
  */
 export const FRESHNESS_SCOPE_SQL = `WITH recent AS (
   SELECT DISTINCT j.api_key_id
@@ -88,7 +97,7 @@ SELECT (SELECT count(*) FROM recent) AS derived,
           JOIN public.allocator_equity_derived d ON d.kind = 'key_inputs:' || r.api_key_id::text) AS with_inputs,
        (SELECT count(DISTINCT r.api_key_id) FROM recent r
           JOIN public.allocator_equity_derived d ON d.kind = 'key_inputs:' || r.api_key_id::text
-         WHERE d.payload ? 'realized_terminal_day') AS with_terminal`;
+         WHERE jsonb_typeof(d.payload->'realized_terminal_day') = 'string') AS with_terminal`;
 
 /**
  * The per-key read: one row per derived key, newest `key_inputs` row per kind
@@ -279,6 +288,13 @@ export function judgeFreshness(rows, log = () => {}, tally = {}) {
     if (!r.hasInputs) {
       log(`freshness: ${subject} has no key_inputs row (not judged)`);
       count("noInputs");
+      defects.push({
+        kind: "measure-fail",
+        subject,
+        detail:
+          "a derived key has no key_inputs row, so it cannot be judged and must not read healthy. Read the derive " +
+          "job for this key before trusting a green run.",
+      });
       continue;
     }
     if (r.anchorNullReason !== "") {
@@ -288,8 +304,16 @@ export function judgeFreshness(rows, log = () => {}, tally = {}) {
     }
     const newest = dayNumber(r.newestReturn);
     if (newest === null) {
-      log(`freshness: ${subject} has no stored return day (not judged)`);
+      log(`freshness: ${subject} has no stored return day`);
       count("noReturns");
+      count("stale");
+      defects.push({
+        kind: "freshness-stale",
+        subject,
+        detail:
+          "the key has a key_inputs row, no anchor reason and no stored return day at all: its gap is the whole " +
+          "series, and no stated left-out day covers a series that does not exist.",
+      });
       continue;
     }
     const candidates = [
@@ -439,6 +463,16 @@ async function run({ seams, log, addDefect }) {
       `covered_stated=${t("coveredStated")} covered_anchor=${t("coveredAnchor")} no_inputs=${t("noInputs")} ` +
       `no_returns=${t("noReturns")} no_reference=${t("noReference")} stale=${t("stale")} venues ${venueText}`,
   );
+  if (parsed.rows.length > 0 && t("fresh") + t("coveredStated") + t("stale") === 0) {
+    addDefect(
+      "measure-fail",
+      "freshness",
+      "freshness keys",
+      `${parsed.rows.length} key row(s) were read and none was judged (fresh 0, covered_stated 0, stale 0); ` +
+        `not judged: covered_anchor=${t("coveredAnchor")} no_inputs=${t("noInputs")} no_returns=${t("noReturns")} ` +
+        `no_reference=${t("noReference")}. A run that judged nothing must not read healthy.`,
+    );
+  }
 }
 
 export const ARM = {

@@ -1934,7 +1934,10 @@ describe("[164.1-05] kinds and floors", () => {
     // proving an anchor reason on one key never covers another.
     // ⭐ 103 -> 104 in the Phase 233 review fix (WR-01): the red
     // tail-edge-uncovered fixture; the covered-tail key rides in ok.json.
-    expect(SELF_TEST_SCENARIOS).toBe(104);
+    // ⭐ 104 -> 107 in the Phase 233 review fix (WR-02, SFH-01): three
+    // dedicated `freshness:` scenarios (a key with no stored return pages, a key
+    // with no inputs row is a measure-fail, a run that judged nothing exits 1).
+    expect(SELF_TEST_SCENARIOS).toBe(107);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
@@ -3290,6 +3293,10 @@ describe("[233 FRESH-02] the freshness arm's SQL names are bound to the writers 
     expect(storedBy(EQUITY_DERIVE, '"realized_terminal_day"')).toBe(true);
     expect(storedBy(FRESHNESS_SCOPE_SQL, "'realized_terminal_day'")).toBe(true);
     expect(storedBy(FRESHNESS_KEYS_SQL, "'realized_terminal_day'")).toBe(true);
+  });
+
+  it("the scope statement counts realized_terminal_day only when it is a JSON string (a present-but-null key is not counted)", () => {
+    expect(storedBy(FRESHNESS_SCOPE_SQL, "jsonb_typeof(d.payload->'realized_terminal_day') = 'string'")).toBe(true);
   });
 
   it("the baseline tables the statements read still carry the columns they name", () => {
