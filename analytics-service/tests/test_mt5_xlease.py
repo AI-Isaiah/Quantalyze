@@ -216,10 +216,13 @@ async def test_a_spent_bound_makes_exactly_one_attempt_and_a_free_lease_is_grant
     assert not free.holds(_digest())
 
 
-async def test_lease_unavailable_releases_the_local_lock_and_stamps_nothing() -> None:
+async def test_lease_unavailable_releases_the_local_lock_and_stamps_nothing(
+    monkeypatch, fast_poll
+) -> None:
     fake = FakeXLeaseBackend()
     fake.raises["acquire"] = RuntimeError("boom")
     _install(fake)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_ERROR_BUDGET_S", 0.2)
     epoch_before = _mt5_epoch_for(_KEY)
 
     with pytest.raises(mt5_concurrency.Mt5TerminalLeaseUnavailableError):
@@ -394,7 +397,7 @@ def test_digest_is_64_hex_and_collapses_spellings_and_hides_the_key() -> None:
 
 
 async def test_redaction_nothing_a_full_hold_writes_carries_the_terminal_key(
-    caplog, fast_poll
+    monkeypatch, caplog, fast_poll
 ) -> None:
     """Scan the logs, every exception message and the fake's stored row for the raw
     key, its host part and its port, over a granted hold, a refused bounded caller
@@ -418,6 +421,7 @@ async def test_redaction_nothing_a_full_hold_writes_carries_the_terminal_key(
     await fake.release(_digest(key), foreign)
 
     fake.raises["acquire"] = RuntimeError(f"connection to {key} refused")
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_ERROR_BUDGET_S", 0.2)
     try:
         async with mt5_concurrency.mt5_terminal_lease(key):
             pass
@@ -577,25 +581,28 @@ async def test_cancelling_the_holder_cancels_its_renew_task(quick_renew) -> None
 
 
 @pytest.mark.parametrize(
-    ("poll", "renew", "ttl", "rpc", "named"),
+    ("poll", "renew", "ttl", "rpc", "budget", "named"),
     [
-        (0.5, 0.5, 90.0, 5.0, "_MT5_XLEASE_POLL_S"),  # poll not below renew
-        (0.0, 20.0, 90.0, 15.0, "_MT5_XLEASE_POLL_S"),  # poll not above zero
-        (0.5, 90.0, 90.0, 15.0, "_MT5_XLEASE_RENEW_INTERVAL_S"),  # renew not below ttl
-        (0.5, 20.0, 90.0, 20.0, "_MT5_XLEASE_RPC_TIMEOUT_S"),  # rpc not below renew
-        (0.5, 20.0, 50.0, 15.0, "_MT5_XLEASE_TTL_S"),  # ttl below 2*renew + rpc
+        (0.5, 0.5, 90.0, 5.0, 60.0, "_MT5_XLEASE_POLL_S"),  # poll not below renew
+        (0.0, 20.0, 90.0, 15.0, 60.0, "_MT5_XLEASE_POLL_S"),  # poll not above zero
+        (0.5, 90.0, 90.0, 15.0, 60.0, "_MT5_XLEASE_RENEW_INTERVAL_S"),  # renew not below ttl
+        (0.5, 20.0, 90.0, 20.0, 60.0, "_MT5_XLEASE_RPC_TIMEOUT_S"),  # rpc not below renew
+        (0.5, 20.0, 50.0, 15.0, 60.0, "_MT5_XLEASE_TTL_S"),  # ttl below 2*renew + rpc
+        # error budget not above one RPC's timeout: a single slow call would spend it
+        (0.5, 20.0, 90.0, 15.0, 15.0, "_MT5_XLEASE_ERROR_BUDGET_S"),
     ],
 )
 def test_timing_each_broken_inequality_raises_and_the_shipped_values_pass(
-    poll: float, renew: float, ttl: float, rpc: float, named: str
+    poll: float, renew: float, ttl: float, rpc: float, budget: float, named: str
 ) -> None:
     with pytest.raises(ValueError, match=named):
-        mt5_xlease._validate_xlease_timing(poll, renew, ttl, rpc)
+        mt5_xlease._validate_xlease_timing(poll, renew, ttl, rpc, budget)
     mt5_xlease._validate_xlease_timing(
         mt5_xlease._MT5_XLEASE_POLL_S,
         mt5_xlease._MT5_XLEASE_RENEW_INTERVAL_S,
         mt5_xlease._MT5_XLEASE_TTL_S,
         mt5_xlease._MT5_XLEASE_RPC_TIMEOUT_S,
+        mt5_xlease._MT5_XLEASE_ERROR_BUDGET_S,
     )
 
 
@@ -767,3 +774,229 @@ async def test_a_late_grant_from_an_earlier_poll_is_released_when_the_fallback_i
     )
     await hold.release()
     assert backend.calls.count("release") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Plan 04 Task 2 — every OTHER database error fails closed.
+#
+# T-230-12: a database fault must never let a caller onto the terminal unserialized. An
+# unbounded (batch) caller tolerates consecutive errors for ERROR_BUDGET_S so a PostgREST
+# blip does not burn a derive attempt (the quantity the seven nights count), then gets a
+# classifiable error. A bounded caller keeps polling to ITS OWN deadline and gets busy.
+# --------------------------------------------------------------------------- #
+_SECRET = "SECRET-MARKER-gateway-host.example:8001"
+
+
+def _small_budget(monkeypatch, seconds: float) -> None:
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_ERROR_BUDGET_S", seconds)
+
+
+async def test_budget_unbounded_caller_fails_closed_only_after_the_budget(
+    monkeypatch, fast_poll
+) -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["acquire"] = RuntimeError(f"connection to {_SECRET} refused")
+    _install(fake)
+    _small_budget(monkeypatch, 0.3)
+    epoch_before = _mt5_epoch_for(_KEY)
+    started = time.monotonic()
+
+    async def _attempt() -> None:
+        async with mt5_concurrency.mt5_terminal_lease(_KEY):
+            pytest.fail("the body must never run while the lease database errors")
+
+    with pytest.raises(mt5_concurrency.Mt5TerminalLeaseUnavailableError):
+        await asyncio.wait_for(_attempt(), timeout=10.0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed >= 0.3, (
+        f"the caller gave up after {elapsed:.2f}s, before its 0.3s error budget - one "
+        "blip would burn a derive attempt"
+    )
+    assert elapsed < 5.0
+    assert fake.count("acquire") > 1, "the caller did not keep polling through the errors"
+    assert not mt5_concurrency._mt5_terminal_lock_for(_KEY).locked()
+    assert _mt5_epoch_for(_KEY) == epoch_before
+    assert mt5_client._MT5_LEASE_OCCUPANCY.get() is None
+    assert mt5_client._MT5_LEASE_HOLDER.get() is None
+    assert mt5_terminal_holder(_KEY) is None
+    assert fake.rows == {}, "a failed acquisition left a lease row behind"
+
+
+async def test_budget_a_database_answer_resets_the_error_window(
+    monkeypatch, fast_poll
+) -> None:
+    """Errors for most of the budget, one refusal (the database ANSWERED), then errors
+    again: the window restarts, so the caller does not give up at the original mark."""
+    t0 = time.monotonic()
+    state = {"refused": False}
+
+    async def _step() -> bool:
+        if time.monotonic() - t0 < 0.25 or state["refused"]:
+            raise RuntimeError("blip")
+        state["refused"] = True
+        return False
+
+    mt5_xlease.set_xlease_backend_for_tests(_ScriptedBackend([_step]))
+    _small_budget(monkeypatch, 0.4)
+
+    with pytest.raises(mt5_xlease.XLeaseUnavailable):
+        await asyncio.wait_for(
+            mt5_xlease.acquire_terminal_xlease(
+                _KEY, holder=None, site=None, bound_s=None, on_lost=lambda: None
+            ),
+            timeout=10.0,
+        )
+    elapsed = time.monotonic() - t0
+
+    assert state["refused"], "the scripted refusal never happened"
+    assert elapsed >= 0.6, (
+        f"gave up at {elapsed:.2f}s: an answered call did not reset the 0.4s error budget "
+        "(without a reset it would give up at about 0.4s)"
+    )
+
+
+async def test_budget_one_rpc_error_per_acquisition_is_a_warning_with_the_class_only(
+    monkeypatch, caplog, fast_poll
+) -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["acquire"] = RuntimeError(f"connection to {_SECRET} refused")
+    _install(fake)
+    _small_budget(monkeypatch, 0.2)
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+
+    with pytest.raises(mt5_concurrency.Mt5TerminalLeaseUnavailableError):
+        async with mt5_concurrency.mt5_terminal_lease(_KEY, site=SITE_DERIVE):
+            pass
+
+    errors = _events(caplog, "mt5_xlease_rpc_error")
+    assert fake.count("acquire") > 2, "the test must have polled several times"
+    assert len(errors) == 1, f"expected one warning per acquisition, got {len(errors)}"
+    record = errors[0]
+    assert record.levelno == logging.WARNING
+    assert record.rpc == mt5_xlease.XLEASE_ACQUIRE_RPC
+    assert record.site == SITE_DERIVE
+    assert "RuntimeError" in record.getMessage()
+    assert _events(caplog, "mt5_xlease_unavailable") == [], "a non-missing error is not a missing RPC"
+
+
+async def test_bounded_caller_keeps_polling_through_errors_and_gets_busy_at_its_bound(
+    monkeypatch, fast_poll
+) -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["acquire"] = RuntimeError("blip")
+    _install(fake)
+    _small_budget(monkeypatch, 0.1)  # a bounded caller must ignore the budget
+    started = time.monotonic()
+
+    with pytest.raises(mt5_concurrency.Mt5TerminalBusyError) as raised:
+        async with mt5_concurrency.mt5_terminal_lease(_KEY, wait_s=0.3):
+            pytest.fail("the body must never run while the lease database errors")
+    elapsed = time.monotonic() - started
+
+    assert type(raised.value) is mt5_concurrency.Mt5TerminalBusyError, (
+        "a bounded caller got the batch-job classification instead of the busy answer"
+    )
+    assert elapsed >= 0.3, f"the busy answer came at {elapsed:.2f}s, before the 0.3s bound"
+    assert fake.count("acquire") > 1
+    assert not mt5_concurrency._mt5_terminal_lock_for(_KEY).locked()
+
+
+async def test_renew_missing_rpc_stops_renewing_without_declaring_the_lease_lost(
+    quick_renew, caplog
+) -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["renew"] = _missing_rpc_error()
+    _install(fake)
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+    epoch_before = _mt5_epoch_for(_KEY)
+
+    async with mt5_concurrency.mt5_terminal_lease(_KEY, site=SITE_DERIVE):
+        await asyncio.sleep(0.5)  # ten renew intervals, past LOST_AFTER
+        assert _mt5_epoch_for(_KEY) == epoch_before, (
+            "a missing renew RPC fenced a holder that still owns the terminal"
+        )
+        assert fake.count("renew") == 1, (
+            f"renewal continued against a missing RPC ({fake.count('renew')} calls)"
+        )
+
+    assert _events(caplog, "mt5_xlease_lost") == []
+    missing = [
+        r for r in _events(caplog, "mt5_xlease_unavailable")
+        if r.rpc == mt5_xlease.XLEASE_RENEW_RPC
+    ]
+    assert len(missing) == 1 and missing[0].levelno == logging.ERROR
+
+
+async def test_release_error_never_masks_the_bodys_exception(caplog) -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["release"] = RuntimeError(f"connection to {_SECRET} refused")
+    _install(fake)
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+
+    with pytest.raises(ValueError, match="the body failed"):
+        async with mt5_concurrency.mt5_terminal_lease(_KEY):
+            raise ValueError("the body failed")
+
+    failed = _events(caplog, "mt5_xlease_release_failed")
+    assert len(failed) == 1 and failed[0].levelno == logging.WARNING
+    assert "RuntimeError" in failed[0].getMessage()
+    assert not mt5_concurrency._mt5_terminal_lock_for(_KEY).locked()
+
+
+async def test_release_missing_rpc_is_logged_on_the_relog_clock_and_never_raises(
+    monkeypatch, caplog
+) -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["release"] = _missing_rpc_error()
+    _install(fake)
+    clock = [9000.0]
+    monkeypatch.setattr(mt5_xlease, "_relog_clock", lambda: clock[0])
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+
+    async with mt5_concurrency.mt5_terminal_lease(_KEY):
+        pass
+    clock[0] += 10.0
+    async with mt5_concurrency.mt5_terminal_lease(_KEY):
+        pass
+
+    missing = _events(caplog, "mt5_xlease_unavailable")
+    assert len(missing) == 1, "release shares the relog clock: a second release 10 s later must not re-log"
+    assert missing[0].rpc == mt5_xlease.XLEASE_RELEASE_RPC
+    assert _events(caplog, "mt5_xlease_release_failed") == [], (
+        "a missing release RPC is the unavailable event, not a release failure"
+    )
+
+
+async def test_redaction_no_record_from_the_failure_paths_carries_the_exception_text(
+    monkeypatch, caplog, fast_poll, quick_renew
+) -> None:
+    """Every failure path with an exception whose OWN text carries a host and port: the
+    text must not reach a message, an extra field, exc_info or exc_text."""
+    caplog.set_level(logging.DEBUG)
+    _small_budget(monkeypatch, 0.2)
+    error = RuntimeError(f"connection to {_SECRET} refused")
+    missing = APIError({"message": f"no function at {_SECRET}", "code": "PGRST202"})
+
+    for method, exc in (("acquire", error), ("acquire", missing), ("release", error),
+                        ("release", missing), ("renew", missing)):
+        fake = FakeXLeaseBackend()
+        fake.raises[method] = exc
+        _install(fake)
+        mt5_concurrency.reset_terminal_state_for_tests()
+        try:
+            async with mt5_concurrency.mt5_terminal_lease(_KEY, site=SITE_DERIVE):
+                await asyncio.sleep(0.12)
+        except mt5_concurrency.Mt5TerminalLeaseUnavailableError:
+            pass
+
+    assert caplog.records
+    for record in caplog.records:
+        rendered = " ".join(
+            [record.getMessage(), str(record.__dict__.get("exc_text")), repr(record.args)]
+            + [str(v) for k, v in record.__dict__.items() if k not in {"args", "msg"}]
+        )
+        assert "SECRET-MARKER" not in rendered and "gateway-host" not in rendered, (
+            f"exception text reached a log record: {record.getMessage()!r}"
+        )
+        assert record.exc_info is None, "a log record carried a traceback"
