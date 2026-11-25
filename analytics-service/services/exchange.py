@@ -2808,8 +2808,25 @@ async def _fetch_raw_trades_binance(
 
     fills: list[dict[str, Any]] = []
     failed_symbols: list[str] = []
+    unlisted_symbols: list[str] = []
     first_error: BaseException | None = None
     for idx, item in enumerate(results):
+        if isinstance(item, ccxt.BadSymbol):
+            # Phase 250 BINANCEFILLS (SC-2, T-250-09): ONLY a BadSymbol (ccxt raises it
+            # client-side for a name absent from the loaded markets, and maps the venue
+            # codes -1108, -1121 and -20121 to it) is a symbol the venue does not list.
+            # It is named, never held on. BadRequest, ExchangeError, NetworkError and every
+            # other exception fall through to the holding branch below.
+            symbol = symbols[idx] if idx < len(symbols) else "<unknown>"
+            unlisted_symbols.append(symbol)
+            if first_error is None:
+                first_error = item
+            logger.warning(
+                "Binance symbol %s is not listed by the venue (exc_class=%s scrubbed=%s); "
+                "named in binance_unlisted_symbols and not held",
+                symbol, type(item).__name__, scrub_freeform_string(str(item)),
+            )
+            continue
         if isinstance(item, BaseException):
             # Per-symbol "Binance fetch_my_trades failed for" log shape is
             # load-bearing for existing correlation_id log queries.
@@ -2851,12 +2868,22 @@ async def _fetch_raw_trades_binance(
         # Total-failure escalation (next branch) still raises so the job
         # is marked failed_retry.
         _record_dq_flag("binance_partial_symbols", list(failed_symbols))
-        # Total failure with no successful symbols mirrors the
-        # ColdStartSymbolDiscoveryError contract — every fill is silently
-        # dropped, so the sync looks empty. Raise so the worker marks the
-        # job failed_retry instead of cementing zero-fills success.
-        if len(failed_symbols) == len(symbols) and first_error is not None:
-            raise BinancePerSymbolFetchError(failed_symbols, first_error)
+
+    # Phase 250 BINANCEFILLS (SC-2, CONTEXT [Unlisted symbols, R2-01]): a symbol the venue does
+    # not list is named on EVERY run in a flag the cursor gate does NOT hold on, so the healthy
+    # symbols' span past the cursor is stored and stamped instead of stalling behind a dead
+    # name for good. RECOVERY: a span that was skipped while the symbol was unlisted is
+    # recovered by a reconcile, or a backfill with an explicit since; nothing re-reads it
+    # automatically, and that is deliberate (the flag is non-holding by design).
+    if unlisted_symbols:
+        _record_dq_flag("binance_unlisted_symbols", list(unlisted_symbols))
+
+    # Total failure with no successful symbols mirrors the ColdStartSymbolDiscoveryError
+    # contract: every fill is silently dropped, so the sync looks empty. Raise so the worker
+    # marks the job failed_retry instead of cementing zero-fills success. Unlisted symbols
+    # count as failed here (RESEARCH Pitfall 3).
+    if len(failed_symbols) + len(unlisted_symbols) == len(symbols) and first_error is not None:
+        raise BinancePerSymbolFetchError(failed_symbols + unlisted_symbols, first_error)
 
     return fills
 

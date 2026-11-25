@@ -229,3 +229,44 @@ class TestBinanceFillsThroughTheSyncJob:
         flags = rec.analytics_upserts[-1]["data_quality_flags"]
         assert flags.get("binance_fills_reach_clamped") is True
         assert "binance_partial_symbols" not in flags
+
+    async def test_tracer_an_unlisted_symbol_is_named_and_the_healthy_symbol_stamps(
+        self,
+    ) -> None:
+        """SC-2 (CONTEXT [Unlisted symbols, R2-01] "How do healthy symbols advance while a dead
+        symbol is still named?"): two symbols are discovered, BTCUSDT (listed, fills at the
+        cursor and 5 days before now) and DELISTEDUSDT (absent from the loaded markets, so
+        ccxt raises BadSymbol client-side). The dead symbol is named in
+        `binance_unlisted_symbols` on the run and does NOT hold the cursor: the healthy fill
+        is stored and stamped. Filed under the holding `binance_partial_symbols` (the 250-04
+        behaviour) the stamp stays None forever and every healthy symbol stops past
+        C + 7 days.
+
+        The job writes the drained flags through its `strategy_analytics` upsert
+        (`rec.analytics_upserts[-1]["data_quality_flags"]`)."""
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [
+                    venue_fill("linear", "BTCUSDT", 1, C_MS),
+                    venue_fill("linear", "BTCUSDT", 2, NOW_MINUS_5D_MS),
+                ]
+            }
+        )
+        rec, _fetch = await _run_live(
+            venue,
+            column=C_ISO,
+            stored_fills=[C_ISO],
+            symbols=["BTCUSDT", "DELISTEDUSDT"],
+        )
+
+        assert _the_advance(rec)["p_last_fetched_ts"] == NOW_MINUS_5D_ISO
+        persisted = {
+            str(f["exchange_fill_id"]): f["timestamp"]
+            for batch in rec.upserted_batches
+            for f in batch
+        }
+        assert persisted.get("2") == NOW_MINUS_5D_ISO, persisted
+        assert rec.analytics_upserts, "the job wrote no data_quality_flags"
+        flags = rec.analytics_upserts[-1]["data_quality_flags"]
+        assert flags.get("binance_unlisted_symbols") == ["DELISTEDUSDT"]
+        assert "binance_partial_symbols" not in flags

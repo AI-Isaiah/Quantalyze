@@ -375,3 +375,63 @@ class TestBinanceFillsWindowWalk:
         assert ex.BINANCE_FILLS_WINDOW_DAYS == 7
         assert ex.BINANCE_SPOT_FILLS_WINDOW_HOURS == 24
         assert ex.BINANCE_FILLS_REACH_DAYS == 85
+
+
+class TestBinanceFillsSymbols:
+    """Phase 250 BINANCEFILLS plan 05 (SC-2, SC-5): which stored names are named and which hold.
+
+    Only a `ccxt.BadSymbol` (ccxt raises it client-side for a name absent from the loaded
+    markets, and maps the venue codes -1108, -1121 and -20121 to it) skips a symbol without
+    holding the cursor; it is named in `binance_unlisted_symbols` on every run. Every other
+    failure keeps the holding `binance_partial_symbols`. The all-failed raise counts both.
+
+    PROOF-01 NEUTER (recorded verbatim in the 250-05 SUMMARY, restored from a byte backup of
+    `services/exchange.py` with `cp` and checked with `cmp`):
+      N6  remove the `isinstance(item, ccxt.BadSymbol)` branch:
+          test_an_unlisted_symbol_is_named_and_not_held goes RED.
+      N8b compare `len(failed_symbols)` alone in the total-failure raise:
+          test_every_symbol_unlisted_still_raises goes RED.
+    """
+
+    async def test_an_unlisted_symbol_is_named_and_not_held(
+        self, open_exchanges: list[Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """SC-2: DELISTEDUSDT is absent from the markets, so ccxt raises BadSymbol for it. It
+        is named in `binance_unlisted_symbols`, NOT in the holding `binance_partial_symbols`,
+        and the healthy ETHUSDT fills past C + 7 days are returned."""
+        c_ms = 1792584000000  # 2026-10-21T12:00:00Z
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "ETHUSDT"): [
+                    venue_fill("linear", "ETHUSDT", 1, c_ms),
+                    venue_fill("linear", "ETHUSDT", 2, NOW_MS - 5 * DAY_MS),
+                ]
+            }
+        )
+
+        with caplog.at_level("WARNING"):
+            fills, flags = await _read(
+                open_exchanges, venue, ["ETHUSDT", "DELISTEDUSDT"], c_ms
+            )
+
+        assert flags.get("binance_unlisted_symbols") == ["DELISTEDUSDT"]
+        assert "binance_partial_symbols" not in flags
+        assert _ids(fills, "ETHUSDT") == {"1", "2"}
+        assert any(
+            "DELISTEDUSDT" in record.getMessage() and record.levelname == "WARNING"
+            for record in caplog.records
+        ), "the unlisted symbol must be named in a WARNING"
+
+    async def test_every_symbol_unlisted_still_raises(
+        self, open_exchanges: list[Any]
+    ) -> None:
+        """RESEARCH Pitfall 3: when EVERY symbol failed or was unlisted the read looks empty
+        and would cement a zero-fills success, so `BinancePerSymbolFetchError` is still raised,
+        naming both."""
+        venue = BinanceFillsVenue({})
+
+        with pytest.raises(ex.BinancePerSymbolFetchError) as excinfo:
+            await _read(open_exchanges, venue, ["DELISTEDUSDT", "GONEUSDT"], NOW_MS - 2 * DAY_MS)
+
+        assert set(excinfo.value.failed_symbols) == {"DELISTEDUSDT", "GONEUSDT"}
+        ex.get_and_clear_last_dq_flags()
