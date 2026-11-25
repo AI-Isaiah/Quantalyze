@@ -1043,13 +1043,25 @@ class TestFetchRawTrades:
         assert result[1]["is_maker"] is True  # execType "M" = maker
 
     @pytest.mark.asyncio
-    async def test_fetch_raw_trades_binance_per_symbol(self) -> None:
-        """Binance iterates per-symbol via fetch_my_trades."""
+    async def test_fetch_raw_trades_binance_per_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Binance iterates per-symbol via fetch_my_trades.
+
+        Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: ``since_ms=None`` and ``await_count >= 1``. New:
+        ``since_ms`` pinned, exactly one windowed read per symbol (``await_count ==
+        2``); without the pin a missing seed walks from the 85-day reach and the canned
+        row is served once per window.
+        """
         import asyncio
         from services.exchange import fetch_raw_trades
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
         mock_exchange.fetch_my_trades = AsyncMock(return_value=[
             {
@@ -1092,10 +1104,11 @@ class TestFetchRawTrades:
             return await asyncio.to_thread(fn)
 
         with patch("services.db.db_execute", side_effect=_mock_db_execute):
-            result = await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+            result = await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase, since_ms=1700000000000)
 
         # fetch_my_trades called for each symbol
         assert mock_exchange.fetch_my_trades.await_count >= 1
+        assert mock_exchange.fetch_my_trades.await_count == 2  # one window per symbol
         assert all(r["is_fill"] is True for r in result)
 
     @pytest.mark.asyncio
@@ -1177,19 +1190,30 @@ class TestFetchRawTrades:
             assert "startTime" in sent and "endTime" in sent
 
     @pytest.mark.asyncio
-    async def test_fetch_raw_trades_binance_per_symbol_403(self) -> None:
+    async def test_fetch_raw_trades_binance_per_symbol_403(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """One symbol returns 403 (PermissionDenied), others succeed.
-        Verify partial results returned (not full failure)."""
+        Verify partial results returned (not full failure).
+
+        Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: fake signature ``(symbol, since=None, limit=None)``,
+        ``since_ms=None``. New: the fake also accepts ``params=None`` (the walk's
+        ``until``), ``since_ms`` pinned.
+        """
         import asyncio
         from services.exchange import fetch_raw_trades
         import ccxt.async_support as ccxt_async
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
 
         # First symbol succeeds, second raises 403
-        async def _fetch_my_trades(symbol, since=None, limit=None):
+        async def _fetch_my_trades(symbol, since=None, limit=None, params=None):
             if "ETH" in symbol:
                 raise ccxt_async.PermissionDenied("403 Forbidden")
             return [
@@ -1235,7 +1259,7 @@ class TestFetchRawTrades:
             return await asyncio.to_thread(fn)
 
         with patch("services.db.db_execute", side_effect=_mock_db_execute):
-            result = await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+            result = await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase, since_ms=1700000000000)
 
         # Should have partial results from BTCUSDT, not a full failure
         assert len(result) >= 1
@@ -1390,16 +1414,26 @@ class TestG12BBinanceConcurrency:
     """Audit-2026-05-07 G12.B.3 — fan-out per-symbol fetch via gather."""
 
     @pytest.mark.asyncio
-    async def test_binance_per_symbol_uses_asyncio_gather(self) -> None:
+    async def test_binance_per_symbol_uses_asyncio_gather(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Pre-fix the per-symbol loop ran sequentially. Post-fix it must
         use asyncio.gather with bounded concurrency. We patch
-        asyncio.gather and assert it was called."""
+        asyncio.gather and assert it was called.
+
+        Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: ``since_ms=None``. New: ``since_ms`` pinned; one empty
+        windowed read per symbol, the gather assertion is unchanged.
+        """
         import asyncio
         import services.exchange as exchange_mod
         from services.exchange import fetch_raw_trades
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
         mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
 
@@ -1441,7 +1475,7 @@ class TestG12BBinanceConcurrency:
 
         with patch("services.db.db_execute", side_effect=_mock_db_execute), \
              patch.object(exchange_mod.asyncio, "gather", new=_spy_gather):
-            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase, since_ms=1700000000000)
 
         # Must have called asyncio.gather at least once with all 3 tasks.
         assert any(n >= 3 for n in gather_calls), (
@@ -1451,19 +1485,31 @@ class TestG12BBinanceConcurrency:
     @pytest.mark.asyncio
     async def test_binance_per_symbol_partial_failure_logs_and_continues(
         self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When one symbol fails, gather(return_exceptions=True) catches
         it; the function logs a warning matching the prior shape and
-        returns successful results for the other symbols."""
+        returns successful results for the other symbols.
+
+        Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: fake signature ``(symbol, since=None, limit=None)``,
+        ``since_ms=None``. New: the fake also accepts ``params=None``, ``since_ms``
+        pinned; ETHUSDT still fails with the fake's own RuntimeError.
+        """
         import asyncio
         import logging
         from services.exchange import fetch_raw_trades
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
 
-        async def _fetch_my_trades(symbol, since=None, limit=None):
+        async def _fetch_my_trades(symbol, since=None, limit=None, params=None):
             if "ETH" in symbol:
                 raise RuntimeError("simulated 500")
             return [
@@ -1513,7 +1559,8 @@ class TestG12BBinanceConcurrency:
                 "warning",
             ) as mock_warn:
                 result = await fetch_raw_trades(
-                    mock_exchange, "strat-1", mock_supabase
+                    mock_exchange, "strat-1", mock_supabase,
+                    since_ms=1700000000000,
                 )
 
         # 1 successful symbol → 1 fill; failed symbol logged.
@@ -1591,12 +1638,24 @@ class TestG12BBinanceConcurrency:
                 )
 
     @pytest.mark.asyncio
-    async def test_binance_per_symbol_total_failure_raises_typed(self) -> None:
+    async def test_binance_per_symbol_total_failure_raises_typed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When EVERY per-symbol fetch fails, the function previously
         returned an empty fills list — same false-success outcome that
         ColdStartSymbolDiscoveryError eliminates. Post-fix, total
         per-symbol failure must raise BinancePerSymbolFetchError so the
-        worker marks the job failed_retry."""
+        worker marks the job failed_retry.
+
+        Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: fake signature ``(symbol, since=None, limit=None)``,
+        ``since_ms=None``. New: the fake also accepts ``params=None``; without it every
+        symbol would fail with a TypeError for the new keyword and ``first_error`` would
+        be that TypeError, so the ``RuntimeError`` assertion passes only for the fake's
+        own error.
+        """
         import asyncio
         from services.exchange import (
             BinancePerSymbolFetchError,
@@ -1605,9 +1664,10 @@ class TestG12BBinanceConcurrency:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
 
-        async def _always_fail(symbol, since=None, limit=None):
+        async def _always_fail(symbol, since=None, limit=None, params=None):
             raise RuntimeError(f"simulated 500 for {symbol}")
 
         mock_exchange.fetch_my_trades = _always_fail
@@ -1639,7 +1699,8 @@ class TestG12BBinanceConcurrency:
         with patch("services.db.db_execute", side_effect=_mock_db_execute):
             with pytest.raises(BinancePerSymbolFetchError) as exc_info:
                 await fetch_raw_trades(
-                    mock_exchange, "strat-1", mock_supabase
+                    mock_exchange, "strat-1", mock_supabase,
+                    since_ms=1700000000000,
                 )
         # Both failed symbols must be reported.
         assert sorted(exc_info.value.failed_symbols) == ["BTCUSDT", "ETHUSDT"]
@@ -1648,22 +1709,34 @@ class TestG12BBinanceConcurrency:
     @pytest.mark.asyncio
     async def test_binance_per_symbol_partial_failure_does_not_raise(
         self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The partial-success contract must survive: when SOME (not
         all) symbols fail, fills from the successful symbols are
         returned and a per-symbol-failure summary is logged. A
         regression that promoted partial failure to a raise would
         break the existing test_binance_per_symbol_partial_failure
-        contract; this test pins both directions explicitly."""
+        contract; this test pins both directions explicitly.
+
+        Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: fake signature ``(symbol, since=None, limit=None)``,
+        ``since_ms=None``. New: the fake also accepts ``params=None``, ``since_ms``
+        pinned; the 1-of-2 summary ``(1, 2)`` is unchanged.
+        """
         import asyncio
         import logging
         from services.exchange import fetch_raw_trades
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
 
-        async def _fetch_my_trades(symbol, since=None, limit=None):
+        async def _fetch_my_trades(symbol, since=None, limit=None, params=None):
             if "ETH" in symbol:
                 raise RuntimeError("simulated 500")
             return [
@@ -1713,7 +1786,8 @@ class TestG12BBinanceConcurrency:
                 "warning",
             ) as mock_warn:
                 result = await fetch_raw_trades(
-                    mock_exchange, "strat-1", mock_supabase
+                    mock_exchange, "strat-1", mock_supabase,
+                    since_ms=1700000000000,
                 )
 
         # Partial success — BTCUSDT's fill landed.
@@ -1738,6 +1812,7 @@ class TestG12BBinanceConcurrency:
     @pytest.mark.asyncio
     async def test_binance_semaphore_does_not_serialize_per_symbol_pages(
         self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Phase A moved ``async with sem:`` from outside the per-page
         loop to inside the network call. A regression that re-wraps
@@ -1745,12 +1820,25 @@ class TestG12BBinanceConcurrency:
         fire 5 tasks concurrently but would force each symbol to hold
         a slot for all 20 RTTs — the test below proves page-1 of
         symbol B can complete BEFORE page-2 of symbol A by
-        instrumenting the call ordering."""
+        instrumenting the call ordering.
+
+        Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: fake signature ``(symbol, since=None, limit=None)``,
+        ``since_ms=None``. New: the fake also accepts ``params=None``, ``since_ms``
+        pinned. Page counts stay 2 per symbol: page 1 is full (1000 rows at
+        1700000000000 + i, inside the window), page 2 is empty. The per-request
+        semaphore still lets the symbols interleave.
+        """
         import asyncio
         from services.exchange import fetch_raw_trades
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
 
         # Two symbols, each needing 2 pages. Tracks call ORDER per symbol.
@@ -1758,7 +1846,7 @@ class TestG12BBinanceConcurrency:
         call_log: list[str] = []
         page_2_started = asyncio.Event()
 
-        async def _fetch_my_trades(symbol, since=None, limit=None):
+        async def _fetch_my_trades(symbol, since=None, limit=None, params=None):
             page_counts[symbol] = page_counts.get(symbol, 0) + 1
             page = page_counts[symbol]
             call_log.append(f"{symbol}-p{page}")
@@ -1819,7 +1907,8 @@ class TestG12BBinanceConcurrency:
 
         with patch("services.db.db_execute", side_effect=_mock_db_execute):
             await fetch_raw_trades(
-                mock_exchange, "strat-1", mock_supabase
+                mock_exchange, "strat-1", mock_supabase,
+                since_ms=1700000000000,
             )
 
         # Both symbols ran 2 pages each.
@@ -2803,7 +2892,18 @@ class TestG12BBinancePaginationLoop:
     page returns or the 20-page cap fires."""
 
     @pytest.mark.asyncio
-    async def test_binance_paginates_past_1000_fills(self) -> None:
+    async def test_binance_paginates_past_1000_fills(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: fake signature ``(symbol, since=None, limit=None)``,
+        ``since_ms=None``. New: the fake also accepts ``params=None``, ``since_ms``
+        pinned; both pages (rows at 1700000000000 + i and 1700001000000) lie inside the
+        one window. Counts unchanged: 1001 fills, 2 calls, page 2's ``since`` equals
+        page 1's last timestamp (no +1).
+        """
         import asyncio
         from services.exchange import fetch_raw_trades
 
@@ -2843,7 +2943,7 @@ class TestG12BBinancePaginationLoop:
 
         call_log: list[int | None] = []
 
-        async def _fetch_my_trades(symbol, since=None, limit=None):
+        async def _fetch_my_trades(symbol, since=None, limit=None, params=None):
             call_log.append(since)
             if len(call_log) == 1:
                 return page_1
@@ -2851,6 +2951,7 @@ class TestG12BBinancePaginationLoop:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
         mock_exchange.fetch_my_trades = _fetch_my_trades
 
@@ -2877,7 +2978,8 @@ class TestG12BBinancePaginationLoop:
 
         with patch("services.db.db_execute", side_effect=_mock_db_execute):
             result = await fetch_raw_trades(
-                mock_exchange, "strat-1", mock_supabase
+                mock_exchange, "strat-1", mock_supabase,
+                since_ms=1700000000000,
             )
 
         # We expect both pages to be merged: 1000 + 1 = 1001.
@@ -2890,9 +2992,21 @@ class TestG12BBinancePaginationLoop:
         assert call_log[1] == page_1[-1]["timestamp"]
 
     @pytest.mark.asyncio
-    async def test_binance_pagination_hits_page_cap(self) -> None:
+    async def test_binance_pagination_hits_page_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If the venue keeps returning full pages, the 20-page cap must
-        eventually terminate the loop (no runaway iteration)."""
+        eventually terminate the loop (no runaway iteration).
+
+        Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: fake signature ``(symbol, since=None, limit=None)``,
+        ``since_ms=None``, cap of 20 pages per symbol. New: the fake also accepts
+        ``params=None``, ``since_ms`` pinned; the cap is now per WINDOW, and the 20
+        pages' rows (up to 1700020000999) all lie inside the one window, so it is still
+        exactly 20 calls and 20000 fills.
+        """
         import asyncio
         import logging
         from services.exchange import fetch_raw_trades
@@ -2918,7 +3032,7 @@ class TestG12BBinancePaginationLoop:
 
         call_count = {"n": 0}
 
-        async def _fetch_my_trades(symbol, since=None, limit=None):
+        async def _fetch_my_trades(symbol, since=None, limit=None, params=None):
             call_count["n"] += 1
             # Increment timestamps so cursor moves forward; CCXT mutation
             # safe since list reconstruction below.
@@ -2929,6 +3043,7 @@ class TestG12BBinancePaginationLoop:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
         mock_exchange.fetch_my_trades = _fetch_my_trades
 
@@ -2959,7 +3074,8 @@ class TestG12BBinancePaginationLoop:
                 "warning",
             ) as mock_warn:
                 result = await fetch_raw_trades(
-                    mock_exchange, "strat-1", mock_supabase
+                    mock_exchange, "strat-1", mock_supabase,
+                    since_ms=1700000000000,
                 )
 
         # Exactly 20 fetch calls — the BINANCE_PAGE_CAP.
@@ -4074,7 +4190,17 @@ class TestClusterIBinancePartialFailureSurface:
     buffer so the worker can stamp them into ``strategy_analytics``."""
 
     @pytest.mark.asyncio
-    async def test_partial_failure_records_failed_symbols(self) -> None:
+    async def test_partial_failure_records_failed_symbols(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: fake signature ``(symbol, since=None, limit=None)``,
+        ``since_ms=None``. New: the fake also accepts ``params=None``, ``since_ms``
+        pinned; ETHUSDT is named in ``binance_partial_symbols`` for the fake's own
+        RuntimeError.
+        """
         import asyncio
         from services.exchange import (
             fetch_raw_trades,
@@ -4086,9 +4212,10 @@ class TestClusterIBinancePartialFailureSurface:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
 
-        async def _fetch_my_trades(symbol, since=None, limit=None):
+        async def _fetch_my_trades(symbol, since=None, limit=None, params=None):
             if "ETH" in symbol:
                 raise RuntimeError("simulated ETH 500")
             return [
@@ -4133,7 +4260,7 @@ class TestClusterIBinancePartialFailureSurface:
             return await asyncio.to_thread(fn)
 
         with patch("services.db.db_execute", side_effect=_mock_db_execute):
-            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase, since_ms=1700000000000)
 
         flags = get_and_clear_last_dq_flags()
         # Pre-fix: flags["binance_partial_symbols"] was never set, partial
@@ -4144,8 +4271,18 @@ class TestClusterIBinancePartialFailureSurface:
         assert "BTCUSDT" not in flags["binance_partial_symbols"]
 
     @pytest.mark.asyncio
-    async def test_full_success_leaves_dq_buffer_clean(self) -> None:
-        """A clean sync must NOT leak a stale flag into the buffer."""
+    async def test_full_success_leaves_dq_buffer_clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A clean sync must NOT leak a stale flag into the buffer.
+
+        Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: ``since_ms=None``. New: ``since_ms`` pinned; one
+        windowed read per symbol, and the buffer stays clean (no clamp flag: the seed is
+        inside the reach).
+        """
         import asyncio
         from services.exchange import (
             fetch_raw_trades,
@@ -4155,6 +4292,7 @@ class TestClusterIBinancePartialFailureSurface:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
         mock_exchange.fetch_my_trades = AsyncMock(return_value=[
             {
@@ -4193,7 +4331,7 @@ class TestClusterIBinancePartialFailureSurface:
             return await asyncio.to_thread(fn)
 
         with patch("services.db.db_execute", side_effect=_mock_db_execute):
-            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase, since_ms=1700000000000)
 
         flags = get_and_clear_last_dq_flags()
         assert flags.get("binance_partial_symbols") is None
@@ -4842,7 +4980,15 @@ class TestClusterIDqBufferResetOnEntry:
     sync's reported flags."""
 
     @pytest.mark.asyncio
-    async def test_entry_seam_clears_stale_flags(self) -> None:
+    async def test_entry_seam_clears_stale_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Phase 250 BINANCEFILLS: the Binance read is now a since-aligned window walk
+        whose every request carries ``params={'until': window_end}``. The clock is
+        pinned at 1700030000000 (2023-11-15T06:33:20Z) and ``since_ms`` is 1700000000000
+        (2023-11-14T22:13:20Z), so each symbol walks exactly ONE 7-day window
+        (1699996400000, the seed less the one-hour overlap, to the clock) that holds
+        every fixture row. Old: ``since_ms=None``. New: ``since_ms`` pinned; one empty
+        windowed read, the stale flag is still gone.
+        """
         import asyncio
         from services.exchange import (
             _record_dq_flag,
@@ -4855,6 +5001,7 @@ class TestClusterIDqBufferResetOnEntry:
 
         mock_exchange = AsyncMock()
         mock_exchange.id = "binance"
+        monkeypatch.setattr("services.exchange._now_ms", lambda: 1700030000000)  # 2023-11-15T06:33:20Z
         mock_exchange.markets = {}
         mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
 
@@ -4880,7 +5027,7 @@ class TestClusterIDqBufferResetOnEntry:
             return await asyncio.to_thread(fn)
 
         with patch("services.db.db_execute", side_effect=_mock_db_execute):
-            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase, since_ms=1700000000000)
 
         flags = get_and_clear_last_dq_flags()
         # Stale flag is gone.
