@@ -165,8 +165,194 @@ nothing. Record two counts, no digests.
 **(d) Neither service logged `mt5_xlease_unavailable` since its deploy.** Record "0" or the count per
 service. A non-zero count means the migration or the schema cache was missing for some period.
 
-## 6. Nightly evidence
+## 6. Nightly evidence (MT5D-02)
 
-The seven-night count, its pass rule, the evidence queries and the per-night record are in the section
-that plan 09 of this phase adds below this one after the deploy, because the queries are proven against
-the lane before they are written here. Night 1 is defined in 5(a).
+> **Lane proof PENDING (recorded 2026-11-26).** The queries below were checked statically against
+> the committed schema (the dump plus the one migration newer than it, the lease) and parsed by a
+> real PostgreSQL parser, but they have NOT been executed on a database. The lane run was deferred
+> by the load limit the coordinator set for this phase (no local Docker). It is owned by the
+> post-ship session that starts the nights and it is step 0: run it before night 1's first read.
+> Expected result of the lane command at the end of this section: the single row
+> `3|3|2|1|0|1|0|1|0`. That row is the EXPECTED value, not a result; do not copy it into a record.
+> If a column is missing or the row differs, fix the query in this section, never the seed.
+
+Seven consecutive passing nights are what ROADMAP SC-2 asks for. Everything here is read-only and
+records counts and dates only: never an id, login, amount, digest, host or server name.
+
+### 6.1 Night 1
+
+Night 1 is the first 00:40Z derive after the LATER of the backfill-worker deploy and the API-service
+deploy that carry the lease, and after the lease migration's PROD apply. The holdings poll runs in the
+API process, so a night where only the worker carried the lease is not a night of the fix. Post-deploy
+checks (a) to (d) in section 5 come first, and (b) must read "equal: yes".
+
+Before night 1, run the night query below for each of the five nights before the deploys (set
+`night_start` to each day's 00:30Z) and keep the largest `poll_second_attempts` as the reference for the
+guard in 6.4. If a night's derive batch is created outside 00:30Z to 01:30Z, widen that night's window
+and say so in its record (the nightly batch is created at 00:40Z on every night measured so far).
+
+### 6.2 The marker query, then the night query
+
+Run the marker query ALONE, first, on every night, and read which database it names. It must name
+PROD. `current_database()` is `postgres` on both projects and proves nothing. A NULL answer means the
+marker was lost: stop and re-set it before reading anything.
+
+```sql
+SELECT shobj_description(oid, 'pg_database') AS which_database
+  FROM pg_database WHERE datname = current_database();
+```
+
+Then the night query. It takes two psql variables, `night_start` (that UTC date at 00:30Z) and
+`night_end` (01:30Z), and returns ONE row of nine counts in this order: `jobs`, `done`,
+`done_first_attempt`, `second_attempts`, `not_done`, `ledger_rows`, `poll_second_attempts`,
+`lease_job_class`, `lease_validation_class`. A job is counted once however many of the three join paths
+reach it: key-scoped (the job's own key), strategy through `strategies.api_key_id`, and strategy
+through `strategy_keys`. A key counts when its `exchange` is `mt5`. The ledger half joins on
+`job_id`, because the ledger is the half that still sees an attempt a reclaim decremented. The lease
+classes use the site-to-terminal map in section 2; a row whose last site is `equity_backfill` or
+`unattributed` is in neither class and shows in the total of 6.4.
+
+Through the Supabase MCP `execute_sql` (no psql variables there), replace ONLY the two `:'...'`
+tokens on the `win` line with quoted timestamp literals such as `'2026-11-26T00:30:00Z'`, and change
+nothing else.
+
+<!-- night-query:start -->
+```sql
+WITH win AS (
+  SELECT :'night_start'::timestamptz AS s, :'night_end'::timestamptz AS e
+), mt5 AS (
+  SELECT ak.id FROM public.api_keys ak WHERE ak.exchange = 'mt5'
+), jobs AS (
+  SELECT cj.id, cj.status, cj.attempts
+    FROM public.compute_jobs cj, win
+   WHERE cj.kind = 'derive_broker_dailies'
+     AND cj.created_at >= win.s AND cj.created_at < win.e
+     AND (
+          cj.api_key_id IN (SELECT id FROM mt5)
+       OR cj.strategy_id IN (SELECT st.id FROM public.strategies st WHERE st.api_key_id IN (SELECT id FROM mt5))
+       OR cj.strategy_id IN (SELECT sk.strategy_id FROM public.strategy_keys sk WHERE sk.api_key_id IN (SELECT id FROM mt5))
+     )
+)
+SELECT
+  (SELECT count(*) FROM jobs) AS jobs,
+  (SELECT count(*) FROM jobs WHERE status = 'done') AS done,
+  (SELECT count(*) FROM jobs WHERE status = 'done' AND attempts = 1) AS done_first_attempt,
+  (SELECT count(*) FROM jobs WHERE attempts > 1) AS second_attempts,
+  (SELECT count(*) FROM jobs WHERE status <> 'done') AS not_done,
+  (SELECT count(*) FROM public.compute_job_attempt_failures f WHERE f.job_id IN (SELECT id FROM jobs)) AS ledger_rows,
+  (SELECT count(*) FROM public.compute_jobs pj, win
+    WHERE pj.kind = 'poll_allocator_positions' AND pj.attempts > 1
+      AND pj.created_at >= win.s AND pj.created_at < win.s + interval '2 hours'
+      AND pj.api_key_id IN (SELECT id FROM mt5)) AS poll_second_attempts,
+  (SELECT count(*) FROM public.mt5_terminal_leases l
+    WHERE l.site IN ('derive_broker_dailies', 'sync_trades_balance', 'allocator_holdings', 'session_heal')) AS lease_job_class,
+  (SELECT count(*) FROM public.mt5_terminal_leases l
+    WHERE l.site IN ('validate_wizard', 'validate_worker', 'terminal_scrub', 'validation_liveness')) AS lease_validation_class;
+```
+<!-- night-query:end -->
+
+### 6.3 Reading a failing night
+
+Only on a night that fails, read the ledger rows for the cause, as classes and counts. Same two
+variables, same window rule; the statement below repeats the three join paths of the night query:
+
+```sql
+WITH win AS (
+  SELECT :'night_start'::timestamptz AS s, :'night_end'::timestamptz AS e
+), mt5 AS (
+  SELECT ak.id FROM public.api_keys ak WHERE ak.exchange = 'mt5'
+), jobs AS (
+  SELECT cj.id
+    FROM public.compute_jobs cj, win
+   WHERE cj.kind = 'derive_broker_dailies'
+     AND cj.created_at >= win.s AND cj.created_at < win.e
+     AND (
+          cj.api_key_id IN (SELECT id FROM mt5)
+       OR cj.strategy_id IN (SELECT st.id FROM public.strategies st WHERE st.api_key_id IN (SELECT id FROM mt5))
+       OR cj.strategy_id IN (SELECT sk.strategy_id FROM public.strategy_keys sk WHERE sk.api_key_id IN (SELECT id FROM mt5))
+     )
+)
+SELECT f.cause_class, f.error_kind, count(*) AS rows
+  FROM public.compute_job_attempt_failures f
+ WHERE f.job_id IN (SELECT id FROM jobs)
+ GROUP BY f.cause_class, f.error_kind
+ ORDER BY f.cause_class, f.error_kind;
+```
+
+Record the classes and counts only. Never select `error_text`, `worker_id`, `job_id` or any key or
+strategy id.
+
+### 6.4 Guard reads
+
+- **Total lease rows.** `SELECT count(*) FROM public.mt5_terminal_leases;` (marker first). One row per
+  terminal: at most one per class in the night query's two columns, and the total is the number of
+  terminals in use. A total above the two class columns summed means a row whose last site is outside
+  both classes; say so in the record.
+- **Poll second attempts.** `poll_second_attempts` is the guard on the holdings poll's retry budget
+  (RESEARCH Pitfall 6). It must not rise: a night above the pre-deploy reference taken in 6.1 is named
+  in the record and read before the night is counted. No retry budget is touched to bring it down.
+
+### 6.5 Log reads (both services)
+
+For EACH of the backfill worker and the API service, read the Railway logs over 00:30Z to 02:30Z of the
+night's date and count the lines carrying each event name from section 3. Read each night's logs within
+a day: Railway log retention is unmeasured, and a night whose logs cannot be read cannot show
+`mt5_xlease_unavailable` is 0, so it does not count.
+
+| Event | Count per service | Rule |
+|---|---|---|
+| `mt5_xlease_waited` | per service and in total | the positive signal; for the night also record the largest `duration_ms`, and name in the record any wait above 150000 ms, which RESEARCH Pitfall 6 names as the trigger for the single-slot waiter-reservation follow-up |
+| `mt5_xlease_unavailable` | per service | must be 0 in both |
+| `mt5_xlease_lost` | per service | any above 0 is named in the record |
+
+Record the `site` of a wait, never anything else the line carries.
+
+### 6.6 The rules
+
+**Pass rule.** A night passes only when ALL of these hold: `jobs` is at least 1 (a zero-job row is not a
+night: wrong window, wrong role, or no derive ran), `done_first_attempt` equals `jobs`,
+`second_attempts` is 0, `not_done` is 0, `ledger_rows` is 0, `lease_job_class` and
+`lease_validation_class` are each at most 1, and `mt5_xlease_unavailable` is 0 in both services. The
+guards in 6.4 and the `mt5_xlease_lost` count are recorded and named, as above.
+
+**Consecutive rule.** Seven consecutive passing nights are needed. A failing night restarts the count
+from the next night; its ledger rows are read for the cause (6.3), classes and counts only.
+
+**Discriminating rule.** MT5D-02 closes only after seven consecutive passing nights, recorded with
+their dates, that include at least one night with a logged cross-process wait. Seven clean nights
+alone are weak evidence: 2026-11-06 to 2026-11-14 were nine consecutive clean nights with no fix in
+place (RESEARCH, "Seven nights and base rate"). If the seven pass with `mt5_xlease_waited` 0 on every
+night, record them as **not discriminating**, keep the nights running, and put the record to the
+founder, who decides whether MT5D-02 closes on it or the nights keep running.
+
+**No budget changes.** No retry budget, no watchdog threshold and no lease constant may be raised or
+loosened to make a night pass.
+
+### 6.7 Record format
+
+One table row per night, counts and dates only, appended under this heading by the records PR:
+
+| Date (UTC) | jobs | done_first_attempt | second_attempts | not_done | ledger rows | poll second attempts | lease rows (job / validation) | waited | unavailable | lost |
+|---|---|---|---|---|---|---|---|---|---|---|
+
+`waited`, `unavailable` and `lost` are written as `worker+api` counts (for example `1+0`), and a night
+with a wait adds its largest `duration_ms`.
+
+### 6.8 Lane proof (step 0 of the post-ship session)
+
+On the private local-stack lane only, never a shared database:
+
+1. `bash scripts/local-stack/run.sh up`, then `bash scripts/local-stack/run.sh --assert-local-handoff`.
+2. Seed, as the lane's `postgres` role, a scratch file (never committed) that creates one owner and
+   all its parent rows, then, every job created at 2026-11-26T00:40:00Z: one MT5 key and one strategy
+   whose `api_key_id` is that key; a second MT5 key linked to a second strategy ONLY through
+   `strategy_keys` (that strategy's `api_key_id` stays NULL); a key-scoped MT5 derive job `done` at
+   attempts 1; a strategy-scoped job through the strategy's own key, `done` at attempts 2; a
+   strategy-scoped job through `strategy_keys`, `done` at attempts 1; one ledger row for the attempts-2
+   job; a non-MT5 key with a key-scoped derive job at attempts 2 and a ledger row, both of which must
+   not count; one MT5 `poll_allocator_positions` job at attempts 1; one lease row whose site is
+   `derive_broker_dailies`.
+3. Extract the text between the two night-query markers, minus the fence lines, and run it with
+   `-X -A -t -F '|' -v ON_ERROR_STOP=1 -v night_start=2026-11-26T00:30:00Z -v night_end=2026-11-26T01:30:00Z`.
+4. Require exactly `3|3|2|1|0|1|0|1|0`, then `bash scripts/local-stack/run.sh down` and
+   `bash scripts/local-stack/run.sh --assert-teardown`, and stop Docker Desktop if it was started.
