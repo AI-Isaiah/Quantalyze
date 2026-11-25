@@ -295,7 +295,7 @@ Plans:
 4. Two keys that share a login always carry a share link, so a shared login with no link cannot recur; a test drives the stamping in `account_identity.py` for that case. MT5 account identity includes the broker server, so the same login on two servers never collides, and the backfill uses no data-reading `DO` guard. (ONCE-04, CONN-03)
 5. An MT5 key whose sign-in keeps failing cannot claim an account's holder slot. A test drives a failing key beside a working one for the same account, and the working key holds the slot. (MT5D-08)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration (the CONN-03 identity change and backfill, any per-owner refusal constraint) passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 19 plans
+**Plans:** 20 plans
 
 Plans:
 **Wave 1**
@@ -324,14 +324,16 @@ Plans:
 
 **Plan 13 founder ruling, 2026-11-25:** "Owner-only read (Recommended)": SELECT on `api_keys.venue_server` is granted to `authenticated`, owner-only through the existing RLS, like `venue_account_id`. Recorded in `225-CONTEXT.md` Q6.
 
-**Gap closure for CR-01 (founder ruling 2026-11-25, `225-CONTEXT.md` Q6): plans 13-18 ship as PR-2b-1, PR-2b-2 and PR-2c from origin/main before PR-3; plan 19 re-bases plan 10. Gap waves below are numbered within the gap set.**
+**Gap closure for CR-01 (founder ruling 2026-11-25, `225-CONTEXT.md` Q6): plans 13-18 and 20 ship as PR-2b-1, PR-2b-2, PR-2c0 and PR-2c from origin/main before PR-3; plan 19 re-bases plan 10. Gap waves below are numbered within the gap set.**
+**Plan 20 added 2026-11-25:** plan 18's merge gate step 1 found 0 relogin server verdicts on PROD, and PR-2c review WR-01 found that the three MT5 poll reads prove only the login. Plan 20 (PR-2c0) logs a server verdict at those reads and measures it on PROD before PR-2c merges. Plan 18 now waits on that measurement. Plan 19 waits on the poll-path refusal being shipped, or booked with an owner by plan 20 Task 3.
 **Gap wave 1**
 - [ ] 225-13-PLAN.md — owners can read `venue_server` (column GRANT), after a founder decision checkpoint (PR-2b-1)
 - [ ] 225-14-PLAN.md — the Python twin: a server-aware `account_identity_tokens`, the derive reads `venue_server`, and the named `account_server_ambiguous` refusal (PR-2b-2)
-- [ ] 225-18-PLAN.md — the MT5 connect check proves the broker server, not only the login, with founder measurements before and after deploy (PR-2c)
+- [ ] 225-20-PLAN.md — the MT5 poll reads log whether the session is on the requested broker server, measured on PROD before PR-2c merges, and the poll-path refusal gets an owner (PR-2c0)
 
 **Gap wave 2** *(blocked on gap wave 1 completion)*
 - [ ] 225-15-PLAN.md — the TS twin: a server-aware `accountIdentityTokens` and every reader and key-card state carries `venue_server` (PR-2b-2)
+- [ ] 225-18-PLAN.md — the MT5 connect check proves the broker server, not only the login, with founder measurements before and after deploy, after plan 20's measurement (PR-2c)
 
 **Gap wave 3** *(blocked on gap wave 2 completion)*
 - [ ] 225-16-PLAN.md — the SQL twin: `commit_scenario_batch` identity edges become server-aware, with a gate arm per rule clause (PR-2b-2)
