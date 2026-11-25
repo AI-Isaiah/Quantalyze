@@ -54,6 +54,7 @@ import sentry_sdk
 
 from services.mt5_client import (
     HOLDER_HOUSE,
+    HOLDER_VALIDATION,
     Mt5AccountMismatchError,
     Mt5Client,
     Mt5ClientError,
@@ -390,6 +391,7 @@ def run_probe(
     investor_pw: str,
     server: str,
     log_prefix: str,
+    site: str,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Log in, read the account + terminal, and probe capability ONCE.
 
@@ -402,10 +404,23 @@ def run_probe(
     router maps them onto HTTP statuses and the adapter onto a
     ``ValidationResult`` / a propagated transient, and those dispositions
     deliberately stay at the two call sites.
+
+    ⭐ 225-20 WR-01 — ``site`` (the caller's validate-site literal) is used ONLY for
+    the one log-only server-verdict line written after the PRE login bracket.
     """
     client.login(login, investor_pw, server)  # falsy -> Mt5ClientError
     info = client.account_info()  # proves auth + read
     assert_expected_login(info, login=login)  # PRE-probe bracket
+    # ⭐ 225-20 WR-01 — LOG-ONLY server verdict on the VALIDATION terminal, the one
+    # PR-2c's enforcement runs on (the poll sites' lines come from the worker
+    # gateway's terminal, a proxy). Written once per probe, on the snapshot whose
+    # login the bracket above just accepted. Refuses and returns nothing. The import
+    # is local because ``mt5_read`` imports this module.
+    from services.mt5_read import log_mt5_poll_server_verdict
+
+    log_mt5_poll_server_verdict(
+        info, requested_server=server, site=site, holder=HOLDER_VALIDATION
+    )
     # D-31: the TERMINAL's own state, read once ATTACHED (it describes the
     # terminal we are logged into) and INSIDE the PRE/POST login bracket so the
     # whole probe stays framed by the account-mismatch guard.
