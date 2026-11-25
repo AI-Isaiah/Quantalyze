@@ -134,6 +134,8 @@ SELECT coalesce(ki.payload->>'venue', 'unknown') AS venue,
  * appears here: the subject's tag is the way to find the key.
  */
 export const REMEDIES = {
+  "freshness-no-scope":
+    "The freshness scope read answered zero derived keys: no api key has a derive_broker_dailies job in the last 3 days, so the arm has nothing to judge and an empty answer must never read as healthy. With an admin session through the Supabase MCP read path, run the database marker query first, then read the newest compute_jobs rows of kind derive_broker_dailies over the last 3 days and the status of the nightly derive cron. If the jobs exist and this arm still read zero, the arm's statement or the prober role's access to compute_jobs is the defect; if they do not exist, the nightly derive is not running and that is the page.",
   "freshness-stale":
     "A derived key's newest stored return day trails its newest flow, terminal or NAV-mark day by more than the bound, and no day-by-day stated reason (the derive's tiny_base_days) or anchor_null_reason explains it. With an admin session through the Supabase MCP read path, run the database marker query first, then read that key's newest csv_daily_returns day and its newest key_inputs row (flows, realized_terminal_day, nav_mark, tiny_base_days, anchor_null_reason), matching the key by the tag in the subject (the first 8 hex characters of md5 of its id). Open a debug session to find which day the derive left out and why; never backfill the series by hand.",
 };
@@ -359,6 +361,28 @@ async function run({ seams, log, addDefect }) {
   // is checked, so a later failure cannot hide it.
   log(`freshness: scope derived=${scope.derived} with_inputs=${scope.withInputs} with_terminal=${scope.withTerminal}`);
 
+  if (scope.derived === 0) {
+    addDefect(
+      "freshness-no-scope",
+      "freshness",
+      "compute_jobs",
+      "the scope read found no derive_broker_dailies job in the last 3 days, so no key was judged. An empty " +
+        "scope is a defect, never a pass.",
+      REMEDIES["freshness-no-scope"],
+    );
+    return;
+  }
+  if (scope.withTerminal === 0) {
+    addDefect(
+      "measure-fail",
+      "freshness",
+      "key_inputs",
+      `${scope.derived} derived key(s) exist but none carries realized_terminal_day, so a renamed or dropped ` +
+        "writer field would read every key as not judged. Read the writer before trusting a green run.",
+    );
+    return;
+  }
+
   const keysRes = await seams.sql("freshness", FRESHNESS_KEYS_SQL);
   if (keysRes.measureFail) {
     addDefect(
@@ -379,6 +403,19 @@ async function run({ seams, log, addDefect }) {
       `the freshness per-key read could not be parsed (${parsed.error}), so whether any key is stale is unknown.`,
     );
     return;
+  }
+
+  // The database's own count against the rows parsed: a truncated read must
+  // not read as fewer keys to worry about. The rows judged are still reported;
+  // the ones never seen are the point.
+  if (parsed.rows.length !== scope.derived) {
+    addDefect(
+      "measure-fail",
+      "freshness",
+      "freshness keys",
+      `the scope read counted ${scope.derived} derived key(s) but the per-key read returned ${parsed.rows.length} ` +
+        "row(s); the rows returned are judged below, and the keys never seen are the point.",
+    );
   }
 
   const tally = {};

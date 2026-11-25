@@ -152,7 +152,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 5;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 93;
+export const SELF_TEST_SCENARIOS = 103;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -184,7 +184,7 @@ export const SELF_TEST_SCENARIOS = 93;
  *
  * ⭐ Phase 233 (FRESH-02) added `freshness-stale` the same way: its fixture, its
  * remedy, its `KIND_ASSERTIONS` entry and both scenario counters in ONE commit.
- * Plan 233-04 adds `freshness-no-scope` by the same rule.
+ * Plan 233-04 added `freshness-no-scope` by the same rule: an empty scope pages.
  */
 export const DEFECT_KINDS = [
   // harness-wide
@@ -218,6 +218,7 @@ export const DEFECT_KINDS = [
   "mt5-probe-timeout",
   "mt5-terminal-error",
   // freshness (phase 233)
+  "freshness-no-scope",
   "freshness-stale",
   // floors — findings about the INSTRUMENT, not about production
   "floor",
@@ -981,6 +982,14 @@ const sqlOk = (stdout) => ({ status: 0, stdout, stderr: "", timedOut: false, mea
  *                                            Absent = GREEN (scope 1 1 1 and
  *                                            one healthy row), so every
  *                                            full-registry bundle stays green.
+ *                                            Plan 233-04 modes: `scope` or `rows`
+ *                                            as a STRING is rendered RAW (the
+ *                                            unparsable case); `scope` as
+ *                                            {measureFail} is a scope psql that
+ *                                            could not run; `keysMeasureFail` is
+ *                                            the same for the per-key read; a
+ *                                            scope that disagrees with the rows
+ *                                            is just a scope object that does.
  */
 function fixtureSql(data) {
   return (query, opts = {}) => {
@@ -1054,6 +1063,10 @@ function fixtureSql(data) {
     if (q.includes("csv_daily_returns") || q.includes("compute_jobs")) {
       const fr = data.freshness === undefined ? FRESHNESS_GREEN_DEFAULT : data.freshness;
       if (q.includes("csv_daily_returns")) {
+        if (fr.keysMeasureFail) {
+          return { status: null, stdout: "", stderr: "", timedOut: false, measureFail: fr.keysMeasureFail };
+        }
+        if (typeof fr.rows === "string") return sqlOk(fr.rows);
         const lines = fr.rows.map((r) =>
           [
             r.venue,
@@ -1068,6 +1081,10 @@ function fixtureSql(data) {
           ].join(fieldSep),
         );
         return sqlOk(lines.length === 0 ? "" : `${lines.join("\n")}\n`);
+      }
+      if (typeof fr.scope === "string") return sqlOk(fr.scope);
+      if (fr.scope.measureFail) {
+        return { status: null, stdout: "", stderr: "", timedOut: false, measureFail: fr.scope.measureFail };
       }
       return sqlOk(`${[fr.scope.derived, fr.scope.withInputs, fr.scope.withTerminal].join(fieldSep)}\n`);
     }
@@ -1283,6 +1300,12 @@ const ARM_FIXTURE_TABLE = [
       // The held-back series end: ONE key, ONE cause (a gap over the bound with
       // no stated day and no anchor reason).
       "stale.json": "freshness-stale",
+      // The empty scope: zero derived keys is a page, never a pass.
+      "no-scope.json": "freshness-no-scope",
+      // The day-by-day rule: a reason covering only some gap days does not
+      // count, and the bound is a boundary (gap 3 pages; ok.json's gap 2 does not).
+      "partial-cover.json": "freshness-stale",
+      "bound-plus-one.json": "freshness-stale",
     },
   },
 ];
@@ -1375,6 +1398,7 @@ export async function selfTest() {
     "mt5-not-authorized": (d) => d.kind === "mt5-not-authorized",
     "mt5-ssh-transport": (d) => d.kind === "mt5-ssh-transport",
     "mt5-terminal-error": (d) => d.kind === "mt5-terminal-error",
+    "freshness-no-scope": (d) => d.kind === "freshness-no-scope",
     "freshness-stale": (d) => d.kind === "freshness-stale",
     // ⚠️ Not reachable from the fixture table (see the mt5 entry's `kinds`
     // note) — its scenario applies this entry by hand, for the same reason the
@@ -1653,6 +1677,150 @@ export async function selfTest() {
         expect(
           r.tallyByArm["cron-obs"] === 2,
           `the arm issued the TTL read and the fan-out read, and skipped only the pg_net join (got ${r.tallyByArm["cron-obs"]})`,
+        ) &&
+        pass;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 233 plan 04 (FRESH-02). The freshness arm's silent-green guards, which
+  // the isolation loop cannot reach: a measure-fail takes no remedy, and each
+  // guard is a DIFFERENT way an empty, truncated, renamed or malformed read
+  // could otherwise come back GREEN. Built on ok.json's rows, so any defect
+  // beyond the expected one is the arm misbehaving.
+  // -------------------------------------------------------------------------
+  {
+    const frOk = loadFixture("freshness", "ok.json");
+    const runFresh = async (overrides, lines = []) => {
+      const data = { ...clone(frOk.data), ...overrides };
+      const seams = createSeams({ sqlRunner: fixtureSql({ freshness: data }) });
+      return runProber({
+        arms: [FRESHNESS_MOD.ARM],
+        env: { ...SELFTEST_ENV },
+        seams,
+        armsFloor: 1,
+        log: (s) => lines.push(s),
+      });
+    };
+    const onlyFrMeasureFail = (r, label, subject) =>
+      expect(r.exitCode === 1, `${label}: exits 1 (got ${r.exitCode})`) &&
+      expect(r.defects.length === 1, `${label}: exactly one defect (got ${r.defects.length}: ${r.defects.map((x) => x.kind).join(", ")})`) &&
+      expect(r.defects[0] && r.defects[0].kind === "measure-fail", `${label}: the defect is a measure-fail, never a pass and never a stale page (got ${r.defects[0] && r.defects[0].kind})`) &&
+      expect(r.defects[0] && r.defects[0].arm === "freshness", `${label}: attributed to freshness`) &&
+      expect(r.defects[0] && r.defects[0].subject === subject, `${label}: the subject is "${subject}" (got ${r.defects[0] && r.defects[0].subject})`);
+    // Two rows that judge fresh, so a guard that vanishes reads GREEN, not a stale page.
+    const twoFresh = () => (frOk.ok ? clone(frOk.data.rows.slice(0, 2)) : []);
+
+    scenario("freshness: an UNPARSABLE per-key row is a measure-fail naming the arm, never a green or a stale page");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      // Two fields where nine are expected: the shape a changed query would produce.
+      pass = onlyFrMeasureFail(await runFresh({ rows: "deribit\tcccc0001\n" }), "unparsable row", "freshness keys") && pass;
+    }
+
+    scenario("freshness: a per-key read with FEWER rows than the scope counted is a measure-fail (the keys never seen are the point)");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const r = await runFresh({ scope: { derived: 3, withInputs: 3, withTerminal: 3 }, rows: twoFresh() });
+      pass =
+        onlyFrMeasureFail(r, "truncated read", "freshness keys") &&
+        expect(
+          r.defects[0] && r.defects[0].detail.includes("counted 3") && r.defects[0].detail.includes("returned 2"),
+          `truncated read: the detail carries both counts (got ${r.defects[0] && r.defects[0].detail})`,
+        ) &&
+        pass;
+    }
+
+    scenario("freshness: derived keys with NONE carrying realized_terminal_day is a measure-fail, even when every row would judge fresh");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const r = await runFresh({ scope: { derived: 2, withInputs: 2, withTerminal: 0 }, rows: twoFresh() });
+      pass =
+        onlyFrMeasureFail(r, "no terminal day", "key_inputs") &&
+        expect(
+          r.tallyByArm.freshness === 1,
+          `no terminal day: the guard returns before the per-key read (got ${r.tallyByArm.freshness} seam call(s))`,
+        ) &&
+        pass;
+    }
+
+    scenario("freshness: a scope psql that could not run is a measure-fail and the per-key read is never issued");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const r = await runFresh({ scope: { measureFail: "psql exited 2" } });
+      pass =
+        onlyFrMeasureFail(r, "scope psql failure", "freshness scope") &&
+        expect(
+          r.defects[0] && r.defects[0].detail.includes("psql exited 2"),
+          `scope psql failure: the detail carries psql's own reason (got ${r.defects[0] && r.defects[0].detail})`,
+        ) &&
+        expect(
+          r.tallyByArm.freshness === 1,
+          `scope psql failure: only the scope read was issued (got ${r.tallyByArm.freshness} seam call(s))`,
+        ) &&
+        pass;
+    }
+
+    scenario("freshness: a non-ISO day (2026-02-30) is a measure-fail, never rolled into March and never judged");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const rows = twoFresh().slice(0, 1);
+      rows[0].newestFlow = "2026-02-30";
+      const r = await runFresh({ scope: { derived: 1, withInputs: 1, withTerminal: 1 }, rows });
+      pass =
+        onlyFrMeasureFail(r, "non-ISO day", "freshness keys") &&
+        expect(
+          r.defects[0] && r.defects[0].detail.includes("newest_flow"),
+          `non-ISO day: the detail names the column (got ${r.defects[0] && r.defects[0].detail})`,
+        ) &&
+        pass;
+    }
+
+    scenario("freshness: an anchor reason on key X never covers key Y's uncovered gap");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const base = frOk.data.rows[0];
+      const x = { ...clone(base), venue: "deribit", tag: "dddd0002", newestReturn: "2026-10-01", anchorNullReason: "balance_error", newestFlow: "2026-11-23", terminalDay: "2026-11-23", markDay: "", tinyDays: [] };
+      const y = { ...clone(base), venue: "binance", tag: "eeee0002", newestReturn: "2026-11-10", anchorNullReason: "", newestFlow: "2026-11-23", terminalDay: "2026-11-23", markDay: "", tinyDays: [] };
+      const r = await runFresh({ scope: { derived: 2, withInputs: 2, withTerminal: 2 }, rows: [x, y] });
+      pass =
+        expect(r.exitCode === 1, `anchor X beside stale Y exits 1 (got ${r.exitCode})`) &&
+        expect(
+          r.defects.length === 1 && r.defects[0].kind === "freshness-stale",
+          `exactly one freshness-stale (got ${r.defects.map((d) => d.kind).join(", ") || "nothing"})`,
+        ) &&
+        expect(
+          r.defects[0] && r.defects[0].subject === "binance#eeee0002",
+          `the subject is Y, not X (got ${r.defects[0] && r.defects[0].subject})`,
+        ) &&
+        pass;
+    }
+
+    scenario("freshness: the scope log line is printed exactly once and carries the scope's own three counts (plan 233-06 reads it)");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const lines = [];
+      const r = await runFresh({}, lines);
+      const scopeLines = lines.filter((l) => l.startsWith("freshness: scope "));
+      const m = /^freshness: scope derived=([0-9]+) with_inputs=([0-9]+) with_terminal=([0-9]+)$/.exec(scopeLines[0] || "");
+      const sc = frOk.data.scope;
+      pass =
+        expect(r.exitCode === 0, `the GREEN control exits 0 (got ${r.exitCode})`) &&
+        expect(scopeLines.length === 1, `exactly one scope line (got ${scopeLines.length})`) &&
+        expect(m !== null, `the scope line has the pinned shape (got ${scopeLines[0]})`) &&
+        expect(
+          m !== null &&
+            Number(m[1]) === sc.derived &&
+            Number(m[2]) === sc.withInputs &&
+            Number(m[3]) === sc.withTerminal,
+          `the three numbers equal ok.json's scope ${sc.derived}/${sc.withInputs}/${sc.withTerminal} (got ${scopeLines[0]})`,
         ) &&
         pass;
     }
