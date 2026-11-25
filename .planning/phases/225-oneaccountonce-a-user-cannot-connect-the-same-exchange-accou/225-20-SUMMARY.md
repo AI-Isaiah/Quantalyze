@@ -126,6 +126,12 @@ What the orchestrator must read, read-only, holder ids and server names kept in 
 5. Verdict: PASS when lines > 0, False = 0, not_captured = 0, and every determinable live server has at least one True. Any False or not_captured is a STOP to the founder; PR-2c does not merge.
 6. Book the poll-path refusal (review WR-01) on a PASS or a STOP: add `## Poll-path server enforcement: owner` to this file (owner 225-21 on a PASS, the founder's decision verbatim on a STOP), and one bold prose line under the Phase 225 plan list in ROADMAP.md naming it. The `## Poll-path server enforcement: owner` heading is deliberately NOT present yet, so the plan's acceptance grep stays false until Task 3 runs.
 
+Review WR-01 amendment (the log-only verdict now also runs on the VALIDATION terminal, inside `run_probe`, with `site=validate_wizard` or `validate_worker` and `holder=validation`):
+
+- Step 3 also counts `validate_wizard` and `validate_worker`.
+- The PASS rule in step 5 also requires 0 False and 0 not_captured on the validation sites. A False or not_captured on either is a STOP.
+- Coverage is per KEY, not per line. Count the distinct live MT5 keys polled in the window against the distinct holders seen in the lines, and report the keys with zero lines per site. A server counts as covered only if its keys were polled. Validation lines carry `holder=validation`, so they cannot be attributed to a server and cover no server; they only gate the PASS.
+
 Note for the orchestrator: the PR-2c work branch carries its own, now stale, copy of 225-18-PLAN.md; the revised plan 18 is on the phase branch.
 
 ## Self-Check: PASSED
