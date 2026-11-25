@@ -38,6 +38,23 @@ Out of scope: raising retries, the watchdog or any timeout (ROADMAP); moving or 
 - [Nights] Q: "How are the seven nights counted?" → Selected: "From the lease fix's backfill-worker deploy (the first 00:40Z derive after it is night 1). Each night reads the stored job rows (MT5 `derive_broker_dailies`, `attempts > 1` = 0) and the 227 ledger (MT5 rows in `compute_job_attempt_failures` = 0), marker query first, recorded with its date." The phase waits for the nights after ship and records the exact re-read query and dates. It never sleeps in a loop.
 - [Replay] Q: "What does the MT5D-03 deliverable consist of?" → Selected: "A read-only capture script handed to the coordinator. It is kept OUT of the tracked tree and run by base64-exec through `railway ssh` into `quantalyze-analytics-backfill`, the 164.6.6.2.3-08 precedent. It writes its output to the coordinator's scratchpad only. The write review is recorded in the plan SUMMARY, and the replay steps run `mt5offset_dry_run` once per clock setting the 202 values were written under. Its output has the JSON shape `mt5offset_dry_run --captured` reads. Attribution compares the moved days per scope with 202's recorded moved sets (s6, s9, s10, b0→b1; s2, s5, s8, s13, c0→c1), including the 29 vanished winter rows and the TINYBASE / #1205 candidates. The result is recorded as counts per scope: attributed to the clock switch, or to another named cause." The legacy offset value comes from research (the repo's record of the pre-11-03 setting).
 
+### Decided autonomously after research (2026-11-25, `230-RESEARCH.md`)
+- [Site edits] CORRECTS "no site edits" above. Failing closed needs three small site edits and one `classify_exception` arm (transient):
+  - the holdings fetcher must not stamp the lease error into a user-visible `sync_error`;
+  - the two `process_key` validate arms must answer a retryable busy, never a bodyless 500.
+
+  `Mt5TerminalLeaseUnavailableError` subclasses `Mt5TerminalBusyError`, so the wizard, heal and liveness arms need no edit.
+- [Missing RPC] `is_missing_rpc` goes in `services/db.py`, because `mt5_concurrency` is a pinned leaf, with a parity test against `main_worker._is_missing_rpc`. It relogs every 900 s (the 227 cadence) and never latches. This replaces "logs once per process" above.
+- [Night 1] CORRECTS the night count above. Night 1 is the first 00:40Z derive after BOTH the backfill worker and the API service deploys carry the lease, because the holdings poll runs in the API process.
+  - Each night also records three checks: the cross-process wait log count (the positive signal), that `poll_allocator_positions` attempts did not rise, and that the lease table holds one row per terminal.
+  - Base rate: 11-06 to 11-14 was nine clean nights with no fix. So seven clean nights corroborate the fix but do not prove it. The proof is PROOF-01 plus the wait log.
+- [Replay] Run `--legacy-offset-s 7200 --rule us`: both older sides of 202's pairs were written under 7200.
+  - `mt5offset_dry_run` gains a `--days-out` scratch flag so the moved day sets can be compared with 202's. The flag writes only to the named path, and the report stays counts-only.
+  - The replay cannot attribute the 29 vanished winter rows, because 7200 and `us` agree in winter. Record them under the remaining named candidates (#1196 TINYBASE, #1205 gap closure) or as not attributable, never as the clock.
+- [Capture] The capture runs in a quiet window and does not take the lease, so it writes no row. A quiet window means no MT5 job is running, outside 00:40 to 01:40Z and away from the 08:00Z poll.
+  - The steps end with the 164.6.6.2.3 precedent's restart of both services as a coordinator-run step, because the per-process holder and settled registries go stale.
+  - Whether `railway ssh` reaches the backfill service is unmeasured, so the steps give the precedent's command and a fallback.
+
 ### Claude's Discretion
 - Plan split, file placement, RPC and table names, TTL, renew and poll constants, provided they are stated and pinned.
 
