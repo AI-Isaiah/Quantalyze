@@ -5,15 +5,15 @@ milestone_name: TRUTH — data you can trust
 current_phase: 225
 current_phase_name: ONEACCOUNTONCE
 status: executing
-stopped_at: "Phase 225 plan 10 (migration B) executing"
+stopped_at: "Phase 225 gap plans 13-19 planned for CR-01; plan 10 (migration B, PR-3) held"
 last_updated: "2026-11-25T08:29:29.206Z"
 last_activity: 2026-11-25
-last_activity_desc: Phase 225 execution started
+last_activity_desc: Phase 225 gap-closure plans 13-19 planned (CR-01)
 state_head: acb5e158986806e733453296dc6bced2efaed3b1
 progress:
   total_phases: 21
   completed_phases: 2
-  total_plans: 67
+  total_plans: 74
   completed_plans: 59
   percent: 10
 ---
@@ -177,9 +177,9 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 225 (ONEACCOUNTONCE) — EXECUTING
-Plan: 10 of 12
+Plan: 10 of 19
 Status: Executing Phase 225
-Last activity: 2026-11-25 — Phase 225 execution started
+Last activity: 2026-11-25 — Phase 225 gap-closure plans 13-19 planned (CR-01)
 Progress: [█░░░░░░░░░] 10%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
