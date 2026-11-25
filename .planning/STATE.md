@@ -732,6 +732,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 155.2 LIVEPARITY's remaining work moved out of v1.18 into the next milestone (2026-11-23, hand-edit, founder "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."): the broker statements, plans 11-14, the Gate B run, verification and phase complete move; its 13 shipped plans stay recorded as shipped. v1.18 keeps 155, 155.1 and 207-220, all complete
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 - Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
+- Phase 251 added (2026-11-25, /gsd-phase add, founder ruling 2026-11-25): SYNCSTORE, the four 232 OKXTRADES leftovers in run_sync_trades_job; depends on 222
 
 ### Decisions
 

@@ -177,6 +177,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [ ] **Phase 239: SURFACECACHE — the composer range and the Discovery ranking reflect the current truth** - Composer range stored as dates; a BTC-unit return never ranked beside USD returns
 - [ ] **Phase 240: CONNECTTRUTH — validating a key or a CSV gets a true answer, and anonymous limits are fair** - One error code on every venue, CSV month-name cells, anonymous bucket fairness, edge and upstream CSV limits agree
 - [ ] **Phase 241: DEMOCREDS — the two demo accounts are gone, and their passwords are out of the tree behind a guard that still bites** - The only HIGH item (158-OPS-03), kept in v1.22 by founder exception: accounts deleted on TEST and PROD, digest absence guard
+- [ ] **Phase 251: SYNCSTORE — run_sync_trades_job stores every run's daily P&L and refusal flags truthfully** - The four 232 OKXTRADES leftovers in `run_sync_trades_job`; after 222
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -727,6 +728,21 @@ Plans:
 | 239. SURFACECACHE | 0/? | Not started | - |
 | 240. CONNECTTRUTH | 0/? | Not started | - |
 | 241. DEMOCREDS | 0/? | Not started | - |
+| 251. SYNCSTORE | 0/? | Not started | - |
+
+### Phase 251: SYNCSTORE — run_sync_trades_job stores every run's daily P&L and refusal flags truthfully
+
+**Goal:** Every run of `run_sync_trades_job` keeps the daily P&L it read and records its refusal flags truthfully. Booked by founder ruling 2026-11-25 from the four items Phase 232 OKXTRADES routed by name to 222 (`232-01-SUMMARY.md`, handoff-222), which fall outside 222's goal:
+1. the Phase-1 daily P&L store runs after the Phase-2 walk, so a first sync whose walk hits the 900 s handler timeout loses that run's Phase-1 daily P&L;
+2. the Phase-1 store proceeds under refusal flags;
+3. the public `daily_pnl_*` flags are never cleared by any run;
+4. with `USE_RAW_TRADE_INGESTION` off and Phase 1 fine, `needs_flag_write` is False, so a drained `daily_pnl_*` refusal flag (232-03's `daily_pnl_non_usd_okx` among them) never reaches `data_quality_flags` while `last_sync_at` still advances.
+**Requirements**: TBD
+**Depends on:** Phase 222 (it reorders `run_sync_trades_job`, which 222 edits)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
 
 ## 📋 v1.23 HARDEN — security, alerting, tooling (planned; starts after TRUTH closes)
 
