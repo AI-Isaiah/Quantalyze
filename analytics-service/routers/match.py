@@ -722,7 +722,10 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
     strategy, so the AUM is the sum over EVERY live key's position, and keys that
     read ONE exchange account count it once. Each account (``account_identity_tokens``,
     the dashboard's and the commit RPC's identity: keys that share a non-blank
-    (exchange, venue_account_id) or a marker link; any other key is its own account)
+    (exchange, venue_account_id) and the same broker server, or a marker link; one login
+    on two set servers is two accounts, a key with no server joins its login only while
+    the login carries at most one set server (225 CONN-03, CONTEXT Q6); any other key,
+    an unplaceable server-less one included, is its own account)
     takes its rows at its newest ``asof``, and ``one_key_per_account_day`` (plan 11)
     keeps, per account AND per holding type, the one key that wins that day (latest
     ``updated_at`` instant, ties by smallest lowercase ``api_key_id``). Rows of a key before its account's newest day
@@ -821,7 +824,7 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
     key_rows = rows(
         supabase.table("api_keys")
         .select(
-            "id, exchange, venue_account_id, account_share_kind, "
+            "id, exchange, venue_account_id, venue_server, account_share_kind, "
             "account_shared_with_api_key_id"
         )
         .eq("user_id", allocator_id)
