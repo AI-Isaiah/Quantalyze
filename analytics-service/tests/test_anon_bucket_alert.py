@@ -280,6 +280,30 @@ def test_an_unreadable_refusing_bucket_is_logged_not_silent() -> None:
     assert failures[0]["exc_info"] is True
 
 
+def test_rate_limit_lines_stay_capturable_after_logging_is_reconfigured() -> None:
+    """A rate-limit line emitted after a re-configure must reach ``capture_logs``.
+
+    ``configure_logging()`` turns on ``cache_logger_on_first_use``. A module-scope
+    logger froze onto the processor list of its first emission, and a later
+    ``configure_logging()`` installed a new list it never saw, so every rate-limit
+    line after that escaped capture. That is how
+    ``test_a_per_ip_refusal_leaks_no_identity_in_body_headers_or_the_handler_log``
+    went red on main depending on xdist ordering. This pins the order that
+    triggered it, in one test.
+    """
+    from services.logging_config import configure_logging
+
+    request: Any = SimpleNamespace(state=SimpleNamespace(view_rate_limit=None))
+    configure_logging()
+    app_error_handlers._alert_anon_bucket_saturated(request, None)  # first emission
+    configure_logging()
+
+    with capture_logs() as logs:
+        app_error_handlers._alert_anon_bucket_saturated(request, None)
+
+    assert [e["event"] for e in logs] == ["request.anon_bucket_alert_failed"], logs
+
+
 def test_the_429_is_byte_identical_with_the_hook_neutered(
     client: TestClient,
     sentry_spy: _FakeSentry,

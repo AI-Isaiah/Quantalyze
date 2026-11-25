@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.133.74.3] - 2026-11-25 — fix: rate-limit log lines stay capturable after logging is reconfigured
+
+Main went red at `017ba2e08` (run 45579286889) on `test_a_per_ip_refusal_leaks_no_identity_in_body_headers_or_the_handler_log`, which #1334 shipped. It passed alone and on rerun. This fixes the cause in the service module, not the test order.
+
+### Root cause
+- `services/logging_config.py`'s `configure_logging()` sets `cache_logger_on_first_use=True`. `services/app_error_handlers.py` held `_rate_limit_log` at module scope, so the proxy froze onto the processor list in force at its first emission.
+- A later `configure_logging()` call installs a NEW processor list. The frozen logger keeps writing to the old one, while `structlog.testing.capture_logs()` swaps its capture into the new one.
+- The failing order inside one xdist worker: a test that calls `configure_logging()` (for example `test_correlation_middleware.py`'s fixture, `test_stdlib_redact_bridge.py` or `test_logging_config.py`), then any test that hits a 429, then another `configure_logging()`, then the capture. One earlier 429 alone is not enough, because a pytest process keeps structlog's default config (no caching) until some test calls `configure_logging()`.
+- Production calls `configure_logging()` once, at `main.py` module scope, so the live 429 log was not affected. Only capture in tests was.
+
+### Fixed
+- `_rate_limit_log` is now a function that looks the logger up per call, the same shape as `_stage_logger` in `services/mt5_client.py`. All three call sites use it: `request.rate_limited`, `request.anon_bucket_saturated` and `request.anon_bucket_alert_failed`. The last one is captured by `tests/test_anon_bucket_alert.py`, which had the same latent ordering failure.
+
+### Tests
+- `test_rate_limit_lines_stay_capturable_after_logging_is_reconfigured` in `tests/test_anon_bucket_alert.py` replays configure, emit, configure, capture in one test. It was observed RED against the old module-scope logger and GREEN with the fix. The four-test repro (`test_correlation_middleware` case, a 429 test, another `test_correlation_middleware` case, then the failing test) was RED before and GREEN after.
+
+### Notes
+- Same latent class, left alone in this fix: the other module-scope structlog loggers (`_validation_log` in the same file, `main._auth_log`, `routers/process_key.py`'s `log`, `services/rate_limit.py`'s `log`). They fail the same way only under the same configure, emit, configure order.
+
 ## [0.133.74.2] - 2026-11-25 — records: Phases 223, 229, 231, 232, 239 and 240 phase records; Phase 250 BINANCEFILLS booked
 
 This is a records PR. It changes no source, test, workflow or migration file. It brings onto `main` the planning records of six v1.22 phases that already shipped: 223 FLOWKINDS (#1327), 229 MT5DERIVE2 (#1328), 231 BYBITREADS plan 06 (#1333), 232 OKXTRADES (#1330), 239 SURFACECACHE (#1332) and 240 CONNECTTRUTH (#1334). It replaces the never-opened `records/232-okxtrades` branch (v0.133.70.1). Its content is reused here, but not its version.
