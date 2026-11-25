@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { adaptPortfolioAnalytics } from "./portfolio-analytics-adapter";
+import {
+  adaptPortfolioAnalytics,
+  benchmarkNoteTone,
+} from "./portfolio-analytics-adapter";
 
 import complete from "@/__tests__/fixtures/portfolio-analytics/complete.json";
 import partialNullBenchmark from "@/__tests__/fixtures/portfolio-analytics/partial-null-benchmark.json";
@@ -212,6 +215,30 @@ describe("adaptPortfolioAnalytics", () => {
 
     const noNote = adaptPortfolioAnalytics(complete);
     expect("note" in (noNote?.benchmark_comparison ?? {})).toBe(false);
+  });
+
+  // Phase 222 ERRC-02: a total benchmark source failure is stored as a named
+  // outage with stale false. The wire value must reach the page unchanged.
+  it("round-trips the no-source benchmark note with stale false", () => {
+    const parsed = adaptPortfolioAnalytics({
+      ...complete,
+      benchmark_comparison: {
+        symbol: "BTC",
+        correlation: null,
+        benchmark_twr: null,
+        portfolio_twr: 0.12,
+        stale: false,
+        note: "benchmark unavailable: no price source",
+      },
+    });
+    expect(parsed?.benchmark_comparison).toEqual({
+      symbol: "BTC",
+      correlation: null,
+      benchmark_twr: null,
+      portfolio_twr: 0.12,
+      stale: false,
+      note: "benchmark unavailable: no price source",
+    });
   });
 
   it("handles a row with benchmark_comparison set to null", () => {
@@ -469,5 +496,47 @@ describe("adaptPortfolioAnalytics optimizer lift verdict (194 D-15)", () => {
       dd_improvement: 0.01,
       score: 0.5,
     });
+  });
+});
+
+// Phase 222 ERRC-02 / founder ruling OQ1: the amber-only-when-stale rule held as
+// code. The tone reads the stored `stale` boolean, never the note string.
+describe("benchmarkNoteTone", () => {
+  const toneFor = (stale: boolean, note: string) => {
+    const parsed = adaptPortfolioAnalytics({
+      ...complete,
+      benchmark_comparison: {
+        symbol: "BTC",
+        correlation: null,
+        benchmark_twr: null,
+        portfolio_twr: 0.12,
+        stale,
+        note,
+      },
+    });
+    const comparison = parsed?.benchmark_comparison;
+    if (!comparison) throw new Error("comparison did not parse");
+    return benchmarkNoteTone(comparison);
+  };
+
+  it("is warning when the stored value is stale", () => {
+    expect(toneFor(true, "benchmark unavailable: stale")).toBe("warning");
+  });
+
+  it("is muted for the no-source outage, which is stored with stale false", () => {
+    expect(toneFor(false, "benchmark unavailable: no price source")).toBe("muted");
+  });
+
+  it("is muted for the thin-overlap and computation-failed notes", () => {
+    expect(
+      toneFor(false, "benchmark unavailable: fewer than 30 shared days"),
+    ).toBe("muted");
+    expect(toneFor(false, "benchmark unavailable: computation failed")).toBe(
+      "muted",
+    );
+  });
+
+  it("reads the boolean, never the note: a stale-sounding note with stale false is muted", () => {
+    expect(toneFor(false, "benchmark unavailable: stale")).toBe("muted");
   });
 });

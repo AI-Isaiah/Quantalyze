@@ -3831,7 +3831,7 @@ describe("[140.5-02 / SEAMPROSE-03] the four scope/permission wire codes, answer
     expect(
       classifyKeyValidationError(
         seamThrow(
-          "Key validation failed unexpectedly. Contact support if this persists.",
+          "Key validation failed unexpectedly. Use the contact form if this persists.",
           "VALIDATION_UNEXPECTED",
         ),
       ),

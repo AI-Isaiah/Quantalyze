@@ -155,6 +155,26 @@ function parseBenchmarkComparison(v: Json): BenchmarkComparison | null {
   };
 }
 
+/**
+ * Phase 222 ERRC-02, founder ruling OQ1 (2026-11-25): the amber-only-when-stale
+ * rule for the portfolio benchmark note. ROADMAP SC-2 is met by the stored
+ * `stale: false` on a total source failure, this rule, and the adapter test that
+ * pins both. No card or component is rebuilt; nothing renders the note today
+ * (BenchmarkComparison.tsx was deleted in Phase 195 TRIM).
+ *
+ * UI-SPEC classes for any renderer. The note is a `<p role="status">` with the
+ * base `mb-4 text-small break-words first-letter:uppercase`, then:
+ * - "warning": `text-warning bg-warning-bg border border-warning-border rounded px-2 py-1`
+ * - "muted": `text-text-muted`
+ * Never red, never an icon, and the note is rendered verbatim as a text node.
+ *
+ * The tone MUST be derived from the `stale` boolean alone, never from the note
+ * string: a note's wording can change, the stored flag is the contract.
+ */
+export function benchmarkNoteTone(comparison: BenchmarkComparison): "warning" | "muted" {
+  return comparison.stale ? "warning" : "muted";
+}
+
 const LIFT_STATES: ReadonlySet<string> = new Set(["withheld", "short", "full", "null"]);
 
 /**

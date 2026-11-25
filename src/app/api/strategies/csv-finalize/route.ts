@@ -1984,15 +1984,17 @@ async function writeFailedStrategyAnalyticsPlaceholder(
  * `strategy_analytics.computation_error` when the analytics enqueue loses an
  * MVCC race (SQLSTATE 40001, the classification mig 20260826150000 added).
  *
- * ⚠️ DELIBERATE DIVERGENCE (2026-11-14, Phase 212 WIZTRUTH, SC6/SC7). This
- * sentence used to byte-copy the ELSE arm of `computation_error_copy(TEXT)`
- * (mig 20260826120000, Phase 162 HONEST-01), with route.test.ts reading that arm
- * out of supabase/schema/functions/computation_error_copy.sql as its oracle.
- * That arm still ends in the legacy support pointer, a channel that does not
- * exist. Rewording the SQL needs a migration, which Phase 212 forbids (SC7), so
- * the TS string now names the contact form and the oracle is a hand-typed
- * sentence. The SQL arms stay as they are and are booked for a later migration
- * phase; until then the two are NOT in parity, on purpose.
+ * ⚠️ BYTE-COPY OF THE SQL ELSE ARM, AGAIN (2026-11-27, Phase 222 ALERTTRUTH,
+ * ERRC-01). This sentence byte-copies the ELSE arm of
+ * `computation_error_copy(TEXT)` (mig 20260826120000, Phase 162 HONEST-01),
+ * re-based by mig 20261125212222_computation_error_copy_contact_form.sql, and
+ * route.test.ts reads that arm out of the generated snapshot
+ * supabase/schema/functions/computation_error_copy.sql as its oracle. Between
+ * 2026-11-14 (Phase 212 WIZTRUTH, SC6/SC7) and that migration the two were NOT
+ * in parity on purpose: the SQL arm still ended in the legacy support pointer, a
+ * channel that does not exist, and rewording it needed a migration that Phase
+ * 212 forbade. The migration closed that gap, so the test is the tie between the
+ * two again.
  *
  * ⚖️ WHY A LITERAL AND NOT AN RPC TO THE HELPER — mig 20260826150000's header
  * proposed calling it, and it IS service_role-EXECUTEable, so the call would

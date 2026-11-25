@@ -496,11 +496,12 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
         kind: "row",
         status: "failed",
         // The REAL shape of this column's value on the composite failure path,
-        // post-migration-20260826120000: curated copy derived from the job's
-        // error_kind. Not a member label, and not an exception either.
+        // post-migration-20261125212222_computation_error_copy_contact_form:
+        // curated copy derived from the job's error_kind. Not a member label,
+        // and not an exception either.
         error:
           "Analytics could not complete for this strategy, and retrying alone " +
-          "will not resolve it. Contact support if you need this strategy computed.",
+          "will not resolve it. Use the contact form if you need this strategy computed.",
       }),
     });
 
@@ -529,7 +530,7 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     // where the appendix was most load-bearing.
     const envelope = screen.getByTestId("error-envelope");
     expect(envelope.getAttribute("data-error-code")).toBe("GATE_ANALYTICS_FAILED");
-    expect(envelope.textContent ?? "").not.toContain("Contact support if you need");
+    expect(envelope.textContent ?? "").not.toContain("Use the contact form if you need");
     expect(envelope.textContent ?? "").not.toContain("Details:");
     // …and it still gives the user its own account of the state.
     expect(envelope.textContent ?? "").toContain("Analytics computation failed.");
