@@ -1357,8 +1357,14 @@ async def test_wr01_the_fence_fires_before_the_row_expires_when_a_renew_hangs(
 
 
 async def test_wr01_a_renew_that_hangs_from_the_first_tick_is_cut_off_at_the_deadline(
-    scaled_timing,
+    scaled_timing, monkeypatch
 ) -> None:
+    """The RPC timeout is set to 0.19 (just under the 0.2 renew interval, still valid) so
+    the old loop's drift shows: renews sent at 0.2 and 0.59 each ran their whole bound,
+    and it fenced at about 0.78 s, after the 0.7 s deadline. The bounded loop cuts the
+    second renew at the deadline. (At the 0.15 s bound this test used to pass on the old
+    code too, because the two renew windows happened to end exactly on the deadline.)"""
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.19)
     fake = _FailFastThenHang(fast_failures=0)
     _install(fake)
     fenced_at: list[float] = []
@@ -1369,7 +1375,9 @@ async def test_wr01_a_renew_that_hangs_from_the_first_tick_is_cut_off_at_the_dea
     )
     await asyncio.sleep(1.1)
     hold.stop_renewing()
-    assert fenced_at and fenced_at[0] < 0.9, fenced_at
+    assert fenced_at and fenced_at[0] < 0.75, (
+        f"fenced at {fenced_at}: the in-flight renew was not cut off at the 0.7 s deadline"
+    )
 
 
 async def test_wr01_a_successful_renew_moves_the_deadline_from_its_send_time(
@@ -1476,3 +1484,33 @@ async def test_cr2_01_the_renew_deadline_is_seeded_by_the_granting_calls_own_sen
         "first call's send time, not the granting call's"
     )
     assert fenced_at[0] < 0.9, "fenced after the row's expiry"
+
+
+async def test_wr2_01_a_grant_that_lands_late_gets_a_renew_before_any_fence(
+    scaled_stuck,
+) -> None:
+    """Every acquire call takes 0.55 s, so the granting call (sent at 0) answers when the
+    loss deadline (0.7 s) is only 0.15 s away. Renew matches the token regardless of
+    expiry and is sent before the earliest possible expiry (0.9 s), so it settles the
+    question safely. The loop used to sleep until the deadline and fence without one
+    renew attempt, burning the derive attempt on a healthy lease."""
+    fake = FakeXLeaseBackend()
+
+    async def _slow() -> None:
+        await asyncio.sleep(0.55)
+
+    fake.before["acquire"] = _slow
+    _install(fake)
+    fenced: list[float] = []
+    t0 = time.monotonic()
+    hold = await mt5_xlease.acquire_terminal_xlease(
+        _KEY, holder=None, site=None, bound_s=None,
+        on_lost=lambda: fenced.append(time.monotonic() - t0),
+    )
+    assert time.monotonic() - t0 >= 0.5, "the grant was not late; the test proves nothing"
+    await asyncio.sleep(0.5)
+    hold.stop_renewing()
+
+    assert fenced == [], f"a late grant was fenced at {fenced} without being given a renew"
+    assert fake.count("renew") >= 1
+    await hold.release()

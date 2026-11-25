@@ -94,7 +94,9 @@ def _validate_xlease_timing(
     rpc_timeout``: the self-fence deadline (``lost_after = ttl - renew``) is at least
     one renew interval plus one RPC bound after the granting call's send, so a prompt
     grant's first renew (sent one renew interval in) gets its FULL ``rpc_timeout``
-    before the fence and a single slow call never fences a healthy holder. ``rpc_timeout < error_budget``: one
+    before the fence and a single slow call never fences a healthy holder. A grant that
+    lands LATE gets its first renew at once, with whatever time is left to the deadline
+    (``min(rpc_timeout, lost_at - now)``), never a fence with no attempt. ``rpc_timeout < error_budget``: one
     slow call must not by itself spend the budget an unbounded caller is allowed
     (DEC-04-C).
 
@@ -501,10 +503,19 @@ class XLeaseHold:
         exception CLASS only and keeps looping; ``CancelledError`` is not an
         ``Exception`` and passes through."""
         lost_at = self._granted_sent_at + _MT5_XLEASE_LOST_AFTER_S
+        # The FIRST sleep leaves room for a full-bound renew before the deadline, so a
+        # grant that landed late (its call was sent long before it answered) renews at
+        # once instead of being fenced without a single attempt (WR2-01). Only the
+        # first: a renew that has already failed does not get an instant retry loop.
+        lead_s = _MT5_XLEASE_RPC_TIMEOUT_S
         while True:
             await asyncio.sleep(
-                max(0.0, min(_MT5_XLEASE_RENEW_INTERVAL_S, lost_at - time.monotonic()))
+                max(
+                    0.0,
+                    min(_MT5_XLEASE_RENEW_INTERVAL_S, lost_at - time.monotonic() - lead_s),
+                )
             )
+            lead_s = 0.0
             try:
                 sent_at = time.monotonic()
                 if sent_at >= lost_at:
