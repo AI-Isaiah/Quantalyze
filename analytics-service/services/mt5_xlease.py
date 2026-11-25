@@ -79,7 +79,11 @@ logger = logging.getLogger("quantalyze.analytics.mt5_xlease")
 # DEC-02-E — timing. Plain constants; no env override (the 227 pattern).
 # --------------------------------------------------------------------------- #
 def _validate_xlease_timing(
-    poll_s: float, renew_s: float, ttl_s: float, rpc_timeout_s: float
+    poll_s: float,
+    renew_s: float,
+    ttl_s: float,
+    rpc_timeout_s: float,
+    error_budget_s: float,
 ) -> None:
     """Refuse contradictory timing constants at import, naming the broken
     inequality. Modelled on ``main_worker._validate_claim_renew_interval``.
@@ -89,7 +93,8 @@ def _validate_xlease_timing(
     a renew that can outlast its own interval stacks. ``ttl >= 2 * renew +
     rpc_timeout``: the holder survives one missed renew plus one slow call before the
     row can expire, and the self-fence (``ttl - renew``) fires while the lease is
-    still ours."""
+    still ours. ``rpc_timeout < error_budget``: one slow call must not by itself spend
+    the budget an unbounded caller is allowed (DEC-04-C)."""
     if not 0.0 < poll_s < renew_s:
         raise ValueError(
             f"_MT5_XLEASE_POLL_S must be in (0, renew interval {renew_s}); got "
@@ -113,6 +118,12 @@ def _validate_xlease_timing(
             f"({2.0 * renew_s + rpc_timeout_s}); got {ttl_s} - one missed renew "
             f"plus one slow call would expire a live holder"
         )
+    if not rpc_timeout_s < error_budget_s:
+        raise ValueError(
+            f"_MT5_XLEASE_ERROR_BUDGET_S must exceed _MT5_XLEASE_RPC_TIMEOUT_S "
+            f"({rpc_timeout_s}); got {error_budget_s} - one slow call would spend the "
+            f"whole error budget"
+        )
 
 
 _MT5_XLEASE_TTL_S: Final[float] = 90.0
@@ -133,6 +144,12 @@ _MT5_XLEASE_LOST_AFTER_S: Final[float] = (
 #: lease into "busy". It overshoots the caller's bound by at most this much, once.
 _MT5_XLEASE_MIN_ATTEMPT_S: Final[float] = 0.5
 
+#: DEC-04-C. How long an UNBOUNDED caller (a batch job) tolerates CONSECUTIVE backend
+#: errors on the acquire before it raises ``XLeaseUnavailable``: a PostgREST blip must not
+#: burn a derive attempt, the quantity the seven nights count. An answer from the
+#: database, True or False, resets the window. A bounded caller ignores it and keeps
+#: polling to its own deadline.
+_MT5_XLEASE_ERROR_BUDGET_S: Final[float] = 60.0
 #: Re-log the "lease RPC is missing" ERROR at most this often (the 227
 #: ``_RENEW_UNAVAILABLE_RELOG_S`` cadence). Never latched: PGRST202 also fires on a
 #: parameter-signature drift, so one line per process would hide a persistent fault
@@ -144,6 +161,7 @@ _validate_xlease_timing(
     _MT5_XLEASE_RENEW_INTERVAL_S,
     _MT5_XLEASE_TTL_S,
     _MT5_XLEASE_RPC_TIMEOUT_S,
+    _MT5_XLEASE_ERROR_BUDGET_S,
 )
 
 XLEASE_ACQUIRE_RPC: Final[str] = "acquire_mt5_terminal_lease"
@@ -455,6 +473,13 @@ class XLeaseHold:
                         _MT5_XLEASE_RPC_TIMEOUT_S,
                     )
                 except Exception as exc:  # noqa: BLE001 — no success is counted
+                    if is_missing_rpc(exc):
+                        # The RPC went away (a rollback): the row went with it, so
+                        # there is nothing to renew and nothing that was LOST. Stop
+                        # renewing WITHOUT the self-fence; the holder keeps its
+                        # in-process lock, as in the acquire fallback.
+                        _note_unavailable(XLEASE_RENEW_RPC, self._site)
+                        return
                     logger.warning(
                         "mt5_xlease: a lease renew failed (exc_class=%s); the "
                         "lease is lost if none succeeds within %.0fs",
@@ -515,12 +540,15 @@ class XLeaseHold:
         try:
             await asyncio.wait_for(asyncio.shield(fut), _MT5_XLEASE_RPC_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001 — a release failure must not mask the body
-            logger.warning(
-                "mt5_xlease: the lease release failed (exc_class=%s); the row "
-                "expires on its own TTL",
-                type(exc).__name__,
-                extra={"event_type": "mt5_xlease_release_failed"},
-            )
+            if is_missing_rpc(exc):
+                _note_unavailable(XLEASE_RELEASE_RPC, self._site)
+            else:
+                logger.warning(
+                    "mt5_xlease: the lease release failed (exc_class=%s); the row "
+                    "expires on its own TTL",
+                    type(exc).__name__,
+                    extra={"event_type": "mt5_xlease_release_failed"},
+                )
         finally:
             # An acquire that timed out client-side may land AFTER this release and
             # re-take the row for this token; release it again when it does.
@@ -552,8 +580,11 @@ async def acquire_terminal_xlease(
     token. ``bound_s=None`` polls until granted; a float polls to its deadline and then
     raises ``XLeaseBoundExpired``; ``bound_s <= 0`` makes exactly one attempt. A
     backend exception that is a MISSING RPC returns a local-only hold (``cross_process``
-    False, logged by ``_note_unavailable``); any other backend exception raises
-    ``XLeaseUnavailable`` (fail closed: the caller never proceeds unserialized). ``on_lost`` is called by the renew task if the lease is
+    False, logged by ``_note_unavailable``). Any other backend exception fails closed:
+    an unbounded caller keeps polling for ``_MT5_XLEASE_ERROR_BUDGET_S`` of consecutive
+    errors and then raises ``XLeaseUnavailable``; a bounded caller keeps polling to its
+    deadline and gets ``XLeaseBoundExpired``. Either way it never proceeds
+    unserialized. ``on_lost`` is called by the renew task if the lease is
     lost while held (the self-fence)."""
     backend = _BACKEND
     digest = terminal_lease_digest(terminal_key)
@@ -565,6 +596,10 @@ async def acquire_terminal_xlease(
     deadline = None if bound_s is None else started + max(0.0, bound_s)
     pending: set[asyncio.Future[bool]] = set()
     refusals = 0
+    #: Start of the current run of consecutive backend errors; None while the database
+    #: is answering. Only an unbounded caller is cut off by it (DEC-04-C).
+    first_error_at: float | None = None
+    error_logged = False
 
     try:
         while True:
@@ -602,12 +637,39 @@ async def acquire_terminal_xlease(
                             on_lost=on_lost,
                             cross_process=False,
                         )
-                    # Any OTHER backend failure fails closed.
-                    raise XLeaseUnavailable() from None
-                if granted:
-                    break
-                refusals += 1
-            # else: the call outlived its RPC bound. It stays in `pending`; the next
+                    # Any OTHER backend failure fails closed, but a blip is tolerated
+                    # for the budget (unbounded) or to the deadline (bounded): the
+                    # caller never proceeds unserialized.
+                    error_now = time.monotonic()
+                    if first_error_at is None:
+                        first_error_at = error_now
+                    if not error_logged:
+                        error_logged = True
+                        # Class name only: a PostgREST message can echo a URL.
+                        logger.warning(
+                            "mt5_xlease: the lease acquire RPC failed (exc_class=%s "
+                            "site=%s); retrying",
+                            type(exc).__name__,
+                            site_n,
+                            extra={
+                                "event_type": "mt5_xlease_rpc_error",
+                                "rpc": XLEASE_ACQUIRE_RPC,
+                                "site": site_n,
+                                "exc_class": type(exc).__name__,
+                            },
+                        )
+                    if (
+                        bound_s is None
+                        and error_now - first_error_at >= _MT5_XLEASE_ERROR_BUDGET_S
+                    ):
+                        raise XLeaseUnavailable() from None
+                else:
+                    first_error_at = None  # the database answered: the window restarts
+                    if granted:
+                        break
+                    refusals += 1
+            # else: the call outlived its RPC bound (neither an answer nor an error,
+            # so it neither opens nor clears the error window). It stays in `pending`; the next
             # poll reuses the same token, so a late grant is idempotent for it.
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0.0:
