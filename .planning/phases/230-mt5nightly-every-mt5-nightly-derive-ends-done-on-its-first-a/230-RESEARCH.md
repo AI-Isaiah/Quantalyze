@@ -545,17 +545,24 @@ Missing-RPC fallback: on `is_missing_rpc(exc)` return `None` (in-process only), 
 | A9 | 2025 US fall change was 2025-11-02 | MT5D-03 | only the summer-only sanity check shifts |
 | A10 | CI Python version equals local 3.14.3 | Standard Stack | none expected; not read |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does the plan accept three site edits and one classify arm against CONTEXT's "no site edits"?**
    - What we know: the holdings fetcher and the two `process_key` validate arms mishandle a lease-unavailable raise (user-visible leak, bodyless 500).
    - Recommendation: yes; they are the price of the locked fail-closed rule. Flag the correction to the coordinator.
+   - RESOLVED: CONTEXT "Decided autonomously after research" [Site edits] accepts the three site edits and the classify arm; plan 05 implements them.
 2. **Night 1 definition.** CONTEXT counts from the backfill deploy; the API process runs the holdings poll. Recommendation: `max(both deploys)`, after the migration applied.
+   - RESOLVED: CONTEXT [Night 1] adopts the later of the two deploys, after the PROD apply; plan 09 defines and records night 1.
 3. **Capture and the lease (D-02 is silent; blocks the capture steps).** (a) capture takes `mt5_terminal_lease` (excludes the nightly jobs; writes lease and handover rows, so not strictly read-only) or (b) capture without it in the proven quiet window, as the 164.6.6.2.3-08 precedent did. Either way the capture moves the terminal under the live workers' in-process holder and settled registries; the precedent restarted both services afterwards (founder decision "Both services") and D-02 covers no restart. Recommendation: (b) plus the precedent's restart sequence, put to the founder as one question.
+   - RESOLVED: CONTEXT [Capture] takes (b), no lease and a quiet window, and ends with the restart of both services as a coordinator step; plan 10 hands it over (D-02) and plan 03 writes the steps.
 4. **`railway ssh` reach to the backfill service** (Assumption A6) and the fallback.
+   - RESOLVED as unmeasured, fallback planned: plan 03 (DEC-03-D) writes the API-service fallback into the runbook, and plan 10 stops and asks the founder if both routes fail. Not a measurement.
 5. **Cross-process staleness of the per-process holder and settled registries** (Runtime State). Pre-existing, not widened by the lease; the kept-row design leaves the hook. Recommendation: book as a follow-up, not fix here.
+   - RESOLVED: booked as a follow-up through plan 08's ship record (the new staleness TODOS entry), not fixed in this phase.
 6. **`--days-out` on `mt5offset_dry_run.py`** (comparison level). Recommendation: add it (small, scratch-only, tested).
+   - RESOLVED: CONTEXT [Replay] adopts it; plan 03 adds the flag with its test.
 7. **Relog cadence for the missing-RPC line:** once per process (CONTEXT) or every 900 s (227)? Recommendation: 900 s.
+   - RESOLVED: CONTEXT [Missing RPC] adopts 900 s; plan 04 implements the relog clock.
 
 ## Environment Availability
 
