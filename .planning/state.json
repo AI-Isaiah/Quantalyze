@@ -4,16 +4,6 @@
   "milestone": "v1.22 — TRUTH — data you can trust",
   "phases": [
     {
-      "number": "155.2",
-      "name": "LIVEPARITY",
-      "status": "in_progress"
-    },
-    {
-      "number": "157",
-      "name": "FOUNDER-CONFIRM",
-      "status": "in_progress"
-    },
-    {
       "number": "222",
       "name": "ALERTTRUTH",
       "status": "pending"
@@ -117,7 +107,7 @@
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 1 of 24 · 42% · executing"
+    "reason": "Phase 1 of 22 · 45% · executing"
   },
-  "updated_at": "2026-11-25T12:37:58.500Z"
+  "updated_at": "2026-11-25T17:56:52.025Z"
 }

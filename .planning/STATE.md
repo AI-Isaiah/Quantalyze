@@ -6,16 +6,16 @@ current_phase: 234
 current_phase_name: NOCAPITAL
 status: executing
 stopped_at: "Phases 229, 234 and 237 closed: 229 and 237 human items recorded; 234 records landed"
-last_updated: "2026-11-25T12:37:58.360Z"
+last_updated: "2026-11-25T17:56:52.025Z"
 last_activity: 2026-11-25
 last_activity_desc: "Phases 229 MT5DERIVE2, 234 NOCAPITAL and 237 FACTSHEETHONEST complete (229 live soak exit 0; 237 both visual checks pass; 234 shipped #1339)"
-state_head: 32be13ce022aa607ea065660da6c65270dd94750
+state_head: 91f5023e05b4cba4fac3c608ca47b471e5143efb
 progress:
-  total_phases: 24
+  total_phases: 22
   completed_phases: 10
-  total_plans: 97
-  completed_plans: 83
-  percent: 42
+  total_plans: 81
+  completed_plans: 73
+  percent: 45
 ---
 
 ## ⭐ STATE lineage
@@ -186,7 +186,7 @@ This section holds exactly one of each field above, because the gsd-tools STATE 
 
 ## Current Focus
 
-**Next: Phase 226 MT5SOAK, wave 0 (`/gsd-autonomous --only 226`), with the read-only Deribit diagnosis beside it as a `/gsd-debug` session.** v1.22 TRUTH — data you can trust was roadmapped on 2026-11-23: 21 phases, 81/81 requirements mapped. Goal: every number, label and alert we show is correct, or it fails loudly. Order (founder F-1): data integrity first, 227 JOBLEDGER → 225 ONEACCOUNTONCE → 228 KEYANSWERS → 229 MT5DERIVE2 → 230 MT5NIGHTLY → 231 BYBITREADS ‖ 232 OKXTRADES ‖ 223 FLOWKINDS → 233 DERIBITTRUTH → 234 NOCAPITAL ‖ 235 HOLDINGSTRUTH → 236 FIGUREMATH. User-facing next: 237 FACTSHEETHONEST → 238 NEVERCOMPUTED ‖ 239 SURFACECACHE ‖ 240 CONNECTTRUTH ‖ 222 ALERTTRUTH. 241 DEMOCREDS is the founder's security exception. 155.2 and 157 run outside the order. Number-moving phases (225, 229, 234, 236, and 230 or 233 if their fix moves MT5 numbers) merge before 155.2 plan 12's recapture or after plan 14, never in between. No composite work (F-2). The order, seam owners and milestone-wide rules are in ROADMAP's v1.22 section. By founder ruling F-10 ("Yes, split into two milestones") the security, alerting and tooling work, Phases 221 and 224 included, is a later milestone and not tracked here.
+**Next: Phase 226 MT5SOAK, wave 0 (`/gsd-autonomous --only 226`), with the read-only Deribit diagnosis beside it as a `/gsd-debug` session.** v1.22 TRUTH — data you can trust was roadmapped on 2026-11-23: 21 phases, 81/81 requirements mapped. Goal: every number, label and alert we show is correct, or it fails loudly. Order (founder F-1): data integrity first, 227 JOBLEDGER → 225 ONEACCOUNTONCE → 228 KEYANSWERS → 229 MT5DERIVE2 → 230 MT5NIGHTLY → 231 BYBITREADS ‖ 232 OKXTRADES ‖ 223 FLOWKINDS → 233 DERIBITTRUTH → 234 NOCAPITAL ‖ 235 HOLDINGSTRUTH → 236 FIGUREMATH. User-facing next: 237 FACTSHEETHONEST → 238 NEVERCOMPUTED ‖ 239 SURFACECACHE ‖ 240 CONNECTTRUTH ‖ 222 ALERTTRUTH. 241 DEMOCREDS is the founder's security exception. 155.2 and 157 run outside the order. Number-moving phases (225, 229, 234, 236, and 230 or 233 if their fix moves MT5 numbers) merge before 155.2 plan 12's recapture or after plan 14, never in between. No composite work (F-2). The order, seam owners and milestone-wide rules are in ROADMAP's v1.22 section. By founder ruling F-10 ("Yes, split into two milestones") the security, alerting and tooling work, Phases 221 and 224 included, is a later milestone and not tracked here. ⭐ 2026-11-25: 155.2 and 157 moved to v1.23 HARDEN as well (founder ruling in chat: "We will Move 157 and 155.2 into the next milestone"). The freeze rule above still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs.
 
 v1.18 MT5-VERIFY & founder confirmations closed 2026-11-23 (audit `passed`, 5/5 requirements, 16/16 phases); archive in `.planning/milestones/v1.18-*`. v1.22 holds the carried Phases 155.2, 157, 222, 223 and 225 (moved by founder rulings 2026-11-23; 221 and 224 moved on by F-10) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04 with D-A..D-E; their text is in `milestones/v1.18-REQUIREMENTS.md` under "Carried to the next milestone". ⛔ MT5 stays unadvertised until 155.2 passes. v1.21 closed 2026-11-13; archive in `.planning/milestones/v1.21-*`. The v1.17 sequencing below is lineage.
 
@@ -735,6 +735,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 250 added (2026-11-24, /gsd-phase add, founder ruling 2026-11-24, "R2-02: book a follow-up phase with /gsd-phase (plain add) for a windowed Binance fills read. It must land before USE_RAW_TRADE_INGESTION is turned on for Binance. Fold R2-01 and the BINANCE_PAGE_CAP no-flag item into the same phase's scope."): BINANCEFILLS, a Binance fills read walks every window and never stalls its cursor. Placed in v1.22 by hand: the handler appended it below the v1.22 Progress table with `Depends on: Phase 249` (a v1.23 phase); both were corrected. Number 250 because 242-249 are taken by v1.23.
 - Phase 251 added (2026-11-25, /gsd-phase add, founder ruling 2026-11-25): SYNCSTORE, the four 232 OKXTRADES leftovers in run_sync_trades_job; depends on 222
 - Phase 252 added (2026-11-25, /gsd-phase add, founder decision 2026-11-25, AskUserQuestion, "Book it in v1.22 (Recommended)"): DERIBITOPTIONS, a Deribit options strategy's published figures are mark-to-market or withheld, never a cash-wallet artefact. It books the fix the diagnosed debug session `deribit-implausible-returns` (mechanism B) named as its next action, now tracked so the phase can cite it. The handler appended the section below the v1.22 Progress table with `Depends on: Phase 250` and a TBD stub; all three were corrected by hand. Number 252 because 251 (SYNCSTORE) was already booked in the 222 worktrees; 251 is carried onto main in the same records PR.
+- Phase 155.2 and Phase 157 moved out of v1.22 TRUTH into v1.23 HARDEN: 2026-11-25, hand-edit of ROADMAP.md because /gsd-phase --edit preserves a phase's milestone; founder ruling in chat, "We will Move 157 and 155.2 into the next milestone". Their sections, Progress rows and 10 requirements (MT5-07..10, MT5-15, MT5-GOAL-01, FCONF-01..04) move to v1.23; v1.22 holds 22 phases (10 complete) and 71 requirements, v1.23 12 phases and 45. The 155.2 freeze window still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs.
 
 ### Decisions
 
