@@ -1928,7 +1928,10 @@ describe("[164.1-05] kinds and floors", () => {
     // fixture and six dedicated `freshness:` scenarios (unparsable row, a
     // truncated read, no terminal day, a scope psql failure, a non-ISO day, the
     // pinned scope log line).
-    expect(SELF_TEST_SCENARIOS).toBe(100);
+    // ⭐ 100 -> 103 in Phase 233 plan 04 (FRESH-02 day-by-day rules): the red
+    // partial-cover and bound-plus-one fixtures and the dedicated scenario
+    // proving an anchor reason on one key never covers another.
+    expect(SELF_TEST_SCENARIOS).toBe(103);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);

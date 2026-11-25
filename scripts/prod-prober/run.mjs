@@ -152,7 +152,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 5;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 100;
+export const SELF_TEST_SCENARIOS = 103;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1302,6 +1302,10 @@ const ARM_FIXTURE_TABLE = [
       "stale.json": "freshness-stale",
       // The empty scope: zero derived keys is a page, never a pass.
       "no-scope.json": "freshness-no-scope",
+      // The day-by-day rule: a reason covering only some gap days does not
+      // count, and the bound is a boundary (gap 3 pages; ok.json's gap 2 does not).
+      "partial-cover.json": "freshness-stale",
+      "bound-plus-one.json": "freshness-stale",
     },
   },
 ];
@@ -1773,6 +1777,27 @@ export async function selfTest() {
         expect(
           r.defects[0] && r.defects[0].detail.includes("newest_flow"),
           `non-ISO day: the detail names the column (got ${r.defects[0] && r.defects[0].detail})`,
+        ) &&
+        pass;
+    }
+
+    scenario("freshness: an anchor reason on key X never covers key Y's uncovered gap");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const base = frOk.data.rows[0];
+      const x = { ...clone(base), venue: "deribit", tag: "dddd0002", newestReturn: "2026-10-01", anchorNullReason: "balance_error", newestFlow: "2026-11-23", terminalDay: "2026-11-23", markDay: "", tinyDays: [] };
+      const y = { ...clone(base), venue: "binance", tag: "eeee0002", newestReturn: "2026-11-10", anchorNullReason: "", newestFlow: "2026-11-23", terminalDay: "2026-11-23", markDay: "", tinyDays: [] };
+      const r = await runFresh({ scope: { derived: 2, withInputs: 2, withTerminal: 2 }, rows: [x, y] });
+      pass =
+        expect(r.exitCode === 1, `anchor X beside stale Y exits 1 (got ${r.exitCode})`) &&
+        expect(
+          r.defects.length === 1 && r.defects[0].kind === "freshness-stale",
+          `exactly one freshness-stale (got ${r.defects.map((d) => d.kind).join(", ") || "nothing"})`,
+        ) &&
+        expect(
+          r.defects[0] && r.defects[0].subject === "binance#eeee0002",
+          `the subject is Y, not X (got ${r.defects[0] && r.defects[0].subject})`,
         ) &&
         pass;
     }
