@@ -3557,7 +3557,15 @@ export const FILES_FLOOR = 93;
 // WAIVED_CEILING stays 0 - no waiver was added.
 // MERGED 2026-11-24: Phase 227 JOBLEDGER (910 -> 990 on its branch, +80 twinned arms) onto origin/main at 940 (Phase 225, +30): 940 + 80 = 1020.
 // The CI `sql-mutation` FULL run on the PR head is the measurement of the merged corpus. WAIVED_CEILING stays 0.
-export const ARMS_FLOOR = 1020;
+// RAISED 1020 -> 1028 2026-11-25 (Phase 225 ONEACCOUNTONCE plan 10, migration B): +8 arms, each twinned, in two files that already
+// counted toward FILES_FLOOR (it stays 93): +5 in test_api_keys_venue_identity_uniq.sql (14 -> 19: 6s-null-null, 6s-two-servers,
+// 6s-same-server, 6s-null-vs-set, 6s-two-owners; arm 2's twin and the 6f CCXT twin were rewritten, not added) and +3 in
+// test_api_keys_account_identity.sql (41 -> 44: RECON-server-other, RECON-server-null, RECON-server-keynull). MEASURED:
+// `node scripts/mutation-runner/run.mjs --parse-only` printed `arms: 0/1028/0` and `No static defects`; the exit-2-by-design
+// DIAGNOSTIC runs of the two files printed `arms: 19/19/0`, `biting: 19`, `lane-invocations: 19` and `arms: 44/44/0`, `biting: 44`,
+// `lane-invocations: 44`, with every arm `RED (identity ok)`. The full-corpus run is the CI `sql-mutation` run on the PR head.
+// WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 1028;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
