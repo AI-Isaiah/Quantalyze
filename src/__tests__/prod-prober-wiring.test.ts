@@ -859,6 +859,7 @@ describe("[164.1-05] kinds and floors", () => {
     "cron-secret-in-command",
     "cron-transport-error",
     "floor",
+    "freshness-no-scope",
     "freshness-stale",
     "manifest-invalid",
     "measure-fail",
@@ -1923,7 +1924,11 @@ describe("[164.1-05] kinds and floors", () => {
     // step's measure-fail beside a failing fan-out).
     // ⭐ 91 -> 93 in Phase 233 (FRESH-02 tracer): the freshness arm's green
     // fixture and its held-back red fixture
-    expect(SELF_TEST_SCENARIOS).toBe(93);
+    // ⭐ 93 -> 100 in Phase 233 plan 04 (FRESH-02 expansion): the red no-scope
+    // fixture and six dedicated `freshness:` scenarios (unparsable row, a
+    // truncated read, no terminal day, a scope psql failure, a non-ISO day, the
+    // pinned scope log line).
+    expect(SELF_TEST_SCENARIOS).toBe(100);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
