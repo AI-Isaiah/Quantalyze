@@ -53,6 +53,7 @@ export const NODE_ENV_TEST_FILES: string[] = [
   "src/__tests__/chart-ticks-class-guard.test.ts",
   "src/__tests__/check-admin-route-manifest.test.ts",
   "src/__tests__/check-banned-packages.test.ts",
+  "src/__tests__/check-demo-credential-digests.test.ts",
   "src/__tests__/check-route-contract.test.ts",
   "src/__tests__/claim-dedupe-done-pending-children-guard.test.ts",
   "src/__tests__/compare-holding-rls.test.ts",
