@@ -2613,8 +2613,7 @@ async def _fetch_raw_trades_binance(
     A row outside its window raises ``BinanceFillsOutOfWindow`` (the symbol fails and is
     named in ``binance_partial_symbols``). A symbol's walk ends early only three ways, each a
     ``_BinanceSymbolRead.stop`` with a ``read_through_ms`` bound: ``cap`` (``BINANCE_PAGE_CAP``
-    pages inside one window, or one full page for a spot-resolved name, bound the window's start
-    minus 1 ms: the spot docs return the most recent trades unless ``fromId`` is set), ``untimed`` (a full page whose last row has no timestamp) and
+    pages inside one window), ``untimed`` (a full page whose last row has no timestamp) and
     ``deadline`` (``read_deadline_s`` seconds after the read began, checked before EVERY request,
     exempt overlap pages included).
     Flags are recorded here in the parent, never inside the gathered per-symbol tasks.
@@ -2767,7 +2766,6 @@ async def _fetch_raw_trades_binance(
         if "/" not in ccxt_symbol:
             ccxt_symbol = ccxt_symbol_by_normalized.get(symbol, symbol)
 
-        is_spot = _binance_resolves_to_spot(exchange, ccxt_symbol)
         window_ms = _binance_fills_window_ms(exchange, ccxt_symbol)
         all_trades: list[dict[str, Any]] = []
         stop: Literal["cap", "untimed", "deadline"] | None = None
@@ -2818,27 +2816,6 @@ async def _fetch_raw_trades_binance(
                     )
                 all_trades.extend(batch)
                 if len(batch) < BINANCE_FILLS_PAGE_LIMIT:
-                    break
-                if is_spot:
-                    # WR-02: the spot ``myTrades`` page says "If ``fromId`` is set, it will get
-                    # trades >= that ``fromId``. Otherwise most recent trades are returned.",
-                    # so a full page for a window need not be its OLDEST rows, and ccxt's
-                    # client-side sort hides the order. Advancing ``since`` past it could skip
-                    # every older fill in the window with no flag. ``fromId`` paging cannot
-                    # start below a page that may be the newest, so the window is not read
-                    # past: stop with the cap's shape, complete only through the window's
-                    # start (never a row of this page). The rows read are kept. A spot name
-                    # with a full page of fills in one window stops here on every run. The
-                    # USD-M page carries the same "most recent" wording only on ``fromId``;
-                    # its time-bounded request keeps the since-advance walk.
-                    logger.warning(
-                        "Binance fetch_my_trades %s: full spot page of %d fills in one window; "
-                        "the venue may have served the newest rows, so the window is not "
-                        "read past it",
-                        symbol, len(batch),
-                    )
-                    stop = "cap"
-                    read_through_ms = window_start - 1
                     break
                 last_ts = batch[-1].get("timestamp")
                 if not isinstance(last_ts, (int, float)):
