@@ -118,7 +118,7 @@ function dayBefore(day: string): string {
 
 /**
  * Phase 225 CONN-03, CONTEXT Q6 (founder ruling 2026-11-25 and the marked agent
- * decision): each key's login identity and the ids of its AMBIGUOUS keys. One
+ * decision): each key's login identity (null for an AMBIGUOUS key). One
  * canonical identity per key, never a pairwise wildcard: union-find is
  * transitive, so a key with no server unioned pairwise with servers a and b
  * would merge a and b again.
@@ -135,7 +135,6 @@ function dayBefore(day: string): string {
  */
 function loginIdentities(keys: readonly DepartedHistoryKey[]): {
   identities: Map<string, string | null>;
-  ambiguous: Set<string>;
 } {
   const servers = new Map<string, Set<string>>();
   const parsed = new Map<string, { pair: string; own: string | null } | null>();
@@ -158,7 +157,6 @@ function loginIdentities(keys: readonly DepartedHistoryKey[]): {
     }
   }
   const identities = new Map<string, string | null>();
-  const ambiguous = new Set<string>();
   for (const [id, item] of parsed) {
     if (item === null) {
       identities.set(id, null);
@@ -176,10 +174,9 @@ function loginIdentities(keys: readonly DepartedHistoryKey[]): {
       identities.set(id, `${pair}\u0000${[...seen][0]}`);
     } else {
       identities.set(id, null);
-      ambiguous.add(id);
     }
   }
-  return { identities, ambiguous };
+  return { identities };
 }
 
 /**
@@ -193,19 +190,6 @@ export function accountLoginIdentity(
   keys: readonly DepartedHistoryKey[],
 ): Map<string, string | null> {
   return loginIdentities(keys).identities;
-}
-
-/**
- * The ids of keys whose account cannot be placed: a non-blank login, no
- * server, and two or more distinct set servers on their (exchange, login). Such
- * a key joins no login union, so `keyAccountOf` gives it its own `key:<id>`
- * account and `departedHistoryInclusion` reads it as `account_unknown`. Only
- * the Python derive refuses. Twin of Python `ambiguous_server_key_ids`. Pure.
- */
-export function ambiguousServerKeyIds(
-  keys: readonly DepartedHistoryKey[],
-): Set<string> {
-  return loginIdentities(keys).ambiguous;
 }
 
 /**
