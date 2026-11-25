@@ -80,3 +80,7 @@ The former same-owner-groups census was dropped in review (WR-05, commit 2d52865
 ## Ship note for PR-3
 
 The ship deletes `TODOS.md` entry A-3 (`venue_account_id` is the MT5 login alone) and names it in the CHANGELOG entry. Before merge: migration-reviewer and rls-policy-auditor clean at MEDIUM+, and no other open PR touches `supabase/migrations`. After merge: read the index definition from `pg_indexes` and the reconnect body from `pg_proc` on PROD and record both.
+
+## Hold (2026-11-25)
+
+PR-3 is held on review finding CR-01 (`225-REVIEW-PR3.md`). After the index admits one owner's same login on two servers, the derive's login-only identity token refuses that owner's book. CONN-03 is complete at the index and at reconnect, but it must not ship until the same-owner readers are server-aware. That change needs a founder rule for a NULL-server key on a login with two or more set servers. Re-run four checks before PR-3 opens: the migration-name rule, gate A5, the 155.2 freeze, and the check for open PRs touching migrations.
