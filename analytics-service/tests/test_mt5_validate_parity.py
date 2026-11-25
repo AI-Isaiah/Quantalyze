@@ -486,11 +486,14 @@ def test_run_probe_writes_one_log_only_server_verdict_on_the_validation_terminal
     inside ``run_probe``, so the measurement that gates it must come from there too,
     not only from the poll terminal. One INFO line per probe (the POST bracket
     re-reads ``account_info`` and must not write a second), keyed by the validate
-    site and ``holder=validation``, and it never changes what ``run_probe`` returns
-    or refuses: a False and a not_captured probe return what a True one does.
+    site and ``holder=validation``. Since PR-2c (225-18) a False or not_captured
+    session is REFUSED by ``assert_expected_server`` right after that line, so the
+    line is written BEFORE the refusal: the measurement survives the refusal it
+    gates, and a refused probe still writes exactly one line.
     """
     import logging
 
+    from services.mt5_client import Mt5ServerMismatchError
     from services.mt5_probe import run_probe
 
     account = {"login": _ACCT_LOGIN, "trade_allowed": False}
@@ -501,8 +504,8 @@ def test_run_probe_writes_one_log_only_server_verdict_on_the_validation_terminal
         terminal_info={"connected": True, "trade_allowed": False},
     )
 
-    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.mt5_read"):
-        info, probe, _terminal = run_probe(
+    def _probe():
+        return run_probe(
             client,
             login=_ACCT_LOGIN,
             investor_pw="pw",
@@ -511,7 +514,16 @@ def test_run_probe_writes_one_log_only_server_verdict_on_the_validation_terminal
             site=site,
         )
 
-    assert info["login"] == _ACCT_LOGIN and probe == {}
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.mt5_read"):
+        if label == "True":
+            info, probe, _terminal = _probe()
+            assert info["login"] == _ACCT_LOGIN and probe == {}
+        else:
+            with pytest.raises(Mt5ServerMismatchError):
+                _probe()
+            # Refused at the PRE bracket: nothing after it ran.
+            assert "terminal_info" not in client.calls, client.calls
+
     lines = _verdict_lines(caplog)
     assert lines == [
         f"{_VERDICT_MSG} site={site} holder=validation "
