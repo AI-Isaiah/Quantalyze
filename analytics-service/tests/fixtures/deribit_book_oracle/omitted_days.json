@@ -1,0 +1,112 @@
+{
+  "_comment": "Every value here is synthetic. Book A, one counted key k1, nine union days 2025-01-01 .. 2025-01-09 (d1..d9). HAND DERIVATION. k1 terminal 732.05 on d9, no flow, P = 0,100,-1100,0,500,50,55,60.5,66.55; level(prev) = level(day) - P(day): L9 = 732.05, L8 = 665.5, L7 = 605, L6 = 550, L5 = 500, L4 = 0, L3 = 0, L2 = 1100, L1 = 1000. Stored returns exist on d2 (100/1000 = 0.1), d3 (-1100/1100 = -1), d7 (55/550 = 0.1), d8 (60.5/605 = 0.1) and d9 (66.55/665.5 = 0.1). d5 has P 500 over a previous level of 0 (the writer left no return) and d6 is a dropped day (50 recorded in dropped_day_pnl, no stored return). THE OMITTED DAYS, each under its name: d1 has no previous union day, no_stored_base_level; d4 has previous level L3 = 0, so its denominator is 0, skipped_nonpositive_denominator; d5 has previous level L4 = 0, skipped_nonpositive_denominator; d6 is the only participant and it sat out (dropped day with no return), so no key has a defined return, missing_return_inside_coverage, carrying the key_sat_out annotation; d9 is computed (0.1) but the book published only d2..d8, so it is outside the published window, outside_published_window. No day is non-finite (the loader refuses non-finite numbers). Published 4 (d2, d3, d7, d8), all explained (0.1, -1, 0.1, 0.1), withheld 0, omitted 5, one annotated day (d6). Verdict CLEAN, exit 0.",
+  "book": {
+    "label": "A",
+    "returns": [
+      {
+        "date": "2025-01-02",
+        "r": 0.1
+      },
+      {
+        "date": "2025-01-03",
+        "r": -1.0
+      },
+      {
+        "date": "2025-01-07",
+        "r": 0.1
+      },
+      {
+        "date": "2025-01-08",
+        "r": 0.1
+      }
+    ],
+    "flags": {},
+    "degrade_reasons": [],
+    "inputs": {
+      "n_keys": 1
+    }
+  },
+  "keys": {
+    "k1": {
+      "composed_day_pnl": [
+        {
+          "utc_day_iso": "2025-01-01",
+          "pnl_usd": 0
+        },
+        {
+          "utc_day_iso": "2025-01-02",
+          "pnl_usd": 100
+        },
+        {
+          "utc_day_iso": "2025-01-03",
+          "pnl_usd": -1100
+        },
+        {
+          "utc_day_iso": "2025-01-04",
+          "pnl_usd": 0
+        },
+        {
+          "utc_day_iso": "2025-01-05",
+          "pnl_usd": 500
+        },
+        {
+          "utc_day_iso": "2025-01-06",
+          "pnl_usd": 50
+        },
+        {
+          "utc_day_iso": "2025-01-07",
+          "pnl_usd": 55
+        },
+        {
+          "utc_day_iso": "2025-01-08",
+          "pnl_usd": 60.5
+        },
+        {
+          "utc_day_iso": "2025-01-09",
+          "pnl_usd": 66.55
+        }
+      ],
+      "composed_flows": [],
+      "dropped_day_pnl": [
+        {
+          "utc_day_iso": "2025-01-06",
+          "pnl_usd": 50
+        }
+      ],
+      "returns_stamp": [
+        {
+          "utc_day_iso": "2025-01-02",
+          "return": 0.1
+        },
+        {
+          "utc_day_iso": "2025-01-03",
+          "return": -1.0
+        },
+        {
+          "utc_day_iso": "2025-01-07",
+          "return": 0.1
+        },
+        {
+          "utc_day_iso": "2025-01-08",
+          "return": 0.1
+        },
+        {
+          "utc_day_iso": "2025-01-09",
+          "return": 0.09999999999999999
+        }
+      ],
+      "realized_terminal_day": "2025-01-09",
+      "realized_terminal_usd": 732.05,
+      "anchor_usd": null,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    }
+  },
+  "declared": {
+    "counted": [
+      "k1"
+    ]
+  }
+}

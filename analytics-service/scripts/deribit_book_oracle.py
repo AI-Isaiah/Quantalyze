@@ -57,9 +57,13 @@ applies stitch, departed and exit rules at compose time; none of that is in the 
 follows is the compose job's key read in ``job_worker.run_derive_allocator_equity_job``) and the
 oracle only checks that the declared set counts to ``inputs.n_keys``.
 
-Known limits of this version (named, not silent): a coverage-handoff rotation that the export
-does not declare in ``declared.departed`` is not detected here, and a stitched child is modelled
-as its own key series with its join and the next day treated as a boundary.
+Known limits of this version (named, not silent): a stitched child is modelled as its own key
+series with its join and the next day treated as a boundary; the emptied band is classified on
+each key's raw writer-basis levels (the terminal level before the live anchor replaces it), so a
+live anchor inside the band is not itself classified; ``nonfinite_return`` is named and produced
+by the loop but no fixture reaches it (the loader refuses non-finite numbers, so only an overflow
+sum could); an ``omitted`` day outside the first-to-last published day is named
+``outside_published_window`` and still printed day by day.
 
 Closed sets (public constants below): ``WITHHELD_REASONS`` for a published day the oracle does not
 reproduce, in priority order; ``OMITTED_REASONS`` for a day of the book's span the compose did not
@@ -74,7 +78,8 @@ venue text. An exception prints its type only (a message can carry an id).
 
 Run recipe: plan 233-05 Task 3 (the orchestrator exports through the MCP read path, one statement
 per call, into its session scratchpad, then runs ``python3 deribit_book_oracle.py --input <file>``).
-The script holds no connection and no DSN.
+``python3 deribit_book_oracle.py --print-sql[=<label>]`` prints the read-only statements, with
+placeholders only, that produce the export. The script holds no connection and no DSN.
 """
 from __future__ import annotations
 
@@ -85,7 +90,7 @@ import re
 import sys
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Final
 
 # ── closed sets ────────────────────────────────────────────────────────────────────────────────
@@ -135,6 +140,15 @@ _MIN_EXPLAINED_SHARE: Final[float] = 0.5
 # A REPORTING threshold taken from the CONTEXT measurement (the book's days above 30%). It picks
 # which days get an ``oracle-big-day:`` line and splits the cumulative; it never changes a class.
 _BIG_DAY_ABS_RETURN: Final[float] = 0.30
+
+# The emptied band, three literal COPIES of ``allocator_equity_derive.EMPTIED_FRACTION``,
+# ``EMPTIED_NEGATIVE_FRACTION`` and ``EMPTIED_RESTART_FLOOR_USD`` (the book's own flag). They are
+# copies on purpose, so the oracle imports nothing it judges; ``tests/test_deribit_book_oracle.py``
+# imports production IN THE TEST ONLY and fails if a copy drifts. The tiny-base constants are NOT
+# copied: the oracle never recomputes that rule (tiny days arrive in the dropped set).
+_EMPTIED_FRACTION: Final[float] = 0.01
+_EMPTIED_NEGATIVE_FRACTION: Final[float] = 1e-4
+_EMPTIED_RESTART_FLOOR_USD: Final[float] = 100.0
 
 # ── errors and small helpers ───────────────────────────────────────────────────────────────────
 
@@ -520,6 +534,93 @@ def _carry_day(levels: KeyLevels, rotated: bool, day: str) -> str | None:
     return _last_le(levels.days, day)
 
 
+def _next_day(day: str) -> str:
+    return (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+
+
+def _coverage_rotations(levels: Mapping[str, KeyLevels]) -> frozenset[str]:
+    """The keys a DISJOINT coverage handoff rotates out (the SPEC's ``segment_coverage`` seams).
+
+    A day belongs to the keys that have a level day on it. Consecutive calendar days with an
+    identical covering set form one segment; a change of the set or a calendar gap starts a new
+    one. Between two adjacent segments whose covering sets are disjoint, and whose key windows
+    (first day to last day plus one, half open) do not overlap, the earlier segment's keys are
+    rotated out. Overlapping transitions share a key, carry no seam, and an early-ended key that
+    still overlaps another keeps carrying its last level."""
+    covered = {label: set(lv.days) for label, lv in levels.items() if lv.days}
+    union = sorted({day for days in covered.values() for day in days})
+    segments: list[tuple[frozenset[str], str, str]] = []
+    cur_keys: frozenset[str] | None = None
+    start = ""
+    prev: str | None = None
+    for day in union:
+        today = frozenset(label for label, days in covered.items() if day in days)
+        gap = prev is not None and (date.fromisoformat(day) - date.fromisoformat(prev)).days > 1
+        if cur_keys is None:
+            cur_keys, start = today, day
+        elif today != cur_keys or gap:
+            assert prev is not None
+            segments.append((cur_keys, start, prev))
+            cur_keys, start = today, day
+        prev = day
+    if cur_keys is not None and prev is not None:
+        segments.append((cur_keys, start, prev))
+    window = {label: (levels[label].days[0], _next_day(levels[label].days[-1])) for label in covered}
+    rotated: set[str] = set()
+    for (a_keys, _a_start, _a_end), (b_keys, _b_start, _b_end) in zip(segments, segments[1:]):
+        if not a_keys.isdisjoint(b_keys):
+            continue
+        if any(
+            window[p][0] < window[n][1] and window[n][0] < window[p][1] for p in a_keys for n in b_keys
+        ):
+            continue
+        rotated.update(a_keys)
+    return frozenset(rotated)
+
+
+def _emptied_ceiling(peak: float) -> float:
+    return min(_EMPTIED_FRACTION * peak, _EMPTIED_RESTART_FLOOR_USD)
+
+
+def emptied_days(key: KeyInputs, levels: KeyLevels) -> frozenset[str]:
+    """The key's level days whose raw writer-basis level sits inside the emptied band.
+
+    The SPEC's chronological scan: the prior peak is the maximum over EARLIER non-emptied
+    positive levels (an emptied day never lifts it); a level is emptied when it is from
+    ``_EMPTIED_NEGATIVE_FRACTION`` of the prior peak below zero up to the smaller of
+    ``_EMPTIED_FRACTION`` of the prior peak and ``_EMPTIED_RESTART_FLOOR_USD``; a day with a
+    positive flow right after an emptied day ends the stretch when it lifts the level out of the
+    band (the peak restarts at that level). The last day uses the raw terminal level, before the
+    live anchor replaced it."""
+    if levels.level is None:
+        return frozenset()
+    peak: float | None = None
+    prev_emptied = False
+    out: set[str] = set()
+    last = levels.days[-1]
+    for index, day in enumerate(levels.days):
+        level = key.terminal_usd if day == last and key.terminal_usd is not None else levels.level[day]
+        ends_stretch = (
+            index > 0
+            and prev_emptied
+            and key.flows.get(day, 0.0) > 0.0
+            and peak is not None
+            and level >= _emptied_ceiling(peak)
+        )
+        if ends_stretch:
+            if level > 0.0:
+                peak = level
+            prev_emptied = False
+        elif peak is not None and -_EMPTIED_NEGATIVE_FRACTION * peak <= level < _emptied_ceiling(peak):
+            out.add(day)
+            prev_emptied = True
+        else:
+            if level > 0.0:
+                peak = level if peak is None else max(peak, level)
+            prev_emptied = False
+    return frozenset(out)
+
+
 # ── the book ───────────────────────────────────────────────────────────────────────────────────
 
 
@@ -555,7 +656,9 @@ def reproduce_book(
     denominator or a non-finite sum is omitted under a name; a day on which every participant sat
     out is absent from the compose and omitted as ``missing_return_inside_coverage``."""
     union = tuple(sorted({day for lv in levels.values() for day in lv.days}))
-    rotated = set(departed)
+    # A declared departure and a disjoint coverage handoff both rotate a key out; an overlapping
+    # key that ended early is neither, so its last level carries with no P&L.
+    rotated = set(departed) | _coverage_rotations(levels)
     out: dict[str, DayRepro] = {}
     for index, day in enumerate(union):
         if index == 0:
@@ -689,10 +792,18 @@ def classify_days(
     key's basis holds (so a stamp that disagrees with P over the previous level withholds the day
     even if the book value happens to match). Otherwise it is withheld under the first matching name
     of ``WITHHELD_REASONS``: an unreproduced key set, then a day on a declared departure or stitch
-    boundary, then no stored base level, then a key basis that does not reproduce, then (plan
-    233-05 inserts ``emptied_stretch`` here) a plain attribution mismatch."""
+    boundary, then no stored base level, then a key basis that does not reproduce, then a
+    participating key whose level sat inside the emptied band (``emptied_stretch``), then a plain
+    attribution mismatch.
+
+    A day of the span the compose did not publish is omitted under the reason the loop recorded,
+    else ``no_stored_base_level``; a day the oracle computes outside the first-to-last published day
+    is ``outside_published_window``, and one inside it is ``omission_unexplained``. Annotations
+    (capital outside the base, a key that sat out) are named per day and never change a class."""
     published = export.book.returns
     boundary = _boundary_days(export, repro, levels)
+    emptied = {label: emptied_days(export.keys[label], lv) for label, lv in levels.items()}
+    window = (min(published), max(published)) if published else None
     out: list[DayClass] = []
     for day in sorted(set(repro.union) | set(published)):
         rep = repro.days.get(day)
@@ -709,8 +820,9 @@ def classify_days(
                 out.append(DayClass(day, "withheld", "key_set_not_reproducible", pub, oracle_value))
             elif structural is not None:
                 out.append(DayClass(day, "withheld", structural, pub, oracle_value))
+            elif rep is not None and _in_emptied_band(rep, day, repro.union, levels, emptied):
+                out.append(DayClass(day, "withheld", "emptied_stretch", pub, oracle_value))
             else:
-                # (plan 233-05: the ``emptied_stretch`` rule goes here, ahead of the plain mismatch)
                 out.append(DayClass(day, "withheld", "attribution_mismatch", pub, oracle_value))
             continue
         assert rep is not None
@@ -718,10 +830,55 @@ def classify_days(
             reason = rep.omitted
         elif rep.value is None:
             reason = "no_stored_base_level"
+        elif window is None or not window[0] <= day <= window[1]:
+            reason = "outside_published_window"
         else:
             reason = "omission_unexplained"
         out.append(DayClass(day, "omitted", reason, None, oracle_value))
-    return Classification(tuple(out), {})
+    return Classification(tuple(out), _annotate(export, repro))
+
+
+def _in_emptied_band(
+    rep: DayRepro,
+    day: str,
+    union: Sequence[str],
+    levels: Mapping[str, KeyLevels],
+    emptied: Mapping[str, frozenset[str]],
+) -> bool:
+    """A participating key's previous or same-day level is inside its emptied band."""
+    index = union.index(day)
+    if index == 0:
+        return False
+    prev = union[index - 1]
+    for label in rep.participants:
+        for at in (prev, day):
+            applies = _last_le(levels[label].days, at)
+            if applies is not None and applies in emptied[label]:
+                return True
+    return False
+
+
+def _annotate(export: Export, repro: BookRepro) -> dict[str, tuple[str, ...]]:
+    """Capital outside the base, named per day and never nulled (CONTEXT Q4; RESEARCH A5b).
+
+    ``capital_outside_base_options_cash``: a participating key whose open option book is outside
+    its base. ``capital_outside_base_flow_day``: a participating key with a non-zero composed flow
+    on the day. ``key_sat_out``: a participating key the writer dropped that day. Any day of the
+    span can carry them; none changes a class or a value."""
+    out: dict[str, tuple[str, ...]] = {}
+    for day, rep in repro.days.items():
+        names: set[str] = set()
+        for label in rep.participants:
+            key = export.keys[label]
+            if key.options_cash_basis:
+                names.add("capital_outside_base_options_cash")
+            if key.flows.get(day, 0.0) != 0.0:
+                names.add("capital_outside_base_flow_day")
+        if rep.sat_out:
+            names.add("key_sat_out")
+        if names:
+            out[day] = tuple(name for name in ANNOTATIONS if name in names)
+    return out
 
 
 @dataclass(frozen=True)
@@ -929,9 +1086,25 @@ def emit_reading(analysis: Analysis) -> list[str]:
     for day in omitted:
         assert day.reason is not None
         rows.append(("oracle-omitted:", (("date", _dt(day.day)), ("reason", _nm(day.reason)))))
-    # Annotations are plan 233-05's: say so, so "explained without annotated days" is not misread.
-    rows.append(("oracle-annotation:", (("state", _nm("not_computed")),)))
     pub_days = [d for d in cls.days if d.kind in ("explained", "withheld")]
+    explained_by_day = {d.day: d for d in explained}
+    present = [a for a in ANNOTATIONS if any(a in names for names in cls.annotations.values())]
+    if not present:
+        rows.append(("oracle-annotation:", (("name", _nm("none")), ("days", _cnt(0)))))
+    for ann in present:
+        days_with = [day for day, names in cls.annotations.items() if ann in names]
+        explained_with = [explained_by_day[day] for day in days_with if day in explained_by_day]
+        rows.append(
+            (
+                "oracle-annotation:",
+                (
+                    ("name", _nm(ann)),
+                    ("days", _cnt(len(days_with))),
+                    ("explained_days", _cnt(len(explained_with))),
+                    ("explained_cumulative", _xv(_product(d.oracle for d in explained_with if d.oracle is not None))),
+                ),
+            )
+        )
     annotated_days = set(cls.annotations)
     rows.append(
         (
