@@ -6,7 +6,7 @@
     {
       "number": "222",
       "name": "ALERTTRUTH",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "223",
@@ -71,7 +71,7 @@
     {
       "number": "236",
       "name": "FIGUREMATH",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "237",
@@ -102,12 +102,27 @@
       "number": "250",
       "name": "BINANCEFILLS",
       "status": "pending"
+    },
+    {
+      "number": "251",
+      "name": "SYNCSTORE",
+      "status": "pending"
+    },
+    {
+      "number": "252",
+      "name": "DERIBITOPTIONS",
+      "status": "in_progress"
+    },
+    {
+      "number": "253",
+      "name": "BINANCECURSOR",
+      "status": "pending"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 1 of 22 · 45% · executing"
+    "reason": "Phase 1 of 23 · 48% · executing"
   },
-  "updated_at": "2026-11-25T17:56:52.025Z"
+  "updated_at": "2026-11-25T23:19:07.581Z"
 }
