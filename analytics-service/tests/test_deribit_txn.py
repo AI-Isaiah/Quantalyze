@@ -575,16 +575,19 @@ def _correction_row(
     rid: int = 952844476,
     change: float = _KEY3_CORRECTION_CHANGE_BTC,
     with_info: bool = True,
+    instrument_name: object = None,
 ) -> dict[str, object]:
     """A `correction` row modelled on the actual key3 shape: type=correction, a
     nonzero BTC `change`, currency=BTC, no instrument_name/index_price (a bare
     balance correction, not an instrument fill). ``reason`` sets info.reason; pass
-    ``with_info=False`` to model a schema-drifted row that carries NO info at all."""
+    ``with_info=False`` to model a schema-drifted row that carries NO info at all.
+    ``instrument_name`` (default None, as observed) models a structured instrument
+    on the row (Phase 233 DBOOK-02)."""
     row: dict[str, object] = {
         "type": "correction",
         "currency": "BTC",
         "change": change,
-        "instrument_name": None,
+        "instrument_name": instrument_name,
         "timestamp": _ms(_DAY_A),
         "id": rid,
     }
@@ -788,6 +791,210 @@ def test_correction_reason_gate_denylist_precedence_and_word_boundary(
     # Contrast: the actual key3 FUNDING reason (no capital keyword) is still trading.
     assert correction_is_trading(_correction_row())
     assert not correction_is_trading(bad)
+
+
+def test_correction_capital_reason_with_trading_token_and_no_capital_word_fails_loud() -> None:
+    """Phase 233 DBOOK-02 headline. A capital adjustment worded `funding account
+    correction` carries the trading token `funding`, no capital word (so the
+    denylist cannot catch it) and names NO instrument. The old two-step gate
+    classified it as trading P&L.
+
+    WHY it must fail loud: summed as trading P&L it inflates realized performance,
+    and the balance-identity oracle is blind to the misroute (the reference set and
+    the computed side derive from the same predicate). A trading word alone is not
+    enough: a trading correction must also name an instrument. The observed PROD
+    shape (a BTC-PERPETUAL funding calculation correction) still classifies
+    trading, asserted last as the contrast.
+
+    REVERT-PROOF: restore the old two-step gate (trading word alone) and the first
+    assertion reddens, because the classifier returns True for this reason."""
+    row = _correction_row("funding account correction")
+    assert correction_is_trading(row) is False
+    with pytest.raises(LedgerValuationError) as exc_usd:
+        txn_rows_to_daily_records([row])
+    assert "funding account correction" in str(exc_usd.value)
+    with pytest.raises(LedgerValuationError) as exc_native:
+        txn_rows_to_native_daily([row])
+    assert "funding account correction" in str(exc_native.value)
+    # Contrast: the one observed PROD shape names an instrument and stays trading.
+    assert correction_is_trading(_correction_row()) is True
+
+
+# Phase 233 DBOOK-02 shape fixtures. One test per shape, each through the classifier
+# AND both aggregators. The trading shapes pair the correction with the same-day BTC
+# `settlement` the two hand-derived tests use, because the USD path values a
+# correction without its own index at the same-day index fallback.
+_SETTLEMENT_DAY_A: dict[str, object] = {
+    "type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+    "change": 0.01, "index_price": 50000.0, "timestamp": _ms(_DAY_A), "id": 11,
+}
+
+
+def _assert_trading_correction_carries_cash(correction: dict[str, object]) -> None:
+    """The correction classifies trading and both aggregators carry its cash on its
+    UTC day. Hand-derived oracle, never the code under test: +0.01 BTC settlement
+    plus the correction's -3.2469e-4 BTC, valued at the same-day index 50000 (USD) or
+    raw native BTC."""
+    assert correction_is_trading(correction) is True
+    records = txn_rows_to_daily_records([_SETTLEMENT_DAY_A, correction])
+    assert len(records) == 1
+    assert records[0]["price"] == pytest.approx(
+        500.0 + (-3.2469e-4 * 50000.0), abs=1e-9
+    )  # 483.7655 USD
+    native = txn_rows_to_native_daily([_SETTLEMENT_DAY_A, correction])
+    assert native["BTC"]["2026-01-15"] == pytest.approx(0.01 + (-3.2469e-4), abs=1e-12)
+
+
+def _assert_correction_fails_loud(row: dict[str, object], reason: str) -> None:
+    """The correction is NOT trading and both aggregators raise, naming the reason.
+    The classifier assertion comes first so a RED line names the gate."""
+    assert correction_is_trading(row) is False
+    with pytest.raises(LedgerValuationError) as exc_usd:
+        txn_rows_to_daily_records([row])
+    assert reason in str(exc_usd.value)
+    with pytest.raises(LedgerValuationError) as exc_native:
+        txn_rows_to_native_daily([row])
+    assert reason in str(exc_native.value)
+
+
+def test_correction_structured_instrument_name_with_trading_word_is_trading() -> None:
+    """Shape 2. A trading word plus a structured `instrument_name` (an option name)
+    is a trading correction even though the reason carries no instrument token: the
+    venue named the instrument on the row, so the cash belongs to an instrument fill
+    path and is realized.
+
+    REVERT-PROOF: make the instrument test ignore `instrument_name` (reason token
+    only) and this reason has no token, so the classifier returns False and the first
+    assertion reddens."""
+    row = _correction_row(
+        "funding calculation correction", instrument_name="ETH-28MAR25-3000-C"
+    )
+    _assert_trading_correction_carries_cash(row)
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["BTC_USDC-PERPETUAL", "BTC-27MAR26", "BTC_USDC-27MAR26-50000-C"],
+)
+def test_correction_instrument_token_variants_are_trading(token: str) -> None:
+    """Shape 3. The Deribit instrument shapes the module documents (a linear
+    perpetual, a dated future, an option) each satisfy the structural test when the
+    reason carries them beside a trading word.
+
+    REVERT-PROOF: narrow the token pattern to inverse perpetuals only and the
+    classifier returns False for the other two, reddening the first assertion."""
+    _assert_trading_correction_carries_cash(
+        _correction_row(f"{token} funding correction")
+    )
+
+
+def test_correction_capital_word_beats_instrument_token() -> None:
+    """Shape 4. A capital word keeps precedence over an instrument token and a
+    trading word: `transfer BTC-PERPETUAL funding correction` is a capital movement
+    that merely names an instrument.
+
+    REVERT-PROOF: check the instrument before the capital denylist and this reason
+    classifies trading and silently sums, reddening the first assertion."""
+    reason = "transfer BTC-PERPETUAL funding correction"
+    _assert_correction_fails_loud(_correction_row(reason), reason)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["funding calculation correction", "settlement correction"],
+)
+def test_correction_trading_word_without_instrument_fails_loud(reason: str) -> None:
+    """Shape 6. A trading word with no instrument anywhere (reason or structured
+    name) is not enough: the shape is a capital adjustment until evidence says
+    otherwise, so it fails loud.
+
+    REVERT-PROOF: drop the instrument conjunct (trading word alone) and the
+    classifier returns True, reddening the first assertion."""
+    _assert_correction_fails_loud(_correction_row(reason), reason)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "BTC-PERP funding correction",
+        "BTC-PERPETUALS funding correction",
+        "SUB-C funding correction",
+    ],
+)
+def test_correction_near_miss_instrument_tokens_fail_loud(reason: str) -> None:
+    """Shape 7. Near-miss tokens are not instruments: `BTC-PERP` is truncated,
+    `BTC-PERPETUALS` is a longer word, and `SUB-C` ends in `-C` but is not an option
+    name. `SUB-C` is why `classify_instrument` is not the structural test: that
+    classifier is lenient and accepts any name ending `-C`, `-P` or `-PERPETUAL`.
+
+    REVERT-PROOF: replace the anchored pattern with classify_instrument-style suffix
+    leniency and `SUB-C` classifies trading, reddening that parameter."""
+    _assert_correction_fails_loud(_correction_row(reason), reason)
+
+
+def test_correction_instrument_without_trading_word_fails_loud() -> None:
+    """Shape 8 (RESEARCH A6, the conjunction). An instrument token with no trading
+    word (`BTC-PERPETUAL adjustment`) is not trading: the gate needs BOTH, so an
+    unclassified adjustment on an instrument still fails loud.
+
+    REVERT-PROOF: make the instrument alone sufficient and the classifier returns
+    True, reddening the first assertion."""
+    reason = "BTC-PERPETUAL adjustment"
+    _assert_correction_fails_loud(_correction_row(reason), reason)
+
+
+def test_correction_lowercase_instrument_token_fails_loud() -> None:
+    """Shape 9. The observed instrument token is upper-case, so a lower-case one
+    (`btc-perpetual funding correction`) is unobserved and fails loud, the safe
+    direction.
+
+    REVERT-PROOF: search the lowered reason or compile the pattern case-insensitive
+    and the classifier returns True, reddening the first assertion."""
+    reason = "btc-perpetual funding correction"
+    _assert_correction_fails_loud(_correction_row(reason), reason)
+
+
+@pytest.mark.parametrize(
+    "instrument_name",
+    ["", "   ", 123, {"name": "BTC-PERPETUAL"}],
+    ids=["empty", "blank", "int", "dict"],
+)
+def test_correction_blank_or_nonstring_instrument_name_fails_loud(
+    instrument_name: object,
+) -> None:
+    """Shape 10. A blank or non-string `instrument_name` is not a structured
+    instrument: with a trading word and no token in the reason the correction fails
+    loud. A dict that merely contains an instrument string is not coerced.
+
+    REVERT-PROOF: treat any non-null `instrument_name` as an instrument and the
+    classifier returns True for all four values, reddening the first assertion."""
+    reason = "funding calculation correction"
+    row = _correction_row(reason, instrument_name=instrument_name)
+    _assert_correction_fails_loud(row, reason)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "funding account correction",
+        "funding calculation correction",
+        "transfer BTC-PERPETUAL funding correction",
+        "BTC-PERP funding correction",
+        "BTC-PERPETUAL adjustment",
+        "btc-perpetual funding correction",
+    ],
+)
+def test_correction_zero_change_non_trading_shapes_are_ignored(reason: str) -> None:
+    """Shape 11. A zero-change correction has no cash to misplace, so the non-trading
+    shapes are harmlessly ignored by both aggregators (the module's zero-change
+    convention), while the same shapes with a non-zero change fail loud above.
+
+    REVERT-PROOF: raise on a zero-change non-trading correction and both aggregator
+    calls here redden."""
+    row = _correction_row(reason, change=0.0)
+    assert correction_is_trading(row) is False
+    assert txn_rows_to_daily_records([row]) == []
+    assert txn_rows_to_native_daily([row]) == {}
 
 
 def test_correction_unrecognized_or_missing_reason_fails_loud() -> None:
