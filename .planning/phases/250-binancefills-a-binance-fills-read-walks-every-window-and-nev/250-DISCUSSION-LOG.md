@@ -29,3 +29,18 @@ No question met the hard-to-reverse or preference class (no migration, no schema
 - Read-through cursor stamp on an empty tail (founder decision if wanted).
 - Per-symbol persisted cursors (migration).
 - Clearing resolved flags from data_quality_flags (Phase 251 class).
+
+## Open founder decision (recorded 2026-11-25, plan-phase revision iteration 1)
+
+The plan checker (iteration 1: 0 blockers, 3 warnings) flagged that a deadline-stopped read does not let the cursor advance across a quiet prefix. Its property accepted either "the cursor advances on repeated runs" OR "the inability is a recorded known limit". The orchestrator's revision note ruled out the known-limit route, reading the goal ("its cursor never stalls") as forbidding it. The planner then returned REVISION_CONFLICT:
+
+- Mechanism: a deadline-stopped run whose covered prefix holds no stored fill after C cannot stamp (Phase 232 rule: stamp a stored fill only), and the next seed is min(cursor, newest stored fill) - 1 h (Phase 232 VREAD-08 seed rule), so run N+1 re-covers the same prefix. Ordering and deadline size only move where the common frontier sits. CONTEXT's empty-tail decision ("every run walks C to now") is false under a deadline and needs correcting with the answer.
+- Region (DERIVED, not measured: the 229 ms per weight-5 request throttle was measured without network latency; the venue's out-of-reach behaviour is unmeasured; the "3 months" doc line was read through a summarising fetch; PROD held 0 Binance keys on 2026-11-25): a 240 s run makes about 1,048 requests. Up to about 80 symbols a cold 85-day walk finishes in one run. At 100 symbols one run covers about 70 days, at 150 about 49, at 300 about 21. A stall needs a strategy-wide quiet stretch longer than that. It is loud (`binance_deadline_symbols` every run), and the delay is bounded by the reach clamp, so a fill lands within roughly the uncovered tail (derived).
+- Alternatives:
+  - (A) Record the limit as known. SC-1 is NOT met in that region, and the SC-4 precondition comment at the flag declaration must name the exception.
+  - (B) A read-through stamp for a cleanly walked deadline frontier. This relaxes TWO Phase 232 rules (stored-fill stamp and the VREAD-08 seed); CONTEXT already names it a founder decision.
+  - (C) A persisted per-symbol cursor or read-frontier column. Needs a migration.
+  - (D) fromId paging to jump a quiet stretch. Contradicts the explicit-endTime decision; the venue forbids fromId with startTime or endTime.
+- Rider for any option: a per-caller deadline. The sync path gets about 840 s of its 900 s; reconcile keeps 240 s, and its request count does not grow with the walk. The call-site edit at `fetch_raw_trades` in `run_sync_trades_job` sits outside Phase 222's hunks. Only this phase's own CONTEXT write-scope fence excluded it, and that fence is reversible. This shrinks the region about 3.5x (derived) but does not close it.
+- 250-07's Task 1 precondition greps the token for that decision in 250-CONTEXT.md. The token is deliberately NOT written to CONTEXT until the founder answers. The answer goes in CONTEXT.md and in the ROADMAP Phase 250 section.
+- Resume point: plan-phase step 12 (revision loop) at iteration 1 with one conflict returned. Apply the answer to CONTEXT and to 250-07, run the checker on all 7 plans, then do steps 13 to 13e. A plain plan-phase re-entry hits the existing-plans prompt instead. Stale until then: 250-VALIDATION.md (quick-run command and per-task map predate the re-slice) and the ROADMAP "0 plans" stub.
