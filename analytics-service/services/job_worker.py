@@ -2850,19 +2850,16 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # wizard was the only path that needed this and it has been broken
     # since the queue substrate was introduced.
     #
-    # Enqueue is best-effort *for the job retry loop* — a transient failure
-    # must not retry-loop sync_trades (the trades are already persisted and
-    # the next cron tick re-enqueues cleanly). However, the wizard polls
-    # strategy_analytics.computation_status and would otherwise spin for
-    # up to 24h with no error UI until the daily cron tick (regression
-    # of the same wizard-hang class PR #116 was meant to root-cause-fix).
-    #
-    # Fix: when the enqueue fails, write a `failed` row to strategy_analytics
-    # with a discriminating computation_error so the wizard's polling loop
-    # in SyncPreviewStep.tsx surfaces a GATE_ANALYTICS_FAILED envelope and
-    # the user sees a real error instead of an indefinite spinner. The
-    # daily cron will still re-enqueue and the next successful run will
-    # upsert computation_status back to 'computing' / 'complete'.
+    # Enqueue outcome (Phase 222 ERRC-03, founder rulings OQ2 and OQ4): the trades are
+    # already persisted when the enqueue runs, so a failure here is NOT retried as a
+    # sync of its own accord. What the failure does depends on whether the strategy has
+    # numbers published (see the except arm below):
+    #   * nothing published -> a `failed` row is written for the wizard poller
+    #     (SyncPreviewStep.tsx) and the handler returns FAILED / transient, so the queue
+    #     retries the sync with its backoff; the row reads 'computing' between attempts
+    #     and 'failed' with the retries-exhausted sentence at the last;
+    #   * published, or the publish state unreadable -> nothing is written and the job is
+    #     DONE; the daily cron re-enqueues on the next tick.
     # Follow-on analytics kind: the funding-inclusive CSV route
     # (derive_broker_dailies → compute_analytics_from_csv). The legacy
     # trades-only compute_analytics re-entry was retired in 106-08.
@@ -2894,12 +2891,15 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             exc,
         )
 
-        # Phase 222 ERRC-03: read the publish state BEFORE any write. Local twin of
-        # `_published_numbers_exist` in run_derive_broker_dailies_job (same select, same
-        # `getattr(res, "data", None) or {}` read, same OQ4 predicate); that closure is
-        # out of this handler's write scope, so it is mirrored here, not shared. Published
-        # means a success status, or a 'computing' row that already carries its headline
-        # ``metrics_json`` (founder ruling OQ4, 2026-11-25).
+        # Phase 222 ERRC-03 (CONTEXT ruling, option a; founder rulings OQ2 and OQ4,
+        # 2026-11-25). What this tail does depends on whether the strategy has numbers
+        # PUBLISHED, so that is read BEFORE any write. `_strategy_has_published_numbers`
+        # is the local twin of `_published_numbers_exist` in
+        # run_derive_broker_dailies_job (same select, same `getattr(res, "data", None)
+        # or {}` read, same OQ4 predicate); that closure is outside this handler's write
+        # scope, so it is mirrored here rather than shared. Published means a success
+        # status, or a 'computing' row that already carries its headline
+        # ``metrics_json``.
         def _strategy_has_published_numbers() -> bool:
             res = (
                 ctx.supabase.table("strategy_analytics")
@@ -2917,118 +2917,104 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 )
             )
 
-        _published = await db_read_with_retry(_strategy_has_published_numbers)
-
-        # Mark strategy_analytics.computation_status='failed' so the
-        # wizard's poller (SyncPreviewStep.tsx) breaks out of its
-        # waiting_for_complete state and renders an error envelope.
-        # Best-effort: if even this write fails, we log + swallow rather
-        # than fail the job (the trades are already persisted).
-        # ⛔⛔ THIS WRITE IS ERASED ONE RPC LATER, AND NO PROVENANCE MARKER CAN
-        # SAVE IT (164.2-REVIEW WR-01). READ THIS BEFORE ADDING ONE BACK.
-        # --------------------------------------------------------------------
-        # Phase 164.2 stamped this payload with ('writer', <this job's id>) on
-        # the theory that the bridge's branch (b) would then keep the curated
-        # sentence. MEASURED, it never reaches a branch that consults a marker:
-        # this handler returns DispatchOutcome.DONE at the foot of the function
-        # (the trades DID persist), `main_worker.py:929` maps DONE to
-        # `mark_compute_job_done`, and that RPC ends in
-        # `PERFORM sync_strategy_analytics_status`. With this sync job now done
-        # and NO analytics job enqueued — that is the very failure being
-        # recorded — every compute_jobs row for the strategy is terminal-done,
-        # `live_failures` is empty, and the bridge takes branch (c), which
-        # writes computation_status='complete', computation_error=NULL, BOTH
-        # markers NULL and a fresh computed_at, unconditionally.
-        #
-        # So the user's row reads 'complete' with no analytics and a fresh
-        # vintage. That erasure is PRE-EXISTING — it is the 161.1 F1 class, and
-        # F1's comment at the derive handler's insufficient-history exit
-        # (:5082) describes it exactly — and this comment is what 164.2 owed it
-        # instead of a stamp that nothing reads.
-        #
-        # ⛔ AND THE F1 REMEDY DOES NOT TRANSFER TO THIS HANDLER. F1 returns
-        # FAILED/permanent so the bridge takes (b) or (b-prime). It is applied
-        # at a `derive_broker_dailies` job, and that kind is IN the bridge's
-        # `is_protected` kind list (`derive_broker_dailies`,
-        # `compute_analytics_from_csv`, `stitch_composite`) — so on a marked
-        # recurring refresh over a healthy published row it lands on (b-prime),
-        # which PRESERVES the publish state. `sync_trades` is not in that list
-        # and can never be protected, so the same edit here always lands on the
-        # LOUD branch (b): a routine cron sync whose follow-on enqueue hiccups
-        # would unpublish a live funded factsheet to 'failed' until the next
-        # tick's `done` supersedes it — and if the enqueue ever fails
-        # SYSTEMATICALLY (a bad kind, an RLS change), every live strategy on the
-        # platform goes dark within one cron tick. Correcting the outcome here
-        # needs to be scoped to the case with nothing published to lose, which
-        # is a founder-facing change and NOT a review fix. Booked in TODOS.md as
-        # [SYNCTRADES-ENQUEUE-DONE].
-        #
-        # Until that lands this payload is DELIBERATELY UNSTAMPED, and the
-        # provenance census carves it out BY EXACT KEY SET with its own count,
-        # so re-stamping it collapses the carve-out and reddens the gate rather
-        # than silently restoring an inert marker.
-        #
-        # ⚠️ The WRITE itself stays, and the paragraph above is why the comment
-        # below it must not be read as a working guarantee: the bridge runs
-        # inside the very next RPC, so the 'failed' row this lands is visible to
-        # the wizard poller for milliseconds at best. It is kept because it is
-        # the authoritative record at the moment it is made, because deleting it
-        # would be a SECOND behaviour change on the same live path, and because
-        # it is the row that becomes correct the day the TODOS item lands.
+        _nothing_published = False
         try:
-            def _mark_analytics_failed() -> None:
-                _enqueue_failed_payload: dict[str, Any] = {
-                        "strategy_id": strategy_id,
-                        "computation_status": "failed",
-                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker on
-                        # every terminal 'failed' so the status bridge (branches
-                        # a/c) cannot resurrect a stale complete_with_warnings.
-                        "computation_warned": False,
-                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
-                        "computing_started_at": None,
-                        "computation_error": (
-                            "Analytics enqueue failed during sync. "
-                            "The next scheduled sync will retry — "
-                            "use the contact form if this persists."
-                        ),
-                        # ⛔ NO computation_error_source / computation_error_job_id.
-                        # See the block above this `try`. A marker here is read by
-                        # nobody and asserts a protection that does not exist.
-                }
-
-                ctx.supabase.table("strategy_analytics").upsert(
-                    _enqueue_failed_payload,
-                    on_conflict="strategy_id",
-                ).execute()
-
-            await db_execute(_mark_analytics_failed)
-        except Exception as mark_exc:  # noqa: BLE001
+            _published = await db_read_with_retry(_strategy_has_published_numbers)
+        except Exception as read_exc:  # noqa: BLE001
+            # FAILED is reserved for a strategy with nothing published, and an
+            # unreadable state is not that: a read hiccup must never unpublish a live
+            # strategy. Write nothing, return DONE below. RESIDUAL (T-222-13): if the
+            # enqueue AND this read both fail on a never-published strategy, the row is
+            # left to the status bridge, which reads 'complete' (today's outcome).
+            # Recorded as a known limit; ERROR so an operator sees it.
             logger.exception(
-                "sync_trades: failed to mark strategy_analytics as "
-                "failed for strategy %s after enqueue failure — wizard "
-                "may still hang. Error: %s",
+                "sync_trades: follow-on enqueue failed for strategy %s AND the publish "
+                "state could not be read — writing nothing and returning DONE (an "
+                "unreadable state is not 'nothing published'). Error: %s",
                 strategy_id,
-                mark_exc,
+                read_exc,
             )
+        else:
+            if _published:
+                logger.error(
+                    "sync_trades: follow-on enqueue failed for strategy %s, which is "
+                    "published — writing nothing so its publish state (status, "
+                    "computation_warned, figures) is kept; the next cron tick retries "
+                    "the enqueue.",
+                    strategy_id,
+                )
+            else:
+                _nothing_published = True
 
-        # Phase 222 ERRC-03 (CONTEXT ruling, option a; founder rulings OQ2 and OQ4,
-        # 2026-11-25). With NOTHING published the handler fails the job instead of
-        # returning DONE. DONE let `mark_compute_job_done` run the status bridge, which
-        # found every job done and took branch (c): the row read 'complete' with a NULL
-        # error and no analytics (ROADMAP SC-3).
-        #   * FAILED only when nothing is published: the 161.1 F1 remedy (an
-        #     unconditional FAILED) does not transfer, because `sync_trades` is not in
-        #     the bridge's `is_protected` kind list, so an unconditional FAILED would
-        #     land every live strategy on the loud branch (b) and unpublish it.
-        #   * transient (OQ2): an enqueue fault is not a property of the strategy. The
-        #     retry re-runs the sync, so the row reads 'computing' while retries remain
-        #     (branch (a)) and 'failed' with the retries-exhausted sentence at the last
-        #     attempt (branch (b)).
-        #   * the payload above stays UNSTAMPED by founder ruling (the provenance census
-        #     keeps EXPECTED_INERT_SITES), so branch (b) stores the curated kind sentence
-        #     over it rather than keeping the handler's own.
-        # The message is a constant operator sentence: no exception text, no ids.
-        if not _published:
+        # Nothing published: mark strategy_analytics 'failed', then return FAILED below.
+        # Best-effort: if even this write fails, we log + swallow (the trades are already
+        # persisted); the FAILED outcome below still lets the status bridge set the row.
+        #
+        # THE FAILED/DONE SPLIT (replaces the 164.2-REVIEW WR-01 erasure analysis):
+        #   * nothing published -> FAILED / transient -> `mark_compute_job_failed` ->
+        #     `failed_retry` (bridge branch (a): the row reads 'computing' between
+        #     attempts) and then `failed_final` at the last attempt (bridge branch (b):
+        #     the curated transient sentence from `computation_error_copy`). The DONE
+        #     this handler used to return sent the bridge to branch (c) and the row read
+        #     'complete' with a NULL error and no analytics (ROADMAP SC-3).
+        #   * published -> NO write, DONE -> branch (c) keeps the publish state (a
+        #     complete_with_warnings row stays that, because this write is what used to
+        #     clear `computation_warned`). OQ4.
+        #   * publish read failed -> NO write, DONE, plus the residual noted at the
+        #     `except` above.
+        # Why FAILED only when nothing is published: the 161.1 F1 remedy (an
+        # unconditional FAILED) does not transfer to this handler. `sync_trades` is not
+        # in the bridge's `is_protected` kind list (`derive_broker_dailies`,
+        # `compute_analytics_from_csv`, `stitch_composite`), so an unconditional FAILED
+        # would always land on the loud branch (b) and unpublish a live funded factsheet;
+        # a SYSTEMATIC enqueue fault would take every live strategy dark in one cron tick.
+        #
+        # This payload stays DELIBERATELY UNSTAMPED by founder ruling 2026-11-25 (Phase
+        # 222 ERRC-03): no computation_error_source / computation_error_job_id, so branch
+        # (b) stores the curated kind sentence over it instead of keeping this one. The
+        # provenance census carves the payload out BY EXACT KEY SET with its own count
+        # (EXPECTED_INERT_SITES), so re-stamping it reddens that gate; a re-stamp needs a
+        # new founder decision, not a count change.
+        if _nothing_published:
+            try:
+                def _mark_analytics_failed() -> None:
+                    _enqueue_failed_payload: dict[str, Any] = {
+                            "strategy_id": strategy_id,
+                            "computation_status": "failed",
+                            # SI-02 (MEDIUM-2): clear the runner-owned warned marker on
+                            # every terminal 'failed' so the status bridge (branches
+                            # a/c) cannot resurrect a stale complete_with_warnings.
+                            "computation_warned": False,
+                            # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                            "computing_started_at": None,
+                            "computation_error": (
+                                "Analytics enqueue failed during sync. "
+                                "The next scheduled sync will retry — "
+                                "use the contact form if this persists."
+                            ),
+                            # ⛔ NO computation_error_source / computation_error_job_id.
+                            # See the block above this `try`. A marker here is read by
+                            # nobody and asserts a protection that does not exist.
+                    }
+
+                    ctx.supabase.table("strategy_analytics").upsert(
+                        _enqueue_failed_payload,
+                        on_conflict="strategy_id",
+                    ).execute()
+
+                await db_execute(_mark_analytics_failed)
+            except Exception as mark_exc:  # noqa: BLE001
+                logger.exception(
+                    "sync_trades: failed to mark strategy_analytics as "
+                    "failed for strategy %s after enqueue failure — wizard "
+                    "may still hang. Error: %s",
+                    strategy_id,
+                    mark_exc,
+                )
+
+            # Constant operator sentence naming the cause: no exception text, no ids
+            # (T-222-11). Transient (OQ2): an enqueue fault is not a property of the
+            # strategy; the retry re-runs the sync.
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
                 error_kind="transient",

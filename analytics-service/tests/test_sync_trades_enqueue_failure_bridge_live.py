@@ -292,3 +292,92 @@ def test_nothing_published_ends_failed_with_the_retries_exhausted_sentence() -> 
     assert job["error_kind"] == "transient", job
     assert result.outcome == DispatchOutcome.FAILED, result
     assert result.error_kind == "transient", result
+
+
+_METRICS = {"sharpe": 1.25, "marker": "p222-published-figures"}
+
+
+def test_published_complete_with_warnings_keeps_status_and_warned_flag() -> None:
+    """OQ4 / T-222-10: the failed write that clears ``computation_warned`` is skipped for a
+    published strategy, so after the DONE mark the bridge's branch (c) still reads
+    ``complete_with_warnings`` and the warned flag survives, figures untouched."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+
+    result, row, _job = _drive(
+        admin,
+        tag="pub-cww",
+        seed_row={
+            "computation_status": "complete_with_warnings",
+            "computation_warned": True,
+            "metrics_json": _METRICS,
+        },
+    )
+
+    assert row is not None
+    assert row["computation_status"] == "complete_with_warnings", row
+    assert row["computation_warned"] is True, row
+    assert row["computation_error"] is None, row
+    assert row["metrics_json"] == _METRICS, row
+    assert result.outcome == DispatchOutcome.DONE, result
+
+
+def test_published_complete_stays_complete() -> None:
+    """T-222-09: a plain published ``complete`` row is not unpublished by a failed
+    enqueue, and its figures are unchanged."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+
+    result, row, _job = _drive(
+        admin,
+        tag="pub-complete",
+        seed_row={"computation_status": "complete", "metrics_json": _METRICS},
+    )
+
+    assert row is not None
+    assert row["computation_status"] == "complete", row
+    assert row["computation_error"] is None, row
+    assert row["metrics_json"] == _METRICS, row
+    assert result.outcome == DispatchOutcome.DONE, result
+
+
+def test_computing_with_figures_keeps_them_and_resolves_to_complete() -> None:
+    """OQ4: a ``computing`` row that already carries ``metrics_json`` counts as published.
+    The handler returns DONE with no write, and the bridge resolves the row to
+    ``complete`` with the figures untouched and no error."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+
+    result, row, _job = _drive(
+        admin,
+        tag="pub-computing",
+        seed_row={"computation_status": "computing", "metrics_json": _METRICS},
+    )
+
+    assert row is not None
+    assert row["computation_status"] == "complete", row
+    assert row["computation_error"] is None, row
+    assert row["metrics_json"] == _METRICS, row
+    assert result.outcome == DispatchOutcome.DONE, result
+
+
+def test_nothing_published_on_a_first_attempt_retries_and_reads_computing() -> None:
+    """OQ2: with retries remaining the job reads ``failed_retry`` and the row reads
+    ``computing`` (bridge branch (a)), never ``complete`` and not yet ``failed``."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+
+    result, row, job = _drive(
+        admin, tag="nopub-first", seed_row=None, attempts_before_claim=0
+    )
+
+    assert row is not None
+    assert row["computation_status"] == "computing", row
+    assert job["status"] == "failed_retry", job
+    assert job["error_kind"] == "transient", job
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "transient", result
