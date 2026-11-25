@@ -46,7 +46,7 @@
     {
       "number": "229",
       "name": "MT5DERIVE2",
-      "status": "in_progress"
+      "status": "pending"
     },
     {
       "number": "230",
@@ -71,7 +71,7 @@
     {
       "number": "234",
       "name": "NOCAPITAL",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "235",
@@ -117,7 +117,7 @@
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 1 of 22 · 32% · executing"
+    "reason": "Phase 1 of 22 · 36% · executing"
   },
-  "updated_at": "2026-11-25T10:59:56.159Z"
+  "updated_at": "2026-11-25T12:05:00.933Z"
 }

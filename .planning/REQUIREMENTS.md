@@ -94,10 +94,10 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Data integrity: no-capital keys (NOCAPITAL)
 
-- [ ] **NOCAP-01**: An MT5 key whose stored terminal reads zero for one tick is never dropped as no-capital while it is funded. (covers: 166.3.1-NOCAP-MT5-A2-CIRCULAR)
-- [ ] **NOCAP-02**: Any exception raised by a no-capital candidate, not only `NavReconstructionError`, leaves the previous row intact. The row never goes stale across retries. (covers: 166.3.1-NOCAP-NONNAV-EXCEPTIONS)
-- [ ] **NOCAP-03**: A fallback to `dropped_key` stores a payload flag naming why, and is counted per run. A log line alone is not enough. (covers: 166.3.1-NOCAP-FALLBACK-TRACE)
-- [ ] **NOCAP-04**: A refused candidate leaves no residue reason (such as `key_inputs_mismatch`) in the stored payload. (covers: 166.3.1-NOCAP-SEGMENT-REASON-RESIDUE)
+- [x] **NOCAP-01**: An MT5 key whose stored terminal reads zero for one tick is never dropped as no-capital while it is funded. (covers: 166.3.1-NOCAP-MT5-A2-CIRCULAR)
+- [x] **NOCAP-02**: Any exception raised by a no-capital candidate, not only `NavReconstructionError`, leaves the previous row intact. The row never goes stale across retries. (covers: 166.3.1-NOCAP-NONNAV-EXCEPTIONS)
+- [x] **NOCAP-03**: A fallback to `dropped_key` stores a payload flag naming why, and is counted per run. A log line alone is not enough. (covers: 166.3.1-NOCAP-FALLBACK-TRACE)
+- [x] **NOCAP-04**: A refused candidate leaves no residue reason (such as `key_inputs_mismatch`) in the stored payload. (covers: 166.3.1-NOCAP-SEGMENT-REASON-RESIDUE)
 
 ### Data integrity: no stranded strategy (JOBHEAL)
 
@@ -325,10 +325,10 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | HOLD-03 | Phase 229 | Shipped (#1328), human verification pending |
 | HOLD-04 | Phase 235 | Pending |
 | HOLD-05 | Phase 235 | Pending |
-| NOCAP-01 | Phase 234 | Pending |
-| NOCAP-02 | Phase 234 | Pending |
-| NOCAP-03 | Phase 234 | Pending |
-| NOCAP-04 | Phase 234 | Pending |
+| NOCAP-01 | Phase 234 | Complete |
+| NOCAP-02 | Phase 234 | Complete |
+| NOCAP-03 | Phase 234 | Complete |
+| NOCAP-04 | Phase 234 | Complete |
 | HEAL-01 | Phase 227 | Complete |
 | HEAL-02 | Phase 227 | Complete |
 | HEAL-03 | Phase 227 | Complete |
