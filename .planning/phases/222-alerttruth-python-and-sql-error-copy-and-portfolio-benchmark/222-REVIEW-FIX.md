@@ -125,3 +125,71 @@ None.
 _Fixed: 2026-11-25T14:20:00Z_
 _Fixer: Claude (gsd-code-fixer)_
 _Iteration: 1_
+
+---
+
+## Round 2
+
+**Fixed at:** 2026-11-25T16:20:00Z
+**Source review:** 222-REVIEW.md, "## Round 2"
+**Iteration:** 2
+
+**Summary:**
+- Findings in scope: 1 (R2-WR-01, MEDIUM, data-integrity)
+- Fixed: 1
+- Skipped: 0
+- Not touched, by instruction: R2-IN-01, R2-IN-02, R2-IN-03 (LOW/INFO).
+
+**Where verification ran:** the main checkout of the isolated Phase 222 worktree, `/Users/helios-mammut/claude-projects/quantalyze-wt-222` on branch `gsd/phase-222-alerttruth`. The live module ran against the local-stack lane booted from that worktree, loopback only (`http://127.0.0.1:54421`), with the lane handoff exported as `SUPABASE_TEST_URL`, `SUPABASE_TEST_SERVICE_KEY` and `LANE_DB_URL` the way CI's python job does. No remote database was touched. The lane's logflare container does not turn healthy on this machine, so it was booted with `-x logflare,vector` through a throwaway copy of `scripts/local-stack/run.sh` (`run-tmp-nolf.sh`). The copy was deleted after teardown, and `git status` shows no change under `scripts/`. `run.sh down` ran and 0 `supabase_*` containers remain.
+
+### R2-WR-01: the enqueue-failure tail still returned FAILED when its UPDATE lost the race
+
+**Files modified:** `analytics-service/services/job_worker.py` (enqueue-failure tail only), `analytics-service/tests/test_sync_trades_enqueue_failure_bridge_live.py`, `analytics-service/tests/test_job_worker.py`
+**Commit:** 12b56c5e4
+**Status:** fixed: requires human verification (concurrency/logic fix)
+**Applied fix:**
+- `_mark_analytics_failed` now returns `bool(getattr(res, "data", None))`, i.e. whether the conditional UPDATE matched a row (supabase-py `update()` returns the matched rows).
+- On a zero-row result the handler re-runs `_strategy_has_published_numbers`. If the strategy is now published it logs the lost race at ERROR, writes nothing and falls through to the final DONE return, so `mark_compute_job_done` sends the bridge to branch (c) and the published row survives. If it is still not published (no row at all) it falls through to FAILED / transient, and the bridge creates the row as before.
+- The FAILED return is now guarded by `_nothing_published`.
+- Still one payload-shaped write statement, unstamped payload, five keys: `EXPECTED_INERT_SITES` stays 1 and the census passes.
+- Live race test `test_a_row_published_between_the_read_and_the_write_is_not_overwritten` now runs as the LAST attempt (`attempts_before_claim` default, `None`) and asserts the row AFTER the mark RPC and bridge (`complete_with_warnings`, `computation_warned` true, no error, figures intact), the DONE outcome and `job.status == "done"`. It keeps its handler-level assertion on the row `after_handler`.
+- `test_failed_write_is_conditional_on_nothing_published` (offline chain pin) now ignores the mock's `.data.__bool__` bookkeeping call that the new `bool(res.data)` produces. The method sequence and every argument string are still pinned.
+
+**RED** (the extended live test against the unfixed code, before any production edit):
+
+```
+E       AssertionError: {'computation_status': 'failed', 'computation_error': 'Analytics could not complete after several automatic retries. R...f it keeps failing.', 'computation_warned': True, 'metrics_json': {'marker': 'p222-published-figures', 'sharpe': 1.25}}
+E       assert 'failed' == 'complete_with_warnings'
+E         - complete_with_warnings
+E         + failed
+FAILED tests/test_sync_trades_enqueue_failure_bridge_live.py::test_a_row_published_between_the_read_and_the_write_is_not_overwritten
+1 failed, 7 passed, 14 warnings in 21.80s
+```
+
+That is the bridge's branch (b) writing `failed` with the curated retries-exhausted sentence over the row published in between, which is exactly what the review describes. The unfixed code is the neuter, so no byte backup was needed.
+
+**GREEN** (fix applied, same live module, lane up, nothing skipped):
+
+```
+8 passed, 14 warnings in 22.23s
+```
+
+**Gate set** (`test_job_worker.py`, `test_computation_error_provenance_census.py`, `test_failed_status_logged.py`, `test_sync_trades_enqueue_failure_bridge_live.py`, `test_no_contact_support_copy.py`, `test_live_db_reach_roster.py`; live module un-skipped):
+
+```
+197 passed, 71 warnings in 47.09s
+```
+
+**mypy strict** (the CI command, whole service tree):
+
+```
+Success: no issues found in 143 source files
+```
+
+**Known limit, recorded not fixed:** the re-read sits inside the existing `try`. If that second read raises, the tail logs "failed to mark ... wizard may still hang" and returns FAILED, so a strategy published in that window AND unreadable on the re-read would still reach branch (b) on the last attempt. That needs the enqueue failure, the lost race and a read failure together, and the first read's "unreadable means DONE" treatment is not duplicated here, to keep the fix to the finding.
+
+---
+
+_Round 2 fixed: 2026-11-25T16:20:00Z_
+_Fixer: Claude (gsd-code-fixer)_
+_Iteration: 2_
