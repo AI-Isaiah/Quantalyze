@@ -4420,6 +4420,31 @@ async def test_no_capital_exit_mt5_ledger_exactly_at_minus_the_dust_floor_still_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ledger", "refused"),
+    [
+        # Upper edge, inclusive: the ledger gate does not refuse +DUST_NAV_FLOOR. A +100.0 ledger
+        # against a 0.0 terminal implies a negative start, so the replay then refuses it instead.
+        # The arm pins that the LEDGER gate did not (a ``>=`` would count it ledger_level_funded).
+        (DUST_NAV_FLOOR, {"replay_refused": 1}),
+        (DUST_NAV_FLOOR + 0.01, {"ledger_level_funded": 1}),
+        (-DUST_NAV_FLOOR - 0.01, {"ledger_level_negative": 1}),
+    ],
+)
+async def test_no_capital_exit_mt5_ledger_band_edges(ledger: float, refused: dict[str, int]) -> None:
+    """NOCAP-01 review round 2 WR-01. The band is the whole NOCAP-01 proof on MT5 and it is
+    ``-DUST_NAV_FLOOR <= level <= DUST_NAV_FLOOR``. The other arms pin the lower edge from inside
+    and the far sides, so a 10x wider band on either side, or ``>=`` on the upper edge, passed them
+    all. These three pin both edges from just outside (a cent past the floor) and the upper edge's
+    inclusion, each against a 0.0 terminal."""
+    payload = await _compose_no_capital_book(
+        _nc_mt5_ledger_book(flows={_BTC_DAYS[3]: ledger})
+    )
+
+    assert _nc_refused(payload) == refused
+
+
+@pytest.mark.asyncio
 async def test_no_capital_exit_mt5_empty_basis_lists_are_refused_as_ledger_basis_absent() -> None:
     """NOCAP-01 review WR-01. A row carrying ``composed_flows: []`` and ``composed_day_pnl: []`` reads
     as an empty pair that sums to 0.0, which the gate would take for a proved-empty ledger. The job's
