@@ -45,6 +45,8 @@ byte backup outside the worktree and checked with `cmp`):
       test_a_stop_with_nothing_stampable_anchors_a_null_column goes RED.
   N20 delete the unusable-stop disjunct of `_fills_incomplete`:
       test_a_stop_record_without_a_usable_bound_holds goes RED.
+  R2-N2 drop the `exchange_dq_flags["binance_stop_below_cursor"] = True` write:
+      test_a_stop_below_a_column_set_by_another_strategy_is_flagged_and_warned goes RED.
 """
 
 from __future__ import annotations
@@ -271,6 +273,65 @@ class TestBinanceFillsCursorGate:
         )
         assert _the_advance(rec)["p_last_fetched_ts"] == stamp
         assert column_after_advance(CURSOR_AHEAD_TS, stamp) == CURSOR_AHEAD_TS
+
+    async def test_a_stop_below_a_column_set_by_another_strategy_is_flagged_and_warned(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Round-2 review WR-01, the likeliest entry into the recorded open gap: the first sync of
+        # a second strategy on a key shared with another strategy. The column (2026-06-20) was
+        # set by the other strategy; this strategy has no stored fill and no daily row, so the
+        # read has no seed and walks from the reach. It stops at 2026-06-02T09:00Z, stamps the
+        # fill at 2026-06-01T09:00Z, and the forward-only `advance_sync_cursor` drops that stamp.
+        # The next seed is again the column, so the run must NAME the skipped span: the
+        # `binance_stop_below_cursor` flag lands on `strategy_analytics`, and a WARNING names the
+        # strategy, the column and the stop's bound.
+        supabase, rec = _make_supabase(trades_rows=[])
+        with caplog.at_level(logging.WARNING, logger=_WARNING_LOGGER):
+            await _run_job(
+                supabase=supabase,
+                column=CURSOR_AHEAD_TS,
+                raw_fills=[
+                    _bfill("fill-btc", B_TS, "BTCUSDT"),
+                    _bfill("fill-eth", HEALTHY_NEWER_TS, "ETHUSDT"),
+                ],
+                fills_flags={
+                    "binance_page_cap_symbols": ["BTCUSDT"],
+                    "binance_read_through_ms": SECOND_STOP_MS,
+                },
+            )
+        assert _the_advance(rec)["p_last_fetched_ts"] == B_TS
+        assert rec.analytics_upserts[-1]["data_quality_flags"]["binance_stop_below_cursor"] is True
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "binance_stop_below_cursor" in r.getMessage()
+        ]
+        assert len(warnings) == 1, f"expected one WARNING, got {warnings}"
+        assert STRATEGY_ID in warnings[0]
+        assert CURSOR_AHEAD_TS in warnings[0]
+        assert str(SECOND_STOP_MS) in warnings[0]
+
+    async def test_a_stop_at_or_above_the_column_is_not_flagged(self) -> None:
+        # The control: with the column below the stop's bound the next seed is the column, which
+        # is below the unread span, so the span is re-read and nothing is skipped. The flag fires
+        # only when the column is ahead of where the unread span starts.
+        supabase, rec = _make_supabase(trades_rows=DEFAULT_TRADES)
+        await _run_job(
+            supabase=supabase,
+            column=CURSOR_BEHIND_TS,
+            raw_fills=[
+                _bfill("fill-btc", B_TS, "BTCUSDT"),
+                _bfill("fill-eth", HEALTHY_NEWER_TS, "ETHUSDT"),
+            ],
+            fills_flags={
+                "binance_page_cap_symbols": ["BTCUSDT"],
+                "binance_read_through_ms": B_MS,
+            },
+        )
+        flags = (
+            rec.analytics_upserts[-1]["data_quality_flags"] if rec.analytics_upserts else {}
+        )
+        assert "binance_stop_below_cursor" not in flags
 
     async def test_two_stopped_symbols_stamp_at_or_before_the_smaller_bound(
         self,
