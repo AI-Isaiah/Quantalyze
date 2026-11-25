@@ -3454,10 +3454,12 @@ class TestSyncTradesEnqueueFailurePublishState:
         result, payloads = await self._run(None, caplog, writes)
         assert result.outcome == DispatchOutcome.FAILED
         # One table mock per `.table("strategy_analytics")` call: the read and the
-        # write. Drop the read's select chain.
+        # write. Drop the read's select chain, and the `.data` truthiness probe the
+        # handler runs on the UPDATE's result (R2-WR-01: it is the mock's bookkeeping
+        # of `bool(res.data)`, not part of the query chain).
         calls = [
             c for table in writes for c in table.mock_calls
-            if not c[0].startswith("select")
+            if not c[0].startswith("select") and ".data" not in c[0]
         ]
         by_name = {c[0]: c for c in calls}
         assert [c[0] for c in calls] == [

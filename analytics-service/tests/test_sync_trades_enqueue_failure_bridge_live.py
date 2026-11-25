@@ -445,22 +445,27 @@ def test_a_failed_row_with_old_figures_is_not_published_and_ends_failed() -> Non
 
 
 def test_a_row_published_between_the_read_and_the_write_is_not_overwritten() -> None:
-    """222-REVIEW SFH-01: the publish read and the failed write are separate round
-    trips. Here nothing is published at the read (no row) and a ``complete_with_warnings``
-    row lands before the write. The failed write is conditional on nothing being
-    published, so the row the handler leaves is the published one, warned flag and
-    figures intact. An unconditional upsert would overwrite it with ``failed`` and
-    ``computation_warned = false``."""
+    """222-REVIEW SFH-01 / R2-WR-01: the publish read and the failed write are separate
+    round trips. Here nothing is published at the read (no row) and a
+    ``complete_with_warnings`` row lands before the write. The failed write is
+    conditional on nothing being published, so the row the handler leaves is the
+    published one, warned flag and figures intact (an unconditional upsert would
+    overwrite it with ``failed`` and ``computation_warned = false``).
+
+    It runs as the LAST attempt and asserts the row AFTER the mark RPC and the bridge:
+    the skipped write alone is not enough, because a handler that still returned FAILED
+    sends ``failed_final`` to the bridge's branch (b), which writes ``failed`` over the
+    row published in between. The handler must re-read, see the row, and return DONE
+    so the bridge takes branch (c)."""
     _need_supabase()
     _require_loopback_lane(SUPABASE_URL)
     admin = _lane_client()
 
     left: dict[str, Any] = {}
-    _drive(
+    result, row, job = _drive(
         admin,
         tag="race",
         seed_row=None,
-        attempts_before_claim=0,
         publish_race_row={
             "computation_status": "complete_with_warnings",
             "computation_warned": True,
@@ -469,8 +474,14 @@ def test_a_row_published_between_the_read_and_the_write_is_not_overwritten() -> 
         after_handler=left,
     )
 
-    row = left["row"]
+    # The handler's own write left the published row alone.
+    assert left["row"]["computation_status"] == "complete_with_warnings", left["row"]
+    assert left["row"]["computation_warned"] is True, left["row"]
+    # And so did the mark RPC and the bridge, which is what the owner reads.
+    assert row is not None
     assert row["computation_status"] == "complete_with_warnings", row
     assert row["computation_warned"] is True, row
     assert row["computation_error"] is None, row
     assert row["metrics_json"] == _METRICS, row
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert job["status"] == "done", job

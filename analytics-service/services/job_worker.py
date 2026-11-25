@@ -2977,7 +2977,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # new founder decision, not a count change.
         if _nothing_published:
             try:
-                def _mark_analytics_failed() -> None:
+                def _mark_analytics_failed() -> bool:
                     _enqueue_failed_payload: dict[str, Any] = {
                             "strategy_id": strategy_id,
                             "computation_status": "failed",
@@ -3002,11 +3002,14 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     # concurrent analytics job published in between. The write itself
                     # is therefore conditional on "nothing published" (the inverse of
                     # `_strategy_has_published_numbers`): an UPDATE that skips a success
-                    # status and a 'computing' row carrying metrics_json. With no row
-                    # there is nothing to update; the FAILED return below makes
+                    # status and a 'computing' row carrying metrics_json. A zero-row
+                    # result is therefore ambiguous, and the caller decides which it
+                    # was: no row (the FAILED return below makes
                     # `mark_compute_job_failed` run the status bridge, which creates
-                    # the row (branch (a) 'computing', then branch (b) 'failed').
-                    (
+                    # the row: branch (a) 'computing', then branch (b) 'failed'), or a
+                    # row published in between (R2-WR-01: it must not be marked failed
+                    # by the bridge either, so the caller returns DONE).
+                    res = (
                         ctx.supabase.table("strategy_analytics")
                         .update(_enqueue_failed_payload)
                         .eq("strategy_id", strategy_id)
@@ -3017,8 +3020,18 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                         .or_("computation_status.neq.computing,metrics_json.is.null")
                         .execute()
                     )
+                    return bool(getattr(res, "data", None))
 
-                await db_execute(_mark_analytics_failed)
+                wrote = await db_execute(_mark_analytics_failed)
+                if not wrote and await db_read_with_retry(_strategy_has_published_numbers):
+                    logger.error(
+                        "sync_trades: follow-on enqueue failed for strategy %s, and the "
+                        "strategy was published between the publish read and the write "
+                        "— writing nothing and returning DONE so the status bridge "
+                        "keeps its publish state (R2-WR-01).",
+                        strategy_id,
+                    )
+                    _nothing_published = False
             except Exception as mark_exc:  # noqa: BLE001
                 logger.exception(
                     "sync_trades: failed to mark strategy_analytics as "
@@ -3031,14 +3044,15 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             # Constant operator sentence naming the cause: no exception text, no ids
             # (T-222-11). Transient (OQ2): an enqueue fault is not a property of the
             # strategy; the retry re-runs the sync.
-            return DispatchResult(
-                outcome=DispatchOutcome.FAILED,
-                error_kind="transient",
-                error_message=(
-                    "sync_trades: the follow-on analytics enqueue failed and the "
-                    "strategy has nothing published"
-                ),
-            )
+            if _nothing_published:
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_kind="transient",
+                    error_message=(
+                        "sync_trades: the follow-on analytics enqueue failed and the "
+                        "strategy has nothing published"
+                    ),
+                )
 
     return DispatchResult(
         # NEW-C12-02: trade_count must reflect PERSISTED rows, not fetched.
