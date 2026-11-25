@@ -78,6 +78,9 @@ Requirements: ONCE-01, ONCE-02, ONCE-03, ONCE-04, CONN-01, CONN-03, MT5D-08.
     - when that key has a strategy (`VENUE_ALREADY_CONNECTED` and similar), name the strategy and link to it;
     - when it has none (`KEY_ORPHANED`), name the key (its nickname and when it was added) and link to the page where that key appears for this account. Which page that is gets verified for a manager, an allocator and a both-roles account.
   - **Only ever the caller's own key and strategy, never another account's.** Every read stays owner-scoped.
+  - **Sharpened, founder 2026-11-25, verbatim:** "That is confusing. isn't it logic, that when putting in the key, I want to finalize the setup? shouldn't I get a link to either the strategy, or to where to finalize the setup".
+    - For `KEY_ORPHANED`, the primary action is to continue the setup on the stored key, not to retry: an in-place "Finish setup with your stored key '<nickname>'" that switches to the existing use-existing-key arm (the 162-05 / D-162-3 preselect seam). Where that cannot happen in place, a link to the key's row. "Disconnect" stays as the secondary path.
+    - For `VENUE_ALREADY_CONNECTED`, the primary action is a link to the named strategy.
   - **Ships** as a small PR on the wizard refusal surface, beside the MT5 -6 copy follow-up.
   - **Reversibility:** cheap. It is copy and links on a refusal, and changes no rule.
 - **Wrong-server connect, measured on PROD 2026-11-25 (founder attempts; PR-2c not deployed, main at v0.133.79.1).**
