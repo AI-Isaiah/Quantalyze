@@ -918,9 +918,16 @@ async def test_bounded_caller_keeps_polling_through_errors_and_gets_unavailable_
     assert not mt5_concurrency._mt5_terminal_lock_for(_KEY).locked()
 
 
-async def test_renew_missing_rpc_stops_renewing_without_declaring_the_lease_lost(
+async def test_sf_m4_renew_missing_rpc_is_a_failed_renew_loud_and_fenced_at_the_deadline(
     quick_renew, caplog
 ) -> None:
+    """SF-M4 reversed the plan-04 shape "a missing renew RPC stops renewing, unfenced".
+    PGRST202 also fires on a signature drift of ``renew`` alone, where the row SURVIVES,
+    expires within a TTL and another process takes it while this holder keeps driving the
+    terminal with no fence at all. A missing renew is now what it is for the holder, a
+    renew that did not succeed: loud on the relog clock, retried, and fenced at the loss
+    deadline like any other silence. (DEC-04-A is the ACQUIRE's fallback hold and is
+    untouched.)"""
     fake = FakeXLeaseBackend()
     fake.raises["renew"] = _missing_rpc_error()
     _install(fake)
@@ -928,20 +935,42 @@ async def test_renew_missing_rpc_stops_renewing_without_declaring_the_lease_lost
     epoch_before = _mt5_epoch_for(_KEY)
 
     async with mt5_concurrency.mt5_terminal_lease(_KEY, site=SITE_DERIVE):
-        await asyncio.sleep(0.5)  # ten renew intervals, past LOST_AFTER
-        assert _mt5_epoch_for(_KEY) == epoch_before, (
-            "a missing renew RPC fenced a holder that still owns the terminal"
+        await asyncio.sleep(0.12)  # inside LOST_AFTER (0.25 s): nothing fenced yet
+        assert _mt5_epoch_for(_KEY) == epoch_before, "fenced before the loss deadline"
+        await asyncio.sleep(0.4)  # past it
+        assert _mt5_epoch_for(_KEY) == epoch_before + 1, (
+            "a holder whose renew RPC is missing kept the terminal unfenced past the "
+            "loss deadline"
         )
-        assert fake.count("renew") == 1, (
-            f"renewal continued against a missing RPC ({fake.count('renew')} calls)"
-        )
+        assert fake.count("renew") > 1, "a missing renew RPC ended the renew loop"
 
-    assert _events(caplog, "mt5_xlease_lost") == []
+    assert len(_events(caplog, "mt5_xlease_lost")) == 1
     missing = [
         r for r in _events(caplog, "mt5_xlease_unavailable")
         if r.rpc == mt5_xlease.XLEASE_RENEW_RPC
     ]
     assert len(missing) == 1 and missing[0].levelno == logging.ERROR
+
+
+async def test_sf_m4_a_missing_renew_that_then_answers_never_fences(quick_renew) -> None:
+    """The deploy-order blip (the function reappears after one miss): the next renew
+    succeeds, so the holder was never lost."""
+    fake = FakeXLeaseBackend()
+    state = {"n": 0}
+
+    async def _missing_once() -> None:
+        state["n"] += 1
+        if state["n"] == 1:
+            raise _missing_rpc_error()
+
+    fake.before["renew"] = _missing_once
+    _install(fake)
+    epoch_before = _mt5_epoch_for(_KEY)
+
+    async with mt5_concurrency.mt5_terminal_lease(_KEY, site=SITE_DERIVE):
+        await asyncio.sleep(0.6)  # well past LOST_AFTER, with renews succeeding
+        assert _mt5_epoch_for(_KEY) == epoch_before
+        assert fake.count("renew") >= 3
 
 
 async def test_release_error_never_masks_the_bodys_exception(caplog) -> None:

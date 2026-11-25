@@ -512,19 +512,20 @@ class XLeaseHold:
                     )
                 except Exception as exc:  # noqa: BLE001 — no success is counted
                     if is_missing_rpc(exc):
-                        # The RPC went away (a rollback): the row went with it, so
-                        # there is nothing to renew and nothing that was LOST. Stop
-                        # renewing WITHOUT the self-fence; the holder keeps its
-                        # in-process lock, as in the acquire fallback.
+                        # The RPC is missing: loud, but still a FAILED renew (SF-M4).
+                        # PGRST202 also fires on a signature drift of renew alone,
+                        # where the row survives; ending the loop here would leave the
+                        # holder running unfenced after that row expires. It falls
+                        # through to the loss deadline like any other silence.
                         _note_unavailable(XLEASE_RENEW_RPC, self._site)
-                        return
-                    logger.warning(
-                        "mt5_xlease: a lease renew failed (exc_class=%s); the "
-                        "lease is lost if none succeeds within %.0fs",
-                        type(exc).__name__,
-                        _MT5_XLEASE_LOST_AFTER_S,
-                        extra={"event_type": "mt5_xlease_renew_failed"},
-                    )
+                    else:
+                        logger.warning(
+                            "mt5_xlease: a lease renew failed (exc_class=%s); the "
+                            "lease is lost if none succeeds within %.0fs",
+                            type(exc).__name__,
+                            _MT5_XLEASE_LOST_AFTER_S,
+                            extra={"event_type": "mt5_xlease_renew_failed"},
+                        )
                 if renewed is True:
                     lost_at = sent_at + _MT5_XLEASE_LOST_AFTER_S
                 elif renewed is False or time.monotonic() >= lost_at:
