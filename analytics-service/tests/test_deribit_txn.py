@@ -956,18 +956,33 @@ def test_correction_lowercase_instrument_token_fails_loud() -> None:
 
 @pytest.mark.parametrize(
     "instrument_name",
-    ["", "   ", 123, {"name": "BTC-PERPETUAL"}],
-    ids=["empty", "blank", "int", "dict"],
+    [
+        "",
+        "   ",
+        123,
+        {"name": "BTC-PERPETUAL"},
+        "n/a",
+        "SUB-C",
+        "btc-perpetual",
+        "BTC-PERP",
+    ],
+    ids=["empty", "blank", "int", "dict", "n-a", "sub-c", "lower-perpetual", "truncated-perp"],
 )
 def test_correction_blank_or_nonstring_instrument_name_fails_loud(
     instrument_name: object,
 ) -> None:
-    """Shape 10. A blank or non-string `instrument_name` is not a structured
-    instrument: with a trading word and no token in the reason the correction fails
-    loud. A dict that merely contains an instrument string is not coerced.
+    """Shape 10. A blank, non-string or non-instrument `instrument_name` is not a
+    structured instrument: with a trading word and no token in the reason the
+    correction fails loud. A dict that merely contains an instrument string is not
+    coerced. `n/a`, `SUB-C`, `btc-perpetual` and `BTC-PERP` are non-blank strings
+    that do not fullmatch the anchored instrument pattern, so only the structured
+    branch's `fullmatch` decides them.
 
     REVERT-PROOF: treat any non-null `instrument_name` as an instrument and the
-    classifier returns True for all four values, reddening the first assertion."""
+    classifier returns True for all eight values; loosen the structured branch to
+    `isinstance(name, str) and name.strip()` (any non-blank string) and it returns
+    True for the four non-blank non-instrument strings (`n/a`, `SUB-C`,
+    `btc-perpetual`, `BTC-PERP`), reddening those parameters."""
     reason = "funding calculation correction"
     row = _correction_row(reason, instrument_name=instrument_name)
     _assert_correction_fails_loud(row, reason)
