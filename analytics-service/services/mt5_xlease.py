@@ -91,10 +91,20 @@ def _validate_xlease_timing(
     ``0 < poll < renew < ttl``: a poll slower than a renew, or a renew at or past the
     TTL, lets a healthy holder expire between two renewals. ``rpc_timeout < renew``:
     a renew that can outlast its own interval stacks. ``ttl >= 2 * renew +
-    rpc_timeout``: the holder survives one missed renew plus one slow call before the
-    row can expire, and the self-fence (``ttl - renew``) fires while the lease is
-    still ours. ``rpc_timeout < error_budget``: one slow call must not by itself spend
-    the budget an unbounded caller is allowed (DEC-04-C)."""
+    rpc_timeout``: the self-fence deadline (``lost_after = ttl - renew``) is at least
+    one renew interval plus one RPC bound after a hold's last successful send, so the
+    first renew after it always gets its FULL ``rpc_timeout`` before the fence and a
+    single slow call never fences a healthy holder. ``rpc_timeout < error_budget``: one
+    slow call must not by itself spend the budget an unbounded caller is allowed
+    (DEC-04-C).
+
+    ⚠️ What the inequalities do NOT prove, and what does: ``ttl >= 2 * renew +
+    rpc_timeout`` says nothing about the fence landing before the row expires. That is
+    the renew loop's own deadline: it fences at ``send_time_of_last_success +
+    (ttl - renew)``, and the database stamps the row's expiry at or after that send, so
+    the fence precedes expiry by at least one renew interval (to within event-loop
+    scheduling). The fence then acts at the body's NEXT MT5 round-trip, so a read
+    already in flight can outlive it by up to the read bound."""
     if not 0.0 < poll_s < renew_s:
         raise ValueError(
             f"_MT5_XLEASE_POLL_S must be in (0, renew interval {renew_s}); got "
@@ -115,8 +125,8 @@ def _validate_xlease_timing(
     if ttl_s < 2.0 * renew_s + rpc_timeout_s:
         raise ValueError(
             f"_MT5_XLEASE_TTL_S must be at least 2 * renew interval + rpc timeout "
-            f"({2.0 * renew_s + rpc_timeout_s}); got {ttl_s} - one missed renew "
-            f"plus one slow call would expire a live holder"
+            f"({2.0 * renew_s + rpc_timeout_s}); got {ttl_s} - the first renew "
+            f"after a grant could not get its full RPC bound before the self-fence"
         )
     if not rpc_timeout_s < error_budget_s:
         raise ValueError(
@@ -425,6 +435,7 @@ class XLeaseHold:
         pending: set[asyncio.Future[bool]],
         on_lost: Callable[[], None],
         cross_process: bool = True,
+        granted_sent_at: float | None = None,
     ) -> None:
         self._backend = backend
         self._digest = digest
@@ -438,6 +449,12 @@ class XLeaseHold:
         #: False for the missing-RPC fallback (DEC-04-A): the caller holds the
         #: in-process lock only, so there is nothing to renew or release.
         self._cross_process = cross_process
+        #: Monotonic time the GRANTING acquire was SENT. The database stamps the row's
+        #: expiry when it executes that call, so this is the earliest the expiry can
+        #: be measured from and the base of the first loss deadline (WR-01).
+        self._granted_sent_at = (
+            time.monotonic() if granted_sent_at is None else granted_sent_at
+        )
 
     @property
     def cross_process(self) -> bool:
@@ -456,28 +473,42 @@ class XLeaseHold:
     async def _renew_loop(self) -> None:
         """Keep the row while the body runs; declare it lost when it cannot be kept.
 
-        Each tick sleeps one renew interval, then renews under the RPC bound. A False
-        answer (the database no longer recognises the token) or no SUCCESSFUL renew
-        for ``_MT5_XLEASE_LOST_AFTER_S`` (``ttl - renew``, measured on the monotonic
-        clock so it fires while the lease is still ours) is a loss: one ERROR line,
-        the ``on_lost`` self-fence, and the loop ends.
+        ⭐ LOSS IS A DEADLINE, ``lost_at``, measured on the monotonic clock from the SEND
+        time of the last successful renew (of the granting acquire for the first),
+        because the database stamps ``expires_at`` when it EXECUTES a call, at or after
+        the moment it was sent. The sleep and every renew call are bounded by the time
+        left to it, so ``on_lost`` fires at ``send + _MT5_XLEASE_LOST_AFTER_S`` however
+        the renews fail or hang, and that is at least ``renew interval`` (``ttl -
+        lost_after``) before the row can expire (to within event-loop scheduling). A
+        False answer (the database no longer recognises the token) is a loss at once.
+        Either way: one ERROR line, the ``on_lost`` self-fence, and the loop ends.
+
+        What this does NOT promise: the fence acts at the body's next MT5 round-trip
+        (``Mt5Client._assert_live``), so a read already in flight carries on, and the
+        margin it leaves is one renew interval.
 
         ⛔ A RAISING BACKGROUND TASK REACHES ``main.lifespan``'s crash handler, which
         stops dispatch behind a green ``/health`` (the reason the handover recorder
         never raises either). So the body is one ``try/except Exception`` that logs the
         exception CLASS only and keeps looping; ``CancelledError`` is not an
         ``Exception`` and passes through."""
-        last_success = time.monotonic()
+        lost_at = self._granted_sent_at + _MT5_XLEASE_LOST_AFTER_S
         while True:
-            await asyncio.sleep(_MT5_XLEASE_RENEW_INTERVAL_S)
+            await asyncio.sleep(
+                max(0.0, min(_MT5_XLEASE_RENEW_INTERVAL_S, lost_at - time.monotonic()))
+            )
             try:
+                sent_at = time.monotonic()
+                if sent_at >= lost_at:
+                    self._declare_lost()
+                    return
                 renewed: bool | None = None
                 try:
                     renewed = await asyncio.wait_for(
                         self._backend.renew(
                             self._digest, self._token, int(_MT5_XLEASE_TTL_S)
                         ),
-                        _MT5_XLEASE_RPC_TIMEOUT_S,
+                        min(_MT5_XLEASE_RPC_TIMEOUT_S, lost_at - sent_at),
                     )
                 except Exception as exc:  # noqa: BLE001 — no success is counted
                     if is_missing_rpc(exc):
@@ -494,11 +525,9 @@ class XLeaseHold:
                         _MT5_XLEASE_LOST_AFTER_S,
                         extra={"event_type": "mt5_xlease_renew_failed"},
                     )
-                now = time.monotonic()
                 if renewed is True:
-                    last_success = now
-                    continue
-                if renewed is False or now - last_success >= _MT5_XLEASE_LOST_AFTER_S:
+                    lost_at = sent_at + _MT5_XLEASE_LOST_AFTER_S
+                elif renewed is False or time.monotonic() >= lost_at:
                     self._declare_lost()
                     return
             except Exception as exc:  # noqa: BLE001 — see the docstring
@@ -642,6 +671,9 @@ async def acquire_terminal_xlease(
     #: reaches its deadline with NO answer met an outage, not a busy terminal (SF-M1).
     answered = False
     last_failure = ""
+    #: Monotonic send time of the acquire call currently awaited (at most one is ever in
+    #: flight); the granting call's value seeds the renew loop's loss deadline.
+    call_sent_at = started
 
     try:
         while True:
@@ -660,6 +692,7 @@ async def acquire_terminal_xlease(
                 # cancels it on a timeout nor when this task is cancelled, so the RPC's
                 # outcome stays observable (Pitfall 2). It joins `pending` BEFORE the
                 # await, so a cancellation mid-call is covered too.
+                call_sent_at = time.monotonic()
                 fut = asyncio.ensure_future(
                     backend.acquire(digest, token, holder_n, site_n, ttl_s)
                 )
@@ -773,6 +806,7 @@ async def acquire_terminal_xlease(
         site=site_n,
         pending=pending,
         on_lost=on_lost,
+        granted_sent_at=call_sent_at,
     )
     hold.start_renewing()
     return hold

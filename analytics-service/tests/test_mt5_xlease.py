@@ -1248,3 +1248,95 @@ async def test_sf_m1_one_refusal_then_errors_is_still_busy_at_the_bound(fast_pol
             _KEY, holder=None, site=None, bound_s=0.2, on_lost=lambda: None
         )
     assert calls["n"] > 1
+
+
+# --------------------------------------------------------------------------- #
+# Round-1 review fixes (WR-01 = SF-M5): the self-fence fires before the row expires.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def scaled_timing(monkeypatch):
+    """The reviewer's 1:100 copy of the shipped constants (TTL 90, renew 20, RPC 15,
+    LOST_AFTER = TTL - renew), which still passes ``_validate_xlease_timing``."""
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_TTL_S", 0.9)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RENEW_INTERVAL_S", 0.2)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.15)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_LOST_AFTER_S", 0.7)
+    mt5_xlease._validate_xlease_timing(0.005, 0.2, 0.9, 0.15, 0.6)
+
+
+class _FailFastThenHang(FakeXLeaseBackend):
+    """Renew raises at once ``fast_failures`` times, then never answers."""
+
+    def __init__(self, fast_failures: int) -> None:
+        super().__init__()
+        self._fast_failures = fast_failures
+        self.renews = 0
+
+    async def renew(self, digest, token, ttl_s) -> bool:
+        self.renews += 1
+        if self.renews <= self._fast_failures:
+            raise RuntimeError("fast fail")
+        await sleep_forever()
+        return False
+
+
+async def test_wr01_the_fence_fires_before_the_row_expires_when_a_renew_hangs(
+    scaled_timing,
+) -> None:
+    """The database stamps ``expires_at`` when it EXECUTES a statement, so the row
+    expires ``TTL`` after the last successful renew was SENT. The loop used to check
+    loss only after a renew call returned and to measure silence from when the reply
+    ARRIVED, so with fast failures followed by a hang it fenced at about
+    LOST_AFTER + RENEW + RPC_TIMEOUT (0.957 s here) against a row that expired at 0.9 s:
+    another process could already hold the terminal while this holder still drove it.
+    Loss is a deadline measured from SEND time that also bounds the sleep and the call."""
+    fake = _FailFastThenHang(fast_failures=3)
+    _install(fake)
+    fenced_at: list[float] = []
+    t0 = time.monotonic()
+    hold = await mt5_xlease.acquire_terminal_xlease(
+        _KEY, holder=None, site=None, bound_s=None,
+        on_lost=lambda: fenced_at.append(time.monotonic() - t0),
+    )
+    row_expires = 0.9
+    await asyncio.sleep(1.3)
+    hold.stop_renewing()
+
+    assert fenced_at, "on_lost never fired"
+    assert fenced_at[0] < row_expires, (
+        f"the self-fence fired at {fenced_at[0]:.3f}s, after the row expired "
+        f"({row_expires}s)"
+    )
+    assert fenced_at[0] < 0.7 + 0.1, f"fence at {fenced_at[0]:.3f}s, not at LOST_AFTER (0.7s)"
+    assert hold.lost
+
+
+async def test_wr01_a_renew_that_hangs_from_the_first_tick_is_cut_off_at_the_deadline(
+    scaled_timing,
+) -> None:
+    fake = _FailFastThenHang(fast_failures=0)
+    _install(fake)
+    fenced_at: list[float] = []
+    t0 = time.monotonic()
+    hold = await mt5_xlease.acquire_terminal_xlease(
+        _KEY, holder=None, site=None, bound_s=None,
+        on_lost=lambda: fenced_at.append(time.monotonic() - t0),
+    )
+    await asyncio.sleep(1.1)
+    hold.stop_renewing()
+    assert fenced_at and fenced_at[0] < 0.9, fenced_at
+
+
+async def test_wr01_a_successful_renew_moves_the_deadline_from_its_send_time(
+    scaled_timing,
+) -> None:
+    """The control: a healthy renewing holder is never fenced, however long it runs.
+    Without the reset the new deadline would fence it at 0.7 s."""
+    fake = FakeXLeaseBackend()
+    _install(fake)
+    lost: list[int] = []
+    hold = await _grant(lost)
+    await asyncio.sleep(1.2)  # well past LOST_AFTER, with renews every 0.2 s
+    assert lost == [] and not hold.lost
+    assert fake.count("renew") >= 4
+    await hold.release()
