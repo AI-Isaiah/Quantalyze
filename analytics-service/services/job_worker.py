@@ -2744,6 +2744,25 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             _read_through = _epoch + timedelta(milliseconds=_read_through_raw)
         except OverflowError:
             _read_through = None
+    _fills_stopped = "binance_read_through_ms" in exchange_dq_flags or any(
+        exchange_dq_flags.get(key)
+        for key in (
+            "binance_page_cap_symbols",
+            "binance_untimed_page_symbols",
+            "binance_deadline_symbols",
+        )
+    )
+    if _fills_stopped and _read_through is None:
+        # A stop record whose bound is unusable (T-250-05): hold, exactly like
+        # any other incomplete read. Names the strategy and the bound's type
+        # only, never fill content.
+        if not _fills_incomplete:
+            logger.warning(
+                "sync_trades Phase 2: holding fetched-cursor for strategy %s — "
+                "a Binance stop record has no usable read-through bound (%s)",
+                strategy_id, type(_read_through_raw).__name__,
+            )
+        _fills_incomplete = True
     advance_fetched_cursor = (
         bool(raw_fills)
         and phase2_complete
@@ -2784,6 +2803,15 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # column at the read start so the next clean run re-reads that span
         # before the self-heal clears the flag. It never points past where the
         # read began, and the RPC writes it only into a NULL or earlier column.
+        _p_last_fetched = fills_anchor_iso
+    if _p_last_fetched is None and _fills_stopped and fills_anchor_iso is not None:
+        # Phase 250 BINANCEFILLS (SC-3): a stopped read that left nothing
+        # stampable (every persisted fill after the bound, or no fill at all,
+        # an empty list included) on a NULL column. Anchor at the read start,
+        # never past where the read began; the RPC writes it only into a NULL
+        # or earlier column. Without it the next run seeds from the daily
+        # high-water, which moves on, and the stopped span is never re-read
+        # (RESEARCH Pitfall 5, the 232 CR-01 class).
         _p_last_fetched = fills_anchor_iso
 
     # NEW-C12-05 (CL12): fenced epilogue write. The two cursor checkpoints

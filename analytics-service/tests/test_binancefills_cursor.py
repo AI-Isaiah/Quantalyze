@@ -146,3 +146,205 @@ class TestBinanceFillsCursorGate:
         )
 
         assert _the_advance(rec)["p_last_fetched_ts"] == B_PLUS_123_TS
+
+    # ---- holds win, nothing stampable, a lost bound ------------------------
+
+    @pytest.mark.parametrize(
+        "hold",
+        [
+            {"binance_partial_symbols": ["ETHUSDT"]},
+            {"sync_truncated_okx": True},
+        ],
+        ids=["partial-symbols", "sync-truncated"],
+    )
+    async def test_a_hold_beats_a_stop(self, hold: dict[str, Any]) -> None:
+        # A transient failure or a truncated read leaves an unread span behind
+        # the newest fill, so the cursor holds even when a usable bound would
+        # have selected a stampable fill. The control without the hold stamps B,
+        # so the hold is the flag's doing and not the fixture's.
+        raw_fills = [
+            _bfill("fill-btc", B_TS, "BTCUSDT"),
+            _bfill("fill-eth", HEALTHY_NEWER_TS, "ETHUSDT"),
+        ]
+        supabase, rec = _make_supabase(trades_rows=DEFAULT_TRADES)
+        await _run_job(
+            supabase=supabase,
+            column=CURSOR_BEHIND_TS,
+            raw_fills=raw_fills,
+            fills_flags={**hold, **_CAP_AT_B},
+        )
+        assert _the_advance(rec)["p_last_fetched_ts"] is None, (
+            "a hold flag must win over a stop's bound"
+        )
+
+        control, control_rec = _make_supabase(trades_rows=DEFAULT_TRADES)
+        await _run_job(
+            supabase=control,
+            column=CURSOR_BEHIND_TS,
+            raw_fills=raw_fills,
+            fills_flags=dict(_CAP_AT_B),
+        )
+        assert _the_advance(control_rec)["p_last_fetched_ts"] == B_TS
+
+    @pytest.mark.parametrize(
+        "raw_fills, flags",
+        [
+            (
+                [
+                    _bfill("fill-btc", B_TS, "BTCUSDT"),
+                    _bfill("fill-eth", HEALTHY_NEWER_TS, "ETHUSDT"),
+                ],
+                {
+                    "binance_page_cap_symbols": ["BTCUSDT"],
+                    "binance_read_through_ms": CURSOR_BEHIND_MS,
+                },
+            ),
+            (
+                [],
+                {
+                    "binance_deadline_symbols": ["BTCUSDT"],
+                    "binance_read_through_ms": CURSOR_BEHIND_MS,
+                },
+            ),
+        ],
+        ids=["every-fill-after-the-bound", "empty-fill-list"],
+    )
+    async def test_a_stop_with_nothing_stampable_anchors_a_null_column(
+        self, raw_fills: list[dict[str, Any]], flags: dict[str, Any]
+    ) -> None:
+        # The column is NULL and the stopped read stored nothing at or before
+        # its bound: without an anchor the next run seeds from the daily
+        # high-water, which moves on, and the stopped span is never read again
+        # (RESEARCH Pitfall 5, the 232 CR-01 class). Anchor at the read start.
+        supabase, rec = _make_supabase(trades_rows=DAILY_ONLY_TRADES)
+        await _run_job(
+            supabase=supabase,
+            column=None,
+            raw_fills=raw_fills,
+            fills_flags=flags,
+        )
+        assert _the_advance(rec)["p_last_fetched_ts"] == DAILY_NEWEST_DAY_START_ISO
+
+    async def test_a_stop_with_nothing_stampable_leaves_a_set_column(self) -> None:
+        # On a set column the cursor is already the resume point: writing
+        # nothing keeps it exactly where it was.
+        supabase, rec = _make_supabase(trades_rows=DEFAULT_TRADES)
+        await _run_job(
+            supabase=supabase,
+            column=CURSOR_BEHIND_TS,
+            raw_fills=[
+                _bfill("fill-btc", B_TS, "BTCUSDT"),
+                _bfill("fill-eth", HEALTHY_NEWER_TS, "ETHUSDT"),
+            ],
+            fills_flags={
+                "binance_page_cap_symbols": ["BTCUSDT"],
+                "binance_read_through_ms": CURSOR_BEHIND_MS,
+            },
+        )
+        assert _the_advance(rec)["p_last_fetched_ts"] is None
+
+    async def test_two_stopped_symbols_stamp_at_or_before_the_smaller_bound(
+        self,
+    ) -> None:
+        # The producer delivers the minimum over stopped symbols: BTCUSDT capped
+        # at B, ETHUSDT stopped at 2026-06-02T09:00Z, SOLUSDT healthy. The stamp
+        # is B: neither stopped symbol's unread span is skipped.
+        supabase, rec = _make_supabase(trades_rows=DEFAULT_TRADES)
+        await _run_job(
+            supabase=supabase,
+            column=CURSOR_BEHIND_TS,
+            raw_fills=[
+                _bfill("fill-btc", B_TS, "BTCUSDT"),
+                _bfill("fill-eth", "2026-06-02T09:00:00+00:00", "ETHUSDT"),
+                _bfill("fill-sol-1", HEALTHY_NEWER_TS, "SOLUSDT"),
+                _bfill("fill-sol-2", HEALTHY_LATER_TS, "SOLUSDT"),
+            ],
+            fills_flags={
+                "binance_page_cap_symbols": ["BTCUSDT"],
+                "binance_untimed_page_symbols": ["ETHUSDT"],
+                "binance_read_through_ms": min(B_MS, SECOND_STOP_MS),
+            },
+        )
+        assert _the_advance(rec)["p_last_fetched_ts"] == B_TS
+
+    @pytest.mark.parametrize(
+        "flags, bad_type",
+        [
+            ({"binance_page_cap_symbols": ["BTCUSDT"]}, None),
+            ({"binance_untimed_page_symbols": ["BTCUSDT"]}, None),
+            ({"binance_deadline_symbols": ["BTCUSDT"]}, None),
+            (
+                {"binance_page_cap_symbols": ["BTCUSDT"], "binance_read_through_ms": True},
+                "bool",
+            ),
+            (
+                {
+                    "binance_page_cap_symbols": ["BTCUSDT"],
+                    "binance_read_through_ms": "1780304400000",
+                },
+                "str",
+            ),
+            (
+                {"binance_page_cap_symbols": ["BTCUSDT"], "binance_read_through_ms": -1},
+                "int",
+            ),
+        ],
+        ids=[
+            "cap-list-alone",
+            "untimed-list-alone",
+            "deadline-list-alone",
+            "bound-is-bool",
+            "bound-is-str",
+            "bound-is-negative",
+        ],
+    )
+    async def test_a_stop_record_without_a_usable_bound_holds(
+        self,
+        flags: dict[str, Any],
+        bad_type: str | None,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # `_record_dq_flag` swallows its own exceptions, so a stop list whose
+        # bound was lost must read as an incomplete read, never as "no stop":
+        # stamping the newest fill would pass the stopped symbol's unread span.
+        raw_fills = [
+            _bfill("fill-btc", B_TS, "BTCUSDT"),
+            _bfill("fill-eth", HEALTHY_NEWER_TS, "ETHUSDT"),
+        ]
+        supabase, rec = _make_supabase(trades_rows=DEFAULT_TRADES)
+        with caplog.at_level(logging.WARNING, logger=_WARNING_LOGGER):
+            await _run_job(
+                supabase=supabase,
+                column=CURSOR_BEHIND_TS,
+                raw_fills=raw_fills,
+                fills_flags=dict(flags),
+            )
+        assert _the_advance(rec)["p_last_fetched_ts"] is None, (
+            "a stop record without a usable bound must hold the fills cursor"
+        )
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING and STRATEGY_ID in r.getMessage()
+            and "read-through bound" in r.getMessage()
+        ]
+        assert len(warnings) == 1, f"expected one WARNING, got {warnings}"
+        expected_type = bad_type if bad_type is not None else "NoneType"
+        assert expected_type in warnings[0]
+
+    async def test_a_stop_record_without_a_usable_bound_anchors_a_null_column(
+        self,
+    ) -> None:
+        # A NULL column plus a lost bound: holding protects nothing, so the
+        # column is anchored at the read start (the daily seed) like any hold.
+        supabase, rec = _make_supabase(trades_rows=DAILY_ONLY_TRADES)
+        await _run_job(
+            supabase=supabase,
+            column=None,
+            raw_fills=[
+                _bfill("fill-btc", B_TS, "BTCUSDT"),
+                _bfill("fill-eth", HEALTHY_NEWER_TS, "ETHUSDT"),
+            ],
+            fills_flags={"binance_page_cap_symbols": ["BTCUSDT"]},
+        )
+        assert _the_advance(rec)["p_last_fetched_ts"] == DAILY_NEWEST_DAY_START_ISO
