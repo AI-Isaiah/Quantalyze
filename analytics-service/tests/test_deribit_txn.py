@@ -790,6 +790,33 @@ def test_correction_reason_gate_denylist_precedence_and_word_boundary(
     assert not correction_is_trading(bad)
 
 
+def test_correction_capital_reason_with_trading_token_and_no_capital_word_fails_loud() -> None:
+    """Phase 233 DBOOK-02 headline. A capital adjustment worded `funding account
+    correction` carries the trading token `funding`, no capital word (so the
+    denylist cannot catch it) and names NO instrument. The old two-step gate
+    classified it as trading P&L.
+
+    WHY it must fail loud: summed as trading P&L it inflates realized performance,
+    and the balance-identity oracle is blind to the misroute (the reference set and
+    the computed side derive from the same predicate). A trading word alone is not
+    enough: a trading correction must also name an instrument. The observed PROD
+    shape (a BTC-PERPETUAL funding calculation correction) still classifies
+    trading, asserted last as the contrast.
+
+    REVERT-PROOF: restore the old two-step gate (trading word alone) and the first
+    assertion reddens, because the classifier returns True for this reason."""
+    row = _correction_row("funding account correction")
+    assert correction_is_trading(row) is False
+    with pytest.raises(LedgerValuationError) as exc_usd:
+        txn_rows_to_daily_records([row])
+    assert "funding account correction" in str(exc_usd.value)
+    with pytest.raises(LedgerValuationError) as exc_native:
+        txn_rows_to_native_daily([row])
+    assert "funding account correction" in str(exc_native.value)
+    # Contrast: the one observed PROD shape names an instrument and stays trading.
+    assert correction_is_trading(_correction_row()) is True
+
+
 def test_correction_unrecognized_or_missing_reason_fails_loud() -> None:
     """DERIBITFIX-02(c) — a `correction` with an UNRECOGNIZED reason, an EMPTY
     reason, or NO info at all (schema drift) carrying real cash FAILS LOUD on both
