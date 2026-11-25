@@ -6312,6 +6312,27 @@ async def test_no_capital_exit_a_fault_in_the_stored_input_compose_keeps_todays_
         result = await run_derive_allocator_equity_job(_nc_job())
     assert result.outcome.name == "FAILED" and result.error_kind == "permanent"
     _assert_refusal_recorded(refused, _NOCAP_ALLOC, "compose_refused")
+    # NOCAP-03 review SFH M2: the refusal written after the fallback carries the run's counts, here the
+    # one candidate whose compose raised the ``ValueError`` (hand-derived: one candidate in play).
+    (_, refusal_row, _), = _refusal_upserts(refused)
+    assert refusal_row["payload"]["inputs"]["no_capital_exit_refused"] == {"candidate_exception": 1}
+
+    # control: no candidate in play, the same refusal record has no such field
+    control = _FakeSupabase(_nc_with_stale_row(_nc_assemble([])))
+    with (
+        patch("services.job_worker.get_supabase", return_value=control),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(
+                ValueError("unused"), NavReconstructionError("allocator equity replay: injected")
+            ),
+        ),
+    ):
+        control_result = await run_derive_allocator_equity_job(_nc_job())
+    assert control_result.outcome.name == "FAILED" and control_result.error_kind == "permanent"
+    _assert_refusal_recorded(control, _NOCAP_ALLOC, "compose_refused")
+    (_, control_row, _), = _refusal_upserts(control)
+    assert "no_capital_exit_refused" not in control_row["payload"]["inputs"]
 
 
 @pytest.mark.asyncio

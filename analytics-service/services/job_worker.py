@@ -18302,7 +18302,11 @@ async def run_derive_allocator_equity_job(
         # post-liquidation poison input would leave the frozen pre-liquidation curve
         # rendering as trustworthy FOREVER; the refusal record (167.1.2.1.1 D-04)
         # holds the row instead and the book shows "rebuilding" with its reason.
-        await _persist_refusal(DeriveRefusal.COMPOSE_REFUSED.value)
+        # 234 NOCAP-03: a refusal written after a candidate fallback carries the run's counts.
+        await _persist_refusal(
+            DeriveRefusal.COMPOSE_REFUSED.value,
+            no_capital_exit_refused=no_capital_refusal_field(no_capital_refusals) or None,
+        )
         scrubbed = str(scrub_freeform_string(str(exc)))
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
