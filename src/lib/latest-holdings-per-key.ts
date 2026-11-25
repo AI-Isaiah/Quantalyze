@@ -78,14 +78,18 @@ export const POLL_COMPLETED_ACTION = "allocator.holdings.sync_completed";
 /**
  * The key columns the account identity reads (`accountIdentityTokens`). Every
  * one is in `API_KEY_USER_COLUMNS`, so the user-scoped client may select it.
+ * `venue_server` is identity too (Phase 225 CONN-03, CONTEXT Q6: one login on
+ * two set servers is two accounts); the owner may read it since plan 13's
+ * column GRANT. Dropping it from this list silently merges two servers.
  */
 export const KEY_IDENTITY_COLUMNS =
-  "id, exchange, venue_account_id, account_share_kind, account_shared_with_api_key_id";
+  "id, exchange, venue_account_id, venue_server, account_share_kind, account_shared_with_api_key_id";
 
 export type KeyIdentityRow = {
   id: string;
   exchange: string | null;
   venue_account_id: string | null;
+  venue_server: string | null;
   account_share_kind: string | null;
   account_shared_with_api_key_id: string | null;
 };
@@ -98,7 +102,8 @@ export type KeyIdentityRow = {
  * does the same, so "which keys share an account" has one mechanism.
  *
  * `keys` are the owner's `api_keys` rows read with `KEY_IDENTITY_COLUMNS`; the
- * five fields `accountIdentityTokens` also takes are not identity and are null.
+ * five liveness and returns fields `accountIdentityTokens` also takes are not
+ * identity and are null. `venue_server` IS identity: it is passed through.
  * A key the identity does not group, or that is absent from `keys`, is its own
  * account (`key:<id>`).
  */
@@ -110,6 +115,7 @@ export function keyAccountOf(
       id: k.id,
       exchange: typeof k.exchange === "string" ? k.exchange : "",
       venue_account_id: k.venue_account_id ?? null,
+      venue_server: k.venue_server ?? null,
       account_share_kind: k.account_share_kind ?? null,
       account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
       disconnected_at: null,
