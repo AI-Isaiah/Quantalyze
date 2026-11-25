@@ -14,6 +14,11 @@ const auditMock = vi.hoisted(() => ({ logAuditEventAsUser: vi.fn() }));
 vi.mock("@/lib/audit", () => auditMock);
 
 import {
+  accountIdentityTokens,
+  ambiguousServerKeyIds,
+  type DepartedHistoryKey,
+} from "./departed-history";
+import {
   MAX_VENUE_SERVER_LENGTH,
   afterSlotSwap,
   normaliseConnectedVenueServer,
@@ -23,6 +28,23 @@ import {
   sameVenueServer,
   swapAccountSlot,
 } from "./venue-identity";
+
+type TokenKey = {
+  id: string;
+  exchange: string;
+  venue_account_id: string | null;
+  venue_server: string | null;
+  account_shared_with_api_key_id?: string | null;
+  account_share_kind?: string | null;
+  disconnected_at?: string | null;
+};
+
+type TokenCase = {
+  name: string;
+  keys: TokenKey[];
+  tokens: Record<string, string | null>;
+  ambiguous: string[];
+};
 
 type PickCase = {
   name: string;
@@ -45,6 +67,7 @@ const spec = JSON.parse(
   connect: Array<{ raw: string; stored: string | null }>;
   same: Array<{ a: string | null; b: string | null; same: boolean }>;
   pick: PickCase[];
+  tokens: TokenCase[];
 };
 
 describe("the shared fixture is not vacuous", () => {
@@ -53,6 +76,7 @@ describe("the shared fixture is not vacuous", () => {
     expect(spec.connect.length).toBeGreaterThan(0);
     expect(spec.same.length).toBeGreaterThan(0);
     expect(spec.pick.length).toBeGreaterThan(0);
+    expect(spec.tokens.length).toBeGreaterThan(0);
   });
 });
 
@@ -105,6 +129,38 @@ describe("pickSameAccountHolder (the fixture's cases)", () => {
 
   it.each(spec.pick)("$name (rows reversed)", ({ rows, server, mode, expect: want }) => {
     expect(pickSameAccountHolder([...rows].reverse(), server, mode)?.id ?? null).toBe(want);
+  });
+});
+
+// The TS twin of Python `account_identity_tokens` / `ambiguous_server_key_ids`
+// (225 plan 14, plan 15). Every non-identity field of DepartedHistoryKey is null.
+const toHistoryKey = (k: TokenKey): DepartedHistoryKey => ({
+  id: k.id,
+  exchange: k.exchange,
+  venue_account_id: k.venue_account_id,
+  venue_server: k.venue_server,
+  account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
+  account_share_kind: k.account_share_kind ?? null,
+  disconnected_at: k.disconnected_at ?? null,
+  sync_status: null,
+  history_inclusion: null,
+  first_returns_day: null,
+  last_returns_day: null,
+});
+
+describe("accountIdentityTokens and ambiguousServerKeyIds (the fixture's tokens cases)", () => {
+  const replay = (keys: TokenKey[], want: TokenCase) => {
+    const historyKeys = keys.map(toHistoryKey);
+    expect(Object.fromEntries(accountIdentityTokens(historyKeys))).toEqual(want.tokens);
+    expect([...ambiguousServerKeyIds(historyKeys)].sort()).toEqual([...want.ambiguous].sort());
+  };
+
+  it.each(spec.tokens)("$name", (c) => {
+    replay(c.keys, c);
+  });
+
+  it.each(spec.tokens)("$name (rows reversed)", (c) => {
+    replay([...c.keys].reverse(), c);
   });
 });
 

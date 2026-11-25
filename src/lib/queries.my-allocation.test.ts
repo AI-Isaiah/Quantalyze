@@ -5164,7 +5164,7 @@ describe("getMyAllocationDashboard — Open Positions reads each key's own lates
       (e) =>
         e.table === "api_keys" &&
         e.select ===
-          "id, exchange, venue_account_id, account_share_kind, account_shared_with_api_key_id",
+          "id, exchange, venue_account_id, venue_server, account_share_kind, account_shared_with_api_key_id",
     );
     expect(idRead?.eqs).toContainEqual({ column: "user_id", value: "user-1" });
     // Review C4 SFH-C4-02: the poll-outcome read is owner- and key-scoped.
