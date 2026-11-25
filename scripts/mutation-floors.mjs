@@ -1392,7 +1392,8 @@
 // MERGED 2026-11-24: Phase 227 JOBLEDGER (85 -> 92 on its branch, +7 files) onto origin/main at 86 (Phase 225, +1 file): 86 + 7 = 93.
 // The CI `sql-mutation` FULL run on the PR head is the measurement of the merged corpus.
 // RAISED 93 -> 94 2026-11-25 (Phase 225 plan 16, ONEACCOUNTONCE PR-2b-2): +1 NEW annotated gate file, test_commit_scenario_batch_venue_server_identity.sql (commit_scenario_batch groups an owner's keys by the canonical (exchange, login, server) identity, migration 20261125151936). MEASURED: `--parse-only` printed `coverage: files 94/121` and `No static defects`; the exit-2-by-design DIAGNOSTIC run of that file printed `arms: 12/12/0   (executed/annotated/waived)`, `biting: 12`, `lane-invocations: 12` with every arm `RED (identity ok)` and `No defects in the narrowed scope`. CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the run that compares it again. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 94;
+// RAISED 94 -> 95 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): +1 NEW annotated gate file, test_mt5_terminal_lease.sql (the MT5 terminal lease table and its acquire, renew and release RPCs, migration 20261126120000). MEASURED: `--parse-only` printed `coverage: files 95/122` and `No static defects`; the FULL run on this tree printed `coverage: files 95/122`, `arms: 1041/1041/0   (executed/annotated/waived)`, `biting: 1041`, `lane-invocations: 1041` (the two independent arm tallies agree), `lane-blocked: 0 file(s)`, `pending: 0` and `file test_mt5_terminal_lease.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8`. WAIVED_CEILING stays 0 - no waiver was added.
+export const FILES_FLOOR = 95;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3564,7 +3565,10 @@ export const FILES_FLOOR = 94;
 // RAISED 1021 -> 1033 2026-11-25 (Phase 225 plan 16, ONEACCOUNTONCE PR-2b-2): +12 twinned arms, one per clause of the shared server-aware identity rule, in the NEW file test_commit_scenario_batch_venue_server_identity.sql (FILES_FLOOR 93 -> 94, see its block above): two-servers-two-accounts, same-server-pair-one-account, null-joins-single-server, null-ambiguous-own-account, all-null-one-account, two-nulls-ambiguous, three-servers-plus-null, other-exchange-same-login, exchange-partitions-server-count, exchange-case, marker-links-ambiguous-key, marker-links-keyless-key.
 // MEASURED: `--parse-only` printed `arms: 0/1033/0` and `coverage: files 94/121`; the exit-2-by-design DIAGNOSTIC run of that file printed `arms: 12/12/0   (executed/annotated/waived)`, `biting: 12`, `lane-invocations: 12` with every arm `RED (identity ok)` and `No defects in the narrowed scope`. NOT MEASURED by a FULL local run, so 1033 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the run that compares it with a real biting count.
 // WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 1033;
+// RAISED 1033 -> 1041 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): +8 twinned arms, L1 to L8, in the NEW file test_mt5_terminal_lease.sql (FILES_FLOOR 94 -> 95, see its block above): one owner token per terminal digest with idempotent same-token acquire (L1), expired-lease takeover and fenced renew and release (L2, L3, L4), bad-input refusals (L5), grants and RLS (L6), distinct terminals independent (L7), table CHECKs (L8).
+// MEASURED: `--parse-only` printed `arms: 0/1041/0` and `coverage: files 95/122`; the FULL run printed `arms: 1041/1041/0   (executed/annotated/waived)`, `biting: 1041` and `lane-invocations: 1041` with every arm `RED (identity ok)`.
+// WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 1041;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
