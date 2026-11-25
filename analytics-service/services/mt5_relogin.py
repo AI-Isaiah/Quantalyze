@@ -76,7 +76,11 @@ from services.mt5_client import (
     mt5_terminal_answer_count,
     mt5_terminal_key,
 )
-from services.mt5_concurrency import Mt5TerminalBusyError, mt5_terminal_lease
+from services.mt5_concurrency import (
+    Mt5TerminalBusyError,
+    Mt5TerminalLeaseUnavailableError,
+    mt5_terminal_lease,
+)
 from services.mt5_handover import HOLDER_HOUSE, SITE_HEAL
 from services.mt5_session_episodes import (
     KIND_ALREADY_AUTHORIZED,
@@ -157,6 +161,11 @@ logger = logging.getLogger("quantalyze.analytics.mt5_relogin")
 # credential there heals nothing while re-collapsing exactly the distinction
 # Phase 164.1 built.
 _MT5_NO_AUTHORIZED_ACCOUNT_CODE: Final[int] = -6
+
+#: Phase 230 round 1 (SF-M1) — the heal's reading when the cross-process lease could not
+#: be reached. Local to this module like the validation probe's own `probe_failed`: it
+#: is `not_measured`, counted by the blind-run escalation, and is NOT `busy_skip`.
+KIND_LEASE_UNAVAILABLE: Final[str] = "lease_unavailable"
 
 # --------------------------------------------------------------------------- #
 # ⭐ THE ESCALATION's CODE GATE (164.6.5 plan 05, D-08) — which IPC fault a
@@ -2927,6 +2936,28 @@ async def heal_mt5_terminal_session(
                     ),
                     timeout=budget_s,
                 )
+        except Mt5TerminalLeaseUnavailableError:
+            # ⭐ Phase 230 round 1 (SF-M1) — NOT A BUSY TERMINAL. This subclasses the busy
+            # error (so every other busy arm still skips), which made the arm below read
+            # a lease-DATABASE outage as "somebody is already successfully using the
+            # terminal, which is itself evidence the session is fine". Nothing was using
+            # it: the cross-process lease could not be asked, so the heal did not run and
+            # the session was NOT measured. ERROR, and no "session fine" claim. Closed
+            # literal text and the label only: no credential, host, port or account.
+            logger.error(
+                "%s: the terminal lease could not be reached (the lease database "
+                "did not answer), so the heal did not run this tick. Nobody was "
+                "found using the terminal and the session was not measured; the "
+                "next tick tries again.",
+                label,
+            )
+            await record_mt5_session_reading(
+                KIND_LEASE_UNAVAILABLE,
+                None,
+                source=source,
+                poll_interval_s=poll_interval_s,
+            )
+            return
         except Mt5TerminalBusyError:
             # ⭐ A DESIGNED SKIP, and this module's own derivation says so: "the
             # correct behaviour when the terminal is already busy is to SKIP: a

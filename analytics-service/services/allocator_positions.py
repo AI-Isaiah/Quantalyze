@@ -107,6 +107,7 @@ from services.mt5_concurrency import (
     _MT5_DERIVE_READ_TIMEOUT_S,
     _mt5_bounded_restart,
     _mt5_terminal_lock_for,
+    Mt5TerminalBusyError,
     mt5_terminal_lease,
 )
 from services.mt5_handover import SITE_HOLDINGS
@@ -1007,153 +1008,178 @@ async def _fetch_mt5_account_rows(
     # ⭐ Phase 164.6.6 criterion 1 — taken in this key's name (`api_key_id`), so
     # a login that switches the shared terminal to it is recorded against the
     # holder it displaced.
-    async with mt5_terminal_lease(
-        session.client.terminal_key, holder=api_key_id, site=SITE_HOLDINGS
-    ):
-        try:
-            info = await asyncio.wait_for(
-                asyncio.to_thread(_mt5_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S
-            )
-        except asyncio.TimeoutError as exc:
-            # D-09/D-10 (167-02) — see the Mt5ClientError arm below for why
-            # this is consulted before anything else in the arm.
-            if _must_reach_handler_unwrapped(exc):
-                raise
-            # A blocked RPyC/Wine pipe does NOT self-unblock, so actively (and
-            # boundedly) restart the terminal before the transient, or every
-            # retry inherits the same wedge and burns to failed_final.
-            logger.warning(
-                "poll_allocator_positions: mt5 holdings read exceeded its "
-                "wall-clock bound — classified transient, restarting the "
-                "terminal (FLIPRETRY-01 / MT5CONC-01)"
-            )
-            await _mt5_bounded_restart(session.client, log_prefix="poll_allocator_positions")
-            raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
-        except Mt5SessionAbandoned as exc:
-            # D-09/D-10 (167-02) — see the Mt5ClientError arm below.
-            if _must_reach_handler_unwrapped(exc):
-                raise
-            # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a plain
-            # `Exception` (D-42), so it matches none of the three sibling arms
-            # here; without this one it left `fetch_allocator_holdings` as a raw
-            # type the caller's dedicated `AllocatorHoldingsSyncTransientError`
-            # arm cannot see — which is how a fault whose user copy is a FIXED
-            # constant ends up as `str(exc)` in an allocator's `sync_error`.
-            #
-            # ⚠️ On the genuinely abandoned path nobody awaits this read, so the
-            # raise reaches no one and this arm never runs (D-39). It exists for
-            # the FALSE-POSITIVE path: a legitimate read refused by the fence
-            # must be retried and must never be dressed as the allocator's fault.
-            #
-            # ⛔ NO `_mt5_bounded_restart`, unlike the two arms around it. Those
-            # heal a pipe that is OURS and wedged; a fence refusal means the
-            # terminal was handed on, so a restart here would fire the one
-            # permitted `mt5.shutdown()` on the NEXT holder's session — the
-            # -10004 cross-holder outage this phase closes.
-            logger.warning(
-                "poll_allocator_positions: mt5 holdings read was refused by the "
-                "abandoned-session fence — classified transient, retrying; NOT "
-                "restarting, because another holder owns the hardware now "
-                "(WIZFORM-ABANDON / D-40)"
-            )
-            raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
-        except Mt5AccountMismatchError as exc:
-            # D-09/D-10 (167-02) — see the Mt5ClientError arm below.
-            if _must_reach_handler_unwrapped(exc):
-                raise
-            # A mis-routed / stale terminal is an INFRA fault, never user blame:
-            # nothing is returned, nothing is persisted, and the restart heals
-            # exactly the stale pipe that causes it. The mismatch detail (two
-            # int logins) reaches the log and the exception chain, never the
-            # user-visible copy.
-            logger.warning(
-                "poll_allocator_positions: mt5 login bracket rejected a "
-                "mismatched terminal account (%s) — classified transient, "
-                "restarting the terminal; NO row emitted (MT5CONC-02)",
-                str(exc),
-            )
-            await _mt5_bounded_restart(session.client, log_prefix="poll_allocator_positions")
-            raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
-        except Mt5ClientError as exc:
-            # D-09/D-10 (167-02) — consult the same authority the two ccxt
-            # arms below already do, ahead of anything else in this arm. This
-            # is the MEASURED wrong-password path (`Mt5ClientError(0, "Invalid
-            # account")` — services/mt5_validation.py's `_AUTH_PHRASES`
-            # corpus). `job_worker.classify_exception` has no MT5-specific
-            # branch today, so a real instance still falls to its generic
-            # 'unknown' bucket and this stays a structural fix rather than a
-            # behavior change for THAT shape — see 167-02-SUMMARY.md. It stops
-            # being a no-op the day a future classifier addition (or a later
-            # phase) makes an MT5 read-time failure classify permanent.
-            if _must_reach_handler_unwrapped(exc):
-                raise
-            # ⭐ Phase 167 / D-11 arm B, NARROWED by CR-01 — ONLY A LOGIN-STAGE
-            # REFUSAL IS A SIGN-IN FAILURE. This arm sees every `Mt5ClientError`
-            # `_mt5_read` can produce, and most of them are NOT one:
-            # `initialize()` failing or its transport dropping (no credential
-            # sent yet — a gateway redeploy or wedge hits every MT5 key on the
-            # terminal at once), the transport dropping mid-login, and
-            # `account_info()` failing AFTER a successful login. Stamping those
-            # `sign_in_failed` told every owner to fix a working credential.
-            #
-            # `is_mt5_login_refusal` is the ONE predicate the wizard's
-            # `validate_key` applies to the same boundary: the terminal answered
-            # the `login()` call itself falsy (`Mt5LoginRefusedError`, the shape
-            # a wrong investor password and a wrong server BOTH produce) AND the
-            # code is not one of the -10000…-10004 IPC-infrastructure codes or
-            # the success code 1. A login-stage -10005 IS a refusal (D-17: the
-            # modal login dialog D-08 measured for a wrong password). Everything
-            # else keeps the pre-167 posture byte-unchanged:
-            # MT5_UNREACHABLE_NOTE, transient.
-            #
-            # ⭐ 167 SFH-LOW-2 — and a message the ONE classifier reads as
-            # naming the credential or the broker server (`"auth"` /
-            # `"wrong_server"` from `classify_mt5_login_error`) is a sign-in
-            # failure too, whatever stage raised it. The wizard answers that
-            # verdict with a confident 400 (AUTH_FAILED / wrong server) at any
-            # stage; before this, the holdings poll called the SAME error a
-            # transport blip and promised a retry. Same copy and `permanent`
-            # disposition as the login-stage refusal: the terminal's own text
-            # blamed the credential, so re-sending it on every backoff rung is
-            # the D-08 harm.
-            #
-            # The exception's own text is already secret-scrubbed at
-            # construction, but it is still INTERNAL text (it can echo the
-            # terminal's `last_error()` back at us); only the authored copy
-            # constant is surfaced, and only the numeric code is logged.
-            login_verdict = classify_mt5_login_error(exc)
-            names_credential_or_server = login_verdict in ("auth", "wrong_server")
-            if not (names_credential_or_server or is_mt5_login_refusal(exc)):
+    # ⭐ Phase 230 (MT5D-02). The cross-process lease can fail CLOSED at its ENTRY:
+    # `Mt5TerminalLeaseUnavailableError` (a busy subclass) when its database is
+    # unreachable, or a plain `Mt5TerminalBusyError`. Both are plain `Exception`s
+    # raised by `mt5_terminal_lease(...)` itself, OUTSIDE the body's own arms, so
+    # without this arm they leave `fetch_allocator_holdings` as a raw type the
+    # handler's dedicated `AllocatorHoldingsSyncTransientError` arm cannot see, and
+    # the allocator-visible `sync_error` falls to generic copy instead of the
+    # unreachable-terminal note. Infrastructure state must not cross as text: the
+    # user-safe answer is the fixed note, with the lease error kept as the cause.
+    # The body below raises no busy error of its own (each function holds the lease
+    # exactly once, pinned by `_PRODUCTION_LEASE_SITES`), so this arm sees only the
+    # entry. NO terminal restart: the terminal was never touched.
+    try:
+        async with mt5_terminal_lease(
+            session.client.terminal_key, holder=api_key_id, site=SITE_HOLDINGS
+        ):
+            try:
+                info = await asyncio.wait_for(
+                    asyncio.to_thread(_mt5_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S
+                )
+            except asyncio.TimeoutError as exc:
+                # D-09/D-10 (167-02) — see the Mt5ClientError arm below for why
+                # this is consulted before anything else in the arm.
+                if _must_reach_handler_unwrapped(exc):
+                    raise
+                # A blocked RPyC/Wine pipe does NOT self-unblock, so actively (and
+                # boundedly) restart the terminal before the transient, or every
+                # retry inherits the same wedge and burns to failed_final.
                 logger.warning(
-                    "poll_allocator_positions: mt5 holdings read hit a client "
-                    "error that is not a login-stage refusal (code=%s) — "
-                    "classified transient, retrying",
-                    exc.code,
+                    "poll_allocator_positions: mt5 holdings read exceeded its "
+                    "wall-clock bound — classified transient, restarting the "
+                    "terminal (FLIPRETRY-01 / MT5CONC-01)"
+                )
+                await _mt5_bounded_restart(session.client, log_prefix="poll_allocator_positions")
+                raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+            except Mt5SessionAbandoned as exc:
+                # D-09/D-10 (167-02) — see the Mt5ClientError arm below.
+                if _must_reach_handler_unwrapped(exc):
+                    raise
+                # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a plain
+                # `Exception` (D-42), so it matches none of the three sibling arms
+                # here; without this one it left `fetch_allocator_holdings` as a raw
+                # type the caller's dedicated `AllocatorHoldingsSyncTransientError`
+                # arm cannot see — which is how a fault whose user copy is a FIXED
+                # constant ends up as `str(exc)` in an allocator's `sync_error`.
+                #
+                # ⚠️ On the genuinely abandoned path nobody awaits this read, so the
+                # raise reaches no one and this arm never runs (D-39). It exists for
+                # the FALSE-POSITIVE path: a legitimate read refused by the fence
+                # must be retried and must never be dressed as the allocator's fault.
+                #
+                # ⛔ NO `_mt5_bounded_restart`, unlike the two arms around it. Those
+                # heal a pipe that is OURS and wedged; a fence refusal means the
+                # terminal was handed on, so a restart here would fire the one
+                # permitted `mt5.shutdown()` on the NEXT holder's session — the
+                # -10004 cross-holder outage this phase closes.
+                logger.warning(
+                    "poll_allocator_positions: mt5 holdings read was refused by the "
+                    "abandoned-session fence — classified transient, retrying; NOT "
+                    "restarting, because another holder owns the hardware now "
+                    "(WIZFORM-ABANDON / D-40)"
                 )
                 raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
-            #
-            # ⛔ The three SIBLING arms above are deliberately NOT moved. A
-            # stage timeout, an abandoned-session fence refusal and an
-            # account mismatch are transport, lease and concurrency faults in
-            # which no sign-in is implicated; telling their owner that their
-            # credentials may have changed would be the same false blame this
-            # phase exists to remove, pointed at a different cause. They keep
-            # MT5_UNREACHABLE_NOTE and sync_status='error', byte-unchanged.
-            #
-            # ⛔ The ccxt `AuthenticationError` path is NOT moved either. The
-            # VENUE asserted that rejection, so it stays the confident
-            # `revoked` claim — see `AllocatorHoldingsSignInFailedError` for
-            # the two-honesty-level split this preserves.
-            logger.warning(
-                "poll_allocator_positions: mt5 holdings sign-in failed "
-                "(code=%s, login_verdict=%s) — surfacing the sign-in copy "
-                "(D-11 arm B)",
-                exc.code,
-                login_verdict,
-            )
-            raise AllocatorHoldingsSignInFailedError(
-                SIGN_IN_FAILED_NOTE.format(venue=_venue_display(exchange_name))
-            ) from exc
+            except Mt5AccountMismatchError as exc:
+                # D-09/D-10 (167-02) — see the Mt5ClientError arm below.
+                if _must_reach_handler_unwrapped(exc):
+                    raise
+                # A mis-routed / stale terminal is an INFRA fault, never user blame:
+                # nothing is returned, nothing is persisted, and the restart heals
+                # exactly the stale pipe that causes it. The mismatch detail (two
+                # int logins) reaches the log and the exception chain, never the
+                # user-visible copy.
+                logger.warning(
+                    "poll_allocator_positions: mt5 login bracket rejected a "
+                    "mismatched terminal account (%s) — classified transient, "
+                    "restarting the terminal; NO row emitted (MT5CONC-02)",
+                    str(exc),
+                )
+                await _mt5_bounded_restart(session.client, log_prefix="poll_allocator_positions")
+                raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+            except Mt5ClientError as exc:
+                # D-09/D-10 (167-02) — consult the same authority the two ccxt
+                # arms below already do, ahead of anything else in this arm. This
+                # is the MEASURED wrong-password path (`Mt5ClientError(0, "Invalid
+                # account")` — services/mt5_validation.py's `_AUTH_PHRASES`
+                # corpus). `job_worker.classify_exception` has no MT5-specific
+                # branch today, so a real instance still falls to its generic
+                # 'unknown' bucket and this stays a structural fix rather than a
+                # behavior change for THAT shape — see 167-02-SUMMARY.md. It stops
+                # being a no-op the day a future classifier addition (or a later
+                # phase) makes an MT5 read-time failure classify permanent.
+                if _must_reach_handler_unwrapped(exc):
+                    raise
+                # ⭐ Phase 167 / D-11 arm B, NARROWED by CR-01 — ONLY A LOGIN-STAGE
+                # REFUSAL IS A SIGN-IN FAILURE. This arm sees every `Mt5ClientError`
+                # `_mt5_read` can produce, and most of them are NOT one:
+                # `initialize()` failing or its transport dropping (no credential
+                # sent yet — a gateway redeploy or wedge hits every MT5 key on the
+                # terminal at once), the transport dropping mid-login, and
+                # `account_info()` failing AFTER a successful login. Stamping those
+                # `sign_in_failed` told every owner to fix a working credential.
+                #
+                # `is_mt5_login_refusal` is the ONE predicate the wizard's
+                # `validate_key` applies to the same boundary: the terminal answered
+                # the `login()` call itself falsy (`Mt5LoginRefusedError`, the shape
+                # a wrong investor password and a wrong server BOTH produce) AND the
+                # code is not one of the -10000…-10004 IPC-infrastructure codes or
+                # the success code 1. A login-stage -10005 IS a refusal (D-17: the
+                # modal login dialog D-08 measured for a wrong password). Everything
+                # else keeps the pre-167 posture byte-unchanged:
+                # MT5_UNREACHABLE_NOTE, transient.
+                #
+                # ⭐ 167 SFH-LOW-2 — and a message the ONE classifier reads as
+                # naming the credential or the broker server (`"auth"` /
+                # `"wrong_server"` from `classify_mt5_login_error`) is a sign-in
+                # failure too, whatever stage raised it. The wizard answers that
+                # verdict with a confident 400 (AUTH_FAILED / wrong server) at any
+                # stage; before this, the holdings poll called the SAME error a
+                # transport blip and promised a retry. Same copy and `permanent`
+                # disposition as the login-stage refusal: the terminal's own text
+                # blamed the credential, so re-sending it on every backoff rung is
+                # the D-08 harm.
+                #
+                # The exception's own text is already secret-scrubbed at
+                # construction, but it is still INTERNAL text (it can echo the
+                # terminal's `last_error()` back at us); only the authored copy
+                # constant is surfaced, and only the numeric code is logged.
+                login_verdict = classify_mt5_login_error(exc)
+                names_credential_or_server = login_verdict in ("auth", "wrong_server")
+                if not (names_credential_or_server or is_mt5_login_refusal(exc)):
+                    logger.warning(
+                        "poll_allocator_positions: mt5 holdings read hit a client "
+                        "error that is not a login-stage refusal (code=%s) — "
+                        "classified transient, retrying",
+                        exc.code,
+                    )
+                    raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+                #
+                # ⛔ The three SIBLING arms above are deliberately NOT moved. A
+                # stage timeout, an abandoned-session fence refusal and an
+                # account mismatch are transport, lease and concurrency faults in
+                # which no sign-in is implicated; telling their owner that their
+                # credentials may have changed would be the same false blame this
+                # phase exists to remove, pointed at a different cause. They keep
+                # MT5_UNREACHABLE_NOTE and sync_status='error', byte-unchanged.
+                #
+                # ⛔ The ccxt `AuthenticationError` path is NOT moved either. The
+                # VENUE asserted that rejection, so it stays the confident
+                # `revoked` claim — see `AllocatorHoldingsSignInFailedError` for
+                # the two-honesty-level split this preserves.
+                logger.warning(
+                    "poll_allocator_positions: mt5 holdings sign-in failed "
+                    "(code=%s, login_verdict=%s) — surfacing the sign-in copy "
+                    "(D-11 arm B)",
+                    exc.code,
+                    login_verdict,
+                )
+                raise AllocatorHoldingsSignInFailedError(
+                    SIGN_IN_FAILED_NOTE.format(venue=_venue_display(exchange_name))
+                ) from exc
+    except Mt5TerminalBusyError as exc:
+        # D-09/D-10 (167-02) — consult the classifier first, like every sibling arm
+        # (`test_every_retry_promising_raise_is_guarded_by_the_classifier` gates it).
+        # Both lease raises classify transient or unknown, so this never re-raises today.
+        if _must_reach_handler_unwrapped(exc):
+            raise
+        logger.warning(
+            "poll_allocator_positions: mt5 terminal lease unavailable or busy at "
+            "entry (%s) — classified transient, retrying (MT5D-02)",
+            type(exc).__name__,
+        )
+        raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
 
     # (f) Currency gate — [A3] fail-loud. An account denominated in anything but
     # USD cannot be valued here without an FX rate we do not have, and silently

@@ -374,8 +374,21 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * All nine are EXPECTED until that re-dump, and NO allowlist row was added for any of them. Raising
  * this floor records the functions joining the corpus; it does NOT suppress any finding.
  * MERGED 2026-11-24: Phase 227 (+5 functions on its branch, 138 -> 143) onto origin/main at 139 (Phase 225, +1): 144.
+ *
+ * MOVED 2026-11-25 (Phase 230 MT5NIGHTLY plan 06), 144 -> 147: three ADDITIONS, not a parser gain.
+ * `public.acquire_mt5_terminal_lease(...)`, `public.renew_mt5_terminal_lease(...)` and
+ * `public.release_mt5_terminal_lease(...)` enter the chain via forward migration
+ * 20261126120000_mt5_terminal_lease.sql. MEASURED by `node scripts/baseline-content-drift-check.mjs`
+ * on this tree: `functions compared 147 - MATCH 140, DRIFT 4, SNAPSHOT_MISSING 3, SNAPSHOT_ONLY 0,
+ * UNCOMPARABLE 0`, `findings 4`. The three SNAPSHOT_MISSING findings are the three new functions,
+ * whose migration is not on PROD yet (each recorded as a dated `snapshot-only` row in
+ * NAME_SET_RATCHET in scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply).
+ * They are EXPECTED until that re-dump, and NO allowlist row was added for any of them. The one
+ * DRIFT finding, `commit_scenario_batch/5`, is not this phase's: it is the Phase 225 re-base
+ * already on origin/main. Raising this floor records the functions joining the corpus; it does NOT
+ * suppress any finding.
  */
-export const COMPARED_FLOOR = 144;
+export const COMPARED_FLOOR = 147;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

@@ -1810,6 +1810,37 @@ export type Database = {
           },
         ]
       }
+      // 2026-11-25 (Phase 230 MT5NIGHTLY plan 06): mt5_terminal_leases and the
+      // acquire/renew/release_mt5_terminal_lease signatures below are hand-added from
+      // migration 20261126120000, which has NOT applied to PROD yet. A regen against
+      // the linked PROD project drops them until it does; re-apply them then.
+      mt5_terminal_leases: {
+        Row: {
+          acquired_at: string
+          expires_at: string
+          holder: string
+          owner_token: string | null
+          site: string
+          terminal_digest: string
+        }
+        Insert: {
+          acquired_at: string
+          expires_at: string
+          holder: string
+          owner_token?: string | null
+          site: string
+          terminal_digest: string
+        }
+        Update: {
+          acquired_at?: string
+          expires_at?: string
+          holder?: string
+          owner_token?: string | null
+          site?: string
+          terminal_digest?: string
+        }
+        Relationships: []
+      }
       notification_dispatches: {
         Row: {
           created_at: string | null
@@ -3804,6 +3835,16 @@ export type Database = {
         Args: { p_diff: Json; p_index: number }
         Returns: undefined
       }
+      acquire_mt5_terminal_lease: {
+        Args: {
+          p_holder: string
+          p_owner_token: string
+          p_site: string
+          p_terminal_digest: string
+          p_ttl_s: number
+        }
+        Returns: boolean
+      }
       add_wizard_composite_key: {
         Args: {
           p_api_key_encrypted: string
@@ -4372,6 +4413,18 @@ export type Database = {
       reconstruct_positions_atomic: {
         Args: { p_positions: Json; p_strategy_id: string }
         Returns: undefined
+      }
+      release_mt5_terminal_lease: {
+        Args: { p_owner_token: string; p_terminal_digest: string }
+        Returns: boolean
+      }
+      renew_mt5_terminal_lease: {
+        Args: {
+          p_owner_token: string
+          p_terminal_digest: string
+          p_ttl_s: number
+        }
+        Returns: boolean
       }
       request_allocator_holdings_sync: {
         Args: { p_api_key_id: string }

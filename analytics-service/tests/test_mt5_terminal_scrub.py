@@ -601,11 +601,19 @@ async def test_TERMINAL_SCRUB_the_scheduled_scrub_takes_the_lock_BEFORE_a_later_
         mt5_terminal_scrub.schedule_validation_terminal_scrub(
             _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WIZARD, probe_thread_done=_set_event()
         )
+        # Phase 230 (MT5D-02): snapshot the scheduled task HERE. The lease's release
+        # now awaits one bounded database RPC before it frees the lock, which moves
+        # the scrub's completion (and its removal from `_SCRUB_TASKS`) ahead of the
+        # competitor's, so draining the live set afterwards found it already gone.
+        # The invariant under test is the queue ORDER below, not how many loop turns
+        # the lease's release takes.
+        scheduled = list(mt5_terminal_scrub._SCRUB_TASKS)
+        assert scheduled, "no scrub task was scheduled"
         await asyncio.sleep(0)
         competitor = asyncio.create_task(_competitor())
         await asyncio.sleep(0)
     await competitor
-    await _drain_scrub_tasks()
+    await asyncio.gather(*scheduled)
     assert seen_by_competitor == [1], (
         "the later lease got the terminal before the scheduled scrub"
     )

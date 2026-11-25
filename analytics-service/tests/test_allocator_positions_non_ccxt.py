@@ -2549,3 +2549,96 @@ async def test_mt5_login_stage_refusal_code_writes_sign_in_failed_end_to_end(
         "initialize",
         "login",
     ]
+
+
+# ===========================================================================
+# Phase 230 (MT5D-02) — a lease outage or a cross-process busy at the holdings
+# poll's lease ENTRY.
+#
+# The poll takes the lease unbounded, so before Phase 230 its entry could not raise
+# a busy error. The cross-process lease fails CLOSED when its database is
+# unreachable (`Mt5TerminalLeaseUnavailableError`, a busy subclass), and that raise
+# comes from `mt5_terminal_lease(...)` itself, OUTSIDE the body's own arms. Without
+# the entry arm it escapes `_fetch_mt5_account_rows` as a raw type, and the
+# handler's `except Exception` stamps `str(exc)` (infrastructure text) into the
+# allocator-visible `api_keys.sync_error`. The user-safe answer is the one the rest
+# of this function already gives for an unreachable terminal.
+# ===========================================================================
+def _lease_raising_on_entry(exc: Exception):
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _lease(terminal_key, **kwargs):  # noqa: ANN001, ANN202
+        raise exc
+        yield  # pragma: no cover
+
+    return _lease
+
+
+def _lease_error_cases():
+    from services.mt5_concurrency import (
+        Mt5TerminalBusyError,
+        Mt5TerminalLeaseUnavailableError,
+    )
+
+    return [
+        pytest.param(Mt5TerminalLeaseUnavailableError, id="lease-unavailable"),
+        pytest.param(Mt5TerminalBusyError, id="plain-busy"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc_type", _lease_error_cases())
+async def test_mt5_holdings_lease_entry_failure_is_the_user_safe_transient(
+    mt5_enabled, monkeypatch, exc_type
+):
+    """The lease entry's busy / lease-unavailable raise becomes
+    `AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE)`, with the lease
+    error chained as the cause and its text nowhere in the user-visible string.
+    Mutation guard: drop the entry arm and the raw lease error escapes."""
+    marker = "lease-rpc-host-10.0.0.9-digest-feedface"
+    monkeypatch.setattr(
+        ap, "mt5_terminal_lease", _lease_raising_on_entry(exc_type(marker))
+    )
+    transport = _RecordingMt5Transport(account=_account())
+
+    with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as info:
+        await fetch_allocator_holdings("mt5", _session(transport), API_KEY_ID)
+
+    assert str(info.value) == ap.MT5_UNREACHABLE_NOTE
+    assert marker not in str(info.value)
+    assert isinstance(info.value.__cause__, exc_type)
+    # The terminal was never touched: the lease refused before the read.
+    assert [c for c in transport.calls if c != "transport_close"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc_type", _lease_error_cases())
+async def test_mt5_holdings_lease_entry_failure_stamps_the_safe_note_end_to_end(
+    mt5_enabled, monkeypatch, exc_type
+):
+    """End to end through the REAL poll handler: the allocator-visible
+    `sync_error` is exactly `MT5_UNREACHABLE_NOTE`, never the lease error's text,
+    and the status stays the retried `error`, never `sign_in_failed`."""
+    from services.allocator_positions import (
+        MT5_UNREACHABLE_NOTE,
+        SIGN_IN_FAILED_SYNC_STATUS,
+    )
+
+    marker = "lease-rpc-host-10.0.0.9-digest-feedface"
+    monkeypatch.setattr(
+        ap, "mt5_terminal_lease", _lease_raising_on_entry(exc_type(marker))
+    )
+    session = _session(_RecordingMt5Transport(account=_account()))
+
+    coro, updates = _drive_poll_handler(monkeypatch, exchange=session, venue="mt5")
+    result = await coro
+
+    api_key_updates = [p for (name, p) in updates if name == "api_keys"]
+    assert api_key_updates, f"expected an api_keys write; got {updates!r}"
+    final = api_key_updates[-1]
+    assert final["sync_error"] == MT5_UNREACHABLE_NOTE
+    assert marker not in final["sync_error"]
+    assert final["sync_status"] == "error"
+    assert final["sync_status"] != SIGN_IN_FAILED_SYNC_STATUS
+    assert result.error_kind == "transient"
