@@ -37,7 +37,7 @@
 --     same trigger raises, so dropping it reddens ACCT-d first;
 --   * RECON-tenant runs before the other-exchange key is inserted, so its
 --     sibling mutation cannot trip on that key first;
---   * the three RECON-server-* arms run after every other RECON arm, on logins
+--   * the four RECON-server-* arms run after every other RECON arm, on logins
 --     of their own: their twins edit only the server line of the reconnect
 --     refusal, and every earlier fixture carries a NULL server, on which the
 --     edited and the pristine line agree;
@@ -996,6 +996,7 @@ DECLARE
   c_s_other  CONSTANT text := 'acct-identity-s1';
   c_s_null   CONSTANT text := 'acct-identity-s2';
   c_s_knull  CONSTANT text := 'acct-identity-s3';
+  c_s_same   CONSTANT text := 'acct-identity-s4';
   k_s_dis    uuid;
   k_s_live   uuid;
 BEGIN
@@ -1170,9 +1171,32 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (RECON-server-keynull): reconnecting a key with NO server while a live sibling on the same login has a server was not refused with 23505 KEY_VENUE_ALREADY_CONNECTED, or the key came back live (SQLSTATE %, message %, disconnected_at %).', v_err, v_msg, v_disc;
   END IF;
 
+  -- ----- RECON-server-same: a live sibling on the SAME server blocks by name ----------------
+  -- Both keys carry a server and it is the same one: neither NULL wildcard applies, so only the
+  -- equality leg of the server line matches. Once the backfill completes this is the ordinary
+  -- MT5 reconnect refusal.
+  -- RED-UNDER: delete the `s.venue_server = v_venue_server` equality leg from the server line of
+  --            the refusal's sibling test in migration 20261125083433; the refusal no longer
+  --            fires, the UPDATE reaches the index and fails 23505 with the index's message.
+  -- RED-UNDER-M: {"arm":"RECON-server-same","apply":[{"kind":"edit","file":"supabase/migrations/20261125083433_api_keys_venue_server_index.sql","find":"\n       AND (s.venue_server IS NULL OR v_venue_server IS NULL OR s.venue_server = v_venue_server)","replace":"\n       AND (s.venue_server IS NULL OR v_venue_server IS NULL)","occurrences":1}]}
+  k_s_dis := gen_random_uuid(); k_s_live := gen_random_uuid();
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server, disconnected_at, sync_status)
+  VALUES (k_s_dis,  uid_a, 'okx', 'recon same server a', 'enc', true, c_s_same, 'srv-a', now(), 'idle'),
+         (k_s_live, uid_a, 'okx', 'recon same server b', 'enc', true, c_s_same, 'srv-a', NULL,  'idle');
+  v_err := NULL; v_msg := NULL; v_ret := NULL;
+  BEGIN
+    v_ret := public.reconnect_allocator_api_key(k_s_dis);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT disconnected_at INTO v_disc FROM api_keys WHERE id = k_s_dis;
+  IF v_err IS DISTINCT FROM '23505' OR v_msg IS DISTINCT FROM 'KEY_VENUE_ALREADY_CONNECTED' OR v_disc IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (RECON-server-same): reconnecting a key while a live sibling on the same login and the SAME server exists was not refused with 23505 KEY_VENUE_ALREADY_CONNECTED, or the key came back live (SQLSTATE %, message %, disconnected_at %).', v_err, v_msg, v_disc;
+  END IF;
+
   PERFORM set_config('request.jwt.claims', '', true);
 
-  RAISE NOTICE 'PASS (RECON behavioural): reconnect into an occupied slot refused 23505 KEY_VENUE_ALREADY_CONNECTED and the key stays disconnected; with only a disconnected sibling the reconnect returns true, resets the key and clears its history_inclusion; another tenant''s key and another exchange''s key on the same account id do not block it; a live sibling on another server does not block it (RECON-server-other) while a sibling or a reconnecting key with no server does (RECON-server-null, RECON-server-keynull).';
+  RAISE NOTICE 'PASS (RECON behavioural): reconnect into an occupied slot refused 23505 KEY_VENUE_ALREADY_CONNECTED and the key stays disconnected; with only a disconnected sibling the reconnect returns true, resets the key and clears its history_inclusion; another tenant''s key and another exchange''s key on the same account id do not block it; a live sibling on another server does not block it (RECON-server-other) while a sibling or a reconnecting key with no server does (RECON-server-null, RECON-server-keynull) and a sibling on the same server does (RECON-server-same).';
 
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);

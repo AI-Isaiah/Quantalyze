@@ -3565,7 +3565,13 @@ export const FILES_FLOOR = 93;
 // DIAGNOSTIC runs of the two files printed `arms: 19/19/0`, `biting: 19`, `lane-invocations: 19` and `arms: 44/44/0`, `biting: 44`,
 // `lane-invocations: 44`, with every arm `RED (identity ok)`. The full-corpus run is the CI `sql-mutation` run on the PR head.
 // WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 1028;
+// RAISED 1028 -> 1029 2026-11-25 (Phase 225 ONEACCOUNTONCE plan 10 review fix WR-01): +1 twinned arm, RECON-server-same, in
+// test_api_keys_account_identity.sql (44 -> 45): a disconnected key beside a live same-owner sibling on the SAME login and the SAME
+// server, so only the equality leg of the reconnect wildcard matches; its twin drops that leg. FILES_FLOOR stays 93. MEASURED: the
+// exit-2-by-design `--file supabase/tests/test_api_keys_account_identity.sql` run printed `arms: 45/45/0`, `biting: 45`,
+// `lane-invocations: 45`, every arm `RED (identity ok)` (RECON-server-same included) and `No defects in the narrowed scope.`;
+// `--parse-only` printed `No static defects`. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 1029;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

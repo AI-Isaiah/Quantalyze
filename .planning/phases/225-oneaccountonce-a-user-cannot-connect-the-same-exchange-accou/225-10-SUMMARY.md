@@ -46,19 +46,19 @@ The unique identity index keeps its name and both predicates and now keys on the
 ## Tasks
 
 - **Task 1 (tracer), commit dce263327.** Migration `20261125083433_api_keys_venue_server_index.sql` rebuilds `api_keys_user_exchange_venue_account_uniq` with `COALESCE(venue_server, '')` as its fourth key, re-bases `reconnect_allocator_api_key` on `20260925120000` with the wildcard in its live-sibling EXISTS, re-issues the ACL pair, and self-verifies from the catalogue only. Manual rollback in `down/20261125083433-rollback.sql`. The uniqueness gate's arm 2 asserts the 4-key expression shape (`indnkeyatts`), and five new behavioural arms (6s-null-null, 6s-two-servers, 6s-same-server, 6s-null-vs-set, 6s-two-owners) each bite under a twin.
-- **Task 2, commit ac341adbf.** The five existing RECON twins now edit the migration B body. Three new arms (RECON-server-other, RECON-server-null, RECON-server-keynull) pin the wildcard rule. The census fixture index matches the new definition and gains `venue_server`.
+- **Task 2, commit ac341adbf.** The five existing RECON twins now edit the migration B body. Three new arms (RECON-server-other, RECON-server-null, RECON-server-keynull) pin the wildcard rule; review fix WR-01 added a fourth, RECON-server-same, for its equality leg. The census fixture index matches the new definition and gains `venue_server`.
 - **Task 3, commit 402a8630d.** Census values moved by measurement. The previous phase agent wrote most of this before the machine restart; this run finished it (the two per-file rows in the synthetic FULL log) and committed it.
-  - `ARMS_FLOOR` 1020 -> 1028 (`scripts/mutation-floors.mjs`), `FILES_FLOOR` stays 93, `WAIVED_CEILING` stays 0.
-  - `gate-family-meta.test.ts` registry entry `ARMS_FLOOR=1028`.
-  - `mutation-runner-floors.test.ts`: `totalAnchored` 1028; synthetic FULL log arms/biting/lane-invocations/mean 1028 and derived offsets 1027/1029; per-file rows `test_api_keys_account_identity.sql` 41 -> 44 (sections 44) and `test_api_keys_venue_identity_uniq.sql` 14 -> 19 (sections 12 -> 17).
-  - `mutation-annotation-parser.test.ts`: `armsSeen` 1020 -> 1028, `stepsSeen` 1171 -> 1174, `needles.length` 1171 -> 1174, the values the test reported.
+  - `ARMS_FLOOR` 1020 -> 1029 (`scripts/mutation-floors.mjs`; 1028 at this commit, +1 for the review fix WR-01 arm RECON-server-same), `FILES_FLOOR` stays 93, `WAIVED_CEILING` stays 0.
+  - `gate-family-meta.test.ts` registry entry `ARMS_FLOOR=1029`.
+  - `mutation-runner-floors.test.ts`: `totalAnchored` 1029; synthetic FULL log arms/biting/lane-invocations/mean 1029 and derived offsets 1028/1030; per-file rows `test_api_keys_account_identity.sql` 41 -> 45 (sections 45) and `test_api_keys_venue_identity_uniq.sql` 14 -> 19 (sections 12 -> 17).
+  - `mutation-annotation-parser.test.ts`: `armsSeen` 1020 -> 1029, `stepsSeen` 1171 -> 1175, `needles.length` 1171 -> 1175, the values the test reported.
 - **Task 4 (gate A5).** Run by the phase agent on PROD, read-only, below.
 
 ## Runner records (PROOF-01)
 
-- `node scripts/mutation-runner/run.mjs --parse-only`: `coverage: files 93/120`, `arms: 0/1028/0`, `No static defects`.
+- `node scripts/mutation-runner/run.mjs --parse-only`: `coverage: files 93/120`, `arms: 0/1029/0`, `No static defects`.
 - `--file supabase/tests/test_api_keys_venue_identity_uniq.sql` (exit 2 by design): `arms: 19/19/0`, `biting: 19`, `lane-invocations: 19`, every arm `RED (identity ok)`, `No defects in the narrowed scope.`
-- `--file supabase/tests/test_api_keys_account_identity.sql` (exit 2 by design): `arms: 44/44/0`, `biting: 44`, `lane-invocations: 44`, 44 arms `RED (identity ok)`, `No defects in the narrowed scope.`
+- `--file supabase/tests/test_api_keys_account_identity.sql` (exit 2 by design): `arms: 45/45/0`, `biting: 45`, `lane-invocations: 45`, 45 arms `RED (identity ok)`, `No defects in the narrowed scope.`
 - `node scripts/lint-sql-gates.mjs`: 120 files, 0 findings.
 - `node scripts/lint-migration-data-dependence.mjs`: 83 refusals, 83 allowlisted, 0 NEW.
 - `npm run schema:functions:check`: snapshot current (142 functions).
