@@ -97,6 +97,7 @@ import { departedHistoryInclusion, isDepartedKey, type DepartedHistoryKey } from
 import { MARKS_SINCE_FLAG, MARKS_TRAILING_SINCE_FLAG, parseMarksStart } from "./nav-marks-start";
 import { OPTIONS_ACTIVITY_FLAG, OPTIONS_CASH_BASIS_FLAG, isOptionsCashBasis } from "./options-cash-basis-flag";
 import { TINY_BASE_DAYS_FLAG, readTinyBaseDays } from "@/lib/tiny-base-flag";
+import { analyticsHold } from "@/lib/analytics-hold";
 import {
   PERCENTILE_METRICS,
   scoreAgainstPopulation,
@@ -2659,6 +2660,18 @@ export interface MyAllocationDashboardPayload {
        * only this three-valued presentation string crosses to the client.
        */
       series_state: SeriesState;
+      /**
+       * Phase 237 / FACT-02 (S8b) — true ONLY for a held re-run: a `pending` or
+       * `computing` `strategy_analytics` row over a stored, non-composite success
+       * result (`analyticsHold(row).updating`), so the figures on this row are the
+       * last success's while a new run is in flight. The scenario composer prints
+       * the quiet Updating line from it. The RAW `computation_status`,
+       * `cumulative_return`, `computed_at` and flags blob that decide it NEVER ship
+       * (T-147-10, T-111-03). Same meaning as the returns API's field and the
+       * shaped list row's `analytics_updating`. Optional only so legacy hand-built
+       * fixtures compile; `getMyAllocationDashboard` ALWAYS sets it.
+       */
+      analytics_updating?: boolean;
       /**
        * 194 D-15 (2026-11-07): the strategy's TOTAL record as three scalars, computed
        * SERVER-side by `figureRecordScalars` off the placeholder-free resolved series
@@ -6061,6 +6074,8 @@ export const getMyAllocationDashboard = cache(
               data_quality_flags,
               returns_series,
               computation_status,
+              cumulative_return,
+              computed_at,
               record_observations:metrics_json->record_observations
             )
           )
@@ -6147,10 +6162,9 @@ export const getMyAllocationDashboard = cache(
       const rawA = castRow<{ strategy_analytics: unknown }>(embed, "analytics-join")
         ?.strategy_analytics;
       const a = (Array.isArray(rawA) ? rawA[0] : rawA) as
-        | { data_quality_flags?: { native_unit?: unknown } | null }
-        | null
-        | undefined;
-      return parseReturnsUnit(a?.data_quality_flags?.native_unit) !== null;
+        | Parameters<typeof effectiveDataQualityFlags>[0];
+      // 237 WR-01: the unit of the numbers the row STORES (a derive prestamp's live flags are the new derive's).
+      return parseReturnsUnit(effectiveDataQualityFlags(a).flags?.native_unit) !== null;
     });
     const btcCloses = bookHasNativeUnit ? await readBtcCloses(supabase) : null;
     if (bookHasNativeUnit && btcCloses === null) {
@@ -6206,7 +6220,9 @@ export const getMyAllocationDashboard = cache(
       // emitted analytics below so only this boolean crosses to the client
       // (T-111-03: degraded-member venue detail never ships).
       const analyticsObj = (analytics ?? null) as Record<string, unknown> | null;
-      const dqf = analyticsObj?.data_quality_flags as
+      // 237 WR-01: the flags that belong to the stored numbers (the bound snapshot's inside a
+      // derive prestamp window), the same read the returns API and the factsheet make.
+      const dqf = effectiveDataQualityFlags(analyticsObj).flags as
         | { composite?: unknown; native_unit?: unknown; cumulative_method?: unknown; tiny_base_days?: unknown }
         | null
         | undefined;
@@ -6291,6 +6307,10 @@ export const getMyAllocationDashboard = cache(
           computation_status: _cs,
           // 194 D-15: read below for `figure_observations`, then dropped.
           record_observations: _ro,
+          // 237 FACT-02: read below by `analyticsHold` (the stored-result
+          // evidence), then dropped. Neither column crosses to the client.
+          cumulative_return: _cr,
+          computed_at: _ca,
           ...analyticsRest
         } = analyticsObj;
         // P3: keep the intermediate at the Record<string, unknown> idiom this
@@ -6336,6 +6356,10 @@ export const getMyAllocationDashboard = cache(
         resolvedDailyReturns.length > 0
           ? "available"
           : deriveEmptySeriesState(seriesStatus, strategyCreatedAt);
+      // Phase 237 / FACT-02 (S8b) — the ONE held-re-run verdict, from the UNSTRIPPED
+      // row (status, stored-result evidence and the flags blob are all still on
+      // `analyticsObj`). Only this boolean ships; the raw status and flags do not.
+      const analytics_updating = analyticsHold(analyticsObj).updating;
 
       // eligibility: a strategy is eligible for outcome
       // recording only when:
@@ -6449,6 +6473,7 @@ export const getMyAllocationDashboard = cache(
             native_unpriced,
             ...(strategyTinyBaseDays.length > 0 ? { tiny_base_days: strategyTinyBaseDays } : {}),
             series_state,
+            analytics_updating,
             ...figureRecordScalars({
               series: resolvedDailyReturns,
               recordSeriesStart: curveRecordStart(analyticsObj?.daily_returns, analyticsObj?.returns_series),

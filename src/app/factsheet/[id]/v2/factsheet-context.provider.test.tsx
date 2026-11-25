@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } fr
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
-import { FactsheetProvider, useComparator, useDisplay, useToggles, useXRange } from "./factsheet-context";
+import { FactsheetProvider, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
 
 /**
  * B7c — FactsheetProvider ⇄ localStorage integration.
@@ -510,14 +510,20 @@ describe("FactsheetProvider — the removed dark option is never read or re-writ
  * must survive it; and reset returns to the CURRENT full range, not the first render's.
  */
 describe("FactsheetProvider — xRange follows the full range until the user sets one (D-07)", () => {
-  function payloadOfLength(n: number): FactsheetPayload {
-    const d = new Date(Date.UTC(2024, 0, 1));
+  // Phase 239 (CACHE-02): n UTC-consecutive ISO days from `startISO`, so a test can grow
+  // the series at the FRONT (an earlier start) as well as at the back.
+  function payloadSpanning(n: number, startISO: string): FactsheetPayload {
+    const d = new Date(`${startISO}T00:00:00Z`);
     const dates = Array.from({ length: n }, () => {
       const iso = d.toISOString().slice(0, 10);
       d.setUTCDate(d.getUTCDate() + 1);
       return iso;
     });
     return { ...makePayload(), dates };
+  }
+
+  function payloadOfLength(n: number): FactsheetPayload {
+    return payloadSpanning(n, "2024-01-01");
   }
 
   function RangeProbe() {
@@ -535,12 +541,38 @@ describe("FactsheetProvider — xRange follows the full range until the user set
     );
   }
 
+  // Phase 239 (CACHE-02): prints the axis DATES at the two ends of the range, so a test can
+  // tell "the same indices" apart from "the same days".
+  function DatesProbe() {
+    const payload = usePayload();
+    const { xRange } = useXRange();
+    return <span data-testid="dates">{`${payload.dates[xRange[0]]}..${payload.dates[xRange[1]]}`}</span>;
+  }
+
   const tree = (n: number) => (
     <FactsheetProvider payload={payloadOfLength(n)} persist={false}>
       <RangeProbe />
     </FactsheetProvider>
   );
+  // Phase 239 (CACHE-02): the composer's 12M tab, as the provider sees it.
+  function PresetProbe() {
+    const { setPresetRange } = useXRange();
+    return (
+      <button data-testid="p12" onClick={() => setPresetRange(12)}>
+        12M
+      </button>
+    );
+  }
+
+  const datedTree = (payload: FactsheetPayload) => (
+    <FactsheetProvider payload={payload} persist={false}>
+      <RangeProbe />
+      <DatesProbe />
+      <PresetProbe />
+    </FactsheetProvider>
+  );
   const range = () => screen.getByTestId("range").textContent;
+  const dates = () => screen.getByTestId("dates").textContent;
 
   it("an unset range follows the axis when the payload grows from 3 to 120 dates", () => {
     const { rerender } = render(tree(3));
@@ -549,18 +581,32 @@ describe("FactsheetProvider — xRange follows the full range until the user set
     expect(range()).toBe("0-119");
   });
 
-  it("a range the user set is kept when the series grows, and reset returns to the CURRENT full range", () => {
-    const { rerender } = render(tree(120));
+  it("a range the user set keeps its DATES when the series grows at the back, and reset returns to the CURRENT full range", () => {
+    const { rerender } = render(datedTree(payloadOfLength(120)));
     act(() => {
       fireEvent.click(screen.getByTestId("set"));
     });
     expect(range()).toBe("10-40");
-    rerender(tree(150));
+    expect(dates()).toBe("2024-01-11..2024-02-10");
+    rerender(datedTree(payloadOfLength(150)));
+    expect(dates()).toBe("2024-01-11..2024-02-10");
     expect(range()).toBe("10-40");
     act(() => {
       fireEvent.click(screen.getByTestId("reset"));
     });
     expect(range()).toBe("0-149");
+  });
+
+  it("a range the user set keeps its DATES when the series grows at the FRONT", () => {
+    const { rerender } = render(datedTree(payloadOfLength(120)));
+    act(() => {
+      fireEvent.click(screen.getByTestId("set"));
+    });
+    expect(dates()).toBe("2024-01-11..2024-02-10");
+    // 30 earlier days arrive: every index now points 30 days earlier than before.
+    rerender(datedTree(payloadSpanning(150, "2023-12-02")));
+    expect(dates()).toBe("2024-01-11..2024-02-10");
+    expect(range()).toBe("40-70");
   });
 
   it("a range the user set that points past the end of a SHRUNK axis falls back to the current full range", () => {
@@ -571,5 +617,62 @@ describe("FactsheetProvider — xRange follows the full range until the user set
     expect(range()).toBe("10-40");
     rerender(tree(20));
     expect(range()).toBe("0-19");
+  });
+
+  const click = (id: string) =>
+    act(() => {
+      fireEvent.click(screen.getByTestId(id));
+    });
+
+  it("12M preset is the last 12 calendar months ending on the latest day", () => {
+    render(datedTree(payloadOfLength(500)));
+    click("p12");
+    expect(dates()).toBe("2024-05-14..2025-05-14");
+  });
+
+  it("12M preset still ends on the latest day after front growth", () => {
+    const { rerender } = render(datedTree(payloadOfLength(500)));
+    click("p12");
+    rerender(datedTree(payloadSpanning(530, "2023-12-02")));
+    expect(dates()).toBe("2024-05-14..2025-05-14");
+  });
+
+  it("12M preset rolls to the new latest day on back growth", () => {
+    const { rerender } = render(datedTree(payloadOfLength(500)));
+    click("p12");
+    rerender(datedTree(payloadOfLength(530)));
+    expect(dates()).toBe("2024-06-13..2025-06-13");
+  });
+
+  it("a 12M preset on a short series is the full range", () => {
+    render(datedTree(payloadOfLength(200)));
+    click("p12");
+    expect(range()).toBe("0-199");
+  });
+
+  it("a short-series preset start moves earlier on front growth", () => {
+    // 200 days end on 2024-07-18; 400 days from 2023-06-15 end on the same day.
+    const { rerender } = render(datedTree(payloadOfLength(200)));
+    click("p12");
+    rerender(datedTree(payloadSpanning(400, "2023-06-15")));
+    expect(dates()).toBe("2023-07-18..2024-07-18");
+  });
+
+  it("reset after a preset returns the full range", () => {
+    render(datedTree(payloadOfLength(500)));
+    click("p12");
+    expect(dates()).toBe("2024-05-14..2025-05-14");
+    click("reset");
+    expect(range()).toBe("0-499");
+  });
+
+  it("a manual range set after a preset keeps its dates", () => {
+    const { rerender } = render(datedTree(payloadOfLength(500)));
+    click("p12");
+    click("set");
+    expect(dates()).toBe("2024-01-11..2024-02-10");
+    // A newer day arrives: the manual range does not roll.
+    rerender(datedTree(payloadOfLength(530)));
+    expect(dates()).toBe("2024-01-11..2024-02-10");
   });
 });

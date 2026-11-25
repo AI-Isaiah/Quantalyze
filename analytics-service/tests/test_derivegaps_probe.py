@@ -55,6 +55,20 @@ _INST_BASE = {"SWAP": 1_000_000, "FUTURES": 2_000_000, "SPOT": 3_000_000, "MARGI
 
 
 @pytest.fixture(autouse=True)
+def _pinned_okx_walk_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 232: the OKX window walk reads "now" through ``services.exchange._now_ms``; pin it to the
+    run instant so these fixtures (dated 2026-10-31) neither rot nor depend on the calendar."""
+    import services.exchange as _ex
+
+    monkeypatch.setattr(_ex, "_now_ms", lambda: int(_RUN_AT.timestamp() * 1000))
+    # The probe's page arithmetic (pages per instType, the cap, the continuation past it) is defined
+    # over ONE read of the whole range. One window as long as the reach is exactly that request
+    # shape, so these fixtures keep their meaning; the walk's own windowing is gated in
+    # ``tests/test_okxtrades_walk.py``.
+    monkeypatch.setattr(_ex, "OKX_BILLS_WINDOW_DAYS", 400)
+
+
+@pytest.fixture(autouse=True)
 def _clean_dq_buffer() -> None:
     """The DQ buffer is per asyncio task; start every test with it empty."""
     get_and_clear_last_dq_flags()
@@ -68,10 +82,14 @@ def _clean_dq_buffer() -> None:
 def _okx_rows(inst_type: str, count: int) -> list[dict[str, str]]:
     """``count`` bills, newest first, one hour apart, with ids that fall as the list goes on."""
     base = _INST_BASE[inst_type]
+    # Phase 232: the OKX read starts at the 93-day reach, so a history of more than a thousand bills
+    # is spaced a minute apart (15,050 bills span about ten days) to stay inside it and inside the
+    # one window these tests read.
+    step_ms = _HOUR_MS if count <= 1000 else 60_000
     return [
         {
             "billId": str(base + count - k),
-            "ts": str(_NEWEST_MS - k * _HOUR_MS),
+            "ts": str(_NEWEST_MS - k * step_ms),
             "ccy": "USDT",
             "type": "2",
             "instType": inst_type,
@@ -113,6 +131,12 @@ class _FakeOkx:
         if self._fail is not None:
             raise self._fail
         rows = table.get(params.get("instType", ""), [])  # the funding read sends no instType
+        # Phase 232: honour ``begin``/``end`` on ``ts`` like the venue; the window walk refuses a
+        # bill the venue served outside the window it asked for.
+        if "begin" in params:
+            rows = [r for r in rows if int(r["ts"]) >= int(params["begin"])]
+        if "end" in params:
+            rows = [r for r in rows if int(r["ts"]) <= int(params["end"])]
         after = params.get("after")
         if after:
             rows = [r for r in rows if int(r["billId"]) < int(after)]
@@ -215,7 +239,8 @@ async def test_full_pages_to_the_loop_cap_read_truncated_through_the_real_fetche
     assert values["flag_fetch_error"] is False
     assert values["okx_bills_pages_max"] == 100
     assert values["okx_inst_types_at_cap"] == 1
-    assert values["realized_oldest_age"] == "365-546"
+    # Phase 232: a window past the cap is dropped whole and the walk stops, so no row is kept.
+    assert values["realized_oldest_age"] == "none"
 
 
 async def test_network_error_reads_fetch_error_with_a_closed_class_and_no_message() -> None:
@@ -251,11 +276,12 @@ class _FakeOkxArchiveDies(_FakeOkx):
 async def test_the_at_cap_count_of_a_failed_or_timed_out_read_is_field_absent(
     monkeypatch: pytest.MonkeyPatch, hang: bool
 ) -> None:
-    # 150 bills pages walk past today's 100-page cap before the archive endpoint dies. The cap WAS
-    # hit, but the read stopped part-way, so the count of capped walks is a partial figure; printing
-    # 0 or 1 from it would read as "not capped" / "capped once" for a walk set that is incomplete.
+    # The bills endpoint answers and the archive endpoint dies. The read stopped part-way, so the count
+    # of capped walks is a partial figure; printing 0 or 1 from it would read as "not capped" /
+    # "capped once" for a walk set that is incomplete. (Phase 232: a window past the cap now STOPS the
+    # walk before the archive is asked, so the part-way stop is reached with a history under the cap.)
     monkeypatch.setattr(dp, "KEY_READ_TIMEOUT_S", 0.3)
-    client = _FakeOkxArchiveDies({"SWAP": 15_000}, hang=hang)
+    client = _FakeOkxArchiveDies({"SWAP": 250}, hang=hang)
 
     values = await dp.measure_realized(_view(client), "okx", _RUN_DAY)
 
@@ -863,9 +889,12 @@ async def test_continuation_sizes_the_full_okx_history_past_the_cap() -> None:
     values = await dp.measure_past_cap(view, "okx", view.realized_walks, _RUN_DAY)
 
     assert values["pages_needed_okx_bills"] == 151  # 150 full pages plus the short last one
-    assert values["pages_needed_okx_archive"] == 1  # the archive walk was never at the cap
+    # Phase 232: the window past the cap stops the walk, so the archive was never asked.
+    assert values["pages_needed_okx_archive"] == 0
     assert values["past_cap_reached_end"] is True
-    assert values["past_cap_oldest_age"] == "547-729"
+    # Phase 232: 15,050 bills a minute apart span about ten days (the 93-day reach cannot hold them at
+    # an hour apart), so the oldest bill is in the 0-29 day bucket.
+    assert values["past_cap_oldest_age"] == "0-29"
     assert values["pages_needed_bybit_window"] == dp.FIELD_ABSENT
     # The continuation used the SAME endpoint and params with the `after` cursor from the last
     # recorded bill, so the venue was walked once, not restarted.
@@ -890,9 +919,11 @@ async def test_continuation_stops_at_its_ceiling_and_reports_a_lower_bound(
 
 
 async def test_a_spent_call_budget_in_the_continuation_is_a_lower_bound_not_a_refusal() -> None:
-    # 107 realized pages and one equity call fit under 110; the continuation then gets two pages.
+    # Phase 232: the capped window stops the walk before the archive is asked, so the realized read
+    # spends fewer calls than before; under a ceiling of 103 the realized read and the one equity
+    # call leave the continuation two pages (measured: 100 + 2 = 102).
     client = _FakeOkx(bills={"SWAP": 15_050})
-    view = _view(client, ceiling=110)
+    view = _view(client, ceiling=103)
     await dp.measure_realized(view, "okx", _RUN_DAY)
 
     values = await dp.measure_past_cap(view, "okx", view.realized_walks, _RUN_DAY)

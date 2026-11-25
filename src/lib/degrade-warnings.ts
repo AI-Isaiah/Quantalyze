@@ -881,6 +881,14 @@ export const DEGRADE_WARNINGS = [
     scope: "none",
     action: null,
   },
+  // Phase 237 FACT-02 (S8): `ANALYTICS_UPDATING_LINE` on a composer row whose strategy is re-running over its stored figures.
+  {
+    id: "scenario.analytics-updating",
+    surface: "scenario",
+    class: "in_progress",
+    scope: "none",
+    action: null,
+  },
   // The Scenario's per-source fallback (UI-SPEC target, scope key, the action is the named
   // wait): shown when the allocator has eligible keys and none has a per-key series yet. A
   // key with no per-key series is named by its label; when no label resolves the line
@@ -1126,16 +1134,17 @@ export const DEGRADE_WARNINGS = [
     ],
   },
   // MARKER-ONLY (the view keeps its shipped JSX and `data-degrade-id` is added). The USD view's
-  // two unavailable notes: a failed BTC-close read keeps its shipped wait as `shippedAction`
-  // (OQ-3: no vocabulary id fits "It is retried within the hour."), and no stored close at all is
-  // a steady fact about the record, an empty state, not a degrade.
+  // two unavailable notes: a failed BTC-close read ends on A-RELOAD, and no stored close at all is
+  // a steady fact about the record, an empty state, not a degrade. Phase 237 CACHE-03 closed the
+  // OQ-3 exception this entry carried ("no vocabulary id fits 'It is retried within the hour.'",
+  // shipped as `shippedAction`): a failed read is no longer cached, so a reload rebuilds the view
+  // and the line now says what is true, the A-RELOAD sentence, which the registry owns.
   {
     id: "factsheet.usd-view-read-failed",
     surface: "factsheet",
     class: "read_failure",
     scope: "none",
-    action: null,
-    shippedAction: "It is retried within the hour.",
+    action: "A-RELOAD",
   },
   {
     id: "factsheet.usd-view-no-priced-day",

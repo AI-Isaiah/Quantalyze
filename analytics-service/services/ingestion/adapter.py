@@ -148,11 +148,19 @@ class ValidationResult:
     #            adapter other than MT5 returns today. Consumers MUST fall
     #            through to their existing classification logic on None so this
     #            field changes no behaviour it does not explicitly opt into.
-    # All three states are LIVE at the one consumer that reads the field
+    # All three states are LIVE at the first consumer that reads the field
     # (services/ingestion/long_fetch.py): a stated verdict is authoritative in
     # both directions, and only None falls through. A consumer that honours
     # True but silently ignores False would make this docstring a lie and drop
     # the author's explicit statement on the floor.
+    # A second consumer exists since Phase 240 (CONN-05): the two adapter-fed
+    # validation arms in routers/process_key.py (the synchronous gate and
+    # _run_validate_only). They honour a stated True only and keep their own
+    # code-derived verdict on False and on None, by the Phase 240 CONTEXT
+    # decision. That True-only shape is a recorded choice, not the silent drop
+    # warned against above: those arms answer 403 (or 200 at validate-only) with
+    # recoverable false on True, and a stated False must never turn a credential
+    # or scope rejection into a retryable answer there.
     # Why provenance instead of a longer code list: the consumers' permanent-code
     # sets are structurally uncompletable — services/ingestion/csv_adapter.py
     # mints error_code from a pandera rule name (``first_rule.upper()``), an open

@@ -57,7 +57,7 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Data integrity: MT5 derives (MT5DERIVE2)
 
-- [ ] **MT5D-01**: Every failed attempt of a compute job leaves an append-only record of its cause, written before the re-claim clears `last_error`. The record tells a stall or watchdog reset apart from a real error, and stays readable after a later attempt succeeds. The deliberate `last_error` clear on re-claim stays. (covers: 175-NIGHTLY-MT5-DERIVE-CHECK)
+- [x] **MT5D-01**: Every failed attempt of a compute job leaves an append-only record of its cause, written before the re-claim clears `last_error`. The record tells a stall or watchdog reset apart from a real error, and stays readable after a later attempt succeeds. The deliberate `last_error` clear on re-claim stays. (covers: 175-NIGHTLY-MT5-DERIVE-CHECK)
 - [ ] **MT5D-02**: Once that record has collected real nightly runs, the named cause of MT5 `derive_broker_dailies` second attempts is fixed at its root, so that over seven consecutive nights every MT5 derive ends `done` with `attempts=1`. Raising retries or a watchdog threshold is not a close. (covers: 175-NIGHTLY-MT5-DERIVE-CHECK)
 - [ ] **MT5D-03**: The MT5 derive values that moved without explanation are replayed under both server-clock settings, and each moved value is attributed to the clock switch or to another named cause. (covers: 202-MT5-CLOCK-LEAD-01)
 - [ ] **MT5D-04**: A timed re-funding day with an empty cohort 0 keeps the return chain intact instead of being dropped by a guard. (covers: 164.6.6.2.3-EMPTY-COHORT0-REFUND)
@@ -69,10 +69,10 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 ### Data integrity: venue reads (BYBITREADS, OKXTRADES)
 
 - [ ] **VREAD-01**: The Bybit derive anchor sums the same set of stable coins as the current-equity read, through one shared coin-set constant. (covers: 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR)
-- [ ] **VREAD-02**: The Bybit holdings poll includes USDC-settled and inverse positions and their uPnL, not only USDT-linear ones. (covers: 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY)
-- [ ] **VREAD-03**: A Bybit strategy trade sync whose start is older than seven days returns every execution in the requested window, or refuses by name. (covers: 167.2.1.1.2.1-STRATEGY-BYBIT-7DAY)
-- [ ] **VREAD-04**: A Bybit on-chain deposit is counted exactly once. Replace or union is decided on probe evidence, and recorded as undecided if the probe cannot tell the two apart. (covers: 186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED)
-- [ ] **VREAD-05**: The Bybit owner's static egress IP is allow-listed (a founder action, recorded with its date), and that key's daily derive no longer errors for that reason. (covers: 167.1.2.2-BYBIT-STATIC-EGRESS)
+- [x] **VREAD-02**: The Bybit holdings poll includes USDC-settled and inverse positions and their uPnL, not only USDT-linear ones. (covers: 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY)
+- [x] **VREAD-03**: A Bybit strategy trade sync whose start is older than seven days returns every execution in the requested window, or refuses by name. (covers: 167.2.1.1.2.1-STRATEGY-BYBIT-7DAY)
+- [x] **VREAD-04**: A Bybit on-chain deposit is counted exactly once. Replace or union is decided on probe evidence, and recorded as undecided if the probe cannot tell the two apart. (covers: 186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED)
+- [x] **VREAD-05**: The Bybit owner's static egress IP is allow-listed (a founder action, recorded with its date), and that key's daily derive no longer errors for that reason. (covers: 167.1.2.2-BYBIT-STATIC-EGRESS)
 - [ ] **VREAD-06**: An OKX daily P&L bill in a currency other than USDT is converted at a stated rate or refused by name. It is never summed at face value. (covers: 167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY)
 - [ ] **VREAD-07**: An OKX first window longer than the page cap completes across ticks instead of truncating every day. Raising `OKX_BILLS_PAGE_CAP` is not a close. If an earlier phase already closed this, the closing evidence is recorded instead. (covers: 167.1.2.2.2-OKX-PERSISTENT-TRUNCATION)
 - [ ] **VREAD-08**: `api_keys.last_fetched_trade_timestamp` never reads ahead of the newest stored trade, and a key found ahead has its skipped days re-read. (covers: 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD)
@@ -101,11 +101,11 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Data integrity: no stranded strategy (JOBHEAL)
 
-- [ ] **HEAL-01**: A finalize-wizard strategy whose first `sync_trades` enqueue dropped is re-enqueued, or shown in a named state. This uses its own mechanism, not a second predicate on the reconcile sweep. (covers: L4282)
-- [ ] **HEAL-02**: A `derive_allocator_equity` job queued behind slow batch-mates is never reset and run twice. (covers: 166.5.1-DERIVE-BATCH-RESET-RESIDUAL)
-- [ ] **HEAL-03**: A strategy whose reconcile readmit hits its ceiling emits a readable signal. Whether that is an audit row or an external alert is a founder ruling at plan time. (covers: L2244)
-- [ ] **HEAL-04**: A job reclaimed after a crash keeps its curated error sentence, and the strategy's analytics status follows the reclaim. (covers: 164.2-RECLAIM-PROVENANCE)
-- [ ] **HEAL-05**: The daily positions poll also covers private strategies, so they get position snapshots. The `poll_positions` enqueue stays live (F-8). (covers: FANOUT-COHORT-SIBLING-POLL-01)
+- [x] **HEAL-01**: A finalize-wizard strategy whose first `sync_trades` enqueue dropped is re-enqueued, or shown in a named state. This uses its own mechanism, not a second predicate on the reconcile sweep. (covers: L4282)
+- [x] **HEAL-02**: A `derive_allocator_equity` job queued behind slow batch-mates is never reset and run twice. (covers: 166.5.1-DERIVE-BATCH-RESET-RESIDUAL)
+- [x] **HEAL-03**: A strategy whose reconcile readmit hits its ceiling emits a readable signal. Whether that is an audit row or an external alert is a founder ruling at plan time. (covers: L2244)
+- [x] **HEAL-04**: A job reclaimed after a crash keeps its curated error sentence, and the strategy's analytics status follows the reclaim. (covers: 164.2-RECLAIM-PROVENANCE)
+- [x] **HEAL-05**: The daily positions poll also covers private strategies, so they get position snapshots. The `poll_positions` enqueue stays live (F-8). (covers: FANOUT-COHORT-SIBLING-POLL-01)
 
 ### Data integrity: one figure convention (FIGUREMATH)
 
@@ -151,9 +151,9 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### CI and tooling: MT5 soak (MT5SOAK)
 
-- [ ] **SOAK-01**: The soak judges a BTC-unit account on floors in its own unit, not on USD floors. (covers: 164.6.6.2.3-SOAK-BTC-FLOORS)
-- [ ] **SOAK-02**: The soak's timed-day check rejects NaN and implausible returns, not only infinity, and goes RED on a 1e-3 nudge to a timed day. (covers: 164.6.6.2.3-SOAK-TIMED-DAYS-UNCHECKED)
-- [ ] **SOAK-03**: The soak checks day attribution against an independent per-day walk that imports no production helper, and goes RED when one deal is moved by one UTC day. (covers: 164.6.6.2.3-SOAK-DAY-ATTRIBUTION)
+- [x] **SOAK-01**: The soak judges a BTC-unit account on floors in its own unit, not on USD floors. (covers: 164.6.6.2.3-SOAK-BTC-FLOORS)
+- [x] **SOAK-02**: The soak's timed-day check rejects NaN and implausible returns, not only infinity, and goes RED on a 1e-3 nudge to a timed day. (covers: 164.6.6.2.3-SOAK-TIMED-DAYS-UNCHECKED)
+- [x] **SOAK-03**: The soak checks day attribution against an independent per-day walk that imports no production helper, and goes RED when one deal is moved by one UTC day. (covers: 164.6.6.2.3-SOAK-DAY-ATTRIBUTION)
 
 ### Carried phase 222 ALERTTRUTH
 
@@ -299,7 +299,7 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | ONCE-03 | Phase 225 | Pending |
 | ONCE-04 | Phase 225 | Pending |
 | PROOF-01 | Every v1.22 phase, and every v1.23 phase by F-10 (closed at each milestone audit) | Pending |
-| MT5D-01 | Phase 227 | Pending |
+| MT5D-01 | Phase 227 | Complete |
 | MT5D-02 | Phase 230 | Pending |
 | MT5D-03 | Phase 230 | Pending |
 | MT5D-04 | Phase 229 | Pending |
@@ -308,10 +308,10 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | MT5D-07 | Phase 229 | Pending |
 | MT5D-08 | Phase 225 | Pending |
 | VREAD-01 | Phase 231 | Pending |
-| VREAD-02 | Phase 231 | Pending |
-| VREAD-03 | Phase 231 | Pending |
-| VREAD-04 | Phase 231 | Pending |
-| VREAD-05 | Phase 231 | Pending |
+| VREAD-02 | Phase 231 | Complete |
+| VREAD-03 | Phase 231 | Complete |
+| VREAD-04 | Phase 231 | Complete |
+| VREAD-05 | Phase 231 | Complete |
 | VREAD-06 | Phase 232 | Pending |
 | VREAD-07 | Phase 232 | Pending |
 | VREAD-08 | Phase 232 | Pending |
@@ -328,24 +328,24 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | NOCAP-02 | Phase 234 | Pending |
 | NOCAP-03 | Phase 234 | Pending |
 | NOCAP-04 | Phase 234 | Pending |
-| HEAL-01 | Phase 227 | Pending |
-| HEAL-02 | Phase 227 | Pending |
-| HEAL-03 | Phase 227 | Pending |
-| HEAL-04 | Phase 227 | Pending |
-| HEAL-05 | Phase 227 | Pending |
+| HEAL-01 | Phase 227 | Complete |
+| HEAL-02 | Phase 227 | Complete |
+| HEAL-03 | Phase 227 | Complete |
+| HEAL-04 | Phase 227 | Complete |
+| HEAL-05 | Phase 227 | Complete |
 | FIG-01 | Phase 236 | Pending |
 | FIG-02 | Phase 236 | Pending |
 | FIG-03 | Phase 236 | Pending |
 | FIG-04 | Phase 236 | Pending |
 | FIG-05 | Phase 236 | Pending |
-| FACT-01 | Phase 237 | Pending |
-| FACT-02 | Phase 237 | Pending |
+| FACT-01 | Phase 237 | Shipped (#1316), human verification pending |
+| FACT-02 | Phase 237 | Shipped (#1316), human verification pending |
 | FACT-03 | Phase 238 | Pending |
-| FACT-04 | Phase 237 | Pending |
+| FACT-04 | Phase 237 | Shipped (#1316), human verification pending |
 | FACT-05 | Phase 238 | Pending |
-| CACHE-01 | Phase 237 | Pending |
+| CACHE-01 | Phase 237 | Shipped (#1316), human verification pending |
 | CACHE-02 | Phase 239 | Pending |
-| CACHE-03 | Phase 237 | Pending |
+| CACHE-03 | Phase 237 | Shipped (#1316), human verification pending |
 | CACHE-04 | Phase 239 | Pending |
 | CONN-01 | Phase 225 | Pending |
 | CONN-02 | Phase 228 | Pending |
@@ -384,9 +384,9 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | LANE-02 | Phase 249 (v1.23) | Pending |
 | LANE-03 | Phase 249 (v1.23) | Pending |
 | LANE-04 | Phase 249 (v1.23) | Pending |
-| SOAK-01 | Phase 226 | Pending |
-| SOAK-02 | Phase 226 | Pending |
-| SOAK-03 | Phase 226 | Pending |
+| SOAK-01 | Phase 226 | Complete |
+| SOAK-02 | Phase 226 | Complete |
+| SOAK-03 | Phase 226 | Complete |
 
 **Coverage:**
 - 116 requirements in all, across two milestones (F-10). FLOWK-01 was dropped by the founder on 2026-11-23 and is not counted.

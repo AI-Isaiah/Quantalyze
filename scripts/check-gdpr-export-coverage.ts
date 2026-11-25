@@ -405,6 +405,15 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "Per-key per-day marked-to-market NAV store (migration 20261029120000). ON DELETE CASCADE from auth.users erases every row when the user is sanitized, and ON DELETE CASCADE from api_keys erases a deleted key's rows. No explicit sanitize_user matrix row needed; mirrors the allocator_equity_derived CASCADE-erasure allowlist pattern.",
   },
+  // ⛔ `compute_job_attempt_failures` (Phase 227 JOBLEDGER) does NOT belong here, and this note
+  // stops someone adding it. An earlier revision allowlisted it on the claim that its owner
+  // ON DELETE CASCADEs erase it. That was false on the erasure path: sanitize_user DELETEs
+  // api_keys but only ANONYMIZES strategies, portfolios and auth.users, so the strategy_id,
+  // portfolio_id and allocator_id cascades never fire. Migration
+  // 20261124120700_sanitize_user_attempt_failures.sql gives the table a REAL Art. 17 policy
+  // (a live DELETE arm over all four owner keys plus its `-- compute_job_attempt_failures |
+  // PURGE` matrix row), proved by supabase/tests/test_compute_job_attempt_failures.sql arms
+  // E11 to E11d against the real sanitize_user.
   // bridge_outcomes / bridge_outcome_dismissals: cross-party bridge
   // surfaces. Matching the contact_requests PRESERVE pattern - the
   // anonymized profile's identity is non-resolvable once

@@ -1,10 +1,12 @@
 import asyncio
 import ccxt.async_support as ccxt
 import logging
+import math
 import os
 import random
 import re
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
@@ -15,8 +17,15 @@ from supabase import Client
 
 from services.account_identity import VENUES_WITH_ACCOUNT_ID, venue_account_id_from
 from services.closed_sets import is_trade_side
+from services.exchange_pagination import (
+    PageRequest,
+    PageResult,
+    ProviderPaginationContract,
+    walk_paginated,
+)
 from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
+from services.price_rule import is_stable_value
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics")
@@ -140,12 +149,46 @@ def get_and_clear_last_dq_flags() -> dict[str, Any]:
 # ``daily_pnl_truncated_*`` flag a cap hit has always set.
 OKX_BILLS_PAGE_CAP: int = 100
 OKX_ARCHIVE_PAGE_CAP: int = 100
+#: Phase 232 VREAD-07: the OKX bills read walks UTC-day-aligned windows of this many days, oldest
+#: first, and the two caps above are per (window, instType, endpoint). Sizing: a 7-day window at
+#: the unchanged cap holds up to 10,000 bills per instType, 1,428 a day, at least 28 times the
+#: heaviest measured day (RESEARCH). A window past the cap still refuses by name.
+OKX_BILLS_WINDOW_DAYS: int = 7
+#: How far back the OKX walk starts when it has no (or an older) start. Longer than any calendar
+#: three months (92 days at most), the archive's documented reach, so a cron tick never spends its
+#: deadline on windows that can only be empty.
+OKX_BILLS_REACH_DAYS: int = 93
+#: ``/account/bills`` documents the last 7 days. A window that ends after the live floor (the UTC
+#: day of now minus this many days minus one) reads it, one that starts before it reads the archive.
+OKX_LIVE_BILLS_DAYS: int = 7
 #: Per 7-day window, at ``BYBIT_CLOSED_PNL_LIMIT`` rows a page. The 186-04 probe measured 44 pages
 #: (about 4,400 closes) in the one PROD Bybit key's busiest week, so the first value, 50, left 12%
 #: headroom, and one busier week would have refused that key every day for a year (the walk is a
 #: rolling 365 days). 200 pages is 20,000 rows a window, about 100 s only in a window that busy
 #: (0.5 s a page); ``DAILY_PNL_READ_DEADLINE_S`` still bounds the whole walk (D-06).
 BYBIT_PNL_PAGE_CAP: int = 200
+#: Phase 231 VREAD-03: the Bybit execution read walks seven-day windows (``startTime`` and
+#: ``endTime`` on every request, the venue answers a start-only request with seven days) and each
+#: window is paged by cursor. Per window, at ``BYBIT_EXECUTION_PAGE_SIZE`` rows a page.
+#: Sizing (ruling OQ7): the 2026-11-23 probe's trade sweep did not finish, so it gave no page-cap
+#: input (``trade-cap-input: field-absent``) and the rule's floor applies, 200. The sweep's own
+#: maximum, 121 pages in one window of the one measured PROD key, is a LOWER bound (the sweep was
+#: incomplete), and 200 is above it without being proven sufficient. A window still live after the
+#: cap raises ``BybitTradeWindowIncomplete`` by name; it is never returned short.
+BYBIT_EXECUTION_WINDOW_PAGE_CAP: int = 200
+#: Bybit V5 ``/v5/execution/list`` documents a maximum page size of 100.
+BYBIT_EXECUTION_PAGE_SIZE: int = 100
+#: A first sync (no start, RESEARCH F3) walks this many days back (ruling OQ2): 53 windows.
+BYBIT_EXECUTION_DEFAULT_LOOKBACK_DAYS: int = 365
+#: The ``execType`` values that are fills the reader stores as trades: an unreadable row of one of
+#: these refuses the read. Any other typed row (Funding, Settle, Delivery, ...) is not a fill, and
+#: a row with no ``execType`` has no type to judge by, so both keep the logged skip.
+BYBIT_FILL_EXEC_TYPES: Final[frozenset[str]] = frozenset(
+    {"Trade", "BustTrade", "AdlTrade", "BlockTrade"}
+)
+#: The venue keeps two years of executions and rejects an older start (retCode 10001). A start
+#: older than this is refused before any request, never clamped.
+BYBIT_EXECUTION_HISTORY_DAYS: int = 730
 #: Bybit V5 ``/v5/position/closed-pnl`` documents a maximum page size of 100; the
 #: request used to send 200 (D-10: set to the documented maximum).
 BYBIT_CLOSED_PNL_LIMIT: int = 100
@@ -164,11 +207,23 @@ DAILY_PNL_READ_DEADLINE_S: float = 397.0
 _monotonic: Callable[[], float] = time.monotonic
 
 
+def _wall_clock_ms() -> int:
+    """Wall-clock epoch milliseconds."""
+    return int(time.time() * 1000)
+
+
+#: Indirection so a test pins "now" for the OKX window walk (no fixture straddles UTC midnight).
+_now_ms: Callable[[], int] = _wall_clock_ms
+
+
 #: ccxt exception class names ``fetch_daily_pnl`` records for a venue rate limit.
 DAILY_PNL_RATE_LIMIT_CLASSES: Final[frozenset[str]] = frozenset(
     {"RateLimitExceeded", "DDoSProtection"}
 )
 _DAILY_PNL_ERROR_CLASS_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+#: Phase 232 VREAD-06: a currency code the OKX non-USD census may name in its one WARNING log line;
+#: anything else is logged as ``malformed`` (a venue string never reaches a flag or a log verbatim).
+_OKX_CCY_CODE_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9]{1,16}$")
 
 
 class DailyPnlReadVerdict(NamedTuple):
@@ -197,8 +252,9 @@ def daily_pnl_read_verdict(flags: Mapping[str, Any]) -> DailyPnlReadVerdict:
     ``daily_pnl_malformed_*`` (a row the walk dropped because it could not be read) is NOT a
     reason, by founder decision D-12 (2026-11-04): a malformed row is stamped as a data-quality
     flag and the key keeps publishing, because refusing would remove a key from the book every day
-    for as long as the row stays in the walk, and no one has counted the keys that carry one
-    (TODOS ``[186-REALIZED-MALFORMED-COUNT]``). All three readers therefore ignore the flag. The derive
+    for as long as the row stays in the walk. Counted read-only on 2026-11-24 (Phase 223, FLOWK-03):
+    0 flags on every measured key and strategy (two Bybit key rows computed before Phase 186 are not
+    measured), and the founder ruled "Keep flagging" the same day. All three readers therefore ignore the flag. The derive
     persists it from the buffer it drains: strategy mode on ``strategy_analytics.data_quality_flags``,
     key mode on the key's ``key_inputs`` record.
     """
@@ -207,6 +263,8 @@ def daily_pnl_read_verdict(flags: Mapping[str, Any]) -> DailyPnlReadVerdict:
         reasons.append("daily_pnl_fetch_error")
     if flags.get("daily_pnl_binance_income_fallback"):
         reasons.append("daily_pnl_binance_income_fallback")
+    if flags.get("daily_pnl_non_usd_okx"):
+        reasons.append("daily_pnl_non_usd_okx")
     reasons.extend(
         key
         for key, value in flags.items()
@@ -635,6 +693,67 @@ class ColdStartSymbolDiscoveryError(Exception):
     (allocator's Trade Volume tab stays empty even with 90 days of
     trades on the account) — see G12.B.1.
     """
+
+
+class BybitTradeWindowIncomplete(RuntimeError):
+    """The Bybit execution read could not return every execution of its window, so it returns none.
+
+    ``reason`` is closed: ``page_cap`` (a window still live after
+    ``BYBIT_EXECUTION_WINDOW_PAGE_CAP`` pages), ``cursor_stuck`` (a page with rows answered the
+    cursor it was sent), ``start_too_old`` (a start past the venue's two-year history) or
+    ``malformed_reply`` (a page with no ``result`` object or no ``list`` array, which reads as an
+    empty window and would end the walk as complete) or ``unreadable_fill`` (a
+    row whose ``execType`` is in ``BYBIT_FILL_EXEC_TYPES`` and whose time, price or quantity cannot
+    be read, which would be a fill missing from a read returned as complete).
+
+    The text is static per reason, with no digit and no venue text: ``run_sync_trades_job`` stores
+    ``str(e)[:200]``. It is not a ``PaginationCeilingExceeded``, so no existing handler for that
+    class catches it by accident.
+    """
+
+    _TEXTS: Final[dict[str, str]] = {
+        "page_cap": "Bybit trade read incomplete: a window holds more executions than the page cap allows",
+        "cursor_stuck": "Bybit trade read incomplete: the venue's page cursor did not advance",
+        "start_too_old": "Bybit trade read refused: the start is older than the venue's execution history",
+        "malformed_reply": "Bybit trade read refused: a page answer has no result list",
+        "unreadable_fill": "Bybit trade read refused: an execution has no readable time, price or quantity",
+    }
+
+    def __init__(
+        self,
+        reason: Literal[
+            "page_cap", "cursor_stuck", "start_too_old", "malformed_reply", "unreadable_fill"
+        ],
+    ) -> None:
+        self.reason = reason
+        super().__init__(self._TEXTS[reason])
+
+
+class OkxBillsWindowIncomplete(RuntimeError):
+    """The OKX bills walk caught the venue not honouring the window it asked for, so it returns none.
+
+    ``reason`` is closed: ``out_of_window`` (a row whose ``ts`` lies outside the requested
+    ``begin``/``end``, so the venue ignored a bound) or ``order_drift`` (numeric ``billId`` values
+    not strictly descending, or a page that does not continue below the cursor it was sent, so a
+    short page would end a window early and the tail would be missing).
+
+    The text is static per reason, with no digit and no venue text: only the class name reaches
+    ``daily_pnl_fetch_error_class``.
+    """
+
+    _TEXTS: Final[dict[str, str]] = {
+        "out_of_window": "OKX bills read refused: the venue served a bill outside the requested window",
+        "order_drift": "OKX bills read refused: the venue's pages are not in newest-first order",
+    }
+
+    def __init__(self, reason: Literal["out_of_window", "order_drift"]) -> None:
+        self.reason = reason
+        super().__init__(self._TEXTS[reason])
+
+
+class _BybitWindowPageCap(Exception):
+    """The walker's ceiling error for the Bybit execution read. Its message carries the cap and the
+    window bounds, so the reader catches it and raises ``BybitTradeWindowIncomplete`` instead."""
 
 
 class BinancePerSymbolFetchError(Exception):
@@ -1516,6 +1635,97 @@ async def _okx_bills_fetch_with_backoff(
     raise RuntimeError("unreachable: _okx_bills_fetch_with_backoff")
 
 
+def _okx_utc_date(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+async def _okx_bills_window_read(
+    exchange: ccxt.Exchange,
+    method_name: str,
+    inst_type: str,
+    start_ms: int,
+    end_ms: int,
+    page_cap: int,
+    read_deadline: float,
+) -> tuple[list[dict[str, Any]], Literal["complete", "cap", "deadline"]]:
+    """Read one window ``[start_ms, end_ms)`` of one instType from one OKX bills endpoint.
+
+    Pages newest-first by ``after`` (the last ``billId`` of the previous page) up to ``page_cap``.
+    Every request carries ``begin`` = start minus 1 ms and ``end`` = end, so the venue's bound
+    inclusivity (undocumented) cannot lose an edge bill; the 1 ms edge rows outside ``[start, end)``
+    are dropped silently, they belong to the neighbouring window. Any other row with a digit ``ts``
+    outside ``[start - 1, end]`` means the venue ignored a bound: ``OkxBillsWindowIncomplete``
+    (``out_of_window``). Numeric ``billId`` values must be strictly descending within a page and a
+    page's first must be below the cursor it was sent, else ``order_drift``. A row with a non-digit
+    ``ts`` or a non-numeric ``billId`` passes through unchanged (the aggregator names it).
+
+    Returns the rows kept and an outcome: ``complete`` (an empty or short page ended the window),
+    ``cap`` (a full page on the last allowed page) or ``deadline`` (the read deadline passed before a
+    request). The caller drops the rows of a window that is not ``complete``.
+    """
+    label = ("archive " if method_name.endswith("_archive") else "") + inst_type
+    kept: list[dict[str, Any]] = []
+    after_id = ""
+    for page in range(page_cap):
+        if _monotonic() >= read_deadline:
+            return kept, "deadline"
+        params: dict[str, str] = {
+            "instType": inst_type,
+            "limit": "100",
+            "begin": str(start_ms - 1),
+            "end": str(end_ms),
+        }
+        if after_id:
+            params["after"] = after_id
+        try:
+            reply = await _okx_bills_fetch_with_backoff(
+                exchange, method_name, params, label=label, page=page,
+            )
+        except Exception as e:
+            # NEW-C13-04 / NEW-C13-10: re-raise so the partial series is rejected; scrub first.
+            logger.error(
+                "OKX bills fetch failed for %s page %d: exc_class=%s scrubbed=%s — "
+                "re-raising (partial daily_pnl rejected)",
+                label, page, type(e).__name__, scrub_freeform_string(str(e)),
+            )
+            raise
+        data = reply.get("data", [])
+        if not data:
+            return kept, "complete"
+        previous_id: int | None = None
+        cursor_id = int(after_id) if after_id.isdigit() else None
+        for row in data:
+            bill_id = str(row.get("billId", ""))
+            if bill_id.isdigit():
+                numeric_id = int(bill_id)
+                bound = previous_id if previous_id is not None else cursor_id
+                if bound is not None and numeric_id >= bound:
+                    logger.warning(
+                        "OKX bills %s: page order is not newest-first (window %s..%s) — refusing the read",
+                        label, _okx_utc_date(start_ms), _okx_utc_date(end_ms),
+                    )
+                    raise OkxBillsWindowIncomplete("order_drift")
+                previous_id = numeric_id
+            ts_raw = row.get("ts", "")
+            if isinstance(ts_raw, str) and ts_raw.isdigit():
+                ts = int(ts_raw)
+                if ts < start_ms - 1 or ts > end_ms:
+                    logger.warning(
+                        "OKX bills %s: a bill lies outside the requested window %s..%s — refusing the read",
+                        label, _okx_utc_date(start_ms), _okx_utc_date(end_ms),
+                    )
+                    raise OkxBillsWindowIncomplete("out_of_window")
+                if ts < start_ms or ts >= end_ms:
+                    continue  # the 1 ms overlap edge: the neighbouring window owns this bill
+            kept.append(row)
+        after_id = str(data[-1].get("billId", ""))
+        if len(data) < 100:
+            return kept, "complete"
+        if page == page_cap - 1:
+            return kept, "cap"
+    return kept, "complete"
+
+
 async def fetch_daily_pnl(
     exchange: ccxt.Exchange,
     since_ms: int | None = None,
@@ -1530,7 +1740,13 @@ async def fetch_daily_pnl(
 
     ``read_deadline_s`` (Phase 186, opt-in, default off): a wall-clock budget for the walk. Only a
     caller that drains the DQ flags afterwards may pass it, because a walk that stops at the
-    deadline reports it only through ``daily_pnl_truncated_*``.
+    deadline reports it only through a ``daily_pnl_*`` flag.
+
+    OKX (Phase 232 VREAD-07): the walk reads UTC-day-aligned windows of ``OKX_BILLS_WINDOW_DAYS``
+    days, oldest first. At the deadline it stamps ``daily_pnl_deadline_okx`` and returns whole UTC
+    days of the windows read before it, a contiguous oldest prefix; a window past the page cap
+    stamps ``daily_pnl_truncated_okx`` and the walk stops with the same kind of prefix. A caller
+    re-reading from the newest returned day completes the range.
     """
     # Audit-2026-05-07 C-0319 (Bybit cutover) / maintainability — same
     # entry-seam reset as ``fetch_raw_trades``. The Bybit branch used to
@@ -1552,153 +1768,85 @@ async def fetch_daily_pnl(
     try:
         if exchange.id == "okx":
             # OKX: fetch account bills (P&L history) across all instrument
-            # types, paginated for full history.
+            # types. Phase 232 VREAD-07: a WINDOW-MAJOR walk. UTC-day-aligned windows
+            # of OKX_BILLS_WINDOW_DAYS days are read OLDEST first, every request
+            # carrying ``begin`` and ``end``, so the page cap is per (window, instType,
+            # endpoint) and not spent on the newest bills of the whole range. A
+            # window's bills join the result only when every instType and endpoint of
+            # that window finished: on a deadline or a cap breach the in-progress
+            # window is dropped and the walk STOPS, so the result is a contiguous
+            # oldest prefix of whole UTC days.
             all_bills: list[dict[str, Any]] = []
 
-            # Phase 186 D-06: one deadline for the whole walk. Past it no further
-            # request is issued and ``daily_pnl_deadline_okx`` is stamped (not the cap flag).
-            _okx_deadline_hit = False
-            for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
-                if _okx_deadline_hit:
-                    break
-                after_id = ""
-                type_count = 0
-                _okx_bills_cap_hit = False
-
-                for page in range(OKX_BILLS_PAGE_CAP):
-                    if _monotonic() >= _read_deadline:
-                        _okx_deadline_hit = True
-                        break
-                    params: dict[str, str] = {"instType": inst_type, "limit": "100"}
-                    if since_ms:
-                        params["begin"] = str(since_ms)
-                    if after_id:
-                        params["after"] = after_id
-
-                    try:
-                        bills = await _okx_bills_fetch_with_backoff(
-                            exchange,
-                            "private_get_account_bills",
-                            params,
-                            label=inst_type,
-                            page=page,
-                        )
-                        data = bills.get("data", [])
-                        if not data:
-                            break
-                        all_bills.extend(data)
-                        type_count += len(data)
-                        after_id = data[-1].get("billId", "")
-                        if len(data) < 100:
-                            break
-                        # NEW-C13-05: detect page-cap exhaustion
-                        if page == OKX_BILLS_PAGE_CAP - 1:
-                            _okx_bills_cap_hit = True
-                    except Exception as e:
-                        # NEW-C13-04: re-raise so the worker retries and the
-                        # partial series is not silently treated as complete.
-                        # Pre-fix: warn+break returned a truncated series as
-                        # canonical daily PnL, feeding wrong Sharpe/equity.
-                        # NEW-C13-10: scrub before logging.
-                        logger.error(
-                            "OKX bills fetch failed for %s page %d: exc_class=%s scrubbed=%s — "
-                            "re-raising (partial daily_pnl rejected)",
-                            inst_type, page, type(e).__name__, scrub_freeform_string(str(e)),
-                        )
-                        raise
-
-                if type_count > 0:
-                    logger.info("OKX %s: fetched %d bills", inst_type, type_count)
-                if _okx_bills_cap_hit:
-                    # NEW-C13-05: page cap exhausted — history is truncated.
-                    logger.warning(
-                        "OKX %s: bills page cap (%d) hit — daily_pnl "
-                        "may be truncated for this inst_type",
-                        inst_type, OKX_BILLS_PAGE_CAP,
+            _okx_day_ms = 86_400_000
+            _okx_now_ms = _now_ms()
+            _okx_window_ms = OKX_BILLS_WINDOW_DAYS * _okx_day_ms
+            _okx_reach_ms = _okx_now_ms - OKX_BILLS_REACH_DAYS * _okx_day_ms
+            _okx_start_raw = _okx_reach_ms
+            if since_ms:
+                if since_ms >= _okx_reach_ms:
+                    _okx_start_raw = since_ms
+                else:
+                    logger.info(
+                        "OKX: since_ms is %d days older than the %d-day bills reach; "
+                        "the walk starts at the reach",
+                        (_okx_reach_ms - since_ms) // _okx_day_ms, OKX_BILLS_REACH_DAYS,
                     )
-                    _record_dq_flag("daily_pnl_truncated_okx", True)
-            if _okx_deadline_hit:
-                logger.warning(
-                    "OKX: read deadline (%.0fs) passed — daily_pnl truncated "
-                    "after %d bills",
-                    read_deadline_s, len(all_bills),
-                )
-                _record_dq_flag("daily_pnl_deadline_okx", True)
+            _okx_window_start = _okx_start_raw - _okx_start_raw % _okx_day_ms
+            # /account/bills serves the last 7 days; an older instant is read from the archive.
+            _okx_live_floor_ms = (
+                _okx_now_ms - _okx_now_ms % _okx_day_ms
+                - (OKX_LIVE_BILLS_DAYS - 1) * _okx_day_ms
+            )
 
-            # Fetch bills-archive for older history (>3 months)
-            # Only fetch archive if we need data older than 90 days
-            archive_bills: list[dict[str, Any]] = []
-            three_months_ago_ms = int((datetime.now(timezone.utc) - timedelta(days=90)).timestamp() * 1000)
-            should_fetch_archive = since_ms is None or since_ms < three_months_ago_ms
-            if not should_fetch_archive:
-                logger.info("OKX: skipping archive API (since_ms is within 3 months)")
-            else:
-                logger.info("OKX: fetching archive API for older history...")
-                _okx_archive_deadline_hit = False
+            while _okx_window_start < _okx_now_ms:
+                _okx_window_end = min(_okx_window_start + _okx_window_ms, _okx_now_ms)
+                _okx_window_bills: list[dict[str, Any]] = []
+                _okx_outcome: Literal["complete", "cap", "deadline"] = "complete"
+                _okx_stop_inst = ""
                 for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
-                    if _okx_archive_deadline_hit:
-                        break
-                    after_id = ""
-                    type_count = 0
-                    _okx_archive_cap_hit = False
-                    for page in range(OKX_ARCHIVE_PAGE_CAP):
-                        if _monotonic() >= _read_deadline:
-                            _okx_archive_deadline_hit = True
+                    _okx_routes: list[tuple[str, int]] = []
+                    if _okx_window_end > _okx_live_floor_ms:
+                        _okx_routes.append(("private_get_account_bills", OKX_BILLS_PAGE_CAP))
+                    if _okx_window_start < _okx_live_floor_ms:
+                        _okx_routes.append(
+                            ("private_get_account_bills_archive", OKX_ARCHIVE_PAGE_CAP)
+                        )
+                    for _okx_method, _okx_cap in _okx_routes:
+                        _okx_rows, _okx_outcome = await _okx_bills_window_read(
+                            exchange, _okx_method, inst_type,
+                            _okx_window_start, _okx_window_end, _okx_cap, _read_deadline,
+                        )
+                        _okx_window_bills.extend(_okx_rows)
+                        if _okx_outcome != "complete":
                             break
-                        params = {"instType": inst_type, "limit": "100"}
-                        if since_ms:
-                            params["begin"] = str(since_ms)
-                        if after_id:
-                            params["after"] = after_id
-                        try:
-                            bills = await _okx_bills_fetch_with_backoff(
-                                exchange,
-                                "private_get_account_bills_archive",
-                                params,
-                                label=f"archive {inst_type}",
-                                page=page,
-                            )
-                            data = bills.get("data", [])
-                            if not data:
-                                break
-                            archive_bills.extend(data)
-                            type_count += len(data)
-                            after_id = data[-1].get("billId", "")
-                            if len(data) < 100:
-                                break
-                            # 167.1.2.2.2 PR-B round 1 (ME-02): the archive walk
-                            # had a silent cap. OKX pages newest-first, so a
-                            # capped walk drops the OLDEST days of the window.
-                            if page == OKX_ARCHIVE_PAGE_CAP - 1:
-                                _okx_archive_cap_hit = True
-                        except Exception as e:
-                            # NEW-C13-04: same rationale as the bills path.
-                            # NEW-C13-10: scrub before logging.
-                            logger.error(
-                                "OKX archive bills fetch failed for %s: exc_class=%s scrubbed=%s — "
-                                "re-raising (partial daily_pnl rejected)",
-                                inst_type, type(e).__name__, scrub_freeform_string(str(e)),
-                            )
-                            raise
-                    if type_count > 0:
-                        logger.info("OKX archive %s: fetched %d bills", inst_type, type_count)
-                    if _okx_archive_cap_hit:
+                    if _okx_outcome != "complete":
+                        _okx_stop_inst = inst_type
+                        break
+                if _okx_outcome != "complete":
+                    _okx_window_label = (
+                        f"{_okx_utc_date(_okx_window_start)}..{_okx_utc_date(_okx_window_end)}"
+                    )
+                    if _okx_outcome == "deadline":
                         logger.warning(
-                            "OKX archive %s: page cap (%d) hit — daily_pnl "
-                            "may be truncated for this inst_type",
-                            inst_type, OKX_ARCHIVE_PAGE_CAP,
+                            "OKX: read deadline (%.0fs) passed in window %s (%s) — "
+                            "returning the %d bills of the earlier whole windows only",
+                            read_deadline_s, _okx_window_label, _okx_stop_inst, len(all_bills),
+                        )
+                        _record_dq_flag("daily_pnl_deadline_okx", True)
+                    else:
+                        logger.warning(
+                            "OKX: bills page cap hit in window %s (%s) — the window is "
+                            "dropped and the walk stops; daily_pnl is truncated",
+                            _okx_window_label, _okx_stop_inst,
                         )
                         _record_dq_flag("daily_pnl_truncated_okx", True)
-                if _okx_archive_deadline_hit:
-                    logger.warning(
-                        "OKX archive: read deadline (%.0fs) passed — daily_pnl "
-                        "truncated after %d archive bills",
-                        read_deadline_s, len(archive_bills),
-                    )
-                    _record_dq_flag("daily_pnl_deadline_okx", True)
+                    break
+                all_bills.extend(_okx_window_bills)
+                _okx_window_start = _okx_window_end
 
-            # Merge recent + archive and deduplicate by billId
-            merged_bills = all_bills + archive_bills
+            # Deduplicate by billId (a straddling window reads both endpoints).
+            merged_bills = all_bills
             seen_ids: set[str] = set()
             unique_bills: list[dict[str, Any]] = []
             for bill in merged_bills:
@@ -1712,9 +1860,8 @@ async def fetch_daily_pnl(
             all_bills = unique_bills
 
             logger.info(
-                "OKX total: %d bills (%d recent + %d archive, %d after dedup)",
-                len(all_bills), len(merged_bills) - len(archive_bills),
-                len(archive_bills), len(all_bills)
+                "OKX total: %d bills (%d after dedup)",
+                len(merged_bills), len(all_bills),
             )
 
             # Aggregate bills into daily PnL
@@ -1730,6 +1877,7 @@ async def fetch_daily_pnl(
             # filter cutover (Sprint 5.6) by dropping type=='8' here.
             _OKX_FUNDING_BILL_TYPE = "8"
             _okx_funding_bills_dropped = 0
+            _okx_non_usd_census: Counter[str] = Counter()
             for bill in all_bills:
                 bill_type = str(bill.get("type", "")).strip()
                 if bill_type == _OKX_FUNDING_BILL_TYPE:
@@ -1749,6 +1897,19 @@ async def fetch_daily_pnl(
                     _record_dq_flag("daily_pnl_malformed_okx", True)
                     continue
                 pnl_val = _pnl_raw + _fee_raw
+                # Phase 232 VREAD-06: a nonzero amount in a currency that is not a stable
+                # coin is never summed into USDT daily P&L at face value; a blank or missing
+                # ``ccy`` counts as not stable. A zero amount contributes 0 at any rate. The
+                # check sits after the type-8 drop and after the finite parse on purpose: a
+                # funding bill in BTC never refuses, and a non-finite amount keeps the
+                # malformed path above (a data-quality flag, not a refusal, D-12).
+                _ccy = str(bill.get("ccy") or "")
+                if pnl_val != 0.0 and not is_stable_value(_ccy):
+                    _okx_non_usd_census[
+                        _ccy if _OKX_CCY_CODE_RE.match(_ccy)
+                        else ("blank" if not _ccy else "malformed")
+                    ] += 1
+                    continue
                 ts_raw = bill.get("ts", "")
                 if ts_raw and ts_raw.isdigit():
                     dt = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
@@ -1767,6 +1928,19 @@ async def fetch_daily_pnl(
                         ts_raw, bill.get("billId"), bill.get("billType"),
                     )
                     _record_dq_flag("daily_pnl_malformed_okx", True)
+
+            if _okx_non_usd_census:
+                # Phase 232 VREAD-06: one non-USD bill refuses EVERY day of the read (the same
+                # history fails the same way on the next tick: a permanent class). The flag
+                # value is the boolean True; the venue's currency codes go to this log line
+                # only, by count, after the regex above (T-232-09).
+                _record_dq_flag("daily_pnl_non_usd_okx", True)
+                logger.warning(
+                    "OKX daily P&L refused: bills in a currency that is not a stable coin "
+                    "(census=%s, bills=%d)",
+                    dict(_okx_non_usd_census), sum(_okx_non_usd_census.values()),
+                )
+                return []
 
             logger.info(
                 "OKX: %d bills aggregated to %d daily PnL entries "
@@ -2770,8 +2944,21 @@ async def _fetch_raw_trades_bybit(
     since_ms: int | None,
     *,
     category: str = "linear",
+    now_ms: int | None = None,
+    default_lookback_days: int = BYBIT_EXECUTION_DEFAULT_LOOKBACK_DAYS,
 ) -> list[dict[str, Any]]:
-    """Bybit: private_get_v5_execution_list with cursor-based pagination.
+    """Bybit: private_get_v5_execution_list, every execution in ``[since_ms, now]`` or a refusal.
+
+    Phase 231 VREAD-03: Bybit answers a start-only request with seven days and a cursor belongs to
+    its query, so the read walks seven-day windows through ``walk_paginated``, sending ``startTime``
+    and ``endTime`` on every request and paging each window by ``nextPageCursor``. A missing start
+    walks ``default_lookback_days`` (``BYBIT_EXECUTION_DEFAULT_LOOKBACK_DAYS`` unless a caller
+    narrows it: ``BybitAdapter.fetch_raw`` passes 7, the reach a start-less read had before this
+    phase, because it serves the inline teaser (60 s budget) and the queued long_fetch onboard and
+    resync alike, census row C29). It raises ``BybitTradeWindowIncomplete`` (a
+    window past the page cap, a cursor that does not advance on a page with rows, a start past the
+    venue's two years) rather than return fewer executions than the window holds. ``now_ms`` is a
+    clock seam (the wall clock when None).
 
     NEW-C13-01: ``category`` is asserted against ``_BYBIT_FILL_CATEGORIES``
     so a future caller (or a refactor) cannot quietly request inverse
@@ -2791,150 +2978,202 @@ async def _fetch_raw_trades_bybit(
             f"_BYBIT_FILL_CATEGORIES — add explicit support before fetching"
         )
 
-    fills: list[dict[str, Any]] = []
-    cursor = ""
-    natural_break = False
+    now = int(time.time() * 1000) if now_ms is None else now_ms
+    day_ms = 24 * 60 * 60 * 1000
+    if since_ms is not None and since_ms < now - BYBIT_EXECUTION_HISTORY_DAYS * day_ms:
+        # Never clamped: a clamp would return a shorter history than the caller asked for.
+        raise BybitTradeWindowIncomplete("start_too_old")
 
-    PAGE_CAP = 100
-    for page in range(PAGE_CAP):
-        params: dict[str, str] = {"category": category, "limit": "100"}
-        if cursor:
-            params["cursor"] = cursor
-        if since_ms and not cursor:
-            params["startTime"] = str(since_ms)
+    async def _fetch_page(req: PageRequest) -> PageResult[dict[str, Any]]:
+        params: dict[str, str] = {
+            "category": category,
+            "limit": str(BYBIT_EXECUTION_PAGE_SIZE),
+            "startTime": str(req.window_start),
+            "endTime": str(req.window_end),
+        }
+        if req.cursor:
+            params["cursor"] = req.cursor
 
         try:
             result = await exchange.private_get_v5_execution_list(params)
-            items = result.get("result", {}).get("list", [])
-            if not items:
-                natural_break = True
-                break
-
-            for fill in items:
-                ts_raw = fill.get("execTime", "")
-                if ts_raw and ts_raw.isdigit():
-                    ts_dt = datetime.fromtimestamp(
-                        int(ts_raw) / 1000, tz=timezone.utc
-                    )
-                else:
-                    # Drop fills with unparseable ``execTime`` (C-0226 /
-                    # H-0667) — same rationale as the OKX branch. Log
-                    # whitelisted fields only.
-                    logger.error(
-                        "Bybit fill dropped: unparseable execTime=%r (symbol=%s, execId=%s)",
-                        ts_raw,
-                        fill.get("symbol"),
-                        fill.get("execId"),
-                    )
-                    continue
-
-                symbol = normalize_symbol("bybit", fill.get("symbol", ""))
-                side = fill.get("side", "").lower()
-                # Audit-2026-05-07 H-0661 — finite-value validation; same
-                # rationale as the OKX branch.
-                # NEW-C13-11: also reject zero/negative price and amount —
-                # both are physically impossible for a fill and indicate
-                # corrupt data; _finite_positive_float rejects ≤0 values.
-                # H-0669 — parse Bybit's decimal STRINGS straight to Decimal.
-                price_chk = _finite_positive_decimal(
-                    fill.get("execPrice", 0), label="Bybit execPrice"
-                )
-                amount_chk = _finite_positive_decimal(
-                    fill.get("execQty", 0), label="Bybit execQty"
-                )
-                if price_chk is None or amount_chk is None:
-                    logger.error(
-                        "Bybit fill dropped: non-finite price=%r or amount=%r "
-                        "(symbol=%s, execId=%s)",
-                        fill.get("execPrice"), fill.get("execQty"),
-                        fill.get("symbol"), fill.get("execId"),
-                    )
-                    continue
-                price = price_chk
-                amount = amount_chk
-                # Preserve signed fee so maker rebates remain negative
-                # (H-0671) — same rationale as the OKX branch.
-                fee_chk = _finite_decimal(
-                    fill.get("execFee", 0), label="Bybit execFee"
-                )
-                fee = fee_chk if fee_chk is not None else Decimal("0")
-                fee_currency = fill.get("feeCurrency", "USDT")
-                # Audit-2026-05-07 H-0670 — fee-currency mismatch flag.
-                _check_fee_currency_mismatch(
-                    exchange="bybit", symbol=symbol, fee_currency=fee_currency,
-                )
-                # Audit-2026-05-07 G12.B.9 — Bybit V5 sometimes returns
-                # boolean true/false (post JSON decode) and sometimes
-                # capital "True"/"TRUE". Strict string equality silently
-                # mis-classifies maker fills as taker, distorting the
-                # maker_ratio analytic + fee analysis. Accept either
-                # boolean True or any case-insensitive "true" string.
-                _raw_is_maker = fill.get("isMaker")
-                is_maker = _raw_is_maker is True or (
-                    isinstance(_raw_is_maker, str)
-                    and _raw_is_maker.lower() == "true"
-                )
-
-                # dict(...) widens the FillRow (TypedDict) factory output to the
-                # plain dict the list[dict[str, Any]] accumulator holds.
-                fills.append(dict(_make_fill_dict(
-                    exchange="bybit",
-                    symbol=symbol,
-                    side=side,
-                    price=price,
-                    quantity=amount,
-                    fee=fee,
-                    fee_currency=fee_currency,
-                    timestamp=ts_dt.isoformat(),
-                    exchange_order_id=fill.get("orderId", ""),
-                    exchange_fill_id=fill.get("execId", ""),
-                    is_maker=is_maker,
-                    raw_data=dict(fill),
-                    # Audit-2026-05-07 G12.B.4 — Bybit-side direction
-                    # derivation (closeOnTrigger, hedge mode flag) is
-                    # not in this batch's scope. Leave None; downstream
-                    # consumers fall back to side-based inference.
-                    position_direction=None,
-                )))
-
-            next_cursor = result.get("result", {}).get("nextPageCursor", "")
-            # Audit-2026-05-07 G12.B.6 — stuck-cursor guard. If Bybit
-            # returns the SAME nextPageCursor on a subsequent call, we'd
-            # otherwise loop until the page cap. Falsy nextPageCursor is
-            # the documented natural-stop condition.
-            if not next_cursor:
-                natural_break = True
-                break
-            if next_cursor == cursor:
-                logger.warning(
-                    "Pagination stuck on cursor=%s for exchange=bybit; terminating early",
-                    next_cursor,
-                )
-                natural_break = True
-                break
-            cursor = next_cursor
         except Exception as e:
             # Re-raise per-page failures (C-0227) — same rationale as the
             # OKX branch.
             # NEW-C13-10: scrub before logging.
             logger.error(
-                "Bybit execution list failed page %d (re-raising to fail the sync): exc_class=%s scrubbed=%s",
-                page, type(e).__name__, scrub_freeform_string(str(e)),
+                "Bybit execution list failed window=[%s,%s] cursor_set=%s (re-raising to fail the sync): exc_class=%s scrubbed=%s",
+                req.window_start, req.window_end, bool(req.cursor),
+                type(e).__name__, scrub_freeform_string(str(e)),
             )
             raise
 
-    if not natural_break:
-        # Audit-2026-05-07 M-0663 — same DQ flag pattern as OKX. Bybit
-        # cursor pagination doesn't expose a "has_more" hint other than
-        # nextPageCursor, so hitting the page cap is the only signal
-        # truncation occurred.
+        # Both keys are required, never defaulted: a reply with no ``result`` or no ``list``
+        # would otherwise read as an empty window and end the walk as a natural stop.
+        inner = result.get("result") if isinstance(result, dict) else None
+        items = inner.get("list") if isinstance(inner, dict) else None
+        if not isinstance(inner, dict) or not isinstance(items, list):
+            raise BybitTradeWindowIncomplete("malformed_reply")
+        next_cursor = inner.get("nextPageCursor") or ""
+        if not isinstance(next_cursor, str):
+            raise RuntimeError("Bybit execution list cursor is not a string")
+        if items and next_cursor and next_cursor == req.cursor:
+            # Audit-2026-05-07 G12.B.6 stopped silently here; Phase 231 refuses, because a stop
+            # on a live cursor is a short list stored as complete.
+            logger.warning(
+                "Pagination stuck on cursor for exchange=bybit; refusing the read"
+            )
+            raise BybitTradeWindowIncomplete("cursor_stuck")
+
+        page_fills: list[dict[str, Any]] = []
+        for fill in items:
+            # A fill the read cannot parse is a fill missing from a read returned as complete, so
+            # it refuses. A fill is a row whose ``execType`` is in ``BYBIT_FILL_EXEC_TYPES``
+            # (a liquidation, ADL or block trade is as much a fill as a Trade). Funding, Settle
+            # and Delivery rows are not fills, and a row with no ``execType`` has no type to judge
+            # by, so those keep the logged skip, as does a finite zero or negative quantity.
+            exec_type = fill.get("execType")
+            is_fill_row = exec_type in BYBIT_FILL_EXEC_TYPES
+            ts_raw = fill.get("execTime", "")
+            if ts_raw and ts_raw.isdigit():
+                ts_dt = datetime.fromtimestamp(
+                    int(ts_raw) / 1000, tz=timezone.utc
+                )
+            else:
+                # Drop fills with unparseable ``execTime`` (C-0226 /
+                # H-0667) — same rationale as the OKX branch. Log
+                # whitelisted fields only.
+                logger.error(
+                    "Bybit fill dropped: unparseable execTime=%r (execType=%s, symbol=%s, execId=%s)",
+                    ts_raw,
+                    exec_type,
+                    fill.get("symbol"),
+                    fill.get("execId"),
+                )
+                if is_fill_row:
+                    raise BybitTradeWindowIncomplete("unreadable_fill")
+                continue
+
+            symbol = normalize_symbol("bybit", fill.get("symbol", ""))
+            side = fill.get("side", "").lower()
+            # Audit-2026-05-07 H-0661 — finite-value validation; same
+            # rationale as the OKX branch.
+            # NEW-C13-11: also reject zero/negative price and amount —
+            # both are physically impossible for a fill and indicate
+            # corrupt data; _finite_positive_float rejects ≤0 values.
+            # H-0669 — parse Bybit's decimal STRINGS straight to Decimal.
+            price_chk = _finite_positive_decimal(
+                fill.get("execPrice", 0), label="Bybit execPrice"
+            )
+            amount_chk = _finite_positive_decimal(
+                fill.get("execQty", 0), label="Bybit execQty"
+            )
+            if price_chk is None or amount_chk is None:
+                logger.error(
+                    "Bybit fill dropped: non-finite price=%r or amount=%r "
+                    "(execType=%s, symbol=%s, execId=%s)",
+                    fill.get("execPrice"), fill.get("execQty"),
+                    exec_type, fill.get("symbol"), fill.get("execId"),
+                )
+                # Not finite (or absent) refuses; a finite zero or negative stays a skip.
+                if is_fill_row and (
+                    _finite_decimal(fill.get("execPrice"), label="Bybit execPrice") is None
+                    or _finite_decimal(fill.get("execQty"), label="Bybit execQty") is None
+                ):
+                    raise BybitTradeWindowIncomplete("unreadable_fill")
+                continue
+            price = price_chk
+            amount = amount_chk
+            # Preserve signed fee so maker rebates remain negative
+            # (H-0671) — same rationale as the OKX branch.
+            fee_chk = _finite_decimal(
+                fill.get("execFee", 0), label="Bybit execFee"
+            )
+            fee = fee_chk if fee_chk is not None else Decimal("0")
+            fee_currency = fill.get("feeCurrency", "USDT")
+            # Audit-2026-05-07 H-0670 — fee-currency mismatch flag.
+            _check_fee_currency_mismatch(
+                exchange="bybit", symbol=symbol, fee_currency=fee_currency,
+            )
+            # Audit-2026-05-07 G12.B.9 — Bybit V5 sometimes returns
+            # boolean true/false (post JSON decode) and sometimes
+            # capital "True"/"TRUE". Strict string equality silently
+            # mis-classifies maker fills as taker, distorting the
+            # maker_ratio analytic + fee analysis. Accept either
+            # boolean True or any case-insensitive "true" string.
+            _raw_is_maker = fill.get("isMaker")
+            is_maker = _raw_is_maker is True or (
+                isinstance(_raw_is_maker, str)
+                and _raw_is_maker.lower() == "true"
+            )
+
+            # dict(...) widens the FillRow (TypedDict) factory output to the
+            # plain dict the list[dict[str, Any]] accumulator holds.
+            page_fills.append(dict(_make_fill_dict(
+                exchange="bybit",
+                symbol=symbol,
+                side=side,
+                price=price,
+                quantity=amount,
+                fee=fee,
+                fee_currency=fee_currency,
+                timestamp=ts_dt.isoformat(),
+                exchange_order_id=fill.get("orderId", ""),
+                exchange_fill_id=fill.get("execId", ""),
+                is_maker=is_maker,
+                raw_data=dict(fill),
+                # Audit-2026-05-07 G12.B.4 — Bybit-side direction
+                # derivation (closeOnTrigger, hedge mode flag) is
+                # not in this batch's scope. Leave None; downstream
+                # consumers fall back to side-based inference.
+                position_direction=None,
+            )))
+
+        return PageResult(
+            rows=page_fills,
+            next_cursor=next_cursor,
+            is_full_page=len(items) >= BYBIT_EXECUTION_PAGE_SIZE,
+            is_empty=not items,
+        )
+
+    # Cursor-authoritative (a short page with a live cursor still has rows), so no short-page stop;
+    # a repeated cursor is refused in the page callback, never a stop.
+    contract = ProviderPaginationContract(
+        fetcher="fetch_raw_trades_bybit",
+        page_cap=BYBIT_EXECUTION_WINDOW_PAGE_CAP,
+        on_ceiling="raise",
+        stop_on_short_page=False,
+        stuck_cursor_is_stop=False,
+        window_max_days=7,
+        default_lookback_days=default_lookback_days,
+        ceiling_exc=_BybitWindowPageCap,
+        ceiling_label="BYBIT_EXECUTION_WINDOW_PAGE_CAP",
+    )
+    try:
+        walked = await walk_paginated(
+            contract, since_ms=since_ms, now_ms=now, fetch_page=_fetch_page
+        )
+    except _BybitWindowPageCap:
+        # Audit-2026-05-07 M-0663: the DQ flags a cap hit has always set, for any caller that
+        # drains them. The driver's message (cap and window bounds) is dropped on purpose.
         logger.warning(
-            "Pagination hit %d-page cap for bybit; possible truncation",
-            PAGE_CAP,
+            "Pagination hit %d-page cap for bybit; refusing the read",
+            BYBIT_EXECUTION_WINDOW_PAGE_CAP,
         )
         _record_dq_flag("sync_truncated_bybit", True)
-        _record_dq_flag("sync_truncated_bybit_pages", int(PAGE_CAP))
+        _record_dq_flag("sync_truncated_bybit_pages", int(BYBIT_EXECUTION_WINDOW_PAGE_CAP))
+        raise BybitTradeWindowIncomplete("page_cap") from None
 
+    # Windows do not overlap, so a repeated execId means the venue served a fill twice: keep the
+    # first. A fill with no execId has no identity to dedupe on, so it is always kept.
+    seen: set[str] = set()
+    fills: list[dict[str, Any]] = []
+    for row in walked.rows:
+        exec_id = row.get("exchange_fill_id")
+        if exec_id:
+            if exec_id in seen:
+                continue
+            seen.add(exec_id)
+        fills.append(row)
     return fills
 
 
@@ -3152,6 +3391,88 @@ async def fetch_usdt_balance_with_status(
     return None, False
 
 
+async def fetch_bybit_stable_wallet_with_status(
+    exchange: ccxt.Exchange,
+) -> tuple[float | None, bool]:
+    """VREAD-01 — the Bybit derive anchor: the wallet balance of EVERY stable
+    coin, summed, with ``fetch_usdt_balance_with_status``'s three-state contract.
+
+    Bybit's ccxt ``total`` is each coin's ``walletBalance`` (ccxt 4.5.89
+    ``bybit.parse_balance``), so the sum carries no open-position unrealized PnL,
+    the same realized basis as before. Stable membership is decided per coin at
+    call time by ``price_rule.is_stable_value`` (STABLECOINS plus
+    STABLECOIN_SPLIT_SUFFIXES), the rule ``equity_reconstruction._price_wallet_totals``
+    applies to the mark's wallet, so the anchor and the mark cannot disagree on
+    which coins count. A non-stable coin (BTC, ETH, ...) is never parsed and never
+    added: pricing it needs a ticker, and its absence from the anchor is the
+    decided, reported scope of VREAD-01.
+
+    Returns ``(balance, balance_error)``:
+
+        * ``(float, False)`` — successful read, positive stable-coin sum.
+        * ``(None, False)`` — successful read, no stable coin, every stable
+          coin at 0, or a signed stable sum at or below 0. Not an error.
+        * ``(None, True)`` — ``fetch_balance`` failed, ``total`` is absent or not
+          a mapping, a stable coin's quantity is malformed (not a finite
+          number), or ANY stable coin's quantity is ``None`` (even beside a
+          readable one: the sum would be partial, so the read is unreadable;
+          the coin codes, never values, are named in a WARNING). A negative
+          stable balance (a spot borrow) is subtracted, never skipped: the sum
+          is signed, as Bybit's own ``totalWalletBalance`` is.
+
+    ``fetch_usdt_balance_with_status`` is left untouched on purpose: its callers
+    write ``api_keys.account_balance_usdt`` and strategy capital, which stay
+    USDT-only (Phase 231 ruling OQ1 Option A).
+    """
+    try:
+        balance = await exchange.fetch_balance()
+    except Exception as e:
+        # Same scrub as fetch_usdt_balance_with_status (NEW-C13-10): a signed
+        # request error can embed the HMAC signature in str(e).
+        logger.warning(
+            "Could not fetch account balance: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
+        )
+        return None, True
+    try:
+        totals = balance.get("total")
+        if not isinstance(totals, Mapping):
+            raise TypeError("balance total is not a mapping")
+        stable_qtys: list[float] = []
+        none_coins: list[str] = []
+        for coin, qty in totals.items():
+            if not is_stable_value(str(coin)):
+                continue
+            if qty is None:
+                none_coins.append(str(coin))
+                continue
+            try:
+                q = float(qty)
+            except (TypeError, ValueError):
+                raise ValueError(f"stable quantity for {coin} is unreadable") from None
+            if not math.isfinite(q):
+                raise ValueError(f"stable quantity for {coin} is unreadable")
+            stable_qtys.append(q)  # signed: a borrowed stable coin reduces the wallet
+        # fsum is exact, so the anchor is identical for any order of coins.
+        stable_sum = math.fsum(stable_qtys)
+    except (TypeError, ValueError, AttributeError) as e:
+        logger.error(
+            "Malformed balance response shape: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
+        )
+        return None, True
+    if none_coins:
+        # A None stable quantity makes the sum partial whether or not another
+        # stable coin parses, so the read is unreadable, never a smaller anchor.
+        logger.warning(
+            "Stable coin quantity is None, read unreadable: coins=%s", ",".join(none_coins),
+        )
+        return None, True
+    if stable_sum > 0:
+        return stable_sum, False
+    return None, False
+
+
 def _okx_upl_or_zero(raw_upl: Any) -> tuple[float, bool]:
     """Coerce OKX ``upl`` (account-level open unrealized PnL, USD) to a float.
 
@@ -3239,11 +3560,13 @@ async def fetch_account_equity_usd(
 ) -> tuple[float | None, bool]:
     """Account-equity anchor in USD for the initial-capital anchor, dispatched
     by venue. OKX includes open-position unrealized PnL (raw ``totalEq``);
-    Bybit and Binance return the realized-basis USDT wallet figure.
+    Bybit returns the realized-basis wallet sum of every stable coin
+    (``fetch_bybit_stable_wallet_with_status``, VREAD-01) and Binance the
+    realized-basis USDT wallet figure.
 
     OKX is read via the raw ``totalEq`` endpoint (``fetch_okx_total_equity_usd``)
     because ccxt's unified ``fetch_balance()`` crashes on OKX in ccxt 4.5.x.
-    Other venues use ``fetch_usdt_balance_with_status``. Bybit's ccxt ``total``
+    Binance uses ``fetch_usdt_balance_with_status``. Bybit's ccxt ``total``
     is the coin ``walletBalance`` (ccxt 4.5.88 ``bybit.parse_balance``) and
     Binance's default spot ``total`` is free + locked (ccxt 4.5.88
     ``binance.parse_balance_custom``, spot), so neither includes open-position
@@ -3256,6 +3579,8 @@ async def fetch_account_equity_usd(
     if venue == "okx":
         eq = await fetch_okx_total_equity_usd(exchange)
         return eq, eq is None
+    if venue == "bybit":
+        return await fetch_bybit_stable_wallet_with_status(exchange)
     return await fetch_usdt_balance_with_status(exchange)
 
 
@@ -3276,7 +3601,10 @@ async def fetch_account_equity_and_upnl_usd(
       partial/schema-drifted response is LOUD, not a silent 0 that embeds MTM.
     * **Bybit / Binance** — the anchor is realized-basis ``walletBalance``
       (ccxt 4.5.88 ``bybit.parse_balance``: ``total`` is the coin ``walletBalance``;
-      ``binance.parse_balance_custom``, spot: ``total`` is free + locked): the wedge is
+      ``binance.parse_balance_custom``, spot: ``total`` is free + locked). Bybit's
+      anchor sums every stable coin's wallet balance
+      (``fetch_bybit_stable_wallet_with_status``, VREAD-01); Binance's is the USDT
+      coin alone. The wedge is
       STRUCTURALLY 0.0 by construction, so a downstream subtract can never
       double-count (Q2 / Pitfall 2). Returning a non-zero wedge here is the
       double-count bug — it is hard-coded 0.0, NOT a read field, so it is never
@@ -3297,6 +3625,9 @@ async def fetch_account_equity_and_upnl_usd(
             (upl if eq is not None else 0.0),
             (upl_unreadable if eq is not None else False),
         )
+    if venue == "bybit":
+        equity, balance_error = await fetch_bybit_stable_wallet_with_status(exchange)
+        return equity, balance_error, 0.0, False
     equity, balance_error = await fetch_usdt_balance_with_status(exchange)
     return equity, balance_error, 0.0, False
 

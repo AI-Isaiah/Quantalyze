@@ -174,6 +174,7 @@ const SAMPLES = {
   "scenario.auto-excluded": { args: undefined, labels: [], days: [] },
   "scenario.loading-returns": { args: undefined, labels: [], days: [] },
   "scenario.series-syncing": { args: undefined, labels: [], days: [] },
+  "scenario.analytics-updating": { args: undefined, labels: [], days: [] },
   // 199-15 Task 2: the Holdings table's strategies read failure (a read_failure, no scope).
   "allocation.holdings-strategies-read-failed": { args: undefined, labels: [], days: [] },
   // 199-16 Task 1: the strategies-list Health detail for Analytics failed. The day is the last
@@ -677,6 +678,8 @@ describe("the inventory entries (199-05 Task 3): class, surface and the alerts l
     ["scenario.auto-excluded", "composition", "scenario"],
     ["scenario.loading-returns", "in_progress", "scenario"],
     ["scenario.series-syncing", "in_progress", "scenario"],
+    // Phase 237 FACT-02 (S8): the composer row's Updating line.
+    ["scenario.analytics-updating", "in_progress", "scenario"],
   ] as const)("%s is a marker-only %s entry on %s with scope none and no action", (id, cls, surface) => {
     const e = entry(id);
     expect(e.class).toBe(cls);
@@ -1042,13 +1045,13 @@ describe("the factsheet's degraded-members line: the owner view names its keys a
     expect(judgeEntry(leaky, { args: undefined, labels: [], days: [] }).join("|")).toContain(`names an owner key (${KEY_A})`);
   });
 
-  it("the two USD-view notes are marker-only: a read failure that keeps its shipped wait, and the steady no-priced-day fact", () => {
+  it("the two USD-view notes are marker-only: a read failure that ends on A-RELOAD (CACHE-03), and the steady no-priced-day fact", () => {
     const failed = entry("factsheet.usd-view-read-failed");
     expect([failed.class, failed.scope, failed.action, failed.shippedAction, failed.text]).toEqual([
       "read_failure",
       "none",
-      null,
-      "It is retried within the hour.",
+      "A-RELOAD",
+      undefined,
       undefined,
     ]);
     const none = entry("factsheet.usd-view-no-priced-day");

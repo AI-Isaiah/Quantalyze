@@ -190,6 +190,7 @@ const SCAN_LEDGER: Record<string, LedgerRow> = {
       "scenario.loading-returns",
       "scenario.per-source-fallback",
       "scenario.series-syncing",
+      "scenario.analytics-updating",
     ],
     reason:
       "the Scenario: the own-book sentence and the per-source fallback render registry text through DegradeLine; the empty-intersection banner, the auto-excluded group (with its rows and reason text), the loading-returns line and the series-syncing note keep their JSX and carry the marker (composition, in_progress); the InfoBanner shell around the fallback and the 'too similar' pair chip (amber chip, a diagnostic count, not a degrade warning) account for the rest of the count",

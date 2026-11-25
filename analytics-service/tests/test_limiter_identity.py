@@ -62,6 +62,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import hmac
+import os
 import pathlib
 import time
 import tokenize
@@ -545,6 +546,36 @@ class TestClassClosure:
             "routers/ get_remote_address references changed. The quarantine is "
             f"{sorted(IP_KEYED_QUARANTINE) or 'EMPTY'} — no router may key on the "
             f"request address — but found {sorted(offenders)}."
+        )
+
+    def test_no_non_test_module_in_analytics_service_references_get_remote_address(
+        self,
+    ) -> None:
+        """RLIM-01: the pin covers the WHOLE service, not only ``routers/``.
+
+        Behind Railway's edge ``get_remote_address`` is the proxy's IP, so a limit
+        keyed on it is one platform-wide bucket wearing a per-client disguise. The
+        scan above reads ``routers/`` only; a ``services/`` or top-level module
+        could re-introduce the defect without tripping it. This walks every
+        non-test ``.py`` under the analytics-service directory, skipping ``tests``
+        and any virtualenv or cache segment, and compares the offender set (paths
+        relative to analytics-service) to the same quarantine.
+        """
+        root = ROUTERS_DIR.parent
+        skipped = {"tests", ".venv", "venv", "site-packages", "__pycache__"}
+        offenders: set[str] = set()
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in skipped]
+            for name in filenames:
+                if not name.endswith(".py"):
+                    continue
+                path = pathlib.Path(dirpath) / name
+                if "get_remote_address" in _source_name_tokens(path):
+                    offenders.add(path.relative_to(root).as_posix())
+        assert offenders == IP_KEYED_QUARANTINE, (
+            "get_remote_address references changed outside tests/. The quarantine "
+            f"is {sorted(IP_KEYED_QUARANTINE) or 'EMPTY'} — nothing in "
+            f"analytics-service may key on the proxy IP — but found {sorted(offenders)}."
         )
 
     def test_shared_limiter_module_no_longer_references_get_remote_address(self) -> None:

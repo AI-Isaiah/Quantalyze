@@ -118,6 +118,7 @@ const SHAPE_COMPOSITE =
   "A composite strategy has no self-serve re-run. Use the contact form to start a new computation.";
 const SHAPE_CSV =
   "A CSV strategy's data is fixed at upload. To publish a corrected series, upload a new CSV strategy, or use the contact form.";
+const EXCHANGES_KEY = "Check its key on the Exchanges page.";
 const EDIT_HREF = `/strategies/${STRATEGY_ID}/edit`;
 // Phase 164.6.6.3.5 DOMAINONE (AD-05): the pointer phrase links the contact
 // form, same tab, carrying the strategy id. Hand-typed, never built by contactHref.
@@ -170,6 +171,10 @@ const STATE = {
   rpcResult: { data: [] as unknown, error: null as unknown },
   /** When true the request client carries NO `rpc` member (a throw). */
   rpcMissing: false,
+  /** The owner's `profiles.role` (WR-01): the default is the manager the older cases assume. */
+  profileRole: "manager" as string | null,
+  /** The error the owner's `profiles` read answers with, if any (R2-01). */
+  profileError: null as unknown,
   /** The head-count answer of `strategy_keys` on the request client. */
   memberCountResult: { count: 0 as number | null, error: null as unknown },
   observed: {
@@ -178,6 +183,8 @@ const STATE = {
     requestTables: [] as string[],
     /** Tables named by `.from()` on the service-role client, in call order. */
     adminTables: [] as string[],
+    /** The `.eq(column, value)` arguments of the request client's `profiles` reads. */
+    profileEqCalls: [] as Array<[string, unknown]>,
   },
 };
 
@@ -203,16 +210,30 @@ function mockRequestClient() {
       let sawOr = false;
       const chain = {
         select: () => chain,
-        eq: () => chain,
+        eq: (column: string, value: unknown) => {
+          if (table === "profiles") STATE.observed.profileEqCalls.push([column, value]);
+          return chain;
+        },
         or: () => {
           sawOr = true;
           return chain;
         },
+        // Phase 237 (FACT-04): the owner lane reads the latest
+        // `strategy_verifications` row (select/eq/order/limit/maybeSingle). These
+        // pending drafts have none, so it answers no row and no error.
+        order: () => chain,
+        limit: () => chain,
         maybeSingle: () =>
           Promise.resolve(
-            sawOr
-              ? { data: STATE.ownerRow, error: null }
-              : { data: STATE.publishedRow, error: null },
+            table === "strategy_verifications"
+              ? { data: null, error: null }
+              : table === "profiles"
+                ? STATE.profileError
+                  ? { data: null, error: STATE.profileError }
+                  : { data: STATE.profileRole ? { role: STATE.profileRole } : null, error: null }
+              : sawOr
+                ? { data: STATE.ownerRow, error: null }
+                : { data: STATE.publishedRow, error: null },
           ),
       };
       return chain;
@@ -348,10 +369,13 @@ beforeEach(() => {
   STATE.adminError = null;
   STATE.rpcResult = { data: [], error: null };
   STATE.rpcMissing = false;
+  STATE.profileRole = "manager";
+  STATE.profileError = null;
   STATE.memberCountResult = { count: 0, error: null };
   STATE.observed.rpcCalls = [];
   STATE.observed.requestTables = [];
   STATE.observed.adminTables = [];
+  STATE.observed.profileEqCalls = [];
 
   getUserSpy.mockImplementation(async () => ({
     data: { user: STATE.sessionUser },
@@ -899,10 +923,16 @@ describe("KCS-09 — an unreadable read never claims progress", () => {
 // Locked copy, typed as literals (UI-SPEC § B / § KCS-12 and § KCS-10).
 const MINT_A =
   "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.";
-const MINT_B =
+// Phase 238 (FACT-05): KCS12-MINT-B is RETIRED. The pending page no longer renders it for any
+// input; it is kept typed out only so a negative can name it.
+const RETIRED_MINT_B =
   "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds.";
+// Phase 238 (FACT-05): the owner pending page's note for a kind-less not_available arm is
+// KCS12-MINT-B-LEAD, one space, then the same action sentence the KCS-09 remedy line ends on.
+const MINT_B_LEAD =
+  "Right now, a private link to this strategy shows that its factsheet is not available.";
 const MINT_UNREADABLE =
-  "Right now, a private link to this strategy shows a placeholder page instead of the numbers. They appear there once a computation succeeds.";
+  "Right now, a private link to this strategy opens a page without its factsheet. If no computation is running, use the contact form to have it checked.";
 // 199-18 (UI-SPEC "Factsheet" row 3): the shipped KCS10 sentence, unchanged, then the one action a
 // visitor has (registered as factsheet.public-pending).
 const PUBLIC_SENTENCE =
@@ -946,18 +976,173 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(last.className).toBe(SHARE_NOTE_CLASS);
   });
 
-  it("SHARE-NOTE-B: a failed job -> the panel's last child is KCS12-MINT-B", async () => {
+  it("SHARE-NOTE-B: a permanently failed job -> the panel's last child is KCS12-MINT-B-LEAD plus the remedy line's own action", async () => {
     givenOwnerPendingDraft();
     givenJobs(TRIGGER_ROWS);
 
-    const { container } = await renderOwnerPending();
+    const { container, remedyLine } = await renderOwnerPending();
     const last = panelOf(container).lastElementChild as HTMLElement;
 
-    expect(last.textContent).toBe(MINT_B);
+    expect(last.textContent).toBe(
+      "Right now, a private link to this strategy shows that its factsheet is not available. Use the contact form to have it resolved.",
+    );
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${CONTACT_PERMANENT}`);
     expect(last.className).toBe(SHARE_NOTE_CLASS);
+    expect(last.textContent).not.toBe(RETIRED_MINT_B);
+    // The contact pointer is the note's one link, carrying the strategy id.
+    const pointers = last.querySelectorAll("a");
+    expect(pointers).toHaveLength(1);
+    expect(pointers[0].textContent).toBe("contact form");
+    expect(pointers[0].getAttribute("href")).toBe(CONTACT_HREF);
+    // Parity: the page's own remedy line ends on the same action.
+    expect(remedyLine!.textContent!.endsWith(CONTACT_PERMANENT)).toBe(true);
+    expect(last.textContent!.endsWith(remedyLine!.textContent!)).toBe(true);
   });
 
-  it("SHARE-NOTE-UNREADABLE: an unreadable read -> the panel's last child is KCS12-UNREADABLE", async () => {
+  it("SHARE-NOTE-B-SINGLE: a transient failure on a single-key strategy -> the lead plus Resync on the edit page, the same action as the remedy line", async () => {
+    givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID });
+    givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${SHAPE_SINGLE}`);
+    expect(last.className).toBe(SHARE_NOTE_CLASS);
+    expect(remedyLine!.textContent).toBe(SHAPE_SINGLE);
+    const hrefs = Array.from(last.querySelectorAll("a")).map((a) => a.getAttribute("href"));
+    expect(hrefs.filter((h) => h === EDIT_HREF)).toHaveLength(1);
+    expect(last.textContent).not.toMatch(/\byet\b|once a computation succeeds|appear there|wait/);
+  });
+
+  it("SHARE-NOTE-B-NEVER-STARTED: no computation on record, no key -> the lead plus the unlinked remedy's action", async () => {
+    givenOwnerPendingDraft({ source: "api", api_key_id: null });
+    givenJobs([]);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(remedyLine!.textContent).toBe(SHAPE_UNLINKED);
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${SHAPE_UNLINKED}`);
+    expect(last.textContent).not.toContain(RETIRED_MINT_B);
+  });
+
+  it("SHARE-NOTE-ALLOCATOR-SINGLE: an allocator-only owner, a transient failure on a key-fed strategy -> the note and the remedy line both name the Exchanges action, and no link reaches the manager-guarded edit page", async () => {
+    STATE.profileRole = "allocator";
+    givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID });
+    givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${EXCHANGES_KEY}`);
+    expect(remedyLine!.textContent).toBe(EXCHANGES_KEY);
+    expect(last.textContent!.endsWith(remedyLine!.textContent!)).toBe(true);
+    expect(last.querySelector('a[href="/profile?tab=exchanges"]')).not.toBeNull();
+    expect(container.querySelector('a[href*="/edit"]')).toBeNull();
+    expect(container.querySelector('a[href*="/strategies/new/wizard"]')).toBeNull();
+  });
+
+  it("SHARE-NOTE-ALLOCATOR-UNLINKED: an allocator-only owner, never_started with no key -> the contact form, and no edit link renders", async () => {
+    STATE.profileRole = "allocator";
+    givenOwnerPendingDraft({ source: "api", api_key_id: null });
+    givenJobs([]);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${CONTACT_CHECK}`);
+    expect(remedyLine!.textContent).toBe(CONTACT_CHECK);
+    expect(container.querySelector('a[href*="/edit"]')).toBeNull();
+  });
+
+  it("SHARE-NOTE-ALLOCATOR-CSV: an allocator-only owner, a failed job on a CSV strategy -> the contact form, and no link reaches the CSV wizard", async () => {
+    STATE.profileRole = "allocator";
+    givenOwnerPendingDraft({ source: "csv", api_key_id: null });
+    givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${CONTACT_CHECK}`);
+    expect(remedyLine!.textContent).toBe(CONTACT_CHECK);
+    expect(container.querySelector('a[href*="/edit"]')).toBeNull();
+    expect(container.querySelector('a[href*="/strategies/new/wizard"]')).toBeNull();
+  });
+
+  it("SHARE-NOTE-ROLE-READ-FAILED: the owner's role read errors -> read as not-a-manager (the Exchanges action, no edit link), logged and sent to Sentry, and the read asked for the owner's own row", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // A manager row would be returned if the error were ignored; the error must win.
+      STATE.profileRole = "manager";
+      STATE.profileError = { code: "500", message: "profiles down" };
+      // The real row carries `user_id` (the fixture default omits it), which the role read keys on.
+      givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID, user_id: OWNER_UID });
+      givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+      STATE.memberCountResult = { count: 0, error: null };
+
+      const { container, remedyLine } = await renderOwnerPending();
+      const last = panelOf(container).lastElementChild as HTMLElement;
+
+      expect(last.textContent).toBe(`${MINT_B_LEAD} ${EXCHANGES_KEY}`);
+      expect(remedyLine!.textContent).toBe(EXCHANGES_KEY);
+      expect(last.querySelector('a[href="/profile?tab=exchanges"]')).not.toBeNull();
+      // Scoped to the note and the line: with `user_id` on the row the panel
+      // renders its own "Edit strategy" button, which is not the remedy.
+      expect(last.querySelector('a[href*="/edit"]')).toBeNull();
+      expect(remedyLine!.querySelector('a[href*="/edit"]')).toBeNull();
+
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining("owner role read failed"),
+        STATE.profileError,
+      );
+      expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+        STATE.profileError,
+        expect.objectContaining({
+          tags: expect.objectContaining({ stage: "owner-role" }),
+        }),
+      );
+      // The read is the owner's own profile row, never another user's.
+      expect(STATE.observed.profileEqCalls.length).toBeGreaterThan(0);
+      for (const call of STATE.observed.profileEqCalls) expect(call).toEqual(["id", OWNER_UID]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("SHARE-NOTE-ROLE-ROW-MISSING: no profile row and no error -> read as not-a-manager (the contact form, no CSV wizard link)", async () => {
+    STATE.profileRole = null;
+    givenOwnerPendingDraft({ source: "csv", api_key_id: null });
+    givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${CONTACT_CHECK}`);
+    expect(remedyLine!.textContent).toBe(CONTACT_CHECK);
+    expect(last.querySelector(`a[href="${CONTACT_HREF}"]`)).not.toBeNull();
+    expect(container.querySelector('a[href*="/strategies/new/wizard"]')).toBeNull();
+    expect(container.querySelector('a[href*="/edit"]')).toBeNull();
+  });
+
+  it("SHARE-NOTE-BOTH: a `both` owner keeps the manager action, the edit link", async () => {
+    STATE.profileRole = "both";
+    givenOwnerPendingDraft({ source: "api", api_key_id: LINKED_KEY_ID });
+    givenJobs([chainJob("derive_broker_dailies", "failed_final", "transient")]);
+    STATE.memberCountResult = { count: 0, error: null };
+
+    const { container, remedyLine } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(`${MINT_B_LEAD} ${SHAPE_SINGLE}`);
+    expect(remedyLine!.textContent).toBe(SHAPE_SINGLE);
+    expect(last.querySelector(`a[href="${EDIT_HREF}"]`)).not.toBeNull();
+  });
+
+  it("SHARE-NOTE-UNREADABLE: an unreadable read -> the panel's last child is KCS12-MINT-B-UNKNOWN (founder ruling 2026-11-24)", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       givenOwnerPendingDraft();
@@ -993,7 +1178,7 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
     expect(shareBtn, "the panel must render its share control").toBeDefined();
     expect(note.contains(shareBtn!)).toBe(true);
     expect(panel.querySelector("p.mt-2")).toBeNull();
-    for (const note of [MINT_A, MINT_B, MINT_UNREADABLE]) {
+    for (const note of [MINT_A, RETIRED_MINT_B, MINT_B_LEAD, MINT_UNREADABLE]) {
       expect(container.textContent).not.toContain(note);
     }
 
@@ -1266,7 +1451,7 @@ describe("164.6.6.3.3 D-08 — a finished job whose analytics failed", () => {
 
   // 170.1 D-08 / R-1 — RE-POINTED. This case used to pin "a computing row keeps
   // KCS09-FINISHED and its generic note", where the banner was the arm-derived
-  // KCS12-MINT-B ("not available yet ... once a computation succeeds"). For a
+  // the retired KCS12-MINT-B ("not available yet ... once a computation succeeds"). For a
   // job that FINISHED without a built factsheet that wait never ends, and the
   // body's state line and remedy already said "have it checked". The banner now
   // gives the same instruction. Strings typed by hand from the UI-SPEC row.

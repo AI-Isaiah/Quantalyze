@@ -91,3 +91,47 @@ def load_strategy_high_waters(
             mapping[sid] = None
             errors.append(f"{sid}: {type(exc).__name__}: {exc}")
     return mapping, ("; ".join(errors) if errors else None)
+
+
+def load_strategy_fill_high_water(
+    supabase: Any, strategy_id: str
+) -> tuple[str | None, str | None]:
+    """The strategy's newest stored raw FILL timestamp, EXACT, or `None` when it
+    has none or the read failed. Returns `(timestamp, error)`.
+
+    Phase 232 VREAD-08. The queued `sync_trades` job clamps its fills-read seed
+    to this value, so a `last_fetched_trade_timestamp` that sits ahead of the
+    newest stored fill (the days between them were never fetched) is read from
+    that fill instead and the skipped days are re-read.
+
+    ⛔ `is_fill = true` IS THE WHOLE FILTER, and it is the reason this helper
+    differs from `load_strategy_high_waters`, which filters `is_fill = false`
+    (the daily-P&L rows). The two never share a floor: the daily rows are
+    one-per-day and floored to 00:00 UTC, while a fills seed is the fill's own
+    timestamp, UNFLOORED (LASTSYNC-SEED decision 4), because flooring would
+    only widen an over-fetch the unique-index dedup already absorbs.
+
+    ⚠️ FAIL OPEN, NEVER RAISES. A read or parse error returns `(None, error)`;
+    the caller treats that as "no stored fill known" and bounds the cursor by
+    the daily seed, so a Supabase blip can never leave an ahead cursor
+    unclamped. The error string is shaped like the sibling's.
+    """
+    try:
+        result = (
+            supabase.table("trades")
+            .select("timestamp")
+            .eq("strategy_id", strategy_id)
+            .eq("is_fill", True)
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+        )
+        newest = rows(result)
+        return (str(newest[0]["timestamp"]) if newest else None), None
+    except Exception as exc:
+        logger.exception(
+            "stored-fill-high-water read failed for strategy %s — failing OPEN "
+            "to the daily seed for this fills read",
+            strategy_id,
+        )
+        return None, f"{strategy_id}: {type(exc).__name__}: {exc}"

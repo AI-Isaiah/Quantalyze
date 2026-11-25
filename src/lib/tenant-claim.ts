@@ -101,14 +101,45 @@ export interface TenantIdentity {
    * value the caller supplied, and never `X-User-Id` (which is unsigned client
    * input the Python limiter deliberately ignores).
    *
-   * ONE server-side literal is also admitted: `"public"`, the anonymous teaser
-   * bucket. `verify-strategy`'s route passes it through `postProcessKey`'s
-   * `userId` field so all unauthenticated traffic shares a window isolated from
-   * every authenticated tenant. It is a constant in OUR source, not a value that
-   * arrived over the wire, so it satisfies "server-derived" in the sense that
-   * matters here.
+   * `postProcessKey` also passes payloads from two SERVER-SIDE families, both
+   * produced in our source and never accepted from the wire:
+   *   - the anonymous family, `"public"` and `"public:<32 hex>"`, built by
+   *     `anonymousClaimPayload` below. `verify-strategy`'s route passes the
+   *     literal `"public"` through `postProcessKey`'s `userId` field, and the
+   *     chokepoint turns it into a per-IP pseudonym so unauthenticated traffic
+   *     is isolated from every authenticated tenant and from other visitors.
+   *   - the csv scope, `"csv:<user id>"`, derived inside `postProcessKey` from
+   *     `flow_type === "csv"` for an authenticated caller. The user id stays the
+   *     identity; the prefix only selects the CSV flow's bucket in Python.
    */
   readonly userId: string;
+}
+
+/**
+ * Phase 240 / RLIM-01 — the ONE producer of anonymous claim payloads.
+ *
+ * Returns `public:<32 lowercase hex>`, the hex being the first 32 characters of
+ * HMAC-SHA256 keyed with `secret` (`INTERNAL_API_TOKEN`) over `"anon-ip:" + ip`,
+ * so the analytics service can give each anonymous visitor their own rate-limit
+ * window while the RAW IP never leaves Vercel: only this keyed pseudonym rides
+ * the signed claim. For an unknown, empty or whitespace-only IP it returns the
+ * bare `public`, the shared fallback bucket in Python, so `getClientIp`'s
+ * `"unknown"` can never mint a per-IP bucket of its own.
+ *
+ * Properties the tests pin: deterministic per (secret, ip); dot-free, so mint
+ * guard 2 holds and the verifier's `rsplit(".", 2)` stays unambiguous; the
+ * `anon-ip:` domain prefix means the digest can never equal a claim MAC (whose
+ * message is `<payload>.<exp>`); IPv6 is hashed exactly as given, with no /64
+ * normalisation (CONTEXT discretion resolution).
+ *
+ * Pseudonymous, not anonymous: Python holds the same key (T-240-22, accepted).
+ */
+export function anonymousClaimPayload(ip: string, secret: string): string {
+  if (typeof ip !== "string" || ip.trim() === "" || ip === "unknown") {
+    return "public";
+  }
+  const digest = createHmac("sha256", secret).update(`anon-ip:${ip}`).digest("hex");
+  return `public:${digest.slice(0, 32)}`;
 }
 
 export class TenantClaimError extends Error {

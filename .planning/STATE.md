@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
-current_phase: 225
-current_phase_name: ONEACCOUNTONCE
+current_phase: 227
+current_phase_name: JOBLEDGER
 status: executing
-stopped_at: "v1.22 roadmap created (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK"
-last_updated: "2026-11-23T18:44:28.265Z"
-last_activity: 2026-11-23
-last_activity_desc: Phase 225 execution started
-state_head: 2ab976392c596434a9a1476127f4f98e88116bae
+stopped_at: Phase 227 complete, shipped as #1325 (HEAL-01 sweep registered on PROD)
+last_updated: "2026-11-24T17:48:57.707Z"
+last_activity: 2026-11-24
+last_activity_desc: Phase 227 JOBLEDGER complete (verification passed, threats_open 0)
+state_head: 3dd2a6d8e4e3ce68b4d834c06ebbaf675f2d4842
 progress:
   total_phases: 21
-  completed_phases: 0
-  total_plans: 32
-  completed_plans: 14
-  percent: 0
+  completed_phases: 2
+  total_plans: 67
+  completed_plans: 52
+  percent: 10
 ---
 
 ## ⭐ STATE lineage
@@ -32,7 +32,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-23)
 
-**Current focus:** Phase 225 — ONEACCOUNTONCE
+**Current focus:** v1.22 TRUTH — data you can trust; roadmap created 2026-11-23 (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK (wave 0)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 225 (ONEACCOUNTONCE) — EXECUTING
-Plan: 1 of 12
-Status: Executing Phase 225
-Last activity: 2026-11-23 — Phase 225 execution started
-Progress: [░░░░░░░░░░] 0%
+Phase: 231 (BYBITREADS) — IN PROGRESS (plans 01-05 shipped: v0.133.61.6 #1314, v0.133.65.0 #1321; plan 06 waits for Phase 229)
+Plan: 5 of 6
+Status: In progress; plan 06 (VREAD-01) blocked on Phase 229; other v1.22 phases run in parallel
+Last activity: 2026-11-24 — Phase 227 JOBLEDGER complete (v0.133.67.0, #1325; HEAL-01 sweep live on PROD)
+Progress: [█░░░░░░░░░] 10%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -413,6 +413,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 209 P03 | 20min | 2 tasks | 2 files |
 | Phase 209 P04 | 25min | 2 tasks | 3 files |
 | Phase 209 P05 | 15min | 2 tasks | 3 files |
+| Phase 226 P01 | 75 min | 3 tasks | 2 files |
+| Phase 226 P02 | 60 min | 3 tasks | 2 files |
+| Phase 226 P03 | 18 min | 3 tasks | 2 files |
+| Phase 226 P04 | 34 min | 3 tasks | 2 files |
+| Phase 226 P05 | 20 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -1117,6 +1122,14 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 209]: 209-04 D-13: validate-and-encrypt body guard copied exactly from create-with-key, no new error code; the parse rejection is swallowed (credential hygiene, Pitfall 5)
 - [Phase 209]: 209-04 D-14: both emission censuses moved on purpose (KEY_MISSING_REQUIRED_FIELD 2 to 3, expectedSites 12 to 13, rosterFloor stays 4)
 - [Phase 209]: 209-05 D-15/D-16: create_scenario_share listed in MUTATING_RPC_NAMES, route call made a plain typed one-line literal, and a positive-control pin (RED under cast, unlisted name, removed audit call) keeps the listing from going decorative
+- [Phase 226]: 226-01: soak unit failure is INCONCLUSIVE (unit_unresolved), no USD fallback; unit floors threaded into all five USD reads; USD_FLOORS defaults keep existing helper tests untouched
+- [Phase 226]: 226-02: the redundant pre-walk classify_deal pass is dropped; combine_mt5_deal_ledger raises on an unknown type first, so the services.mt5_deals import block is gone
+- [Phase 226]: 226-02: the soak walk handles a fixed integer server offset only (RESEARCH A4); a DST-aware soak needs the walk extended and re-fuzzed
+- [Phase 226]: 226-03: the soak judges the published returns by its own timed-day set (walk.timing); a day it and the fold disagree on is a named attribution_check mismatch (OQ2)
+- [Phase 226]: 226-03: _WalkDayTiming.pnl keeps the two contract fields; the closing deal's instant must resolve but is not stored
+- [Phase 226]: 226-04: _walk_day_guard and _WALK_PNL_DOM_RATIO are soak-owned and the ratio is drift-pinned to nav_twr.PNL_DOM_RATIO; the infinity-only timed kind is retired for timed_day_not_finite
+- [Phase 226]: 226-05: _MIN_CHECKED_SHARE = 0.5 set from fixture shares (2/3, 4/7, 1/200), not a live soak record; timed days passing the cohort compare count as certified; quiet tiny-base days stay in flat; vacuous stays checked == 0
+- [Phase 226]: 226-05: tiny-base NaN is explained by the soak-owned _walk_tiny_base_days (constants pinned to services.tiny_base) and the untimed branch moved onto _walk_day_guard (OQ4 complete)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1821,8 +1834,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-11-23T13:14:40.000Z
-**Stopped At:** v1.22 roadmap created (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK
+**Last Date:** 2026-11-23T18:28:35.274Z
+**Stopped At:** Phase 227 complete, shipped as #1325
 **Resume File:** None
 
 **Last Date:** 2026-11-14T07:30:26.000Z

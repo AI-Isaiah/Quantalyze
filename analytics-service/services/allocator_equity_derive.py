@@ -80,7 +80,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Final, TypeVar
 
 import pandas as pd
 
@@ -1869,6 +1869,129 @@ def read_writer_basis(
         _read_basis_rows(raw_flows, "flow_usd", "composed flows"),
         _read_basis_rows(raw_pnl, "pnl_usd", "composed day P&L"),
     )
+
+
+# ── Phase 229 (MT5DERIVE2, MT5D-07): why a timed MT5 key stored no writer basis ──────────────
+#
+# A timed MT5 key whose derive reaches the store gate without a writer basis would compose on
+# the legacy roll with nothing saying so (the compose sees neither "timed" nor the branch).
+# The writer therefore stores ONE closed token in ``key_inputs`` (``writer_basis_withheld``)
+# and the compose blocks the book as ``key_inputs_mismatch`` while any key carries it.
+#
+# The set is closed on the WRITE side. The reader below deliberately accepts a string outside
+# it: a token a later writer adds still blocks (forward compatible), and the compose logs it
+# under ``unknown`` rather than echoing it.
+WRITER_BASIS_WITHHELD_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        # priced_through is None: no USD return day (closes absent for every pair).
+        "no_usd_return_day",
+        # An interior unpriced hole (hole_segment_ends non-empty): segments, not a whole-key basis.
+        "interior_hole",
+        # Unpriced days exist but none separates two events (a leading or trailing stretch).
+        "unpriced_days_without_interior_hole",
+        # The native NAV levels or the native day P&L are empty.
+        "no_levels_or_pnl",
+        # The first NAV day lies after priced_through or has no native P&L row.
+        "first_day_unpriceable",
+        # A calendar day between the first NAV day and priced_through has no usable close.
+        "calendar_day_without_close",
+        # No native level was carried to a calendar day (unreachable by construction).
+        "no_carried_level",
+        # The store-gate fallback when no branch named itself.
+        "store_gate_unmet",
+    }
+)
+
+
+def read_writer_basis_withheld(payload: Mapping[str, Any]) -> str | None:
+    """The ``writer_basis_withheld`` token from a ``key_inputs`` payload, else ``None``.
+
+    Absent or null is a row written before 229 (never blocked, so legacy rows and Deribit compose
+    as before: the block keys on this token, never on an absent basis). A non-empty string is
+    returned unchanged, one outside ``WRITER_BASIS_WITHHELD_TOKENS`` included, so an unknown token
+    still blocks. Anything else, an empty string included, raises ``ValueError`` (the job disposes
+    it as a corrupt input) with a message that echoes no stored value.
+
+    A sibling of ``read_writer_basis``, which is deliberately left as it is."""
+    raw = payload.get("writer_basis_withheld")
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("key_inputs writer_basis_withheld: must be a non-empty string")
+    return raw
+
+
+# ── Phase 229 (MT5DERIVE2, HOLD-03): the returns a derive wrote, stored beside its basis ─────
+#
+# ``key_inputs`` and ``csv_daily_returns`` are two writes with no transaction, so a compose can
+# read the row of one derive with the returns of another. Both can share the calendar and the
+# terminal day, and the writer-basis gate then composes a wrong book as trustworthy. The derive
+# therefore stores, in the SAME atomic ``key_inputs`` upsert as the basis, the exact per-day
+# returns it wrote (``returns_stamp``, rows ``{utc_day_iso, return}``), and the compose compares
+# each key's RAW stored returns to it, per key and before any stitch joins a series.
+#
+# The stamp compares RETURNS, not P&L: a timed day's stored return is a product of cohort returns
+# and cannot be inverted back to a P&L, so a P&L formula falsely refuses a healthy timed day.
+#
+# Tolerance. Python writes the shortest round-trip repr of a float and float8 reads it back
+# exactly, or within about 5e-15 for a return up to 1. A real ledger correction moves a stored
+# return by about 1e-9 or more. 1e-12 sits well above the round trip and well below a correction.
+RETURNS_STAMP_TOL: Final[float] = 1e-12
+
+
+def returns_stamp_payload(day_returns: Mapping[str, float]) -> dict[str, Any]:
+    """The ``key_inputs`` field ``returns_stamp``: one ``{utc_day_iso, return}`` per day, in ISO
+    order, exactly the rows the derive upserted into ``csv_daily_returns``.
+
+    A non-finite value is refused with a message that names no amount: JSONB cannot hold it, and
+    a poison value would fail the upsert and loop the derive."""
+    rows: list[dict[str, Any]] = []
+    for day in sorted(day_returns):
+        value = float(day_returns[day])
+        if not math.isfinite(value):
+            raise NavReconstructionError(
+                "key_inputs returns stamp: non-finite return — refusing to persist it"
+            )
+        rows.append({"utc_day_iso": day, "return": value})
+    return {"returns_stamp": rows}
+
+
+def read_returns_stamp(payload: Mapping[str, Any]) -> dict[str, float] | None:
+    """``{ISO day: return}`` from a ``key_inputs`` payload, or ``None`` when the row predates
+    HOLD-03 (field absent or null: never refused, only counted by the caller). Any malformation
+    raises ``ValueError`` (the job disposes it as a corrupt input), echoing no stored value."""
+    raw = payload.get("returns_stamp")
+    if raw is None:
+        return None
+    return _read_basis_rows(raw, "return", "returns stamp")
+
+
+def returns_stamp_mismatch_days(
+    stamp: Mapping[str, float],
+    series: Mapping[str, float] | pd.Series | None,
+    *,
+    tol: float = RETURNS_STAMP_TOL,
+) -> int:
+    """How many days the key's raw stored returns disagree with the stamp of the derive that wrote
+    the row. ``series`` is keyed by ISO day (``None`` for a key with no rows).
+
+    The window is the stamp's own first to last day. Inside it a day on one side only, or on both
+    with an absolute difference strictly above ``tol``, is a mismatching day. A stored row after
+    the last stamped day or before the first is ignored (the routine next-day append is already
+    caught, transiently, by ``realized_terminal_day_mismatch``). An empty stamp has no window and
+    counts 0."""
+    if not stamp:
+        return 0
+    first, last = min(stamp), max(stamp)
+    stored: dict[str, float] = {} if series is None else {str(d): float(v) for d, v in series.items()}
+    in_window = {d: v for d, v in stored.items() if first <= d <= last}
+    mismatches = 0
+    for day in set(stamp) | set(in_window):
+        if day not in stamp or day not in in_window:
+            mismatches += 1
+        elif abs(in_window[day] - stamp[day]) > tol:
+            mismatches += 1
+    return mismatches
 
 
 # ── Phase 167.1.2.2.1 (DERIBITWEDGE, PR-1): the stored account-summary read ──────────────────

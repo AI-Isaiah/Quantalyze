@@ -30,8 +30,9 @@ Why each group matters (Rule 9):
     carry the walletBalance, not the equity, or uPnL is counted twice.
   * cross-path: three per-path tests can each pass while the three paths still
     disagree. One identity ties them to the same payload.
-  * coin coverage: derive reads the USDT coin only; reconstruct and holdings read
-    every coin. Not a uPnL question, pinned so the gap is a recorded fact.
+  * coin coverage: derive, reconstruct and the mark all sum the stable coins through
+    ``price_rule.is_stable_value`` (VREAD-01, closed by Phase 231); holdings read every coin.
+    Not a uPnL question.
   * positions failure: after the fix Bybit depends on ``fetch_positions()``; a
     failed read must stay visible in the log, and never leak a request signature.
 """
@@ -100,6 +101,8 @@ BYBIT_LINEAR_POSITIONS: list[dict[str, Any]] = [
         "entryPrice": 57495.0,
         "markPrice": 60000.0,
         "unrealizedPnl": 250.5,
+        # ccxt's ``info`` is the raw v5 row, whose ``size`` the Bybit arm requires.
+        "info": {"size": "0.1", "positionValue": "6000"},
     }
 ]
 
@@ -165,14 +168,35 @@ def _coin_row(payload: dict[str, Any], coin: str) -> dict[str, str]:
 
 def _fake_bybit(balance: dict[str, Any], positions: Any) -> MagicMock:
     """A venue stub whose balance is the REAL parsed balance. ``positions`` is a
-    list, or an exception instance for ``fetch_positions`` to raise."""
+    list, or an exception instance for ``fetch_positions`` to raise.
+
+    Phase 231 (VREAD-02): the holdings poll reads three position categories, so a
+    stub that answers every call with the same list would triple the rows. This one
+    dispatches on ``params`` like the venue: no params or ``settleCoin`` USDT answers
+    ``positions`` (``_fetch_current_equity`` still calls ``fetch_positions()`` with no
+    arguments), while ``settleCoin`` USDC and ``subType`` inverse answer an empty
+    list. An empty category is re-read on the raw V5 path, so
+    ``private_get_v5_position_list`` answers an empty page.
+    """
     ex = MagicMock()
     ex.id = "bybit"
     ex.fetch_balance = AsyncMock(return_value=copy.deepcopy(balance))
     if isinstance(positions, BaseException):
         ex.fetch_positions = AsyncMock(side_effect=positions)
     else:
-        ex.fetch_positions = AsyncMock(return_value=copy.deepcopy(positions))
+
+        async def fetch_positions(symbols: Any = None, params: Any = None) -> list[dict[str, Any]]:
+            p = params or {}
+            if p.get("settleCoin") == "USDC" or p.get("subType") == "inverse":
+                return []
+            return copy.deepcopy(positions)
+
+        ex.fetch_positions = AsyncMock(side_effect=fetch_positions)
+
+    async def private_get_v5_position_list(params: Any) -> dict[str, Any]:
+        return {"retCode": 0, "result": {"list": [], "nextPageCursor": ""}}
+
+    ex.private_get_v5_position_list = AsyncMock(side_effect=private_get_v5_position_list)
     ex.fetch_ticker = AsyncMock(return_value={"last": 0.0})
     ex.fetch_tickers = AsyncMock(return_value={})
     return ex
@@ -308,11 +332,16 @@ async def test_holdings_bybit_spot_row_is_wallet_balance_and_derivative_row_carr
 
     # No monkeypatch of fetch_positions: the derivative rows go through the REAL
     # positions seam (the ccxt dicts carry markPrice, entryPrice and unrealizedPnl).
-    rows, warning = await fetch_allocator_holdings(
-        "bybit", _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS)
-    )
+    fake = _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS)
+    rows, warning = await fetch_allocator_holdings("bybit", fake)
 
     assert warning is None
+    # 231 (VREAD-02): one derivative read per category, not one for everything.
+    assert [c.args[1] for c in fake.fetch_positions.await_args_list] == [
+        {"settleCoin": "USDT"},
+        {"settleCoin": "USDC"},
+        {"subType": "inverse"},
+    ]
     spot_rows = [r for r in rows if r["holding_type"] == "spot"]
     deriv_rows = [r for r in rows if r["holding_type"] == "derivative"]
     assert len(spot_rows) == 1 and len(deriv_rows) == 1, f"rows: {rows!r}"
@@ -376,11 +405,16 @@ async def test_cross_path_bybit_reconstruct_equals_derive_plus_upnl_equals_holdi
 
 
 # ---------------------------------------------------------------------------
-# Coin coverage (booked gap, not a uPnL question)
+# Coin coverage (VREAD-01, closed by Phase 231; not a uPnL question)
 # ---------------------------------------------------------------------------
 
 
-async def test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin() -> None:
+async def test_coin_coverage_bybit_derive_and_reconstruct_sum_the_same_stable_coins() -> None:
+    """VREAD-01, closed by Phase 231. The flipped, renamed form of
+    ``test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums_every_stable_coin``,
+    which pinned the gap: the derive anchor read the USDT coin only (1000) while reconstruct
+    summed every stable coin. The derive now sums the same stable coins, through
+    ``price_rule.is_stable_value``, the rule ``_price_wallet_totals`` applies."""
     from services.equity_reconstruction import _fetch_current_equity
     from services.exchange import fetch_account_equity_and_upnl_usd
 
@@ -390,20 +424,102 @@ async def test_coin_coverage_bybit_derive_reads_usdt_only_while_reconstruct_sums
     )
     parsed = await real_bybit_parse_balance(payload)
 
-    derive, _err, _wedge, _unreadable = await fetch_account_equity_and_upnl_usd(
+    derive, err, wedge, unreadable = await fetch_account_equity_and_upnl_usd(
         _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS), "bybit"
     )
     reconstruct, _ = await _fetch_current_equity(_fake_bybit(parsed, BYBIT_LINEAR_POSITIONS), "bybit")
 
     note = (
-        f"ccxt {ccxt.__version__}: pins the booked gap, TODOS [167.2.1.1-DERIVE-USDT-ONLY-ANCHOR]; "
-        "update this test and the entry together if the derive starts reading other coins"
+        f"ccxt {ccxt.__version__}: VREAD-01, closed by Phase 231; the derive anchor and the "
+        "current-equity read sum the same stable coins through price_rule.is_stable_value"
     )
-    assert derive == 1000.0, f"derive reads the USDT coin only (1000), got {derive}; {note}"
-    # 1000 USDT + 200 USDC (a stablecoin, priced at 1) + 250.5 open uPnL
+    # 1000 USDT wallet + 200 USDC wallet (a stable coin, valued at 1); the 250.5 uPnL is NOT in it.
+    assert derive == 1200.0, f"derive must sum every stable coin (1000 + 200), got {derive}; {note}"
+    assert err is False and unreadable is False, f"a clean read; {note}"
+    assert wedge == 0.0, f"the derive wedge stays structurally 0.0; {note}"
+    # 1000 USDT + 200 USDC + 250.5 open uPnL
     assert reconstruct == pytest.approx(1450.5, abs=1e-9), (
         f"reconstruct sums every stable coin plus the position uPnL, got {reconstruct}; {note}"
     )
+    assert reconstruct == pytest.approx(derive + 250.5, abs=1e-9), (
+        f"reconstruct == derive + open uPnL still holds with a non-USDT stable coin; {note}"
+    )
+
+
+async def test_shared_stable_set_drives_the_anchor_and_the_mark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One rule, one constant: ``price_rule._STABLE_VALUE`` decides which coins are stable for the
+    derive anchor AND for the mark's wallet pricing. A coin code only that constant knows (a
+    synthetic ``QSTB``) moves both. If the anchor kept its own coin list, only the mark would move."""
+    from services import price_rule
+    from services.equity_reconstruction import _price_wallet_totals
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    monkeypatch.setattr(price_rule, "_STABLE_VALUE", price_rule._STABLE_VALUE | {"QSTB"})
+    payload = bybit_wallet_balance(
+        "UNIFIED", [bybit_coin("USDT", "1000", "0"), bybit_coin("QSTB", "50", "0")]
+    )
+    parsed = await real_bybit_parse_balance(payload)
+
+    anchor, err, _wedge, _unreadable = await fetch_account_equity_and_upnl_usd(
+        _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS), "bybit"
+    )
+    marked, partial = await _price_wallet_totals(_fake_bybit(parsed, []), dict(parsed["total"]))
+
+    # 1000 USDT + 50 QSTB, both valued at 1 because the shared set says so.
+    assert err is False
+    assert anchor == 1050.0, f"the anchor must include the coin the shared set adds, got {anchor}"
+    assert marked == 1050.0 and not partial, f"the mark must include it too, got {marked}, {partial}"
+    assert anchor == marked, "the anchor and the mark price the wallet with one rule"
+
+
+async def test_bybit_anchor_is_independent_of_coin_order() -> None:
+    """The anchor is a sum over ``balance['total']``; the order the venue lists coins in must not
+    move it. The quantities are chosen so a left-to-right ``+=`` float sum differs by order:
+    0.1 + 0.2 + 0.3 is 0.6000000000000001 but 0.3 + 0.2 + 0.1 is 0.6."""
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    coins = [
+        bybit_coin("USDT", "0.1", "0"),
+        bybit_coin("USDC", "0.2", "0"),
+        bybit_coin("FDUSD", "0.3", "0"),
+    ]
+    anchors = []
+    for ordered in (coins, list(reversed(coins)), [coins[1], coins[2], coins[0]]):
+        parsed = await real_bybit_parse_balance(bybit_wallet_balance("UNIFIED", ordered))
+        anchor, err, _wedge, _unreadable = await fetch_account_equity_and_upnl_usd(
+            _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS), "bybit"
+        )
+        assert err is False
+        anchors.append(anchor)
+
+    # 0.1 + 0.2 + 0.3 = 0.6
+    assert anchors[0] == anchors[1] == anchors[2], f"anchor depends on coin order: {anchors}"
+    assert anchors[0] == pytest.approx(0.6, abs=1e-12)
+
+
+async def test_non_stable_collateral_stays_out_of_the_bybit_anchor() -> None:
+    """CONTEXT [Anchor] decision, flagged to the founder: BTC held in the account is NOT added to
+    the anchor (pricing it needs a ticker, and the realized basis stays a stable-coin figure). The
+    anchor never asks for a price, and a garbled BTC quantity cannot fail it."""
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    parsed = await real_bybit_parse_balance(
+        bybit_wallet_balance(
+            "UNIFIED", [bybit_coin("USDT", "1000", "0"), bybit_coin("BTC", "0.1", "0")]
+        )
+    )
+    fake = _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS)
+    anchor, err, wedge, _unreadable = await fetch_account_equity_and_upnl_usd(fake, "bybit")
+
+    assert (anchor, err, wedge) == (1000.0, False, 0.0), "BTC 0.1 must add nothing to the anchor"
+    fake.fetch_ticker.assert_not_awaited()
+    fake.fetch_tickers.assert_not_awaited()
+
+    garbled = _fake_bybit(parsed, BYBIT_LINEAR_POSITIONS)
+    garbled.fetch_balance = AsyncMock(return_value={"total": {"USDT": 1000.0, "BTC": "garbled"}})
+    assert await fetch_account_equity_and_upnl_usd(garbled, "bybit") == (1000.0, False, 0.0, False)
 
 
 # ---------------------------------------------------------------------------

@@ -208,9 +208,12 @@ async def _drive_through_worker(
     def _rpc(name: str, params: dict[str, Any] | None = None) -> MagicMock:
         worker_rpc.append((name, dict(params or {})))
         chain = MagicMock()
-        chain.execute.return_value = MagicMock(
-            data=[dict(job)] if name == _CLAIM_RPC else []
-        )
+        if name == "renew_compute_job_claims":
+            # Phase 227 claim fence: the realistic answer is "all still mine".
+            data: list[Any] = list((params or {}).get("p_job_ids", []))
+        else:
+            data = [dict(job)] if name == _CLAIM_RPC else []
+        chain.execute.return_value = MagicMock(data=data)
         return chain
 
     supabase.rpc.side_effect = _rpc

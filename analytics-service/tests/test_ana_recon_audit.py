@@ -456,46 +456,97 @@ def test_c12_02_phase1_failed_gates_last_sync_at():
     )
 
 
-def test_redteam_c1_phase1_failed_blocks_fetched_cursor_advance():
-    """red-team/C-1: advance_fetched_cursor must be False when phase1_failed=True
-    and phase2_complete=True.
+@pytest.mark.asyncio
+async def test_redteam_c1_phase1_failed_blocks_fetched_cursor_advance():
+    """red-team/C-1: the fills cursor must NOT advance when Phase 1 failed, even
+    though Phase 2 persisted its fills.
 
-    Without this guard, last_fetched_trade_timestamp is advanced to now() even
-    when Phase-1 failed. On the next run, parse_since_ms returns the advanced
-    preferred timestamp (last_fetched_trade_timestamp) over last_sync_at,
-    permanently skipping the unpersisted daily-PnL window.
-
-    This test verifies the fix: (not raw_fills) or (phase2_complete and not phase1_failed).
+    Without this guard the fetched cursor moved past an unpersisted daily-PnL
+    window. Phase 232 VREAD-08 rewrote this test (Rule 9): it used to re-type
+    the gate formula inline and grep the source, so it could not fail when the
+    job changed. It now drives the real `run_sync_trades_job` and reads the
+    `p_last_fetched_ts` the `advance_sync_cursor` RPC received.
     """
-    # Simulate: Phase-1 failed, Phase-2 succeeded with fills.
-    raw_fills = [{"id": "fill1"}]       # non-empty → not raw_fills = False
-    phase2_complete = True
-    phase1_failed = True
+    from unittest.mock import patch
 
-    advance_fetched_cursor = (not raw_fills) or (phase2_complete and not phase1_failed)
-    assert not advance_fetched_cursor, (
-        "red-team/C-1: last_fetched_trade_timestamp must NOT advance when "
-        "phase1_failed=True and phase2_complete=True — otherwise the preferred "
-        "cursor overrides last_sync_at and the failed PnL window is skipped."
+    from services.job_worker import DispatchOutcome, run_sync_trades_job
+
+    newest_fill_ts = "2026-06-01T09:00:00+00:00"
+    fills = [
+        {
+            "exchange": "okx", "symbol": "BTC-USDT-SWAP", "side": "buy",
+            "price": "50000", "quantity": "0.1", "fee": "0.5",
+            "exchange_fill_id": f"fill-{ts}", "is_fill": True, "timestamp": ts,
+        }
+        for ts in (newest_fill_ts, "2026-05-31T23:59:59+00:00")
+    ]
+
+    async def _run(sync_trades_raises: bool) -> dict:
+        advance: list[dict] = []
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            if name == "advance_sync_cursor":
+                advance.append(dict(payload))
+            stub = MagicMock()
+            if name == "sync_trades" and sync_trades_raises:
+                stub.execute.side_effect = RuntimeError("22023 simulated")
+            else:
+                stub.execute.return_value = MagicMock(
+                    data=True if name == "advance_sync_cursor" else 0
+                )
+            return stub
+
+        table = MagicMock()
+        # trades: high-water reads and the amendment probe return no rows;
+        # strategy_analytics: no flag row yet.
+        table.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
+        table.select.return_value.eq.return_value.eq.return_value.in_.return_value.execute.return_value = MagicMock(data=[])
+        table.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(data=None)
+        table.upsert.return_value.execute.return_value = MagicMock(data=None)
+
+        supabase = MagicMock()
+        supabase.rpc.side_effect = _rpc
+        supabase.table.return_value = table
+
+        ctx = MagicMock()
+        ctx.exchange = AsyncMock()
+        ctx.supabase = supabase
+        ctx.strategy_row = {"id": "strat-c1", "user_id": "user-1"}
+        ctx.key_row = {
+            "id": "key-c1", "exchange": "okx", "user_id": "user-1",
+            "last_sync_at": None, "last_fetched_trade_timestamp": None,
+        }
+        with patch(
+            "services.job_worker._exchange_preflight", new=AsyncMock(return_value=ctx)
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance", new=AsyncMock(return_value=1.0)
+        ), patch(
+            "services.job_worker.fetch_raw_trades", new=AsyncMock(return_value=fills)
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch("services.job_worker._RAW_TRADE_INGESTION_ENABLED", True):
+            result = await run_sync_trades_job(
+                {"id": "job-c1", "kind": "sync_trades", "strategy_id": "strat-c1"}
+            )
+        assert result.outcome == DispatchOutcome.DONE
+        assert len(advance) == 1, advance
+        return advance[0]
+
+    # Phase 1 failed (the sync_trades RPC raised), Phase 2 persisted both fills.
+    failed = await _run(sync_trades_raises=True)
+    assert failed["p_last_fetched_ts"] is None, (
+        "red-team/C-1: the fills cursor must NOT advance when Phase 1 failed and "
+        "Phase 2 succeeded; last_sync_at is held back with it"
     )
+    assert failed["p_last_sync_at"] is None
 
-    # Verify the other paths are unaffected:
-    # Phase-2 succeeded, Phase-1 succeeded → advance.
-    assert (not []) or (True and not False), "empty fetch path must advance"
-    assert (not raw_fills) or (True and not False), "phase1 success + phase2 success must advance"
-
-    # Phase-2 failed, Phase-1 succeeded → do NOT advance (G12.A.7).
-    assert not ((not raw_fills) or (False and not False)), (
-        "phase2 failure must block cursor advance"
-    )
-
-    # Verify the gate is present in the actual source.
-    import inspect
-    from services import job_worker
-    src = inspect.getsource(job_worker.run_sync_trades_job)
-    assert "not phase1_failed" in src and "phase2_complete" in src, (
-        "red-team/C-1: advance_fetched_cursor must include 'not phase1_failed' gate"
-    )
+    # Control: Phase 1 succeeds, so the stamp is the newest persisted fill.
+    clean = await _run(sync_trades_raises=False)
+    assert clean["p_last_fetched_ts"] == newest_fill_ts
 
 
 # ---------------------------------------------------------------------------

@@ -56,10 +56,15 @@ function Segment({ segment }: { segment: DegradeSegment }): ReactNode {
       <span className="font-semibold text-text-primary">{segment.label}</span>
     );
   }
-  return <Action id={segment.action} strategyId={segment.strategyId} />;
+  return <DegradeAction id={segment.action} strategyId={segment.strategyId} />;
 }
 
-function Action({ id, strategyId }: { id: ActionId; strategyId?: string }) {
+/**
+ * One action sentence with the link its kind names. Exported so the /strategies
+ * share notes render their action exactly as the Health detail does (Phase 238
+ * UI-SPEC 1.4), never through a second copy of this switch.
+ */
+export function DegradeAction({ id, strategyId }: { id: ActionId; strategyId?: string }) {
   const action = ACTION_SENTENCES[id];
   const { sentence } = action;
   switch (action.link) {

@@ -1983,3 +1983,21 @@ class TestLiveTypeLiterals:
         assert f'_OKX_FUNDING_BILL_TYPE = "{okx_archive_job._OKX_FUNDING_BILL_TYPE}"' in inspect.getsource(
             exchange.fetch_daily_pnl
         )
+
+
+def test_a_non_usd_okx_realized_flag_stops_the_rebuild_by_name() -> None:
+    """Phase 232 hand-off (2026-11-24): a non-stable OKX bill is flagged
+    ``daily_pnl_non_usd_okx`` by the realized read, which cannot value it in USD. The
+    archive job must not reconcile or roll the NAV anchor on that series: it stops as
+    ``live_anchor_unusable live_realized=non_usd``. The token is named by its string
+    because 232's constant is not on main yet."""
+    from services.okx_archive_job import _Stop, _check_live_realized_flags
+
+    with pytest.raises(_Stop) as stopped:
+        _check_live_realized_flags({"daily_pnl_non_usd_okx": True})
+    assert (stopped.value.stop_class, stopped.value.detail) == (
+        "live_anchor_unusable",
+        "live_realized=non_usd",
+    )
+    # A false flag is not a stop, so the arm keys on the flag's value, not its presence.
+    _check_live_realized_flags({"daily_pnl_non_usd_okx": False})

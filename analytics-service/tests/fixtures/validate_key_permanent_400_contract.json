@@ -1,0 +1,161 @@
+{
+  "contract": "CONNECTTRUTH CONN-05 (Phase 240 plan 03) - the PERMANENT 400 body on the LIVE key-connect route (POST /api/validate-key). Every case below is the EXACT wire body the Python service emits for a credential-class refusal: a FLAT object whose top-level `detail` is a SCALAR string, plus a machine `code` and a boolean `recoverable` that is false on every case here (a permanent verdict: retrying the same credentials cannot succeed). The scalar `detail` is the load-bearing half and is byte-identical to the bare `{detail}` body these arms answered before the code was added: src/lib/analytics-client.ts does `error.detail ?? \"Analytics service error\"` and src/lib/wizardErrors.ts `classifyKeyValidationError` branches on body.code first and falls back to a SUBSTRING CASCADE over that message, so a reworded detail would move a rendered verdict.",
+  "notes": "COMMITTED, never generated, written by hand from the literal strings. The `python` and `frontend` jobs in ci.yml are siblings with no `needs:` edge, so a file one job writes is invisible to the other. The Python consumer asserts these bodies equal what the REAL route emits through the REAL main.app exception-handler stack. The TypeScript consumer asserts the wizard verdict for each body equals the verdict for the HEAD-shape body (the same detail with no code and no recoverable), so adding a code moves no rendered copy and no Retry control. Neither consumer may derive its expectations from the module under test: every value here is a literal. Synthetic values only; no credentials, no tenant data. This is a SEPARATE file from validate_key_venue_transient_contract.json, whose TypeScript reader asserts one status (424) across all of its cases.",
+  "invariants": [
+    "status is 400 on every case. These are CALLER-REQUEST faults (a credential the caller sent was refused), unlike the 424 venue-transient class in validate_key_venue_transient_contract.json.",
+    "body key set is EXACTLY {detail, code, recoverable} - no more, no fewer.",
+    "body.detail is a scalar JSON string, byte-identical to the copy these arms answered before the code was added. A reword is a CROSS-LANGUAGE breaking change.",
+    "recoverable is false on every case: a permanent credential verdict."
+  ],
+  "consumers": [
+    "analytics-service/tests/test_validate_key_permanent_400.py - asserts each body equals a REAL full-stack TestClient(main.app) response at the site named by site_id",
+    "tests/lib/validate-key-permanent-400-parity.test.ts - asserts the wizard verdict for each body equals the verdict for the HEAD-shape body, over these same bytes"
+  ],
+  "sites": {
+    "P1": "routers/exchange.py _validate_sfox_key, except SfoxApiError, status 401 or 403",
+    "P2": "routers/exchange.py _validate_sfox_key, the blank or whitespace-only token guard before client construction",
+    "P3": "routers/exchange.py _validate_sfox_key, except ValueError (aiohttp control-character token)",
+    "P4": "routers/exchange.py _validate_mt5_key_probe, except Mt5ValidationError, wrong_server kind",
+    "P5": "routers/exchange.py _validate_mt5_key_probe, except Mt5ValidationError, auth kind",
+    "P6": "routers/exchange.py _connect_and_probe (inside _validate_mt5_key_probe), classify_mt5_login_error -> auth",
+    "P7": "routers/exchange.py _connect_and_probe (inside _validate_mt5_key_probe), classify_mt5_login_error -> wrong_server",
+    "P8": "routers/exchange.py _connect_and_probe (inside _validate_mt5_key_probe), classify_trade_capability -> trade_capable (master password)",
+    "P9": "routers/exchange.py validate_key, the sFOX go-dark gate (sfox_enabled_server() false), before any client is built",
+    "P10": "routers/exchange.py validate_key, the MT5 go-dark gate (mt5_enabled_server() false), before any client or probe",
+    "P11": "routers/exchange.py validate_key, the create_exchange except ValueError arm (an exchange name outside EXCHANGE_CLASSES)"
+  },
+  "cases": [
+    {
+      "site_id": "P1",
+      "trigger": "sfox_http_401",
+      "note": "sFOX answered 401 (a 403 answers the identical body). A rejected credential, permanent for these credentials.",
+      "status": 400,
+      "body": {
+        "detail": "Authentication failed. Check your API key and secret.",
+        "code": "AUTH_FAILED",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P2",
+      "trigger": "sfox_blank_token",
+      "note": "An empty or whitespace-only sFOX token fails closed before any client is built. A 500 here would be a leak of the constructor's ValueError.",
+      "status": 400,
+      "body": {
+        "detail": "Authentication failed. Check your API key and secret.",
+        "code": "AUTH_FAILED",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P3",
+      "trigger": "sfox_control_char_token",
+      "note": "A token with an embedded control character makes aiohttp raise a ValueError that can embed the token. It is a credential problem and the response never carries the token.",
+      "status": 400,
+      "body": {
+        "detail": "Authentication failed. Check your API key and secret.",
+        "code": "AUTH_FAILED",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P4",
+      "trigger": "mt5_credential_wrong_server",
+      "note": "A blank broker server, caught offline before any client is built.",
+      "status": 400,
+      "body": {
+        "detail": "Broker server not found — check the exact server name shown in your MT5 terminal login window.",
+        "code": "MT5_WRONG_SERVER",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P5",
+      "trigger": "mt5_credential_auth",
+      "note": "A non-numeric login or a blank investor password, caught offline before any client is built. The same code and detail as an sFOX 401: one condition, one body.",
+      "status": 400,
+      "body": {
+        "detail": "Authentication failed. Check your API key and secret.",
+        "code": "AUTH_FAILED",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P6",
+      "trigger": "mt5_login_auth",
+      "note": "The terminal refused the investor password (the login error classified auth).",
+      "status": 400,
+      "body": {
+        "detail": "Authentication failed. Check your API key and secret.",
+        "code": "AUTH_FAILED",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P7",
+      "trigger": "mt5_login_wrong_server",
+      "note": "The terminal could not find the broker server (the login error classified wrong_server).",
+      "status": 400,
+      "body": {
+        "detail": "Broker server not found — check the exact server name shown in your MT5 terminal login window.",
+        "code": "MT5_WRONG_SERVER",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P8",
+      "trigger": "mt5_master_password",
+      "note": "A trade-capable (master) login is rejected and never persisted as read-only.",
+      "status": 400,
+      "body": {
+        "detail": "MT5 master password detected — this login can place trades. Reconnect using your read-only investor password.",
+        "code": "MT5_MASTER_PASSWORD",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P9",
+      "trigger": "sfox_disabled",
+      "note": "SFOX_ENABLED is not true: the go-dark gate refuses before any client is built. The credentials reached this service first, so the wizard renders UNKNOWN (UI-SPEC ruling R1).",
+      "status": 400,
+      "body": {
+        "detail": "sFOX integration is not yet available.",
+        "code": "VENUE_DISABLED",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P10",
+      "trigger": "mt5_disabled",
+      "note": "MT5_ENABLED is not true: the go-dark gate refuses before any client or probe. Same body as sFOX apart from the detail; the same body rotate-secret answers when MT5 is off.",
+      "status": 400,
+      "body": {
+        "detail": "MT5 integration is not yet available.",
+        "code": "VENUE_DISABLED",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P11",
+      "trigger": "unsupported_exchange",
+      "note": "create_exchange raised ValueError('Unsupported exchange: nasdaq'). The detail is the ValueError message verbatim. The wizard renders UNKNOWN (UI-SPEC ruling R2).",
+      "status": 400,
+      "body": {
+        "detail": "Unsupported exchange: nasdaq",
+        "code": "INVALID_REQUEST",
+        "recoverable": false
+      }
+    },
+    {
+      "site_id": "P11",
+      "trigger": "unsupported_exchange_empty_message",
+      "note": "create_exchange raised a ValueError with an EMPTY message. The flat-body constructor refuses an empty detail, so the router substitutes a fixed fallback rather than answer a bodyless 500.",
+      "status": 400,
+      "body": {
+        "detail": "Unsupported exchange.",
+        "code": "INVALID_REQUEST",
+        "recoverable": false
+      }
+    }
+  ]
+}

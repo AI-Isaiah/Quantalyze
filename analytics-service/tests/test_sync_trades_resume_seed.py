@@ -12,8 +12,15 @@ the route; this file pins the job. Both call ONE definition,
 LASTSYNC-SEED decision 4 splits the old single `since_ms`:
   * the daily-P&L read (`fetch_all_trades`) seeds from the stored `is_fill =
     false` high-water and NEVER trusts the fills cursor;
-  * the fills read (`fetch_raw_trades`) prefers `last_fetched_trade_timestamp`
-    and falls back to the stored high-water when that cursor is NULL.
+  * the fills read (`fetch_raw_trades`) takes the EARLIER of
+    `last_fetched_trade_timestamp` and the stored fills high-water (the newest
+    `is_fill = true` row, exact), and the daily seed in place of the fills
+    high-water when no fill is stored; it falls back to the stored daily
+    high-water when that cursor is NULL. (Phase 232 VREAD-08, ruling Q1: the
+    cursor is never trusted alone, so a cursor ahead of the stored fills is
+    clamped and its skipped days are re-read. The cases below keep a cursor
+    behind the stored fill, where it is still the seed; the ahead and
+    bootstrap cases live in `tests/test_okxtrades_cursor.py`.)
 
 THE FAKE FILTERS. The `trades` table fake applies every `.eq`, `.order` and
 `.limit`, because a bare `MagicMock` would make the helper fail open (full

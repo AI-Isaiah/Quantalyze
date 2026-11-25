@@ -26,17 +26,17 @@
     {
       "number": "225",
       "name": "ONEACCOUNTONCE",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "226",
       "name": "MT5SOAK",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "227",
       "name": "JOBLEDGER",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "228",
@@ -56,7 +56,7 @@
     {
       "number": "231",
       "name": "BYBITREADS",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "232",
@@ -112,7 +112,7 @@
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 5 of 21 · 0% · executing"
+    "reason": "Phase 1 of 21 · 10% · executing"
   },
-  "updated_at": "2026-11-23T18:44:28.327Z"
+  "updated_at": "2026-11-24T17:48:57.769Z"
 }

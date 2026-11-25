@@ -631,6 +631,39 @@ describe("[140.3-02 / TS-12] POST /api/verify-strategy — success is decided by
     expect(typeof body.public_token).toBe("string");
     expect(body.status).toBe("published");
   });
+
+  it("RLIM-01: the teaser hands postProcessKey the Vercel-read client IP (getClientIp) with userId 'public'", async () => {
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: () => ({ update: () => ({ eq: async () => ({ error: null }) }) }),
+      }),
+    }));
+    const postProcessKey = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        code: null,
+        verification_id: "99999999-9999-9999-9999-999999999999",
+        status: "published",
+      },
+    });
+    vi.doMock("@/lib/process-key-client", () => ({ postProcessKey }));
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    await POST(postReq(VALID_BODY));
+
+    expect(postProcessKey).toHaveBeenCalledTimes(1);
+    const args = postProcessKey.mock.calls[0][0] as {
+      userId: string;
+      clientIp?: string;
+    };
+    // The mocked getClientIp (top of this file) answers 127.0.0.1; the raw IP
+    // is pseudonymised inside postProcessKey, never in the route.
+    expect(args.clientIp).toBe("127.0.0.1");
+    expect(args.userId).toBe("public");
+  });
 });
 
 /**

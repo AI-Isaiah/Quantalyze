@@ -1235,65 +1235,70 @@ describe("D-15 extended again: Dash all of them", () => {
       }
     });
 
-    it("D1: every EOY Returns year row EXCEPT the record's last keeps its strategy figure", () => {
-      // Flipped deliberately (plan 15 review WR-01, founder 2026-10-15 "fix the medium
-      // user-facing issues"): the last year is the Year-to-date figure, which the Returns panel
-      // dashes on a Withheld row. It reads "—" (pinned in the WR-01 test below). Every EARLIER
-      // year covers its own calendar year and keeps its figure.
+    // Phase 237 FACT-01 (founder Q2, 2026-11-23): EOY Returns and Calmar by Year withhold their
+    // WHOLE body on a Withheld full-history view, so D1, D4, WR-01 and R3-WR-01 (which pinned the
+    // old "dash only the record's last year" rule) are flipped deliberately, not drifted. HAND-TYPED.
+    const PANEL_WITHHELD = `⚠ Withheld: this panel covers earlier history, which is unreliable (it includes ${R3}), and the span after it has not been measured yet.`;
+    /** One panel reduced to strings: its year rows, its tables, its notes (RTL cleanup empties containers). */
+    const readBody = (container: HTMLElement, panel: string) => {
+      const section = panelSection(container, panel);
+      if (typeof section === "string") throw new Error(`the panel keeps its header: ${section}`);
+      return {
+        yearRows: [...section.querySelectorAll<HTMLTableRowElement>("tbody tr")].map((tr) =>
+          [...tr.querySelectorAll("td")].map((td) => (td.textContent ?? "").trim()),
+        ),
+        tables: section.querySelectorAll("table").length,
+        notes: [...section.querySelectorAll('[data-testid="panel-withheld-note"]')].map((n) => (n.textContent ?? "").trim()),
+        scopeNotes: section.querySelectorAll('[data-testid="scope-note"]').length,
+        text: section.textContent ?? "",
+      };
+    };
+
+    it("D1 (superseded by Phase 237 FACT-01, Q2): EOY Returns keeps its header and prints the withheld note, with no year row at all", () => {
+      const dated = renderColumn(withHeadlineNaN(payloadWithComparator(DATED)));
+      expect(readBody(dated.container, "EOY Returns").yearRows.length, "premise: a Dated row renders year rows").toBeGreaterThan(1);
+      dated.unmount();
       const { container } = render1();
-      const rows = rowsOf(container, "EOY Returns");
-      expect(rows.length, "premise: the EOY panel renders year rows").toBeGreaterThan(1);
-      for (const tr of rows.slice(0, -1)) {
-        const tds = tr.querySelectorAll("td");
-        expect(tds[0].textContent).toMatch(/^\d{4}$/);
-        expect(tds[1].textContent, `EOY ${tds[0].textContent}`).toMatch(/\d/);
-      }
+      const body = readBody(container, "EOY Returns");
+      expect(body.yearRows, "no year row prints: not the break year, not the last, not an earlier one").toHaveLength(0);
+      expect(body.tables).toBe(0);
+      expect(body.notes).toEqual([PANEL_WITHHELD]);
     });
 
-    it("D4: every Calmar by Year row EXCEPT the record's last keeps its Return figure", () => {
-      // Flipped deliberately with D1 (plan 15 review WR-01): the last year's Return is the
-      // Year-to-date figure.
+    it("D4 (superseded by Phase 237 FACT-01, Q2): Calmar by Year keeps its header and prints the withheld note, with no year row at all", () => {
+      const dated = renderColumn(withHeadlineNaN(payloadWithComparator(DATED)));
+      expect(readBody(dated.container, "Calmar by Year").yearRows.length, "premise: a Dated row renders year rows").toBeGreaterThan(1);
+      dated.unmount();
       const { container } = render1();
-      const rows = rowsOf(container, "Calmar by Year");
-      expect(rows.length, "premise: the Calmar panel renders year rows").toBeGreaterThan(1);
-      for (const tr of rows.slice(0, -1)) {
-        const tds = tr.querySelectorAll("td");
-        expect(tds[1].textContent, `Calmar ${tds[0].textContent}`).toMatch(/\d/);
-      }
+      const body = readBody(container, "Calmar by Year");
+      expect(body.yearRows).toHaveLength(0);
+      expect(body.tables).toBe(0);
+      expect(body.notes).toEqual([PANEL_WITHHELD]);
+      expect(body.text, "no under-200-days footnote beside a note").not.toContain("partial");
     });
 
-    it("WR-01: the record's last calendar year IS the Year-to-date figure; on a Withheld row it reads the em-dash in EOY Returns and Calmar by Year, on a clean row it carries the same digits", () => {
+    it("WR-01 (superseded by Phase 237 FACT-01, Q2): the old last-year dash is gone; on a clean row the last year still carries the Year-to-date digits, on a Withheld row neither panel prints a row", () => {
       const ytd = (c: HTMLElement) => {
         const cell = readCell(c, { id: "ytd", panel: "Returns", row: "Year-to-date", col: 1 });
         if ("error" in cell) throw new Error(cell.error);
         return cell.text;
       };
       const lastRow = (c: HTMLElement, panel: string) => {
-        const rows = rowsOf(c, panel);
-        return [...rows[rows.length - 1].querySelectorAll("td")].map((td) => ({
-          text: (td.textContent ?? "").trim(),
-          cls: td.className,
-          style: td.getAttribute("style") ?? "",
-        }));
+        const rows = readBody(c, panel).yearRows;
+        return rows[rows.length - 1];
       };
       // Premise, the clean row: EOY's last strategy cell and Calmar's last Return cell repeat
-      // the Returns panel's Year-to-date figure digit for digit.
+      // the Returns panel's Year-to-date figure digit for digit, so the gate-off render is intact.
       const clean = renderColumn(payloadWithComparator(CLEAN));
       const cleanYtd = ytd(clean.container);
       expect(cleanYtd, "premise: a clean row prints a YTD figure").toMatch(/\d/);
       const cleanEoy = lastRow(clean.container, "EOY Returns");
       const cleanCalmar = lastRow(clean.container, "Calmar by Year");
-      expect(cleanEoy[1].text, "premise: EOY's last year is the YTD figure").toBe(cleanYtd);
-      expect(cleanCalmar[1].text, "premise: Calmar's last Return is the YTD figure").toBe(cleanYtd);
-      expect(cleanEoy[2].text, "premise: the clean benchmark cell carries a digit").toMatch(/\d/);
-      expect(cleanEoy[3].text, "premise: the clean delta cell carries a digit").toMatch(/\d/);
-      expect(cleanCalmar[2].text, "premise: the clean Max DD cell carries a digit").toMatch(/\d/);
-      expect(cleanCalmar[3].text, "premise: the clean Calmar cell carries a digit").toMatch(/\d/);
+      expect(cleanEoy[1], "premise: EOY's last year is the YTD figure").toBe(cleanYtd);
+      expect(cleanCalmar[1], "premise: Calmar's last Return is the YTD figure").toBe(cleanYtd);
+      for (const t of [cleanEoy[2], cleanEoy[3], cleanCalmar[2], cleanCalmar[3]]) expect(t, "premise: clean cells carry digits").toMatch(/\d/);
       clean.unmount();
-      // The verdict, the Withheld row: YTD reads "—", and so does every cell that repeats it,
-      // with no tone. The year label and the day count are not figures and stay.
-      // As the read path builds it: `withSuffixWindows` nulls the seven trailing windows too
-      // (`withHeadlineNaN` only does the seven stored scalars), so YTD is null.
+      // The verdict, the Withheld row, built as the read path builds it (the seven windows nulled too).
       const built = withHeadlineNaN(payloadWithComparator(WITHHELD_DQ));
       const asBuilt = {
         ...built,
@@ -1301,39 +1306,30 @@ describe("D-15 extended again: Dash all of them", () => {
       } as FactsheetPayload;
       const w = renderColumn(asBuilt);
       expect(ytd(w.container), "premise: the Returns panel dashes YTD on a Withheld row").toBe("—");
-      const eoy = lastRow(w.container, "EOY Returns");
-      const calmar = lastRow(w.container, "Calmar by Year");
-      expect(eoy[0].text).toBe(cleanEoy[0].text);
-      for (const cell of [eoy[1], eoy[2], eoy[3], calmar[1], calmar[2], calmar[3]]) {
-        expect(cell.text).toBe("—");
-        expect(cell.style).not.toContain("--color-positive");
-        expect(cell.style).not.toContain("--color-negative");
+      for (const panel of ["EOY Returns", "Calmar by Year"]) {
+        const body = readBody(w.container, panel);
+        expect(body.yearRows, panel).toHaveLength(0);
+        expect(body.notes, panel).toEqual([PANEL_WITHHELD]);
       }
-      expect(calmar[4].text, "the day count is not a figure").toMatch(/^\d+$/);
       w.unmount();
     });
 
-    it("R3-WR-01 (round-2 review): inside a zoom, the last EOY and Calmar year stay dashed on a Withheld row, because both panels show the full history", async () => {
-      // Plan 15 round 3, WR-01 (regression from 3194279bf): the two panels read the full-history
-      // view and say "Full history" inside a zoom, so the slice-aware gate (`!selected`) must not
-      // switch their dash off. The rail's own slice figures keep the slice-aware gate (D-78, the
-      // window exemption above). Built as the read path builds it (YTD and the windows nulled).
+    it("R3-WR-01 (superseded by Phase 237 FACT-01, Q2): inside a zoom both panels stay withheld and keep their Full history scope note, because both show the whole record", async () => {
+      // Plan 15 round 3, WR-01: the two panels read the full-history view and say "Full history"
+      // inside a zoom, so the slice-aware gate (`!selected`) must not switch the withholding off.
+      // Under Phase 237 the withholding is the whole body, not the last year's dash.
       const built = withHeadlineNaN(payloadWithComparator(WITHHELD_DQ));
       const asBuilt = {
         ...built,
         strategyMetrics: { ...built.strategyMetrics, mtd: null, ytd: null, p3m: null, p6m: null, p1y: null, p3y: null, p5y: null },
       } as FactsheetPayload;
-      const lastRow = (c: HTMLElement, panel: string) => {
-        const rows = rowsOf(c, panel);
-        return [...rows[rows.length - 1].querySelectorAll("td")].map((td) => (td.textContent ?? "").trim());
-      };
-      // Premise A: a clean row inside the same zoom prints digits in every last-year cell, so the
-      // dash below is the Withheld verdict and not an artefact of the zoom.
+      // Premise A: a clean row inside the same zoom prints digits in every last-year cell and
+      // carries the scope note, so the note below is the Withheld verdict and not the zoom.
       const clean = await zoomedColumn(payloadWithComparator(CLEAN));
-      const cleanEoy = lastRow(clean.container, "EOY Returns");
-      const cleanCalmar = lastRow(clean.container, "Calmar by Year");
-      for (const t of [cleanEoy[1], cleanEoy[2], cleanEoy[3], cleanCalmar[1], cleanCalmar[2], cleanCalmar[3]]) {
-        expect(t, "premise: a clean zoomed last-year cell carries a digit").toMatch(/\d/);
+      for (const panel of ["EOY Returns", "Calmar by Year"]) {
+        const rows = readBody(clean.container, panel).yearRows;
+        for (const t of rows[rows.length - 1].slice(1, 4)) expect(t, `premise: clean zoomed ${panel}`).toMatch(/\d/);
+        expect(readBody(clean.container, panel).scopeNotes, `premise: ${panel} says Full history in a zoom`).toBe(1);
       }
       clean.unmount();
       // Premise B: the zoom is real on the Withheld row, the rail's Returns panel keeps its slice figure.
@@ -1341,13 +1337,11 @@ describe("D-15 extended again: Dash all of them", () => {
       const skew = readCell(w.container, { id: "A1", panel: "Main Metrics", row: "Skew", col: 1 });
       if ("error" in skew) throw new Error(skew.error);
       expect(skew.text, "premise: the zoom keeps the rail's slice figure (window exemption A1)").toMatch(/\d/);
-      const eoy = lastRow(w.container, "EOY Returns");
-      const calmar = lastRow(w.container, "Calmar by Year");
-      expect(eoy[0]).toBe(cleanEoy[0]);
-      for (const t of [eoy[1], eoy[2], eoy[3], calmar[1], calmar[2], calmar[3]]) expect(t).toBe("—");
-      // Earlier years keep their figures inside the zoom too (they cover their own calendar year).
-      for (const tr of rowsOf(w.container, "EOY Returns").slice(0, -1)) {
-        expect(tr.querySelectorAll("td")[1].textContent, "earlier EOY year").toMatch(/\d/);
+      for (const panel of ["EOY Returns", "Calmar by Year"]) {
+        const body = readBody(w.container, panel);
+        expect(body.yearRows, panel).toHaveLength(0);
+        expect(body.notes, panel).toEqual([PANEL_WITHHELD]);
+        expect(body.scopeNotes, `${panel} keeps its Full history scope note`).toBe(1);
       }
       w.unmount();
     }, SNAPSHOT_TIMEOUT_MS);
@@ -1372,11 +1366,25 @@ describe("D-15 extended again: Dash all of them", () => {
       }
     });
 
-    it("D6: the Worst 10 Drawdowns table keeps at least one Depth figure", () => {
+    it("D6 (superseded by Phase 237 FACT-01, founder Q1 2026-11-23): the Worst 10 Drawdowns panel keeps its header and shows the withheld note instead of a table", () => {
+      // Until Phase 237 this case pinned "the table keeps at least one Depth figure" on a Withheld
+      // full-history row. The founder ruled that the panel withholds its whole body there (a
+      // drawdown row is measured across the break the row's own note names), so the assertion is
+      // flipped deliberately, not drifted. The Dated premise below keeps the table's own rows in
+      // view, so the absence of a row on the Withheld render is the verdict and not an empty fixture.
+      const dated = renderColumn(withHeadlineNaN(payloadWithComparator(DATED)));
+      expect(rowsOf(dated.container, "Worst 10 Drawdowns").length, "premise: a Dated row renders the Worst 10 rows").toBeGreaterThan(0);
+      dated.unmount();
       const { container } = render1();
-      const rows = rowsOf(container, "Worst 10 Drawdowns");
-      expect(rows.length, "premise: the Worst 10 table renders rows").toBeGreaterThan(0);
-      expect(rows.some((tr) => /\d/.test(tr.querySelectorAll("td")[4]?.textContent ?? ""))).toBe(true);
+      const section = panelSection(container, "Worst 10 Drawdowns");
+      if (typeof section === "string") throw new Error(`the panel keeps its header: ${section}`);
+      expect(rowsOf(container, "Worst 10 Drawdowns")).toHaveLength(0);
+      expect(section.querySelectorAll("table")).toHaveLength(0);
+      const note = section.querySelectorAll('[data-testid="panel-withheld-note"]');
+      expect(note).toHaveLength(1);
+      expect((note[0].textContent ?? "").trim()).toBe(
+        `⚠ Withheld: this panel covers earlier history, which is unreliable (it includes ${R3}), and the span after it has not been measured yet.`,
+      );
     });
   });
 
@@ -1484,7 +1492,12 @@ describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
     // whenever the chart still counts that year.
     const HUGE = (p: FactsheetPayload) => ({ yearly: { ...p.strategyMetrics.yearly, [lastYearOf(p)]: 9 } });
 
-    it("a Withheld row at full history prints no last-year label, bar or scale for that year; earlier years keep theirs", async () => {
+    it("WR-02 (superseded by Phase 237 FACT-01, UI-SPEC 1.6): a Withheld row at full history prints no label, bar or scale for ANY year, only the title and one note", async () => {
+      // Until Phase 237 this case pinned "no last-year label, bar or scale; earlier years keep
+      // theirs". The founder's FACT-01 follow-on (the figures a withheld panel hides are withheld
+      // wherever else they render) replaces the whole chart body with one note, so the assertion is
+      // flipped deliberately, not drifted. The clean premise below keeps the chart's own labels,
+      // bars and scale in view, so their absence on the Withheld render is the verdict.
       const clean = payloadWithComparator(CLEAN);
       const year = lastYearOf(clean);
       const cleanView = await mountBody({
@@ -1498,16 +1511,18 @@ describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
       expect(cleanRow.caption, "premise: the scale caption encodes the huge last year").toContain("±900%");
       const prevYear = String(Number(year) - 1);
       const cleanPrev = eoyRow(cleanView.container, prevYear);
+      expect(cleanPrev.texts.length, "premise: an earlier year prints its labels too").toBeGreaterThanOrEqual(3);
       cleanView.unmount();
 
       const w = await mountBody(WITHHELD(HUGE));
-      const row = eoyRow(w.container, year);
-      expect(row.texts, "only the year label remains").toEqual([year]);
-      expect(row.bars, "no bar encodes the withheld figure").toBe(0);
-      expect(row.caption, "the scale caption leaves that year out").not.toContain("±900%");
-      const prev = eoyRow(w.container, prevYear);
-      expect(prev.texts, "an earlier year keeps its labels").toEqual(cleanPrev.texts);
-      expect(prev.bars).toBeGreaterThan(0);
+      const fig = figureTitled(w.container, "End-of-Year Returns");
+      expect(fig.querySelectorAll('[data-testid="chart-withheld-note"]'), "one note replaces the chart body").toHaveLength(1);
+      expect(fig.querySelector("svg"), "no frame, so no year label, bar or value label for any year").toBeNull();
+      expect(fig.querySelector("header p"), "no scale caption").toBeNull();
+      expect(fig.textContent, "no year's figure, the huge last year's least of all").not.toMatch(/\d%|900/);
+      for (const y of [year, prevYear]) {
+        expect([...fig.querySelectorAll("g")].some((n) => n.querySelector(":scope > text")?.textContent === y), `no row for ${y}`).toBe(false);
+      }
       w.unmount();
     }, SNAPSHOT_TIMEOUT_MS);
 
@@ -1538,7 +1553,11 @@ describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
       };
     }
 
-    it("a Withheld row at full history dashes the last row's YTD cell and its last month cell with no tone; earlier rows and every earlier month cell keep their figures", async () => {
+    it("WR-03 (superseded by Phase 237 FACT-01, UI-SPEC 1.6): a Withheld row at full history dashes EVERY row's YTD cell and the last row's last month cell with no tone; every other month cell keeps its figure", async () => {
+      // Until Phase 237 this case pinned "earlier rows keep their YTD total". The FACT-01 follow-on
+      // withholds the same per-year figures the EOY Returns table withholds, so the earlier-row
+      // assertion at the end is flipped deliberately, not drifted. The clean premises keep every
+      // row's toned total in view.
       const clean = await mountBody(payloadWithComparator(CLEAN));
       const c = lastHeatmapRow(clean.container);
       // Premise: the same surface prints a toned YTD figure for the last year, on a clean row.
@@ -1590,10 +1609,19 @@ describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
         c.months.filter((_, i) => i !== lastIdx),
       );
       expect(row.monthTitles.filter((_, i) => i !== lastIdx)).toEqual(c.monthTitles.filter((_, i) => i !== lastIdx));
-      const earlier = [...figureTitled(w.container, "Monthly Returns").querySelectorAll("tbody tr")]
+      expect(cleanEarlier.length, "premise: there is at least one earlier row").toBeGreaterThan(0);
+      for (const t of cleanEarlier) expect(t, "premise: a clean earlier row prints its total").toMatch(/\d/);
+      const earlierCells = [...figureTitled(w.container, "Monthly Returns").querySelectorAll("tbody tr")]
         .slice(0, -1)
-        .map((tr) => (tr.querySelector("td:last-child")?.textContent ?? "").trim());
-      expect(earlier, "an earlier year keeps its total").toEqual(cleanEarlier);
+        .map((tr) => tr.querySelector<HTMLElement>("td:last-child")!);
+      expect(
+        earlierCells.map((td) => (td.textContent ?? "").trim()),
+        "an earlier year's total is dashed too",
+      ).toEqual(cleanEarlier.map(() => "—"));
+      for (const td of earlierCells) {
+        expect(td.getAttribute("style") ?? "").not.toMatch(/--color-(positive|negative)/);
+        expect(td.getAttribute("title")).toBeNull();
+      }
       w.unmount();
     }, SNAPSHOT_TIMEOUT_MS);
 
@@ -1679,21 +1707,31 @@ describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
   describe("scope: the copies follow the rail's dash at full history only, never a Dated row or mark-to-market", () => {
     /** Every surface that repeats the Year-to-date figure, reduced to strings. */
     function readCopies(container: HTMLElement, year: string) {
-      const lastRailRow = (panel: string) => {
+      // Phase 237 FACT-01 (Q2): a Withheld cash row has no year row in these two panels, only the
+      // note, so each panel reads as its last row (null when there is none) and its note texts.
+      const railPanel = (panel: string) => {
         const hits = [...container.querySelectorAll<HTMLElement>("section")].filter((sec) =>
           (sec.querySelector(":scope > header h3")?.textContent ?? "").trim().startsWith(panel),
         );
         if (hits.length !== 1) throw new Error(`${hits.length} panels titled "${panel}"`);
         const trs = [...hits[0].querySelectorAll("tbody tr")];
-        return [...trs[trs.length - 1].querySelectorAll("td")].map((td) => (td.textContent ?? "").trim());
+        return {
+          lastRow: trs.length === 0 ? null : [...trs[trs.length - 1].querySelectorAll("td")].map((td) => (td.textContent ?? "").trim()),
+          notes: [...hits[0].querySelectorAll('[data-testid="panel-withheld-note"]')].length,
+        };
       };
       const fig = figureTitled(container, "End-of-Year Returns");
       const barRow = [...fig.querySelectorAll("g")].find((n) => n.querySelector(":scope > text")?.textContent === year);
       const heat = figureTitled(container, "Monthly Returns");
       const heatTds = [...heat.querySelectorAll("tbody tr:last-child td")];
       return {
-        eoy: lastRailRow("EOY Returns"),
-        calmar: lastRailRow("Calmar by Year"),
+        // Phase 237 FACT-01 (UI-SPEC 1.6): a Withheld cash row has no bar row at all (the chart is
+        // its title and one note) and dashes EVERY heatmap row's YTD cell, not only the last.
+        barNotes: fig.querySelectorAll('[data-testid="chart-withheld-note"]').length,
+        barSvg: fig.querySelector("svg") !== null,
+        heatYtds: [...heat.querySelectorAll("tbody tr")].map((tr) => (tr.querySelector("td:last-child")?.textContent ?? "").trim()),
+        eoy: railPanel("EOY Returns"),
+        calmar: railPanel("Calmar by Year"),
         barTexts: [...(barRow?.querySelectorAll("text") ?? [])].map((t) => t.textContent ?? ""),
         heatYtd: (heatTds[heatTds.length - 1].textContent ?? "").trim(),
         avg: [...container.querySelectorAll("svg text")].map((t) => (t.textContent ?? "").trim()).filter((t) => /^avg\s/.test(t)),
@@ -1725,14 +1763,24 @@ describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
       // Premise: the very same payload under cash IS the redacted render, so the MTM
       // assertions below cannot pass by the copies never having been withheld.
       const cash = await take("cash_settlement");
-      for (const t of [cash.eoy[1], cash.eoy[2], cash.eoy[3], cash.calmar[1], cash.calmar[2], cash.calmar[3], cash.heatYtd]) {
-        expect(t, "premise: cash dashes the copy").toBe("—");
+      expect(cash.heatYtd, "premise: cash dashes the heatmap copy").toBe("—");
+      for (const p of [cash.eoy, cash.calmar]) {
+        expect(p.lastRow, "premise: cash prints no by-year row (FACT-01 Q2)").toBeNull();
+        expect(p.notes, "premise: cash prints the withheld note").toBe(1);
       }
-      expect(cash.barTexts, "premise: cash drops the chart labels").toEqual([year]);
+      expect(cash.barTexts, "premise: cash drops every chart row (FACT-01 UI-SPEC 1.6)").toEqual([]);
+      expect(cash.barSvg, "premise: cash draws no chart frame").toBe(false);
+      expect(cash.barNotes, "premise: cash prints the chart's withheld note").toBe(1);
+      expect(cash.heatYtds.length, "premise: more than one heatmap row").toBeGreaterThan(1);
+      expect(cash.heatYtds.every((t) => t === "—"), "premise: cash dashes every heatmap YTD").toBe(true);
       expect(cash.avg, "premise: cash drops the avg labels").toEqual([]);
       const mtm = await take("mark_to_market");
-      for (const t of [mtm.eoy[1], mtm.eoy[2], mtm.eoy[3], mtm.calmar[1], mtm.calmar[2], mtm.calmar[3], mtm.heatYtd]) {
-        expect(t, "MTM keeps the copy").toMatch(/\d/);
+      expect(mtm.heatYtd, "MTM keeps the heatmap copy").toMatch(/\d/);
+      for (const t of mtm.heatYtds) expect(t, "MTM keeps every heatmap YTD").toMatch(/\d/);
+      expect(mtm.barNotes, "MTM prints no chart note").toBe(0);
+      for (const p of [mtm.eoy, mtm.calmar]) {
+        expect(p.notes, "MTM prints no withheld note").toBe(0);
+        for (const t of p.lastRow?.slice(1, 4) ?? ["premise: MTM keeps a by-year row"]) expect(t, "MTM keeps the copy").toMatch(/\d/);
       }
       expect(mtm.barTexts.length, "MTM keeps the chart labels").toBeGreaterThanOrEqual(2);
       expect(mtm.avg, "MTM keeps the avg labels").toHaveLength(3);
@@ -1754,8 +1802,14 @@ describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
       const copies = readCopies(w.container, year);
       expect(copies.avg, "premise: the rolling charts are zoomed (a full-history Withheld render draws none)").toHaveLength(3);
       expect(copies.heatYtd).toBe("—");
-      expect(copies.barTexts).toEqual([year]);
-      expect(copies.eoy.slice(1, 4)).toEqual(["—", "—", "—"]);
+      expect(copies.heatYtds.every((t) => t === "—"), "FACT-01: every heatmap row dashes inside a zoom too").toBe(true);
+      expect(copies.barTexts, "FACT-01: no chart row inside a zoom either").toEqual([]);
+      expect(copies.barNotes).toBe(1);
+      expect(copies.barSvg).toBe(false);
+      for (const p of [copies.eoy, copies.calmar]) {
+        expect(p.lastRow, "FACT-01 Q2: no by-year row inside a zoom either").toBeNull();
+        expect(p.notes).toBe(1);
+      }
       w.unmount();
     }, SNAPSHOT_TIMEOUT_MS);
   });

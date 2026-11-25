@@ -320,7 +320,16 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     // declares `ALL 8 ARMS EXECUTED`, so it no longer shares the "ALL 7" text; only
     // test_sync_status_curated_sentence_survives.sql prints it. MEASURED: this arm read
     // `expected 1 to be 2` once the gate gained its eighth arm.
-    expect(okCount).toBe(1);
+    // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): two MORE checked files now share the
+    // text, test_reconcile_readmit_exhaustions.sql and test_enqueue_poll_positions_cohort.sql (each
+    // declares `ALL 7 ARMS EXECUTED`, ordinary sql-tests gates), so the expected count is the three
+    // checked sharers. MEASURED: this arm read `expected 3 to be 1` once ci.yml carried
+    // SENTINEL_FLOOR=37 and both files joined the derivation table.
+    // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER review round 1, SFH-01): test_reconcile_readmit_exhaustions.sql
+    // gained arm X8 and now declares `ALL 8 ARMS EXECUTED`, so it no longer shares the "ALL 7" text; the
+    // sharers are test_sync_status_curated_sentence_survives.sql and test_enqueue_poll_positions_cohort.sql.
+    // MEASURED: this arm read `expected 2 to be 3` once the detector gate gained its eighth arm.
+    expect(okCount).toBe(2);
     expect(out).toContain(
       "completion sentinel DECLARED but not checked against a run — LANE-ONLY",
     );

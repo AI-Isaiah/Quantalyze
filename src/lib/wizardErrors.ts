@@ -5468,6 +5468,41 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
         "A dedicated member is a real improvement and is NOT this plan's.",
     ],
     [
+      "VENUE_DISABLED",
+      "Phase 240 CONNECTTRUTH plan 05 (CONN-05, UI-SPEC ruling R1). Emitted by " +
+        "`validate_key`'s two go-dark gates (`sfox_enabled_server()` and " +
+        "`mt5_enabled_server()` false) and by the MT5 gate in `rotate_key_secret`, " +
+        "as a flat 400 `{detail, code, recoverable: false}` whose detail is " +
+        "'sFOX integration is not yet available.' or 'MT5 integration is not yet " +
+        "available.'. Replayed through `classifyKeyValidationError` on 2026-11-24, " +
+        "both the coded body and the same detail with no code answer UNKNOWN/500, " +
+        "exactly as before the code existed. NOT a verdict row, because the only " +
+        "candidate, `KEY_VENUE_NOT_ENABLED`, says the credentials were not sent " +
+        "anywhere and nothing was stored: FALSE on this arm, since the credentials " +
+        "reached the analytics service before its gate refused them. A row would " +
+        "render a false clause, and the honest render is UNKNOWN. Reachability: " +
+        "three of the four TypeScript callers (`validate-and-encrypt`, " +
+        "`create-with-key`, `composite/add-key`) gate the venue first and answer " +
+        "`KEY_VENUE_NOT_ENABLED` before any call, so only `keys/[id]/rotate-secret` " +
+        "(MT5-only, no TypeScript gate) can reach it. Dedicated copy would be new " +
+        "copy and a new booking (UI-SPEC assumption A3).",
+    ],
+    [
+      "INVALID_REQUEST",
+      "Phase 240 CONNECTTRUTH plan 05 (CONN-05, UI-SPEC ruling R2). Emitted by " +
+        "`validate_key`'s `create_exchange` `except ValueError` arm, whose only " +
+        "message is 'Unsupported exchange: {name}', as a flat 400 with " +
+        "`recoverable: false` (an empty message falls back to 'Unsupported " +
+        "exchange.'). Replayed through `classifyKeyValidationError` on 2026-11-24, " +
+        "both the coded body and the same detail with no code answer UNKNOWN/500, " +
+        "exactly as before the code existed. NOT a verdict row: it is reached only " +
+        "after the TypeScript routes accepted the venue against their own closed " +
+        "set, so `KEY_UNSUPPORTED_VENUE`'s 'pick one of the exchanges shown' would " +
+        "be false, because the user did. The cause is a mismatch between the " +
+        "TypeScript and Python venue sets, which is ours. Same reasoning as the " +
+        "`UNSUPPORTED_EXCHANGE` exemption above.",
+    ],
+    [
       "VALIDATION_UNEXPECTED",
       "Detail: 'Key validation failed unexpectedly. Contact support if this " +
         "persists.' It is BY DEFINITION the unclassified residue of the Python " +

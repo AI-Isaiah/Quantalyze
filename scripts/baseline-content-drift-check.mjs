@@ -358,8 +358,24 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply). It is EXPECTED until
  * that re-dump, and NO allowlist row was added for it. Raising this floor records the function
  * joining the corpus; it does NOT suppress any finding.
+ *
+ * MOVED 2026-11-24 (Phase 227 JOBLEDGER plan 10), 138 -> 143: five ADDITIONS, not a parser gain.
+ * `public.record_compute_job_attempt_error(uuid, text, text, text)`, `public.renew_compute_job_claims(...)`,
+ * `public.record_reconcile_readmit_exhaustions()`, `public.first_hop_enqueue_sweep()` and
+ * `public.record_orphan_reaped_attempt()` enter the chain via the phase's forward migrations
+ * 20261124120000 to 20261124120600. MEASURED by `node scripts/baseline-content-drift-check.mjs` on
+ * this tree: `functions compared 143 - MATCH 131, DRIFT 7, SNAPSHOT_MISSING 5, SNAPSHOT_ONLY 0,
+ * UNCOMPARABLE 0`, `findings 9`. The five SNAPSHOT_MISSING findings are the five new functions,
+ * whose migrations are not on PROD yet (each recorded as a dated `snapshot-only` row in
+ * NAME_SET_RATCHET in scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply).
+ * The four new DRIFT findings are functions the same migrations re-base, where the committed dump
+ * still carries the old body: `enqueue_poll_positions_for_all_strategies/0`,
+ * `mark_compute_job_failed/4`, `reclaim_stuck_compute_jobs/1` and `reset_stalled_compute_jobs/2`.
+ * All nine are EXPECTED until that re-dump, and NO allowlist row was added for any of them. Raising
+ * this floor records the functions joining the corpus; it does NOT suppress any finding.
+ * MERGED 2026-11-24: Phase 227 (+5 functions on its branch, 138 -> 143) onto origin/main at 139 (Phase 225, +1): 144.
  */
-export const COMPARED_FLOOR = 139;
+export const COMPARED_FLOOR = 144;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

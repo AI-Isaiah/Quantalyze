@@ -115,6 +115,7 @@ from services.db import (
 )
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
+    BybitTradeWindowIncomplete,
     aclose_exchange,
     create_exchange,
     fetch_all_trades,
@@ -126,9 +127,18 @@ from services.exchange import (
     parse_since_ms,
 )
 from services.exchange_pagination import PaginationCeilingExceeded
-from services.positions import fetch_positions, persist_position_snapshots
+from services.ingestion._timestamps import coerce_to_aware_utc
+from services.positions import (
+    BYBIT_LIST_NOT_ENDED_REASON,
+    BybitPositionReadRefused,
+    fetch_positions,
+    persist_position_snapshots,
+)
 from services.sfox_client import SfoxClient  # type annotations only
-from services.trade_resume import load_strategy_high_waters
+from services.trade_resume import (
+    load_strategy_fill_high_water,
+    load_strategy_high_waters,
+)
 from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
 # Phase 151: moved to services/mt5_concurrency.py (leaf) so allocator_positions.py
 # can share the ONE terminal registry without an import cycle; re-imported here so
@@ -1342,6 +1352,23 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     if isinstance(exc, BybitUnifiedFlowReadError):
         return ("permanent", str(exc)[:500])
 
+    # Phase 231 (review W2 SF-5, narrowed by round 2 R2-2). The Bybit trade read and the Bybit
+    # position read refuse by name when they cannot return the whole answer. Both are RuntimeError
+    # subclasses, so without an arm they fall through to ``unknown`` (retried), and both texts are
+    # static by contract (no venue text, id or number). PERMANENT only for the reasons that are
+    # deterministic, where a retry repeats the same walk for the same refusal: a window past the
+    # page cap, a start past the venue's history, a row that cannot be read, a position list that
+    # did not end within the page cap. Every other reason (a cursor that did not advance, a reply
+    # with no list, a position row with no size or mark) can be a venue blip, so it stays
+    # ``unknown`` and is retried; failing it for good would withhold the allocator's whole Bybit
+    # book with no second attempt.
+    if isinstance(exc, BybitTradeWindowIncomplete) and exc.reason in (
+        "page_cap", "start_too_old", "unreadable_fill",
+    ):
+        return ("permanent", str(exc)[:500])
+    if isinstance(exc, BybitPositionReadRefused) and str(exc) == BYBIT_LIST_NOT_ENDED_REASON:
+        return ("permanent", str(exc)[:500])
+
     # Phase 215 SC-4: the CSV runner's four former HTTP raise sites are worker domain
     # exceptions now (``services/job_failure.py``). Same ``(kind, text)`` the HTTP arm
     # below produced for each (a 404 and a 500 both land on ``unknown``, a 400 and a
@@ -2100,6 +2127,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     daily_since_ms: int | None = None
 
     raw_fills: list[dict[str, Any]] = []
+    # Phase 232 VREAD-08 bootstrap anchor: the ISO form of the fills-read seed
+    # when the cursor column was NULL at read time and the run had a non-NULL
+    # seed. The epilogue writes it only when the fills read failed (see there).
+    fills_anchor_iso: str | None = None
     # Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_all_trades`` /
     # ``fetch_daily_pnl`` can write DQ flags into the per-task buffer
     # (historically ``bybit_daily_pnl_includes_funding`` pre-C-0319;
@@ -2200,15 +2231,40 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             # is NULL it falls back to the stored daily high-water, never to
             # `last_sync_at` (the `None` first argument removes that fallback).
             # A failed high-water read left `daily_since_ms` None, so a NULL
-            # cursor then means full reach (decision 3). TODOS
-            # 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD stays OPEN: this read
-            # still trusts its cursor and nobody has traced the writer that
-            # put it ahead.
-            fills_since_ms = parse_since_ms(
+            # cursor then means full reach (decision 3).
+            #
+            # Phase 232 VREAD-08 (ruling Q1): the cursor is NOT trusted alone.
+            # A cursor ahead of the newest stored fill means the days between
+            # were never fetched, so the seed is the EARLIER of the cursor and
+            # that fill's exact timestamp; with no stored fill (or a failed
+            # fills read) it is the earlier of the cursor and the daily seed.
+            # The over-fetch is absorbed by the (strategy_id, exchange,
+            # exchange_fill_id) unique index. A NULL or unparsable cursor keeps
+            # the daily seed, issues no fills read, and remembers that seed
+            # (`fills_anchor_iso`) so a refusal of this very read can anchor
+            # the cursor at the read start in the epilogue.
+            _fills_cursor_ms = parse_since_ms(
                 None, preferred=ctx.key_row.get("last_fetched_trade_timestamp")
             )
-            if fills_since_ms is None:
+            if _fills_cursor_ms is None:
                 fills_since_ms = daily_since_ms
+                if daily_since_ms is not None:
+                    fills_anchor_iso = datetime.fromtimestamp(
+                        daily_since_ms / 1000, tz=timezone.utc
+                    ).isoformat()
+            else:
+                _fill_hw_iso, _fill_hw_err = await db_execute(
+                    lambda: load_strategy_fill_high_water(ctx.supabase, strategy_id)
+                )
+                _fill_hw_ms = parse_since_ms(_fill_hw_iso)
+                _seed_bound_ms = (
+                    _fill_hw_ms if _fill_hw_ms is not None else daily_since_ms
+                )
+                fills_since_ms = (
+                    None
+                    if _seed_bound_ms is None
+                    else min(_fills_cursor_ms, _seed_bound_ms)
+                )
             try:
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=fills_since_ms
@@ -2628,31 +2684,71 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     strategy_id, flag_exc,
                 )
 
-    # Checkpoint cursor after any successful fetch (empty or not). Survives
-    # downstream analytics/reconstruction failure. Best-effort — a missed
-    # stamp just means re-fetching one window next run.
+    # Checkpoint the fills cursor to what was STORED, never to the clock.
+    # Survives downstream analytics/reconstruction failure. Best-effort — a
+    # missed stamp just means re-fetching one window next run.
     #
-    # G12.A.7: only advance the granular fetched-cursor if Phase 2 fully
-    # succeeded (or wasn't run). A partial-batch failure leaves the cursor
-    # untouched so the next run re-fetches the lost fills. Empty fetches
-    # (`raw_fills == []`) and feature-flag-disabled paths still advance —
-    # `phase2_complete` defaults False but `raw_fills` is also False so
-    # the gate falls through.
-    #
-    # red-team/C-1 (NEW-C12-02 follow-up): when Phase-1 failed AND Phase-2
-    # succeeded, last_sync_at is correctly held back (NEW-C12-02). Gate: do NOT
-    # advance the fetched cursor when Phase-1 failed.
-    #
-    # Since Phase 211 (LASTSYNC-SEED decision 4) the Phase-1 daily-P&L read
-    # seeds from the stored daily high-water, which does not advance when
-    # Phase-1 failed to persist, so the unpersisted window is re-read
-    # regardless of this cursor. Holding the fills cursor back on a Phase-1
-    # failure now only re-fetches FILLS on the next run, which the
-    # exchange_fill_id dedup (unique index) absorbs. Lineage, 2026-11-14: the
-    # C-1 gate was written when `parse_since_ms` preferred this cursor for the
-    # Phase-1 fetch, where advancing it would have skipped the PnL window for
-    # good. The gate stays; its reason narrowed.
-    advance_fetched_cursor = (not raw_fills) or (phase2_complete and not phase1_failed)
+    # Phase 232 VREAD-08: `last_fetched_trade_timestamp` is a stored-through
+    # mark. When the gate below holds, the stamp is the newest `timestamp`
+    # among the fills this run PERSISTED. Otherwise the param is NULL and the
+    # RPC leaves the column untouched. Before Phase 232 an empty fill list
+    # advanced the cursor to wall-clock now, which covered a raised fetch, an
+    # empty read, the MT5 arm and every run with USE_RAW_TRADE_INGESTION off,
+    # and put the column ahead of the newest stored fill (the 231
+    # `dependency-232` record, WR-03). The gate holds only when:
+    #   * raw fills exist AND every batch persisted (`phase2_complete`);
+    #   * Phase 2 did not fail (`phase2_failed`: a raised fetch or a partial
+    #     persist, G12.A.7: the next run re-fetches the lost fills);
+    #   * Phase 1 did not fail (red-team/C-1: the fills cursor is held back
+    #     with last_sync_at; since Phase 211 the daily read seeds from the
+    #     stored daily high-water, so this now only re-fetches FILLS, which the
+    #     exchange_fill_id dedup absorbs);
+    #   * no `sync_truncated_*` flag is true (Phase 232 ruling Q7: a truncated
+    #     read stored an incomplete window, so its newest fill is not a
+    #     stored-through mark) and `binance_partial_symbols` is not set (a
+    #     symbol whose fills read failed left an unread span behind the newest
+    #     fill of the symbols that succeeded; review 232 CR-02 / SFH-01);
+    #   * every fill timestamp parses (a fill that cannot be dated holds the
+    #     cursor; never a partial maximum).
+    _fills_incomplete = any(
+        (key.startswith("sync_truncated_") or key == "binance_partial_symbols")
+        and value
+        for key, value in exchange_dq_flags.items()
+    )
+    advance_fetched_cursor = (
+        bool(raw_fills)
+        and phase2_complete
+        and not phase2_failed
+        and not phase1_failed
+        and not _fills_incomplete
+    )
+    _p_last_fetched: str | None = None
+    if advance_fetched_cursor:
+        try:
+            _p_last_fetched = max(
+                coerce_to_aware_utc(fill["timestamp"], "sync_trades")
+                for fill in raw_fills
+            ).isoformat()
+        except (KeyError, ValueError, TypeError, OverflowError, OSError) as exc:
+            # A fill without a usable timestamp: hold the cursor. The log names
+            # the strategy and the exception class only, never fill content.
+            logger.warning(
+                "sync_trades Phase 2: holding fetched-cursor for strategy %s — "
+                "a persisted fill has no usable timestamp (%s)",
+                strategy_id, type(exc).__name__,
+            )
+            _p_last_fetched = None
+    elif (phase2_failed or _fills_incomplete) and fills_anchor_iso is not None:
+        # Phase 232 VREAD-08 bootstrap anchor (ruling Q1): the cursor column was
+        # NULL at read time and this run's fills read began at `fills_anchor_iso`
+        # but did not store its span (a raised fetch OR a partial persist: both
+        # leave an unstored span under phase2_fill_ingestion_failed; a truncated
+        # or partial-symbol read returns fills yet leaves an unread span, and
+        # holding a NULL column protects nothing: review 232 CR-01). Anchor the
+        # column at the read start so the next clean run re-reads that span
+        # before the self-heal clears the flag. It never points past where the
+        # read began, and the RPC writes it only into a NULL or earlier column.
+        _p_last_fetched = fills_anchor_iso
 
     # NEW-C12-05 (CL12): fenced epilogue write. The two cursor checkpoints
     # (last_fetched_trade_timestamp, last_sync_at) and the balance snapshot are
@@ -2668,10 +2764,11 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     #
     # Gating is unchanged from the pre-RPC two-write form; a NULL param means
     # "leave this column untouched", mirroring the old conditional builds:
-    #   • last_fetched_trade_timestamp advances only when advance_fetched_cursor
-    #     (G12.A.7 / red-team C-1: held back when Phase-1 failed). Since Phase
-    #     211 it seeds the Phase-2 fills read ONLY (`fills_since_ms`); the
-    #     Phase-1 daily-P&L read seeds from the stored high-water instead.
+    #   • last_fetched_trade_timestamp is written only with the stored-through
+    #     stamp when advance_fetched_cursor holds (Phase 232 VREAD-08; held
+    #     back on a Phase-1 or Phase-2 failure, G12.A.7 / red-team C-1). Since
+    #     Phase 211 it seeds the Phase-2 fills read ONLY (`fills_since_ms`);
+    #     the Phase-1 daily-P&L read seeds from the stored high-water instead.
     #   • last_sync_at advances only when Phase-1 persisted rows (NEW-C12-02:
     #     advancing past an unpersisted window loses the daily-PnL permanently).
     #   • account_balance_usdt is written whenever present (no ordering).
@@ -2683,12 +2780,11 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # swallow-with-warning is safe and avoids a retry storm on a persistent
     # api_keys write fault. Not silent: the warning is surfaced loudly.
     _now_iso = datetime.now(timezone.utc).isoformat()
-    _p_last_fetched = _now_iso if advance_fetched_cursor else None
     _p_last_sync = _now_iso if not phase1_failed else None
 
     if _p_last_fetched is None and _p_last_sync is None and account_balance is None:
-        # silent-failure/F-04: nothing to write (fetched cursor held, Phase-1
-        # failed, no balance). Log the deliberate skip so operators can
+        # silent-failure/F-04: nothing to write (no stored-through fills stamp,
+        # Phase-1 failed, no balance). Log the deliberate skip so operators can
         # distinguish it from a write-path regression that drops the update.
         logger.info(
             "sync_trades: advance_sync_cursor skipped — no columns to write "
@@ -3043,6 +3139,27 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
 
     Pre-flight: same as sync_trades (strategy + api_key load, circuit
     breaker, decrypt, exchange create). On 429, stamps last_429_at.
+
+    Bybit (Phase 223 C27, founder ruling 3): the walk is one 7-day window at a
+    time, oldest first, and each window is stored before the next is read. The
+    cursor above is the newest stored row, so a walk that stores nothing until
+    it ends loses every attempt to the handler budget (the census measured a
+    first walk of 379 s against 180 s, with 0 rows ever stored). A walk the
+    budget cuts still fails the job as a timeout, and each attempt keeps what
+    it stored, so the next attempt resumes from the stored cursor.
+
+    Malformed funding rows (Phase 223 FLOWK-02, decided 2026-11-24): every
+    venue arm keeps the default ``on_malformed="drop"``. The fetcher drops the
+    row, logs a WARNING with the venue and the count, and the walk still ends
+    DONE with the well-formed rows stored. Reason: no published number reads
+    ``funding_fees``. Its readers at HEAD on 2026-11-24 are
+    ``position_reconstruction.reconstruct_positions`` (no non-test caller), the
+    GDPR export, ``sanitize_user`` and ``scripts/bybit_reconcile.py``. A refusal
+    would also starve the table: a refused walk stores nothing, the cursor never
+    moves, and the job would refuse daily. Revisit when a published reader of
+    ``funding_fees`` appears. The composite member funding read is out of scope
+    (founder ruling F-2). Pinned per venue by
+    ``TestSyncFundingMalformedRowDecision``.
     """
     ctx = await _exchange_preflight(job, "run_sync_funding_job")
     if isinstance(ctx, DispatchResult):
@@ -3076,6 +3193,7 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
         fetch_funding_binance,
         fetch_funding_okx,
         fetch_funding_bybit,
+        bybit_funding_windows,
         upsert_funding_rows,
     )
 
@@ -3085,7 +3203,26 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
         elif exchange_name == "okx":
             rows = await fetch_funding_okx(ctx.exchange, strategy_id, since_ms)
         elif exchange_name == "bybit":
-            rows = await fetch_funding_bybit(ctx.exchange, strategy_id, since_ms)
+            # C27: oldest window first, stored before the next is read.
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            windows = bybit_funding_windows(since_ms, now_ms)
+            stored_rows = 0
+            for w_start, w_end in windows:
+                window_rows = await fetch_funding_bybit(
+                    ctx.exchange, strategy_id, w_start, until_ms=w_end
+                )
+                failed = await _store_funding_window(
+                    ctx.supabase, strategy_id, window_rows
+                )
+                if failed is not None:
+                    return failed
+                stored_rows += len(window_rows)
+            logger.info(
+                "sync_funding: stored %d bybit funding rows in %d window(s) "
+                "for strategy %s",
+                stored_rows, len(windows), strategy_id,
+            )
+            return DispatchResult(outcome=DispatchOutcome.DONE)
         else:
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
@@ -3135,6 +3272,51 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
         result["inserted"], strategy_id,
     )
     return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
+async def _store_funding_window(
+    supabase: Any, strategy_id: str, rows: list[Any]
+) -> DispatchResult | None:
+    """Store one Bybit funding window; None on success, FAILED transient on error.
+
+    Phase 223 C27. The funding cursor is the newest stored timestamp minus two
+    days, so the walk must never store a newer row while an older row of the
+    same walk is unstored: that hole would sit behind the cursor and never be
+    re-read. Hence the ascending sort (stable, ties keep fetch order; the rows
+    are not rebuilt), 500-row slices, and a return at the first slice that
+    reports an error, before the next slice starts. ``upsert_funding_rows``
+    itself continues past a failed batch (shared with the backfill script), so
+    it is called once per slice and left unchanged.
+    """
+    if not rows:
+        return None
+
+    from services.funding_fetch import FUNDING_UPSERT_BATCH_SIZE, upsert_funding_rows
+
+    ordered = sorted(rows, key=lambda r: r["timestamp"])
+    for i in range(0, len(ordered), FUNDING_UPSERT_BATCH_SIZE):
+        result = await upsert_funding_rows(
+            supabase, ordered[i : i + FUNDING_UPSERT_BATCH_SIZE]
+        )
+        upsert_errors = result.get("errors") or []
+        if upsert_errors:
+            # H-1115: same log signature and FAILED transient shape as the
+            # single-upsert path above.
+            for err in upsert_errors:
+                logger.error(
+                    "sync_funding: upsert_funding_rows batch failed for "
+                    "strategy %s: %s",
+                    strategy_id, err,
+                )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_kind="transient",
+                error_message=(
+                    f"sync_funding: {len(upsert_errors)} upsert "
+                    f"batch(es) failed: {upsert_errors[:3]}"
+                ),
+            )
+    return None
 
 
 async def _resolve_ccxt_flow_price_index(
@@ -4097,7 +4279,7 @@ async def _clear_nav_mark_refusal(
 #: carried flat. The ``kind`` column has no CHECK, so this family needs no migration.
 READ_INCOMPLETE_KIND_PREFIX: Final[str] = "read_incomplete:"
 
-#: The closed set of reasons a key's read is refused by name: the four ``fetch_daily_pnl`` reasons
+#: The closed set of reasons a key's read is refused by name: the five ``fetch_daily_pnl`` reasons
 #: (``services.exchange.daily_pnl_read_verdict``), the three funding reasons and the Bybit Unified
 #: flow read (plan 186-10; the exception CLASS NAME rides beside it). A token outside the
 #: set is never written, so a venue message cannot reach the row.
@@ -4105,6 +4287,7 @@ READ_INCOMPLETE_TOKENS: Final[frozenset[str]] = frozenset(
     {
         "daily_pnl_fetch_error",
         "daily_pnl_truncated_okx",
+        "daily_pnl_non_usd_okx",
         "daily_pnl_truncated_bybit",
         "daily_pnl_binance_income_fallback",
         "read_deadline",
@@ -4122,6 +4305,7 @@ READ_INCOMPLETE_TOKENS: Final[frozenset[str]] = frozenset(
 _DAILY_PNL_REFUSAL_ORDER: Final[tuple[str, ...]] = (
     "daily_pnl_fetch_error",
     "daily_pnl_truncated_okx",
+    "daily_pnl_non_usd_okx",
     "daily_pnl_truncated_bybit",
     "daily_pnl_binance_income_fallback",
     "read_deadline",
@@ -4556,6 +4740,10 @@ class _NativeKeyUsd(NamedTuple):
     # stored terminals, not from a whole-key basis) or when any needed close is missing.
     composed_day_pnl: "pd.Series | None"
     composed_flows: "pd.Series | None"
+    # 229 MT5D-07: why the basis above is ``None`` (a token of
+    # ``allocator_equity_derive.WRITER_BASIS_WITHHELD_TOKENS``), else ``None`` when a basis was
+    # built. Stored by the derive's store gate for a TIMED key only.
+    writer_basis_reason: str | None = None
 
 
 def _convert_native_key_to_usd(
@@ -4677,8 +4865,15 @@ def _convert_native_key_to_usd(
 
     composed_day_pnl: pd.Series | None = None
     composed_flows: pd.Series | None = None
+    writer_basis_reason: str | None
     hole_ends = hole_segment_ends(event_days, unpriced_iso)
-    if priced_through is not None and not hole_ends and not unpriced_iso:
+    if priced_through is None:
+        writer_basis_reason = "no_usd_return_day"
+    elif hole_ends:
+        writer_basis_reason = "interior_hole"
+    elif unpriced_iso:
+        writer_basis_reason = "unpriced_days_without_interior_hole"
+    else:
         basis = _native_key_usd_writer_basis(
             native_nav_levels=native_nav_levels,
             native_day_pnl=native_day_pnl,
@@ -4687,7 +4882,10 @@ def _convert_native_key_to_usd(
             close_by_day=close_by_day,
             priced_through=pd.Timestamp(priced_through),
         )
-        if basis is not None:
+        if isinstance(basis, str):
+            writer_basis_reason = basis
+        else:
+            writer_basis_reason = None
             composed_day_pnl, composed_flows = basis
 
     return _NativeKeyUsd(
@@ -4700,6 +4898,7 @@ def _convert_native_key_to_usd(
         segment_terminals=segment_terminals,
         composed_day_pnl=composed_day_pnl,
         composed_flows=composed_flows,
+        writer_basis_reason=writer_basis_reason,
     )
 
 
@@ -4711,21 +4910,23 @@ def _native_key_usd_writer_basis(
     flows: "list[Any]",
     close_by_day: "dict[pd.Timestamp, float]",
     priced_through: "pd.Timestamp",
-) -> "tuple[pd.Series, pd.Series] | None":
-    """``(composed_day_pnl, composed_flows)`` in USD for a hole-free native key, else ``None``.
+) -> "tuple[pd.Series, pd.Series] | str":
+    """``(composed_day_pnl, composed_flows)`` in USD for a hole-free native key, else the token
+    (``allocator_equity_derive.WRITER_BASIS_WITHHELD_TOKENS``) naming the branch that built none.
 
     164.6.6.2.3 plan 06. Pure bookkeeping on the levels the key's returns were chained from:
     the USD level on each calendar day from the first NAV day to ``priced_through`` is the
     native realized level (the last level on or before the day) x that day's own close, and
     ``nav_twr.level_day_pnl`` turns those levels and the persisted USD flows into
-    ``P_d = L_d - L_{d-1} - F_d`` (the shared builder, no second subtraction). ``None`` when any
-    day on that calendar has no usable close: a level is never priced on a neighbour's close."""
+    ``P_d = L_d - L_{d-1} - F_d`` (the shared builder, no second subtraction). A token string
+    when any day on that calendar has no usable close: a level is never priced on a neighbour's
+    close. 229 MT5D-07: the caller tells the two results apart with ``isinstance(..., str)``."""
     import pandas as pd
 
     from services.nav_twr import _flows_to_daily_usd, level_day_pnl
 
     if native_nav_levels.empty or native_day_pnl.empty:
-        return None
+        return "no_levels_or_pnl"
     native_levels = {
         pd.Timestamp(ts).normalize(): float(level)
         for ts, level in native_nav_levels.sort_index().items()
@@ -4733,17 +4934,17 @@ def _native_key_usd_writer_basis(
     pnl_by_day = {pd.Timestamp(ts).normalize(): float(v) for ts, v in native_day_pnl.items()}
     first = min(native_levels)
     if first > priced_through or first not in pnl_by_day:
-        return None
+        return "first_day_unpriceable"
     days = list(pd.date_range(first, priced_through, freq="D"))
     if any(day not in close_by_day for day in days):
-        return None
+        return "calendar_day_without_close"
 
     usd_levels: list[float] = []
     carried: float | None = None
     for day in days:
         carried = native_levels.get(day, carried)
         if carried is None:
-            return None
+            return "no_carried_level"
         usd_levels.append(carried * close_by_day[day])
     # The native capital before the first day, off the fold's own day-0 identity
     # ``N_0 = N_{-1} + P_0 + f_0``, priced at the first day's close (about 0 on a full history).
@@ -5900,6 +6101,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # the revaluation of the held balance. ``None`` everywhere else, where the basis P&L is
         # ``_day_pnl_usd`` itself.
         _composed_day_pnl_usd: "pd.Series | None" = None
+        # 229 MT5D-07: the closed token naming the branch that built no native-key writer basis.
+        # Declared here, not inside the native-key branch: the epilogue closure reads it on every
+        # venue and would raise ``NameError`` where the branch never ran.
+        _writer_basis_reason: str | None = None
+        # 229 HOLD-03: the per-day returns THIS derive wrote to ``csv_daily_returns`` (ISO day to
+        # return), stored beside the writer basis as ``returns_stamp``. Assigned at each key-mode
+        # exit immediately before the epilogue, from exactly the rows that exit upserted; ``None``
+        # when it wrote none. Declared here, not at the exits: ``_run_key_mode_compose_epilogue``
+        # is a closure defined BEFORE ``rows_payload`` exists and is called from the under-two-days
+        # exit too, so a bare ``rows_payload`` in it would raise ``NameError`` at that exit.
+        _returns_stamp_rows: dict[str, float] | None = None
         # CR-01 (167.1.2.2 round 1): the REALIZED terminal the NAV above was rolled back from,
         # ``(last NAV day, USD)``. It is NOT the live equity the epilogue stores as
         # ``anchor_usd``: MT5 rolls from ``equity - upnl``, Deribit from the native balance less
@@ -8517,6 +8729,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # a holed one, which composes in segments).
                 _composed_day_pnl_usd = _usd_key.composed_day_pnl
                 _composed_flows_usd = _usd_key.composed_flows
+                _writer_basis_reason = _usd_key.writer_basis_reason
                 _segment_terminals = _usd_key.segment_terminals
                 if _segment_terminals and int(meta.get("flow_timing_timed_days", 0)) > 0:
                     # A holed key whose days were measured on a DayTiming returns cohort
@@ -10093,10 +10306,33 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # and a payload with neither field is the old row. The Deribit NAV path and the MT5
             # key-mode path (164.6.6.2.3) set ``_composed_flows_usd``; the ccxt payloads never do
             # (``WRITER_BASIS_VENUES``). No amount is logged.
-            from services.allocator_equity_derive import writer_basis_payload
+            from services.allocator_equity_derive import (
+                returns_stamp_payload,
+                writer_basis_payload,
+            )
 
             _key_inputs_payload.update(
                 writer_basis_payload(_basis_day_pnl, _composed_flows_usd)
+            )
+            # 229 HOLD-03: the returns this derive wrote, in the SAME atomic upsert as the basis,
+            # so the compose can refuse a row and a returns set from two different derives.
+            if _returns_stamp_rows is not None:
+                _key_inputs_payload.update(returns_stamp_payload(_returns_stamp_rows))
+        elif venue == "mt5" and int(meta.get("flow_timing_timed_days", 0)) > 0:
+            # 229 MT5D-07 (founder 2026-11-24, "Block it"): a TIMED MT5 key that stores no writer
+            # basis would compose on the legacy roll, whose cohort-day error nothing flags. Store
+            # the branch that returned no basis as a closed token; the compose reads it and
+            # raises the blocking ``key_inputs_mismatch`` for the book. The payload is rewritten
+            # whole each derive, so the token clears itself on the next derive that stores a basis.
+            # Counts and a closed token only (T-164.6.6.2.3-16): no id, day or amount.
+            _writer_basis_token = _writer_basis_reason or "store_gate_unmet"
+            _key_inputs_payload["writer_basis_withheld"] = _writer_basis_token
+            logger.warning(
+                "derive_broker_dailies: timed mt5 key stores no writer basis, the book reports "
+                "key_inputs_mismatch (branch=%s, timed_days=%d, unpriced_days=%d; 229 MT5D-07)",
+                _writer_basis_token,
+                int(meta.get("flow_timing_timed_days", 0)),
+                len(_native_usd_inputs["unpriced_days"]) if _native_usd_inputs is not None else 0,
             )
         if _native_inception_verdict is not None:
             _key_inputs_payload["native_inception"] = _native_inception_verdict
@@ -10245,6 +10481,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # compose reads both as a double count (`key_inputs_mismatch`).
             _stale_days = _tiny_base_days_stored(meta, returns, _applied_marks, key_mode=True)
             _short_exit_last_day: str | None = None
+            _short_exit_stamp: dict[str, float] | None = None
             if _applied_marks is not None and _applied_marks.covered_from is not None:
                 assert _applied_marks.terminal is not None  # marks exist, so a last mark does
                 # GC2-01: the one day this derive measured (at most one interpretable day) is
@@ -10269,6 +10506,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         .execute()
                     )
                     _short_exit_last_day = max(str(r["date"]) for r in _measured)
+                    _short_exit_stamp = {
+                        str(r["date"]): float(r["daily_return"]) for r in _measured
+                    }
                 _stale_start, _stale_end = _reconcile_hull(
                     [], [*_stale_days, _applied_marks.covered_from, _applied_marks.terminal[0]]
                 )
@@ -10316,6 +10556,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     "api_key %s",
                     api_key_id,
                 )
+            # 229 HOLD-03: stamp exactly the rows this exit upserted (the marked rows), and nothing
+            # when it wrote none. A stamp of the in-memory ``returns`` would refuse a healthy key
+            # forever: rows this exit never wrote are not in the table.
+            _returns_stamp_rows = _short_exit_stamp
             try:
                 await _run_key_mode_compose_epilogue()
             except NavReconstructionError as exc:
@@ -10689,6 +10933,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 "derive_broker_dailies: linked-strategy recompute enqueue failed for api_key %s",
                 api_key_id,
             )
+        # 229 HOLD-03: the table equals ``rows_payload`` inside the span (the delete above removed
+        # every other day), so the stamp is exactly the rows this exit wrote.
+        _returns_stamp_rows = {str(r["date"]): float(r["daily_return"]) for r in rows_payload}
         # F1(a): the SAME Option-B epilogue the <2-day short-circuit runs (one
         # helper, so the two key-mode exits can never drift on the persist/enqueue
         # contract).
@@ -10981,6 +11228,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # NAV_TWR_GUARD_KEYS (an annotation on a kept day is not a warning).
     if meta.get("flow_timing_day_level_large") is True:
         _prestamp_flags["flow_timing_day_level_large"] = True
+    # 229 / MT5D-05 - an inception day's P&L the no-timing branch has no return for is counted by
+    # name, same rules as the annotations above: BOOL only (never the in-process day count or the
+    # amount, T-73-02), present-only, `is True`, NEVER a member of NAV_TWR_GUARD_KEYS.
+    if meta.get("inception_day_pnl_dropped") is True:
+        _prestamp_flags["inception_day_pnl_dropped"] = True
     # 167.2.1.1.1 NAVMTM plan 07 / D-05, D-12, D-15, L2 - where the key's marks begin and which
     # days they skipped. ISO dates and lists of them only (T-73-02: no amount), present-only,
     # and NEVER members of NAV_TWR_GUARD_KEYS: membership promotes a row to
@@ -16511,6 +16763,7 @@ async def run_derive_allocator_equity_job(
     from services.allocator_equity_derive import (
         FULL_HISTORY_VENUES,
         SHARED_ACCOUNT_KINDS,
+        WRITER_BASIS_WITHHELD_TOKENS,
         DegradeReason,
         DeriveRefusal,
         account_groups,
@@ -16519,8 +16772,11 @@ async def run_derive_allocator_equity_job(
         identity_pending_venues,
         read_dropped_day_pnl,
         read_realized_terminal,
+        read_returns_stamp,
         read_writer_basis,
+        read_writer_basis_withheld,
         refusal_payload,
+        returns_stamp_mismatch_days,
         stitch_dropped_day_pnl,
         stitch_flow_disagreement_days,
         stitch_shared_account,
@@ -17030,6 +17286,43 @@ async def run_derive_allocator_equity_job(
     # stitch source's is kept apart: the account's basis is decided after the stitch below.
     writer_basis_raw: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
     source_writer_basis: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
+    # 229 MT5D-07: a key whose row carries ``writer_basis_withheld`` (a TIMED MT5 key the derive
+    # could build no basis for), mapped to the stored token. Any entry blocks the book as
+    # ``key_inputs_mismatch``. Keyed on the stored token, never on an absent basis: a row written
+    # before 229 has none and is never blocked.
+    withheld_by_key: dict[str, str] = {}
+    # 229 MR-01 (founder ruling "Exempt departed keys"): a DEPARTED key whose saved row carries a
+    # withheld token or a stale returns stamp does not block the book (only a live, counted or
+    # stitch-source key does). It is collected here instead, raises the benign
+    # ``departed_writer_basis_unchecked`` flag and is logged as a count only.
+    departed_basis_unchecked: set[str] = set()
+    # 229 HOLD-03: a key whose RAW stored returns disagree with the ``returns_stamp`` of the derive
+    # that wrote its row, mapped to the count of mismatching days. Any entry blocks the book as
+    # ``key_inputs_mismatch``. Compared per raw key BEFORE ``stitch_shared_account`` replaces a
+    # member's series (the replay sees the stitched series, not each member's own rows). A row
+    # without a stamp (written before 229) is never refused, only counted.
+    stamp_mismatch_days_by_key: dict[str, int] = {}
+    stampless_basis_rows = [0]
+
+    def _compare_returns_stamp(
+        key_id: str,
+        stored_payload: Mapping[str, Any],
+        series_by_key: Mapping[str, pd.Series],
+        has_basis: bool,
+        unchecked: set[str] | None = None,
+    ) -> None:
+        stamp = read_returns_stamp(stored_payload)
+        if stamp is None:
+            if has_basis:
+                stampless_basis_rows[0] += 1
+            return
+        mismatching = returns_stamp_mismatch_days(stamp, series_by_key.get(key_id))
+        if mismatching > 0:
+            if unchecked is not None:
+                unchecked.add(key_id)
+            else:
+                stamp_mismatch_days_by_key[key_id] = mismatching
+
     # 164.6.6.2.1 D-09 / D-20: a BTC key whose live close is missing, mapped to that day. Its
     # series is priced through ``priced_through`` and it leaves the book after it (T1).
     unpriced_close_day_by_key: dict[str, str] = {}
@@ -17085,6 +17378,16 @@ async def run_derive_allocator_equity_job(
                     _departed_basis = read_writer_basis(departed_payload)
                     if _departed_basis is not None:
                         writer_basis_raw[api_key_id] = _departed_basis
+                    _departed_withheld = read_writer_basis_withheld(departed_payload)
+                    if _departed_withheld is not None:
+                        departed_basis_unchecked.add(api_key_id)
+                    _compare_returns_stamp(
+                        api_key_id,
+                        departed_payload,
+                        returns_by_key,
+                        _departed_basis is not None,
+                        departed_basis_unchecked,
+                    )
                 continue
             if api_key_id not in counted_ids:
                 # A shared-account key left out by the group resolution: still
@@ -17111,6 +17414,12 @@ async def run_derive_allocator_equity_job(
                     _source_basis = read_writer_basis(source_payload)
                     if _source_basis is not None:
                         source_writer_basis[api_key_id] = _source_basis
+                    _source_withheld = read_writer_basis_withheld(source_payload)
+                    if _source_withheld is not None:
+                        withheld_by_key[api_key_id] = _source_withheld
+                    _compare_returns_stamp(
+                        api_key_id, source_payload, source_returns, _source_basis is not None
+                    )
                 continue
             key_inputs_ids.add(api_key_id)
             payload = row.get("payload") or {}
@@ -17130,6 +17439,10 @@ async def run_derive_allocator_equity_job(
             _basis = read_writer_basis(payload)
             if _basis is not None:
                 writer_basis_raw[api_key_id] = _basis
+            _withheld = read_writer_basis_withheld(payload)
+            if _withheld is not None:
+                withheld_by_key[api_key_id] = _withheld
+            _compare_returns_stamp(api_key_id, payload, returns_by_key, _basis is not None)
             _anchor = payload.get("anchor_usd")
             anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
             if _anchor is None:
@@ -17247,12 +17560,19 @@ async def run_derive_allocator_equity_job(
     # The opposite skew (inputs NEWER than the returns) cannot come from a race given the
     # read order, so it is never retried and blocks at once.
     # The stored row, if any, is left alone: yesterday's curve is a truthful older reading.
+    # SFH-229-02: a counted key whose stored returns disagree with its row's returns_stamp is the
+    # same race when a same-terminal re-derive revised an in-window return (the last day did not
+    # move), so it rides the same retry; on the last attempt it blocks as KEY_INPUTS_MISMATCH.
+    # A key with no stored return day is left out by the no-history rule below, so it is not counted.
     lagging_inputs = [
         k
         for k in counted_ids
-        if k in realized_terminal_by_key
-        and k in last_return_day
-        and last_return_day[k] > realized_terminal_by_key[k][0]
+        if (
+            k in realized_terminal_by_key
+            and k in last_return_day
+            and last_return_day[k] > realized_terminal_by_key[k][0]
+        )
+        or (k in stamp_mismatch_days_by_key and k in last_return_day)
     ]
     if lagging_inputs:
         _attempts = int(job.get("attempts") or 0)
@@ -17681,6 +18001,9 @@ async def run_derive_allocator_equity_job(
                 realized_terminal_by_key, writer_basis_by_key,
             ):
                 _map.pop(_k, None)
+            # 229 MT5D-07: a key the no-history rule removes from the book must not block it.
+            withheld_by_key.pop(_k, None)
+            stamp_mismatch_days_by_key.pop(_k, None)
             if no_capital_stored is not None:
                 for _map in (
                     no_capital_stored.anchors, no_capital_stored.null_reasons,
@@ -17718,6 +18041,48 @@ async def run_derive_allocator_equity_job(
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
+    if withheld_by_key:
+        # 229 MT5D-07: one counts-only line. The key count and a histogram over the closed token
+        # set; a stored string outside it is counted as ``unknown`` and never echoed. No key id,
+        # allocator id, day or amount.
+        _withheld_hist = {_t: 0 for _t in sorted(WRITER_BASIS_WITHHELD_TOKENS)}
+        _withheld_hist["unknown"] = 0
+        for _stored_token in withheld_by_key.values():
+            _bucket = "unknown"
+            if _stored_token in WRITER_BASIS_WITHHELD_TOKENS:
+                _bucket = _stored_token
+            _withheld_hist[_bucket] += 1
+        logger.warning(
+            "derive_allocator_equity: compose blocks the book as key_inputs_mismatch, %d key(s) "
+            "carry no writer basis (%s; 229 MT5D-07)",
+            len(withheld_by_key),
+            ", ".join(f"{_t}={_n}" for _t, _n in _withheld_hist.items() if _n),
+        )
+
+    if stamp_mismatch_days_by_key:
+        # 229 HOLD-03: counts only. Keys refused and total mismatching days; no key id, allocator
+        # id, day or amount.
+        logger.warning(
+            "derive_allocator_equity: compose blocks the book as key_inputs_mismatch, %d key(s) "
+            "disagree with their returns stamp on %d day(s) in total (229 HOLD-03)",
+            len(stamp_mismatch_days_by_key),
+            sum(stamp_mismatch_days_by_key.values()),
+        )
+    if departed_basis_unchecked:
+        # 229 MR-01: counts only. Non-blocking: a departed key is exempt from the writer-basis and
+        # stamp checks, so its history composes as stored. No key id, allocator id, day or amount.
+        logger.warning(
+            "derive_allocator_equity: %d departed key(s) carry no writer basis or disagree with "
+            "their returns stamp and are exempt from that block (229 MR-01)",
+            len(departed_basis_unchecked),
+        )
+    if stampless_basis_rows[0]:
+        logger.info(
+            "derive_allocator_equity: %d writer-basis row(s) carry no returns stamp and are not "
+            "compared (written before 229 HOLD-03)",
+            stampless_basis_rows[0],
+        )
+
     # ── 4. The ONLY derivation call — the frozen-core composition layer. ──────
     def _compose(inputs: _AllocatorKeyInputs) -> dict[str, Any]:
         return compose_allocator_equity(
@@ -17732,6 +18097,8 @@ async def run_derive_allocator_equity_job(
                     ("duplicate_shared_account_counted_once", duplicate_counted_once),
                     ("shared_account_history_stitched", stitched_accounts > 0),
                     ("departed_history_unavailable", bool(departed_unavailable)),
+                    # 229 MR-01: non-blocking. A departed key's withheld token or stale stamp.
+                    ("departed_writer_basis_unchecked", bool(departed_basis_unchecked)),
                     # SFH-02: non-blocking. A stitched account composing on today's roll
                     # because a member has no writer basis; "partial" is the half-deployed
                     # shape (some members carry one), its absence with the base token is a
@@ -17749,6 +18116,12 @@ async def run_derive_allocator_equity_job(
                     (DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY, no_working_groups > 0),
                     (DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE, flows_disagree_accounts > 0),
                     (DegradeReason.ACCOUNT_IDENTITY_PENDING, identity_pending_venue_count > 0),
+                    # 229 MT5D-07: a timed MT5 key stored no writer basis (blocking).
+                    # 229 HOLD-03: a key's stored returns disagree with the stamp of its row.
+                    (
+                        DegradeReason.KEY_INPUTS_MISMATCH,
+                        bool(withheld_by_key) or bool(stamp_mismatch_days_by_key),
+                    ),
                 )
                 if raised
             ]
@@ -17860,6 +18233,9 @@ async def run_derive_allocator_equity_job(
                 "left out of the book",
                 level="warning",
             )
+
+    if departed_basis_unchecked:
+        payload["inputs"]["departed_writer_basis_unchecked_keys"] = len(departed_basis_unchecked)
 
     if absent_stitched_accounts:
         # SFH-02: counts only (no key id, no USD). Both are absent when every stitched

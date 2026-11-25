@@ -2,6 +2,7 @@ import asyncio
 import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ccxt.async_support as ccxt_async
@@ -1099,7 +1100,16 @@ class TestFetchRawTrades:
 
     @pytest.mark.asyncio
     async def test_fetch_raw_trades_bybit_cursor(self) -> None:
-        """Bybit execution_list with cursor pagination — 2 pages."""
+        """Bybit execution_list with cursor pagination — 2 pages.
+
+        Phase 231 flip: this passed ``since_ms=None`` and expected the venue's start-less
+        last-seven-days read. A missing start now walks 365 days of seven-day windows (ruling
+        OQ2), so a canned two-page answer would be served once per window. The test now starts
+        inside ONE window, and the walk's own contract is pinned too: every request carries
+        ``startTime`` and ``endTime``. Old: 2 calls, no start. New: 2 calls, both with a
+        start and an end.
+        """
+        import time
         from services.exchange import fetch_raw_trades
 
         page1 = {
@@ -1148,7 +1158,10 @@ class TestFetchRawTrades:
         )
 
         mock_supabase = MagicMock()
-        result = await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+        result = await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase,
+            since_ms=int(time.time() * 1000) - 24 * 60 * 60 * 1000,
+        )
 
         assert len(result) == 2
         assert result[0]["symbol"] == "BTCUSDT"
@@ -1159,6 +1172,9 @@ class TestFetchRawTrades:
         assert result[1]["is_maker"] is True
         # Verify cursor pagination: 2 calls
         assert mock_exchange.private_get_v5_execution_list.await_count == 2
+        for call in mock_exchange.private_get_v5_execution_list.await_args_list:
+            sent = call.args[0]
+            assert "startTime" in sent and "endTime" in sent
 
     @pytest.mark.asyncio
     async def test_fetch_raw_trades_binance_per_symbol_403(self) -> None:
@@ -2065,9 +2081,18 @@ class TestG12BPaginationGuards:
     ) -> None:
         """Bybit returning the SAME nextPageCursor on every call must
         trigger early termination + a warning, not 100 iterations of
-        duplicate fills."""
+        duplicate fills.
+
+        Phase 231 flip (the most recent and strictest of the reader's two stuck-cursor
+        behaviours wins): the legacy reader stopped SILENTLY here and returned the fills read so
+        far, a short list stored as complete. It now refuses by name. Old: returns the first
+        page's fill after 2 requests. New: ``BybitTradeWindowIncomplete`` (reason
+        ``cursor_stuck``) after 2 requests, the warning still logged. The start is explicit and
+        inside one window so a canned answer is not served once per window.
+        """
         import logging
-        from services.exchange import fetch_raw_trades
+        import time
+        from services.exchange import BybitTradeWindowIncomplete, fetch_raw_trades
 
         page = {
             "result": {
@@ -2101,20 +2126,20 @@ class TestG12BPaginationGuards:
             logging.getLogger("quantalyze.analytics"),
             "warning",
         ) as mock_warn:
-            result = await fetch_raw_trades(
-                mock_exchange, "strat-1", mock_supabase
-            )
+            with pytest.raises(BybitTradeWindowIncomplete) as raised:
+                await fetch_raw_trades(
+                    mock_exchange, "strat-1", mock_supabase,
+                    since_ms=int(time.time() * 1000) - 24 * 60 * 60 * 1000,
+                )
 
-        # Loop must terminate before the 100-page cap.
-        assert mock_exchange.private_get_v5_execution_list.await_count < 100
+        assert raised.value.reason == "cursor_stuck"
+        # Loop must terminate before the page cap: the second request is the stuck one.
+        assert mock_exchange.private_get_v5_execution_list.await_count == 2
         # Stuck-cursor warning must have fired.
         assert any(
             "Pagination stuck" in str(call) and "bybit" in str(call)
             for call in mock_warn.call_args_list
         )
-        # We get exactly 2 fills: one from page 1, one from page 2 (which
-        # shows up as stuck on the third try).
-        assert len(result) >= 1
 
     @pytest.mark.asyncio
     async def test_fetch_raw_trades_okx_empty_tradeId_on_full_page_terminates(
@@ -2508,7 +2533,11 @@ class TestG12BUnparseableTimestampDrops:
 
     @pytest.mark.asyncio
     async def test_bybit_unparseable_execTime_dropped(self) -> None:
+        # Phase 231 flip: the explicit start keeps the read inside ONE window. With
+        # ``since_ms=None`` the walk is 53 windows and this canned page is served (and its bad
+        # row logged) once per window; the contract pinned here is unchanged.
         import logging
+        import time
         from services.exchange import fetch_raw_trades
 
         page = {
@@ -2555,7 +2584,8 @@ class TestG12BUnparseableTimestampDrops:
             "error",
         ) as mock_err:
             result = await fetch_raw_trades(
-                mock_exchange, "strat-1", mock_supabase
+                mock_exchange, "strat-1", mock_supabase,
+                since_ms=int(time.time() * 1000) - 24 * 60 * 60 * 1000,
             )
 
         # Only the well-formed fill survives.
@@ -3653,9 +3683,9 @@ class TestFetchDailyPnlOkxFailLoud:
         valid_ts = str(int(datetime.now(timezone.utc).timestamp() * 1000))
         recent_resp = {
             "data": [
-                {"ts": valid_ts, "pnl": "1.0", "fee": "0", "billId": "B1", "billType": "8"},
-                {"ts": "2026-01-01T00:00:00Z", "pnl": "2.0", "fee": "0", "billId": "B2", "billType": "8"},
-                {"ts": "", "pnl": "3.0", "fee": "0", "billId": "B3", "billType": "8"},
+                {"ts": valid_ts, "pnl": "1.0", "fee": "0", "ccy": "USDT", "billId": "B1", "billType": "8"},
+                {"ts": "2026-01-01T00:00:00Z", "pnl": "2.0", "fee": "0", "ccy": "USDT", "billId": "B2", "billType": "8"},
+                {"ts": "", "pnl": "3.0", "fee": "0", "ccy": "USDT", "billId": "B3", "billType": "8"},
             ]
         }
         archive_resp = {"data": []}
@@ -3675,8 +3705,16 @@ class TestFetchDailyPnlOkxFailLoud:
 
         # since_ms recent (no archive needed)
         since_ms = int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp() * 1000)
+        from services.exchange import get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
         with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
             await fetch_daily_pnl(mock_exchange, since_ms=since_ms)
+        # Phase 232: a non-digit ts is not refused by the window walk; it still reaches the
+        # malformed path (and the read is not a fetch error).
+        _flags = get_and_clear_last_dq_flags()
+        assert _flags.get("daily_pnl_malformed_okx") is True
+        assert "daily_pnl_fetch_error" not in _flags
 
         dropped = [
             r for r in caplog.records
@@ -4351,7 +4389,15 @@ class TestClusterIOkxFundingBillFilter:
 
         async def _bills(params):
             call_state["n"] += 1
-            return page if call_state["n"] == 1 else empty
+            if call_state["n"] != 1:
+                return empty
+            # Phase 232: the walk refuses a bill outside the window it asked for, so the two bills
+            # carry a ts inside the first window the live endpoint is asked for (and a ccy, as
+            # every real OKX bill does).
+            in_window = str(int(params["begin"]) + 1_000)
+            return {
+                "data": [{**bill, "ts": in_window, "ccy": "USDT"} for bill in page["data"]]
+            }
 
         mock_exchange.private_get_account_bills = _bills
         mock_exchange.private_get_account_bills_archive = AsyncMock(
@@ -5049,7 +5095,14 @@ class TestClusterIBybitPageCapTruncationFlag:
 
     @pytest.mark.asyncio
     async def test_bybit_page_cap_records_dq_flag(self) -> None:
+        # Phase 231 flip. Old: ``since_ms=None``, a full 100-page walk returned 100 * 100 fills
+        # and the flags read ``sync_truncated_bybit_pages == 100``; a cap hit returned the fills
+        # read so far. New: a window still live after ``BYBIT_EXECUTION_WINDOW_PAGE_CAP`` pages
+        # refuses with ``BybitTradeWindowIncomplete`` (reason ``page_cap``), still recording the
+        # two flags first. The start is explicit and inside one window, and the cap is lowered.
+        import services.exchange as exchange_module
         from services.exchange import (
+            BybitTradeWindowIncomplete,
             _fetch_raw_trades_bybit,
             get_and_clear_last_dq_flags,
         )
@@ -5089,12 +5142,17 @@ class TestClusterIBybitPageCapTruncationFlag:
 
         mock_exchange.private_get_v5_execution_list = _execution_list
 
-        result = await _fetch_raw_trades_bybit(mock_exchange, since_ms=None)
-        # 100 pages × 100 fills.
-        assert len(result) == 100 * 100
+        now_ms = 1_800_000_000_000
+        with patch.object(exchange_module, "BYBIT_EXECUTION_WINDOW_PAGE_CAP", 4):
+            with pytest.raises(BybitTradeWindowIncomplete) as raised:
+                await _fetch_raw_trades_bybit(
+                    mock_exchange, since_ms=now_ms - 24 * 60 * 60 * 1000, now_ms=now_ms
+                )
+        assert raised.value.reason == "page_cap"
+        assert call_state["n"] == 4
         flags = get_and_clear_last_dq_flags()
         assert flags.get("sync_truncated_bybit") is True
-        assert flags.get("sync_truncated_bybit_pages") == 100
+        assert flags.get("sync_truncated_bybit_pages") == 4
 
 
 class TestRedTeamPhase2RegressionEntrySeamClobbers:
@@ -5856,11 +5914,14 @@ async def test_bybit_binance_wedge_zero() -> None:
     guard). The dispatch never reads a upl field for these venues."""
     from services.exchange import fetch_account_equity_and_upnl_usd
 
+    # VREAD-01 (Phase 231): Bybit reads its anchor through the stable-wallet helper, Binance
+    # through the USDT helper; each iteration patches the helper its venue actually calls.
+    helper_for = {
+        "bybit": "services.exchange.fetch_bybit_stable_wallet_with_status",
+        "binance": "services.exchange.fetch_usdt_balance_with_status",
+    }
     for venue in ("bybit", "binance"):
-        with patch(
-            "services.exchange.fetch_usdt_balance_with_status",
-            new=AsyncMock(return_value=(123456.0, False)),
-        ):
+        with patch(helper_for[venue], new=AsyncMock(return_value=(123456.0, False))):
             eq, err, upl, unreadable = await fetch_account_equity_and_upnl_usd(
                 AsyncMock(), venue
             )
@@ -5869,6 +5930,162 @@ async def test_bybit_binance_wedge_zero() -> None:
         assert upl == 0.0, f"{venue} wedge must be structurally 0.0"
         # Realized-basis venues have NO wedge field to read → never unreadable.
         assert unreadable is False, f"{venue} has no wedge field, not unreadable"
+
+
+# --- VREAD-01 (Phase 231): the Bybit stable-wallet anchor -------------------------------
+
+# Each arm: (id, what ``fetch_balance`` answers or raises, expected (anchor, balance_error),
+# a text the log must carry or None). Expected figures are typed here, never computed.
+_BYBIT_STABLE_ARMS: list[Any] = [
+    ("empty-total", {"total": {}}, (None, False), None),
+    ("no-stable-coin", {"total": {"BTC": 0.5}}, (None, False), None),
+    ("every-stable-at-zero", {"total": {"USDT": 0, "USDC": 0.0}}, (None, False), None),
+    ("stable-at-zero-adds-nothing", {"total": {"USDT": 1000.0, "USDC": 0}}, (1000.0, False), None),
+    ("smallest-positive-counts", {"total": {"USDT": 0, "USDC": 0.000001}}, (0.000001, False), None),
+    ("negative-stable-subtracted", {"total": {"USDT": 1000.0, "USDC": -50.0}}, (950.0, False), None),
+    ("net-negative-stable-sum-is-none", {"total": {"USDT": -50.0, "USDC": 20.0}}, (None, False), None),
+    (
+        "none-quantity-beside-readable-is-unreadable",
+        {"total": {"USDT": 1000.0, "USDC": None}},
+        (None, True),
+        "coins=USDC",
+    ),
+    ("none-beside-zero", {"total": {"USDT": None, "USDC": 0}}, (None, True), "coins=USDT"),
+    ("none-non-stable-ignored", {"total": {"USDT": 1000.0, "BTC": None}}, (1000.0, False), None),
+    (
+        "every-stable-none-is-unreadable",
+        {"total": {"USDT": None, "USDC": None, "BTC": 0.5}},
+        (None, True),
+        "coins=USDT,USDC",
+    ),
+    ("garbled-non-stable-ignored", {"total": {"USDT": 1000.0, "BTC": "garbled"}}, (1000.0, False), None),
+    (
+        "malformed-stable",
+        {"total": {"USDT": 1000.0, "USDC": "garbled"}},
+        (None, True),
+        "stable quantity for USDC is unreadable",
+    ),
+    (
+        "non-finite-stable",
+        {"total": {"USDT": 1000.0, "USDC": float("nan")}},
+        (None, True),
+        "stable quantity for USDC is unreadable",
+    ),
+    ("total-not-a-mapping", {"total": ["USDT"]}, (None, True), "exc_class=TypeError"),
+    ("total-key-absent", {"info": {}}, (None, True), "exc_class=TypeError"),
+    (
+        "fetch-balance-fails",
+        ccxt_async.NetworkError("GET https://api.bybit.com/v5/account/wallet-balance?signature=deadbeef"),
+        (None, True),
+        "exc_class=NetworkError",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "balance,expected,log_needle",
+    [pytest.param(b, e, n, id=i) for i, b, e, n in _BYBIT_STABLE_ARMS],
+)
+async def test_bybit_stable_wallet_arms(
+    balance: Any, expected: tuple[float | None, bool], log_needle: str | None, caplog: Any
+) -> None:
+    """Every edge of the anchor helper: failure and malformed shapes are ``(None, True)`` with a
+    class-only, scrubbed log (a request signature never reaches it); empty, no stable coin and
+    all-zero are ``(None, False)``; zero adds nothing, the smallest positive counts, a negative
+    (spot borrow) is subtracted, a non-stable coin is never parsed. An absent ``total`` key and
+    any stable coin at ``None`` (beside a readable one or not) are ``(None, True)``; a non-stable
+    ``None`` is ignored. The malformed-quantity log names the
+    coin code and never the raw value."""
+    import logging
+
+    from services.exchange import fetch_bybit_stable_wallet_with_status
+
+    ex = MagicMock()
+    if isinstance(balance, BaseException):
+        ex.fetch_balance = AsyncMock(side_effect=balance)
+    else:
+        ex.fetch_balance = AsyncMock(return_value=balance)
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        got = await fetch_bybit_stable_wallet_with_status(ex)
+
+    assert got == expected, f"expected {expected}, got {got}"
+    assert "deadbeef" not in caplog.text, "a request signature reached the log"
+    assert "garbled" not in caplog.text, "a raw quantity reached the log"
+    if log_needle is None:
+        assert caplog.records == [], f"a clean read must not log: {caplog.text}"
+    else:
+        assert log_needle in caplog.text, f"the log must name the class: {caplog.text!r}"
+
+
+async def _parsed_bybit_balance(coins: list[dict[str, str]]) -> dict[str, Any]:
+    from tests.test_upnl_venues import bybit_wallet_balance, real_bybit_parse_balance
+
+    return await real_bybit_parse_balance(bybit_wallet_balance("UNIFIED", coins))
+
+
+@pytest.mark.asyncio
+async def test_bybit_borrowed_stable_coin_is_subtracted_through_the_real_parse() -> None:
+    """MD-01: a borrowed stable coin (USDT walletBalance -50, borrowAmount 50) beside 200 USDC is
+    a 150 net stable wallet, the arithmetic of Bybit's own totalWalletBalance. Skipping the
+    negative would state 200 and inflate the capital base past the liability. Built through
+    ccxt's real ``bybit.parse_balance``, which passes the negative straight into ``total``."""
+    from services.exchange import fetch_bybit_stable_wallet_with_status
+    from tests.test_upnl_venues import bybit_coin
+
+    borrowed = {**bybit_coin("USDT", "-50", "0"), "borrowAmount": "50"}
+    parsed = await _parsed_bybit_balance([borrowed, bybit_coin("USDC", "200", "0")])
+    assert parsed["total"]["USDT"] == -50.0, "the parse must carry the negative into total"
+    ex = MagicMock()
+    ex.fetch_balance = AsyncMock(return_value=parsed)
+
+    assert await fetch_bybit_stable_wallet_with_status(ex) == (150.0, False)
+
+
+@pytest.mark.asyncio
+async def test_bybit_two_tuple_and_four_tuple_anchor_agree() -> None:
+    """RESEARCH F7: both entry points end in the same Bybit helper, so on a mixed stable balance
+    (real ccxt parse) they cannot return different equity or a different error flag."""
+    from services.exchange import (
+        fetch_account_equity_and_upnl_usd,
+        fetch_account_equity_usd,
+    )
+    from tests.test_upnl_venues import bybit_coin
+
+    parsed = await _parsed_bybit_balance(
+        [bybit_coin("USDT", "1000", "250.5"), bybit_coin("USDC", "200", "0")]
+    )
+
+    def venue() -> MagicMock:
+        ex = MagicMock()
+        ex.fetch_balance = AsyncMock(return_value=parsed)
+        return ex
+
+    two_equity, two_err = await fetch_account_equity_usd(venue(), "bybit")
+    four_equity, four_err, wedge, unreadable = await fetch_account_equity_and_upnl_usd(venue(), "bybit")
+
+    # 1000 USDT + 200 USDC wallet balances; the 250.5 uPnL is not in a walletBalance.
+    assert two_equity == 1200.0 and four_equity == 1200.0
+    assert (two_err, four_err) == (False, False)
+    assert wedge == 0.0 and unreadable is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_usdt_balance_stays_usdt_on_a_mixed_stable_bybit_balance() -> None:
+    """Census C05, ruling OQ1 Option A: ``fetch_usdt_balance`` feeds ``api_keys.account_balance_usdt``
+    and strategy capital, columns named and valued in USDT. A Bybit balance of USDT 1000 plus USDC
+    200 still reads 1000.0 there; only the derive anchor widened (VREAD-01)."""
+    from services.exchange import fetch_usdt_balance
+    from tests.test_upnl_venues import bybit_coin
+
+    parsed = await _parsed_bybit_balance(
+        [bybit_coin("USDT", "1000", "0"), bybit_coin("USDC", "200", "0")]
+    )
+    ex = MagicMock()
+    ex.fetch_balance = AsyncMock(return_value=parsed)
+
+    assert await fetch_usdt_balance(ex) == 1000.0
 
 
 @pytest.mark.asyncio
@@ -5900,3 +6117,427 @@ async def test_okx_balance_error_wedge_zero() -> None:
     assert err2 is True
     assert upl2 == 0.0
     assert unreadable2 is False
+
+
+# ===========================================================================
+# Phase 231 plan 04 (VREAD-03): the Bybit execution read walks seven-day
+# windows, or refuses by name.
+# ===========================================================================
+
+
+class TestBybitExecutionWindowWalk:
+    """``_fetch_raw_trades_bybit`` against ``BybitExecutionBook``, which models the venue's
+    seven-day rule: a request with only a start answers start..start+7d, so a reader that sends
+    ``startTime`` on its first page alone returns one week of a longer window and says nothing.
+
+    WHY it matters: the strategy trade sync starts from a stored cursor, and a stale cursor or a
+    first sync is older than a week. A short list stored as complete is a silently wrong trade
+    history, so every gate here is either "all of it" or "a refusal with a name"."""
+
+    NOW = 1_800_000_000_000
+
+    @staticmethod
+    def _client() -> Any:
+        return ccxt_async.bybit({})
+
+    @pytest.mark.asyncio
+    async def test_tracer_a_start_twenty_two_days_back_returns_every_fill(self) -> None:
+        from services.exchange import _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS, install_execution_list, trade_rows
+
+        start = self.NOW - 22 * DAY_MS
+        trades = [
+            trade_rows(1, start + day * DAY_MS, 1, symbol="BTC/USDT:USDT", id_prefix=f"d{day:02d}-")[0]
+            for day in (1, 9, 16, 21)
+        ]
+        ex = self._client()
+        try:
+            book = install_execution_list(ex, trades, now_ms=self.NOW)
+            fills = await _fetch_raw_trades_bybit(ex, start, now_ms=self.NOW)
+        finally:
+            await ex.close()
+
+        got = {f["exchange_fill_id"] for f in fills}
+        missing = [t["id"] for t in trades if t["id"] not in got]
+        assert not missing, (
+            f"first missing execId {missing[0]}: the read returned {len(got)} of {len(trades)} "
+            "fills for a start 22 days back (a start-only request is answered with seven days)"
+        )
+        assert len(fills) == len(trades)
+        assert book.calls, "the book saw no request"
+        for call in book.calls:
+            assert isinstance(call["startTime"], str) and call["startTime"].isdigit()
+            assert isinstance(call["endTime"], str) and call["endTime"].isdigit()
+            assert int(call["endTime"]) - int(call["startTime"]) <= 7 * DAY_MS
+
+    @pytest.mark.asyncio
+    async def test_touching_windows_share_no_fill_and_skip_none(self) -> None:
+        """A fill stamped exactly at a window's end is read once, and a fill one millisecond
+        later (the next window's first millisecond) is read once: the plus-one-millisecond
+        boundary neither duplicates nor drops the fill that sits on it."""
+        from services.exchange import _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS, install_execution_list, trade_rows
+
+        start = self.NOW - 10 * DAY_MS
+        window_end = start + 7 * DAY_MS
+        trades = [
+            *trade_rows(1, window_end, 1, symbol="BTC/USDT:USDT", id_prefix="edge-end-"),
+            *trade_rows(1, window_end + 1, 1, symbol="BTC/USDT:USDT", id_prefix="edge-next-"),
+        ]
+        ex = self._client()
+        try:
+            book = install_execution_list(ex, trades, now_ms=self.NOW)
+            fills = await _fetch_raw_trades_bybit(ex, start, now_ms=self.NOW)
+        finally:
+            await ex.close()
+
+        ids = sorted(f["exchange_fill_id"] for f in fills)
+        assert ids == ["edge-end-00000", "edge-next-00000"]
+        assert len(book.calls) == 2
+        assert int(book.calls[1]["startTime"]) == int(book.calls[0]["endTime"]) + 1
+
+    @pytest.mark.asyncio
+    async def test_a_twenty_four_hour_start_is_one_request(self) -> None:
+        """The reconcile caller reads 24 hours: one window, one request on an empty book."""
+        from services.exchange import _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS, install_execution_list
+
+        ex = self._client()
+        try:
+            book = install_execution_list(ex, [], now_ms=self.NOW)
+            fills = await _fetch_raw_trades_bybit(ex, self.NOW - DAY_MS, now_ms=self.NOW)
+        finally:
+            await ex.close()
+        assert fills == []
+        assert len(book.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_missing_start_walks_three_hundred_sixty_five_days(self) -> None:
+        """No start (a first sync, no cursor and no daily high-water) walks a 365-day default,
+        not the venue's last seven days: 53 seven-day windows, the first starting 365 days back."""
+        from services.exchange import _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS, install_execution_list
+
+        ex = self._client()
+        try:
+            book = install_execution_list(ex, [], now_ms=self.NOW)
+            fills = await _fetch_raw_trades_bybit(ex, None, now_ms=self.NOW)
+        finally:
+            await ex.close()
+        assert fills == []
+        assert len(book.calls) == 53
+        assert int(book.calls[0]["startTime"]) == self.NOW - 365 * DAY_MS
+        assert int(book.calls[-1]["endTime"]) == self.NOW
+
+    @pytest.mark.asyncio
+    async def test_the_ingestion_adapter_with_no_start_sends_one_seven_day_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``BybitAdapter.fetch_raw`` (the inline teaser, csv and internal_report flows, 60 s seam
+        budget) keeps the seven-day reach a start-less read had before this phase: ONE window of
+        seven days, not the 365-day walk of 53 windows that the strategy sync reader defaults to.
+        Review W2 CR-01: the anonymous teaser must not run a walk that cannot fit its budget."""
+        import services.exchange as exchange_module
+        from services.ingestion.bybit import BybitAdapter
+        from tests._trade_pages import DAY_MS
+
+        ex = self._client()
+        ex.private_get_v5_execution_list = AsyncMock(
+            return_value={"result": {"list": [], "nextPageCursor": ""}}
+        )
+        monkeypatch.setattr(exchange_module, "create_exchange", lambda *args, **kwargs: ex)
+
+        trades = await BybitAdapter().fetch_raw({"api_key": "key", "api_secret": "secret"})
+
+        assert trades == []
+        calls = [c.args[0] for c in ex.private_get_v5_execution_list.call_args_list]
+        assert len(calls) == 1, f"{len(calls)} requests: a start-less inline read must be one window"
+        assert int(calls[0]["endTime"]) - int(calls[0]["startTime"]) == 7 * DAY_MS
+
+    @pytest.mark.asyncio
+    async def test_no_fills_in_any_window_returns_empty_without_refusing(self) -> None:
+        from services.exchange import _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS, install_execution_list
+
+        ex = self._client()
+        try:
+            install_execution_list(ex, [], now_ms=self.NOW)
+            fills = await _fetch_raw_trades_bybit(ex, self.NOW - 30 * DAY_MS, now_ms=self.NOW)
+        finally:
+            await ex.close()
+        assert fills == []
+
+    @pytest.mark.asyncio
+    async def test_a_window_past_the_page_cap_refuses_by_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A window that still has a live cursor after the cap is refused, never returned
+        short, and the two DQ flags a cap hit has always set are recorded before the raise."""
+        import services.exchange as exchange_module
+        from services.exchange import (
+            BybitTradeWindowIncomplete,
+            _fetch_raw_trades_bybit,
+            get_and_clear_last_dq_flags,
+        )
+        from tests._trade_pages import DAY_MS, install_execution_list, trade_rows
+
+        monkeypatch.setattr(exchange_module, "BYBIT_EXECUTION_WINDOW_PAGE_CAP", 3)
+        start = self.NOW - 2 * DAY_MS
+        # 350 fills in one window is four pages at 100 a page; the cap is three.
+        trades = trade_rows(350, start + 1000, 1000, symbol="BTC/USDT:USDT")
+        ex = self._client()
+        get_and_clear_last_dq_flags()
+        try:
+            book = install_execution_list(ex, trades, now_ms=self.NOW)
+            with pytest.raises(BybitTradeWindowIncomplete) as raised:
+                await _fetch_raw_trades_bybit(ex, start, now_ms=self.NOW)
+        finally:
+            await ex.close()
+        assert raised.value.reason == "page_cap"
+        assert len(book.calls) == 3
+        flags = get_and_clear_last_dq_flags()
+        assert flags.get("sync_truncated_bybit") is True
+        assert flags.get("sync_truncated_bybit_pages") == 3
+
+    @pytest.mark.asyncio
+    async def test_a_cursor_that_does_not_advance_refuses_by_name(self) -> None:
+        from services.exchange import BybitTradeWindowIncomplete, _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS, install_execution_list, trade_rows
+
+        start = self.NOW - 2 * DAY_MS
+        trades = trade_rows(250, start + 1000, 1000, symbol="BTC/USDT:USDT")
+        ex = self._client()
+        try:
+            book = install_execution_list(ex, trades, now_ms=self.NOW, repeat_cursor=True)
+            with pytest.raises(BybitTradeWindowIncomplete) as raised:
+                await _fetch_raw_trades_bybit(ex, start, now_ms=self.NOW)
+        finally:
+            await ex.close()
+        assert raised.value.reason == "cursor_stuck"
+        assert len(book.calls) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            pytest.param({"retCode": 0}, id="no-result"),
+            pytest.param({"retCode": 0, "result": {}}, id="no-list"),
+            pytest.param({"retCode": 0, "result": {"nextPageCursor": ""}}, id="no-list-with-cursor"),
+            pytest.param({"retCode": 0, "result": {"list": None}}, id="list-null"),
+            pytest.param({"retCode": 0, "result": []}, id="result-not-an-object"),
+        ],
+    )
+    async def test_a_page_without_a_result_list_refuses_by_name_not_as_an_empty_window(
+        self, reply: dict[str, Any]
+    ) -> None:
+        """Review W2 WR-01: page 1 carries a fill and a cursor, page 2 is a zero-code reply with no
+        ``result`` list. Defaulting the missing key read it as an empty page and the walk ended the
+        window as complete, a cut-short window returned as the whole read."""
+        from services.exchange import BybitTradeWindowIncomplete, _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS, _raw_bybit_execution
+
+        start = self.NOW - DAY_MS
+        row = _raw_bybit_execution(
+            {"id": "A", "symbol": "BTC/USDT:USDT", "timestamp": start + 1000}
+        )
+        pages = [{"result": {"list": [row], "nextPageCursor": "c1"}}, reply]
+        ex = self._client()
+        try:
+            ex.private_get_v5_execution_list = AsyncMock(side_effect=pages)
+            with pytest.raises(BybitTradeWindowIncomplete) as raised:
+                await _fetch_raw_trades_bybit(ex, start, now_ms=self.NOW)
+        finally:
+            await ex.close()
+        assert raised.value.reason == "malformed_reply"
+        assert not any(ch.isdigit() for ch in str(raised.value)), str(raised.value)
+        assert "Bybit" in str(raised.value)
+
+    @staticmethod
+    def _execution_page(*overrides: dict[str, Any], start: int) -> dict[str, Any]:
+        """One good Trade row plus one row per override (None removes a key)."""
+        from tests._trade_pages import _raw_bybit_execution
+
+        def _row(exec_id: str, offset_ms: int, **fields: Any) -> dict[str, Any]:
+            row = _raw_bybit_execution(
+                {"id": exec_id, "symbol": "BTC/USDT:USDT", "timestamp": start + offset_ms}
+            )
+            for key, value in fields.items():
+                if value is None:
+                    row.pop(key, None)
+                else:
+                    row[key] = value
+            return row
+
+        rows = [_row("good", 1000)]
+        rows.extend(_row(f"bad{i}", 2000 + i, **fields) for i, fields in enumerate(overrides))
+        return {"result": {"list": rows, "nextPageCursor": ""}}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            pytest.param({"execTime": None}, id="time-absent"),
+            pytest.param({"execTime": ""}, id="time-blank"),
+            pytest.param({"execTime": "abc"}, id="time-not-digits"),
+            pytest.param({"execPrice": "nan"}, id="price-nan"),
+            pytest.param({"execPrice": "inf"}, id="price-inf"),
+            pytest.param({"execPrice": None}, id="price-absent"),
+            pytest.param({"execQty": "nan"}, id="qty-nan"),
+            pytest.param({"execQty": "inf"}, id="qty-inf"),
+            pytest.param({"execQty": None}, id="qty-absent"),
+        ],
+    )
+    async def test_a_trade_row_that_cannot_be_read_refuses_by_name_instead_of_being_dropped(
+        self, fields: dict[str, Any]
+    ) -> None:
+        """Review W2 SF-4: a real trade (``execType == "Trade"``) dropped as unreadable is a fill
+        missing from a read returned as complete, with no flag and no refusal."""
+        from services.exchange import BybitTradeWindowIncomplete, _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS
+
+        start = self.NOW - DAY_MS
+        ex = self._client()
+        try:
+            ex.private_get_v5_execution_list = AsyncMock(
+                return_value=self._execution_page(fields, start=start)
+            )
+            with pytest.raises(BybitTradeWindowIncomplete) as raised:
+                await _fetch_raw_trades_bybit(ex, start, now_ms=self.NOW)
+        finally:
+            await ex.close()
+        assert raised.value.reason == "unreadable_fill"
+        assert not any(ch.isdigit() for ch in str(raised.value)), str(raised.value)
+
+    @pytest.mark.asyncio
+    async def test_rows_that_are_not_trades_or_hold_no_quantity_are_still_skipped(self) -> None:
+        """Round-3 flip back (R3-1): only a row whose ``execType`` is a fill type refuses. The
+        ``Funding`` case skips again, with a ``Settle`` row with a blank price. A finite zero
+        quantity and a row with no execType keep their skip too."""
+        from services.exchange import _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS
+
+        start = self.NOW - DAY_MS
+        ex = self._client()
+        try:
+            ex.private_get_v5_execution_list = AsyncMock(
+                return_value=self._execution_page(
+                    {"execType": "Funding", "execTime": None, "execPrice": "nan"},
+                    {"execType": "Settle", "execPrice": ""},
+                    {"execType": "Delivery", "execQty": "nan"},
+                    {"execQty": "0"},
+                    {"execType": None, "execTime": "abc"},
+                    start=start,
+                )
+            )
+            fills = await _fetch_raw_trades_bybit(ex, start, now_ms=self.NOW)
+        finally:
+            await ex.close()
+        assert [f["exchange_fill_id"] for f in fills] == ["good"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exec_type", ["BustTrade", "AdlTrade", "BlockTrade"])
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            pytest.param({"execTime": "abc"}, id="time-not-digits"),
+            pytest.param({"execTime": None}, id="time-absent"),
+            pytest.param({"execPrice": "nan"}, id="price-nan"),
+        ],
+    )
+    async def test_an_unreadable_liquidation_or_adl_row_refuses_by_name(
+        self, exec_type: str, fields: dict[str, Any]
+    ) -> None:
+        """Review W2 round 2, R2-1, narrowed by R3-1 to the fill types: an unreadable liquidation
+        (BustTrade), auto-deleveraging (AdlTrade) or block trade (BlockTrade) row dropped silently
+        is a fill missing from a read returned as complete."""
+        from services.exchange import BybitTradeWindowIncomplete, _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS
+
+        start = self.NOW - DAY_MS
+        ex = self._client()
+        try:
+            ex.private_get_v5_execution_list = AsyncMock(
+                return_value=self._execution_page({"execType": exec_type, **fields}, start=start)
+            )
+            with pytest.raises(BybitTradeWindowIncomplete) as raised:
+                await _fetch_raw_trades_bybit(ex, start, now_ms=self.NOW)
+        finally:
+            await ex.close()
+        assert raised.value.reason == "unreadable_fill"
+
+    @pytest.mark.asyncio
+    async def test_a_start_older_than_two_years_refuses_before_any_request(self) -> None:
+        """Bybit keeps two years. An older start is refused, never clamped to the limit (a clamp
+        would store a shorter history as the answer to a longer question); 729 days is read."""
+        from services.exchange import BybitTradeWindowIncomplete, _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS, install_execution_list
+
+        ex = self._client()
+        try:
+            book = install_execution_list(ex, [], now_ms=self.NOW)
+            with pytest.raises(BybitTradeWindowIncomplete) as raised:
+                await _fetch_raw_trades_bybit(ex, self.NOW - 731 * DAY_MS, now_ms=self.NOW)
+            assert raised.value.reason == "start_too_old"
+            assert book.calls == []
+            assert await _fetch_raw_trades_bybit(ex, self.NOW - 729 * DAY_MS, now_ms=self.NOW) == []
+            assert book.calls, "a 729-day start must be read"
+        finally:
+            await ex.close()
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_text_carries_no_digits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``run_sync_trades_job`` stores ``str(e)[:200]``: a digit would carry the cap, a window
+        bound or a venue figure into stored data. Each reason is produced by its real path."""
+        import services.exchange as exchange_module
+        from services.exchange import BybitTradeWindowIncomplete, _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS, install_execution_list, trade_rows
+
+        monkeypatch.setattr(exchange_module, "BYBIT_EXECUTION_WINDOW_PAGE_CAP", 2)
+        start = self.NOW - 2 * DAY_MS
+        trades = trade_rows(350, start + 1000, 1000, symbol="BTC/USDT:USDT")
+        raised: dict[str, BybitTradeWindowIncomplete] = {}
+        for label, since, options in (
+            ("page_cap", start, {}),
+            ("cursor_stuck", start, {"repeat_cursor": True}),
+            ("start_too_old", self.NOW - 800 * DAY_MS, {}),
+        ):
+            ex = self._client()
+            try:
+                install_execution_list(ex, trades, now_ms=self.NOW, **options)
+                with pytest.raises(BybitTradeWindowIncomplete) as caught:
+                    await _fetch_raw_trades_bybit(ex, since, now_ms=self.NOW)
+                raised[label] = caught.value
+            finally:
+                await ex.close()
+        assert set(raised) == {"page_cap", "cursor_stuck", "start_too_old"}
+        for label, exc in raised.items():
+            assert exc.reason == label
+            assert not any(ch.isdigit() for ch in str(exc)), (label, str(exc))
+            assert "Bybit" in str(exc)
+        assert len({str(exc) for exc in raised.values()}) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_fill_served_twice_is_kept_once(self) -> None:
+        """A repeated execId (the venue served a fill on two pages) comes back once; fills with
+        no execId have no identity to dedupe on, so every one is kept."""
+        from services.exchange import _fetch_raw_trades_bybit
+        from tests._trade_pages import DAY_MS, _raw_bybit_execution
+
+        start = self.NOW - DAY_MS
+
+        def _raw(exec_id: str, offset_ms: int) -> dict[str, Any]:
+            return _raw_bybit_execution(
+                {"id": exec_id, "symbol": "BTC/USDT:USDT", "timestamp": start + offset_ms}
+            )
+
+        pages = [
+            {"result": {"list": [_raw("A", 1000), _raw("", 2000), _raw("", 3000)], "nextPageCursor": "next"}},
+            {"result": {"list": [_raw("A", 1000), _raw("D", 4000)], "nextPageCursor": ""}},
+        ]
+        ex = self._client()
+        try:
+            ex.private_get_v5_execution_list = AsyncMock(side_effect=pages)
+            fills = await _fetch_raw_trades_bybit(ex, start, now_ms=self.NOW)
+        finally:
+            await ex.close()
+        assert [f["exchange_fill_id"] for f in fills] == ["A", "", "", "D"]

@@ -93,7 +93,7 @@ from services.mt5_probe import (
 )
 from services.db import get_supabase, db_execute, one, rows
 # PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
-# this file goes through service_error so the four classes cannot drift apart
+# this file goes through service_error so the five classes cannot drift apart
 # site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
 # PYAPIFIX2-01 — the FLAT venue-transient shape for the SEVEN classified-upstream
@@ -361,7 +361,12 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
     # KEY_AUTH_FAILED — matching this function's documented fail-closed contract
     # rather than leaking a raw 500. Keeps the ctor's non-empty invariant intact.
     if not api_key or not api_key.strip():
-        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code="AUTH_FAILED",
+            detail=AUTH_FAILED_DETAIL,
+            recoverable=False,
+        )
     try:
         client = make_sfox_client(api_key, base_url=SFOX_PROD_BASE_URL)
     except ValueError:
@@ -391,7 +396,17 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         return {"valid": True, "read_only": True}
     except SfoxApiError as e:
         if e.status in (401, 403):
-            raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+            # CONN-05 (Phase 240 plan 03): the flat coded body, the SAME shape the
+            # ccxt auth verdict already answers, so one condition has one body on
+            # every venue. `detail` is the byte-identical AUTH_FAILED_DETAIL the TS
+            # classifier matches on; permanent for these credentials, so
+            # `recoverable=False`. Status stays 400 (a caller-request fault).
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="AUTH_FAILED",
+                detail=AUTH_FAILED_DETAIL,
+                recoverable=False,
+            )
         if e.status == 429:
             # F4: a throttle is an UPSTREAM condition, not bad credentials —
             # recreates the 110.1 honesty fix the ccxt path already made. Emit the
@@ -467,7 +482,12 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         # Deliberately DO NOT log the exception: aiohttp's message can embed the
         # offending header value (the token), so this branch never writes it
         # anywhere. Fails CLOSED — never returns {"valid": true}.
-        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code="AUTH_FAILED",
+            detail=AUTH_FAILED_DETAIL,
+            recoverable=False,
+        )
     finally:
         await client.aclose()
 
@@ -588,9 +608,19 @@ async def _validate_mt5_key_probe(
         # a 400, never a 500, never {"valid": true}.
         if e.kind == "wrong_server":
             trace.outcome = "wrong_server"
-            raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="MT5_WRONG_SERVER",
+                detail=MT5_WRONG_SERVER_DETAIL,
+                recoverable=False,
+            )
         trace.outcome = "auth"
-        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code="AUTH_FAILED",
+            detail=AUTH_FAILED_DETAIL,
+            recoverable=False,
+        )
 
     # Gateway config: a missing/malformed MT5_VALIDATION_GATEWAY_HOST /
     # MT5_VALIDATION_GATEWAY_PORT is a SERVER misconfig, NEVER the user's key —
@@ -977,10 +1007,20 @@ async def _validate_mt5_key_probe(
             kind = classify_mt5_login_error(e)
             if kind == "auth":
                 trace.outcome = "auth"
-                raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+                raise VenueTransientHTTPException(
+                    status_code=400,
+                    code="AUTH_FAILED",
+                    detail=AUTH_FAILED_DETAIL,
+                    recoverable=False,
+                )
             if kind == "wrong_server":
                 trace.outcome = "wrong_server"
-                raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
+                raise VenueTransientHTTPException(
+                    status_code=400,
+                    code="MT5_WRONG_SERVER",
+                    detail=MT5_WRONG_SERVER_DETAIL,
+                    recoverable=False,
+                )
             # transient. 167-CREDTRUST (D-05, D-07) narrows this tail, and only
             # this tail, out of the file's nine `NETWORK_UNAVAILABLE` sites. The
             # other eight (stage timeout, the abandoned-session fence, the
@@ -1342,8 +1382,11 @@ async def _validate_mt5_key_probe(
                     # Master (trade-capable) login REJECTED — never persisted (the TS
                     # caller only encrypts after valid:true). The EoP gate (T-135-09).
                     trace.outcome = "master_rejected"
-                    raise HTTPException(
-                        status_code=400, detail=MT5_MASTER_PASSWORD_DETAIL
+                    raise VenueTransientHTTPException(
+                        status_code=400,
+                        code="MT5_MASTER_PASSWORD",
+                        detail=MT5_MASTER_PASSWORD_DETAIL,
+                        recoverable=False,
                     )
 
                 if verdict == "undetermined":
@@ -1690,6 +1733,13 @@ async def _validate_mt5_key_probe(
         )
 
 
+# CONN-05 (Phase 240 plan 05). The flat-body constructor refuses an EMPTY detail, so
+# an empty ValueError message would otherwise turn a caller 400 into a bodyless 500
+# (the G-8 class). `create_exchange` only raises the non-empty "Unsupported exchange:
+# {name}" today, so this fallback is unreachable now and pinned by a test.
+_INVALID_REQUEST_FALLBACK_DETAIL = "Unsupported exchange."
+
+
 @router.post("/validate-key")
 @limiter.limit(
     "100/hour", key_func=partial(tenant_or_platform_key, scope="validate_key")
@@ -1721,7 +1771,17 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
         # rejection. Mirrors the TS isSfoxEnabledServer() gate at the three key
         # routes; defense-in-depth for any direct/worker caller of /validate-key.
         if not sfox_enabled_server():
-            raise HTTPException(status_code=400, detail=SFOX_DISABLED_DETAIL)
+            # CONN-05 (Phase 240 plan 05): the flat coded 400, same detail constant.
+            # `recoverable=False`: switching the venue on is an operator act, not a
+            # retry. The credentials DID reach this service before the gate refused
+            # them, which is why the TS side renders UNKNOWN rather than a
+            # "nothing was sent" verdict (UI-SPEC ruling R1).
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="VENUE_DISABLED",
+                detail=SFOX_DISABLED_DETAIL,
+                recoverable=False,
+            )
         return await _validate_sfox_key(req.api_key)
 
     # MT5SRC-02 (Phase 135): MT5 is NOT a ccxt exchange — it speaks RPyC to a
@@ -1736,13 +1796,26 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
         # disabled, never a false AUTH_FAILED. Mirrors the TS isMt5EnabledServer()
         # gate at the key routes; defense-in-depth for any direct/worker caller.
         if not mt5_enabled_server():
-            raise HTTPException(status_code=400, detail=MT5_DISABLED_DETAIL)
+            # CONN-05 (Phase 240 plan 05): the same flat coded 400 as the sFOX gate.
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="VENUE_DISABLED",
+                detail=MT5_DISABLED_DETAIL,
+                recoverable=False,
+            )
         return await _validate_mt5_key(req.api_key, req.api_secret, req.passphrase)
 
     try:
         exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # CONN-05 (Phase 240 plan 05): the flat coded 400. `str(e) or fallback`
+        # because the flat-body constructor refuses an empty detail.
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code="INVALID_REQUEST",
+            detail=str(e) or _INVALID_REQUEST_FALLBACK_DETAIL,
+            recoverable=False,
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception(
             "validate_key: create_exchange(%s) failed — %s: %s",

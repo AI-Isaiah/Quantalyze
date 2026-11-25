@@ -1236,9 +1236,15 @@ describe("OWN-03 — the gate cannot pass vacuously", () => {
     expect(body.length).toBeLessThan(adapterSrc.length);
 
     // 7. The cache-callback extractor found the callback, not the whole file.
+    // The upper bound only has to sit far below the file's length. Raised 400 ->
+    // 1000 on 2026-11-23 (Phase 237 CACHE-03): the callback gained a second
+    // degraded-build throw (`price_read_failed`) and now measures 532 characters.
+    // Moving that logic into a helper outside the callback to stay under 400
+    // would hide it from P7's ownership-token scan, which reads only the callback.
     const callback = firstArgument(callArgs(factsheetPageSrc, "unstable_cache"));
     expect(callback.length).toBeGreaterThan(10);
-    expect(callback.length).toBeLessThan(400);
+    expect(callback.length).toBeLessThan(1000);
+    expect(callback.length).toBeLessThan(factsheetPageSrc.length / 10);
   });
 
   it("CALIBRATION (164.8.2/W1) — P10's prose pin THROWS on a missing mount anchor instead of reading the whole file", () => {

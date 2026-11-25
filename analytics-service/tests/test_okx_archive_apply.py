@@ -52,6 +52,9 @@ from tests.test_okx_archive_job import (
 #: Captured at import (collection), before any test patches the module: the base harness
 #: installs a no-op for the evaluation seam, and these tests need the real one back.
 REAL_RUN_EVALUATION = okx_archive_job._run_evaluation
+#: Captured at import (collection), before any test patches the module: the harness replaces
+#: the live funding fetch with a fake, and the malformed-row decision must run the real one.
+REAL_FETCH_FUNDING_OKX = okx_archive_job.fetch_funding_okx
 
 SRC = "okx_bills_history_archive"
 APPLY_RPC = "apply_okx_archive_rebuild"
@@ -481,7 +484,7 @@ def _install(
             exchange_module._record_dq_flag(key, value)
         return _records(live.realized)
 
-    async def _funding(exchange: Any, label: str, since_ms: Any) -> list[dict[str, Any]]:
+    async def _funding(exchange: Any, label: str, since_ms: Any, **kwargs: Any) -> list[dict[str, Any]]:
         live.calls.append(("funding", since_ms))
         return _funding_rows(live.funding)
 
@@ -1260,6 +1263,67 @@ class TestLiveCrawlFlags:
         assert exchange_module.get_and_clear_last_dq_flags() == {}
 
 
+def _okx_funding_bill(bill_id: str, inst_id: str) -> dict[str, str]:
+    """An OKX type-8 bill whose well-formed shape reproduces ``LIVE_FUNDING`` through the real
+    fetcher (2026-09-15, 08:00 UTC, 1.5). A blank ``instId`` is the row the normalizer drops."""
+    return {
+        "instId": inst_id, "type": "8", "pnl": "1.5", "ccy": "USDT",
+        "ts": str(_ms_at("2026-09-15", 8)), "billId": bill_id,
+    }
+
+
+class TestLiveFundingMalformed:
+    """FLOWK-02, ruling 1 (founder, 2026-11-24, "Stop by name"). The live funding read feeds
+    ``rebuild_union`` and the rolled NAV anchor on live-only days, and the cent-level
+    reconciliation does not cover those days. A row the fetcher drops as malformed is a short
+    read, so the rebuild refuses by name instead of publishing a series anchored on it."""
+
+    @staticmethod
+    def _serve(monkeypatch: pytest.MonkeyPatch, *, with_malformed: bool) -> tuple[_World, _Db]:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+        monkeypatch.setattr(okx_archive_job, "fetch_funding_okx", REAL_FETCH_FUNDING_OKX)
+        bills = [_okx_funding_bill("ok1", "BTC-USDT-SWAP")]
+        if with_malformed:
+            bills.append(_okx_funding_bill("bad1", ""))
+        world.answers["private_get_account_bills"] = {"data": bills}
+        world.answers["private_get_account_bills_archive"] = {"data": []}
+        return world, db
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["calibrate", "apply"])
+    async def test_a_malformed_live_funding_row_is_a_named_stop_with_zero_writes(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        """A short live funding read would move the rolled NAV anchor, so one dropped row
+        ends BOTH modes FAILED by name before any write: nothing the founder approved is
+        published on a short read."""
+        world, db = self._serve(monkeypatch, with_malformed=True)
+        extra = {"approved_fingerprint": "0" * 64} if mode == "apply" else {}
+
+        outcome = await _run(_meta(mode, [STRATEGY_ID], **extra))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == "okx_archive_rebuild: live_anchor_unusable live_funding=malformed"
+        result = world.result()
+        assert result["stop_class"] == "live_anchor_unusable"
+        assert result["reconcile"] is None
+        _no_writes_but_progress(world, db)
+        assert _apply_calls(db) == []
+
+    @pytest.mark.asyncio
+    async def test_a_clean_live_funding_read_through_the_real_fetcher_does_not_stop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The threshold is one dropped row, not the presence of the keyword: the same
+        scenario with only the well-formed bill, read by the real fetcher, still calibrates."""
+        world, db = self._serve(monkeypatch, with_malformed=False)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+
+
 class TestInsufficientOverlap:
     """F3. ``days_compared`` counted calendar days, so two empty series compared equal and a
     window of three days or of nothing but zeros authenticated a file. Agreement only means
@@ -1390,7 +1454,7 @@ class TestClaimBudget:
             await asyncio.sleep(0.2)
             return live.equity, False, 0.0, False
 
-        async def _funding(exchange: Any, label: str, since_ms: Any) -> list[dict[str, Any]]:
+        async def _funding(exchange: Any, label: str, since_ms: Any, **kwargs: Any) -> list[dict[str, Any]]:
             await asyncio.sleep(0.2)
             return _funding_rows(live.funding)
 

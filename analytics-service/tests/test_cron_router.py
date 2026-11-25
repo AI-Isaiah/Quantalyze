@@ -7693,7 +7693,12 @@ class TestATruncatedWindowIsNeverTreatedAsComplete:
     result, the envelope and the heartbeat.
     """
 
-    FLAGS = ["daily_pnl_truncated_okx", "daily_pnl_truncated_bybit"]
+    FLAGS = [
+        "daily_pnl_truncated_okx",
+        "daily_pnl_truncated_bybit",
+        # Phase 232 VREAD-06: an empty list with this flag must not read as an idle tick.
+        "daily_pnl_non_usd_okx",
+    ]
 
     def test_each_truncation_flag_is_a_degradation_reason(self):
         for flag in self.FLAGS:
@@ -8721,3 +8726,381 @@ class TestCronSyncHeartbeatCountsEveryUnhealthyOutcome:
         assert set(cron_mod.SYNC_STATUS_SUMMARY_KEYS.values()) <= set(
             cron_mod._CRON_SYNC_HEARTBEAT_METADATA_KEYS
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 232 OKXTRADES VREAD-07 (cron half) — a deadline prefix is stored and held
+# ---------------------------------------------------------------------------
+
+# 2026-11-20T12:00:00Z, the clock the OKX walk is pinned to in these gates.
+_PREFIX_NOW_MS = 1795176000000
+_PREFIX_DAY_MS = 86_400_000
+# 2026-09-21T00:00:00Z: the UTC day of _PREFIX_NOW_MS minus 60 days. The newest stored daily row.
+_PREFIX_HIGH_WATER_DAY_MS = 1789948800000
+# 2026-11-14T00:00:00Z: the oldest instant the venue's live /account/bills serves (now minus 6 UTC days).
+_PREFIX_LIVE_FLOOR_MS = 1794614400000
+
+
+def _prefix_iso_day(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+class _PrefixRequestClock:
+    """A fake monotonic clock that advances `cost_s` per venue request.
+
+    Patched onto `services.exchange._monotonic`, so the walk's deadline and the test's
+    "venue time" are the same instrument. `now` is read before and after a tick to get
+    that tick's venue time, with no wall clock involved.
+    """
+
+    def __init__(self, cost_s: float) -> None:
+        self.cost_s = cost_s
+        self.now = 0.0
+        self.requests = 0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def tick(self) -> None:
+        self.now += self.cost_s
+        self.requests += 1
+
+
+class _PrefixOkxVenue:
+    """The slice of ccxt.okx the OKX walk touches, over venue-faithful archive fakes.
+
+    Both endpoints are `tests/_okx_bills.py::OkxBillsArchive` (begin/end/after/limit/instType
+    honoured); the live one has the seven-day reach. Every request advances the clock.
+    """
+
+    id = "okx"
+    rateLimit = 0
+
+    def __init__(self, rows: list[dict[str, str]], clock: _PrefixRequestClock) -> None:
+        from tests._okx_bills import OkxBillsArchive
+
+        live = OkxBillsArchive(rows, reach_floor_ms=_PREFIX_LIVE_FLOOR_MS)
+        archive = OkxBillsArchive(rows)
+
+        async def _live(params: dict[str, str]) -> Any:
+            clock.tick()
+            return await live(params)
+
+        async def _arch(params: dict[str, str]) -> Any:
+            clock.tick()
+            return await archive(params)
+
+        self.private_get_account_bills = _live
+        self.private_get_account_bills_archive = _arch
+        self.close = AsyncMock()
+
+
+async def _drive_cron_sync_real_fetch(
+    mock_supabase: MagicMock,
+    exchange: Any,
+    clock: _PrefixRequestClock,
+) -> dict[str, Any]:
+    """`_drive_cron_sync` with the REAL `fetch_all_trades` and the REAL flag drain.
+
+    Copies `_drive_cron_sync`'s patches (that helper is not changed) but leaves the fetch and
+    `get_and_clear_last_dq_flags` alone, so the cron's decisions are made on the flags the real
+    window walk actually stamped. The walk's clock and wall instant are pinned.
+    """
+    import sys as _sys
+    import routers.portfolio as portfolio_mod
+    import services.exchange as exchange_mod
+
+    _sys.modules["routers.portfolio"] = portfolio_mod
+    with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+         patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+         patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+         patch.object(cron_mod, "create_exchange", return_value=exchange), \
+         patch.object(
+             cron_mod,
+             "validate_key_permissions",
+             AsyncMock(return_value=_stub_validation(valid=True)),
+         ), \
+         patch.object(cron_mod, "fetch_usdt_balance", AsyncMock(return_value=None)), \
+         patch.object(exchange_mod, "_now_ms", lambda: _PREFIX_NOW_MS), \
+         patch.object(exchange_mod, "_monotonic", clock):
+        return await cron_mod.cron_sync()
+
+
+class TestAnOkxPrefixIsStoredAndHeld:
+    """Phase 232 VREAD-07 (cron half): a deadline prefix is stored, every cursor is held.
+
+    ⛔ THE DEFECT. The cron passed no read deadline, so an OKX first window longer than one
+    tick's budget ran into `KEY_SYNC_TIMEOUT` (the 60 s cancel, which on PROD stores nothing)
+    on EVERY tick and never completed. The window walk (plan 232-02) returns a contiguous
+    oldest prefix of whole UTC days under `daily_pnl_deadline_okx` when its deadline passes;
+    the cron now passes an OKX-only deadline, stores that prefix, moves NO cursor, and reports
+    `held`, so the next tick resumes from the stored high-water.
+
+    PROOF-01 neuters (recorded in the SUMMARY): N1 drop the `read_deadline_s` keyword; N2 drop
+    `and not fetch_prefix_only` from `should_advance_cursor`; N3 from `strategy_advances`; N4
+    from `recompute_strategy_ids`; N5 pass the deadline to every venue; N6 compute
+    `fetch_prefix_only` without `and not fetch_degraded`.
+    """
+
+    # Arithmetic of the tracer. 61 UTC days of bills (2026-09-21 .. 2026-11-20), 5 SWAP bills
+    # a day. From the high-water day the walk has 9 windows: 7 archive-only (4 requests each,
+    # one page per instType), 1 straddling the live floor (8) and 1 live-only (4): 40
+    # requests. At 2.0 s a request the whole read is 80 s of venue time, past the 60 s
+    # KEY_SYNC_TIMEOUT. The 35 s deadline admits 18 requests (the clock reads 36 s before the
+    # 19th), i.e. 4 whole windows (28 days) per tick, so the read completes in 3 ticks.
+    REQUEST_COST_S = 2.0
+    DAYS_WITH_BILLS = 61
+    BILLS_PER_DAY = 5
+
+    @classmethod
+    def _bills(cls) -> list[dict[str, str]]:
+        from tests._okx_bills import okx_bill
+
+        rows: list[dict[str, str]] = []
+        bill_id = 5_000_000
+        for day in range(cls.DAYS_WITH_BILLS):
+            for hour in range(1, cls.BILLS_PER_DAY + 1):
+                ts = _PREFIX_HIGH_WATER_DAY_MS + day * _PREFIX_DAY_MS + hour * 3_600_000
+                bill_id += 1
+                rows.append(
+                    okx_bill(
+                        bill_id, ts, "USDT", "10000", "1",
+                        inst_type="SWAP", pnl="1", fee="0",
+                    )
+                )
+        return rows
+
+    @pytest.mark.asyncio
+    async def test_tracer_a_long_okx_first_window_completes_across_ticks_inside_the_key_budget(
+        self,
+    ):
+        clock = _PrefixRequestClock(self.REQUEST_COST_S)
+        exchange = _PrefixOkxVenue(self._bills(), clock)
+        # The newest stored daily row, as PROD holds it: one marker-less strategy, 60 days behind.
+        stored_rows: list[dict[str, Any]] = [
+            {
+                "strategy_id": "strat-okx-long",
+                "timestamp": "2026-09-21T00:00:00+00:00",
+                "is_fill": False,
+            }
+        ]
+        stored_days: set[str] = set()
+        ticks: list[dict[str, Any]] = []
+
+        for tick_no in range(1, 8):
+            mock_supabase = _make_mock_supabase_for_cron_sync(
+                keys_data=[_strategy_key("okx-long", "okx")],
+                trades_rows=list(stored_rows),
+            )
+            before = clock.now
+            response = await _drive_cron_sync_real_fetch(mock_supabase, exchange, clock)
+            venue_time = clock.now - before
+            result = response["results"][0]
+            (row,) = mock_supabase.cron_runs_inserts
+            ticks.append(result)
+
+            assert venue_time <= cron_mod.KEY_SYNC_TIMEOUT, (
+                f"tick {tick_no} spent {venue_time:.0f} s of venue time, more than the "
+                f"{cron_mod.KEY_SYNC_TIMEOUT} s per-key budget: on PROD that is the cancel "
+                "that stores nothing"
+            )
+            assert result["status"] != "error", (tick_no, result)
+            assert "fetch_degraded" not in result, (tick_no, result)
+
+            for call in mock_supabase.rpc.call_args_list:
+                if call.args[0] != "sync_trades":
+                    continue
+                for daily in call.args[1]["p_trades"]:
+                    stored_days.add(daily["timestamp"][:10])
+                    stored_rows.append(
+                        {
+                            "strategy_id": "strat-okx-long",
+                            "timestamp": daily["timestamp"],
+                            "is_fill": False,
+                        }
+                    )
+
+            if result["status"] == "ok":
+                assert row["status"] == "ok" and row["error"] is None, row
+                break
+
+            assert result["status"] == "held", (tick_no, result)
+            assert result.get("fetch_partial_prefix") is True, (tick_no, result)
+            assert row["status"] == "error", row
+            assert "held=1" in row["error"], row["error"]
+            assert "failed=" not in row["error"], row["error"]
+            assert "fetch_degraded=" not in row["error"], row["error"]
+        else:
+            pytest.fail(f"the read never completed in 7 ticks: {[t['status'] for t in ticks]}")
+
+        assert len(ticks) >= 2, "a first window past one budget must span ticks"
+        expected_days = {
+            _prefix_iso_day(_PREFIX_HIGH_WATER_DAY_MS + d * _PREFIX_DAY_MS)
+            for d in range(self.DAYS_WITH_BILLS)
+        }
+        assert stored_days == expected_days, (
+            "the union of the stored days is every day with bills from the high-water "
+            f"day to now; missing {sorted(expected_days - stored_days)}, "
+            f"extra {sorted(stored_days - expected_days)}"
+        )
+
+    @staticmethod
+    def _capture_api_keys_updates(mock_supabase: MagicMock) -> list[dict[str, Any]]:
+        """Record every payload the tick writes to `api_keys` (the shared fixture hides them)."""
+        payloads: list[dict[str, Any]] = []
+        real_table = mock_supabase.table.side_effect
+
+        def _table(name: str) -> Any:
+            table = real_table(name)
+            if name == "api_keys":
+                real_update = table.update
+
+                def _update(payload: dict[str, Any]) -> Any:
+                    payloads.append(dict(payload))
+                    return real_update(payload)
+
+                table.update = _update
+            return table
+
+        mock_supabase.table.side_effect = _table
+        return payloads
+
+    PREFIX_FLAGS = {"daily_pnl_deadline_okx": True}
+
+    @pytest.mark.asyncio
+    async def test_a_prefix_is_stored_and_every_cursor_is_held(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        key_updates = self._capture_api_keys_updates(mock_supabase)
+        response = await _drive_cron_sync(
+            mock_supabase,
+            fetch_mock=AsyncMock(return_value=[{"id": "t1"}]),
+            dq_flags=self.PREFIX_FLAGS,
+        )
+
+        result = response["results"][0]
+        assert [
+            c for c in mock_supabase.rpc.call_args_list if c.args[0] == "sync_trades"
+        ], "the prefix rows are whole days: they ARE stored"
+        assert result["status"] == "held", result
+        assert result["fetch_partial_prefix"] is True, result
+        assert "fetch_degraded" not in result, result
+        assert mock_supabase.strategy_analytics_updates == [], (
+            "no `trades_fetched_at` stamp for a read that stopped at its deadline: "
+            f"{mock_supabase.strategy_analytics_updates!r}"
+        )
+        assert mock_supabase.strategy_cursor_upserts == [], (
+            "no marker row: a marker-less strategy resumes from its stored high-water, "
+            f"which the prefix just moved. {mock_supabase.strategy_cursor_upserts!r}"
+        )
+        assert not [p for p in key_updates if "last_sync_at" in p], (
+            f"last_sync_at must not advance past the unread suffix: {key_updates!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_empty_prefix_is_held_not_idle(self):
+        """A deadline flag with NO rows is not an idle tick: nothing was read past the deadline."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        key_updates = self._capture_api_keys_updates(mock_supabase)
+        response = await _drive_cron_sync(
+            mock_supabase,
+            fetch_mock=AsyncMock(return_value=[]),
+            dq_flags=self.PREFIX_FLAGS,
+        )
+
+        result = response["results"][0]
+        assert result["status"] == "held", result
+        assert result["fetch_partial_prefix"] is True, result
+        assert not [p for p in key_updates if "last_sync_at" in p], key_updates
+        assert mock_supabase.strategy_cursor_upserts == [], (
+            f"an idle tick would advance every marker: {mock_supabase.strategy_cursor_upserts!r}"
+        )
+        assert mock_supabase.strategy_analytics_updates == [], (
+            mock_supabase.strategy_analytics_updates
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_present_marker_is_held_at_its_pre_tick_value_by_a_prefix(self):
+        result, key_updates, cursors = await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=_make_key_row(
+                exchange="okx",
+                strategy_ids=["strat-A"],
+                last_sync_at=_ONE_TICK_AGO,
+                strategy_cursors={"strat-A": _ONE_TICK_AGO},
+            ),
+            failing_strategy_ids=set(),
+            fetch_mock=AsyncMock(return_value=[{"id": "t1"}]),
+            trades=[{"id": "t1"}],
+            dq_flags=self.PREFIX_FLAGS,
+        )
+        assert TestSyncCursorPerStrategyResume._cursor_map(cursors) == {
+            "strat-A": _ONE_TICK_AGO
+        }, "the marker stays at its pre-tick value: the unread suffix is still outstanding"
+        assert not [p for p in key_updates if "last_sync_at" in p], key_updates
+        assert result["status"] == "held", result
+        assert result["fetch_partial_prefix"] is True, result
+
+    @pytest.mark.asyncio
+    async def test_a_prefix_enqueues_no_recompute(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        await _drive_cron_sync(
+            mock_supabase,
+            fetch_mock=AsyncMock(return_value=[{"id": "t1"}]),
+            dq_flags=self.PREFIX_FLAGS,
+        )
+        assert not [
+            c
+            for c in mock_supabase.rpc.call_args_list
+            if c.args[0] == "enqueue_compute_job"
+        ], "a derive over a half-read span is wasted: it runs on the completing tick"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("exchange", "expected"),
+        [("okx", "OKX_CRON_READ_DEADLINE_S"), ("bybit", None)],
+    )
+    async def test_okx_gets_the_cron_read_deadline_and_bybit_none(self, exchange, expected):
+        """Bybit's deadline flag marks a PARTIAL window, not a prefix: it must never be armed here."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", exchange)],
+        )
+        fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+        await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+
+        want = None if expected is None else getattr(cron_mod, expected)
+        assert fetch_mock.call_args.kwargs["read_deadline_s"] == want, (
+            exchange,
+            fetch_mock.call_args.kwargs,
+        )
+        if expected is not None:
+            assert cron_mod.OKX_CRON_READ_DEADLINE_S < cron_mod.KEY_SYNC_TIMEOUT, (
+                "the walk's budget must leave room for the rest of the key's tick"
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_fetch_wins_over_a_prefix(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        response = await _drive_cron_sync(
+            mock_supabase,
+            fetch_mock=AsyncMock(return_value=[{"id": "t1"}]),
+            dq_flags={
+                "daily_pnl_truncated_okx": True,
+                "daily_pnl_deadline_okx": True,
+            },
+        )
+        result = response["results"][0]
+        assert result["status"] == "error", result
+        assert result["fetch_degraded"] is True, result
+        assert "fetch_partial_prefix" not in result, (
+            f"a degraded read is not a prefix: {result!r}"
+        )
+        assert not [
+            c for c in mock_supabase.rpc.call_args_list if c.args[0] == "sync_trades"
+        ], "nothing of a degraded read is stored"

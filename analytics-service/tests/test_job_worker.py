@@ -76,6 +76,48 @@ class TestClassifyException:
         assert kind == "transient"
         assert "429" in msg or "too many" in msg.lower()
 
+    def test_bybit_read_refusals_are_permanent_with_their_static_text(self) -> None:
+        """Review W2 SF-5, narrowed by round 2 R2-2: ``BybitTradeWindowIncomplete`` and
+        ``BybitPositionReadRefused`` are RuntimeError subclasses. The deterministic reasons are
+        permanent (a retry repeats the same walk for the same refusal). Every other reason can be a
+        venue blip and stays ``unknown``, which the queue retries. Mutation guard: drop the arm
+        and the permanent set flips to ('unknown', ...); widen it and the unknown set flips."""
+        from services.exchange import BybitTradeWindowIncomplete
+        from services.positions import (
+            BYBIT_CURSOR_STUCK_REASON,
+            BYBIT_LIST_NOT_ENDED_REASON,
+            BYBIT_MALFORMED_REPLY_REASON,
+            BYBIT_UNPRICED_INVERSE_REASON,
+            BYBIT_UNREADABLE_INVERSE_VALUE_REASON,
+            BYBIT_UNREADABLE_LINEAR_VALUE_REASON,
+            BYBIT_UNREADABLE_SIZE_REASON,
+            BybitPositionReadRefused,
+        )
+
+        permanent = [
+            BybitTradeWindowIncomplete("page_cap"),
+            BybitTradeWindowIncomplete("start_too_old"),
+            BybitTradeWindowIncomplete("unreadable_fill"),
+            BybitPositionReadRefused(BYBIT_LIST_NOT_ENDED_REASON),
+        ]
+        retried = [
+            BybitTradeWindowIncomplete("cursor_stuck"),
+            BybitTradeWindowIncomplete("malformed_reply"),
+            BybitPositionReadRefused(BYBIT_CURSOR_STUCK_REASON),
+            BybitPositionReadRefused(BYBIT_MALFORMED_REPLY_REASON),
+            BybitPositionReadRefused(BYBIT_UNREADABLE_SIZE_REASON),
+            BybitPositionReadRefused(BYBIT_UNPRICED_INVERSE_REASON),
+            BybitPositionReadRefused(BYBIT_UNREADABLE_INVERSE_VALUE_REASON),
+            BybitPositionReadRefused(BYBIT_UNREADABLE_LINEAR_VALUE_REASON),
+        ]
+        for exc in permanent:
+            kind, msg = classify_exception(exc)
+            assert kind == "permanent", (type(exc).__name__, str(exc), kind)
+            assert msg == str(exc)
+        for exc in retried:
+            kind, _msg = classify_exception(exc)
+            assert kind == "unknown", (type(exc).__name__, str(exc), kind)
+
     def test_bybit_cloudfront_geoblock_is_permanent_not_rate_limit(self) -> None:
         """Bybit's CloudFront country-block returns a non-JSON 403 that ccxt
         mis-maps to RateLimitExceeded. It MUST classify permanent (no retry,
@@ -1158,7 +1200,13 @@ class TestAdvanceSyncCursorFence:
         assert params["p_job_id"] == "job-fence-on"
         # Phase-1 succeeded + balance fetched → both cursors + balance written.
         assert params["p_last_sync_at"] is not None
-        assert params["p_last_fetched_ts"] is not None
+        # VREAD-08 (Phase 232): ingestion is OFF here, so no fill was persisted
+        # and the fills cursor is left untouched (NULL param). Before Phase 232
+        # this stamped wall-clock now, which put the column ahead of stored data.
+        assert params["p_last_fetched_ts"] is None, (
+            "no fill was persisted, so the fills cursor must be left untouched "
+            "(VREAD-08); before Phase 232 it stamped wall-clock now"
+        )
         assert params["p_account_balance"] == 10000.0
         # Owned write → no orphan signal.
         assert not any(
@@ -2552,6 +2600,49 @@ class TestDeriveBrokerDailies:
         assert all(f.get("flow_timing_day_level_large") is True for f in prestamp_flags)
         for f in prestamp_flags:
             assert "flow_timing_day_level_large_days" not in f
+
+    @pytest.mark.asyncio
+    async def test_a_day_zero_pnl_on_an_inception_day_prestamps_the_bool(self) -> None:
+        """MT5D-05 end to end (the tracer). A binance strategy-mode derive whose first realized
+        day carries BOTH the account's first deposit (a 5000 USDT inception) and a realized
+        P&L (+40): the day has no return (D-12, the broker path supplies no time of day) but its
+        P&L is no longer dropped as a silent NaN. Every pre-stamp ``data_quality_flags`` dict
+        carries ``inception_day_pnl_dropped`` as a BOOL, never the in-process day count and
+        never an amount (T-73-02), and no guard key (an annotation never warns, T-229-04).
+
+        Anchor 5150 = 5000 deposit + (40 + 50 + 60) realized, so the day-0 base reconstructs to
+        zero (the inception predicate) and day 0's own P&L is the +40. Mutation-honest: removing
+        the pre-stamp carry in ``job_worker`` drops the key -> RED."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+        from services.nav_twr import NAV_TWR_GUARD_KEYS
+
+        days, realized, _ = self._guarded_day_inputs([40.0, 50.0, 60.0], None)
+        day0_ms = int(
+            _dt.datetime.fromisoformat(days[0] + "T00:00:00+00:00").timestamp() * 1000
+        )
+        deposit = {"id": "d0", "type": "deposit", "currency": "USDT",
+                   "amount": 5_000.0, "timestamp": day0_ms, "internal": False}
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="binance", deposits=[deposit], realized=realized, equity=5_150.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # day 0 is the inception day (no return, D-12); days 1 and 2 are measured
+        assert sorted(r["date"] for r in captured["csv_rows"]) == days[1:]
+        prestamp_flags = [
+            u["data_quality_flags"]
+            for u in captured["analytics_upserts"]
+            if "data_quality_flags" in u
+        ]
+        assert prestamp_flags
+        assert all(f.get("inception_day_pnl_dropped") is True for f in prestamp_flags)
+        for f in prestamp_flags:
+            assert "inception_day_pnl_dropped_days" not in f
+            assert not (set(f) & set(NAV_TWR_GUARD_KEYS))
 
     @pytest.mark.asyncio
     async def test_clean_broker_rederive_clears_stale_warn_flags(self) -> None:

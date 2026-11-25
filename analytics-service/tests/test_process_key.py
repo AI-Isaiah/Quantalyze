@@ -3127,12 +3127,13 @@ def test_process_key_limit_key_func_is_not_get_remote_address():
 
 
 def test_process_key_limit_sizing_literals():
-    """The three bucket sizes, as LITERALS (founder-retunable).
+    """The bucket sizes, as LITERALS (founder-retunable).
 
     tenant 100/hour  — unchanged from the pre-fix single bucket
     anon    30/hour  — deliberately BELOW a tenant bucket (OPEN-3): the public
                        teaser is the untrusted half and must not be able to
                        consume a paying tenant's worth of platform capacity
+    csv     60/minute — a csv-scoped claim's per-user bucket (Phase 240 RLIM-02)
     ceiling 500/hour — the stacked backstop; post-PYAPI-04 every admitted
                        caller presents the SAME INTERNAL_API_TOKEN, so this is
                        one platform-wide bucket by construction, and 5x the
@@ -3144,24 +3145,41 @@ def test_process_key_limit_sizing_literals():
     assert limit_for("process_key:t:tenant-a") == "100/hour"
     assert limit_for("process_key:unverified:abc123") == "100/hour"
     assert limit_for("process_key:anon") == "30/hour"
+    # Phase 240 / RLIM-01: a per-IP pseudonym has the same 30/hour as the legacy
+    # shared key, and the anonymous AGGREGATE (all pseudonyms together) is 200/hour.
+    assert limit_for("process_key:anon:0123456789abcdef0123456789abcdef") == "30/hour"
+    assert process_key_router._process_key_anon_aggregate_limit() == "200/hour"
+    # Phase 240 / RLIM-02: a csv-scoped claim's per-user bucket is 60/minute (three
+    # times the edge's 20 per 60 s), and the shared tenant tier above is NOT retuned.
+    assert limit_for("process_key:csv:0b8f2c4e-5d1a-4c7b-9e3f-6a2d8c1b7e90") == "60/minute"
     assert ceiling_for("process_key:ceiling:abc123") == "500/hour"
     assert ceiling_for("process_key:anon") == "500/hour"
 
 
 def test_process_key_route_registers_both_limits():
-    """Two stacked limits must be REGISTERED on the endpoint, not one.
+    """Three stacked limits must be REGISTERED on the endpoint, in evaluation order.
 
+    The name is kept (other test files cite it) although the route now carries
+    THREE limits: per-identity, the anonymous aggregate, and the platform ceiling.
     Complements the live-traffic proof below: this catches a decorator being
-    dropped in a refactor even when the remaining one would mask it at runtime.
+    dropped or reordered in a refactor even when the remaining ones would mask it
+    at runtime. The order is the evaluation order (slowapi evaluates the bottom
+    decorator first and stops at the first refusal), so a refused request spends
+    no shared token.
     """
     from services import rate_limit as _rl
 
     name = "routers.process_key.process_key"
     groups = _rl.limiter._dynamic_route_limits.get(name, [])
-    assert len(groups) == 2, (
-        "PYAPI-02: /process-key must carry BOTH the per-identity limit and the "
-        f"stacked platform ceiling. Registered groups: {len(groups)}."
+    assert len(groups) == 3, (
+        "RLIM-01: /process-key must carry the per-identity limit, the anonymous "
+        f"aggregate and the stacked platform ceiling. Registered groups: {len(groups)}."
     )
+    assert [g.key_function.__name__ for g in groups] == [
+        "_process_key_rate_limit_key",
+        "_process_key_anon_aggregate_key",
+        "_process_key_ceiling_key",
+    ], "RLIM-01: evaluation order must be identity, aggregate, ceiling"
 
 
 def test_cross_language_claim_from_ts_client_buckets_to_tenant(monkeypatch):

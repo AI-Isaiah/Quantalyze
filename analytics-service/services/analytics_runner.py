@@ -281,6 +281,12 @@ class DataQualityFlags(TypedDict, total=False):
     # never a warning (in neither NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS), no day is
     # dropped. A BOOL only (T-73-02). ---
     flow_timing_day_level_large: bool
+    # --- 229 (MT5D-05): an inception day (day 0 of a full-history account, no DayTiming) has no
+    # return (D-12) but carried P&L, counted by name instead of vanishing into the NaN. Stamped
+    # by the broker derive's pre-stamp and carried present-only by run_csv_strategy_analytics,
+    # same as flow_timing_day_level_large: an INFORMATIONAL annotation, never a warning (in
+    # neither NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS). A BOOL only (T-73-02). ---
+    inception_day_pnl_dropped: bool
     # --- Phase 186 (D-12, review R3-03): a realized row the venue read dropped because it could not
     # be read ("daily_pnl_malformed_<venue>", one BOOL per venue). Stamped by the broker derive's
     # pre-stamp and carried present-only by run_csv_strategy_analytics. A FLAG, never a warning:
@@ -2335,6 +2341,12 @@ async def run_csv_strategy_analytics(
             # which the factsheet says "returns can be extreme", not a warning.
             if existing_flags.get("flow_timing_day_level_large") is True:
                 data_quality_flags["flow_timing_day_level_large"] = True
+
+            # 229 (MT5D-05): the inception-day annotation rides the same PRESENT-ONLY,
+            # strictly-`is True`, outside-the-`_warned`-loops carry: the rebuild is wholesale, so
+            # an unbridged pre-stamp would be wiped. A note, not a warning.
+            if existing_flags.get("inception_day_pnl_dropped") is True:
+                data_quality_flags["inception_day_pnl_dropped"] = True
 
             # Phase 186 (D-12, review R3-03): carry the dropped-row flags PRESENT-ONLY, strictly
             # `is True`, and OUTSIDE both `_warned` loops above, exactly like small_base_measured.

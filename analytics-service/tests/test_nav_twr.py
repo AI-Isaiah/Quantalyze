@@ -2273,6 +2273,120 @@ def test_timed_inception_pnl_before_the_first_deposit_keeps_the_guard() -> None:
     assert math.isnan(got2) and key2 == "dust_nav_guard"
 
 
+def test_a_refund_into_an_emptied_mt5_account_is_published_end_to_end() -> None:
+    """MT5D-04 tracer, through the real combiner. Day 1 funds 10,000 and earns +100; day 2
+    withdraws all 10,100 (the account is empty); day 3 re-funds 1,000 at 08:00 and opens a
+    trade at 10:00 that earns +50; day 4 earns +21 on the 1,050 left. The re-fund day's only
+    position opened after the deposit, so it traded on 1,000 and the day is 50 / 1,000 = 0.05.
+    Before the fix cohort 0 (start-of-day level 0, no P&L) was judged anyway, the day was
+    dropped as ``negative_nav_guard`` and the interior break cut the headline to the suffix.
+    Expected values are typed from Fraction arithmetic; no ``nav_twr`` helper is imported."""
+    from datetime import date
+
+    from services.broker_dailies import combine_mt5_deal_ledger
+    from tests.test_mt5_deal_reconstruction import (
+        _timed_flow_deal,
+        _timed_position_deals,
+        _utc_ms,
+    )
+
+    d1, d2, d3, d4 = (date(2026, 10, day) for day in (1, 2, 3, 4))
+    deals: list[dict] = [
+        _timed_flow_deal(_utc_ms(d1, 8), Fraction(10000)),
+        *_timed_position_deals(1, _utc_ms(d1, 10), _utc_ms(d1, 15), Fraction(100)),
+        _timed_flow_deal(_utc_ms(d2, 8), Fraction(-10100)),
+        _timed_flow_deal(_utc_ms(d3, 8), Fraction(1000)),
+        *_timed_position_deals(2, _utc_ms(d3, 10), _utc_ms(d3, 15), Fraction(50)),
+        *_timed_position_deals(3, _utc_ms(d4, 10), _utc_ms(d4, 15), Fraction(21)),
+    ]
+    returns, meta = combine_mt5_deal_ledger(
+        deals, 1071.0, 1071.0, server_utc_offset_s=0
+    )
+    by_day = {pd.Timestamp(day).date(): value for day, value in returns.items()}
+    assert by_day[d3] == pytest.approx(float(Fraction(50, 1000)), abs=1e-12)
+    assert by_day[d4] == pytest.approx(float(Fraction(21, 1050)), abs=1e-12)
+    for key in ("negative_nav_guard", "dust_nav_guard", "tiny_base_guard", "twr_chain_broken"):
+        assert key not in meta, key
+
+
+_REFUND_TIMING = DayTiming(flows=((1000, 1000.0),), pnl=((2000, 50.0, 2500),))
+
+
+@pytest.mark.parametrize(
+    ("prev", "expected"),
+    [
+        (0.0, Fraction(50, 1000)),
+        (-0.5, Fraction(50) / (Fraction(1000) - Fraction(1, 2))),
+        (5.0, Fraction(50, 1005)),
+    ],
+)
+def test_timed_empty_cohort_zero_is_skipped_when_a_later_cohort_is_judged(
+    prev: float, expected: Fraction
+) -> None:
+    """MT5D-04 at the helper. Cohort 0 holds no P&L and a later cohort does (a 1,000 deposit
+    at 1000, a trade opened at 2000 earning +50): the empty start-of-day cohort is not judged,
+    so an emptied (0), slightly negative (-0.5) or dust (5.0) start never drops the day. The
+    tiny-base test is not in this function; it runs at the chain call site."""
+    got, key = _timed_day_return(prev, _REFUND_TIMING, USD_FLOORS, inception=False)
+    assert key is None
+    assert got == pytest.approx(float(expected), abs=1e-12)
+
+
+def test_timed_cohort_zero_with_pnl_is_still_judged() -> None:
+    """MT5D-04: the rule keys on P&L, not on the flow. A position opened overnight (open
+    None, +5) sits in cohort 0 on an emptied account, so cohort 0 is judged on its start-of-day
+    base of 0 and the day keeps ``negative_nav_guard`` although a later cohort also earned."""
+    timing = DayTiming(
+        flows=((1000, 1000.0),), pnl=((None, 5.0, 500), (2000, 50.0, 2500))
+    )
+    got, key = _timed_day_return(0.0, timing, USD_FLOORS, inception=False)
+    assert math.isnan(got) and key == "negative_nav_guard"
+
+
+def test_timed_flow_only_day_on_an_emptied_account_keeps_its_guard() -> None:
+    """MT5D-04: no later cohort holds P&L, so cohort 0 is judged as today. A deposit with no
+    trade on an account that opened the day empty keeps ``negative_nav_guard``."""
+    timing = DayTiming(flows=((1000, 1000.0),), pnl=())
+    got, key = _timed_day_return(0.0, timing, USD_FLOORS, inception=False)
+    assert math.isnan(got) and key == "negative_nav_guard"
+
+
+@pytest.mark.parametrize(
+    ("prev", "peak", "expected", "guard"),
+    [
+        (0.0, 10100.0, Fraction(50, 1000), None),
+        (-0.5, 10100.0, Fraction(50) / (Fraction(1000) - Fraction(1, 2)), None),
+        (5.0, 10100.0, None, "tiny_base_guard"),    # was dust_nav_guard; still left out
+        (150.0, 10100.0, None, "tiny_base_guard"),  # 188: under 5% of the peak
+        (400.0, 10100.0, None, "tiny_base_guard"),
+        (50.0, 100.0, Fraction(50, 1050), None),
+        (5.0, 100.0, Fraction(50, 1005), None),     # exactly 5%: is_tiny_base is strict
+        (4.0, 100.0, None, "tiny_base_guard"),
+    ],
+)
+def test_a_refund_day_is_measured_unless_it_opened_on_a_tiny_base(
+    prev: float, peak: float, expected: Fraction | None, guard: str | None
+) -> None:
+    """MT5D-04 with 188 precedence, through ``chain_linked_twr``. Day 0 sits at the 30-day
+    ``peak``, day 1 drains the account to ``prev`` (a day-level flow), day 2 re-funds 1,000
+    at 1000 and a trade opened at 2000 earns +50. The day is measured on the re-fund cohort
+    unless the day OPENED on a positive sliver under 5% of the peak (188's founder rule, judged
+    on ``prev`` after the cohort guards). Only day 2's value and the three base-guard keys are
+    asserted: day 1's drain adds day-level flow annotations to every row."""
+    idx = _days(3)
+    nav = pd.Series([peak, prev, prev + 1000.0 + 50.0], index=idx, name="nav")
+    daily = pd.Series([0.0, 0.0, 50.0], index=idx, name="daily_pnl")
+    flows = pd.Series([0.0, prev - peak, 1000.0], index=idx, name="flows")
+    timing = {idx[2]: _REFUND_TIMING}
+    returns, flags = chain_linked_twr(nav, daily, flows, floors=USD_FLOORS, timing=timing)
+    if expected is None:
+        assert np.isnan(returns.iloc[2])
+    else:
+        assert returns.iloc[2] == pytest.approx(float(expected), abs=1e-12)
+    for key in ("negative_nav_guard", "dust_nav_guard", "tiny_base_guard"):
+        assert (key in flags) is (key == guard), key
+
+
 def test_timed_small_base_is_counted_from_the_smallest_measured_cohort() -> None:
     """D-25 on a timed day. A cohort base under the 1e-4 material equity that was measured is
     counted as ``small_base_measured`` with that base as the minimum. D-16 re-pin: the first
@@ -2368,6 +2482,70 @@ def test_inception_day_zero_residue_raises_no_flag_without_timing(residue: float
     assert returns.iloc[1] == pytest.approx(50.0 / (residue + 5000.0 + 0.0), abs=1e-12)
 
 
+def _inception_pnl_chain(pnl0: float, *, flow0: float = 5000.0):
+    """MT5D-05: day 0 deposits ``flow0`` onto a zero base and ALSO earns ``pnl0`` (so the
+    day-0 NAV is ``flow0 + pnl0``), day 1 earns +50. No ``DayTiming``, so day 0 reaches the
+    no-timing inception branch, which has no return (D-12) but must not hide its P&L."""
+    nav = pd.Series([flow0 + pnl0, flow0 + pnl0 + 50.0], index=_days(2), name="nav")
+    daily = pd.Series([pnl0, 50.0], index=_days(2), name="daily_pnl")
+    flows = pd.Series([flow0, 0.0], index=_days(2), name="flows")
+    return chain_linked_twr(nav, daily, flows, prev0=0.0, full_history=True)
+
+
+@pytest.mark.parametrize(
+    ("pnl0", "flagged"),
+    [(0.0, False), (1e-12, False), (4e-6, False), (6e-6, True), (0.01, True)],
+)
+def test_inception_day_zero_pnl_is_flagged_by_name_never_dropped_silently(
+    pnl0: float, flagged: bool
+) -> None:
+    """MT5D-05 (ROADMAP SC-2). Day 0 is the inception day: no return (D-12) and no warning,
+    but a day-0 P&L above the relative float-noise floor (1e-9 x max(NAV_0, flow_0) = 5e-6 on
+    a 5,000 deposit) is COUNTED by name instead of vanishing into the NaN. The two sides of the
+    floor are pinned one step either side (4e-6 quiet, 6e-6 flagged). Day 1 stays measured and
+    no guard key is set (the flag is an annotation)."""
+    returns, flags = _inception_pnl_chain(pnl0)
+    assert np.isnan(returns.iloc[0])
+    assert returns.iloc[1] == pytest.approx(50.0 / (5000.0 + pnl0), abs=1e-12)
+    assert not (set(flags) & set(NAV_TWR_GUARD_KEYS))
+    if flagged:
+        assert flags["inception_day_pnl_dropped"] is True
+        assert flags["inception_day_pnl_dropped_days"] == 1
+    else:
+        assert "inception_day_pnl_dropped" not in flags
+        assert "inception_day_pnl_dropped_days" not in flags
+
+
+def test_a_single_inception_day_with_pnl_is_flagged() -> None:
+    """MT5D-05: a one-day series whose only day is the inception day and carries P&L is not
+    silently empty: the flag names the dropped P&L with count 1."""
+    nav = pd.Series([5000.01], index=_days(1), name="nav")
+    daily = pd.Series([0.01], index=_days(1), name="daily_pnl")
+    flows = pd.Series([5000.0], index=_days(1), name="flows")
+    returns, flags = chain_linked_twr(nav, daily, flows, prev0=0.0, full_history=True)
+    assert np.isnan(returns.iloc[0])
+    assert flags["inception_day_pnl_dropped"] is True
+    assert flags["inception_day_pnl_dropped_days"] == 1
+
+
+def test_inception_day_pnl_dropped_is_a_complete_annotation_through_build_nav_meta() -> None:
+    """MT5D-05 / T-229-04: the flag is an annotation. A flag-only set keeps the hint
+    ``complete`` and carries the bool and the in-process count; beside a real guard the status
+    still promotes."""
+    only = _build_nav_meta(
+        {"inception_day_pnl_dropped": True, "inception_day_pnl_dropped_days": 1}
+    )
+    assert only["computation_status_hint"] == "complete"
+    assert only["inception_day_pnl_dropped"] is True
+    assert only["inception_day_pnl_dropped_days"] == 1
+    both = _build_nav_meta(
+        {"inception_day_pnl_dropped": True, "inception_day_pnl_dropped_days": 1,
+         "dust_nav_guard": True}
+    )
+    assert both["computation_status_hint"] == "complete_with_warnings"
+    assert both["inception_day_pnl_dropped"] is True
+
+
 @pytest.mark.parametrize(
     ("residue", "label"),
     [(0.0, "negative_nav_guard"), (1e-16, "dust_nav_guard"), (-1e-16, "negative_nav_guard")],
@@ -2452,9 +2630,9 @@ def test_inception_certified_widens_only_the_tolerance_the_gate_already_applied(
 
 def test_inception_with_a_timing_measures_the_positions_opened_after_the_deposit() -> None:
     """D-12. A 1.0 BTC deposit at instant 1000 on day 0 and a trade opened at 2000 earning
-    +0.011: the trade traded on the deposit, so day 0 is 0.011 / 1.0 with no flag. Without
-    ``full_history`` the same record is judged on a base of (about) zero and keeps its
-    guard - the rule is opt-in."""
+    +0.011: the trade traded on the deposit, so day 0 is 0.011 / 1.0 with no flag. The
+    same record WITHOUT ``full_history`` is pinned by
+    ``test_an_empty_cohort_zero_is_skipped_with_or_without_full_history`` (MT5D-04)."""
     day0 = pd.Timestamp("2026-01-01")
     timing = {day0: DayTiming(flows=((1000, 1.0),), pnl=((2000, 0.011, 3000),))}
     kwargs = dict(
@@ -2470,9 +2648,27 @@ def test_inception_with_a_timing_measures_the_positions_opened_after_the_deposit
     assert meta["flow_timing_timed_days"] == 1
     assert meta["computation_status_hint"] == "complete"
 
-    off, off_meta = reconstruct_nav_and_twr(_pnl([0.011, 0.002]), **kwargs)
-    assert np.isnan(off.loc[day0])
-    assert "dust_nav_guard" in off_meta or "negative_nav_guard" in off_meta
+
+def test_an_empty_cohort_zero_is_skipped_with_or_without_full_history() -> None:
+    """MT5D-04 (CONTEXT 2026-11-24 "Empty cohort 0", ROADMAP SC-1). The 1.0 BTC deposit at
+    1000 with a trade opened at 2000 earning +0.011 leaves cohort 0 empty: the rule skips
+    it whenever a later cohort holds P&L, on every day, so day 0 is measured on the
+    deposit (0.011 / 1.0) and raises no guard whether or not the account is flagged
+    ``full_history``. It was opt-in before; the empty cohort is no longer judged on a base
+    of about zero."""
+    day0 = pd.Timestamp("2026-01-01")
+    timing = {day0: DayTiming(flows=((1000, 1.0),), pnl=((2000, 0.011, 3000),))}
+    for full_history in (True, False):
+        returns, meta = reconstruct_nav_and_twr(
+            _pnl([0.011, 0.002]),
+            anchor_nav=1.013,
+            external_flows=[("2026-01-01", 1.0)],
+            floors=_BTC_FLOORS,
+            timing=timing,
+            full_history=full_history,
+        )
+        assert returns.loc[day0] == pytest.approx(0.011, abs=1e-9), full_history
+        assert not (set(meta) & set(NAV_TWR_GUARD_KEYS)), full_history
 
 
 def test_inception_through_reconstruct_without_timing_is_nan_and_complete() -> None:
@@ -2718,3 +2914,71 @@ def test_ccxt_history_reaches_inception_unknown_venue_has_no_cap() -> None:
     assert ccxt_history_reaches_inception(
         "somevenue", _INCEPTION_NOW - pd.Timedelta(days=2000), _INCEPTION_NOW
     ) is True
+
+
+# ---------------------------------------------------------------------------
+# 229 MT5D-05: the inception-day annotation fires on the native (Deribit) and MT5 day-0 paths,
+# not only on the ccxt one the job_worker tracer drives.
+# ---------------------------------------------------------------------------
+
+
+def test_native_and_mt5_day_zero_pnl_raise_the_flag() -> None:
+    """MT5D-05 / ROADMAP SC-2. A full-history key whose day 0 is a deposit that ALSO carried P&L
+    and has no ``DayTiming`` reaches the no-timing inception branch on EVERY combiner, so the
+    flag is not MT5-specific (A-02-3):
+
+    - MT5: ``combine_mt5_deal_ledger`` over an untimed ledger (a trade deal with no position id
+      cannot resolve its open, so the day-0 record is day-level) with a 5000 deposit and a +40
+      trade on day 0 and a +50 trade on day 1.
+    - Deribit: ``reconstruct_native_nav_and_twr`` over a full-history ledger whose day-0
+      deposit carries +40 (the section-5 gate certifies the zero pre-history base).
+
+    Each asserts the bool, the in-process count 1 where the meta carries it, no guard key and
+    status ``complete`` (T-229-04). Day 0 is NaN in both: no return is invented for it."""
+    import calendar
+
+    from services.broker_dailies import combine_mt5_deal_ledger
+    from services.native_nav import NativeLedger, reconstruct_native_nav_and_twr
+
+    def _epoch(day: int) -> int:
+        return calendar.timegm((2026, 1, day, 12, 0, 0))
+
+    def _deal(day: int, kind: str, amount: float) -> dict:
+        row = {"profit": amount, "swap": 0.0, "commission": 0.0, "fee": 0.0,
+               "time": _epoch(day)}
+        if kind == "flow":
+            return {**row, "type": 2}
+        return {**row, "type": 0 if amount >= 0 else 1, "entry": 1}
+
+    deals = [_deal(1, "flow", 5000.0), _deal(1, "pnl", 40.0), _deal(2, "pnl", 50.0)]
+    mt5_returns, mt5_meta = combine_mt5_deal_ledger(
+        deals, account_equity=5090.0, account_balance=5090.0, server_utc_offset_s=0
+    )
+    assert np.isnan(mt5_returns.iloc[0])
+    assert mt5_returns.iloc[1] == pytest.approx(50.0 / 5040.0, abs=1e-12)
+    assert mt5_meta["inception_day_pnl_dropped"] is True
+    assert mt5_meta["inception_day_pnl_dropped_days"] == 1
+    assert mt5_meta["computation_status_hint"] == "complete"
+    assert not (set(mt5_meta) & set(NAV_TWR_GUARD_KEYS))
+
+    idx = pd.date_range("2026-01-01", periods=4, freq="D")
+    ledger = NativeLedger(
+        native_pnl={"USDC": pd.Series([40.0, 50.0, -20.0, 30.0], index=idx, name="native_pnl")},
+        terminal_native_equity={"USDC": 6100.0},
+        marks={},
+        native_flows=[
+            ExternalFlow("2026-01-01", 5000.0, "USDC", 5000.0),
+            ExternalFlow("2026-01-03", 1000.0, "USDC", 1000.0),
+        ],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    native_returns, native_meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    assert np.isnan(native_returns.iloc[0])
+    assert native_returns.iloc[1] == pytest.approx(50.0 / 5040.0, rel=1e-12)
+    assert native_meta["inception_day_pnl_dropped"] is True
+    assert native_meta["inception_day_pnl_dropped_days"] == 1
+    assert native_meta["computation_status_hint"] == "complete"
+    assert not (set(native_meta) & set(NAV_TWR_GUARD_KEYS))

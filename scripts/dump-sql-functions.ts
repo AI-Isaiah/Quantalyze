@@ -392,19 +392,15 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  // ⭐ 2026-11-23: Phase 225 ONEACCOUNTONCE plan 04 adds one `snapshot-only` row, for the
-  // service-role-only function that moves an account's holder slot (MT5D-08, Q1). Same
-  // clearing condition as the rows below: the re-dump taken after the migration has applied
-  // to PROD turns the row into `ratchet-stale` and it is DELETED.
-  {
-    name: "swap_account_slot",
-    side: "snapshot-only",
-    capturedAt: "2026-11-23",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after 20261123180100_swap_account_slot.sql applies to PROD",
-    reason:
-      "Phase 225 MT5D-08 defines the slot-swap function in a forward migration that is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
+  // ⭐ 2026-11-24: the Phase 225 ONEACCOUNTONCE plan 04 row
+  // (`swap_account_slot`, `snapshot-only`, captured 2026-11-23) is DELETED: its clearing
+  // condition, a re-dump taken after 20261123180100_swap_account_slot.sql applied to PROD,
+  // landed as #1317, and the gate then reported it `ratchet-stale`.
+  // ⭐ 2026-11-24: the five Phase 227 JOBLEDGER plan 10 rows (`record_compute_job_attempt_error`,
+  // `renew_compute_job_claims`, `record_reconcile_readmit_exhaustions`, `first_hop_enqueue_sweep`,
+  // `record_orphan_reaped_attempt`, all `snapshot-only`, captured 2026-11-24) are DELETED: their
+  // clearing condition, a re-dump taken after 20261124120000..20261124120600 applied to PROD,
+  // landed in this re-dump PR, and the gate then reported each `ratchet-stale`.
   // ⭐ 2026-11-20: the Phase 219 ACCOUNTEMAIL gap closure plan 08 row
   // (`auth_user_has_password`, `snapshot-only`, captured 2026-11-20) is DELETED: its
   // clearing condition, a re-dump taken after

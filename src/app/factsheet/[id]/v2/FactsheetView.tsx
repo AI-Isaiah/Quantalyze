@@ -1036,6 +1036,7 @@ function PerformanceCharts({ variant = "all" }: { variant?: PerformanceVariant }
   // visible range's average, a slice figure (D-78). The crosshair tooltip on the last point is
   // out of scope (hover, interactive; booked with the residue).
   const fullHistoryWithheld = useFullHistoryWithheld();
+  const basisForNote = useBasisOrCash();
   // Round 4 (MEDIUM 2): "zoomed" is decided from the LIVE range, the one the chart computes its
   // avg over (`TimeSeriesChart` follows the live `xRange`), not from `useWindowedView`, whose
   // scope is the held (gesture start) or deferred range. During a zoom-out gesture that reaches
@@ -1044,6 +1045,17 @@ function PerformanceCharts({ variant = "all" }: { variant?: PerformanceVariant }
   const { xRange } = useXRange();
   const zoomed = resolveRangeScope(xRange, payload.dates.length, view).kind === "selected";
   const railAvgWithheld = fullHistoryWithheld && !zoomed;
+  // Phase 237 FACT-01 (CONTEXT "Follow-ons of the FACT-01 ruling", UI-SPEC 1.6 rows 3 and 4): the
+  // Worst 10 chart's bands are the whole record even inside a zoom, the same drawdowns the rail's
+  // Worst 10 table withholds at full history, so its gate is `fullHistoryWithheld` (NOT the
+  // slice-aware `railAvgWithheld`). The note is the plan-03 "panel" sentence by cause; null on the
+  // failed cause, where the chart is not drawn at all.
+  // Memoised: the note is an object, and a fresh one each render would rebuild every chart config.
+  const worstDDsNote = React.useMemo(
+    () => (fullHistoryWithheld ? headlineCoverageNote(payload.dataQuality, basisForNote, "panel") : null),
+    [fullHistoryWithheld, payload.dataQuality, basisForNote],
+  );
+  const worstDDsOmitted = fullHistoryWithheld && worstDDsNote === null;
   const composite = payload.dataQuality?.composite === true;
   // The MTM toggle renders for a composite OR any single-key options strategy in
   // the MTM basis story (mtmGate present) — the SAME predicate as the ControlBar
@@ -1122,9 +1134,15 @@ function PerformanceCharts({ variant = "all" }: { variant?: PerformanceVariant }
       .filter(cfg => !(volMatchedAbsent && cfg.key === "volMatched"))
       .filter(cfg => !(cfg.key === "rollingBeta" && !beta.enough))
       .filter(cfg => !(ROLLING_CHART_KEYS.has(cfg.key) && (!roll.enough || rollWithheld)))
+      .filter(cfg => !(cfg.key === "worstDDs" && worstDDsOmitted))
       .map(cfg => {
+        if (cfg.key === "worstDDs" && worstDDsNote !== null) {
+          return { ...applyChartUnit(cfg, returnsUnit), withheldNote: worstDDsNote };
+        }
         if (ROLLING_CHART_KEYS.has(cfg.key)) {
-          const avg = railAvgWithheld ? { showStratAverage: false } : {};
+          // The hover note (UI-SPEC 1.6 row 4): the same slice-aware gate as the avg label, so the
+          // last point's value dashes at full history and prints inside a zoom.
+          const avg = railAvgWithheld ? { showStratAverage: false, lastPointWithheld: true } : {};
           if (effectiveRollChoice === "1y") {
             return { ...applyRollingWindowChoice(cfg, "1y", roll1y), ...avg };
           }
@@ -1141,7 +1159,7 @@ function PerformanceCharts({ variant = "all" }: { variant?: PerformanceVariant }
         // `null` returns `cfg` itself, so a USD chart is the config it always was.
         return applyChartUnit(cfg, returnsUnit);
       });
-  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window, returnsUnit, railAvgWithheld, rollWithheld, rollShortDays, effectiveRollChoice, roll1y, variant]);
+  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window, returnsUnit, railAvgWithheld, worstDDsNote, worstDDsOmitted, rollWithheld, rollShortDays, effectiveRollChoice, roll1y, variant]);
 
   const firstRollingKey = configs.find(cfg => ROLLING_CHART_KEYS.has(cfg.key))?.key;
   const rollingRecord = payload.figureRecord ?? null;
@@ -1377,8 +1395,13 @@ export function OwnerUnpublishedPanel({
    * link sees right now, rendered as the panel's last child. Only the owner
    * pending page passes it; absent, no element renders, so every other mount
    * is byte-identical.
+   *
+   * Phase 238 (FACT-05): a string keeps the `ContactPointerText` path (its
+   * "contact form" phrase links the support topic with this strategy's id). A
+   * node, built on the server (the lead plus the action's own renderer), is
+   * rendered as is inside the same `p`.
    */
-  shareNote?: string;
+  shareNote?: string | ReactNode;
 }) {
   const [shareLive, setShareLiveState] = React.useState(hasActiveShare);
   // One setter for both children: the panel's own state and the host stay on the
@@ -1413,10 +1436,14 @@ export function OwnerUnpublishedPanel({
       </OwnerUnpublishedNotice>
       {shareNote && (
         <p className="mt-2 text-fixed-12 text-text-muted">
-          <ContactPointerText
-            text={shareNote}
-            href={contactHref({ topic: "support", strategy: strategyId })}
-          />
+          {typeof shareNote === "string" ? (
+            <ContactPointerText
+              text={shareNote}
+              href={contactHref({ topic: "support", strategy: strategyId })}
+            />
+          ) : (
+            shareNote
+          )}
         </p>
       )}
     </div>
@@ -2954,12 +2981,13 @@ function ControlBar({
   const nativeUnit = unitView?.nativePayload.returnsUnit ?? null;
   const showUnitToggle = unitView != null && nativeUnit != null;
   // UI-SPEC A (Disabled USD): the reason is the segment's title AND a visible line.
-  // A failed read is transient (the cached payload expires within the hour), so it
-  // is amber; no priced day at all is a steady fact, so it is muted.
+  // A failed read is transient, so it is amber: Phase 237 CACHE-03 keeps it out of
+  // the payload cache, so the next view rebuilds and a reload retries it. No priced
+  // day at all is a steady fact, so it is muted.
   const usdUnavailableReason = unitView?.unavailableReason ?? null;
   const usdReasonCopy =
     usdUnavailableReason === "price_read_failed"
-      ? "No USD view: the daily BTC closes could not be read. It is retried within the hour."
+      ? "No USD view: the daily BTC closes could not be read. Reload this page to try again."
       : usdUnavailableReason === "no_priced_day"
         ? "No USD view: no day in this record has a stored BTC close."
         : undefined;

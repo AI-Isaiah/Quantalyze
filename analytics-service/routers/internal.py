@@ -45,10 +45,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from services.db import get_supabase, one
+from services.closed_sets import MT5_DISABLED_DETAIL, mt5_enabled_server
 from services.encryption import decrypt_credentials, encrypt_credentials, get_kek
 # PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
 # this file goes through service_error. Contract: docs/STATUS_CONTRACT.md.
-from services.error_contract import service_error
+from services.error_contract import VenueTransientHTTPException, service_error
 from services.exchange import aclose_exchange, create_exchange
 from services.key_permissions import detect_permissions
 from services.mt5_validation import mt5_venue_account_id
@@ -625,13 +626,16 @@ async def rotate_key_secret(
       4. Venue-scope gate: 422 if the row's ``exchange`` is not ``mt5`` —
          BEFORE any decrypt. Defense-in-depth; the Next.js side (plan 04)
          enforces the same gate as the primary control.
-      5. Load the KEK; 500 ``KEK_UNAVAILABLE`` if unconfigured.
-      6. ``decrypt_credentials`` the row to recover ``(login, OLD password
+      5. MT5 go-dark gate: 400 ``VENUE_DISABLED`` if ``mt5_enabled_server()`` is
+         false — BEFORE the KEK load, any decrypt and any live probe (Phase 240
+         plan 05, CONN-05). The same flat body ``/api/validate-key`` answers.
+      6. Load the KEK; 500 ``KEK_UNAVAILABLE`` if unconfigured.
+      7. ``decrypt_credentials`` the row to recover ``(login, OLD password
          [discarded], broker_server)``; 500 ``KEY_UNDECRYPTABLE`` on a genuine
          decrypt failure (``InvalidToken`` / ``JSONDecodeError`` / ``KeyError``
          only — narrowed per review finding 3; an unrelated bug propagates as
          an unhandled 500 instead of being mislabeled as a broken key).
-      7. Call ``_validate_mt5_key(login, req.new_secret, broker_server)`` —
+      8. Call ``_validate_mt5_key(login, req.new_secret, broker_server)`` —
          the SAME gateway probe MT5 create already uses, with the SAME
          three-argument credential-slot order (login -> api_key position, new
          password -> api_secret position, broker_server -> passphrase
@@ -646,7 +650,7 @@ async def rotate_key_secret(
          True, "read_only": True}`` (review finding 2) — its only non-raising
          exit — before proceeding, rather than trusting that invariant blindly
          across the module boundary.
-      8. On success, ``encrypt_credentials`` the UNCHANGED login/server with
+      9. On success, ``encrypt_credentials`` the UNCHANGED login/server with
          the NEW password and return its six ciphertext fields plus
          ``venue_account_id``. ``login`` is the ONLY plaintext value in the
          response — never the password, never the broker server
@@ -660,7 +664,7 @@ async def rotate_key_secret(
       404 — key_id not found.
       422 — the row's exchange is not ``mt5``.
       429 — per-key rate limit hit.
-      400 — the broker rejected the new credential (three distinguishable
+      400 — MT5 is switched off (``VENUE_DISABLED``), or the broker rejected the new credential (three distinguishable
             detail strings, propagated from ``_validate_mt5_key`` uncaught).
       500 — KEK unavailable, the stored key is undecryptable, or
             ``_validate_mt5_key`` returned a non-success shape without
@@ -696,6 +700,20 @@ async def rotate_key_secret(
         raise HTTPException(
             status_code=422,
             detail="This endpoint only rotates MT5 credentials.",
+        )
+
+    # Phase 240 plan 05 (CONN-05), CONTEXT discretion resolution: a rotate while MT5
+    # is dark would run a LIVE probe against a dark venue (`_validate_mt5_key` below
+    # reaches the gateway). The gate sits AFTER the token, rate-limit, 404 and 422
+    # arms so those keep their statuses, and BEFORE the KEK load and the decrypt so
+    # nothing sensitive is touched. Same flat VENUE_DISABLED 400 and the same
+    # detail constant as `/api/validate-key`'s MT5 gate.
+    if not mt5_enabled_server():
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code="VENUE_DISABLED",
+            detail=MT5_DISABLED_DETAIL,
+            recoverable=False,
         )
 
     try:

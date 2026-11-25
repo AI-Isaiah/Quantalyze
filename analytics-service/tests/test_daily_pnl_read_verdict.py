@@ -52,9 +52,10 @@ _DERIVE_ONLY_FLAGS: tuple[str | None, ...] = (
 def _combinations() -> list[dict[str, Any]]:
     """Every combination of the flag dimensions, absent keys left out of the dict."""
     out: list[dict[str, Any]] = []
-    for fetch_error, klass, trunc_okx, trunc_bybit, income, derive_only in itertools.product(
+    for fetch_error, klass, trunc_okx, trunc_bybit, income, non_usd, derive_only in itertools.product(
         _FETCH_ERROR_ABSENT_OR_TRUE,
         _CLASSES,
+        _FLAG_STATES,
         _FLAG_STATES,
         _FLAG_STATES,
         _FLAG_STATES,
@@ -71,6 +72,8 @@ def _combinations() -> list[dict[str, Any]]:
             flags["daily_pnl_truncated_bybit"] = True
         if income:
             flags["daily_pnl_binance_income_fallback"] = True
+        if non_usd:
+            flags["daily_pnl_non_usd_okx"] = True
         if derive_only is not None:
             flags[derive_only] = True
         out.append(flags)
@@ -81,6 +84,13 @@ def test_a_truncated_okx_walk_is_one_reason_and_not_rate_limited() -> None:
     verdict = daily_pnl_read_verdict({"daily_pnl_truncated_okx": True})
     assert isinstance(verdict, DailyPnlReadVerdict)
     assert verdict.reasons == ("daily_pnl_truncated_okx",)
+    assert verdict.error_class is None
+    assert verdict.rate_limited is False
+
+
+def test_a_non_usd_okx_read_is_one_reason_and_not_rate_limited() -> None:
+    verdict = daily_pnl_read_verdict({"daily_pnl_non_usd_okx": True})
+    assert verdict.reasons == ("daily_pnl_non_usd_okx",)
     assert verdict.error_class is None
     assert verdict.rate_limited is False
 
@@ -140,8 +150,10 @@ def test_a_deadline_hit_is_a_reason_of_its_own_and_not_a_truncation() -> None:
 def test_a_dropped_malformed_row_is_not_a_reason_the_key_keeps_publishing(flag: str) -> None:
     """Founder decision D-12 (2026-11-04), reversing review SFH-5. A malformed realized row is
     stamped as a data-quality flag but is not a refusal: it is the row's content, so a refusal would
-    recur on every daily derive for as long as the row stays in the walk (TODOS
-    ``[186-REALIZED-MALFORMED-COUNT]`` books the production count before refusing is reconsidered)."""
+    recur on every daily derive for as long as the row stays in the walk. The PROD count read on
+    2026-11-24 found 0 flags on every measured key and strategy (two Bybit key rows computed before
+    Phase 186 are not measured), and on 2026-11-24 the founder ruled "Keep flagging" (Phase 223
+    ruling 2, FLOWK-03), so this test stays the guard against a realized-row refusal being switched on."""
     verdict = daily_pnl_read_verdict({flag: True})
     assert verdict.reasons == ()
     assert verdict.rate_limited is False
@@ -152,9 +164,10 @@ def test_the_rate_limit_class_set_is_the_two_ccxt_rate_limit_names() -> None:
 
 
 def test_the_parity_matrix_has_the_documented_size() -> None:
-    # 2 (fetch_error) x 6 (class) x 2 x 2 x 2 (truncated_okx, truncated_bybit, income fallback)
+    # 2 (fetch_error) x 6 (class) x 2 x 2 x 2 x 2 (truncated_okx, truncated_bybit, income fallback,
+    # non_usd_okx, Phase 232)
     # x 5 (none, or one of the two deadline flags or the two malformed-row flags)
-    assert len(_combinations()) == 480
+    assert len(_combinations()) == 960
 
 
 @pytest.mark.parametrize("flags", _combinations(), ids=lambda f: ",".join(sorted(f)) or "empty")

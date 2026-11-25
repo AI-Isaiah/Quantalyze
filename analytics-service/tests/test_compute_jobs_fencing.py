@@ -297,6 +297,9 @@ class TestDispatchTickThreadsClaimToken:
             chain = MagicMock()
             if name == "claim_compute_jobs_with_priority":
                 chain.execute.return_value = MagicMock(data=jobs)
+            elif name == "renew_compute_job_claims":
+                # Phase 227 claim fence: the realistic answer is "all still mine".
+                chain.execute.return_value = MagicMock(data=list(params["p_job_ids"]))
             else:
                 chain.execute.return_value = MagicMock(data=None)
             return chain
@@ -346,6 +349,9 @@ class TestDispatchTickThreadsClaimToken:
             chain = MagicMock()
             if name == "claim_compute_jobs_with_priority":
                 chain.execute.return_value = MagicMock(data=jobs)
+            elif name == "renew_compute_job_claims":
+                # Phase 227 claim fence: the realistic answer is "all still mine".
+                chain.execute.return_value = MagicMock(data=list(params["p_job_ids"]))
             else:
                 chain.execute.return_value = MagicMock(data=None)
             return chain
@@ -403,6 +409,9 @@ class TestDispatchTickThreadsClaimToken:
                     "code": "55006",
                     "message": "preempted by watchdog reclaim",
                 })
+            elif name == "renew_compute_job_claims":
+                # Phase 227 claim fence: the realistic answer is "all still mine".
+                chain.execute.return_value = MagicMock(data=list(params["p_job_ids"]))
             else:
                 chain.execute.return_value = MagicMock(data=None)
             return chain
@@ -460,6 +469,9 @@ class TestDispatchTickThreadsClaimToken:
                     "code": "55006",
                     "message": "preempted by watchdog reclaim",
                 })
+            elif name == "renew_compute_job_claims":
+                # Phase 227 claim fence: the realistic answer is "all still mine".
+                chain.execute.return_value = MagicMock(data=list(params["p_job_ids"]))
             else:
                 chain.execute.return_value = MagicMock(data=None)
             return chain
@@ -520,6 +532,9 @@ class TestDispatchTickThreadsClaimToken:
                         "job-lock-bound kept growing across 10 lock attempts"
                     ),
                 })
+            elif name == "renew_compute_job_claims":
+                # Phase 227 claim fence: the realistic answer is "all still mine".
+                chain.execute.return_value = MagicMock(data=list(params["p_job_ids"]))
             else:
                 chain.execute.return_value = MagicMock(data=None)
             return chain
@@ -607,6 +622,9 @@ class TestDispatchTickThreadsClaimToken:
                     "code": "55006",
                     "message": "preempted by watchdog reclaim",
                 })
+            elif name == "renew_compute_job_claims":
+                # Phase 227 claim fence: the realistic answer is "all still mine".
+                chain.execute.return_value = MagicMock(data=list(params["p_job_ids"]))
             else:
                 chain.execute.return_value = MagicMock(data=None)
             return chain

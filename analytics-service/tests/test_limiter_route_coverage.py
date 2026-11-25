@@ -499,10 +499,14 @@ class TestRouteLimitCoverage:
         the partition — completely unchanged. Only a registry-specific assertion
         can see it.
 
-        Two limits under ONE key (``routers/process_key.py:871, 880-881``)
+        Three limits under ONE key, all callable providers: the per-identity limit
+        (``_process_key_limit_for``), the anonymous aggregate
+        (``_process_key_anon_aggregate_limit``) and the platform ceiling
+        (``_process_key_ceiling_limit_for``)
         [MEASURED: ``len(_dynamic_route_limits["routers.process_key.process_key"])
-        == 2``]. The count is pinned because dropping one of a pair is exactly
-        the kind of edit that reads as a no-op in review.
+        == 3``]. The count is pinned because dropping one of the three is exactly
+        the kind of edit that reads as a no-op in review. The evaluation ORDER is
+        pinned separately in ``tests/test_process_key.py``.
         """
         dynamic = _probe()["dynamic"]
         key = "routers.process_key.process_key"
@@ -516,8 +520,10 @@ class TestRouteLimitCoverage:
         # The probe returns the COUNT per key (the limit objects themselves do
         # not survive a process boundary). The count is the property being
         # pinned, so nothing is lost.
-        assert dynamic[key] == 2, (
-            f"{key} carries {dynamic[key]} callable limit(s), expected 2 "
-            "(`routers/process_key.py:871, 880-881`). One of the pair was "
+        assert dynamic[key] == 3, (
+            f"{key} carries {dynamic[key]} callable limit(s), expected 3 "
+            "(per-identity `_process_key_limit_for`, anonymous aggregate "
+            "`_process_key_anon_aggregate_limit`, platform ceiling "
+            "`_process_key_ceiling_limit_for`). One of the three was "
             "removed - confirm that is intended and update this literal."
         )

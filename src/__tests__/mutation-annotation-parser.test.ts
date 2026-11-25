@@ -1123,7 +1123,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 01): `armsSeen` 910 -> 914, the 4 twinned arms 6v-writes, 6v-check-blank, 6v-omitted and 6v-no-grant of the EXISTING gate test_api_keys_venue_identity_uniq.sql. MEASURED: this file's run read `expected 914 to be 910`, and `--parse-only` printed `coverage: files 85/112`, `arms: 0/914/0`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `armsSeen` 914 -> 927, the 13 twinned arms of the NEW gate test_swap_account_slot.sql. MEASURED: `--parse-only` printed `arms: 0/927/0` and `coverage: files 86/113`; the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, review round 1 SQL fixes): `armsSeen` 927 -> 940, +13 twinned arms: 11 in test_swap_account_slot.sql (one per refusal branch left unpinned, plus the NULL-server inherit, the demoted holder's server clear, the over-long server and the tab/newline login and server) and 2 in test_api_keys_venue_identity_uniq.sql (6v-writes-ws, 6v-check-ws). MEASURED: this file's run read `expected 940 to be 927`.
-    expect(armsSeen).toBe(940);
+    // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `armsSeen` 910 -> 979, the 69 twinned arms of the seven NEW phase gates (14 + 6 + 5 + 8 + 21 + 11 + 4). MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
+    expect(armsSeen).toBe(1020);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1182,7 +1183,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `stepsSeen` 1030 -> 1042, +12 file steps contributed by the NEW gate test_swap_account_slot.sql (twelve `edit` steps; the one `sql` step in SWAP-acl is skipped by this walk). MEASURED: this file's run read `expected 1042 to be 1030`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225, merge of plans 03 and 04): `stepsSeen` 1042 -> 1041. Plan 03 retargeted twin 3f in test_wizard_session_idempotency.sql to one DECLARE edit on A1's body, dropping one file step. MEASURED on the merged branch: `expected 1041 to be 1042`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, review round 1 SQL fixes): `stepsSeen` 1041 -> 1055, +14 file steps: the 13 new twins carry one `edit` step each, and 6v-writes-ws carries two. MEASURED: this file's run read `expected 1055 to be 1041`.
-    expect(stepsSeen).toBe(1055);
+    // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `stepsSeen` 1028 -> 1130, +102 file steps contributed by the seven NEW phase gates, read off the run, never summed. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
+    expect(stepsSeen).toBe(1171);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2157,7 +2159,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `needles.length` 1030 -> 1042, the same +12 file steps as `stepsSeen`, from the NEW gate test_swap_account_slot.sql. MEASURED: this file's run read `expected 1042 to be 1030`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225, merge of plans 03 and 04): `needles.length` 1042 -> 1041. Plan 03 retargeted twin 3f in test_wizard_session_idempotency.sql to one DECLARE edit on A1's body, dropping one file step. MEASURED on the merged branch: `expected 1041 to be 1042`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, review round 1 SQL fixes): `needles.length` 1041 -> 1055, the same +14 file steps as `stepsSeen`. MEASURED: this file's run read `expected 1055 to be 1041`.
-    expect(needles.length).toBe(1055);
+    // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `needles.length` 1028 -> 1130, the same +102 file steps as `stepsSeen`. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
+    expect(needles.length).toBe(1171);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2771,7 +2774,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-19 (Phase 219 ACCOUNTEMAIL, plan 03): `filesTotal` 110 -> 111, the NEW gate test_profiles_email_sync.sql. MEASURED: `--parse-only` printed `coverage: files 84/111`, `arms: 0/901/0`, and the `--file` diagnostic run of plan 01 printed `arms: 10/10/0`, `biting: 10`.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): `filesTotal` 111 -> 112, the NEW gate test_auth_user_has_password.sql. MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and the `--file` diagnostic run of plan 04 printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `filesTotal` 112 -> 113, the NEW gate test_swap_account_slot.sql. MEASURED: `--parse-only` printed `coverage: files 86/113`; this file's run read `expected 113 to be 112`.
-    expect(corpus.filesTotal).toBe(113);
+    // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `filesTotal` 112 -> 119, the seven NEW phase gates. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
+    expect(corpus.filesTotal).toBe(120);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2867,7 +2871,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-19 (Phase 219 ACCOUNTEMAIL, plan 03): `filesAnnotated` 83 -> 84, moving WITH `filesTotal`; the by-name list gained test_profiles_email_sync.sql. MEASURED: `--parse-only` printed `coverage: files 84/111`, `arms: 0/901/0`, and the `--file` diagnostic run of plan 01 printed `arms: 10/10/0`, `biting: 10`.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): `filesAnnotated` 84 -> 85, moving WITH `filesTotal`; the by-name list gained test_auth_user_has_password.sql. MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and the `--file` diagnostic run of plan 04 printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `filesAnnotated` 85 -> 86, moving WITH `filesTotal`; the by-name list below gained test_swap_account_slot.sql. MEASURED: `--parse-only` printed `coverage: files 86/113`.
-    expect(corpus.filesAnnotated).toBe(86);
+    // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `filesAnnotated` 85 -> 92, moving WITH `filesTotal`; the by-name list gained the seven phase gates. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
+    expect(corpus.filesAnnotated).toBe(93);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       // ⭐ ADDED 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): the per-key unique-index gate (6 arms) for migration 20261011120000.
@@ -2921,6 +2926,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_commit_scenario_batch_fingerprint_sameday_empty.sql",
       // ⭐ ADDED 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09, review WR-02): the fingerprint native-unpriced gate (2 arms) for migration 20261011120100.
       "test_commit_scenario_batch_fingerprint_unpriced.sql",
+      // ⭐ ADDED 2026-11-24 (Phase 227 JOBLEDGER, plan 10): one of the seven phase gates (migrations 20261124120000 to 20261124120600).
+      "test_compute_job_attempt_failures.sql",
+      // ⭐ ADDED 2026-11-24 (Phase 227 JOBLEDGER, plan 10): one of the seven phase gates (migrations 20261124120000 to 20261124120600).
+      "test_compute_job_claim_renewal.sql",
       "test_compute_job_fence_errcode.sql",
       // ⭐ ADDED 2026-11-04 (Phase 191 REFUSALRACE, plan 03): the metadata-merge gate (10 sections, 10 twinned arms) for migration 20261106120000.
       "test_compute_job_metadata_merge.sql",
@@ -2942,10 +2951,14 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_enqueue_compute_job_dedupe_non_terminal.sql",
       // ⭐ ADDED 2026-11-14 (Phase 211 SYNCJOBS, plan 06): the enqueue-dedup record-and-retract gate (15 sections, 15 twinned arms) for migration 20261114130000.
       "test_enqueue_dedup_record_retract.sql",
+      // ⭐ ADDED 2026-11-24 (Phase 227 JOBLEDGER, plan 10): one of the seven phase gates (migrations 20261124120000 to 20261124120600).
+      "test_enqueue_poll_positions_cohort.sql",
       "test_enqueue_race_loss_40001.sql",
       // ⭐ ADDED 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): the fan-in failure-cascade gate A (8 arms) and the lock-order race gate B (3 arms, LANE-ONLY: dblink).
       "test_fan_in_failure_cascade.sql",
       "test_fan_in_lock_order_race.sql",
+      // ⭐ ADDED 2026-11-24 (Phase 227 JOBLEDGER, plan 10): one of the seven phase gates (migrations 20261124120000 to 20261124120600).
+      "test_first_hop_enqueue_sweep.sql",
       // ⭐ ADDED 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03) — the FIFTY-NINTH annotated file: a contact message is never deduplicated, two request_call rows still collide (4 arms).
       "test_for_quants_leads_contact_dedupe.sql",
       "test_funding_fees_rls.sql",
@@ -2968,6 +2981,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_okx_archive_rebuild.sql",
       // ⭐ ADDED 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): the ops_staleness_check gate (14 arms).
       "test_ops_staleness_check.sql",
+      // ⭐ ADDED 2026-11-24 (Phase 227 JOBLEDGER, plan 10): one of the seven phase gates (migrations 20261124120000 to 20261124120600).
+      "test_orphan_reaped_attempt_record.sql",
       // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): the
       // FORTY-SEVENTH annotated file. Two arms (G1, S1) proving
       // public.prod_prober_cadence_check() posts on a stale prod_prober
@@ -2977,6 +2992,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_profiles_email_sync.sql",
       "test_profiles_privileged_columns_locked.sql",
       "test_reconcile_dropped_enqueue_sweep.sql",
+      // ⭐ ADDED 2026-11-24 (Phase 227 JOBLEDGER, plan 10): one of the seven phase gates (migrations 20261124120000 to 20261124120600).
+      "test_reconcile_readmit_exhaustions.sql",
+      // ⭐ ADDED 2026-11-24 (Phase 227 JOBLEDGER, plan 10): one of the seven phase gates (migrations 20261124120000 to 20261124120600).
+      "test_reset_stalled_bridge_provenance.sql",
       // ⭐ REMOVED 2026-11-02 (Phase 176 LEGACYRETIRE, plan 13, D-02): test_allocator_equity_pre_terminus_flag.sql, test_refresh_fanout_owed_key_reconstruct.sql, test_refresh_fanout_zero_snapshot_bootstrap.sql and test_replace_allocator_equity_snapshots_window.sql were retired with the legacy equity table and its functions.
       "test_resync_retry_single_job.sql",
       "test_retention_orphaned_running.sql",
@@ -3456,7 +3475,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-19 (Phase 219 ACCOUNTEMAIL, plan 03): `filesTotal` 110 -> 111, the NEW gate test_profiles_email_sync.sql. MEASURED: `--parse-only` printed `coverage: files 84/111`, `arms: 0/901/0`, and the `--file` diagnostic run of plan 01 printed `arms: 10/10/0`, `biting: 10`.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): `filesTotal` 111 -> 112, the NEW gate test_auth_user_has_password.sql. MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and the `--file` diagnostic run of plan 04 printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `filesTotal` 112 -> 113, the NEW gate test_swap_account_slot.sql. MEASURED: `--parse-only` printed `coverage: files 86/113`; this file's run read `expected 113 to be 112`.
-    expect(corpus.filesTotal).toBe(113);
+    // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `filesTotal` 112 -> 119, the seven NEW phase gates. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
+    expect(corpus.filesTotal).toBe(120);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3507,7 +3527,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-19 (Phase 219 ACCOUNTEMAIL, plan 03): `annotatedFiles` 83 -> 84, moving WITH `filesAnnotated`; the NEW gate test_profiles_email_sync.sql. MEASURED: `--parse-only` printed `coverage: files 84/111`, `arms: 0/901/0`, and the `--file` diagnostic run of plan 01 printed `arms: 10/10/0`, `biting: 10`.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): `annotatedFiles` 84 -> 85, moving WITH `filesAnnotated`; the NEW gate test_auth_user_has_password.sql. MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and the `--file` diagnostic run of plan 04 printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `annotatedFiles` 85 -> 86, moving WITH `filesAnnotated`; the NEW gate test_swap_account_slot.sql. MEASURED: `--parse-only` printed `coverage: files 86/113`; this file's run read `expected [ …(86) ] to have a length of 85 but got 86`.
-    expect(corpus.annotatedFiles).toHaveLength(86);
+    // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `annotatedFiles` 85 -> 92, moving WITH `filesAnnotated`. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
+    // ⭐ CURRENCY MERGE 2026-11-24 (Phase 227 JOBLEDGER merged onto origin/main at Phase 225): 86 + 7 = 93 annotated files; the by-name list carries both phases' gates.
+    expect(corpus.annotatedFiles).toHaveLength(93);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

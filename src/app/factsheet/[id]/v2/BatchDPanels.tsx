@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { usePayload } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, BaseLeverageNote } from "./basis-context";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
@@ -30,13 +31,30 @@ import {
  * The demo allocator section was removed in QUIETVIEW (D-05).
  */
 
-export function StyleDriftPanel() {
+export function StyleDriftPanel({ withheldBody }: { withheldBody?: ReactNode } = {}) {
   // Phase 103 (MTM-04): the 50/50 half-vs-half KS drift is a pure function of the
   // strategy's own daily series → follows the active basis (cash view === payload).
   const payload = usePayload();
   const view = useBasisSeriesView(payload);
   const sd = view.styleDrift;
   if (!sd) return null;
+  // Phase 237 FACT-01 (founder Q3): on a Withheld full-history view the panel and its
+  // Kolmogorov-Smirnov line are withheld. The header stays; the half-dates subline, the table,
+  // the figure-gate note, the KS sentence and the thin-half note all go with the body. The note
+  // is decided once in `MetricsColumn` and passed in (that file imports this one, so this file
+  // must not import it back).
+  if (withheldBody != null) {
+    return (
+      <section>
+        <header className="mb-2 border-b border-text pb-1">
+          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">
+            Style Drift — First Half vs Second Half
+          </h3>
+        </header>
+        {withheldBody}
+      </section>
+    );
+  }
   const { h1, h2, ksD, ksP } = sd;
   // 194 D-04 / D-15 (2026-11-07): each half is a window of the strategy's ONE record, so the
   // annualized rows (Sharpe, Sortino, Ann. Volatility) and their deltas are withheld only when

@@ -13,7 +13,7 @@ import { overlayBasisScalars, BASIS_KPI_MAP } from "@/lib/factsheet/basis-metric
 import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import { sanitizeLeverage } from "@/lib/leverage";
 import { LeverageContext } from "./leverage-context";
-import { useXRange } from "./factsheet-context";
+import { ActiveBasisContext, useXRange } from "./factsheet-context";
 
 /**
  * Phase 90 (FS-03, CONTEXT D5/D7) — the NARROW, EPHEMERAL basis context.
@@ -100,7 +100,11 @@ export function BasisProvider({ children }: { children: ReactNode }) {
   const gesture = useMemo<RangeGestureValue>(() => ({ held, ...actions }), [held, actions]);
   return (
     <BasisContext.Provider value={value}>
-      <RangeGestureContext.Provider value={gesture}>{children}</RangeGestureContext.Provider>
+      {/* Phase 239 (CACHE-02): publish the basis so useXRange resolves the stored range
+          dates on the active basis axis. */}
+      <ActiveBasisContext.Provider value={basis}>
+        <RangeGestureContext.Provider value={gesture}>{children}</RangeGestureContext.Provider>
+      </ActiveBasisContext.Provider>
     </BasisContext.Provider>
   );
 }
@@ -538,25 +542,26 @@ export type RangeScope = {
 
 /**
  * D-27 — the full-history rule. The range is the full history when it starts at
- * index 0 and ends at or past the SHORTER of the cash axis end and the view's
- * axis end. That covers the initial and reset range (`fullRange` is cash-sized)
- * under every basis, an MTM axis longer or shorter than cash included. A full
- * scope names the VIEW's first and last dates (W3, 2026-09-26): on an MTM axis
- * longer than cash the reset range's end index is not the view's last day. A
- * selected scope names the view's dates at the clamped indices, which bound a
- * crafted `?range` again (T-169-44).
+ * index 0 and ends at or past the VIEW's last index. Since Phase 239 the
+ * initial and reset range is the full range of the ACTIVE axis (`useXRange`
+ * falls back to `[0, axis.length - 1]`), so that is the one end a "full" range
+ * can have under every basis, an MTM axis longer or shorter than cash included.
+ * Ending short of the view's end is a selection, even when the end is at or past
+ * the cash axis end. A full scope names the VIEW's first and last dates (W3,
+ * 2026-09-26). `_cashLen` is no longer read; it stays only so the callers keep one
+ * signature. A selected scope names the view's dates at the clamped indices,
+ * which bound a crafted `?range` again (T-169-44).
  */
 export function resolveRangeScope(
   xRange: readonly [number, number],
-  cashLen: number,
+  _cashLen: number,
   view: Pick<FactsheetPayload, "dates">,
 ): RangeScope {
   const viewLen = view.dates.length;
   const last = Math.max(0, viewLen - 1);
   const s = Math.min(Math.max(0, Math.floor(xRange[0])), last);
   const e = Math.min(Math.max(s, Math.floor(xRange[1])), last);
-  const fullEnd = Math.min(cashLen, viewLen) - 1;
-  if (s === 0 && e >= fullEnd) {
+  if (s === 0 && e >= last) {
     return { kind: "full", start: view.dates[0] ?? "", end: view.dates[last] ?? "", n: viewLen, startIdx: 0, endIdx: last };
   }
   return { kind: "selected", start: view.dates[s], end: view.dates[e], n: e - s + 1, startIdx: s, endIdx: e };

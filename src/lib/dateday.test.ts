@@ -10,6 +10,7 @@ import {
   localMidnightToday,
   parseIsoDay,
   sortByDayAscending,
+  subtractMonths,
   today,
   utcEpoch,
   utcEpochFromIsoString,
@@ -248,5 +249,35 @@ describe("sortByDayAscending / isMonotonicByDay / assertMonotonic", () => {
     expect(() => assertMonotonic(mk("2024-01-01", "2024-01-01"), false)).not.toThrow();
     expect(() => assertMonotonic(mk("2024-01-01", "2024-01-01"), true)).toThrow();
     expect(() => assertMonotonic(mk("2024-01-02", "2024-01-01"), false)).toThrow();
+  });
+});
+
+/**
+ * Phase 239 (CACHE-02) — the composer's 3M/6M/12M presets are CALENDAR months (founder Q5,
+ * "12 calendar months"). A day the target month lacks clamps to that month's last day, so a
+ * month-end start never rolls over into the next month.
+ */
+describe("subtractMonths — calendar months in UTC, clamped to month end", () => {
+  it("31 Mar - 1M is 28 Feb", () => {
+    expect(subtractMonths("2025-03-31", 1)).toBe("2025-02-28");
+    expect(subtractMonths("2024-03-31", 1)).toBe("2024-02-29");
+  });
+
+  it("29 Feb 2024 - 12M is 28 Feb 2023", () => {
+    expect(subtractMonths("2024-02-29", 12)).toBe("2023-02-28");
+  });
+
+  it("clamps other month ends and keeps a day every month has", () => {
+    expect(subtractMonths("2026-08-31", 6)).toBe("2026-02-28");
+    expect(subtractMonths("2026-06-30", 3)).toBe("2026-03-30");
+    expect(subtractMonths("2025-01-15", 3)).toBe("2024-10-15");
+    expect(subtractMonths("2025-05-14", 0)).toBe("2025-05-14");
+  });
+
+  it("returns null for an invalid day or a month count that is not a non-negative integer", () => {
+    expect(subtractMonths("2024-02-31", 1)).toBeNull();
+    expect(subtractMonths("garbage", 1)).toBeNull();
+    expect(subtractMonths("2024-05-14", -1)).toBeNull();
+    expect(subtractMonths("2024-05-14", 1.5)).toBeNull();
   });
 });

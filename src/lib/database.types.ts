@@ -849,6 +849,91 @@ export type Database = {
           },
         ]
       }
+      // 2026-11-24 (Phase 227 JOBLEDGER review WR-02): compute_job_attempt_failures
+      // is hand-added from migration 20261124120000, which has NOT applied to PROD
+      // yet. A regen against the linked PROD project drops it until it does;
+      // re-apply it then. The generator does not list foreign keys into the auth
+      // schema (the allocator_id foreign key to auth.users), as api_key_nav_marks
+      // shows.
+      compute_job_attempt_failures: {
+        Row: {
+          allocator_id: string | null
+          api_key_id: string | null
+          attempt: number
+          cause_class: string
+          claim_token: string | null
+          error_kind: string | null
+          error_text: string | null
+          exchange: string | null
+          id: string
+          job_created_at: string
+          job_id: string
+          kind: string
+          portfolio_id: string | null
+          recorded_at: string
+          strategy_id: string | null
+          worker_id: string | null
+        }
+        Insert: {
+          allocator_id?: string | null
+          api_key_id?: string | null
+          attempt: number
+          cause_class: string
+          claim_token?: string | null
+          error_kind?: string | null
+          error_text?: string | null
+          exchange?: string | null
+          id?: string
+          job_created_at: string
+          job_id: string
+          kind: string
+          portfolio_id?: string | null
+          recorded_at?: string
+          strategy_id?: string | null
+          worker_id?: string | null
+        }
+        Update: {
+          allocator_id?: string | null
+          api_key_id?: string | null
+          attempt?: number
+          cause_class?: string
+          claim_token?: string | null
+          error_kind?: string | null
+          error_text?: string | null
+          exchange?: string | null
+          id?: string
+          job_created_at?: string
+          job_id?: string
+          kind?: string
+          portfolio_id?: string | null
+          recorded_at?: string
+          strategy_id?: string | null
+          worker_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "compute_job_attempt_failures_api_key_id_fkey"
+            columns: ["api_key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "compute_job_attempt_failures_portfolio_id_fkey"
+            columns: ["portfolio_id"]
+            isOneToOne: false
+            referencedRelation: "portfolios"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "compute_job_attempt_failures_strategy_id_fkey"
+            columns: ["strategy_id"]
+            isOneToOne: false
+            referencedRelation: "strategies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       compute_job_kinds: {
         Row: {
           name: string

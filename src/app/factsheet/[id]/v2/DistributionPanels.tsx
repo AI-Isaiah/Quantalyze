@@ -2,10 +2,10 @@
 
 import { useMemo } from "react";
 import { usePayload, useActiveComparator } from "./factsheet-context";
-import { useBasisSeriesView } from "./basis-context";
+import { useBasisOrCash, useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
-import { comparatorPartialYear, isoToMonthDay } from "./MetricsColumn";
+import { comparatorPartialYear, headlineCoverageNote, isoToMonthDay, PanelWithheldNote } from "./MetricsColumn";
 import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 import { benchmarkWithheldReason } from "@/lib/factsheet/returns-unit";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
@@ -41,7 +41,9 @@ export function EndOfYearBarsPanel({ fullHistoryWithheld }: { fullHistoryWithhel
   // (`vcmp.dailyReturns`, aligned on the VIEW's own date axis) come from the view,
   // so under MTM the bars ride the MTM strategy and the axis-matched benchmark.
   // Under cash the view returns `payload` by reference (byte-identical).
-  const view = useBasisSeriesView(usePayload());
+  const payload = usePayload();
+  const view = useBasisSeriesView(payload);
+  const basis = useBasisOrCash();
   const { key: cmpKey } = useActiveComparator();
   const vcmp = view.comparators[cmpKey];
   const isMobile = useBreakpoint() === "mobile";
@@ -66,26 +68,20 @@ export function EndOfYearBarsPanel({ fullHistoryWithheld }: { fullHistoryWithhel
     return out;
   }, [hasBench, vcmp.dailyReturns, view.dates]);
 
-  // Plan 15 round 3 (WR-02, founder rule 2026-10-15): the record's last calendar year IS the
-  // Year-to-date figure, which the Returns panel and the EOY table dash on a Withheld row (the
-  // gate is decided once, in `MetricsColumn`, and passed in; this chart always shows the full
-  // history, a zoom included). The chart prints it as a bar AND as a value label, so under the
-  // gate that year keeps its row label and loses its strategy and benchmark bars and labels.
-  // Dropping the bars (not only the labels) keeps the year out of `maxAbs`, so the
-  // `scale ±N%` caption does not encode it either. Every earlier year covers its own calendar
-  // year and stays.
-  const lastYear = view.dates.length > 0 ? view.dates[view.dates.length - 1].slice(0, 4) : null;
+  // Phase 237 FACT-01 (CONTEXT "Follow-ons of the FACT-01 ruling", UI-SPEC 1.6): on a Withheld
+  // full-history view the chart prints no per-year figure at all, because the year that holds the
+  // break compounds across it and a Withheld row cannot name which year that is (the rail's EOY
+  // Returns table withholds the same figures, founder Q2). The gate is decided once, in
+  // `FactsheetView`, and arrives as `fullHistoryWithheld`; this chart always shows the full
+  // history, a zoom included. It supersedes plan 15 round 3's last-year-only rule (WR-02).
   const rows = useMemo(() => {
     const years = new Set<string>([...Object.keys(stratByYear), ...Object.keys(benchByYear)]);
-    return Array.from(years).sort().map(year => {
-      const withheld = fullHistoryWithheld && year === lastYear;
-      return {
-        year,
-        strat: withheld ? null : (stratByYear[year] ?? null),
-        bench: hasBench && !withheld ? (benchByYear[year] ?? null) : null,
-      };
-    });
-  }, [stratByYear, benchByYear, hasBench, fullHistoryWithheld, lastYear]);
+    return Array.from(years).sort().map(year => ({
+      year,
+      strat: stratByYear[year] ?? null,
+      bench: hasBench ? (benchByYear[year] ?? null) : null,
+    }));
+  }, [stratByYear, benchByYear, hasBench]);
 
   const maxAbs = useMemo(() => {
     let m = 0.01;
@@ -96,6 +92,24 @@ export function EndOfYearBarsPanel({ fullHistoryWithheld }: { fullHistoryWithhel
     return m;
   }, [rows]);
   if (rows.length === 0) return null;
+
+  // The panel sentence by cause (plan 03's "panel" slot): withheld, recomputing, or null for a
+  // failed row, where the page already says the analytics could not be computed and the figure
+  // is absent. Computed here, in-panel, the way MetricsColumn's cumulative panel computes its own.
+  const withheldNote = fullHistoryWithheld ? headlineCoverageNote(payload.dataQuality, basis, "panel") : null;
+  if (fullHistoryWithheld && withheldNote === null) return null;
+  if (withheldNote !== null) {
+    return (
+      <figure className="flex flex-col gap-2">
+        <header>
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
+            {hasBench ? `End-of-Year Returns vs ${vcmp.shortName}` : "End-of-Year Returns"}
+          </h3>
+        </header>
+        <PanelWithheldNote note={withheldNote} testId="chart-withheld-note" />
+      </figure>
+    );
+  }
 
   const VB_W = 880;
   // Wider rows when paired with benchmark — two bars + a thin gap need vertical room.

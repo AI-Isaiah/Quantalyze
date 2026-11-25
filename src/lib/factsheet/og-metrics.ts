@@ -1,6 +1,11 @@
-import { annualizationPeriods, calendarYears, isRankableAnalyticsRow } from "@/lib/closed-sets";
+import { annualizationPeriods, calendarYears } from "@/lib/closed-sets";
 import { sharpe as sharpeRatio } from "@/lib/return-stats";
-import { headlineVerdict, storedCashHeadlineGate } from "@/lib/factsheet/headline-basis";
+import { effectiveDataQualityFlags } from "@/lib/stored-analytics-result";
+import {
+  headlineVerdict,
+  isStoredResultReadable,
+  storedCashHeadlineGate,
+} from "@/lib/factsheet/headline-basis";
 
 /**
  * Headline metrics for the dynamic OG factsheet card, extracted verbatim from
@@ -77,6 +82,9 @@ export type OgPersistedScalars = {
   /** `strategy_analytics.data_quality_flags` (JSONB); read the same way as
    *  `composite-read-path.ts` does, `=== true` per flag. */
   data_quality_flags?: unknown;
+  /** `strategy_analytics.computed_at`. Phase 237: binds a `last_success_snapshot` inside
+   *  `data_quality_flags` to the success that stored the numbers (`effectiveDataQualityFlags`). */
+  computed_at?: unknown;
   /** `strategy_analytics.metrics_json_by_basis` (JSONB). SFH-R2-01: with the seven
    *  stored headline keys (`cumulative_return`, `volatility`, `max_drawdown`, `cagr`,
    *  `sharpe`, `sortino`, `calmar`) it lets the card ask the page's own question,
@@ -94,15 +102,18 @@ export function computeOgHeadline(
   rows: ReadonlyArray<{ date: unknown; value: number }>,
   assetClass: string | null | undefined,
   persisted?: OgPersistedScalars | null,
+  // Phase 237 FACT-02: true only for a held re-run (`analyticsHold(row).updating`), a pending or
+  // computing row over a stored success result. Same default idiom as `storedCashHeadlineGate`.
+  // It changes WHETHER the stored result is read, never which figures a gate shows: the three
+  // inner gates below all take it, so a Dated or Withheld row prints the dashes the factsheet prints.
+  recomputeOverStoredResult = false,
 ): { sharpe: number; cagr: number; maxDd: number } {
   let sharpe = NaN;
   let cagr = NaN;
   let maxDd = NaN;
 
   const status = persisted?.computation_status;
-  const stored = isRankableAnalyticsRow({ computation_status: typeof status === "string" ? status : null })
-    ? persisted
-    : undefined;
+  const stored = isStoredResultReadable(status, recomputeOverStoredResult) ? persisted : undefined;
   // D-03 / SFH-R2-01: the verdict is the page's own (`headlineVerdict`, the call
   // `applyHeadlineBasis` makes), fed the page's own applicability gate
   // (`storedCashHeadlineGate`) and the flags of the row as it is, whether or not it
@@ -111,13 +122,22 @@ export function computeOgHeadline(
   // raw `cash_settlement` object, unprojected keys): the card would otherwise
   // compute its figures from the whole-record series across the break. The factsheet
   // withholds the seven stored scalars, so the card withholds the three it prints.
-  const gate = storedCashHeadlineGate(persisted, persisted?.metrics_json_by_basis, status);
-  if (headlineVerdict(persisted?.data_quality_flags, gate, status).kind === "withheld") {
+  const gate = storedCashHeadlineGate(
+    persisted,
+    persisted?.metrics_json_by_basis,
+    status,
+    recomputeOverStoredResult,
+  );
+  // Phase 237 FACT-02: the verdict and E2 both read the EFFECTIVE flags, the ones that belong to
+  // the numbers the row stores. Inside the derive hop's prestamp window a held row's live flags
+  // are the new run's, so a chain break or a short window the LAST SUCCESS carried would be missed.
+  // The raw blob is not exposed: the response is a PNG.
+  if (headlineVerdict(effectiveDataQualityFlags(persisted).flags, gate, status).kind === "withheld") {
     return { sharpe, cagr, maxDd };
   }
   // E2 (CR-01): the stored CAGR's own span may be a post-chain-break suffix the
   // card's full-series span cannot see (docblock above). Hide rather than show it.
-  const dqf = stored?.data_quality_flags as
+  const dqf = effectiveDataQualityFlags(stored).flags as
     | { insufficient_window?: unknown; twr_chain_broken?: unknown }
     | null
     | undefined;
@@ -187,8 +207,13 @@ export function computeOgHeadline(
  * the CDN and the unfurlers' own caches, which key a card by URL, are not answered under the
  * new URL with a card rendered under the old rules. The route NEVER reads it: it only moves
  * which cache entry answers.
+ *
+ * 2026-11-23, "3" (Phase 237 FACT-02, the held figure rule): the card now shows a held re-run's
+ * last computed figures with the Updating line, reads unit, curve and headline verdict through the
+ * effective flags, and prints dashes for a terminal row with an unbound derive prestamp. A card
+ * cached under "2" carries the old figure rules and is not answered under the new URL.
  */
-export const OG_CARD_VERSION = "2";
+export const OG_CARD_VERSION = "3";
 
 /** A stored figure as the card renders it: a finite number, else NaN ("—"),
  *  the same rule as the factsheet's strict overlay (`overlayBasisScalars`). */

@@ -31,9 +31,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * `computeOgHeadline` are NOT mocked: the real ones run.
  *
  * Coverage matrix:
- *   P1 — unpublished id: generic card, nothing of the row, long cache, no Sentry
- *   P2 — unknown id: the same generic card, long cache (a genuine not-found)
- *   P3 — malformed id: the generic card as a 200 (never a 404) with the long cache,
+ *   P1 — unpublished id: generic card, nothing of the row, no-store (CACHE-01), no Sentry
+ *   P2 — unknown id: the same generic card, no-store (a genuine not-found, CACHE-01)
+ *   P3 — malformed id: the generic card as a 200 (never a 404) sent no-store (CACHE-01),
  *        no database read, no failure log, no capture (Phase 209 SC3, D-10). The
  *        status line is a real assertion since the mock carries a status (D-12).
  *   P4 — published control (non-vacuity): the SAME row published renders its
@@ -143,7 +143,8 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-/** The long cache a healthy (or genuinely not-found) card carries. */
+/** The long cache a rendered terminal card carries (Phase 237 CACHE-01: a not-found or
+ *  figure-less card is no-store, never this). */
 const LONG_CACHE = "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800";
 
 /** FAILURE_CACHE_CONTROL is not exported, so read it BY SYMBOL from the route
@@ -268,29 +269,29 @@ afterEach(() => {
 });
 
 describe("GET /api/og/factsheet/[id] — signed-out caller (OGPUBLIC)", () => {
-  it("P1 — an UNPUBLISHED id renders the generic card and nothing of the row (D-02, T-170.3-01)", async () => {
+  it("P1 — an UNPUBLISHED id renders the generic card and nothing of the row, sent no-store (D-02, T-170.3-01, CACHE-01)", async () => {
     STATE.strategyRow = makeRow("draft");
     const { GET } = await import("./route");
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
 
     expectGenericCard();
     expect(ogCalls[0]).toBeTruthy();
-    expect(res.headers.get("Cache-Control")).toBe(LONG_CACHE);
+    expect(res.headers.get("Cache-Control")).toBe(failureCacheControl());
     // A not-found is not a failure: nothing goes to Sentry.
     expect(afterSpy).not.toHaveBeenCalled();
   });
 
-  it("P2 — an UNKNOWN id renders the same generic card, long-cached (D-02)", async () => {
+  it("P2 — an UNKNOWN id renders the same generic card, sent no-store (D-02, CACHE-01)", async () => {
     STATE.strategyRow = makeRow("published"); // a row exists, but under another id
     const { GET } = await import("./route");
     const res = await GET(makeRequest(UNKNOWN_ID), ctx(UNKNOWN_ID));
 
     expectGenericCard();
-    expect(res.headers.get("Cache-Control")).toBe(LONG_CACHE);
+    expect(res.headers.get("Cache-Control")).toBe(failureCacheControl());
     expect(afterSpy).not.toHaveBeenCalled();
   });
 
-  it("P3 — a MALFORMED id renders the generic card as a 200 with the long cache and never reaches the database or Sentry (Phase 209 SC3, D-10)", async () => {
+  it("P3 — a MALFORMED id renders the generic card as a 200, sent no-store (CACHE-01), and never reaches the database or Sentry (Phase 209 SC3, D-10)", async () => {
     STATE.strategyRow = makeRow("published");
     const { GET } = await import("./route");
     const res = await GET(makeRequest(MALFORMED_ID), ctx(MALFORMED_ID));
@@ -298,7 +299,7 @@ describe("GET /api/og/factsheet/[id] — signed-out caller (OGPUBLIC)", () => {
 
     expectGenericCard();
     expect(res.status).toBe(200);
-    expect(res.headers.get("Cache-Control")).toBe(LONG_CACHE);
+    expect(res.headers.get("Cache-Control")).toBe(failureCacheControl());
     // A malformed id is a not-found, not a failure: no read, no log, no capture.
     expect(STATE.observed.tables).toEqual([]);
     expect(afterSpy).not.toHaveBeenCalled();

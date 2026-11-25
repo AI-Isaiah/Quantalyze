@@ -161,8 +161,8 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [ ] **Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists** - User-facing error copy and the benchmark outage label, with a migration; independent of the MT5 parity phases
 - [ ] **Phase 223: FLOWKINDS — each funding caller treats a malformed row by a recorded, tested decision, and the malformed count is on record first** - Flow-source half only (F-2, no composites): the funding callers' malformed-row decisions and the PROD malformed count; FLOWK-01 dropped
 - [ ] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23; also the seam S4 owner: server-qualified MT5 identity, the draft-clash answer, the failing-holder rule
-- [ ] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit
-- [ ] **Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job** - Seam S3 owner: per-attempt failure record, first-hop drop, batch-mate reset, readmit ceiling signal, reclaim provenance, private strategies polled; migrations
+- [x] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit (completed 2026-11-24)
+- [x] **Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job** - Seam S3 owner: per-attempt failure record, first-hop drop, batch-mate reset, readmit ceiling signal, reclaim provenance, private strategies polled; migrations (completed 2026-11-24)
 - [ ] **Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key** - Sibling of 225 on seam S4, right after it: the rotated MT5 password reconnect and the KEY_ORPHANED copy for allocators
 - [ ] **Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently** - nav_twr.py empty-cohort refund, day-0 P&L and the D-15 band, basis-silent keys, writer-basis values; moves MT5 numbers (155.2 freeze)
 - [ ] **Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason** - Data-gated on the JOBLEDGER records: the second-attempt cause fixed at its root, seven clean nights, the clock-switch replay
@@ -189,6 +189,8 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 D-E amended 2026-11-22 (founder): the weekend edge is the Fri 2026-11-20 frozen close, read 2026-11-22 for all three accounts; for that edge only, the Gate B window runs past the 11-19 run day (see `milestones/v1.18-REQUIREMENTS.md` D-E; `REQUIREMENTS.md` was removed at the v1.18 close). ⛔ CORRECTED 2026-11-23: `REQUIREMENTS.md` exists again for v1.22 TRUTH; it carries D-A..D-E again, D-E's 2026-11-22 amendment included, beside the archived copy in `milestones/v1.18-REQUIREMENTS.md`.
 
 **Freeze window (v1.22, roadmap 2026-11-23):** a change that moves MT5 numbers for MM2, MM3 or FX-AI_V merges before plan 12's recapture or after plan 14, never in between, because a merge in between voids plan 13's `computed_at` binding. It binds 225, 229, 234 and 236, and binds 230 and 233 if their fix moves these numbers. The research schedules plan 12's recapture after 225 and 229 deploy, so that their fixes (MM3 no longer publishing MM2's numbers, the `nav_twr.py` gaps) are inside the verdict. Plan 11 waits on the founder's broker statements.
+
+⭐ **Run day 2026-12-01, monthly statements only (founder ruling 2026-11-23; also in `155.2-CONTEXT.md` and `155.2-RULINGS.md`).** Founder (2026-11-23): "I would suggest, we do 155.2 on 1st of december with the new monthly statments only". Gate B's statement oracle is the November 2026 monthly statement per account; plan 12's recapture runs on or after 2026-12-01; plans 11 to 14 are re-planned from the actual statements. The freeze window opens only at plan 12's recapture, so until then number-moving phases (225, 229 and the others it binds) merge freely.
 
 Carried context, not requirements: timeout findings #8 and #10 are tuned only from percentile data across several nightlies, with fresh and cached logins split, and are booked separately if the data is not in by the milestone close (`milestones/v1.18-REQUIREMENTS.md` Future). The product call on MT5 as a composite member stays out of scope.
 
@@ -297,12 +299,12 @@ Plans:
 
 Plans:
 **Wave 1**
-- [ ] 225-01-PLAN.md — migration A1: `api_keys.venue_server` column and the 13-parameter `create_wizard_strategy` (PR-1)
-- [ ] 225-02-PLAN.md — the same-owner duplicate census and the one-time delete, run by the orchestrator on PROD (PR-1)
+- [x] 225-01-PLAN.md — migration A1: `api_keys.venue_server` column and the 13-parameter `create_wizard_strategy` (PR-1)
+- [x] 225-02-PLAN.md — the same-owner duplicate census and the one-time delete, run by the orchestrator on PROD (PR-1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 225-03-PLAN.md — move every SQL gate pin to the 13-parameter signature (PR-1)
-- [ ] 225-04-PLAN.md — migration A2: `swap_account_slot`, the one place a holder slot moves; the orchestrator ships PR-1 and confirms both migrations on PROD before wave 3 (PR-1)
+- [x] 225-03-PLAN.md — move every SQL gate pin to the 13-parameter signature (PR-1)
+- [x] 225-04-PLAN.md — migration A2: `swap_account_slot`, the one place a holder slot moves; the orchestrator ships PR-1 and confirms both migrations on PROD before wave 3 (PR-1)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 225-05-PLAN.md — an own-draft match is refused by name, `VENUE_DRAFT_IN_PROGRESS` (PR-2)
@@ -330,10 +332,23 @@ Plans:
 2. The timed-day check rejects NaN and implausible returns as well as infinity, and goes RED when one timed day is nudged by 1e-3. (SOAK-02)
 3. Day attribution is checked against an independent per-day walk that imports no production helper, and goes RED when one deal is moved by one UTC day. (SOAK-03)
 4. PROOF-01: each check goes RED on a neutered copy of `mt5_soak.py` with its own arm first (the BTC-floor arm, the timed-day arm, the attribution arm). It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN. The neuter edit, command, RED line and GREEN line are recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 5/5 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 226-01-PLAN.md — SOAK-01: the unit is resolved once and its floors reach the combiner, the guard and inception reads, the level tolerance and the wedge gate; an unresolvable currency is INCONCLUSIVE (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 226-02-PLAN.md — SOAK-03: a soak-owned per-day walk from the raw deals, a day and flow attribution compare against the fold, and an AST test that the walk imports no production helper (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 226-03-PLAN.md — SOAK-02: the soak's own timed-day set from raw instants and positions; a flow day the fold and the walk time differently is a named mismatch (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 226-04-PLAN.md — SOAK-02: the soak's own D-17 cohort walk; each timed day is compared exactly, so a 1e-3 nudge, NaN, inf, 7.0 and -0.99 are named mismatches (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 226-05-PLAN.md — SOAK-02: the minimum checked share (0.5), the soak-owned tiny-base reading, the untimed guards on the soak-owned predicate, the phase gates and the ship note (wave 5)
 
 ### Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job
 
@@ -353,10 +368,29 @@ Plans:
 4. A job reclaimed after a crash keeps its curated error sentence, and its strategy's analytics status follows the reclaim. The lane arm that re-stamps a different sentence under the same job id shows the reclaimed one surviving. (HEAL-04)
 5. The daily positions poll enqueues private strategies too, so they get position snapshots, and the `poll_positions` enqueue stays live. (HEAL-05)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. New SQL arms carry `RED-UNDER` twins and list their migration in `RED-UNDER-SETUP`. Raising retries or a watchdog threshold is not a close. Each migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding before merge, and runs in the one serial migration lane (they auto-apply to PROD).
-**Plans:** 0 plans
+**Plans:** 11/11 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 227-01-PLAN.md — The per-attempt failure ledger: a real error keeps its cause through the re-claim (MT5D-01)
+- [x] 227-03-PLAN.md — Token-fenced claim renewal RPC: a renewed waiting job survives the watchdog (HEAL-02, SQL half)
+- [x] 227-04-PLAN.md — The readmit-ceiling exhaustion row, written by a SQL detector pinned to the PROD sweep predicate (HEAL-03, durable half)
+- [x] 227-05-PLAN.md — The first-hop sweep: a dropped first `sync_trades` enqueue is re-enqueued once, or shown in a named state; runbook registration (HEAL-01)
+- [x] 227-06-PLAN.md — The daily positions poll covers private strategies and stays live, measured fresh on PROD (HEAL-05)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 227-02-PLAN.md — The watchdog reset and reclaim record their cause and bridge the strategy's status, so the curated sentence survives (MT5D-01, HEAL-04)
+- [x] 227-07-PLAN.md — A reaped orphan keeps its cause, through a trigger on the terminalizer's transition (MT5D-01)
+- [x] 227-08-PLAN.md — Worker: the pre-dispatch claim fence, the heartbeat renewal and the lost-mark error record (HEAL-02, MT5D-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 227-09-PLAN.md — Worker: the readmit-ceiling page through ops_alert, stamped on delivery (HEAL-03, page half)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 227-10-PLAN.md — Every phase migration applies on the local-stack lane, the corpus passes, and the censuses are measured (SC-6)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 227-11-PLAN.md — The migrations-schedule-nothing census, the operator runbook, the validation map and the ship records
 
 ### Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key
 
@@ -426,16 +460,29 @@ Plans:
 **Depends on:** nothing hard. It runs in the venue-reads wave beside 232 and 223, with plan write scopes listed by symbol (`exchange.py`, `positions.py`, `bybit_unified_flows.py`). The anchor feeds `key_inputs.anchor_usd` (S1 to S2), so if 229 is still open, the anchor plan waits for it.
 - Research first: the census, a counts-only trade-window probe, and the on-chain deposit probe.
 - Founder action: VREAD-05.
+- 2026-11-23, plan 05 checkpoint. VREAD-05 is answered: "Allow-listed worker IP" (founder). Its date has an upper bound of 2026-10-24, derived from the derive record (31 of 31 done since that date, 0 IP errors). VREAD-04 is undecided (0 on-chain rows), so `replace` stays.
 **Success Criteria** (what must be TRUE):
 1. A census of every Bybit read path by coin, settle type, window and flow source is recorded in the phase, and every row is fixed or decided with a test built from a real payload shape.
 2. The derive anchor and the current-equity read sum the same stable coins through one shared constant. The holdings poll returns USDC-settled and inverse positions with their uPnL. (VREAD-01, VREAD-02)
 3. A strategy trade sync starting more than seven days back returns every execution in the requested window, or refuses by name. An on-chain deposit is counted exactly once, with replace or union decided on probe evidence or recorded as undecided. (VREAD-03, VREAD-04)
 4. The founder has allow-listed the owner's static egress IP, recorded with its date, and that key's daily derive no longer errors for that reason. (VREAD-05)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Mocks mirror recorded real payloads, not our parser's field names.
-**Plans:** 0 plans
+**Plans:** 5/6 plans executed
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 231-01-PLAN.md — the 27-row Bybit read census and the VREAD-05 founder doc
+- [x] 231-02-PLAN.md — the read-only counts-only probe, shipped v0.133.61.6 (#1314), run once on the backfill worker 2026-11-23
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 231-03-PLAN.md — VREAD-02: the holdings poll reads linear USDT, linear USDC and inverse, inverse in USD at the mark
+- [x] 231-04-PLAN.md — VREAD-03: the strategy trade read walks seven-day windows with both bounds, or refuses by name
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 231-05-PLAN.md — VREAD-04 verdict undecided (replace stays), census closure, VREAD-05 founder record and derive check
+
+**Wave 4** *(blocked on Phase 229 merged)*
+- [ ] 231-06-PLAN.md — VREAD-01: the derive anchor sums the current-equity read's stable coins through one shared rule
 
 ### Phase 232: OKXTRADES — an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades
 
@@ -558,11 +605,23 @@ DBACC-01 (v1.23) edits this seam's whole-column select later and re-bases on it.
 3. A strategy published after its OG card was first requested shows its real card on the next request, and a not-found card is never long-cached. A failed BTC price read is not cached as a normal payload, and the next view retries it. Each case is driven by a good-after-bad-within-TTL test on the real cache wrapper. (CACHE-01, CACHE-03)
 4. The owner's private factsheet shows the data source of their own key-backed strategy, never "Data source —", while anon still reads only the published tier; owner and anon are tested per surface. (FACT-04)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 13 plans
 **UI hint**: yes
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 237-01-PLAN.md — The shared held-re-run verdict `analyticsHold` and the returns API's held series with `analytics_updating` (FACT-02 S6)
+- [x] 237-02-PLAN.md — OG not-found and figure-less cards go out `no-store` keyed on `figuresRendered`; good-after-bad on the real GET (CACHE-01)
+- [x] 237-03-PLAN.md — The panel note slot and component, and Worst 10 Drawdowns shows the Withheld note (FACT-01)
+- [x] 237-04-PLAN.md — A failed BTC price read throws inside the payload cache callback, key v27, the reload sentence (CACHE-03)
+- [x] 237-05-PLAN.md — The share card holds during a re-run with the Updating line and the 60 s held cache; `OG_CARD_VERSION` 3 (FACT-02 S5, CACHE-01)
+- [x] 237-06-PLAN.md — Both PDF routes hold with a held ETag and the 60 s cache; tear sheet seam T5b (FACT-02 S2-S4)
+- [x] 237-07-PLAN.md — Recommendation cards hold with the Updating line through the full verdict (FACT-02 S7)
+- [x] 237-08-PLAN.md — Composer drawer-added rows show the Updating line from the returns field; registry entry (FACT-02 S8)
+- [x] 237-09-PLAN.md — The EOY bar chart, heatmap YTD, Worst 10 chart and rolling hover value are withheld too (FACT-01 follow-on)
+- [x] 237-10-PLAN.md — The owner's unpublished factsheet reads its own trust tier on Lane B through RLS (FACT-04)
+- [x] 237-11-PLAN.md — The recompute-verdict census, the retired surfaces asserted, pins reconciled, full suite green (FACT-02 SC-2)
+- [x] 237-12-PLAN.md — EOY Returns, Calmar by Year and Style Drift with KS show the Withheld note (FACT-01)
+- [x] 237-13-PLAN.md — Composer book-strategy rows show the Updating line from a new book-payload field, book wins (FACT-02 S8b)
 
 ### Phase 238: NEVERCOMPUTED — a strategy that never computed, failed or stalled never claims a compute time or tells its owner to wait
 
@@ -651,19 +710,19 @@ Plans:
 | 157. FOUNDER-CONFIRM | 1/3 | In progress | - |
 | 222. ALERTTRUTH | 0/? | Not started | - |
 | 223. FLOWKINDS | 0/? | Not started | - |
-| 225. ONEACCOUNTONCE | 0/? | Not started | - |
-| 226. MT5SOAK | 0/? | Not started | - |
-| 227. JOBLEDGER | 0/? | Not started | - |
+| 225. ONEACCOUNTONCE | 4/12 | In progress (PR-1 shipped as #1315) | - |
+| 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
+| 227. JOBLEDGER | 11/11 | Complete (shipped v0.133.67.0, #1325; HEAL-01 sweep registered on PROD) | 2026-11-24 |
 | 228. KEYANSWERS | 0/? | Not started | - |
 | 229. MT5DERIVE2 | 0/? | Not started | - |
 | 230. MT5NIGHTLY | 0/? | Not started | - |
-| 231. BYBITREADS | 0/? | Not started | - |
+| 231. BYBITREADS | 5/6 | In progress (plans 01-05 shipped v0.133.61.6 #1314 and v0.133.65.0 #1321; plan 06 waits for 229) | - |
 | 232. OKXTRADES | 0/? | Not started | - |
 | 233. DERIBITTRUTH | 0/? | Not started | - |
 | 234. NOCAPITAL | 0/? | Not started | - |
 | 235. HOLDINGSTRUTH | 0/? | Not started | - |
 | 236. FIGUREMATH | 0/? | Not started | - |
-| 237. FACTSHEETHONEST | 0/? | Not started | - |
+| 237. FACTSHEETHONEST | 13/13 | Shipped v0.133.63.0 (#1316); human verification pending (2 visual checks) | - |
 | 238. NEVERCOMPUTED | 0/? | Not started | - |
 | 239. SURFACECACHE | 0/? | Not started | - |
 | 240. CONNECTTRUTH | 0/? | Not started | - |

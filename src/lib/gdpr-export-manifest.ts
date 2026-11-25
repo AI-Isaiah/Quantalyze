@@ -697,6 +697,18 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
     user_column: "allocator_id",
     project: redactAllocatorMatchForUser,
   },
+  // 2026-11-24 (Phase 227 JOBLEDGER review WR-02, migration 20261124120000):
+  // compute_job_attempt_failures carries one row per failed compute-job attempt.
+  // It is exported by allocator_id, the owner column of the allocator-keyed jobs
+  // (derive_allocator_equity, rescore_allocator) whose strategy_id and api_key_id
+  // are both NULL; error_text can name a broker account, so it is the data
+  // subject's. Erasure is sanitize_user's explicit DELETE over all four owner keys
+  // (migration 20261124120700; the owner cascades do NOT fire on that path, which
+  // anonymizes strategies, portfolios and auth.users in place). Rows keyed
+  // by strategy_id or api_key_id alone are NOT in this entry, the same posture as
+  // compute_jobs itself (a `system` exclusion). The table has a surrogate `id`,
+  // so the `.order("id")` fallback is valid.
+  { kind: "direct", table: "compute_job_attempt_failures", user_column: "allocator_id" },
   { kind: "direct", table: "data_deletion_requests", user_column: "user_id" },
   { kind: "direct", table: "investor_attestations", user_column: "user_id" },
   { kind: "direct", table: "match_batches", user_column: "allocator_id" },

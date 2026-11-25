@@ -20,6 +20,9 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 
+import hashlib
+import hmac
+
 import pytest
 import sentry_sdk
 from fastapi.testclient import TestClient
@@ -355,3 +358,56 @@ def test_the_real_sentry_sdk_emits_one_event_with_the_fingerprint_and_tag(
     assert event["level"] == "warning"
     assert event["fingerprint"] == ["anon-bucket-saturated", "process_key"]
     assert event["tags"]["anon_bucket_saturated"] == "process_key"
+
+
+def _pseudonym(ip: str) -> str:
+    """First 32 hex of HMAC-SHA256(secret, ``anon-ip:<ip>``): the TS construction."""
+    return hmac.new(
+        _CLAIM_SECRET.encode("utf-8"), f"anon-ip:{ip}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:32]
+
+
+def _anon_claim(ip: str) -> str:
+    return _mint_claim(f"public:{_pseudonym(ip)}")
+
+
+def test_an_aggregate_refusal_emits_one_tagged_event(
+    client: TestClient, sentry_spy: _FakeSentry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 240: the anonymous AGGREGATE saturating is the same signal as the shared
+    bucket, so it alerts with the byte-stable message, fingerprint and tag. Three
+    different pseudonyms, one call each: no per-IP window is near full, so only the
+    aggregate (shrunk to 2/hour) can refuse the third."""
+    monkeypatch.setattr(process_key_router, "_PROCESS_KEY_ANON_AGGREGATE_LIMIT", "2/hour")
+
+    assert _post(client, _anon_claim("192.0.2.10")).status_code != 429
+    assert _post(client, _anon_claim("192.0.2.20")).status_code != 429
+    assert sentry_spy.captures == []
+
+    assert _post(client, _anon_claim("198.51.100.30")).status_code == 429
+
+    assert len(sentry_spy.captures) == 1, sentry_spy.captures
+    event = sentry_spy.captures[0]
+    assert event["message"] == "Anonymous teaser bucket saturated on /process-key"
+    assert event["fingerprint"] == ["anon-bucket-saturated", "process_key"]
+    assert event["tags"]["anon_bucket_saturated"] == "process_key"
+
+
+def test_a_per_ip_refusal_emits_no_event_and_grows_no_dedupe_entry(
+    client: TestClient, sentry_spy: _FakeSentry
+) -> None:
+    """One visitor over their own window is a normal fairness refusal, not the
+    saturation signal. Alerting on it would page on ordinary use and grow
+    ``_anon_alert_last_at`` by one key per pseudonym without bound."""
+    a = _anon_claim("192.0.2.10")
+
+    assert _post(client, a).status_code != 429
+    assert _post(client, a).status_code != 429
+    for _ in range(3):
+        assert _post(client, a).status_code == 429
+
+    assert sentry_spy.captures == []
+    assert [
+        k for k in app_error_handlers._anon_alert_last_at if k.startswith("process_key:anon:")
+    ] == []
+    assert app_error_handlers._anon_alert_last_at == {}

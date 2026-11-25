@@ -51,11 +51,14 @@ export function MonthlyReturnsHeatmap({ fullHistoryWithheld }: { fullHistoryWith
   const maxAbs = useMemo(() => percentileOfAbs(rows), [rows]);
   const palette = useHeatmapBase();
   if (rows.length === 0) return null;
-  // Plan 15 round 3 (WR-03, founder rule 2026-10-15): the last row's YTD cell IS the Year-to-date
-  // figure, which the Returns panel dashes on a Withheld row. The gate is decided once, in
-  // `MetricsColumn`, and passed in (this grid shows the full history, a zoom included). Under it
-  // that one cell reads "—" with no tone. Every earlier row's total stays.
-  // Round 4 (MEDIUM 1, same rule): the month cell holding the record's last date IS the
+  // Phase 237 FACT-01 (CONTEXT "Follow-ons of the FACT-01 ruling", UI-SPEC 1.6 row 2): on a
+  // Withheld full-history view EVERY row's YTD cell reads "—" with no tone and no title. The last
+  // row's cell IS the Year-to-date figure the Returns panel dashes (plan 15 round 3, WR-03), and an
+  // earlier row's cell is that year's compounded total, the figure the EOY Returns table and bar
+  // chart withhold (founder Q2: the year that holds the break compounds across it). The gate is
+  // decided once, in `FactsheetView`, and passed in (this grid shows the full history, a zoom
+  // included). It supersedes WR-03's last-row-only rule.
+  // Round 4 (MEDIUM 1, same rule, unchanged): the month cell holding the record's last date IS the
   // Month-to-date figure the Returns panel dashes (same dates, same compounding), and in
   // January also the Year-to-date figure. It goes with the YTD cell: "—", no tone, no figure in
   // its title. Every earlier month cell is a closed per-period entry and stays.
@@ -116,7 +119,7 @@ export function MonthlyReturnsHeatmap({ fullHistoryWithheld }: { fullHistoryWith
                 row={r}
                 maxAbs={maxAbs}
                 palette={palette}
-                ytdWithheld={fullHistoryWithheld && r.year === lastYear}
+                ytdWithheld={fullHistoryWithheld}
                 withheldMonthIdx={fullHistoryWithheld && r.year === lastYear ? lastMonthIdx : -1}
               />
             ))}
@@ -198,6 +201,7 @@ function MonthlyRow({
       })}
       <td
         className="text-right text-micro tabular-nums pl-1 pr-1"
+        data-testid={ytdWithheld ? "heatmap-ytd-withheld" : undefined}
         style={{
           ...(ytdWithheld ? {} : toneStyle(row.ytd, 1)),
           fontWeight: 600,

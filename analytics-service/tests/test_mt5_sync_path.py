@@ -346,6 +346,10 @@ async def test_run_sync_trades_job_mt5_routes_balance_and_skips_ccxt(monkeypatch
     assert advance is not None, f"expected advance_sync_cursor, got {rpc_calls}"
     assert advance["p_account_balance"] == pytest.approx(ACCOUNT_EQUITY)
     assert advance["p_last_sync_at"] is not None
+    assert advance["p_last_fetched_ts"] is None, (
+        "the MT5 arm reads no fills, so the fills cursor is left untouched "
+        "(VREAD-08); before Phase 232 it stamped wall-clock now"
+    )
 
     follow_on = by_name.get("enqueue_compute_job")
     assert follow_on is not None, "expected the derive_broker_dailies follow-on"

@@ -63,7 +63,10 @@ from services.metrics import periods_per_year_for_asset_class
 # had no enclosing try at all before this phase.
 from services.mt5_client import Mt5SessionAbandoned
 from services.rate_limit import (
+    anon_aggregate_key,
     anon_bucket_key,
+    classify_tenant_claim,
+    csv_bucket_key,
     limiter,
     platform_ceiling_key,
     tenant_rate_limit_key,
@@ -116,11 +119,40 @@ _PROCESS_KEY_TENANT_LIMIT = "100/hour"
 #: cannot be contacted, rate-limited by account, or billed.
 _PROCESS_KEY_ANON_LIMIT = "30/hour"
 
+#: The anonymous AGGREGATE: every anonymous visitor together, across all per-IP
+#: pseudonyms and the legacy shared bucket. 40% of the 500/hour ceiling, so six
+#: IPs at their full 30/hour are needed to exhaust it and at least 300/hour of the
+#: ceiling is always left for everyone else. It bounds rotation too: however many
+#: pseudonyms an attacker mints (IPv6 or XFF rotation), total anonymous work is
+#: capped here. Founder-retunable (CONTEXT RLIM-01 discretion resolution).
+_PROCESS_KEY_ANON_AGGREGATE_LIMIT = "200/hour"
+
+#: The CSV-scoped per-user window (Phase 240 RLIM-02): a signed-in user's CSV
+#: validations, carried by the signed ``csv:<uuid>`` claim, get their own bucket
+#: apart from the user's onboard and resync window. The edge is an Upstash sliding
+#: window of 20 per 60 s, so one exact 60 s span can hold up to two edge buckets
+#: (40), and the upstream hit trails the edge check by up to the seam budget, so a
+#: third bucket's worth covers latency. It is sized at three times the edge's
+#: per-window cap so latency between the edge check and the upstream hit cannot push
+#: an admitted user over it. That is a reading of the documented algorithm, not an
+#: Upstash run, and it is not airtight. Founder-ruled 2026-11-24 (CONTEXT RLIM-02).
+_PROCESS_KEY_CSV_LIMIT = "60/minute"
+
 #: The stacked backstop, keyed on the credential hash. Post-PYAPI-04 every
 #: admitted caller presents the same INTERNAL_API_TOKEN, so this is one
 #: platform-wide bucket — 5x the 100/hour the whole platform shared before this
 #: phase, and the only thing standing between N tenants each inside their own
 #: window and a collectively buried service.
+#:
+#: CSV-SCOPED TRAFFIC IS EXEMPT (Phase 240 RLIM-02, ``exempt_when`` on the ceiling
+#: decorator below). The edge admits 20 CSV validations per 60 s per user, which is
+#: 1,200/hour for ONE user against a 500/hour ceiling, so only an exemption keeps
+#: "a CSV user inside the edge limit is never refused upstream" true. What still
+#: bounds CSV traffic: the per-user edge limit, authentication, the request body
+#: cap, the row cap and the per-user 60/minute csv tier. The trade-off is that the
+#: ceiling no longer backstops CSV traffic in aggregate (founder-ruled, recorded in
+#: the CHANGELOG). Only a STRICT csv claim is exempt; see
+#: ``_process_key_is_csv_scoped``.
 _PROCESS_KEY_CEILING_LIMIT = "500/hour"
 
 
@@ -128,7 +160,8 @@ def _process_key_rate_limit_key(request: Request) -> str:
     """Per-identity limiter key for /process-key. See services/rate_limit.py.
 
     Returns ``process_key:t:<user_id>`` for a valid tenant claim,
-    ``process_key:anon`` for the public teaser, and
+    ``process_key:anon`` for the public teaser, ``process_key:csv:<uuid>`` for a
+    CSV-scoped claim (RLIM-02), and
     ``process_key:unverified:<credential-hash>`` (plus a WARN) when the claim is
     absent, malformed, expired or forged. NEVER raises — RESEARCH G-8.
     """
@@ -140,21 +173,79 @@ def _process_key_ceiling_key(request: Request) -> str:
     return platform_ceiling_key(request, "process_key")
 
 
+def _process_key_anon_aggregate_limit() -> str:
+    """The anonymous aggregate window, as a callable provider.
+
+    It declares NO parameter on purpose: a provider that declares ``key`` makes
+    slowapi run the key function for every request, exempt or not, so tenant
+    traffic would pay for a key function it never uses. It is a provider rather
+    than a literal because static string limits ALWAYS evaluate before callable
+    ones, which would put the aggregate ahead of the per-identity limit and let a
+    refused anonymous call spend an aggregate token.
+    """
+    return _PROCESS_KEY_ANON_AGGREGATE_LIMIT
+
+
+def _process_key_anon_aggregate_key(request: Request) -> str:
+    """The one anonymous-aggregate bucket key. Never empty, never raises.
+
+    An empty key makes slowapi log an ERROR per request and skip the limit, so the
+    exemption for non-anonymous traffic is ``exempt_when``, never an empty key.
+    """
+    return anon_aggregate_key("process_key")
+
+
+def _process_key_not_anonymous(request: Request) -> bool:
+    """``exempt_when`` for the aggregate: True when the caller is NOT anonymous.
+
+    Tenant and unverified traffic never spends an aggregate slot. Never raises: an
+    ``exempt_when`` that raises becomes a bodyless 500, and one that defaulted to
+    exempt would skip the limit on a fault. On a fault it answers False (not
+    exempt), so a fault refuses rather than skips (G-8).
+    """
+    try:
+        return classify_tenant_claim(request).kind not in ("anon", "anon_ip")
+    except Exception:
+        log.error("process_key.aggregate_exemption_degraded", exc_info=True)
+        return False
+
+
+def _process_key_is_csv_scoped(request: Request) -> bool:
+    """``exempt_when`` for the platform ceiling: True only for a STRICT csv claim.
+
+    The kind comes from the one classifier, which fullmatches ``csv:`` plus a
+    canonical lowercase uuid over the HMAC-verified payload; a malformed ``csv:``
+    payload is a plain tenant there and is NOT exempt. The scope is never read from
+    an unsigned header or the body. Never raises: an ``exempt_when`` that raises
+    becomes a bodyless 500, and one that defaulted to exempt would skip the ceiling
+    on a fault. On a fault it answers False (not exempt), so a fault refuses rather
+    than skips (G-8).
+    """
+    try:
+        return classify_tenant_claim(request).kind == "csv"
+    except Exception:
+        log.error("process_key.ceiling_exemption_degraded", exc_info=True)
+        return False
+
+
 def _process_key_limit_for(key: str) -> str:
     """Size the per-identity window from the bucket the key function chose.
 
     slowapi supports a CALLABLE limit provider and passes it the key function's
     output when the provider declares a parameter named ``key``
     (``slowapi/wrappers.py`` ``LimitGroup.__iter__``). That is what lets one
-    decorator serve two different sizes: ``exempt_when`` cannot see the request,
-    and a second decorator whose key function returned ``""`` for non-anon
-    traffic would make slowapi log an ERROR on every authenticated call.
+    decorator serve two different sizes. (slowapi 0.1.10 does pass the request to
+    a one-parameter ``exempt_when`` callable, which the aggregate limit below
+    uses; a key-sized provider is still the simpler fit for a per-bucket size.)
     """
-    return (
-        _PROCESS_KEY_ANON_LIMIT
-        if key == anon_bucket_key("process_key")
-        else _PROCESS_KEY_TENANT_LIMIT
-    )
+    anon_key = anon_bucket_key("process_key")
+    if key == anon_key or key.startswith(anon_key + ":"):
+        return _PROCESS_KEY_ANON_LIMIT
+    # ``process_key:csv:`` is disjoint from ``process_key:t:``, so a tenant id can
+    # never be sized as a csv bucket.
+    if key.startswith(csv_bucket_key("process_key", "")):
+        return _PROCESS_KEY_CSV_LIMIT
+    return _PROCESS_KEY_TENANT_LIMIT
 
 
 def _process_key_ceiling_limit_for(key: str) -> str:
@@ -1126,11 +1217,17 @@ async def _run_validate_only(
         # 161-03 / WIZERR-13 — `val.debug_context` is threaded so the CSV
         # adapter's per-row `violations` reach the panel that has always read
         # them. Projected, not passed through.
+        #
+        # Phase 240 CONN-05: an adapter's STATED permanent True is honoured
+        # here (recoverable false); a stated False or None keeps the
+        # code-derived verdict. The status stays 200 by design. See the
+        # PYAPIFIX-02 pre-gate in the synchronous arm for the rule's source.
         return _envelope_error(
             val.error_code,
             val.human_message,
             correlation_id,
             None,
+            recoverable=False if val.permanent is True else None,
             source_debug_context=val.debug_context,
         )
     log.info("process_key.validate_only_ok", duration_ms=duration_ms)
@@ -1160,16 +1257,42 @@ async def _run_validate_only(
 
 
 @router.post("", response_model=None)
-# TWO stacked limits, evaluated in ONE pass (RESEARCH G-9): functools.wraps
-# keeps __module__.__name__ identical, so both land under the same endpoint name
+# THREE stacked limits, evaluated in ONE pass (RESEARCH G-9): functools.wraps
+# keeps __module__.__name__ identical, so all land under the same endpoint name
 # and the outermost wrapper evaluates the whole list before setting
-# request.state._rate_limiting_complete. Inner = per-identity (tenant / anon /
-# unverified); outer = the platform ceiling. Both are pinned by live-TestClient
-# tests because RESEARCH read slowapi 0.1.9 while production pins 0.1.10
-# (ASSUMPTION-1) — if a patch bump broke stacking, one limit would silently
-# never evaluate.
+# request.state._rate_limiting_complete.
+#
+# ORDER IS THE POINT. slowapi evaluates the BOTTOM decorator first and stops at
+# the first refusal, and every limit it evaluated before the refusal has already
+# spent a token. So the order below, read bottom to top, is: per-identity
+# (tenant / anon / unverified), then the anonymous aggregate, then the platform
+# ceiling. A request refused by the per-identity limit therefore spends no
+# aggregate token and no ceiling token (RLIM-01). The comment that used to sit here
+# said "inner = per-identity" and had the order backwards: the ceiling was
+# evaluated FIRST, so every refused anonymous call burned a ceiling token.
+# A side effect, recorded on purpose: a tenant already over its own 100/hour no
+# longer spends ceiling tokens either (strictly less ceiling spend).
+#
+# The ceiling carries an exempt_when predicate (_process_key_is_csv_scoped): a strictly csv-scoped
+# request spends no ceiling token (see _PROCESS_KEY_CEILING_LIMIT's docblock).
+#
+# All three are CALLABLE providers, never strings: static string limits always
+# run before callable ones regardless of decorator order, so a string would jump
+# the queue and re-create the burn. The aggregate carries exempt_when, so tenant
+# and unverified traffic never touches it. Pinned by live-TestClient tests
+# because RESEARCH read slowapi 0.1.9 while production pins 0.1.10
+# (ASSUMPTION-1), and the literal order is read off limiter._dynamic_route_limits.
+@limiter.limit(
+    _process_key_ceiling_limit_for,
+    key_func=_process_key_ceiling_key,
+    exempt_when=_process_key_is_csv_scoped,
+)
+@limiter.limit(
+    _process_key_anon_aggregate_limit,
+    key_func=_process_key_anon_aggregate_key,
+    exempt_when=_process_key_not_anonymous,
+)
 @limiter.limit(_process_key_limit_for, key_func=_process_key_rate_limit_key)
-@limiter.limit(_process_key_ceiling_limit_for, key_func=_process_key_ceiling_key)
 async def process_key(
     request: Request,
     body: Annotated[_ProcessKeyBody, Body()],
@@ -2105,8 +2228,24 @@ async def process_key(
         # it, which is a caller fault. An ADAPTER-set VALIDATION_UNEXPECTED may
         # be a transient exchange error and does escape here — the same
         # distinction long_fetch draws with `_is_unexpected_fallback`.
+        #
+        # Phase 240 CONN-05 — STATED PERMANENCE. `ValidationResult.permanent`
+        # is the adapter's own verdict (services/ingestion/adapter.py). A
+        # stated True ("this can never clear by retrying": MT5_WRONG_SERVER,
+        # MT5_MASTER_PASSWORD) is honoured: it skips this 424 arm and answers
+        # the 403 below with recoverable stated False, whatever the code, so no
+        # code list grew. A stated False or None keeps this arm's code-derived
+        # verdict byte for byte, so an adapter's say-so can never turn a
+        # credential or scope 403 into a retryable 424. services/ingestion/
+        # long_fetch.py is the field's first consumer and honours BOTH
+        # directions; this arm is the second and honours True only, by the
+        # Phase 240 CONTEXT decision (light touch: feed the MT5 permanent codes
+        # into the recoverable derivation and move nothing else). Latent for
+        # MT5 today: MT5 is admitted to onboard and resync only, and both route
+        # to the worker.
         if (
-            val.error_code is not None
+            val.permanent is not True
+            and val.error_code is not None
             and val.error_code
             not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
         ):
@@ -2158,6 +2297,7 @@ async def process_key(
                 val.human_message,
                 correlation_id,
                 verification_id,
+                recoverable=False if val.permanent is True else None,
                 source_debug_context=val.debug_context,
             ),
         )
