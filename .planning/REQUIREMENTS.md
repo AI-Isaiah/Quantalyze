@@ -17,7 +17,7 @@
 - **F-7 `189-OPTIONREPLAY-NEXT-MILESTONE` and `164.8.4-REDACT-NO-POSITIVE-SCAN` stay in `TODOS.md`** ("Bleiben in todos"). They are not v1.22 scope.
 - **F-8 The `poll_positions` enqueue is live.** Measured on PROD 2026-11-23: `poll_positions` jobs ran on 21 days between 2026-10-24 and 2026-11-23, for one strategy only. Phase 224 must NOT retire it. The direction of `FANOUT-COHORT-SIBLING-POLL-01` (widen the cohort) is right. This overrides the wording of Phase 224's ROADMAP goal and of `TODOS.md` `L2925` for `poll_positions`.
 - **F-9 Deribit stale returns** (debug sweep 2026-11-23): one Deribit account's stored returns end 2026-10-26 while its inputs carry a 2026-11-09 flow and its derives report `done`. It gets a stale-returns requirement and a per-venue freshness invariant.
-- **F-10 Two milestones** ("Yes, split into two milestones", 2026-11-23). v1.22 TRUTH keeps the data-integrity and user-facing tiers: the carried Phases 155.2, 157, 222, 223 and 225, the groups MT5D, VREAD, DBOOK, FRESH, HOLD, NOCAP, HEAL, FIG, FACT, CACHE, CONN, RLIM and SOAK (SOAK is the independent MT5 oracle, so it stays as wave 0), and PROOF-01. ⭐ Exception: SECR-01 and SECR-02 (delete the two demo accounts, remove the committed demo credentials) stay in v1.22 because `158-OPS-03` is the only HIGH item. v1.23 HARDEN (security, alerting, tooling; planned, starts after v1.22) takes the carried Phases 221 and 224 and the groups SECR-03/04, DBACC, HELD, ALRT, SQLG and LANE, listed under "Planned for v1.23" below. PROOF-01 applies there too. F-1's tier order holds inside each milestone.
+- **F-10 Two milestones** ("Yes, split into two milestones", 2026-11-23). v1.22 TRUTH keeps the data-integrity and user-facing tiers: the carried Phases 155.2, 157, 222, 223 and 225, the groups MT5D, VREAD, DBOOK, FRESH, HOLD, NOCAP, HEAL, FIG, FACT, CACHE, CONN, RLIM and SOAK (SOAK is the independent MT5 oracle, so it stays as wave 0), and PROOF-01. ⭐ Exception: SECR-01 and SECR-02 (delete the two demo accounts, remove the committed demo credentials) stay in v1.22 because `158-OPS-03` is the only HIGH item. v1.23 HARDEN (security, alerting, tooling; planned, starts after v1.22) takes the carried Phases 221 and 224 and the groups SECR-03/04, DBACC, HELD, ALRT, SQLG and LANE, listed under "Planned for v1.23" below. PROOF-01 applies there too. F-1's tier order holds inside each milestone. ⭐ **2026-11-25 (founder ruling in chat; also in `ROADMAP.md` and in each phase's CONTEXT.md):** "We will Move 157 and 155.2 into the next milestone". The carried Phases 155.2 and 157 moved to v1.23 HARDEN, with MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04. Their requirement text stays under its "Carried" headings below; the traceability table maps them to v1.23.
 
 **Carried with Phase 155.2 and still binding (verbatim from `milestones/v1.18-REQUIREMENTS.md`):**
 
@@ -41,6 +41,8 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Carried: MT5 verification (Phase 155.2, verbatim from `milestones/v1.18-REQUIREMENTS.md`)
 
+⭐ **Moved to v1.23 HARDEN, 2026-11-25** (founder ruling in chat: "We will Move 157 and 155.2 into the next milestone"). The six requirements below keep their ids and text, and are mapped to v1.23 in the traceability table. The text stays here so that its citations keep resolving.
+
 - [ ] **MT5-07**: Rendered performance matches an external oracle within `MT5_PARITY_TOLERANCE` as defined in D-B: Gate A (pre-`S`, closed-trade balance basis) against the terminal's All-History export, and Gate B (from `S`, open P&L included) against broker statements and the weekend reading (D-C, D-E), over windows that end before the run day.
 - [ ] **MT5-08**: The verification runs against the live funded accounts MM2, MM3 and FX-AI_V, with the founder at the terminal on a trading day; a demo, the v1.15 soak account or a weekend-only run does not satisfy it (the weekend reading is an edge input, not the run).
 - [ ] **MT5-09**: Every surface that renders strategy performance shows the same, correct MT5 numbers for these accounts. ⚠️ Re-mapped 2026-11-13: the portfolio PDF (retired in Phase 195 TRIM) and `scenario-blend-panels.ts` (deleted) are dropped; the current surface list is fixed at discuss-phase, cited by symbol.
@@ -49,6 +51,8 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [ ] **MT5-GOAL-01** *(umbrella acceptance, no implementation of its own)*: An MT5 strategy is usable end-to-end by the allocator who uploaded it (ingests, projects in a scenario, factsheet viewable), confirmed live by the founder.
 
 ### Carried: founder confirmations (Phase 157, verbatim from `milestones/v1.18-REQUIREMENTS.md`)
+
+⭐ **Moved to v1.23 HARDEN, 2026-11-25** (founder ruling in chat: "We will Move 157 and 155.2 into the next milestone"). The four requirements below keep their ids and text, and are mapped to v1.23 in the traceability table. The text stays here so that its citations keep resolving.
 
 - [ ] **FCONF-01**: The founder confirms the 2026-08-04 wizard restart is gone: with a live draft, `+ Strategy` shows the resume banner and Resume lands on the draft's step.
 - [ ] **FCONF-02**: The founder sees the amber `wizard-sync-recomputing` block render as specified (heading, no red envelope, no metric numbers).
@@ -273,16 +277,16 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| MT5-07 | Phase 155.2 | Pending |
-| MT5-08 | Phase 155.2 | Pending |
-| MT5-09 | Phase 155.2 | Pending |
-| MT5-10 | Phase 155.2 | Pending |
-| MT5-15 | Phase 155.2 | Pending |
-| MT5-GOAL-01 | Phase 155.2 | Pending |
-| FCONF-01 | Phase 157 | Pending |
-| FCONF-02 | Phase 157 | Pending |
-| FCONF-03 | Phase 157 | Pending |
-| FCONF-04 | Phase 157 | Pending |
+| MT5-07 | Phase 155.2 (v1.23) | Pending |
+| MT5-08 | Phase 155.2 (v1.23) | Pending |
+| MT5-09 | Phase 155.2 (v1.23) | Pending |
+| MT5-10 | Phase 155.2 (v1.23) | Pending |
+| MT5-15 | Phase 155.2 (v1.23) | Pending |
+| MT5-GOAL-01 | Phase 155.2 (v1.23) | Pending |
+| FCONF-01 | Phase 157 (v1.23) | Pending |
+| FCONF-02 | Phase 157 (v1.23) | Pending |
+| FCONF-03 | Phase 157 (v1.23) | Pending |
+| FCONF-04 | Phase 157 (v1.23) | Pending |
 | SCRB-01 | Phase 221 (v1.23) | Pending |
 | SCRB-02 | Phase 221 (v1.23) | Pending |
 | SCRB-03 | Phase 221 (v1.23) | Pending |
@@ -392,11 +396,11 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 
 **Coverage:**
 - 116 requirements in all, across two milestones (F-10). FLOWK-01 was dropped by the founder on 2026-11-23 and is not counted.
-- **v1.22 TRUTH: 81.** Carried: 10 (MT5 6 on 155.2, FCONF 4 on 157). Phases 222, 223 and 225: 9 (ERRC 3, FLOWK 2, ONCE 4). New groups: 61 (MT5D 8, VREAD 8, DBOOK 2, FRESH 2, HOLD 5, NOCAP 4, HEAL 5, FIG 5, FACT 5, CACHE 4, CONN 6, RLIM 2, SOAK 3, SECR-01/02 2). Milestone-wide: 1 (PROOF-01). Mapped: 81/81, to 21 phases (155.2, 157, 222, 223, 225, 226–241).
-- **v1.23 HARDEN, planned: 35.** Carried Phases 221 and 224: 8 (SCRB 3, DEAD 5). New groups: 27 (SECR-03/04 2, DBACC 6, ALRT 8, HELD 2, SQLG 5, LANE 4). Mapped: 35/35, to 10 phases (221, 224, 242–249). PROOF-01 applies there too and is counted once, under v1.22.
+- **v1.22 TRUTH: 71.** ⭐ 2026-11-25: was 81; the carried 10 (MT5 6 on 155.2, FCONF 4 on 157) moved to v1.23 with their phases (founder: "We will Move 157 and 155.2 into the next milestone"). Phases 222, 223 and 225: 9 (ERRC 3, FLOWK 2, ONCE 4). New groups: 61 (MT5D 8, VREAD 8, DBOOK 2, FRESH 2, HOLD 5, NOCAP 4, HEAL 5, FIG 5, FACT 5, CACHE 4, CONN 6, RLIM 2, SOAK 3, SECR-01/02 2). Milestone-wide: 1 (PROOF-01). Mapped: 71/71, to 19 phases (222, 223, 225, 226–241). Phases 250–252, booked later, own no requirement row.
+- **v1.23 HARDEN, planned: 45.** Carried Phases 221 and 224: 8 (SCRB 3, DEAD 5). Moved from v1.22 on 2026-11-25 with Phases 155.2 and 157: 10 (MT5 6, FCONF 4). New groups: 27 (SECR-03/04 2, DBACC 6, ALRT 8, HELD 2, SQLG 5, LANE 4). Mapped: 45/45, to 12 phases (155.2, 157, 221, 224, 242–249). PROOF-01 applies there too and is counted once, under v1.22.
 - Unmapped: 0. Every requirement maps to exactly one phase, and PROOF-01 is milestone-wide.
 - TODOS coverage: every open MEDIUM-and-higher entry in the 2026-11-23 triage (94 open, counting `158-OPS-03`'s HIGH and MEDIUM entries separately), plus the MEDIUM entries already owned by 221–223, maps to a requirement above, to a Future Requirement (MTWEDGE-01, LATENT-01, LATENT-02), or to a recorded exclusion (F-2 composite, F-7). None is unplaced. Basis: the triage's per-entry table, checked by id; `TODOS.md` at HEAD was not re-read. The LOW entries that Phase 224 owns are covered by DEAD-01..05 because the phase owns them by name.
 
 ---
 *Requirements defined: 2026-11-23*
-*Last updated: 2026-11-23, roadmap created: traceability filled, and the v1.23 requirements moved under "Planned for v1.23" by F-10*
+*Last updated: 2026-11-25, Phases 155.2 and 157 and their 10 requirements moved to v1.23 by founder ruling (2026-11-23: roadmap created, traceability filled, and the v1.23 requirements moved under "Planned for v1.23" by F-10)*

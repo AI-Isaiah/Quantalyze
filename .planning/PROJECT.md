@@ -40,7 +40,10 @@ integrity first (founder 2026-11-23). ⛔ **CORRECTED 2026-11-23 (founder ruling
 milestones"):** security, alerting and CI/tooling are NOT v1.22 scope, and neither are the carried Phases
 221 and 224; they moved to the planned v1.23 HARDEN below. The one exception is SECR-01/02 (Phase 241
 DEMOCREDS: delete the two demo accounts and remove their committed passwords), kept in v1.22 because
-`158-OPS-03` is the only HIGH item in scope.
+`158-OPS-03` is the only HIGH item in scope. ⛔ **CORRECTED 2026-11-25 (founder ruling in chat, "We will Move 157 and 155.2 into the next milestone"):**
+155.2 LIVEPARITY and 157 FOUNDER-CONFIRM moved to v1.23 HARDEN with their 10 requirements, so v1.22 now holds
+22 phases (222, 223, 225, 226–241 and the later-booked 250–252) and 71 requirements. The two "Carried" target
+features below are kept as lineage. MT5 stays unadvertised until 155.2 passes.
 
 **Target features:**
 - **Carried, live MT5 parity (155.2 LIVEPARITY)** — the founder's broker statements, the Gate B run and
@@ -75,7 +78,9 @@ Planned by founder ruling F-10 (2026-11-23); starts after v1.22 closes. It holds
 SENTRYSCRUB2 and 224 DEADLEFTOVERS and the new 242–249: secrets hygiene beyond the demo accounts
 (SECR-03/04), database access backstops, held and throttled Sentry captures, alert paging and alert
 readers, SQL gate censuses and live-DB test lanes. Its 35 requirements keep their ids under "Planned for
-v1.23" in `.planning/REQUIREMENTS.md`; the phases are in ROADMAP's v1.23 section.
+v1.23" in `.planning/REQUIREMENTS.md`; the phases are in ROADMAP's v1.23 section. ⭐ **2026-11-25 (founder ruling in
+chat, "We will Move 157 and 155.2 into the next milestone"):** it also holds 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved from v1.22
+with MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04, which makes 45 requirements.
 
 ## ✅ Shipped: v1.18 MT5-VERIFY & founder confirmations (2026-08-14 → 2026-11-23; parked 2026-08-20 → 2026-11-13)
 
@@ -356,6 +361,7 @@ options MTM smoothing.
 
 - **Carried into v1.22 with Phase 155.2 LIVEPARITY (founder 2026-11-23):** MT5-07, MT5-08, MT5-09, MT5-10, MT5-15 and the umbrella MT5-GOAL-01, bound by founder decisions D-A..D-E. Text in `milestones/v1.18-REQUIREMENTS.md`.
 - **Carried into v1.22 with Phase 157 FOUNDER-CONFIRM (founder 2026-11-23):** FCONF-01..04. Text in `milestones/v1.18-REQUIREMENTS.md`.
+- ⭐ **2026-11-25 (founder ruling in chat, "We will Move 157 and 155.2 into the next milestone"):** the two carried groups above moved on to v1.23 HARDEN with Phases 155.2 and 157.
 - Phases 221–225 (booked without requirement ids) are also in v1.22.
 - **Composer range as dates (founder 2026-11-13, "Book a fix")** — save the composer's selected range as dates so presets like 12M always end on the latest day, and re-pin "kept when the series grows" to mean the same dates are kept. In v1.22 (scope group SURFACECACHE); `TODOS.md` `201.1-COMPOSER-RANGE-AS-DATES`.
 
@@ -516,7 +522,7 @@ This document evolves at phase transitions and milestone boundaries.
 **v1.18 MT5-VERIFY & founder confirmations shipped and closed 2026-11-23** (audit `passed`, 5/5
 requirements, 16/16 phases `passed`). See the `## ✅ Shipped: v1.18` section above. **v1.22 TRUTH — data you
 can trust started 2026-11-23** (see `## Current Milestone` above); it holds Phases 155.2, 157, 222, 223, 225 and
-226–241 (221 and 224 moved to the planned v1.23 HARDEN by F-10) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04. MT5 stays unadvertised until 155.2 passes.
+226–241 (221 and 224 moved to the planned v1.23 HARDEN by F-10) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04. MT5 stays unadvertised until 155.2 passes. ⛔ CORRECTED 2026-11-25: 155.2 and 157, with MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04, moved to v1.23 HARDEN (founder: "We will Move 157 and 155.2 into the next milestone"); v1.22 holds 222, 223, 225, 226–241 and 250–252.
 
 **v1.21 UX — trustworthy, navigable, lean shipped and closed 2026-11-13** (audit `tech_debt`, 32/32
 requirements, 18/18 phases `passed`). See the `## ✅ Shipped: v1.21` section above. The next milestone is not

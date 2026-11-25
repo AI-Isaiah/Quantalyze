@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.133.78.1] - 2026-11-25 — records: Phases 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM move from v1.22 TRUTH to v1.23 HARDEN
+
+This is a records PR. It has no source, test, workflow or migration change. It records the founder's ruling of 2026-11-25 in chat, verbatim: "We will Move 157 and 155.2 into the next milestone". The version is the next free patch above main's v0.133.78.0 (#1346, now merged). Open PR #1348 holds v0.133.79.0.
+
+### Changed
+- **`ROADMAP.md`.** The `### Phase 155.2` and `### Phase 157` sections, their overview bullets and their Progress rows move from the v1.22 section to the v1.23 section, ahead of 221. Their content is unchanged apart from one dated ruling note each.
+  - The milestone list: v1.22 loses 155.2 and 157, v1.23 gains them, and the v1.18 line records the onward move.
+  - The v1.22 status paragraph now counts 22 phases (222, 223, 225, 226–241 and 250–252), 10 of them complete. It carries a dated correction, because it still read "no new phase started" and counted 21 phases.
+  - v1.22's goal counts move from 81/35 to 71/45. The ruling is recorded verbatim in both milestone sections. Order item 5 is kept as lineage, and the same item is added to v1.23's Order as item 3. Seam S1's "155.2's fixes" now reads "v1.23's 155.2".
+- **`REQUIREMENTS.md`.** MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04 are re-mapped to `Phase 155.2 (v1.23)` and `Phase 157 (v1.23)` in the traceability table. Coverage: v1.22 has 71 requirements on 19 phases and v1.23 has 45 on 12, for 116 in all.
+  - Their text stays under its "Carried" headings in the v1.22 part, with a dated pointer, so that existing citations still resolve.
+  - F-10 gets a dated note naming the ruling.
+- **`STATE.md` and `state.json`.** v1.22's `total_phases` goes from 24 to 22. `completed_phases` stays 10, and `percent` goes from 42 to 45.
+  - `total_plans` and `completed_plans` were 97 and 83. The handler re-derived `total_plans` as 81 from the PLAN files of the 22 v1.22 phases on disk, and left `completed_plans` at 83. That was set to 73 by hand, from the SUMMARY files of the same phases.
+  - The Roadmap Evolution entry was added through `state.add-roadmap-evolution`. Current Position is unchanged and still names 234.
+  - Current Focus gets a dated note. `state.json` drops the 155.2 and 157 entries, and its `next.reason` now reads "of 22 · 45%".
+- **`155.2-CONTEXT.md` and `157-CONTEXT.md`** each get the dated, verbatim ruling. `PROJECT.md` gets dated corrections where it still put 155.2 and 157 in v1.22.
+
+### Notes
+- **The 155.2 freeze rule still holds.** v1.22 phases that move MT5 numbers for MM2, MM3 or FX-AI_V merge before 155.2 plan 12's recapture or after plan 14. The rule was not deleted. A dated note says that 155.2 is now in v1.23 and that the rule still holds until plan 12's recapture actually runs. The note sits at the milestone-wide rule, in the Depends-on lines of 225, 229, 230, 233, 234, 236 and 252, at criterion 5 of 252, in 155.2's own section and in STATE's Current Focus.
+- No v1.22 phase lists 155.2 or 157 as a completion dependency. The 155.2 clauses in the Depends-on lines of those seven phases are merge-ordering under the freeze, and their meaning is unchanged.
+- MT5 stays unadvertised until 155.2 passes. That rule now outlives a v1.22 close.
+- Known, not changed here: `state.json`'s `phases` array still lacks 251 and 252, as it did before this PR, so it lists 20 of v1.22's 22 phases.
+
 ## [0.133.78.0] - 2026-11-25 — Phase 225 ONEACCOUNTONCE PR-2c0: every MT5 poll and validation logs whether the session's broker server matches the one requested
 
 This is a measurement PR for review finding CR-01 on PR-3. It ships before PR-2c, which refuses a session on the wrong broker server. PR-2c's own pre-merge read found no evidence that the MT5 terminal reports a server spelled the way it was requested. This PR adds that evidence. It is log-only: it never refuses, and never changes what a poll returns or stamps.
