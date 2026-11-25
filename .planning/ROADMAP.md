@@ -159,24 +159,25 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [ ] **Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%** - The founder's scripted session on MM2, MM3 and FX-AI_V, Gate A and Gate B per account, every surface the same, every gap fixed at its root or ruled on; after 155, session after the 155.1 deploy
 - [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
 - [ ] **Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists** - User-facing error copy and the benchmark outage label, with a migration; independent of the MT5 parity phases
-- [ ] **Phase 223: FLOWKINDS — each funding caller treats a malformed row by a recorded, tested decision, and the malformed count is on record first** - Flow-source half only (F-2, no composites): the funding callers' malformed-row decisions and the PROD malformed count; FLOWK-01 dropped
+- [x] **Phase 223: FLOWKINDS — each funding caller treats a malformed row by a recorded, tested decision, and the malformed count is on record first** - Flow-source half only (F-2, no composites): the funding callers' malformed-row decisions and the PROD malformed count; FLOWK-01 dropped (completed 2026-11-24)
 - [ ] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23; also the seam S4 owner: server-qualified MT5 identity, the draft-clash answer, the failing-holder rule
 - [x] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit (completed 2026-11-24)
 - [x] **Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job** - Seam S3 owner: per-attempt failure record, first-hop drop, batch-mate reset, readmit ceiling signal, reclaim provenance, private strategies polled; migrations (completed 2026-11-24)
 - [ ] **Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key** - Sibling of 225 on seam S4, right after it: the rotated MT5 password reconnect and the KEY_ORPHANED copy for allocators
 - [ ] **Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently** - nav_twr.py empty-cohort refund, day-0 P&L and the D-15 band, basis-silent keys, writer-basis values; moves MT5 numbers (155.2 freeze)
 - [ ] **Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason** - Data-gated on the JOBLEDGER records: the second-attempt cause fixed at its root, seven clean nights, the clock-switch replay
-- [ ] **Phase 231: BYBITREADS — a Bybit read covers every coin, settle type, window and deposit exactly once, or refuses by name** - Census first; all-coin anchor, USDC and inverse positions, full trade window, on-chain deposit verdict; the static egress IP is a founder action
-- [ ] **Phase 232: OKXTRADES — an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades** - Mixed-currency daily bills, page-cap truncation, the trade cursor
+- [x] **Phase 231: BYBITREADS — a Bybit read covers every coin, settle type, window and deposit exactly once, or refuses by name** - Census first; all-coin anchor, USDC and inverse positions, full trade window, on-chain deposit verdict; the static egress IP is a founder action (completed 2026-11-25)
+- [x] **Phase 232: OKXTRADES — an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades** - Mixed-currency daily bills, page-cap truncation, the trade cursor (completed 2026-11-24)
 - [ ] **Phase 233: DERIBITTRUTH — a Deribit key's returns reach its newest flow, every book day is explained or withheld, and stale series page on every venue** - From the wave-0 diagnosis: stale-returns root fix, per-venue freshness check, correction classifier, book cumulative
 - [ ] **Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key** - Seam S2 owner: transient-zero MT5 keys, any exception reverts, counted fallback flag, no residue reason
 - [ ] **Phase 235: HOLDINGSTRUTH — one account counts once on Holdings, match scoring and the dashboard, and every failing key is named** - Reads the identity value 225 settles: identity misses fail loud, per-account unpriced marker, dashboard marker read, shared-account keys named
 - [ ] **Phase 236: FIGUREMATH — every engine annualizes one way, CVaR is historical, and moved figures are re-derived and announced** - F-5 "365, ddof 1 everywhere", F-6 historical CVaR, quantstats 0.0.86, one CAGR span rule, fleet re-derive; moves published figures
 - [ ] **Phase 237: FACTSHEETHONEST — every surface shows a strategy's true state, and no cache re-serves a stale or failed one** - Owner of the OG route and payload builder: withheld residue, re-run holding on every surface, OG not-found cache, BTC price failure cache, owner data source
 - [ ] **Phase 238: NEVERCOMPUTED — a strategy that never computed, failed or stalled never claims a compute time or tells its owner to wait** - computed_at on never-computed rows (founder ruling) and the /strategies note wording
-- [ ] **Phase 239: SURFACECACHE — the composer range and the Discovery ranking reflect the current truth** - Composer range stored as dates; a BTC-unit return never ranked beside USD returns
-- [ ] **Phase 240: CONNECTTRUTH — validating a key or a CSV gets a true answer, and anonymous limits are fair** - One error code on every venue, CSV month-name cells, anonymous bucket fairness, edge and upstream CSV limits agree
+- [x] **Phase 239: SURFACECACHE — the composer range and the Discovery ranking reflect the current truth** - Composer range stored as dates; BTC-unit and USD returns ranked together as pure performance (founder ruling 2026-11-24) (completed 2026-11-24)
+- [x] **Phase 240: CONNECTTRUTH — validating a key or a CSV gets a true answer, and anonymous limits are fair** - One error code on every venue, CSV month-name cells, anonymous bucket fairness, edge and upstream CSV limits agree (completed 2026-11-25)
 - [ ] **Phase 241: DEMOCREDS — the two demo accounts are gone, and their passwords are out of the tree behind a guard that still bites** - The only HIGH item (158-OPS-03), kept in v1.22 by founder exception: accounts deleted on TEST and PROD, digest absence guard
+- [ ] **Phase 250: BINANCEFILLS — a Binance fills read walks every window and never stalls its cursor** - Routed from 232 review (R2-01, R2-02, the BINANCE_PAGE_CAP stop); lands before `USE_RAW_TRADE_INGESTION` is turned on for Binance
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -269,6 +270,11 @@ Plans:
 - out of v1.22 and not owned here: `180-BYBIT-LIVE-FLOW-KINDS` and `186-COMPOSITE-MEMBER-READ-GAPS` (`REQUIREMENTS.md` Out of Scope);
 - moved to 231 BYBITREADS: the Bybit anchor and positions entries the booked text kept out of this phase (VREAD-01, VREAD-02), and the Bybit on-chain deposit (VREAD-04).
 
+⭐ **Founder rulings, 2026-11-24 (AskUserQuestion, labels verbatim; recorded in `223-CONTEXT.md` too):**
+- `okx_archive_job`, a malformed live funding row: "Stop by name (Recommended)", `_Stop("live_anchor_unusable", "live_funding=malformed")` before any write.
+- FLOWK-03, a malformed realized row: "Keep flagging (Recommended)". 186 D-12 stays, so no realized-row refusal is switched on.
+- **Scope change.** C27, the Bybit `sync_funding` walk over its 180 s budget (231 census): "Yes, 223 fixes it". This adds `services/funding_fetch.py::fetch_funding_bybit` to the write list, as far as C27 needs it. `run_sync_funding_job` keeps dropping a malformed row, pinned by a test, because no published number reads `funding_fees`.
+
 The composite-worded goal and criteria booked on 2026-11-23 are superseded. Read them in `git show 46e703742:.planning/ROADMAP.md` as lineage only, never as scope. Owns `TODOS.md` `[186-OTHER-FUNDING-CALLERS-DROP]` (its non-composite callers) and `[186-REALIZED-MALFORMED-COUNT]`, with readings and closing conditions as written there.
 **Requirements**: FLOWK-02, FLOWK-03
 **Depends on:** none; it is independent of the MT5 parity phases. It runs in the venue-reads wave beside 231 and 232, with plan write scopes listed by symbol: `run_sync_funding_job`, `okx_archive_job.py` and the `funding_fetch.py` callers. 232 owns the OKX bills reader in `exchange.py`.
@@ -277,10 +283,15 @@ The composite-worded goal and criteria booked on 2026-11-23 are superseded. Read
 2. The per-key count of `daily_pnl_malformed_<venue>` flags on PROD is recorded read-only with its date and brought to the founder. The founder's ruling on refusing a malformed realized row is recorded before any such refusal is switched on. (FLOWK-03)
 3. Every `TODOS.md` entry the phase closes is deleted in the ship PR and named in its CHANGELOG entry. `[186-OTHER-FUNDING-CALLERS-DROP]`'s composite caller is recorded there as out of scope by F-2, not as fixed.
 4. PROOF-01: each decision test goes RED on a neutered copy of its caller, with the malformed-row arm flipped and failing first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN. The neuter edit, command, RED line and GREEN line are recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+5. C27 (added by founder ruling 2026-11-24): a Bybit `sync_funding` walk that runs past its handler budget keeps every window it finished, so the next attempt resumes from where it stopped and a first walk fills `funding_fees`. A timeout still fails the job and is never turned into a quiet DONE. A test pins that a cancelled walk keeps its finished windows, under PROOF-01.
+**Plans:** 5/5 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 223-01-PLAN.md — FLOWK-02, `okx_archive_job`: a malformed live funding row stops calibrate and apply as `live_anchor_unusable live_funding=malformed` before any write (ruling 1)
+- [x] 223-02-PLAN.md — FLOWK-03: the dated PROD reading and ruling 2 replace the TODOS pointer in code, and the D-12 pin is proven able to fail
+- [x] 223-03-PLAN.md — C27 fetcher half: `fetch_funding_bybit` gains an `until_ms` end bound and `bybit_funding_windows` returns the exact windows a full walk uses (ruling 3)
+- [x] 223-04-PLAN.md — C27 handler half: the Bybit funding walk stores each 7-day window, oldest first, before reading the next, so a budget-cut walk keeps what it stored (ruling 3)
+- [x] 223-05-PLAN.md — FLOWK-02, `run_sync_funding_job`: the drop decision recorded and pinned for all three venues, then the phase gate
 
 ### Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed
 
@@ -425,12 +436,24 @@ Plans:
 1. A timed re-funding day into an emptied account (empty cohort 0) keeps the return chain intact; a test that is RED on today's code drives it. (MT5D-04)
 2. An inception day's P&L is booked, or carries a named flag; no day-0 P&L is dropped as NaN without one. (MT5D-05)
 3. A day-level flow just under the previous day's NAV carries the large-flow annotation, or the founder's acceptance of the D-15 band is recorded with its reason. `FLOW_TIMING_LARGE_RATIO` is not widened to make a check pass. (MT5D-06)
-4. A timed MT5 key with no writer basis is counted or blocked with a named signal, never composed silently on the legacy roll. The writer-basis gate refuses a same-day re-derive pair whose per-day P&L does not match, as well as a calendar mismatch. (MT5D-07, HOLD-03)
+4. A timed MT5 key with no writer basis is counted or blocked with a named signal, never composed silently on the legacy roll. The writer-basis gate refuses a same-day re-derive pair whose per-day P&L does not match, as well as a calendar mismatch. (MT5D-07, HOLD-03) ⭐ NOTE 2026-11-24 (planning, recorded in 229-CONTEXT.md): the per-day comparison is a compose-side `returns_stamp` (each derive stores the per-day returns it wrote in its `key_inputs` row; the compose compares it per raw key before the stitch and refuses a differing pair as the blocking `key_inputs_mismatch`). `read_writer_basis` stays byte-unchanged, because editing it fires the open entry `167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY` and a post-stitch check reads the stitched series. Known limit: a correction confined to a day with no stored return that moves no other return leaves the pair content-consistent and is not refused; a row written before this change carries no stamp and is counted, not refused. ⭐ SCOPE NOTE 2026-11-24 (founder ruling on review MR-01 / SFH-229-01, recorded in 229-CONTEXT.md): "Exempt departed keys". Live keys still block. A departed key whose last `key_inputs` row carries `writer_basis_withheld` or a stale returns stamp stays out of `withheld_by_key` and `stamp_mismatch_days_by_key`; it is counted into a non-blocking benign flag with a counts-only log, in the spirit of D-22, because a departed key never re-derives and the block could never self-heal.
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy of `nav_twr.py` / the writer-basis symbols, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Money-math oracles import no production helper. The frozen spine is never re-baselined by re-running `regen_golden.py`. 226's soak, run against the changed derive, is recorded beside the merge.
-**Plans:** 0 plans
+**Plans:** 5/6 plans executed
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 229-01-PLAN.md — An empty cohort 0 is skipped when a later cohort is judged, so a re-fund day into an emptied account is published; 188's tiny-base precedence kept; the D-15 band acceptance recorded (MT5D-04, MT5D-06)
+- [x] 229-03-PLAN.md — A timed MT5 key with no writer basis stores a closed `writer_basis_withheld` token and the compose blocks the book as `key_inputs_mismatch` (MT5D-07)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 229-02-PLAN.md — An inception day-0 P&L without timing is counted as the `inception_day_pnl_dropped` annotation and carried as a bool to the strategy's flags (MT5D-05)
+- [x] 229-04-PLAN.md — 226's soak oracle re-derived from the ruled cohort rule, with a judged knife-edge fixture for its CR-04 family (MT5D-04)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 229-05-PLAN.md — A per-day `returns_stamp` in key_inputs; the compose refuses a same-terminal re-derive pair whose returns differ, never a healthy pair (HOLD-03)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 229-06-PLAN.md — Phase gate on the merged head, PROOF-01 ledger, and the founder's live soak recorded as verdict lines (closing)
 
 ### Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason
 
@@ -467,7 +490,7 @@ Plans:
 3. A strategy trade sync starting more than seven days back returns every execution in the requested window, or refuses by name. An on-chain deposit is counted exactly once, with replace or union decided on probe evidence or recorded as undecided. (VREAD-03, VREAD-04)
 4. The founder has allow-listed the owner's static egress IP, recorded with its date, and that key's daily derive no longer errors for that reason. (VREAD-05)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Mocks mirror recorded real payloads, not our parser's field names.
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans complete
 
 Plans:
 **Wave 1**
@@ -482,7 +505,7 @@ Plans:
 - [x] 231-05-PLAN.md — VREAD-04 verdict undecided (replace stays), census closure, VREAD-05 founder record and derive check
 
 **Wave 4** *(blocked on Phase 229 merged)*
-- [ ] 231-06-PLAN.md — VREAD-01: the derive anchor sums the current-equity read's stable coins through one shared rule
+- [x] 231-06-PLAN.md — VREAD-01: the derive anchor sums the current-equity read's stable coins through one shared rule
 
 ### Phase 232: OKXTRADES — an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades
 
@@ -497,10 +520,21 @@ Plans:
 2. An OKX first window longer than the page cap completes across ticks with no daily `error`, with `OKX_BILLS_PAGE_CAP` unchanged. Alternatively, the evidence that OKXHISTORY already closed it is recorded. (VREAD-07)
 3. A key whose cursor is ahead of its newest stored trade reads from the stored high-water mark and re-reads its skipped days, and the cursor never advances past stored data. (VREAD-08)
 4. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 232-01-PLAN.md — VREAD-08: the fills cursor stamps the newest stored fill or nothing, holds on a refused read, and an ahead key re-reads from stored data
+- [x] 232-02-PLAN.md — VREAD-07 read: the OKX bills walk reads day-aligned 7-day windows oldest first, caps unchanged, every stop a contiguous oldest prefix
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 232-03-PLAN.md — VREAD-06: a non-USD OKX bill refuses the read by `daily_pnl_non_usd_okx`, named by every reader
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 232-04-PLAN.md — VREAD-07 cron: the cron stores a deadline prefix, holds every cursor, and completes a long first window across ticks
+
+**Cross-cutting constraints:** <!-- gsd:generated -->
+- PROOF-01: each named arm goes RED on pre-fix code or a neutered copy first, is restored by `cp` from a byte backup and checked with `cmp`, then goes GREEN; each record is pasted verbatim in the SUMMARY.
 
 ### Phase 233: DERIBITTRUTH — a Deribit key's returns reach its newest flow, every book day is explained or withheld, and stale series page on every venue
 
@@ -645,17 +679,21 @@ Plans:
 **Goal:** The composer range and the Discovery ranking reflect the current truth:
 - **Composer range.** The composer stores its selected range as dates, so a 12M preset always ends on the latest day and keeps the same dates when the series grows at the front (founder: "book a fix", `201.1-COMPOSER-RANGE-AS-DATES`; `factsheet-context.tsx` `userRange` holds axis indices today).
 - **Discovery ranking.** Discovery never ranks a BTC-unit return beside USD returns as if the two were comparable (`queries.ts` ranking and the `StrategyTable.tsx` chip).
+  ⛔ **CORRECTED 2026-11-24 (founder ruling, recorded in `239-CONTEXT.md`; the line above is kept as lineage).** A BTC-unit strategy's returns are its pure performance on a different collateral. Discovery ranks BTC-unit and USD returns together as pure performance, with no BTC price conversion and no separate group; the "in BTC" chip stays. Founder, Q1: "That is correct, As BTC Strategies usually just have a different collateral." Q2: "Dont include BTC Price conversion. Just compare pure Performance". Composer presets roll to the latest day and span calendar months; a manual range keeps its dates (Q4, Q5).
 **Requirements**: CACHE-02, CACHE-04
 **Depends on:** nothing hard. CACHE-04's trigger reading, the count of published native-unit strategies, is taken read-only at plan time.
 **Success Criteria** (what must be TRUE):
 1. A 12M composer preset ends on the latest day, and the selected dates stay the same when the series grows at the front; a test grows the series. (CACHE-02)
 2. Discovery never ranks a BTC-unit return beside USD returns as comparable; a test with one BTC strategy and one USD strategy pins it. (CACHE-04)
+   ⛔ CORRECTED 2026-11-24 (founder ruling): BTC-unit and USD returns are ranked together as pure performance, with no BTC price conversion at list build; a pin test is added only if it encodes that. (CACHE-04)
 3. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 3/3 plans complete
 **UI hint**: yes
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 239-01-PLAN.md — CACHE-02: a manual range keeps its dates on growth at either end (date store, resolver, active-basis axis)
+- [x] 239-02-PLAN.md — CACHE-02: 3M/6M/12M presets span calendar months, end on the latest day and roll
+- [x] 239-03-PLAN.md — CACHE-04: pin that BTC-unit and USD rows rank together unconverted
 
 ### Phase 240: CONNECTTRUTH — validating a key or a CSV gets a true answer, and anonymous limits are fair
 
@@ -663,7 +701,7 @@ Plans:
 - **Error code.** Every validate-key 400 body carries the same machine-readable code field on every venue. The entry's other two findings, permanence plumbing with one consumer and coordinate drift, are fixed or recorded with a reason.
 - **CSV date cells.** A month-name date cell in a numeric-date CSV column is parsed, or rejected with a message naming the cell and the expected format. This is a founder ruling at plan time.
 - **Anonymous bucket.** A few anonymous visitors from different IPs cannot exhaust the shared anonymous verify-strategy bucket, and no limit is keyed on the proxy's IP. A per-IP anonymous tier through the signed claim, or a raised shared tier, is a founder ruling at plan time.
-- **CSV limits.** A signed-in user validating a CSV within the edge limit never gets an upstream 429, because the edge limit and the shared `/process-key` tenant tier agree. The limiter's docblock cites the current upstream cap.
+- **CSV limits.** A signed-in user validating a CSV within the edge limit never gets an upstream 429, because the edge limit and the shared `/process-key` tenant tier agree. The limiter's docblock cites the current upstream cap. ⛔ CORRECTED 2026-11-24 (founder ruling, Phase 240 CONTEXT): agreement is met by a CSV-scoped per-tenant `/process-key` tier (60/minute, exempt from the 500/hour ceiling), not by retuning the shared tenant tier, which stays 100/hour.
 
 No migration.
 **Requirements**: CONN-05, CONN-06, RLIM-01, RLIM-02
@@ -674,13 +712,28 @@ No migration.
 1. Every validate-key 400 body carries the same machine-readable code field on every venue; a test per venue reads it. (CONN-05)
 2. A month-name date cell in a numeric-date CSV column is parsed, or rejected with a message naming the cell and the expected format, per the founder's ruling. (CONN-06)
 3. Several anonymous visitors from different IPs cannot exhaust the shared anonymous verify-strategy bucket, and no limit is keyed on the proxy's IP. (RLIM-01)
-4. A signed-in user validating a CSV within the edge limit never gets an upstream 429; the edge limit and the shared `/process-key` tenant tier agree, and the limiter docblock cites the current upstream cap. (RLIM-02)
+4. A signed-in user validating a CSV within the edge limit never gets an upstream 429; the edge limit and the shared `/process-key` tenant tier agree, and the limiter docblock cites the current upstream cap. (RLIM-02) ⛔ CORRECTED 2026-11-24 (founder ruling, Phase 240 CONTEXT): agreement is met by a CSV-scoped per-tenant `/process-key` tier (60/minute, exempt from the 500/hour ceiling), not by retuning the shared tenant tier, which stays 100/hour.
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 8/8 plans complete
 **UI hint**: yes
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 240-01-PLAN.md — CONN-06: a month-name date cell in a numeric-date CSV column parses and the date-normalization info flag says so (wave 1)
+- [x] 240-02-PLAN.md — RLIM-01 Python: per-IP anonymous buckets, a 200/hour anonymous aggregate, and the limit stack evaluated per-identity first (wave 1)
+- [x] 240-03-PLAN.md — CONN-05 part 1: the rostered-code validate-key 400 arms answer the flat code-bearing body (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 240-04-PLAN.md — RLIM-02 Python: a csv-scoped tier of 60/minute, exempt from the 500/hour ceiling (wave 2)
+- [x] 240-05-PLAN.md — CONN-05 part 2: VENUE_DISABLED and INVALID_REQUEST, the rotate-secret go-dark gate, and a raw-400 census (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 240-06-PLAN.md — RLIM-01/02 TS: the per-IP anonymous claim and the csv scope minted in postProcessKey (wave 3)
+- [x] 240-07-PLAN.md — RLIM-02 edge: csv-finalize gets its own limiter, the docblock cites the real cap, and a cross-language agreement test (wave 3)
+- [x] 240-08-PLAN.md — CONN-05 part 3: process-key honours a stated permanent verdict, STATUS_CONTRACT coordinates re-anchored by symbol (wave 3)
+
+**Cross-cutting constraints:** <!-- gsd:generated -->
+- PROOF-01: each new gate goes RED on a neutered byte copy with its named test, restored with cp, cmp exits 0, GREEN; outputs pasted verbatim into the SUMMARY
 
 ### Phase 241: DEMOCREDS — the two demo accounts are gone, and their passwords are out of the tree behind a guard that still bites
 
@@ -702,6 +755,25 @@ Removing the text alone does not close the item, and history is not rewritten. T
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 250: BINANCEFILLS — a Binance fills read walks every window and never stalls its cursor
+
+**Goal:** A Binance raw fills read covers every window from its cursor to now, and its cursor never stalls, silently or because one symbol fails. This phase must land before `USE_RAW_TRADE_INGESTION` is turned on for Binance. It closes the three Binance survivors that Phase 232's review routed (`232-REVIEW.md`, round 2):
+- **R2-02 (silent stall).** A Binance linear key with a set cursor and more than 7 quiet days reads an empty `[C, C+7d]` window, never stamps, and its cursor never moves again. The fix is a window-walking Binance fills read in `exchange.py`, not a wall-clock advance on an empty read (Phase 232 removed that advance because it ran the cursor ahead, VREAD-08).
+- **R2-01 (loud stall).** A symbol that raises `ccxt.BadSymbol` on every run (delisted or unmapped) sets `binance_partial_symbols` every run, so the Phase 232 CR-02 hold keeps the fills cursor at C and healthy symbols stop past C+7d. The fix lets healthy symbols advance while a venue-unlisted symbol is still named, with no silent skip of a transiently failed symbol's span.
+- **BINANCE_PAGE_CAP stop.** The per-symbol `BINANCE_PAGE_CAP` stop records no flag, so a capped symbol loses its newest fills and the max over the other symbols stamps past them silently. The stop is flagged and resumes past the cap, rather than stalling on the same oldest pages every run.
+**Requirements**: none mapped (routed review survivors from Phase 232: R2-01, R2-02 and the `BINANCE_PAGE_CAP` stop)
+**Depends on:** Phase 232 (shipped, #1330), whose fills-cursor rules (stamp the newest stored fill or nothing; hold on `sync_truncated_*` and `binance_partial_symbols`) this phase keeps. Founder ruling 2026-11-24: "R2-02: book a follow-up phase with /gsd-phase (plain add) for a windowed Binance fills read. It must land before USE_RAW_TRADE_INGESTION is turned on for Binance. Fold R2-01 and the BINANCE_PAGE_CAP no-flag item into the same phase's scope." It shares `run_sync_trades_job` with 222 ALERTTRUTH, so plans list their write scope by symbol.
+**Success Criteria** (what must be TRUE):
+1. A Binance linear key whose cursor is followed by more than 7 days with no fills keeps reading forward window by window and reaches fills newer than those days; its cursor never stays at C on a quiet stretch and never advances past stored data. A test that is RED on today's code feeds the quiet stretch. (R2-02)
+2. A symbol that fails on every run is named on every run, the healthy symbols' fills past C+7d are still read and stored, and a transiently failed symbol's span is re-read on the next clean run, never skipped silently. (R2-01)
+3. A symbol that hits `BINANCE_PAGE_CAP` records a named flag, the cursor never stamps past that symbol's unread fills, and a later run resumes past the cap instead of re-reading the same oldest pages. (`BINANCE_PAGE_CAP` stop)
+4. `USE_RAW_TRADE_INGESTION` is not turned on for Binance before criteria 1 to 3 are met on `main`; the phase records this as an explicit precondition of that switch.
+5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Progress (this milestone)
 
 | Phase | Plans Complete | Status | Completed |
@@ -709,24 +781,25 @@ Plans:
 | 155.2. LIVEPARITY | 13/17 | In progress | - |
 | 157. FOUNDER-CONFIRM | 1/3 | In progress | - |
 | 222. ALERTTRUTH | 0/? | Not started | - |
-| 223. FLOWKINDS | 0/? | Not started | - |
+| 223. FLOWKINDS | 5/5 | Complete (shipped v0.133.68.0, #1327) | 2026-11-24 |
 | 225. ONEACCOUNTONCE | 4/12 | In progress (PR-1 shipped as #1315) | - |
 | 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
 | 227. JOBLEDGER | 11/11 | Complete (shipped v0.133.67.0, #1325; HEAL-01 sweep registered on PROD) | 2026-11-24 |
 | 228. KEYANSWERS | 0/? | Not started | - |
-| 229. MT5DERIVE2 | 0/? | Not started | - |
+| 229. MT5DERIVE2 | 5/6 | Shipped v0.133.69.0 (#1328); human verification pending (229-06 Task 2, the founder's live soak) | - |
 | 230. MT5NIGHTLY | 0/? | Not started | - |
-| 231. BYBITREADS | 5/6 | In progress (plans 01-05 shipped v0.133.61.6 #1314 and v0.133.65.0 #1321; plan 06 waits for 229) | - |
-| 232. OKXTRADES | 0/? | Not started | - |
+| 231. BYBITREADS | 6/6 | Complete (plans 01-05 shipped v0.133.61.6 #1314 and v0.133.65.0 #1321; plan 06 shipped v0.133.73.0 #1333 after Phase 229) | 2026-11-25 |
+| 232. OKXTRADES | 4/4 | Complete (shipped v0.133.70.0, #1330) | 2026-11-24 |
 | 233. DERIBITTRUTH | 0/? | Not started | - |
 | 234. NOCAPITAL | 0/? | Not started | - |
 | 235. HOLDINGSTRUTH | 0/? | Not started | - |
 | 236. FIGUREMATH | 0/? | Not started | - |
 | 237. FACTSHEETHONEST | 13/13 | Shipped v0.133.63.0 (#1316); human verification pending (2 visual checks) | - |
 | 238. NEVERCOMPUTED | 0/? | Not started | - |
-| 239. SURFACECACHE | 0/? | Not started | - |
-| 240. CONNECTTRUTH | 0/? | Not started | - |
+| 239. SURFACECACHE | 3/3 | Complete (shipped v0.133.72.0, #1332) | 2026-11-24 |
+| 240. CONNECTTRUTH | 8/8 | Complete (shipped v0.133.74.0, #1334) | 2026-11-25 |
 | 241. DEMOCREDS | 0/? | Not started | - |
+| 250. BINANCEFILLS | 0/? | Not started | - |
 
 ## 📋 v1.23 HARDEN — security, alerting, tooling (planned; starts after TRUTH closes)
 

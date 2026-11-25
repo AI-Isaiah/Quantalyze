@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
-current_phase: 227
-current_phase_name: JOBLEDGER
+current_phase: 240
+current_phase_name: CONNECTTRUTH
 status: executing
-stopped_at: Phase 227 complete, shipped as #1325 (HEAL-01 sweep registered on PROD)
-last_updated: "2026-11-24T17:48:57.707Z"
-last_activity: 2026-11-24
-last_activity_desc: Phase 227 JOBLEDGER complete (verification passed, threats_open 0)
-state_head: 3dd2a6d8e4e3ce68b4d834c06ebbaf675f2d4842
+stopped_at: "Records landed for 223, 231, 232, 239, 240 (complete) and 229 (shipped #1328, human verification pending)"
+last_updated: "2026-11-25T10:59:56.038Z"
+last_activity: 2026-11-25
+last_activity_desc: "v1.22 records batch: Phases 223, 231, 232, 239, 240 complete; 229 shipped, human verification pending"
+state_head: 017ba2e08202d87a944e341adef1af7d1addb69c
 progress:
-  total_phases: 21
-  completed_phases: 2
-  total_plans: 67
-  completed_plans: 52
-  percent: 10
+  total_phases: 22
+  completed_phases: 7
+  total_plans: 93
+  completed_plans: 79
+  percent: 32
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 231 (BYBITREADS) — IN PROGRESS (plans 01-05 shipped: v0.133.61.6 #1314, v0.133.65.0 #1321; plan 06 waits for Phase 229)
-Plan: 5 of 6
-Status: In progress; plan 06 (VREAD-01) blocked on Phase 229; other v1.22 phases run in parallel
-Last activity: 2026-11-24 — Phase 227 JOBLEDGER complete (v0.133.67.0, #1325; HEAL-01 sweep live on PROD)
-Progress: [█░░░░░░░░░] 10%
+Phase: 240 (CONNECTTRUTH) — COMPLETE (shipped v0.133.74.0, #1334); v1.22 phases run in parallel
+Plan: 8 of 8
+Status: Phase complete; records for 223, 229, 231, 232, 239 and 240 landed together; 229 awaits the founder's live soak (229-06 Task 2)
+Last activity: 2026-11-25 — v1.22 records batch: Phases 223 (#1327), 231 (#1333), 232 (#1330), 239 (#1332) and 240 (#1334) complete; 229 shipped (#1328), human verification pending
+Progress: [███░░░░░░░] 32%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -732,6 +732,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 155.2 LIVEPARITY's remaining work moved out of v1.18 into the next milestone (2026-11-23, hand-edit, founder "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."): the broker statements, plans 11-14, the Gate B run, verification and phase complete move; its 13 shipped plans stay recorded as shipped. v1.18 keeps 155, 155.1 and 207-220, all complete
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 - Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
+- Phase 250 added (2026-11-24, /gsd-phase add, founder ruling 2026-11-24, "R2-02: book a follow-up phase with /gsd-phase (plain add) for a windowed Binance fills read. It must land before USE_RAW_TRADE_INGESTION is turned on for Binance. Fold R2-01 and the BINANCE_PAGE_CAP no-flag item into the same phase's scope."): BINANCEFILLS, a Binance fills read walks every window and never stalls its cursor. Placed in v1.22 by hand: the handler appended it below the v1.22 Progress table with `Depends on: Phase 249` (a v1.23 phase); both were corrected. Number 250 because 242-249 are taken by v1.23.
 
 ### Decisions
 
@@ -1835,7 +1836,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-23T18:28:35.274Z
-**Stopped At:** Phase 227 complete, shipped as #1325
+**Stopped At:** v1.22 records batch (223, 229, 231, 232, 239, 240) landed
 **Resume File:** None
 
 **Last Date:** 2026-11-14T07:30:26.000Z
