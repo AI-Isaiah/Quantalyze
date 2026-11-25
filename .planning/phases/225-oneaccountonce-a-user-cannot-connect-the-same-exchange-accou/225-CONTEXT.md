@@ -57,6 +57,16 @@ Requirements: ONCE-01, ONCE-02, ONCE-03, ONCE-04, CONN-01, CONN-03, MT5D-08.
   - `add_wizard_composite_key` keeps writing no identity, and composite duplicates stay mark-only.
   - No edit to `src/app/api/strategies/composite/add-key/route.ts` or to the composite RPC.
 
+### Same login on two servers: two accounts (Q6, CONN-03, PR-3 review CR-01), founder ruling 2026-11-25
+- **Why this came up.** Review finding CR-01 (`225-REVIEW-PR3.md`): once migration B admits one owner's same MT5 login on two servers, the same-owner identity readers still group keys by login alone, so that owner's allocator derive refuses with ACCOUNT_IDENTITY_COLLISION. The founder was asked through the coordinator's AskUserQuestion on 2026-11-25.
+- **The founder's ruling, verbatim:** "same login different server should be possible, that can only happen, if two brokers offer for example the same login like 1234, but of course on different servers. on the same broker, where it would be a problem, the same login should not connect when the server is incorrect, thus the scenario witkh same login different server should eithe be refused, because same broker, and thus incorrect server, and thus, no ability to read out anything, or should be accepted, if different broker, and thus logically different server"
+- **What it means, as the coordinator relayed it:**
+  1. Two keys with the same login on two different set servers are two different accounts. They never share an identity token, in Python (`account_identity_tokens`), in TS (`accountIdentityTokens`) or in SQL (`commit_scenario_batch` `account_edges`).
+  2. A connect on the same broker with the wrong server must be refused at connect or validation time, because it cannot read anything. The gap plans confirm by measurement that the existing validation already refuses it (the MT5 login fails against the wrong server; the MT5 venue API docs are read too), and close any path that lets it through.
+- **Agent decision under this ruling (the ruling does not cover a key with no server).** A key with no server joins its login's group only when that login has at most one distinct set server across the keys the reader sees. Otherwise the derive refuses with a named reason. Recommended by the phase agent and approved by the coordinator on 2026-11-25. It is marked here as an agent decision, not a founder quote.
+- **Order.** These reader changes merge and deploy before migration B (PR-3).
+- **Reversibility:** costly. It changes which keys every same-owner reader treats as one account.
+
 ### Same-owner duplicates already stored (Q5, ONCE-03) — DEVIATION FROM THE STANDING DATA RULE
 - The founder's answer, 2026-11-23, verbatim: "Delete all duplicate keys. So same key in one accused twice. Delete also all associated factsheet, data etc. One key can be used over several accounts. Imagine one team sharing the key if their master account with several allocator. Of course each allocator should be able to generate a factsheet"
 - Meaning, as the orchestrator relayed it:
