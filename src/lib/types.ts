@@ -1310,6 +1310,10 @@ export interface ApiKey {
   // passed", never "what the venue confirmed" — see the column's own
   // COMMENT. Rendered on both key cards for exchange === "mt5" only.
   venue_account_id: string | null;
+  // Migration 20261125132334 (Phase 225 plan 13, CONN-03). The broker server the
+  // key reads: identity input for accountIdentityTokens (one login on two set
+  // servers is two accounts). Owner-readable; never rendered.
+  venue_server: string | null;
   // Migration 20260925120000 (Phase 167.1.2 D-11). The live key of the same
   // owner that already holds the exchange account this key reads, and why.
   // Both-or-neither in the database. Written only by the service-role
@@ -1373,6 +1377,8 @@ export const ApiKeyRowSchema = z
     last_429_at: _isoTimestampNullable,
     disconnected_at: _isoTimestampNullable,
     venue_account_id: z.string().nullable(),
+    // Phase 225 (CONN-03): owner-readable since plan 13's GRANT.
+    venue_server: z.string().nullable(),
     account_shared_with_api_key_id: z.string().nullable(),
     account_share_kind: z.enum(["duplicate", "composite_member"]).nullable(),
     history_inclusion: z.enum(["include", "exclude"]).nullable(),

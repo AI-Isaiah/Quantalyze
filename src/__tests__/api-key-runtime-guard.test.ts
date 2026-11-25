@@ -32,6 +32,10 @@ const baseRow = {
   // since 20260812083206). Same three-way sync as 066/068/075, so the
   // fixture carries it for `.strict()` to accept the row.
   venue_account_id: null,
+  // Phase 225 plan 15 (CONN-03) — `venue_server` joined the projection
+  // (migration 20261125132334 GRANTs it), so the fixture carries it for
+  // `.strict()` to accept the row.
+  venue_server: null,
   // Phase 167.1.2 plan 04 — the account-share marker and the departed-history
   // flag joined the projection (migration 20260925120000 GRANTs them), so the
   // fixture carries them for `.strict()` to accept the row.
@@ -150,6 +154,24 @@ describe("ApiKeyRowSchema — M-0583 trust-boundary guard", () => {
     const { venue_account_id: _omit, ...rowWithoutVenueAccountId } = baseRow;
     const out = parseApiKeyRows([rowWithoutVenueAccountId]);
     expect(out).toHaveLength(0);
+  });
+
+  // Phase 225 plan 15 (CONN-03, T-225-50): the same pins for `venue_server`.
+  // The projection now selects it, so a schema without it would drop EVERY key
+  // row at the read boundary, and a schema that dropped the value would merge
+  // two servers of one login in accountIdentityTokens.
+  it("preserves venue_server (null) and a stored server in the parsed output", () => {
+    const withNull = parseApiKeyRows([baseRow]);
+    expect(withNull).toHaveLength(1);
+    expect(withNull[0].venue_server).toBeNull();
+    const withServer = parseApiKeyRows([{ ...baseRow, venue_server: "srv-a" }]);
+    expect(withServer).toHaveLength(1);
+    expect(withServer[0].venue_server).toBe("srv-a");
+  });
+
+  it("rejects rows missing venue_server (strict schema)", () => {
+    const { venue_server: _omit, ...rowWithoutVenueServer } = baseRow;
+    expect(parseApiKeyRows([rowWithoutVenueServer])).toHaveLength(0);
   });
 
   // audit-2026-05-07 RT silent-failure HIGH regression: account_balance_usdt
