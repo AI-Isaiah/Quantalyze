@@ -2824,5 +2824,5 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
             verification_id,
             _redact_credentials(str(exc), req),
         )
-        _fail_vr("Verification failed. Contact support if this persists.")
+        _fail_vr("Verification failed. Use the contact form if this persists.")
         raise HTTPException(status_code=500, detail="Strategy verification failed")
