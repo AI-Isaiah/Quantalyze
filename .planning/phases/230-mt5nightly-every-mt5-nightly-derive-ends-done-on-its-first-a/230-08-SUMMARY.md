@@ -25,7 +25,7 @@ key-decisions:
   - "DEC-08-B Section 6 of the lease runbook is a pointer that deliberately does NOT contain plan 09's section title, so plan 09's own grep for that title cannot pass before plan 09 writes it."
   - "DEC-08-C The plan's rehearsal verify block was run under bash, not the zsh the tool shell uses (see Deviations)."
 requirements-completed: []
-status: complete-pending-task-3
+status: complete
 plan_head_before: f9c5df4ac562c3069c47b675b11f4ad078cb68d5
 plan_head_after: bf77bf8fe8584c1893b7fba75a5580b9f4b5352a
 commits: 2
@@ -37,11 +37,11 @@ actuals:
 
 # Phase 230 Plan 08: Ship preparation Summary
 
-**A re-stamp of the lease migration is rehearsed end to end and recorded as a 14-file checklist, the lease has an operator runbook, the go-live single-replica invariant carries a dated correction, and the ship records (1) to (7) are written with today's measurements. Task 3 (the reviewer gates) is the blocking checkpoint this run stops at.**
+**A re-stamp of the lease migration is rehearsed end to end and recorded as a 14-file checklist, the lease has an operator runbook, the go-live single-replica invariant carries a dated correction, and the ship records (1) to (7) are written with today's measurements. Task 3 (the reviewer gates) was the blocking checkpoint; both verdicts are recorded in item (5) and neither blocks the ship.**
 
 `requirements-completed` is empty on purpose: MT5D-02 closes only after seven clean nights (plan 09) and MT5D-03 only after the coordinator's capture (plan 10). This plan claims neither.
 
-`status: complete-pending-task-3`: Tasks 1 and 2 are done and committed. Task 3 is a `checkpoint:human-action` with `gate="blocking-human"`; ship records item (5) reads "pending Task 3" until it resumes. `commits: 2` is measured from the ledger base to `plan_head_after` (the last work commit); this SUMMARY's own commit follows it.
+`status: complete`: Tasks 1 and 2 were committed first and the run stopped at Task 3, a `checkpoint:human-action` with `gate="blocking-human"`. On resume the orchestrator supplied both reviewer verdicts; item (5) now carries them. `commits: 2` is measured from the ledger base to `plan_head_after` (the last work commit); the SUMMARY commits follow it.
 
 ## Tasks
 
@@ -164,7 +164,10 @@ Known limits to carry: MT5D-02 is open until seven clean nights; MT5D-03 is open
 
 ### (5) Before merge
 
-- **Reviewer gates:** pending Task 3.
+- **Reviewer gates:** both reviewers ran at head `f9c5df4ac562c3069c47b675b11f4ad078cb68d5`, as reported by the orchestrator on resume. I confirmed locally that `git diff f9c5df4ac HEAD --stat -- supabase/` is empty at head `6310b49a8`, so the review subject (migration, down file, gate, three mirrors) is unchanged. **No MEDIUM or above from either reviewer: the ship is NOT blocked.**
+  - `migration-reviewer` at `f9c5df4ac`: CRITICAL 0, HIGH 0, MEDIUM 0, LOW 0, INFO 4. MEDIUM-or-above titles: none. INFO: (1) the migration header comment at lines 49-51 says "no key id" while the holder column can carry an api_key_id; (2) service_role SELECT exposes `owner_token`, which is inside the trust boundary; (3) the gate has no arm for renew-on-expired-untaken, for `acquired_at` preservation, or for real concurrency; (4) a re-stamp must move the RED-UNDER-M and RED-UNDER-SETUP paths and the mirror headers (the Task 1 checklist already covers this).
+  - `rls-policy-auditor` at `f9c5df4ac`: CRITICAL 0, HIGH 0, MEDIUM 0, LOW 1, INFO 5. MEDIUM-or-above titles: none. LOW: the privilege assertions (migration lines 357-358 and 362, and gate arm L6) check only SELECT, INSERT, UPDATE and DELETE, not TRUNCATE, REFERENCES or TRIGGER. INFO: `owner_token` readable by service_role; misleading SECURITY DEFINER wording at migration line 313; RLS not FORCEd is unpinned; search_path order is convention; hand-added `database.types.ts` entries.
+  - LOW and INFO are recorded here and NOT booked in `TODOS.md` (CLAUDE.md rule (a)). The ship PR may fix the migration header wording in INFO (1) only if it re-stamps anyway; it is not required.
 - the review lane per the project's review rule (gsd-code-reviewer in parallel with silent-failure-hunter, MEDIUM and above only);
 - CI mypy strict in the pre-push checks (`analytics-service`, the CI-form command in plan 07's table);
 - no `.planning` path on the ship branch (check with `git diff --name-only origin/main...HEAD | grep -a '^\.planning'` before the push);
@@ -178,7 +181,7 @@ VAC-08 is red on the PR by construction until apply-on-merge. **VAC-04** (the re
 **Today's readings (2026-11-25, branch head `bf77bf8fe`, origin/main `3081bdf8b`):**
 
 - origin/main's three newest migrations: the three listed under Task 1. The lease stamp `20261126120000` sorts after all of them.
-- PROD's newest applied migration version: **NOT READ.** The Supabase MCP tool is not loadable from this run (no tool-search facility was available to it), and the constraint is MCP first and otherwise a ship-time step. Do not substitute a CLI query here. At ship time, immediately before opening the PR: run the marker query alone, `SELECT shobj_description(oid, 'pg_database') AS which_database FROM pg_database WHERE datname = current_database();`, then in a separate call `SELECT max(version) FROM supabase_migrations.schema_migrations;`, read-only, one query per call. `20261126120000` must sort after both that value and `git ls-tree --name-only origin/main supabase/migrations/ | grep -v down | sort | tail -3`. If not, re-stamp with the Task 1 checklist in ONE commit and re-run its three checks.
+- PROD's newest applied migration version: **`20261125151936`, read by the coordinator on 2026-11-25 through the Supabase MCP, read-only, and reported to me on resume (I did not read it myself; the MCP tool was not loadable from my run).** The marker query came first and returned the PRODUCTION marker. `20261126120000` sorts after it and after origin/main's tip (`20261125151936` as I read it from `git ls-tree`), so no re-stamp is needed today. This reading is dated 2026-11-25 and must be repeated at push time. At ship time, immediately before opening the PR: run the marker query alone, `SELECT shobj_description(oid, 'pg_database') AS which_database FROM pg_database WHERE datname = current_database();`, then in a separate call `SELECT max(version) FROM supabase_migrations.schema_migrations;`, read-only, one query per call. `20261126120000` must sort after both that value and `git ls-tree --name-only origin/main supabase/migrations/ | grep -v down | sort | tail -3`. If not, re-stamp with the Task 1 checklist in ONE commit and re-run its three checks.
 - `grep -nE '^export const (FILES_FLOOR|ARMS_FLOOR|WAIVED_CEILING)' scripts/mutation-floors.mjs`: `FILES_FLOOR = 95` (line 1396), `ARMS_FLOOR = 1041` (3571), `WAIVED_CEILING = 0` (3685).
 - the six targeted vitest census files, run once:
   `npx vitest run src/__tests__/mutation-runner-floors.test.ts src/__tests__/mutation-annotation-parser.test.ts src/__tests__/gate-family-meta.test.ts src/__tests__/lint-sql-gates.test.ts src/__tests__/drift-check-scripts.test.ts src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts --no-coverage`
@@ -207,7 +210,7 @@ VAC-08 is red on the PR by construction until apply-on-merge. **VAC-04** (the re
 | full vitest, full pytest with the 80 percent coverage floor, e2e | load limit | CI frontend shards plus `frontend-coverage`, CI `python` |
 | Docker, the local-stack lane, the lease gate's `ALL 8 ARMS EXECUTED`, the live module's pass count | load limit, no Docker | CI `sql-tests` and `python` at the PR head SHA |
 | VAC-04 for the three new functions | needs a PROD credential this run must not use | `migration-drift-check.yml` at the PR head SHA |
-| PROD's newest applied migration version | the Supabase MCP tool was not loadable from this run | the ship-time read in item (6) |
+| PROD's newest applied migration version, by me | the Supabase MCP tool was not loadable from my run | the coordinator's read-only MCP reading of 2026-11-25 (`20261125151936`, marker first), to be repeated at push time per item (6) |
 
 Run locally: the rehearsal (parse-only, lint-sql-gates, dump-sql-functions --check), the six targeted vitest census files (1308 tests), `--self-test` of the lint, `baseline-content-drift-check`. No pytest and no mypy run, because this plan changes no analytics source. No database write of any kind was made; the CLI linked to PRODUCTION was not invoked.
 
@@ -219,7 +222,7 @@ Run locally: the rehearsal (parse-only, lint-sql-gates, dump-sql-functions --che
 **2. [Rule 1 - Plan count wrong] Six log events, not five.** `mt5_xlease_renew_failed` exists in the module beside the five the plan names. The runbook documents all six and item (4) tells the ship entry to name six.
 - **Commit:** `bf77bf8fe`
 
-**3. [Plan step deferred] PROD-tip read and VAC-04 reading** are ship-time steps, for the reasons in "Not run locally".
+**3. [Plan step deferred] VAC-04 reading** is a ship-time step (CI at the PR head SHA). The PROD-tip read was supplied by the coordinator on resume (item 6) and is to be repeated at push time.
 
 No auth gates. No stubs.
 
