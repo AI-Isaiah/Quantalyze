@@ -30,6 +30,7 @@ from services.mt5_client import (
     Mt5Client,
     Mt5ClientError,
     Mt5AccountMismatchError,
+    Mt5ServerMismatchError,
     Mt5SessionAbandoned,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
     emit_mt5_stage_event,
@@ -981,18 +982,31 @@ async def _validate_mt5_key_probe(
                 detail=NETWORK_ERROR_DETAIL,
                 recoverable=True,
             )
-        except Mt5AccountMismatchError:
+        except Mt5AccountMismatchError as exc:
             # D-07 part 2: another actor switched the terminal mid-probe. No park.
-            probe_disqualified = "probe_account_mismatch"
-            # RED-TEAM: a concurrent validate re-logged the shared terminal onto
-            # another account mid-probe — an INFRA/concurrency fault, never the
-            # user's key. Fail CLOSED transient (never valid, never auth-failed,
-            # never a wrong-account verdict). No account values in the log line.
-            logger.warning(
-                "validate_key: MT5 terminal account mismatch mid-probe "
-                "(concurrent validate) — failing closed transient"
-            )
-            trace.outcome = "transient"
+            if isinstance(exc, Mt5ServerMismatchError):
+                # WR-02 (225 PR-2c): the SERVER bracket refused — the session is on
+                # another broker server than requested. Not a concurrency race, and
+                # it must not read as one in the log, the trace or the park alert
+                # (Task 3's revert gate reads this line). No login, no server value.
+                probe_disqualified = "probe_server_mismatch"
+                logger.warning(
+                    "validate_key: MT5 session not on the requested broker server "
+                    "— failing closed transient"
+                )
+                trace.outcome = "transient_server_mismatch"
+            else:
+                probe_disqualified = "probe_account_mismatch"
+                # RED-TEAM: a concurrent validate re-logged the shared terminal
+                # onto another account mid-probe — an INFRA/concurrency fault,
+                # never the user's key. Fail CLOSED transient (never valid, never
+                # auth-failed, never a wrong-account verdict). No account values
+                # in the log line.
+                logger.warning(
+                    "validate_key: MT5 terminal account mismatch mid-probe "
+                    "(concurrent validate) — failing closed transient"
+                )
+                trace.outcome = "transient"
             # PYAPIFIX2-01 (C4) — see the C1 block for the shape rationale.
             raise VenueTransientHTTPException(
                 status_code=424,

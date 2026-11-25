@@ -559,6 +559,7 @@ _PARK_ALERT_CAUSES: Final[frozenset[str]] = frozenset(
         "probe_in_flight",
         "probe_session_abandoned",
         "probe_account_mismatch",
+        "probe_server_mismatch",
         "budget_exhausted",
         _PARK_ALERT_UNRECOGNISED_CAUSE,
     }
@@ -834,7 +835,7 @@ def _warn_park_bridge_glitch(*, site: str) -> None:
 
 def report_park_skipped(cause: str, *, site: str) -> None:
     """A call-site gate refused to park (``probe_in_flight``,
-    ``probe_session_abandoned``, ``probe_account_mismatch``,
+    ``probe_session_abandoned``, ``probe_account_mismatch``, ``probe_server_mismatch``,
     ``budget_exhausted``) or the park's own ceiling fired (``ceiling``). Loud,
     never silent; never raises."""
     _alert_park_failed(cause, site=site)
