@@ -141,3 +141,79 @@ def test_scanner_self_test_catches_split_and_fstring_literals_only() -> None:
     # numbers of merged literals are an ast detail, so assert the count and label.
     assert len(found) == 2, f"docstrings, comments and the clean sentence must not report: {found}"
     assert all(x.startswith("synthetic.py:") for x in found), found
+
+
+# (file, function, expected clause). Hand-typed on purpose: an independent oracle
+# of the wording, so a revert of any one sentence fails by name rather than being
+# re-derived from the code it guards. Rows 6, 7, 8 and 10 of the UI-SPEC sentence
+# register are DERIVED wording (RESEARCH A2); the member-cap clause is CONTEXT-locked.
+SENTENCE_PINS = (
+    (
+        "services/exchange.py",
+        "validate_key_permissions",
+        "Key validation failed unexpectedly. Use the contact form if this persists.",
+    ),
+    (
+        "services/csv_validator.py",
+        "_maybe_auto_normalize_percent_form",
+        "If your file was already in decimal form, use the contact form.",
+    ),
+    (
+        "services/job_worker.py",
+        "run_sync_trades_job",
+        "Analytics enqueue failed during sync. The next scheduled sync will retry "
+        "— use the contact form if this persists.",
+    ),
+    (
+        "services/job_worker.py",
+        "run_stitch_composite_job",
+        "Reduce members or use the contact form to ask for a higher limit.",
+    ),
+    (
+        "routers/portfolio.py",
+        "verify_strategy",
+        "Verification failed. Use the contact form if this persists.",
+    ),
+)
+
+
+def _string_constants_in_function(path: Path, function: str) -> list[str]:
+    """Every str Constant inside the named (async) function, at any depth.
+
+    Joined-string pieces are concatenated per ``JoinedStr`` so an f-string sentence
+    split around an interpolation is still read as the sentence it renders; the
+    ``{...}`` holes become ``{}``.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    funcs = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == function
+    ]
+    assert funcs, f"{path.relative_to(ANALYTICS_ROOT)}::{function} not found (pin is vacuous)"
+    out: list[str] = []
+    for fn in funcs:
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                out.append(node.value)
+            elif isinstance(node, ast.JoinedStr):
+                out.append(
+                    "".join(
+                        v.value
+                        if isinstance(v, ast.Constant) and isinstance(v.value, str)
+                        else "{}"
+                        for v in node.values
+                    )
+                )
+    return out
+
+
+@pytest.mark.parametrize(("rel", "function", "clause"), SENTENCE_PINS)
+def test_each_sentence_names_the_contact_form_in_its_own_function(
+    rel: str, function: str, clause: str
+) -> None:
+    assert "contact form" in clause and not LEGACY_POINTER.search(clause)
+    constants = _string_constants_in_function(ANALYTICS_ROOT / rel, function)
+    assert any(clause in c for c in constants), (
+        f"{rel}::{function} no longer produces {clause!r}"
+    )
