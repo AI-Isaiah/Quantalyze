@@ -720,6 +720,17 @@ def compose_allocator_equity(
     hole_exit_units: set[str] = set()
     reentry_units: list[str] = []
     history_first = set(full_history)
+    # 234 NOCAP-04: the candidate set and its fall-back list live here, above the segment loop, because
+    # a candidate whose hole lacks its stored terminals falls back from INSIDE that loop (below).
+    # The set of candidates actually composed is ``no_capital_exit``.
+    no_capital_exit = dict(no_capital_exit_by_key or {})
+    # WR-02 / F4: a candidate is a KEY. A key replayed in segments (``k#hole0 ... k``) is offered
+    # and taken back as one: ``owner`` is the key a unit belongs to, so any of its units that is
+    # refused or flagged blocking takes the whole key back out, not just the last unit that
+    # carries the key's own id.
+    fell_back: list[str] = []
+    # 234 NOCAP-03: one count per owner key and route, written into ``payload["inputs"]`` below.
+    no_capital_refused: Counter[str] = Counter()
     unpriced_days_in = {
         k: frozenset(str(d) for d in days)
         for k, days in (unpriced_days_by_key or {}).items()
@@ -739,6 +750,14 @@ def compose_allocator_equity(
             continue
         terminals = (segment_terminals_by_key or {}).get(k, {})
         if any(e not in terminals for e in ends):
+            if k in no_capital_exit:
+                # 234 NOCAP-04: a candidate exists only because the job offered it, so it falls
+                # back to ``dropped_key`` like every other refused candidate instead of composing
+                # unsplit under a ``key_inputs_mismatch`` that would outlive the refusal. No reason
+                # and no warning here: the fall-back block below names it, once, by count.
+                no_capital_refused["segment_terminals_missing"] += 1
+                fell_back.append(k)
+                continue
             # The writer should have stored the level on each of these days. Without it the
             # levels before the hole are unknowable, so it is NOT guessed: the key composes
             # unsplit (the pre-fix roll) and the book says it cannot be trusted.
@@ -813,16 +832,10 @@ def compose_allocator_equity(
     # candidate the replay refuses (``NavReconstructionError``) or flags with a blocking reason is
     # taken back out and composed exactly as today: ``NO_ANCHOR`` plus ``DROPPED_KEY``. Every other
     # key keeps raising. The set of candidates actually composed is ``no_capital_exit``.
-    no_capital_exit = dict(no_capital_exit_by_key or {})
+    # (``no_capital_exit``, ``fell_back`` and ``no_capital_refused`` are declared above the
+    # interior-hole segment loop, which is the first place a candidate can fall back.)
     per_key_equity: dict[str, KeyEquity] = {}
-    # 234 NOCAP-03: one count per owner key and route, written into ``payload["inputs"]`` below.
-    no_capital_refused: Counter[str] = Counter()
     fell_back_blocking: set[DegradeReason] = set()
-    # WR-02 / F4: a candidate is a KEY. A key replayed in segments (``k#hole0 ... k``) is offered
-    # and taken back as one: ``owner`` is the key a unit belongs to, so any of its units that is
-    # refused or flagged blocking takes the whole key back out, not just the last unit that
-    # carries the key's own id.
-    fell_back: list[str] = []
     for k in anchored_keys:
         owner = parent.get(k, k)
         if owner in fell_back:
@@ -880,13 +893,14 @@ def compose_allocator_equity(
         # Counts and reason classes only: no key id, no day, no USD (T-166.3.1-34).
         logger.warning(
             "compose: %d no-capital candidate(s) fell back to %s (%d refused by the replay, %d "
-            "carried a blocking reason: %s); each is composed as an unanchored key and the book "
-            "is untrustworthy",
+            "carried a blocking reason: %s, %d lacked a stored segment level); each is composed "
+            "as an unanchored key and the book is untrustworthy",
             len(fell_back),
             DegradeReason.DROPPED_KEY.value,
             no_capital_refused["replay_refused"],
             no_capital_refused["blocking_reason"],
             ",".join(sorted(r.value for r in fell_back_blocking)) or "none",
+            no_capital_refused["segment_terminals_missing"],
         )
     for k in anchored_keys:
         if per_key_equity[k].flags.get("writer_basis") is True:

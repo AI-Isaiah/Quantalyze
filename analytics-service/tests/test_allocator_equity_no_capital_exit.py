@@ -283,6 +283,62 @@ def test_hole_candidate_whose_earlier_segment_refuses_falls_back_instead_of_fail
     assert payload["is_trustworthy"] is False
 
 
+# ── 234 NOCAP-04: a candidate whose interior hole lacks its stored segment terminals ─────────────
+# The segment loop cannot roll the levels before a hole without the level stored on the day before
+# it. For a key that is NOT a candidate that stays ``key_inputs_mismatch`` (it composes unsplit and
+# the book says it cannot be trusted). A candidate is composed only because the job offered it, so
+# it must fall back to ``dropped_key`` instead and leave NO residue: the payload is the payload the
+# same inputs give with no candidate offered, except for the NOCAP-03 counts field.
+
+
+@pytest.mark.parametrize(
+    "last_terminal",
+    [
+        pytest.param((DAYS[3], 600.0), id="clean-last-segment"),
+        pytest.param((DAYS[4], 600.0), id="blocking-last-segment"),
+    ],
+)
+def test_hole_candidate_without_its_segment_terminals_falls_back_with_no_residue(
+    last_terminal: tuple[str, float],
+) -> None:
+    """The segment check runs before any replay, so the last segment's own verdict (clean or
+    blocking) is never reached: both shapes fall back the same way. Without the fix the candidate
+    composes unsplit and keeps a blocking ``key_inputs_mismatch`` and ``no_capital_key_exited``."""
+    kwargs = _hole_candidate_book(last_terminal=last_terminal)
+    kwargs["segment_terminals_by_key"] = {}
+    payload = _compose(dict(kwargs))
+    popped, field = _pop_refusal_field(payload)
+
+    assert "key_inputs_mismatch" not in payload["degrade_reasons"]
+    assert "no_capital_key_exited" not in payload["flags"]
+    assert "no_capital_exited_keys" not in payload
+    assert _without_clock(popped) == _without_clock(_compose(_today(kwargs)))
+    assert field == {"segment_terminals_missing": 1}
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert _curve(payload) == {day: pytest.approx(A_LEVEL, abs=1e-9) for day in DAYS}
+
+
+def test_hole_without_segment_terminals_of_a_key_that_is_not_a_candidate_still_blocks() -> None:
+    """The non-candidate control. The same book with B anchored but NOT offered (no candidate, no
+    departed end) keeps today's behaviour: ``key_inputs_mismatch`` blocks the book, B composes
+    unsplit, nothing is named as a fallback and no counts field is stored. Without this control the
+    test above could pass because the missing-terminals branch had been deleted for every key."""
+    kwargs = _hole_candidate_book(last_terminal=(DAYS[3], 600.0))
+    kwargs["segment_terminals_by_key"] = {}
+    kwargs["no_capital_exit_by_key"] = {}
+    kwargs["departed_end_by_key"] = {}
+    payload = _compose(kwargs)
+
+    assert "key_inputs_mismatch" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exit_refused" not in payload["inputs"]  # no "segment_terminals_missing" count
+    assert "no_capital_exited_keys" not in payload
+    assert "dropped_key" not in payload["degrade_reasons"]
+    # B is composed (unsplit), not dropped: its 600.0 is in the book on its first day.
+    assert _curve(payload)[DAYS[0]] == pytest.approx(A_LEVEL + 600.0, abs=1e-9)
+
+
 def test_hole_segment_of_a_key_that_is_not_a_candidate_still_raises() -> None:
     """The parent mapping widens the handler to a candidate's OWN segments only. The same refusing
     earlier segment on a key that is not offered as a candidate keeps raising."""
