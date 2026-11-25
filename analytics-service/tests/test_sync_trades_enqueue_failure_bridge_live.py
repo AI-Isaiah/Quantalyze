@@ -48,6 +48,7 @@ try:
 except ImportError:  # pragma: no cover
     create_client = None  # type: ignore[assignment]
 
+from services import job_worker
 from services.job_worker import DispatchOutcome, DispatchResult, run_sync_trades_job
 from tests.live_db_transport import wrap_live_db_client
 from tests.test_compute_jobs_fencing import _claim_one, _insert_pending_sync_trades
@@ -161,6 +162,8 @@ def _drive(
     tag: str,
     seed_row: dict[str, Any] | None,
     attempts_before_claim: int | None = None,
+    publish_race_row: dict[str, Any] | None = None,
+    after_handler: dict[str, Any] | None = None,
 ) -> tuple[DispatchResult, dict[str, Any] | None, dict[str, Any]]:
     """Run the REAL handler and the REAL mark RPCs for one sync_trades job.
 
@@ -168,6 +171,13 @@ def _drive(
     one). ``None`` means ``max_attempts - 1`` read from the row itself, so the claimed
     attempt is the LAST one and ``mark_compute_job_failed`` makes a transient failure
     final. Returns ``(DispatchResult, strategy_analytics row or None, compute_jobs row)``.
+
+    ``publish_race_row`` (222-REVIEW SFH-01) simulates the race between the handler's
+    publish read and its failed write: right after the handler's publish read returns,
+    this row is written to strategy_analytics through the lane, so the handler decides
+    from a read that is already stale. ``after_handler``, when given, receives the
+    strategy_analytics row as the handler left it (``after_handler["row"]``), before
+    the mark RPC and the bridge run.
     """
     user_id: str | None = None
     strategy_id: str | None = None
@@ -213,7 +223,21 @@ def _drive(
             "user_id": user_id,
         }
         job = dict(claimed)
+
+        real_read = job_worker.db_read_with_retry
+
+        async def _racing_read(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            out = await real_read(fn, *args, **kwargs)
+            if publish_race_row is not None and fn.__name__ == "_strategy_has_published_numbers":
+                admin.table("strategy_analytics").upsert(
+                    {"strategy_id": strategy_id, **publish_race_row},
+                    on_conflict="strategy_id",
+                ).execute()
+            return out
+
         with patch(
+            "services.job_worker.db_read_with_retry", new=_racing_read
+        ), patch(
             "services.job_worker._exchange_preflight", new=AsyncMock(return_value=ctx)
         ), patch(
             "services.job_worker.fetch_all_trades",
@@ -226,6 +250,16 @@ def _drive(
             new=AsyncMock(side_effect=lambda fn: fn()),
         ), patch("services.job_worker._RAW_TRADE_INGESTION_ENABLED", False):
             result = asyncio.run(run_sync_trades_job(job))
+
+        if after_handler is not None:
+            after_handler["row"] = (
+                admin.table("strategy_analytics")
+                .select("computation_status, computation_warned, computation_error, metrics_json")
+                .eq("strategy_id", strategy_id)
+                .single()
+                .execute()
+                .data
+            )
 
         # main_worker.dispatch_tick's mapping, with the real claim token.
         if result.outcome == DispatchOutcome.DONE:
@@ -408,3 +442,35 @@ def test_a_failed_row_with_old_figures_is_not_published_and_ends_failed() -> Non
     assert job["status"] == "failed_final", job
     assert result.outcome == DispatchOutcome.FAILED, result
     assert result.error_kind == "transient", result
+
+
+def test_a_row_published_between_the_read_and_the_write_is_not_overwritten() -> None:
+    """222-REVIEW SFH-01: the publish read and the failed write are separate round
+    trips. Here nothing is published at the read (no row) and a ``complete_with_warnings``
+    row lands before the write. The failed write is conditional on nothing being
+    published, so the row the handler leaves is the published one, warned flag and
+    figures intact. An unconditional upsert would overwrite it with ``failed`` and
+    ``computation_warned = false``."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+
+    left: dict[str, Any] = {}
+    _drive(
+        admin,
+        tag="race",
+        seed_row=None,
+        attempts_before_claim=0,
+        publish_race_row={
+            "computation_status": "complete_with_warnings",
+            "computation_warned": True,
+            "metrics_json": _METRICS,
+        },
+        after_handler=left,
+    )
+
+    row = left["row"]
+    assert row["computation_status"] == "complete_with_warnings", row
+    assert row["computation_warned"] is True, row
+    assert row["computation_error"] is None, row
+    assert row["metrics_json"] == _METRICS, row

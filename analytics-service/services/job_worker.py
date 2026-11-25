@@ -2997,10 +2997,26 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                             # nobody and asserts a protection that does not exist.
                     }
 
-                    ctx.supabase.table("strategy_analytics").upsert(
-                        _enqueue_failed_payload,
-                        on_conflict="strategy_id",
-                    ).execute()
+                    # SFH-01: the publish read above and this write are separate
+                    # round trips, so an unconditional upsert could overwrite a row a
+                    # concurrent analytics job published in between. The write itself
+                    # is therefore conditional on "nothing published" (the inverse of
+                    # `_strategy_has_published_numbers`): an UPDATE that skips a success
+                    # status and a 'computing' row carrying metrics_json. With no row
+                    # there is nothing to update; the FAILED return below makes
+                    # `mark_compute_job_failed` run the status bridge, which creates
+                    # the row (branch (a) 'computing', then branch (b) 'failed').
+                    (
+                        ctx.supabase.table("strategy_analytics")
+                        .update(_enqueue_failed_payload)
+                        .eq("strategy_id", strategy_id)
+                        .not_.in_(
+                            "computation_status",
+                            sorted(STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES),
+                        )
+                        .or_("computation_status.neq.computing,metrics_json.is.null")
+                        .execute()
+                    )
 
                 await db_execute(_mark_analytics_failed)
             except Exception as mark_exc:  # noqa: BLE001

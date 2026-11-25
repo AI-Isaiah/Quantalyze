@@ -3203,6 +3203,15 @@ class TestDeriveBrokerDailies:
             mock_update.eq.return_value = mock_eq
             mock_t.update.return_value = mock_update
 
+            # 222-REVIEW SFH-01: the strategy_analytics failed write is a conditional
+            # UPDATE, so it is recorded here beside the upserts.
+            def _update(payload: dict, **kwargs):
+                if name == "strategy_analytics":
+                    upsert_calls.append((name, dict(payload), dict(kwargs)))
+                return mock_update
+
+            mock_t.update.side_effect = _update
+
             return mock_t
 
         mock_ctx.supabase.table.side_effect = _table
@@ -3234,7 +3243,7 @@ class TestDeriveBrokerDailies:
         assert result.outcome == DispatchOutcome.FAILED
         assert result.error_kind == "transient"
 
-        # Find the upsert into strategy_analytics with the failed status.
+        # Find the write into strategy_analytics with the failed status.
         failed_upserts = [
             payload
             for (table_name, payload, _kwargs) in upsert_calls
@@ -3275,14 +3284,9 @@ class TestDeriveBrokerDailies:
             "The next scheduled sync will retry \u2014 "
             "use the contact form if this persists."
         )
-        # The on_conflict kwarg must be present so this is an upsert,
-        # not an insert that crashes on PK conflict for re-runs.
-        on_conflict = next(
-            kwargs.get("on_conflict")
-            for (table_name, _payload, kwargs) in upsert_calls
-            if table_name == "strategy_analytics"
-        )
-        assert on_conflict == "strategy_id"
+        # (The write is a conditional UPDATE since 222-REVIEW SFH-01, so there is no
+        # on_conflict kwarg to pin; its filters are pinned by
+        # test_failed_write_is_conditional_on_nothing_published below.)
 
 
 class TestSyncTradesEnqueueFailurePublishState:
@@ -3292,10 +3296,17 @@ class TestSyncTradesEnqueueFailurePublishState:
     chain answers with a truthy MagicMock."""
 
     @staticmethod
-    async def _run(read: Any, caplog: pytest.LogCaptureFixture) -> tuple[Any, list[dict]]:
+    async def _run(
+        read: Any,
+        caplog: pytest.LogCaptureFixture,
+        writes: list[Any] | None = None,
+    ) -> tuple[Any, list[dict]]:
         """Run run_sync_trades_job with a failing enqueue and the publish read
         scripted: ``read`` is a response ``data`` value, or an Exception to raise.
-        Returns (DispatchResult, strategy_analytics upsert payloads)."""
+        ``writes``, when given, collects every strategy_analytics table mock so a case
+        can read the conditional-write chain off ``mock_calls``.
+        Returns (DispatchResult, strategy_analytics write payloads: the failed
+        UPDATE's, plus any upsert's)."""
         from services.job_worker import run_sync_trades_job
 
         mock_ctx = MagicMock()
@@ -3327,10 +3338,17 @@ class TestSyncTradesEnqueueFailurePublishState:
                 stub.execute.return_value = MagicMock(data=[])
                 return stub
 
+            def _update(payload: dict, **kwargs: Any) -> MagicMock:
+                # 222-REVIEW SFH-01: the failed write is a conditional UPDATE. Return
+                # the tracked child so the filter chain lands in mock_t.mock_calls.
+                if name == "strategy_analytics":
+                    upserts.append(dict(payload))
+                return mock_t.update.return_value  # type: ignore[no-any-return]
+
             mock_t.upsert.side_effect = _upsert
-            mock_t.update.return_value.eq.return_value.execute.return_value = MagicMock(
-                data=[]
-            )
+            mock_t.update.side_effect = _update
+            if writes is not None and name == "strategy_analytics":
+                writes.append(mock_t)
             execute = mock_t.select.return_value.eq.return_value.maybe_single.return_value.execute
             if isinstance(read, Exception):
                 execute.side_effect = read
@@ -3421,6 +3439,42 @@ class TestSyncTradesEnqueueFailurePublishState:
         assert result.outcome == DispatchOutcome.FAILED
         assert result.error_kind == "transient"
         assert len(upserts) == 1 and upserts[0]["computation_status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_failed_write_is_conditional_on_nothing_published(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """222-REVIEW SFH-01: the publish read and the failed write are separate round
+        trips, so the write itself must refuse a row published in between. It is a
+        single UPDATE that skips the success statuses and a 'computing' row with
+        metrics_json; it is never an unconditional upsert (which would overwrite a
+        row published after the read). The behaviour against a real row is pinned
+        live in test_sync_trades_enqueue_failure_bridge_live.py."""
+        writes: list[Any] = []
+        result, payloads = await self._run(None, caplog, writes)
+        assert result.outcome == DispatchOutcome.FAILED
+        # One table mock per `.table("strategy_analytics")` call: the read and the
+        # write. Drop the read's select chain.
+        calls = [
+            c for table in writes for c in table.mock_calls
+            if not c[0].startswith("select")
+        ]
+        by_name = {c[0]: c for c in calls}
+        assert [c[0] for c in calls] == [
+            "update",
+            "update().eq",
+            "update().eq().not_.in_",
+            "update().eq().not_.in_().or_",
+            "update().eq().not_.in_().or_().execute",
+        ], [c[0] for c in calls]
+        assert by_name["update().eq"][1] == ("strategy_id", "strat-pub")
+        assert by_name["update().eq().not_.in_"][1] == (
+            "computation_status", ["complete", "complete_with_warnings"],
+        )
+        assert by_name["update().eq().not_.in_().or_"][1] == (
+            "computation_status.neq.computing,metrics_json.is.null",
+        )
+        assert len(payloads) == 1 and payloads[0]["computation_status"] == "failed"
 
     @pytest.mark.asyncio
     async def test_unreadable_publish_state_writes_nothing_and_returns_done(
