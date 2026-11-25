@@ -71,6 +71,7 @@ import {
   LEDGER_FANOUT_JOB,
   LEDGER_FANOUT_SQL,
 } from "../../scripts/prod-prober/arms/cron-obs.mjs";
+import { FRESHNESS_KEYS_SQL, FRESHNESS_SCOPE_SQL } from "../../scripts/prod-prober/arms/freshness.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "prod-prober.yml");
@@ -3239,5 +3240,67 @@ describe("[164.6-R2 WR-02] cron-obs ledger fan-out constants match the manifest 
     const entry = jobs.find((j) => j.jobname === LEDGER_FANOUT_JOB)!;
     expect(entry.command).not.toContain(`public.${LEDGER_FANOUT_FUNCTION}_v2()`);
     expect(jobs.find((j) => j.jobname === `${LEDGER_FANOUT_JOB}_x`)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [233 FRESH-02] The freshness arm reads PROD jsonb fields by NAME. A rename on
+// the writer side would make every key read as "not judged" and turn the arm
+// silently GREEN, which no fixture can catch (a fixture is written by the same
+// hand as the arm). So the arm's SQL names are bound to the source lines that
+// write them, in the WR-02 voice above.
+// ---------------------------------------------------------------------------
+describe("[233 FRESH-02] the freshness arm's SQL names are bound to the writers that store them", () => {
+  const BASELINE = readFileSync(join(REPO_ROOT, "supabase", "schema", "baseline.sql"), "utf8");
+  const JOB_WORKER = readFileSync(join(REPO_ROOT, "analytics-service", "services", "job_worker.py"), "utf8");
+  const EQUITY_DERIVE = readFileSync(
+    join(REPO_ROOT, "analytics-service", "services", "allocator_equity_derive.py"),
+    "utf8",
+  );
+  /** The ONE predicate every assertion and the calibration share: string containment. */
+  const storedBy = (src: string, needle: string): boolean => src.includes(needle);
+  /** One `CREATE TABLE` body, from its header to the first closing `);`. */
+  const tableBody = (name: string): string => {
+    const head = `CREATE TABLE IF NOT EXISTS "public"."${name}" (`;
+    const at = BASELINE.indexOf(head);
+    if (at < 0) return "";
+    return BASELINE.slice(at, BASELINE.indexOf("\n);", at));
+  };
+  const KEY_INPUT_FIELDS = ["tiny_base_days", "anchor_null_reason", "venue", "flows", "utc_day_iso", "nav_mark", "mark_day"];
+
+  it("compute_jobs_kind_check still admits derive_broker_dailies, and both statements quote it", () => {
+    const check = BASELINE.split("\n").find((l) => l.includes('CONSTRAINT "compute_jobs_kind_check" CHECK')) ?? "";
+    expect(storedBy(check, "'derive_broker_dailies'::")).toBe(true);
+    expect(storedBy(FRESHNESS_SCOPE_SQL, "'derive_broker_dailies'")).toBe(true);
+    expect(storedBy(FRESHNESS_KEYS_SQL, "'derive_broker_dailies'")).toBe(true);
+  });
+
+  it("job_worker.py still writes every key_inputs field the keys statement reads, and the statement quotes each", () => {
+    for (const f of KEY_INPUT_FIELDS) {
+      expect(storedBy(JOB_WORKER, `"${f}"`), `job_worker.py no longer writes "${f}"`).toBe(true);
+      expect(storedBy(FRESHNESS_KEYS_SQL, `'${f}'`), `the keys statement no longer reads '${f}'`).toBe(true);
+    }
+  });
+
+  it("allocator_equity_derive.py still writes realized_terminal_day, and both statements read it", () => {
+    expect(storedBy(EQUITY_DERIVE, '"realized_terminal_day"')).toBe(true);
+    expect(storedBy(FRESHNESS_SCOPE_SQL, "'realized_terminal_day'")).toBe(true);
+    expect(storedBy(FRESHNESS_KEYS_SQL, "'realized_terminal_day'")).toBe(true);
+  });
+
+  it("the baseline tables the statements read still carry the columns they name", () => {
+    const returns = tableBody("csv_daily_returns");
+    const derived = tableBody("allocator_equity_derived");
+    expect(returns).not.toBe("");
+    expect(derived).not.toBe("");
+    for (const c of ['"api_key_id"', '"date"']) expect(storedBy(returns, c), `csv_daily_returns lost ${c}`).toBe(true);
+    for (const c of ['"payload"', '"computed_at"']) expect(storedBy(derived, c), `allocator_equity_derived lost ${c}`).toBe(true);
+  });
+
+  it("CALIBRATION: the same predicate fails on job_worker.py with the stored key renamed", () => {
+    const drifted = JOB_WORKER.split('"tiny_base_days"').join('"tiny_base_day_list"');
+    expect(drifted).not.toBe(JOB_WORKER);
+    expect(storedBy(JOB_WORKER, '"tiny_base_days"')).toBe(true);
+    expect(storedBy(drifted, '"tiny_base_days"')).toBe(false);
   });
 });
