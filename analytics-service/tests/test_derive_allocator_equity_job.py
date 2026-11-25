@@ -4374,7 +4374,9 @@ def _nc_mt5_ledger_book(*, flows: dict[str, float], basis_pnl: dict[str, float] 
                 "nonpositive", "mt5", 0.0, d[3],
                 flows=flows, dropped_pnl={d[3]: 0.0},
                 basis_flows=flows,
-                basis_pnl=basis_pnl or {d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: 0.0},
+                basis_pnl=(
+                    {d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: 0.0} if basis_pnl is None else basis_pnl
+                ),
             ),
         )
     ])
@@ -4415,6 +4417,19 @@ async def test_no_capital_exit_mt5_ledger_exactly_at_minus_the_dust_floor_still_
     assert payload["no_capital_exited_keys"] == [
         {"api_key_id": "key-C", "reason": "nonpositive", "day": d[2]}
     ]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_empty_basis_lists_are_refused_as_ledger_basis_absent() -> None:
+    """NOCAP-01 review WR-01. A row carrying ``composed_flows: []`` and ``composed_day_pnl: []`` reads
+    as an empty pair that sums to 0.0, which the gate would take for a proved-empty ledger. The job's
+    own rule treats an empty day P&L as no basis, so it is refused as ``ledger_basis_absent``."""
+    payload = await _compose_no_capital_book(_nc_mt5_ledger_book(flows={}, basis_pnl={}))
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"ledger_basis_absent": 1}
 
 
 @pytest.mark.asyncio
@@ -4548,14 +4563,14 @@ async def test_no_capital_exit_a_terminal_exactly_at_minus_the_dust_floor_is_not
 
 def test_no_capital_ledger_level_is_pure_over_the_stored_basis() -> None:
     """NOCAP-01 (DEC-02-A). The level is the sum of the basis' flows and P&L over the key's own
-    row: None for no basis, 0.0 for an empty one, 80000.0 - 20000.0 + 0.0 = 60000.0 for the tracer
-    shape, and None (no proof) for a non-finite total, so an unreadable number never proves an
-    account empty."""
+    row: None for no basis or an empty day P&L (the job's own rule: no day P&L is no basis),
+    80000.0 - 20000.0 + 0.0 = 60000.0 for the tracer shape, and None (no proof) for a non-finite
+    total, so an unreadable number never proves an account empty."""
     from services.job_worker import _no_capital_ledger_level
 
     d = _BTC_DAYS
     assert _no_capital_ledger_level(None) is None
-    assert _no_capital_ledger_level(({}, {})) == 0.0
+    assert _no_capital_ledger_level(({}, {})) is None
     assert _no_capital_ledger_level(({d[0]: 80_000.0, d[3]: -20_000.0}, {d[3]: 0.0})) == 60_000.0
     assert _no_capital_ledger_level(({d[0]: float("inf")}, {d[3]: 0.0})) is None
     assert _no_capital_ledger_level(({d[0]: 1.0}, {d[3]: float("nan")})) is None

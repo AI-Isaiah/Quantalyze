@@ -16740,15 +16740,17 @@ def _no_capital_ledger_level(
     key's own ``key_inputs`` row, or None. For MT5 the stored realized terminal copies the live
     balance read, so A2 on it is circular; the writer builds both series from the deal ledger
     (``history_deals_get``, a full-history fetch), never from ``account_info``, so their sum is
-    the balance the deals imply. Pure over stored numbers. None for no basis, or for a non-finite
-    total (an unreadable number is not evidence of an empty account).
+    the balance the deals imply. Pure over stored numbers. None for no basis, for an empty day P&L
+    (the job's own rule treats it as no basis: an empty pair sums to 0.0 and would read as a proved
+    empty ledger), or for a non-finite total (an unreadable number is not evidence of an empty
+    account).
 
     The caller confirms emptiness over a two-sided band, ``-DUST_NAV_FLOOR <= level <= DUST_NAV_FLOOR``,
     mirroring A2's ``<=``. A ledger above the band says the account is funded; one below it says the
     stored deals miss funding (a withdrawal with no deposit). Neither proves the account empty, and
     the replay does NOT catch the far-negative one downstream, so the caller refuses both. Known bound (RESEARCH A7): a native-BTC MT5 key with a small non-zero
     native terminal adds a bounded extra term to this sum; both live PROD exits are USD keys."""
-    if basis is None:
+    if basis is None or not basis[1]:
         return None
     total = float(sum(basis[0].values())) + float(sum(basis[1].values()))
     return total if math.isfinite(total) else None
