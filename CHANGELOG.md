@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.133.82.0] - 2026-11-26 — Phase 236 FIGUREMATH: every engine annualizes one way, CVaR is historical, and moved figures are named for the fleet re-derive
+
+The stored Python metrics, the factsheet engine, the Scenario planner, the OG share card, the compare surface and the optimizer now follow one convention, F-5 "365, ddof 1 everywhere": a year is 365 days, risk is annualized by frequency (crypto 365, traditional 252), and every annualized dispersion is the sample standard deviation. CVaR is the historical figure and is null when the TOTAL record has fewer than 60 observations (founder ruling Q2, "Total record only"). A zoomed window always shows it. CAGR uses one span rule everywhere, first to last observed date in whole days over 365, and the factsheet now prints that span (Q1, "Keep calendar span, show it"). quantstats moves 0.0.81 to 0.0.86 and each upstream correction is adopted or kept per metric (Q3). The per-metric record is `236-QUANTSTATS-DECISIONS.md` in the phase directory, 16 rows. Requirements FIG-01 to FIG-04 are met in code. FIG-05's fleet re-derive is a PROD write handed to the coordinator through `docs/runbooks/figuremath-fleet-rederive.md`, and it is still pending (see Notes).
+
+### Changed: the figures that move
+- **CAGR and Calmar on a narrowed range, window KPIs and the computed fallback (`compute()`).** Fractional days over 365.25 become whole days over 365, with the one-day floor kept. Only the exponent moves, by about 0.07%. Frozen fixture A: CAGR 0.5234445 to 0.5230056, Calmar 20.2784 to 20.2614. The factsheet record length reads 165/365 years. Stored Python CAGR was already on this rule and does not move.
+- **Scenario planner and OG card CAGR and Calmar (`calendarYears`).** Same rule. BLEND-07: 0.41303 to 0.41270. 300-day card case: 0.200398 to 0.200548.
+- **Sample sd (`SD_DDOF` = 1) in every TypeScript annualized dispersion.** A volatility rises by sqrt(n/(n-1)) and a Sharpe falls by sqrt((n-1)/n). The sites are `compute()` vol and Sharpe (fixture A: vol 0.1301830 to 0.1324085, Sharpe 3.19059 to 3.13696), the bootstrap Sharpe band, the rolling vol and Sharpe charts, tracking error and information ratio, the OG card Sharpe, and the compare surface vol and Sharpe.
+- **Scenario rolling vol and Sharpe hover values** move about 0.4% at w = 126. This supersedes Phase 108's "population std is canonical" decision, which F-5 replaces.
+- **Unchanged on purpose:** skew and kurtosis stay population moments, the Sortino downside RMS is untouched, and `sample-basis-ratios`, `portfolio-stats`, `scenario-benchmark` and `scenario.ts` were already ddof 1 (they now read the constant by name).
+- **`smart_sharpe` and `smart_sortino`** scale by `sqrt(periods_per_year)` instead of a hard-coded sqrt(252). Crypto strategies move by about x1.2035; traditional strategies do not move.
+- **XIRR / allocator MWR** divides day spans by 365 instead of 365.25. Reference sequence 0.15636675 to 0.15625176. Stored in `allocator_equity_derived` (`equity_curve`, `payload.scalars.mwr`), so it moves on each allocator's next compose.
+- **The weight optimizer** annualizes on the blend's frequency clock (365 crypto, 252 traditional) instead of a fixed 252. Its objectives are scale-invariant, so no suggested weight moves beyond solver tolerance (pinned).
+- **CVaR.** `CVAR_MIN_OBS = 60` is one constant per language. Stored `cvar` is null below 60 non-NaN returns; `var_1d_95` is never floored. The floor also applies to the factsheet's whole-record `cvar95` (strategy and allocator-portfolio payloads, the mark-to-market and smoothed bundles, and the leverage what-if), the book's ES95 widget (which keeps its n < 10 state) and the Scenario blend's CVaR (which replaces the n < 10 floor). It counts the record's own non-NaN observations, the count Python floors on.
+- **quantstats 0.0.86, per `236-QUANTSTATS-DECISIONS.md`.** The pin moves in `requirements.in`, `requirements.txt` and `requirements-dev.txt`, and the Dependabot hold is dropped. The lock diff is one line and the digest was checked against PyPI.
+  - ADOPT `serenity_index`, whose CVaR leg becomes the historical tail of the drawdown series. It moves for every strategy with a drawdown: golden_252d 0.019258489731125872 to 0.01893104775322315.
+  - ADOPT `common_sense_ratio`, `time_in_market` and `probabilistic_sharpe_ratio` on observed rows. These move for NaN-carrying series only.
+  - KEEP stored `cvar` and `var_1d_95` on the repo's floor-index historical rule (F-6), and `r_squared` on a benchmark gap (166.4 D-A).
+  - The PSR base and `time_in_market` rows are measured extensions that the coordinator may overrule; each reverts in one line.
+- **`FIGURE_DEFS_VERSION` 2 to 3** in `metrics.py` and `figure-gate.ts`. A version-2 stored row is read as old, so the factsheet shows its computed figures (already on the new convention) until the row is re-derived.
+- **`OG_CARD_VERSION` 3 to 4.** A rendered card is cached for up to 24 h at the CDN, plus 7 days stale-while-revalidate, so the published URL's `?v=` moves.
+- **The factsheet payload cache key moves to `factsheet-v2-payload-v29`.** Computed values change at deploy and the payload gains `cagrStart` and `cagrEnd`. Phase 252 took v28 the same day.
+
+### Added
+- **The CAGR span line.** Under the CAGR row the factsheet prints "CAGR over <first> to <last> (<n> days)". At full history this is the stored span; on a range it is the window's own dates. It also covers the allocator book, the mark-to-market and smoothed bases, the USD view and the Scenario composer. It is never printed under a dashed CAGR, including Phase 252's range-withheld options-book dash. New stored keys are `cagr_start` and `cagr_end`; an older row prints no line.
+- **"Needs 60 observations".** This note sits beside a CVaR dash caused by the floor, on the factsheet cell and the VaR/ES widget, and is derived from `CVAR_MIN_OBS`. It also shows on a JSON-cached page, where the floored figure arrives as null. It does not show on a withheld window, whose dash has another cause.
+- **One named constant set per language,** with a cross-language pin: `CALENDAR_DAYS_PER_YEAR`, `SD_DDOF`, the 365/252 frequency clocks and `CVAR_MIN_OBS`.
+- **`docs/runbooks/figuremath-fleet-rederive.md`,** the coordinator's PROD procedure for the fleet re-derive. It reaches every non-composite strategy (CSV and every key venue, not only the ledger venues). Every write is gated on the database marker.
+  - Before writing, it binds an explicit id set and runs a pre-flight.
+  - It STOPs when the bind or allocator read comes back empty or carries the wrong marker, and when the count of tagged jobs falls short of `selected`.
+  - Afterwards it diffs status per id and reports number-to-null and null-to-number counts for every moved figure and for the allocator MWR. Each number-to-null needs a named cause.
+  - A Recovery section is included, and the 155.2 freeze side is decided by the coordinator's written confirmation.
+
+### Fixed (review rounds)
+- `compute()` with an unparseable first or last date has no span: years, CAGR and Calmar are NaN, not the one-day-floor `eq ** 365 - 1`.
+- An upstream 422 on `/api/scenario/optimize` is captured to Sentry as request-contract drift (status, objective and series count only). The user response stays the flat 502.
+- The `common_sense_ratio` and PSR broken-mirror preconditions read the observed series both mirrors run on.
+
+### Tests
+- A census of every annualizing site in both languages, with an empty migration list asserted in both. It counts camelCase `periodsPerYear` defaults.
+- A CVaR reader census that classifies every `cvar` reader and names the behaviour test pinning each total-record floor.
+- A closed-form annualization parity fixture shared by the Python and TypeScript engines (rtol 1e-9). The Python oracle imports no production helper.
+- The frozen spine is re-baselined as a reviewed act. Fixtures were moved by hand with dated blocks, and `regen_golden.py` was not run.
+- Every data-integrity and user-facing gate was neutered to RED and restored from a byte backup.
+
+### Removed
+- `TODOS.md` entries closed and deleted: `[194-ENGINE-CONSTANTS]`, `QUANTSTATS-0086-REDERIVE-01`, `167.1.2.2.1-CAGR-EMPTY-SPAN`, and the non-composite "Backbone-bypass parity surfaces" bullet.
+
+### Notes
+- **Freeze side: BEFORE 155.2 plan 12's recapture.** `155.2-12-SUMMARY.md` was absent on `origin/main` at ship time (re-checked 2026-11-26).
+- **FIG-05 is pending on the coordinator's fleet re-derive.** It runs after deploy, from the runbook, and its stated precondition is Phases 229, 233 and 234 merged; 233 DERIBITTRUTH was not merged at ship time. Until it runs:
+  - stored rows read version 2 and the factsheet shows computed figures;
+  - the allocator MWR and the stored `cvar`, `smart_*` and `serenity_index` keep their old values.
+- **Known limits:**
+  - `compute()`'s Sortino downside RMS divides by the observed count, outside the ddof rule.
+  - An unknown leg reads 252 in Python and 365 on the TS blend clock. This is deliberate and unowned.
+  - A span under one whole day reads 0 years in the Scenario and OG engines, where Python clamps to one day. ISO day strings cannot produce such a span.
+  - The composite half of the old `L2214` item is out (F-2).
+- **Recorded, not fixed (LOW):**
+  - The runbook's `tagged_total` comparison is by eye and has no reconcile step for a dedup race.
+  - "An empty CSV cell is null" assumes `supabase db query -o csv` output nobody has yet observed.
+- No migration.
+
 ## [0.133.81.2] - 2026-11-26 — fix: the Deribit options probe's main() test gives logging back, so the redact-bridge tests stop reading an empty log
 
 `tests/test_stdlib_redact_bridge.py` failed in the `python` job on PR #1352 (head `8c0453b8f`, worker gw2: the dict-args and format-placeholder tests) and on PR #1354 (head `f615d8ec4`: the signature-in-arg and signature-in-format-string tests). Each failure read an EMPTY capture buffer, passed on rerun, and passed when the file ran alone. Neither PR touches logging. This fixes the test that leaks the state, not the tests that read it.
