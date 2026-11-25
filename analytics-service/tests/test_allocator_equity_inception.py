@@ -421,3 +421,223 @@ async def test_job_threads_tiny_base_days_to_the_out_of_window_count(stated: boo
     payload = payloads[0]
     assert ("out_of_window_flow" in payload["degrade_reasons"]) is (not stated)
     assert payload["is_trustworthy"] is stated
+
+
+# ── 234 founder ruling 2026-11-24: a stated tail day after the last return ────
+# A flow after the key's last return day on a day the key's own row states in
+# tiny_base_days is a stated day's flow, not an out-of-window flow. The scope is
+# exactly that and the arms below pin each edge of it.
+
+
+def _post_window_book() -> tuple[dict[int, float], float]:
+    """A clean opening flow plus a 5000 deposit the day after the last return day, with the
+    exact anchor (r = 0 on the extra day), built forward in exact arithmetic."""
+    flows = {-1: 100_000.0}
+    start = _start_for_share(0.5e-4, 100_000.0)
+    _, anchor_before = _exact_book(start, flows)
+    return {**flows, _N_WINDOW: 5_000.0}, anchor_before + 5_000.0
+
+
+def test_a_stated_tail_day_after_the_last_return_is_not_out_of_window() -> None:
+    flows, anchor = _post_window_book()
+
+    ke = replay_key_equity(
+        _returns(), _flows(flows), anchor, history_reaches_inception=True,
+        tiny_base_days=frozenset({_iso(_N_WINDOW)}),
+    )
+
+    assert ke.degrade_reasons == frozenset()
+    assert "out_of_window_flows" not in ke.flags
+    assert ke.flags["opening_flows_reconciled"] == 1
+    assert ke.is_trustworthy is True
+
+
+def test_a_different_stated_day_keeps_the_post_window_flow_counted() -> None:
+    flows, anchor = _post_window_book()
+
+    ke = replay_key_equity(
+        _returns(), _flows(flows), anchor, history_reaches_inception=True,
+        tiny_base_days=frozenset({_iso(_N_WINDOW + 1)}),
+    )
+
+    assert DegradeReason.OUT_OF_WINDOW_FLOW in ke.degrade_reasons
+    assert ke.flags["out_of_window_flows"] == 1
+
+
+def test_a_listed_day_before_the_window_is_outside_the_ruling() -> None:
+    """The ruling is about days AFTER the last return. A listed earlier day keeps counting."""
+    flows = {-5: 30_000.0, -1: 70_000.0}
+    start = _start_for_share(0.5e-4, 100_000.0)
+    _, anchor = _exact_book(start, flows)
+
+    ke = replay_key_equity(
+        _returns(), _flows(flows), anchor, history_reaches_inception=True,
+        tiny_base_days=frozenset({_iso(-5)}),
+    )
+
+    assert DegradeReason.OUT_OF_WINDOW_FLOW in ke.degrade_reasons
+    assert ke.flags["out_of_window_flows"] == 1
+
+
+def test_a_listed_day_inside_the_window_changes_nothing() -> None:
+    """A listed in-window day exempts nothing: the unstated post-window flow still counts."""
+    flows, anchor = _post_window_book()
+
+    ke = replay_key_equity(
+        _returns(), _flows(flows), anchor, history_reaches_inception=True,
+        tiny_base_days=frozenset({_iso(3)}),
+    )
+
+    assert DegradeReason.OUT_OF_WINDOW_FLOW in ke.degrade_reasons
+    assert ke.flags["out_of_window_flows"] == 1
+
+
+@pytest.mark.parametrize("absent", [None, frozenset()], ids=["none", "empty"])
+def test_an_absent_or_empty_list_is_the_call_without_it(absent: frozenset[str] | None) -> None:
+    flows, anchor = _post_window_book()
+    plain = replay_key_equity(
+        _returns(), _flows(flows), anchor, history_reaches_inception=True,
+    )
+
+    ke = replay_key_equity(
+        _returns(), _flows(flows), anchor, history_reaches_inception=True,
+        tiny_base_days=absent,
+    )
+
+    assert ke.degrade_reasons == plain.degrade_reasons
+    assert ke.flags == plain.flags
+    assert ke.equity is not None and plain.equity is not None
+    assert list(ke.equity.items()) == list(plain.equity.items())
+
+
+@pytest.mark.parametrize("stated", [True, False], ids=["stated-days", "no-list"])
+def test_the_exemption_applies_on_the_writer_basis(stated: bool) -> None:
+    """Returns on days 0-2, writer day P&L 0.0 on days 0-4, a writer flow of +3.0 on day 3 and
+    the realized terminal on day 4: the shape of the Deribit evidence (a flow on a tail day
+    past the last return, both days stated)."""
+    days = [_iso(i) for i in range(5)]
+    flow = ExternalFlow(days[3], 3.0)
+
+    ke = replay_key_equity(
+        pd.Series([0.01, 0.0, 0.0], index=days[:3], name="k"),
+        [flow],
+        100.0,
+        realized_terminal=(days[4], 100.0),
+        writer_day_pnl={d: 0.0 for d in days},
+        writer_flows=[flow],
+        tiny_base_days=frozenset({days[3], days[4]}) if stated else None,
+    )
+
+    assert ke.flags["writer_basis"] is True
+    if stated:
+        assert DegradeReason.OUT_OF_WINDOW_FLOW not in ke.degrade_reasons
+        assert "out_of_window_flows" not in ke.flags
+    else:
+        assert DegradeReason.OUT_OF_WINDOW_FLOW in ke.degrade_reasons
+        assert ke.flags["out_of_window_flows"] == 1
+
+
+# ── the strict reader ─────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"tiny_base_days": None}, {"tiny_base_days": []}],
+    ids=["absent", "null", "empty"],
+)
+def test_the_reader_reads_an_absent_or_empty_field_as_no_stated_days(payload: dict) -> None:
+    assert derive.read_tiny_base_days(payload) == frozenset()
+
+
+def test_the_reader_returns_the_stated_days() -> None:
+    got = derive.read_tiny_base_days({"tiny_base_days": ["2026-11-09", "2026-11-10"]})
+    assert got == frozenset({"2026-11-09", "2026-11-10"})
+
+
+@pytest.mark.parametrize(
+    ("stored", "error"),
+    [
+        ("2026-11-09", TypeError),
+        ([20261109], TypeError),
+        (["2026-13-01"], ValueError),
+        (["2026-11-9"], ValueError),
+        (["garbage-day"], ValueError),
+    ],
+    ids=["not-a-list", "non-string-item", "impossible-day", "non-canonical", "garbage"],
+)
+def test_the_reader_refuses_a_malformed_list_without_echoing_it(
+    stored: object, error: type[Exception]
+) -> None:
+    with pytest.raises(error) as exc:
+        derive.read_tiny_base_days({"tiny_base_days": stored})
+    assert "tiny_base_days" in str(exc.value)
+    for leaked in ("2026-11-09", "20261109", "2026-13-01", "2026-11-9", "garbage-day"):
+        assert leaked not in str(exc.value)
+
+
+# ── compose wiring ────────────────────────────────────────────────────────────
+
+def _compose_post_window(by_key: dict[str, frozenset[str]] | None) -> dict:
+    flows, anchor = _post_window_book()
+    return compose_allocator_equity(
+        {"key-A": _returns()},
+        {"key-A": _flows(flows)},
+        {"key-A": anchor},
+        full_history_keys={"key-A"},
+        tiny_base_days_by_key=by_key,
+    )
+
+
+def test_compose_passes_a_keys_own_stated_days_to_the_replay() -> None:
+    mine = _compose_post_window({"key-A": frozenset({_iso(_N_WINDOW)})})
+    assert "out_of_window_flow" not in mine["degrade_reasons"]
+    assert mine["is_trustworthy"] is True
+
+    other = _compose_post_window({"some-other-key": frozenset({_iso(_N_WINDOW)})})
+    assert "out_of_window_flow" in other["degrade_reasons"]
+    assert other["is_trustworthy"] is False
+
+    assert "out_of_window_flow" in _compose_post_window(None)["degrade_reasons"]
+
+
+# ── job: a malformed list is a named corrupt input; a departed key reads its own ──
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored", ["2026-11-09", ["garbage-day"]], ids=["not-a-list", "bad-day"])
+async def test_job_refuses_a_malformed_tiny_base_days_as_corrupt_input(stored: object) -> None:
+    from tests.test_derive_allocator_equity_job import DERIVED_TABLE, _assert_refusal_recorded
+
+    inputs = _job_inputs_post_window_flow(True)
+    inputs[DERIVED_TABLE][0]["payload"]["tiny_base_days"] = stored
+    result, fake, _ = await _run_job(inputs)
+
+    assert result.outcome.name == "FAILED"
+    _assert_refusal_recorded(fake, "alloc-open", "input_corrupt")
+    assert "garbage-day" not in repr(result)
+    assert "2026-11-09" not in repr(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stated", [True, False], ids=["stated-day", "no-list"])
+async def test_a_departed_key_reads_its_own_stated_days(stated: bool) -> None:
+    from tests.test_allocator_equity_departed import (
+        ALLOC,
+        DAYS,
+        _book,
+        _live_and_departed,
+        _run,
+    )
+    from tests.test_derive_allocator_equity_job import DERIVED_TABLE, _gate_key
+
+    departed = _gate_key(
+        "key-R", ALLOC, venue_account_id="acct-revoked", sync_status="revoked",
+    )
+    fake = _live_and_departed(departed, DAYS[:8])
+    row = next(r for r in fake.rows[DERIVED_TABLE] if r["kind"] == "key_inputs:key-R")
+    row["payload"]["flows"] = [{"utc_day_iso": DAYS[8], "usd_signed": 50.0}]
+    if stated:
+        row["payload"]["tiny_base_days"] = [DAYS[8]]
+    result = await _run(fake)
+
+    assert result.outcome.name == "DONE"
+    payload = _book(fake)
+    assert ("out_of_window_flow" in payload["degrade_reasons"]) is (not stated)
