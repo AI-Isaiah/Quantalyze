@@ -68,14 +68,14 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Data integrity: venue reads (BYBITREADS, OKXTRADES)
 
-- [ ] **VREAD-01**: The Bybit derive anchor sums the same set of stable coins as the current-equity read, through one shared coin-set constant. (covers: 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR)
+- [x] **VREAD-01**: The Bybit derive anchor sums the same set of stable coins as the current-equity read, through one shared coin-set constant. (covers: 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR)
 - [x] **VREAD-02**: The Bybit holdings poll includes USDC-settled and inverse positions and their uPnL, not only USDT-linear ones. (covers: 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY)
 - [x] **VREAD-03**: A Bybit strategy trade sync whose start is older than seven days returns every execution in the requested window, or refuses by name. (covers: 167.2.1.1.2.1-STRATEGY-BYBIT-7DAY)
 - [x] **VREAD-04**: A Bybit on-chain deposit is counted exactly once. Replace or union is decided on probe evidence, and recorded as undecided if the probe cannot tell the two apart. (covers: 186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED)
 - [x] **VREAD-05**: The Bybit owner's static egress IP is allow-listed (a founder action, recorded with its date), and that key's daily derive no longer errors for that reason. (covers: 167.1.2.2-BYBIT-STATIC-EGRESS)
-- [ ] **VREAD-06**: An OKX daily P&L bill in a currency other than USDT is converted at a stated rate or refused by name. It is never summed at face value. (covers: 167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY)
-- [ ] **VREAD-07**: An OKX first window longer than the page cap completes across ticks instead of truncating every day. Raising `OKX_BILLS_PAGE_CAP` is not a close. If an earlier phase already closed this, the closing evidence is recorded instead. (covers: 167.1.2.2.2-OKX-PERSISTENT-TRUNCATION)
-- [ ] **VREAD-08**: `api_keys.last_fetched_trade_timestamp` never reads ahead of the newest stored trade, and a key found ahead has its skipped days re-read. (covers: 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD)
+- [x] **VREAD-06**: An OKX daily P&L bill in a currency other than USDT is converted at a stated rate or refused by name. It is never summed at face value. (covers: 167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY)
+- [x] **VREAD-07**: An OKX first window longer than the page cap completes across ticks instead of truncating every day. Raising `OKX_BILLS_PAGE_CAP` is not a close. If an earlier phase already closed this, the closing evidence is recorded instead. (covers: 167.1.2.2.2-OKX-PERSISTENT-TRUNCATION)
+- [x] **VREAD-08**: `api_keys.last_fetched_trade_timestamp` never reads ahead of the newest stored trade, and a key found ahead has its skipped days re-read. (covers: 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD)
 
 ### Data integrity: Deribit book and freshness (DERIBITBOOK, Deribit stale returns)
 
@@ -88,7 +88,7 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 - [ ] **HOLD-01**: A Holdings row whose key is missing from the identity read fails loud. It never counts as an account of its own. (covers: 170.4-IDENTITY-READ-COMPLETENESS)
 - [ ] **HOLD-02**: Match scoring applies the native-unpriced marker per account, so for a multi-key account match AUM and unpriced days equal what Holdings reports. (covers: 170.4-MATCH-UNPRICED-PER-KEY)
-- [ ] **HOLD-03**: The writer-basis gate compares per-day values as well as the calendar, and refuses a same-day re-derive pair whose P&L does not match. (covers: 167.1.2.2.1-WRITER-BASIS-VALUES)
+- [ ] **HOLD-03**: The writer-basis gate compares per-day values as well as the calendar, and refuses a same-day re-derive pair whose P&L does not match. (covers: 167.1.2.2.1-WRITER-BASIS-VALUES) ⭐ NOTE 2026-11-24 (planning, recorded in 229-CONTEXT.md): the per-day comparison is a compose-side `returns_stamp` (each derive stores the per-day returns it wrote in its `key_inputs` row; the compose compares it per raw key before the stitch and refuses a differing pair as the blocking `key_inputs_mismatch`). `read_writer_basis` stays byte-unchanged, because editing it fires the open entry `167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY` and a post-stitch check reads the stitched series. Known limit: a correction confined to a day with no stored return that moves no other return leaves the pair content-consistent and is not refused; a row written before this change carries no stamp and is counted, not refused.
 - [ ] **HOLD-04**: When the dashboard's unpriced-marker read fails, the page shows a note and a Sentry event fires. Stale rows are never shown silently. (covers: 170.4-DASHBOARD-MARKER-READ-SILENT)
 - [ ] **HOLD-05**: Every failing key of a shared account is named in the missing-data message, even when another key with the same cause already prints a line. (covers: 198-SHARED-ACCOUNT-FALLBACK-UNNAMED)
 
@@ -126,9 +126,10 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 ### User-facing: cached state matches the truth (SURFACECACHE)
 
 - [ ] **CACHE-01**: A strategy published after its OG card was first requested shows its real card on the next request. A not-found card is never long-cached. (covers: 170.3-OG-NOTFOUND-CACHE)
-- [ ] **CACHE-02**: The composer stores its selected range as dates, so a 12M preset always ends on the latest day and keeps the same dates when the series grows at the front. (covers: 201.1-COMPOSER-RANGE-AS-DATES)
+- [x] **CACHE-02**: The composer stores its selected range as dates, so a 12M preset always ends on the latest day and keeps the same dates when the series grows at the front. (covers: 201.1-COMPOSER-RANGE-AS-DATES)
 - [ ] **CACHE-03**: A failed BTC price read is never cached as a normal payload. The next view retries it, so the USD toggle is not disabled for the cache lifetime. (covers: 164.6.6.2.1-USDVIEW-READFAIL-CACHED)
-- [ ] **CACHE-04**: Discovery never ranks a BTC-unit return beside USD returns as if the two were comparable. (covers: 164.6.6.2.1-DISCOVERY-RANKING-HONESTY)
+- [x] **CACHE-04**: Discovery never ranks a BTC-unit return beside USD returns as if the two were comparable. (covers: 164.6.6.2.1-DISCOVERY-RANKING-HONESTY)
+  ⛔ CORRECTED 2026-11-24 (founder ruling, Phase 239 CONTEXT): BTC-unit and USD returns are ranked together as pure performance, with no BTC price conversion; the "in BTC" chip stays. The line above is kept as lineage.
 
 ### User-facing: honest connect answers (CONNECTTRUTH)
 
@@ -136,13 +137,13 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [ ] **CONN-02**: Reconnecting an MT5 account with a rotated or mistyped password gets a named answer that matches what was stored. Validating and storing the new password, or refusing by name, is a founder ruling at plan time. (covers: L4097)
 - [ ] **CONN-03**: MT5 account identity includes the broker server, so the same login on two servers never collides. The backfill uses no data-reading `DO` guard. (covers: L4105)
 - [ ] **CONN-04**: `KEY_ORPHANED` copy tells an allocator-role owner which key to Disconnect. The archived-composite case is out (F-2). (covers: 167.1.2-ORPHAN-COPY-FIX)
-- [ ] **CONN-05**: Every validate-key 400 body carries the same machine-readable code field on every venue. The entry's other two findings (permanence plumbing with one consumer, coordinate drift) are fixed or recorded with a reason. (covers: L2510)
-- [ ] **CONN-06**: A month-name date cell in a numeric-date CSV column is either parsed or rejected with a message naming the cell and the expected format (founder ruling at plan time). (covers: 170.1-CSV-ODD-SPELLING-REJECTED)
+- [x] **CONN-05**: Every validate-key 400 body carries the same machine-readable code field on every venue. The entry's other two findings (permanence plumbing with one consumer, coordinate drift) are fixed or recorded with a reason. (covers: L2510)
+- [x] **CONN-06**: A month-name date cell in a numeric-date CSV column is either parsed or rejected with a message naming the cell and the expected format (founder ruling at plan time). (covers: 170.1-CSV-ODD-SPELLING-REJECTED)
 
 ### User-facing: fair anonymous limits (RATELIMITFAIR)
 
-- [ ] **RLIM-01**: A few anonymous visitors from different IPs cannot exhaust the shared anonymous verify-strategy bucket, and no limit is keyed on the proxy's IP. A per-IP anonymous tier through the signed claim, or a raised shared tier, is a founder ruling at plan time. (covers: L4491)
-- [ ] **RLIM-02**: A signed-in user validating a CSV within the edge limit never gets an upstream 429, because the edge limit and the shared `/process-key` tenant tier agree. The limiter's docblock cites the current upstream cap. (covers: L4501)
+- [x] **RLIM-01**: A few anonymous visitors from different IPs cannot exhaust the shared anonymous verify-strategy bucket, and no limit is keyed on the proxy's IP. A per-IP anonymous tier through the signed claim, or a raised shared tier, is a founder ruling at plan time. (covers: L4491)
+- [x] **RLIM-02**: A signed-in user validating a CSV within the edge limit never gets an upstream 429, because the edge limit and the shared `/process-key` tenant tier agree. The limiter's docblock cites the current upstream cap. (covers: L4501) ⛔ CORRECTED 2026-11-24 (founder ruling, Phase 240 CONTEXT): agreement is met by a CSV-scoped per-tenant `/process-key` tier (60/minute, exempt from the 500/hour ceiling), not by retuning the shared tenant tier, which stays 100/hour.
 
 ### Security: demo credentials (SECRETSHYGIENE; in v1.22 by founder exception, F-10)
 
@@ -163,8 +164,8 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Carried phase 223 FLOWKINDS (flow-source half only, F-2)
 
-- [ ] **FLOWK-02**: `run_sync_funding_job` and `okx_archive_job` each have a recorded, test-pinned decision to refuse a malformed funding row by name or to keep dropping it. The decision is taken with the founder wherever a published number changes. (covers: 186-OTHER-FUNDING-CALLERS-DROP, non-composite callers)
-- [ ] **FLOWK-03**: The per-key count of `daily_pnl_malformed_<venue>` flags on PROD is recorded read-only, and the founder's ruling on refusing a malformed realized row is recorded before any such refusal is switched on. (covers: 186-REALIZED-MALFORMED-COUNT)
+- [x] **FLOWK-02**: `run_sync_funding_job` and `okx_archive_job` each have a recorded, test-pinned decision to refuse a malformed funding row by name or to keep dropping it. The decision is taken with the founder wherever a published number changes. (covers: 186-OTHER-FUNDING-CALLERS-DROP, non-composite callers)
+- [x] **FLOWK-03**: The per-key count of `daily_pnl_malformed_<venue>` flags on PROD is recorded read-only, and the founder's ruling on refusing a malformed realized row is recorded before any such refusal is switched on. (covers: 186-REALIZED-MALFORMED-COUNT)
 
 ### Carried phase 225 ONEACCOUNTONCE
 
@@ -287,8 +288,8 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | ERRC-01 | Phase 222 | Pending |
 | ERRC-02 | Phase 222 | Pending |
 | ERRC-03 | Phase 222 | Pending |
-| FLOWK-02 | Phase 223 | Pending |
-| FLOWK-03 | Phase 223 | Pending |
+| FLOWK-02 | Phase 223 | Complete |
+| FLOWK-03 | Phase 223 | Complete |
 | DEAD-01 | Phase 224 (v1.23) | Pending |
 | DEAD-02 | Phase 224 (v1.23) | Pending |
 | DEAD-03 | Phase 224 (v1.23) | Pending |
@@ -302,26 +303,26 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | MT5D-01 | Phase 227 | Complete |
 | MT5D-02 | Phase 230 | Pending |
 | MT5D-03 | Phase 230 | Pending |
-| MT5D-04 | Phase 229 | Pending |
-| MT5D-05 | Phase 229 | Pending |
-| MT5D-06 | Phase 229 | Pending |
-| MT5D-07 | Phase 229 | Pending |
+| MT5D-04 | Phase 229 | Shipped (#1328), human verification pending |
+| MT5D-05 | Phase 229 | Shipped (#1328), human verification pending |
+| MT5D-06 | Phase 229 | Shipped (#1328), human verification pending |
+| MT5D-07 | Phase 229 | Shipped (#1328), human verification pending |
 | MT5D-08 | Phase 225 | Pending |
-| VREAD-01 | Phase 231 | Pending |
+| VREAD-01 | Phase 231 | Complete |
 | VREAD-02 | Phase 231 | Complete |
 | VREAD-03 | Phase 231 | Complete |
 | VREAD-04 | Phase 231 | Complete |
 | VREAD-05 | Phase 231 | Complete |
-| VREAD-06 | Phase 232 | Pending |
-| VREAD-07 | Phase 232 | Pending |
-| VREAD-08 | Phase 232 | Pending |
+| VREAD-06 | Phase 232 | Complete |
+| VREAD-07 | Phase 232 | Complete |
+| VREAD-08 | Phase 232 | Complete |
 | DBOOK-01 | Phase 233 | Pending |
 | DBOOK-02 | Phase 233 | Pending |
 | FRESH-01 | Phase 233 | Pending |
 | FRESH-02 | Phase 233 | Pending |
 | HOLD-01 | Phase 235 | Pending |
 | HOLD-02 | Phase 235 | Pending |
-| HOLD-03 | Phase 229 | Pending |
+| HOLD-03 | Phase 229 | Shipped (#1328), human verification pending |
 | HOLD-04 | Phase 235 | Pending |
 | HOLD-05 | Phase 235 | Pending |
 | NOCAP-01 | Phase 234 | Pending |
@@ -344,17 +345,17 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | FACT-04 | Phase 237 | Shipped (#1316), human verification pending |
 | FACT-05 | Phase 238 | Pending |
 | CACHE-01 | Phase 237 | Shipped (#1316), human verification pending |
-| CACHE-02 | Phase 239 | Pending |
+| CACHE-02 | Phase 239 | Complete |
 | CACHE-03 | Phase 237 | Shipped (#1316), human verification pending |
-| CACHE-04 | Phase 239 | Pending |
+| CACHE-04 | Phase 239 | Complete |
 | CONN-01 | Phase 225 | Pending |
 | CONN-02 | Phase 228 | Pending |
 | CONN-03 | Phase 225 | Pending |
 | CONN-04 | Phase 228 | Pending |
-| CONN-05 | Phase 240 | Pending |
-| CONN-06 | Phase 240 | Pending |
-| RLIM-01 | Phase 240 | Pending |
-| RLIM-02 | Phase 240 | Pending |
+| CONN-05 | Phase 240 | Complete |
+| CONN-06 | Phase 240 | Complete |
+| RLIM-01 | Phase 240 | Complete |
+| RLIM-02 | Phase 240 | Complete |
 | SECR-01 | Phase 241 | Pending |
 | SECR-02 | Phase 241 | Pending |
 | SECR-03 | Phase 242 (v1.23) | Pending |

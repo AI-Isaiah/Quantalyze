@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.133.74.2] - 2026-11-25 — records: Phases 223, 229, 231, 232, 239 and 240 phase records; Phase 250 BINANCEFILLS booked
+
+This is a records PR. It changes no source, test, workflow or migration file. It brings onto `main` the planning records of six v1.22 phases that already shipped: 223 FLOWKINDS (#1327), 229 MT5DERIVE2 (#1328), 231 BYBITREADS plan 06 (#1333), 232 OKXTRADES (#1330), 239 SURFACECACHE (#1332) and 240 CONNECTTRUTH (#1334). It replaces the never-opened `records/232-okxtrades` branch (v0.133.70.1). Its content is reused here, but not its version.
+
+### Added
+- **Phase directories**, copied from each phase's branch. Each one only adds files to `main`; none removes or rewrites a file already there.
+  - `223-flowkinds-.../`: CONTEXT, DISCUSSION-LOG, RESEARCH, PATTERNS, VALIDATION, the PROD malformed-flag count (`223-PROD-MALFORMED-COUNT.md`), five PLANs and five SUMMARYs, REVIEW, SECURITY, and VERIFICATION (`status: passed`).
+  - `229-mt5derive2-.../`: CONTEXT, DISCUSSION-LOG, RESEARCH, PATTERNS, VALIDATION, six PLANs and six SUMMARYs (229-06 is `status: partial`), REVIEW with its round-1 CR and SFH files, and VERIFICATION (`status: human_needed`).
+  - `231-bybitreads-.../`: the plan-06 SUMMARY, the wave-4 REVIEW, SECURITY, and VERIFICATION (`status: passed`, SC-4 settled by the founder 2026-11-25).
+  - `232-okxtrades-.../`: CONTEXT, DISCUSSION-LOG, RESEARCH, PATTERNS, VALIDATION, four PLANs and four SUMMARYs, REVIEW, SECURITY, and VERIFICATION (`status: passed`). It carries the founder's SC-2 ruling of 2026-11-24 ("SC-2 = key status only").
+  - `239-surfacecache-.../`: CONTEXT, RESEARCH, PATTERNS, UI-SPEC, VALIDATION, three PLANs and three SUMMARYs, REVIEW, SECURITY, and VERIFICATION (`status: passed`).
+  - `240-connecttruth-.../`: CONTEXT, DISCUSSION-LOG, RESEARCH, PATTERNS, UI-SPEC, VALIDATION, eight PLANs and eight SUMMARYs, REVIEW, SECURITY, and VERIFICATION (`status: passed`).
+- **Phase 250 BINANCEFILLS (v1.22)**, booked with `/gsd-phase` add by founder ruling 2026-11-24 and carried over from `records/232-okxtrades`. It owns the three Binance survivors that the 232 review routed:
+  - R2-02: a quiet stretch of more than 7 days silently stalls a Binance linear key's fills cursor;
+  - R2-01: one symbol that fails on every run holds the cursor for every symbol;
+  - the `BINANCE_PAGE_CAP` stop, which records no flag.
+
+  It must land before `USE_RAW_TRADE_INGESTION` is turned on for Binance; that is its success criterion 4.
+
+### Changed
+- **`verified_at_sha` rebound in all six VERIFICATION files.** Each verdict was issued on a phase-branch commit that the squash merge left unreachable from `main`. Each is now bound to its merge commit, with a dated note under the frontmatter, so that `scripts/verification-drift-report.mjs` can diff from a reachable commit. For every phase, `git diff --name-only <branch sha> <merge sha> -- <drift_subjects>` is empty, so none of the files a verdict rested on differs between the two commits. No VERIFICATION carried `covered_files` or `covered_digest`, so nothing needed converting.
+- **`REQUIREMENTS.md`:**
+  - complete, as a checkbox and in the traceability table: FLOWK-02 and FLOWK-03 (223), VREAD-01 (231), VREAD-06 to VREAD-08 (232), CACHE-02 and CACHE-04 (239), and CONN-05, CONN-06, RLIM-01 and RLIM-02 (240);
+  - MT5D-04 to MT5D-07 and HOLD-03 (229) read "Shipped (#1328), human verification pending" in the traceability table, and their checkboxes stay open;
+  - the founder rulings' dated notes from the phase branches are added to HOLD-03, CACHE-04 and RLIM-02.
+- **`ROADMAP.md`:**
+  - Phases 223, 231, 232, 239 and 240: plan lists ticked, overview bullets ticked with their completion dates, and Progress rows reading Complete with their ship version and PR;
+  - Phase 223: the founder rulings of 2026-11-24 and success criterion 5 (C27);
+  - Phases 239 and 240: the dated founder-ruling corrections to CACHE-04 and RLIM-02;
+  - Phase 229: the plan list in four waves, with 229-01 to 229-05 ticked and 229-06 open. Its Progress row reads "5/6, Shipped v0.133.69.0 (#1328); human verification pending (229-06 Task 2, the founder's live soak)". The phase is not ticked complete;
+  - Phase 250: overview bullet, section and Progress row.
+- **`STATE.md` and `state.json`:** progress is re-derived as 7 of 22 phases (32%). Phase 250 is added, and the roadmap-evolution line for it is recorded. Current Position names Phase 240 CONNECTTRUTH complete and says that 229 waits for the founder's live soak.
+
+### Notes
+- **No `TODOS.md` change.** Each ship PR already deleted the entries its phase closed:
+  - #1327 deleted `[186-REALIZED-MALFORMED-COUNT]` and `[186-OTHER-FUNDING-CALLERS-DROP]`;
+  - #1328 deleted `[164.6.6.2.3-INCEPTION-DAY0-PNL]`, `[164.6.6.2.3-MT5-BASIS-SILENT-NONE]`, `[164.6.6.2.3-EMPTY-COHORT0-REFUND]`, `[164.6.6.2.3-D15-THRESHOLD-BAND]` and `167.1.2.2.1-WRITER-BASIS-VALUES`;
+  - #1333 deleted `167.2.1.1-DERIVE-USDT-ONLY-ANCHOR`;
+  - #1330 deleted `[167.1.2.2.2-OKX-PERSISTENT-TRUNCATION]`, `167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD` and `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`;
+  - #1332 deleted `201.1-COMPOSER-RANGE-AS-DATES` and `164.6.6.2.1-DISCOVERY-RANKING-HONESTY`;
+  - #1334 deleted `[170.1-CSV-ODD-SPELLING-REJECTED]` and the v1.16 Phase-140.1.2 routed-findings block.
+
+  The ids these phases still cite that remain in `TODOS.md` are kept on purpose: `186-COMPOSITE-MEMBER-READ-GAPS` (out of scope), `164.6.6.2.3-DERIBIT-INTRADAY-TIMING` (229's D-15 ruling keeps it open), `167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY` (229 left `read_writer_basis` untouched), `202-MT5-CLOCK-LEAD-01` (Phase 230), `167.2.1.1-BINANCE-FUTURES-WALLET-UNREAD` (not a 231 item) and `192-ORPHANED-LANDING-VERIFY` (240 chose not to retire it).
+- **Handler output corrected by hand.** `phase complete 223` and `phase complete 240` reduced the Progress-row prose to a bare "Complete" and moved STATE to Phase 155.2, which has left this milestone. Both were restored. 223's completion date was also set to its ship date, 2026-11-24, instead of the run date.
+- **Phase 229 is shipped, not complete.** 229-06 Task 2 is 226's live soak against the changed derive. It needs the founder's MT5 gateway and broker credentials and has not run. `229-VERIFICATION.md` also asks for the 155.2 freeze check at ship. The branch's STATE line overriding the decision-coverage gate was not carried over, because Current Position holds one line per field. It is recorded here instead: "Phase 229 decision-coverage gate: overridden 2026-11-24 (could-not-parse: smart-discuss CONTEXT carries no D-NN ids by design; it cites prior-phase D-12/D-15/D-17). Every 229 CONTEXT decision was checked by the plan-checker (context compliance pass)."
+- **`completed_plans: 79` is one higher than the ROADMAP reading.** The handler derives it from disk and counts the partial 229-06 SUMMARY, while ROADMAP reads 229 as 5/6. It was left as the handler wrote it, because the next handler run re-derives it.
+- **Phase 229 has no SECURITY file.** No secure-phase record exists on its branch or in its worktree. That is recorded here, not invented.
+- **One hygiene fix inside the copied records.** `223/SECURITY.md` named the macOS home-path prefix unescaped in prose, so the planning-hygiene ABSOLUTE-HOME-PATH rule fired. It now spells the prefix escaped, as that rule requires.
+- **Post-merge PROD cursor repair, DONE 2026-11-24.** It is carried from the 232 records and recorded in `232-01-SUMMARY.md` under `## post-merge:`. After #1330 deployed, the marker query named PRODUCTION. A one-time UPDATE, scoped by explicit key ids, then repaired 20 `last_fetched_trade_timestamp` values that were ahead of their newest stored fill: 16 were set to NULL and 4 to the newest stored fill. No key is ahead afterwards.
+
 ## [0.133.74.1] - 2026-11-25 — Phase 225 ONEACCOUNTONCE N3-1: a slot swap that landed but lost its answer still audits and recomposes
 
 Vercel edge only (`src/lib/venue-identity.ts`, the `validate-and-encrypt` and `create-with-key` routes). No migration, no visual change. Built from two commits: `fix(225): N3-1 audit and recompose a slot swap that landed and lost its answer` and a comment-only follow-up naming both shapes the arm covers.

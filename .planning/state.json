@@ -21,7 +21,7 @@
     {
       "number": "223",
       "name": "FLOWKINDS",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "225",
@@ -46,7 +46,7 @@
     {
       "number": "229",
       "name": "MT5DERIVE2",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "230",
@@ -56,12 +56,12 @@
     {
       "number": "231",
       "name": "BYBITREADS",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "232",
       "name": "OKXTRADES",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "233",
@@ -96,23 +96,28 @@
     {
       "number": "239",
       "name": "SURFACECACHE",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "240",
       "name": "CONNECTTRUTH",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "241",
       "name": "DEMOCREDS",
+      "status": "pending"
+    },
+    {
+      "number": "250",
+      "name": "BINANCEFILLS",
       "status": "pending"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 1 of 21 · 10% · executing"
+    "reason": "Phase 1 of 22 · 32% · executing"
   },
-  "updated_at": "2026-11-24T17:48:57.769Z"
+  "updated_at": "2026-11-25T10:59:56.159Z"
 }
