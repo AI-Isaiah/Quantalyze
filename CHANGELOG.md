@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.133.78.0] - 2026-11-25 — Phase 225 ONEACCOUNTONCE PR-2c0: every MT5 poll and validation logs whether the session's broker server matches the one requested
+
+This is a measurement PR for review finding CR-01 on PR-3. It ships before PR-2c, which refuses a session on the wrong broker server. PR-2c's own pre-merge read found no evidence that the MT5 terminal reports a server spelled the way it was requested. This PR adds that evidence. It is log-only: it never refuses, and never changes what a poll returns or stamps.
+
+### Added
+- **`log_mt5_poll_server_verdict`** in `analytics-service/services/mt5_read.py` writes one INFO line, `mt5 poll server verdict site=<site> holder=<key id> session_server_matches_requested=<True|False|not_captured>`. Its predicate is exactly the one PR-2c enforces. A non-blank string server is compared through `normalise_mt5_server` (trim and case-fold). A missing, blank or non-string server is `not_captured`. The line never carries a login, server or password.
+- **Where it is written:** after the login check at the three poll reads:
+  - the derive's deal-ledger read, which gains a keyword-only `holder`;
+  - the balance read;
+  - the allocator holdings read.
+- **On the validation terminal too (review WR-01):** `run_probe` writes it once after its pre-login check, with `holder=validation`. `run_probe` gains a required keyword `site`. Both callers pass their validation site constant.
+
+### Tests
+- `test_mt5_read.py`, `test_mt5_sync_path.py`, `test_mt5_derive_branch.py` and `test_mt5_validate_parity.py` cover each site and each of matching, other and no server. They also pin that a login mismatch writes no line and that the read returns the same data. Every case was seen RED against a neutered copy, including a move of the call above the login check.
+- Five stub probes in `test_mt5_validation_park.py` accept the new `site` keyword.
+
+### Notes
+- **What happens after deploy:** after one daily MT5 poll cycle, the orchestrator reads the Railway logs by message text (Railway labels these lines as error severity). It records counts only. Coverage is per key: every live MT5 key polled must have a line. PASS means 0 False and 0 `not_captured` on every site. Zero lines in total is a stop, not a pass. Any False goes to the founder and blocks PR-2c.
+- LOW review findings are recorded in the phase review only.
 ## [0.133.77.1] - 2026-11-25 — BASELINE: automated re-dump after the PROD apply of 205653b0
 
 ### Changed
