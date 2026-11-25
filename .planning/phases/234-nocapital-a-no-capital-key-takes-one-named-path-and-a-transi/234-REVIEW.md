@@ -147,3 +147,9 @@ first arm into `ledger_level_funded`, and each 10x widening turns its own just-o
 _Reviewed: 2026-11-25T11:36:24Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+
+## Round 2 disposition (orchestrator, 2026-11-25)
+
+- **WR-01 (band width unpinned): fixed** in `11e3727f0` (`test_no_capital_exit_mt5_ledger_band_edges`, three arms derived from `DUST_NAV_FLOOR`). Each of the three mutants in the table above turns its own arm RED; `services/job_worker.py` was restored from a byte backup and `cmp` reported it identical. The phase suites plus `test_derive_refusal_rows.py` pass (257). A test-only change, read by the orchestrator, so no third reviewer round.
+- **IN-A, IN-B, IN-C, and round 1's IN-03, IN-04, IN-05:** Info, recorded here only (repo rule: LOW/Info is never fixed or booked in TODOS).
+- Silent-failure round 2: M1, M2 and M3 closed, no new MEDIUM+ findings.
