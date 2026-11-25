@@ -24,7 +24,16 @@
     "⚠️ OWED: a pytest reader bound to THIS file. Phase 146 owns the limiter surface;",
     "see 140.1-TS-OBLIGATIONS.md TS-36. Until that lands the cross-language gate rests",
     "on the single hand-copied literal 140.1 pinned in",
-    "analytics-service/tests/test_process_key.py, not on this table."
+    "analytics-service/tests/test_process_key.py, not on this table.",
+    "",
+    "PHASE 240 (RLIM-01, RLIM-02) ADDED THREE CASES AND A `bucket_process_key` ON EVERY CASE.",
+    "`bucket_process_key` is the key Python's tenant_rate_limit_key must return for the",
+    "case's verified payload with scope `process_key`; the `ip` field (documentation range",
+    "203.0.113.7) is on the per-IP case only, and TS must reproduce that case's payload",
+    "from it. The three new claims were computed once by a standalone node process",
+    "requiring only node:crypto, as: HMAC-SHA256(secret, '<payload>.<exp>') for the",
+    "claim and HMAC-SHA256(secret, 'anon-ip:<ip>') sliced to its first 32 hex characters",
+    "for the per-IP payload, secret internal-test-token, exp 2524608300."
   ],
   "ttl_seconds": 300,
   "cases": [
@@ -34,7 +43,8 @@
       "payload": "tenant-a",
       "secret": "internal-test-token",
       "exp": 2524608300,
-      "claim": "tenant-a.2524608300.ec1e8a76925d327d6904d55c880a38640d100c71b924ce49777b5d44c9ebad23"
+      "claim": "tenant-a.2524608300.ec1e8a76925d327d6904d55c880a38640d100c71b924ce49777b5d44c9ebad23",
+      "bucket_process_key": "process_key:t:tenant-a"
     },
     {
       "name": "tenant-b",
@@ -42,7 +52,8 @@
       "payload": "tenant-b",
       "secret": "internal-test-token",
       "exp": 2524608300,
-      "claim": "tenant-b.2524608300.2b3ec38c63c8a0542ef8ee3743486530cb224aaafdd5d7a6182d070e669ba4f4"
+      "claim": "tenant-b.2524608300.2b3ec38c63c8a0542ef8ee3743486530cb224aaafdd5d7a6182d070e669ba4f4",
+      "bucket_process_key": "process_key:t:tenant-b"
     },
     {
       "name": "uuid-payload",
@@ -50,7 +61,8 @@
       "payload": "11111111-2222-3333-4444-555555555555",
       "secret": "internal-test-token",
       "exp": 1900000000,
-      "claim": "11111111-2222-3333-4444-555555555555.1900000000.b6c8871017dcf8dd2410083e6f00536bb251f1fd7fe7880072c875c4ddd323b5"
+      "claim": "11111111-2222-3333-4444-555555555555.1900000000.b6c8871017dcf8dd2410083e6f00536bb251f1fd7fe7880072c875c4ddd323b5",
+      "bucket_process_key": "process_key:t:11111111-2222-3333-4444-555555555555"
     },
     {
       "name": "public-anonymous-different-secret",
@@ -58,7 +70,36 @@
       "payload": "public",
       "secret": "another-secret",
       "exp": 1800000000,
-      "claim": "public.1800000000.449444a51bf7c226e9792f63366f944aab1b56ca34f94f36756d16021b12fb8c"
+      "claim": "public.1800000000.449444a51bf7c226e9792f63366f944aab1b56ca34f94f36756d16021b12fb8c",
+      "bucket_process_key": "process_key:anon"
+    },
+    {
+      "name": "public-per-ip",
+      "why": "the per-IP anonymous pseudonym: HMAC-SHA256 keyed with the secret over anon-ip:<ip>, first 32 hex; the TS derivation must reproduce this payload from ip and secret",
+      "ip": "203.0.113.7",
+      "payload": "public:5f383e52cfee255855bfdcca61f9b650",
+      "secret": "internal-test-token",
+      "exp": 2524608300,
+      "claim": "public:5f383e52cfee255855bfdcca61f9b650.2524608300.6d3b3e58719c186f009bfcaa7c380f06d55bdf6c9967e3688bbea5fc9e67fb0e",
+      "bucket_process_key": "process_key:anon:5f383e52cfee255855bfdcca61f9b650"
+    },
+    {
+      "name": "csv-scoped",
+      "why": "the csv scope: csv: plus a canonical lowercase uuid selects the per-user CSV bucket",
+      "payload": "csv:22222222-3333-4444-8555-666666666666",
+      "secret": "internal-test-token",
+      "exp": 2524608300,
+      "claim": "csv:22222222-3333-4444-8555-666666666666.2524608300.94889f81c0135a7f68c4a458ed2ac274e36dae33d4d9e1155082a9dc8f81ab63",
+      "bucket_process_key": "process_key:csv:22222222-3333-4444-8555-666666666666"
+    },
+    {
+      "name": "public-malformed-suffix",
+      "why": "the public: prefix is reserved; a suffix that is not 32 lowercase hex is the shared anonymous bucket, never a tenant bucket",
+      "payload": "public:not-hex",
+      "secret": "internal-test-token",
+      "exp": 2524608300,
+      "claim": "public:not-hex.2524608300.9cde1b69dfa13bbfe7a22122d8b648031ad10e96b7fd9da6633ab84e7d02e820",
+      "bucket_process_key": "process_key:anon"
     }
   ]
 }

@@ -1462,10 +1462,11 @@ def test_venue_transient_exception_refuses_a_non_4xx_status() -> None:
     ADMISSIBLE RANGE until this guard existed.
 
     The whole 4xx band is admitted, not just the status the sites currently
-    emit. 400 stays admissible ON PURPOSE even though no site uses it any more:
-    this guard pins the class's RANGE, and narrowing it to the one value in use
-    would turn a range guard into a duplicate of the wire pins above — and would
-    have fenced out the 140.3-06 remap itself while it was still scheduled.
+    emit. 400 stays admissible ON PURPOSE, and the validate-key permanent arms use
+    it since Phase 240: this guard pins the class's RANGE, and narrowing it to the
+    one value in use would turn a range guard into a duplicate of the wire pins
+    above — and would have fenced out the 140.3-06 remap itself while it was still
+    scheduled.
     """
     from services.error_contract import VenueTransientHTTPException
 

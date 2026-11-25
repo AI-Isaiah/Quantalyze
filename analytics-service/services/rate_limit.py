@@ -87,8 +87,13 @@ CSV validate (Python)       *(no TS caller — ``csv-validate/route.ts``   L-4  
                             ``:206`` goes via ``/process-key``)*
 Verify strategy (Python)    *(no TS caller — the teaser goes via         L-8              1 of 5/hour
                             ``/process-key``)*
-Simulator                   ``analytics-client.ts:363``                  —                see FINDING-10 below
-``/process-key``            ``process-key-client.ts:151``                —                1 tenant + 1 ceiling token (Plan 06)
+Simulator                   ``analytics-client.ts:363``                  —                1 of 20/hour, scope ``simulator``, keyed by
+                                                                                         ``tenant_or_platform_key`` (Phase 163 SEC-05)
+``/process-key``            ``process-key-client.ts:151``                —                1 per-identity token, plus 1 anonymous-aggregate
+                                                                                         token when anonymous, plus 1 platform-ceiling
+                                                                                         token; a refused call spends none of the later ones
+CSV validate via            ``csv-validate/route.ts`` through            —                1 token of the per-user **60/minute** csv tier
+``/process-key``            ``postProcessKey``, signed ``csv:<uuid>``                     (``process_key:csv:<uuid>``), **no** ceiling token
 Key-permission badge        ``keys/[id]/permissions/route.ts:131``       —                1 of ``internal.py``'s hand-rolled
                                                                                          per-``key_id`` 10/min bucket
 ==========================  ==========================================  ===============  ================================================
@@ -96,16 +101,14 @@ Key-permission badge        ``keys/[id]/permissions/route.ts:131``       —    
 **Limit VALUES above are unchanged by PYAPI-03** — it changes bucket IDENTITY
 only. The value audit is RATE-04 / Phase 146.
 
-⚠️ **FINDING-10 (not predicted by the plan).** ``routers/simulator.py:92``
-``_simulator_rate_limit_key`` returns ``f"simulator:ip:{get_remote_address(...)}"``.
-By BEHAVIOUR that is a tenth IP-keyed route; the plan's do-not-touch list calls it
-"correctly user-keyed", which was true before the PR#241 follow-up reverted it (its
-own docstring records the revert). It is left untouched here per the plan's explicit
-scope fence, and ``tests/test_limiter_identity.py`` quarantines it with a literal
-one-file allow-list so it cannot grow and cannot be forgotten. Its EFFECTIVE
-per-tenant quota lives in-handler against ``req.user_id``
-(``_check_simulator_user_rate``), so the IP key is a ceiling, not the quota — but
-the ceiling is still platform-wide behind the edge proxy.
+⚠️ **FINDING-10, CLOSED (measured at Phase 240).** ``routers/simulator.py`` was a
+tenth IP-keyed route: its key function returned the proxy-visible request address.
+Phase 163 SEC-05 re-keyed it: the simulator route is now decorated with
+``partial(tenant_or_platform_key, scope="simulator")``, the old
+``_simulator_rate_limit_key`` is deleted, and ``tests/test_limiter_identity.py``
+pins the quarantine EMPTY, for ``routers/`` and, since Phase 240 (RLIM-01), for
+every non-test module in ``analytics-service``. Its per-tenant quota still lives
+in-handler (``_check_simulator_user_rate``); the decorator limit is the ceiling.
 
 Phase 146-02 / RATE-03 — the match gap, CLOSED: ``routers/match.py``
 ``POST /api/match/recompute`` and ``GET /api/match/eval`` now carry
@@ -123,8 +126,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import time
-from typing import Any, Final
+from typing import Any, Final, Literal, NamedTuple
 
 import structlog
 from fastapi import Request
@@ -133,8 +137,10 @@ from slowapi import Limiter
 # ⚠️ PYAPI-03: ``slowapi.util.get_remote_address`` is deliberately NOT imported
 # here any more. It was this module's singleton default, and
 # ``routers/optimizer.py`` inherited it by omission — the L-9 defect. Nothing in
-# ``analytics-service`` outside ``routers/simulator.py`` (FINDING-10) may key on
-# it. Re-adding the import is how the class re-opens.
+# ``analytics-service`` may key on it (behind Railway's edge it is the proxy's IP,
+# one platform-wide bucket wearing a per-client disguise). Re-adding the import is
+# how the class re-opens; ``tests/test_limiter_identity.py`` scans every non-test
+# module for the name and pins the quarantine empty.
 
 log = structlog.get_logger("quantalyze.analytics.rate_limit")
 
@@ -145,8 +151,39 @@ log = structlog.get_logger("quantalyze.analytics.rate_limit")
 #: lesson: a caller could mint a fresh bucket per request, or drain a victim's).
 TENANT_CLAIM_HEADER: Final[str] = "X-Tenant-Claim"
 
-#: The payload the public teaser mints. Everything anonymous shares ONE bucket.
+#: The bare anonymous payload. Since Phase 240 (RLIM-01) this is the LEGACY
+#: FALLBACK: the teaser mints it only when the client IP is unknown, and claims
+#: minted before the per-IP change still carry it. Everything that presents it
+#: shares ONE bucket. A known client IP is a per-IP pseudonym instead, minted as
+#: ``ANON_IP_PAYLOAD_PREFIX`` + 32 lowercase hex.
 ANON_PAYLOAD: Final[str] = "public"
+
+#: Prefix of the per-IP anonymous payload: ``public:<32 lowercase hex>``, where the
+#: hex is a keyed HMAC of the client IP computed at Vercel. The prefix is RESERVED:
+#: a payload that starts with it is always anonymous, and a malformed one falls to
+#: the shared anonymous bucket, never to a tenant bucket.
+ANON_IP_PAYLOAD_PREFIX: Final[str] = "public:"
+
+#: Exactly 32 lowercase hex characters after the prefix, matched as a whole
+#: (``fullmatch`` only) and ASCII-only so Unicode digits are not hex.
+_ANON_IP_PAYLOAD_RE: Final[re.Pattern[str]] = re.compile(
+    r"public:([0-9a-f]{32})", re.ASCII
+)
+
+
+#: Prefix of the CSV-scoped payload: ``csv:<canonical lowercase uuid>``. The TS
+#: ``postProcessKey`` signs it into the claim when ``flow_type`` is
+#: ``"csv"`` (Phase 240 RLIM-02), so the scope is covered by the HMAC and is
+#: never read from an unsigned header or the request body.
+CSV_PAYLOAD_PREFIX: Final[str] = "csv:"
+
+#: ``csv:`` plus a canonical lowercase uuid (8-4-4-4-12 hex groups joined by
+#: hyphens), matched as a whole (``fullmatch`` only) and ASCII-only so Unicode
+#: digits are not hex. Anything else that starts with the prefix is a plain tenant
+#: payload: it gets the tenant tier and NO platform-ceiling exemption.
+_CSV_PAYLOAD_RE: Final[re.Pattern[str]] = re.compile(
+    r"csv:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", re.ASCII
+)
 
 
 def anon_bucket_key(scope: str) -> str:
@@ -157,6 +194,53 @@ def anon_bucket_key(scope: str) -> str:
     everything that reasons about it cannot drift apart.
     """
     return f"{scope}:anon"
+
+
+def anon_ip_bucket_key(scope: str, digest: str) -> str:
+    """The ONE spelling of a per-IP anonymous bucket: the shared key plus the digest.
+
+    ``digest`` is the 32 lowercase hex characters the classifier extracted. It is
+    built on :func:`anon_bucket_key` so the provider's prefix test and the alert's
+    key comparison cannot drift from it.
+    """
+    return f"{anon_bucket_key(scope)}:{digest}"
+
+
+def csv_bucket_key(scope: str, user_id: str) -> str:
+    """The ONE spelling of a CSV-scoped per-user bucket: ``<scope>:csv:<user_id>``.
+
+    ``user_id`` is the canonical lowercase uuid the classifier extracted. The prefix
+    is disjoint from every other arm (``:t:``, ``:anon``, ``:unverified:``), so a
+    tenant id can never land here and ``/process-key``'s limit provider can size it
+    by prefix alone. Called with an empty ``user_id`` it yields the prefix itself.
+    """
+    return f"{scope}:csv:{user_id}"
+
+
+def anon_aggregate_key(scope: str) -> str:
+    """The ONE spelling of the anonymous AGGREGATE bucket's limiter key.
+
+    ``<scope>:anon-all``, a distinct spelling on purpose: ``limits`` storage keys
+    include the amount, so reusing the shared anonymous key for a second limit
+    would be a second counter under a confusing name (RESEARCH Pattern 2 item 8).
+    Used by ``/process-key``'s aggregate limit and by the saturation alert.
+    """
+    return f"{scope}:anon-all"
+
+
+class ClaimClass(NamedTuple):
+    """What a verified claim payload is, as the limiter sees it.
+
+    ``kind``: ``anon`` is the shared anonymous bucket (the bare payload, or a
+    malformed per-IP payload); ``anon_ip`` is a well-formed per-IP pseudonym with
+    ``value`` the 32 hex; ``csv`` is a strictly well-formed ``csv:<uuid>`` payload
+    with ``value`` the uuid; ``tenant`` is any other verified payload (a malformed
+    ``csv:`` payload included) with ``value`` the payload; ``unverified`` is a claim
+    that is absent, forged or expired.
+    """
+
+    kind: Literal["anon", "anon_ip", "csv", "tenant", "unverified"]
+    value: str | None
 
 
 #: Refuse to do HMAC work on an oversized header. A claim is
@@ -316,16 +400,57 @@ def verify_tenant_claim(request: Request) -> str | None:
         return None
 
 
+def classify_tenant_claim(request: Request) -> ClaimClass:
+    """Classify the request's verified claim. NEVER raises, NEVER logs.
+
+    The ONE place a verified payload becomes a bucket kind; both key functions and
+    ``/process-key``'s aggregate-exemption predicate go through it. It does not log
+    because a predicate calls it too, so the key functions keep their own WARNs.
+    """
+    try:
+        payload = verify_tenant_claim(request)
+        if payload is None:
+            return ClaimClass("unverified", None)
+        if payload == ANON_PAYLOAD:
+            return ClaimClass("anon", None)
+        if payload.startswith(ANON_IP_PAYLOAD_PREFIX):
+            # Reserved prefix: a malformed per-IP payload is still anonymous.
+            matched = _ANON_IP_PAYLOAD_RE.fullmatch(payload)
+            if matched is not None:
+                return ClaimClass("anon_ip", matched.group(1))
+            return ClaimClass("anon", None)
+        csv_match = _CSV_PAYLOAD_RE.fullmatch(payload)
+        if csv_match is not None:
+            return ClaimClass("csv", csv_match.group(1))
+        # A payload that starts with ``csv:`` but is not a canonical lowercase uuid
+        # falls through to here: a plain tenant, with no ceiling exemption.
+        return ClaimClass("tenant", payload)
+    except Exception:
+        log.error("rate_limit.classify_claim_degraded", exc_info=True)
+        return ClaimClass("unverified", None)
+
+
 def tenant_rate_limit_key(request: Request, scope: str) -> str:
     """The per-tenant limiter key for ``scope``. NEVER raises.
 
     Implements RESEARCH Q1.2's bucket table verbatim:
 
     ==========================================  =================================
-    valid claim, payload != "public"            ``<scope>:t:<user_id>``
+    valid claim, payload "public:<32 hex>"      ``<scope>:anon:<32 hex>``
     valid claim, payload == "public"            ``<scope>:anon``
+    valid claim, any other "public:" payload    ``<scope>:anon``
+    valid claim, payload "csv:<lowercase uuid>" ``<scope>:csv:<uuid>``
+    valid claim, any other payload              ``<scope>:t:<user_id>``
     absent / malformed / bad MAC / expired      ``<scope>:unverified:<cred-hash>``
     ==========================================  =================================
+
+    The ``public:`` prefix is RESERVED (Phase 240 / RLIM-01): exactly 32 lowercase
+    hex characters after it are a per-IP pseudonym; anything else after it is the
+    shared anonymous bucket and can never reach a ``:t:`` tenant bucket.
+
+    The ``csv:`` scope (Phase 240 / RLIM-02) is STRICT: only ``csv:`` plus a canonical
+    lowercase uuid is csv-scoped. A malformed ``csv:`` payload is an ordinary tenant
+    payload (``<scope>:t:csv:...``), so it gets the tenant tier and no exemption.
 
     **Why it must never raise** (RESEARCH G-8): slowapi re-raises whatever a key
     function throws out of ``_check_request_limit`` (``swallow_errors`` is
@@ -343,11 +468,15 @@ def tenant_rate_limit_key(request: Request, scope: str) -> str:
     caller forgot the header" — never "an anonymous caller got a bucket".
     """
     try:
-        payload = verify_tenant_claim(request)
-        if payload == ANON_PAYLOAD:
+        claim = classify_tenant_claim(request)
+        if claim.kind == "anon":
             return anon_bucket_key(scope)
-        if payload is not None:
-            return f"{scope}:t:{payload}"
+        if claim.kind == "anon_ip" and claim.value is not None:
+            return anon_ip_bucket_key(scope, claim.value)
+        if claim.kind == "csv" and claim.value is not None:
+            return csv_bucket_key(scope, claim.value)
+        if claim.kind == "tenant":
+            return f"{scope}:t:{claim.value}"
         log.warning(
             "rate_limit.tenant_claim_unverified",
             scope=scope,
@@ -387,10 +516,23 @@ def tenant_or_platform_key(request: Request, scope: str) -> str:
     """PYAPI-03's key for the nine ex-IP-keyed routes. NEVER raises.
 
     ==========================================  =================================
-    valid claim, payload != "public"            ``<scope>:t:<user_id>``
+    valid claim, payload "public:<32 hex>"      ``<scope>:anon`` (shared; see below)
     valid claim, payload == "public"            ``<scope>:anon``
+    valid claim, any other "public:" payload    ``<scope>:anon``
+    valid claim, payload "csv:<lowercase uuid>" ``<scope>:csv:<uuid>``
+    valid claim, any other payload              ``<scope>:t:<user_id>``
     no verifiable claim                         ``platform:<route-path>``
     ==========================================  =================================
+
+    The ``public:`` prefix is reserved, and the ``csv:`` scope is strict, exactly as
+    in :func:`tenant_rate_limit_key`.
+
+    **Phase 240 (RLIM-01 review): a per-IP pseudonym does NOT get its own
+    bucket here.** Only ``/process-key`` stacks an aggregate anonymous ceiling
+    over its per-IP buckets. These routes carry one limit each, so a per-IP
+    bucket would let N addresses spend N windows with nothing above them. Every
+    anonymous claim on these routes therefore folds into the ONE shared
+    ``<scope>:anon`` bucket, as it did before the per-IP tier existed.
 
     Adopted as::
 
@@ -433,11 +575,13 @@ def tenant_or_platform_key(request: Request, scope: str) -> str:
     cannot classify and that feeds the breaker (G-8).
     """
     try:
-        payload = verify_tenant_claim(request)
-        if payload == ANON_PAYLOAD:
+        claim = classify_tenant_claim(request)
+        if claim.kind in ("anon", "anon_ip"):
             return anon_bucket_key(scope)
-        if payload is not None:
-            return f"{scope}:t:{payload}"
+        if claim.kind == "csv" and claim.value is not None:
+            return csv_bucket_key(scope, claim.value)
+        if claim.kind == "tenant":
+            return f"{scope}:t:{claim.value}"
         return _platform_bucket(request)
     except Exception:
         log.error(

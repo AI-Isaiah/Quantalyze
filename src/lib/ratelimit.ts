@@ -192,18 +192,33 @@ export const preferencesReadLimiter = makeLimiter(60, "60 s");
 // the security cap is independent of the preferences read budget.
 export const scenarioPeerLimiter = makeLimiter(60, "60 s");
 
-// 20/minute per authenticated user — Phase 15 / CSV-01..CSV-02 (WR-02).
+// 20/minute per authenticated user — Phase 15 / CSV-01..CSV-02 (WR-02),
+// csv-validate only (csv-finalize has its own, csvFinalizeLimiter below).
 // CSV iteration realistically spends 3-5 validations per minute as the
 // user fixes monotonic_dates / nav_non_zero errors and re-uploads. The
 // shared userActionLimiter (5/min) collides with attestation + deletion
 // budgets: a user iterating on a CSV burns the bucket and 429s their
-// next sensitive POST with no visible link between the surfaces. The
-// upstream Python service has its own 30/hour cap (the CSV router's limiter in analytics-service/routers/csv.py),
-// so 20/min on the Next.js edge is aligned with both end-user iteration
-// and the upstream budget. Used by /api/strategies/csv-validate AND
-// /api/strategies/csv-finalize so the wizard's validate→submit cycle
-// rides the same dedicated bucket.
+// next sensitive POST with no visible link between the surfaces.
+// Upstream: csv-validate reaches the Python /process-key with a signed csv
+// scope, and Python gives that scope _PROCESS_KEY_CSV_LIMIT (60/minute per
+// user in routers/process_key.py, exempt from the platform ceiling). That is
+// sized at three times this edge cap so latency between the edge check and
+// the upstream hit cannot push an admitted user over it. The sizing is a
+// reading of the Upstash window algorithm, not an airtight bound.
+// tests/lib/csv-limit-agreement.test.ts reads both files and goes red if
+// either number is retuned alone.
 export const csvValidateLimiter = makeLimiter(20, "60 s");
+
+// 20/minute per authenticated user, csv-finalize only — Phase 240 / RLIM-02.
+// csv-finalize spends no upstream /process-key token (Phase 145 folded the
+// manager flow into one RPC), so it has no upstream cap to agree with and gets
+// its own instance, its own docblock and its own tuning. It already counted
+// separately from csv-validate (the two routes pass distinct identifiers); the
+// split is configuration hygiene, not a budget change. The 60 s window is
+// kept because the route's throttle sentence ("Wait a minute and try again")
+// is only true for a 60 s window: if the window ever changes, that sentence
+// changes in the same commit (UI-SPEC section 3).
+export const csvFinalizeLimiter = makeLimiter(20, "60 s");
 
 // 10/hour per authenticated user — Phase 11 review fix IN-03 audit-log
 // CSV export. The endpoint caps the SELECT at 10K rows so a single

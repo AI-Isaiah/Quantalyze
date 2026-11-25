@@ -281,7 +281,24 @@ EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
 #: CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): that arm now raises
 #: ``MT5_VALIDATION_UNCONFIGURED``; ``service_error`` is still not counted here, so
 #: this value does not move. Original kept as lineage.
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 15
+#: 15 -> 23 (2026-11-24, Phase 240 CONNECTTRUTH plan 03 / CONN-05): eight
+#: credential-class 400 arms on ``/api/validate-key`` (sFOX 401/403, blank token and
+#: control-character token; MT5 credential parse wrong_server and auth, MT5 login
+#: classified auth and wrong_server, MT5 master password) moved from a bare
+#: ``HTTPException(400)`` to the flat ``VenueTransientHTTPException(400, ...,
+#: recoverable=False)``. All eight are 4xx, so blind spot (b) stays LATENT; they are
+#: the FIRST subclass constructions at 400, so the status pin below widened from
+#: {424} to {400, 424}.
+#: 23 -> 26 (2026-11-24, Phase 240 CONNECTTRUTH plan 05 / CONN-05): the two go-dark
+#: gates in ``validate_key`` (``VENUE_DISABLED``, sFOX and MT5) and its ``create_exchange``
+#: ``except ValueError`` arm (``INVALID_REQUEST``) moved from a bare ``HTTPException(400)``
+#: to the flat ``VenueTransientHTTPException(400, ..., recoverable=False)``. All three are
+#: 4xx, so blind spot (b) stays LATENT and the status set stays {400, 424}.
+#: 26 -> 27 (2026-11-24, Phase 240 CONNECTTRUTH plan 05 / CONN-05): the MT5 go-dark gate
+#: in ``routers/internal.py::rotate_key_secret`` raises the same flat ``VENUE_DISABLED``
+#: 400 (a live probe against a dark venue is refused before the KEK load, the decrypt and
+#: the probe). 4xx again, status set unchanged.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 27
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on
@@ -826,7 +843,8 @@ class TestBlindSpotsArePinned:
             "through service_error(), or widen MATCHED_CONSTRUCTORS and add the "
             "site to QUARANTINE."
         )
-        assert {s[2] for s in sites} == {424}, (
+        assert {s[2] for s in sites} == {400, 424}, (
             "every VenueTransientHTTPException construction is expected to be a "
-            "424; its own __init__ refuses anything outside 400..499"
+            "424 (venue-transient) or a 400 (CONN-05 permanent credential arms); "
+            "its own __init__ refuses anything outside 400..499"
         )

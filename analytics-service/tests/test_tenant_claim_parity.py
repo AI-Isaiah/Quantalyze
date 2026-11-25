@@ -75,3 +75,24 @@ def test_verify_tenant_claim_accepts_the_committed_bytes(
         "committed wire bytes the TS mint is pinned to — the two "
         "implementations have drifted"
     )
+
+
+@pytest.mark.parametrize("case", _load_cases(), ids=lambda c: str(c["name"]))
+def test_every_case_buckets_to_its_committed_key(
+    case: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 240 (RLIM-01, RLIM-02) — the committed claim buckets, in Python, to the
+    committed ``bucket_process_key``.
+
+    The TS suites prove the mint reproduces each payload; this proves the
+    classifier gives that payload the bucket the fixture names, so a reintroduced
+    "anonymous means payload ``public``" or a drifted ``csv:`` grammar reddens in
+    BOTH languages. ``public:<hex>`` is its own per-IP bucket, ``csv:<uuid>`` its
+    own CSV bucket, and a malformed ``public:`` suffix the shared anonymous bucket.
+    """
+    monkeypatch.setenv("INTERNAL_API_TOKEN", case["secret"])
+    request = cast(Request, _ClaimRequest(case["claim"]))
+    assert rl.tenant_rate_limit_key(request, "process_key") == case["bucket_process_key"], (
+        f"case {case['name']!r}: the Python classifier no longer buckets the "
+        "committed payload where the fixture says it must"
+    )

@@ -108,6 +108,7 @@ vi.mock("@/lib/ratelimit", async (importActual) => {
   return {
     userActionLimiter: {},
     csvValidateLimiter: {},
+    csvFinalizeLimiter: {},
     checkLimit: checkLimitMock,
     rateLimitDenyJson: actual.rateLimitDenyJson,
     isRateLimitMisconfigured: actual.isRateLimitMisconfigured,

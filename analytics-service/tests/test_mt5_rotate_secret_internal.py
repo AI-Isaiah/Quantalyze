@@ -61,6 +61,10 @@ _SYNTH_BROKER_SERVER = "Synthetic-Demo-Server"
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("INTERNAL_API_TOKEN", "test-token")
+    # Phase 240 plan 05: rotate-secret now refuses with a coded 400 while MT5 is
+    # switched off, so every pre-existing case below runs with the venue ON. The
+    # dark-venue cases at the bottom override this per test.
+    monkeypatch.setenv("MT5_ENABLED", "true")
     _reset_rate_limit()
     app = build_test_app(router)
     return TestClient(app)
@@ -536,3 +540,95 @@ def test_rotate_secret_d08_keeps_a_space_bearing_password_verbatim(client):
     mock_encrypt.assert_called_once_with(
         _SYNTH_LOGIN, _SYNTH_PADDED_NEW_PASSWORD, _SYNTH_BROKER_SERVER, b"kek"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 240 plan 05 (CONN-05) — the MT5 go-dark gate on rotate-secret
+# ---------------------------------------------------------------------------
+# A rotate while MT5 is switched off would run a LIVE probe against a dark venue
+# (`_validate_mt5_key` reaches the gateway). The gate answers the same flat
+# VENUE_DISABLED 400 as `/api/validate-key`, and sits AFTER the token, rate-limit,
+# 404 and 422 arms and BEFORE the KEK load, any decrypt and the probe.
+
+# Typed here, independently of services/closed_sets.py.
+_EXPECTED_MT5_DISABLED_DETAIL = "MT5 integration is not yet available."
+
+
+@pytest.mark.parametrize("flag", [None, "", "false", "1"], ids=["unset", "empty", "false", "one"])
+def test_rotate_secret_with_mt5_off_answers_the_coded_400_before_any_decrypt_or_probe(
+    client, monkeypatch, flag
+):
+    if flag is None:
+        monkeypatch.delenv("MT5_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("MT5_ENABLED", flag)
+
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(_mt5_row())), \
+         patch("routers.internal.get_kek") as mock_kek, \
+         patch("routers.internal.decrypt_credentials") as mock_decrypt, \
+         patch("routers.internal._validate_mt5_key", new=AsyncMock()) as mock_validate, \
+         patch("routers.internal.encrypt_credentials") as mock_encrypt:
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_NEW_PASSWORD},
+        )
+
+    assert res.status_code == 400, res.text
+    assert res.json() == {
+        "detail": _EXPECTED_MT5_DISABLED_DETAIL,
+        "code": "VENUE_DISABLED",
+        "recoverable": False,
+    }
+    mock_kek.assert_not_called()
+    mock_decrypt.assert_not_called()
+    mock_validate.assert_not_awaited()
+    mock_encrypt.assert_not_called()
+    assert _SYNTH_NEW_PASSWORD not in res.text
+
+
+def test_rotate_secret_mt5_off_keeps_the_403_for_a_missing_token(client, monkeypatch):
+    monkeypatch.setenv("MT5_ENABLED", "false")
+    with patch("routers.internal.decrypt_credentials") as mock_decrypt, \
+         patch("routers.internal._validate_mt5_key", new=AsyncMock()) as mock_validate:
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            json={"new_secret": _SYNTH_NEW_PASSWORD},
+        )
+
+    assert res.status_code == 403, res.text
+    mock_decrypt.assert_not_called()
+    mock_validate.assert_not_awaited()
+
+
+def test_rotate_secret_mt5_off_keeps_the_404_for_an_unknown_key(client, monkeypatch):
+    monkeypatch.setenv("MT5_ENABLED", "false")
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(None)), \
+         patch("routers.internal.decrypt_credentials") as mock_decrypt, \
+         patch("routers.internal._validate_mt5_key", new=AsyncMock()) as mock_validate:
+        res = client.post(
+            "/internal/keys/unknown-key/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_NEW_PASSWORD},
+        )
+
+    assert res.status_code == 404, res.text
+    mock_decrypt.assert_not_called()
+    mock_validate.assert_not_awaited()
+
+
+def test_rotate_secret_mt5_off_keeps_the_422_for_a_non_mt5_key(client, monkeypatch):
+    monkeypatch.setenv("MT5_ENABLED", "false")
+    row = {"id": "key-ccxt", "exchange": "binance", "is_active": True}
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(row)), \
+         patch("routers.internal.decrypt_credentials") as mock_decrypt, \
+         patch("routers.internal._validate_mt5_key", new=AsyncMock()) as mock_validate:
+        res = client.post(
+            "/internal/keys/key-ccxt/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_NEW_PASSWORD},
+        )
+
+    assert res.status_code == 422, res.text
+    mock_decrypt.assert_not_called()
+    mock_validate.assert_not_awaited()

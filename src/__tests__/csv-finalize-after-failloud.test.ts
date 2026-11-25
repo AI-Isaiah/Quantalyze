@@ -44,6 +44,7 @@ const checkLimitMock = vi.hoisted(() =>
 );
 vi.mock("@/lib/ratelimit", () => ({
   csvValidateLimiter: {},
+  csvFinalizeLimiter: {},
   checkLimit: checkLimitMock,
 }));
 

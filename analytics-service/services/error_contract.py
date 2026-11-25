@@ -3,11 +3,12 @@
 The prose contract lives at ``analytics-service/docs/STATUS_CONTRACT.md`` and is
 the artifact Phase 140.2's TypeScript discriminator (SEAMCORE-01) consumes. This
 module is its executable half: one helper that every deliberate error site calls
-so the four classes cannot drift apart site-by-site.
+so the five classes cannot drift apart site-by-site.
 
-The four classes (see STATUS_CONTRACT.md for the full reasoning)::
+The five classes (see STATUS_CONTRACT.md for the full reasoning)::
 
     CALLER              4xx   caller's request / credentials / authorization
+    CALLER, THROTTLED   429   the caller is over a rate limit we imposed; retryable after Retry-After
     CALLER'S EXCHANGE   424   the third party the CALLER named is at fault
     SERVICE-TRANSIENT   503   one of OUR dependencies is temporarily unavailable
     SERVICE-PERMANENT   500   a misconfiguration or bug an identical retry cannot fix
@@ -104,7 +105,7 @@ def _validate(
     retryable: bool,
     retry_after: int | None,
 ) -> None:
-    """Enforce the four-class contract at construction time.
+    """Enforce the five-class contract at construction time.
 
     Raises ``ValueError`` on any violation — see the module docstring for why
     that is the deliberate posture rather than a silent coercion.
@@ -397,6 +398,13 @@ class VenueTransientHTTPException(HTTPException):
     handlers by walking ``type(exc).__mro__``, so the subclass handler wins over
     FastAPI's default; and every existing ``pytest.raises(HTTPException)``
     direct-call test still catches it with ``.detail`` unchanged.
+
+    **One flat-body builder, and since Phase 240 it also carries permanent 400s.**
+    This class is the repo's one flat-body builder, so the permanent validate-key
+    400s (``AUTH_FAILED``, ``MT5_WRONG_SERVER``, ``MT5_MASTER_PASSWORD``,
+    ``VENUE_DISABLED``, ``INVALID_REQUEST``, ``recoverable`` false) raise it too,
+    which its 4xx range guard already admits. The 424 sites above are the venue
+    verdicts; the 400 sites are the caller's own credentials or an unavailable venue.
 
     **The guards raise ``ValueError``**, like every other rule in this module: a
     violation is a programming error at a raise site, not a runtime condition. A

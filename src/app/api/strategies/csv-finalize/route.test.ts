@@ -30,6 +30,13 @@ vi.mock("@/lib/api/withAuth", () => ({
       handler(req, { id: TEST_USER_ID }),
 }));
 
+// 240-07 / RLIM-02: csv-finalize owns its limiter instance. Two distinct
+// sentinels, so a route that points back at csvValidateLimiter fails an
+// identity (`toBe`) assertion rather than passing on a shared `{}`.
+const limiterSentinels = vi.hoisted(() => ({
+  csvValidateLimiter: { sentinel: "csvValidateLimiter" },
+  csvFinalizeLimiter: { sentinel: "csvFinalizeLimiter" },
+}));
 const checkLimitMock = vi.hoisted(() =>
   // 140.4-13 / SEAMRIM-05 — `reason` is the THIRD outcome: absent is a genuine
   // throttle (429), "ratelimit_misconfigured" is OUR store being unreachable
@@ -49,7 +56,8 @@ const checkLimitMock = vi.hoisted(() =>
 vi.mock("@/lib/ratelimit", async (importActual) => {
   const actual = await importActual<typeof import("@/lib/ratelimit")>();
   return {
-    csvValidateLimiter: {},
+    csvValidateLimiter: limiterSentinels.csvValidateLimiter,
+    csvFinalizeLimiter: limiterSentinels.csvFinalizeLimiter,
     checkLimit: checkLimitMock,
     rateLimitDenyJson: actual.rateLimitDenyJson,
     isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
@@ -299,6 +307,20 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
       expect(res.headers.get("Retry-After")).toBe("25");
       expect(res.headers.get("Cache-Control")).toBe("private, no-store");
       expect(postProcessKeyMock).not.toHaveBeenCalled();
+    });
+
+    it("[240-07 / RLIM-02] csv-finalize spends its OWN limiter, never csvValidateLimiter, under its own identifier", async () => {
+      const res = await POST(makeRequest(validBody()));
+
+      expect(res.status).toBe(200);
+      expect(checkLimitMock).toHaveBeenCalledTimes(1);
+      const [limiter, identifier] = checkLimitMock.mock.calls[0] as unknown as [
+        unknown,
+        string,
+      ];
+      expect(limiter).toBe(limiterSentinels.csvFinalizeLimiter);
+      expect(limiter).not.toBe(limiterSentinels.csvValidateLimiter);
+      expect(identifier).toBe(`strategies-csv-finalize:${TEST_USER_ID}`);
     });
 
     it("success → the deny arm does not fire", async () => {

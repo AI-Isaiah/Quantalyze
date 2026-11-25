@@ -24,7 +24,7 @@ from starlette.responses import Response
 
 from services.error_contract import VenueTransientHTTPException
 from services.logging_config import correlation_id_var
-from services.rate_limit import anon_bucket_key, limiter
+from services.rate_limit import anon_aggregate_key, anon_bucket_key, limiter
 
 # --------------------------------------------------------------------------
 # PYAPI-07 (C-13 / C-14) — the app-global 422 handler.
@@ -221,17 +221,22 @@ def _log_anon_alert_failure() -> None:
 
 
 def _alert_anon_bucket_saturated(request: Request, throttle: RateLimitExceeded) -> None:
-    """Raise a Sentry event when the SHARED anonymous ``/process-key`` bucket refuses.
+    """Raise a Sentry event when a SHARED anonymous ``/process-key`` bucket refuses.
 
-    Every anonymous visitor shares ONE bucket (``anon_bucket_key("process_key")``,
-    "30/hour"). When it saturates every one of them is refused and, before this
-    hook, nobody was told. Observability only: it runs AFTER the 429 response is
-    built, reads nothing the response depends on, and swallows every failure, so
-    the status, body and headers are identical with and without it.
+    Two keys are shared by many visitors: the legacy bucket
+    (``anon_bucket_key("process_key")``, "30/hour", every bare-``public`` claim) and
+    the anonymous aggregate (``anon_aggregate_key("process_key")``, "200/hour", all
+    anonymous visitors together). When either saturates, many visitors are refused
+    at once and, before this hook, nobody was told. Observability only: it runs
+    AFTER the 429 response is built, reads nothing the response depends on, and
+    swallows every failure, so the status, body and headers are identical with and
+    without it.
 
-    Only the anonymous bucket alerts. A tenant-bucket refusal is one customer
-    over their own limit and the platform-ceiling refusal has its own meaning;
-    neither is this signal. The refusing bucket is read from
+    A per-IP refusal (``process_key:anon:<hex>``) is NOT this signal: it is one
+    visitor over their own window. Alerting on it would page on normal fairness
+    refusals and grow ``_anon_alert_last_at`` by one key per pseudonym without
+    bound. A tenant-bucket refusal is one customer over their own limit and the
+    platform-ceiling refusal has its own meaning; neither is this signal either. The refusing bucket is read from
     ``request.state.view_rate_limit`` (slowapi stores ``(limit, [key, scope])``
     for the limit that failed). Never recompute it via ``exc.limit.key_func``:
     that re-runs the key function and re-logs ``tenant_claim_unverified``.
@@ -249,7 +254,10 @@ def _alert_anon_bucket_saturated(request: Request, throttle: RateLimitExceeded) 
     except (AttributeError, IndexError, TypeError):
         _log_anon_alert_failure()
         return
-    if refusing_key != anon_bucket_key("process_key"):
+    if refusing_key not in (
+        anon_bucket_key("process_key"),
+        anon_aggregate_key("process_key"),
+    ):
         return
     _rate_limit_log.warning(
         "request.anon_bucket_saturated",

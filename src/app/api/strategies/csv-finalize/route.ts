@@ -3,7 +3,7 @@ import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { withAuth } from "@/lib/api/withAuth";
-import { csvValidateLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
+import { csvFinalizeLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics, PERCENTILE_GATE_COLUMN } from "@/lib/closed-sets";
 import { canonicalizeExchangeList } from "@/lib/constants";
@@ -2514,7 +2514,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // own tokens before being rejected with a 400. The limiter, key string,
   // and inline 429 envelope are unchanged — only position moved.
   const rl = await checkLimit(
-    csvValidateLimiter,
+    csvFinalizeLimiter,
     `strategies-csv-finalize:${user.id}`,
   );
   if (!rl.success) {

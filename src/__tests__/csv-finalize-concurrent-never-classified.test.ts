@@ -122,6 +122,7 @@ vi.mock("@/lib/api/withAuth", () => ({
 // fail closed and mask the race behind a 503.
 vi.mock("@/lib/ratelimit", () => ({
   csvValidateLimiter: {},
+  csvFinalizeLimiter: {},
   checkLimit: async () => ({ success: true, retryAfter: 0 }),
   rateLimitDenyJson: () => {
     throw new Error("unreachable: the limiter is stubbed to always succeed");

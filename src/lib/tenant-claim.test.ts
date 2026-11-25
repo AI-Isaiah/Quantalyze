@@ -31,7 +31,11 @@ import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { mintTenantClaim, TenantClaimError } from "./tenant-claim";
+import {
+  anonymousClaimPayload,
+  mintTenantClaim,
+  TenantClaimError,
+} from "./tenant-claim";
 
 /** The independent oracle. Same algorithm, written out by hand. */
 function hmacHex(secret: string, message: string): string {
@@ -53,6 +57,10 @@ interface ParityCase {
   secret: string;
   exp: number;
   claim: string;
+  /** Only the per-IP case: the documentation-range address its payload pseudonymises. */
+  ip?: string;
+  /** The key Python's tenant_rate_limit_key must return for this case, scope process_key. */
+  bucket_process_key: string;
 }
 const FIXTURE = JSON.parse(
   readFileSync(
@@ -275,4 +283,80 @@ describe("[140.2-09 / TS-04] the committed cross-language parity fixture", () =>
       );
     },
   );
+});
+
+describe("[240 / RLIM-01] anonymousClaimPayload — the keyed per-IP pseudonym", () => {
+  const SECRET = "internal-test-token";
+  // Expected digests are computed HERE with node:crypto over the documented
+  // derivation, never by asking the function under test.
+  const expectedFor = (ip: string, secret = SECRET) =>
+    `public:${hmacHex(secret, `anon-ip:${ip}`).slice(0, 32)}`;
+
+  it.each([["unknown"], [""], ["   "]])(
+    "an unusable IP %j is the bare shared payload 'public'",
+    (ip) => {
+      expect(anonymousClaimPayload(ip, SECRET)).toBe("public");
+    },
+  );
+
+  it("an IPv4 address is `public:` plus 32 lowercase hex, 39 characters, dot-free", () => {
+    const payload = anonymousClaimPayload("203.0.113.7", SECRET);
+    expect(payload).toBe(expectedFor("203.0.113.7"));
+    expect(payload).toHaveLength(39);
+    expect(payload).toMatch(/^public:[0-9a-f]{32}$/);
+    expect(payload).not.toContain(".");
+  });
+
+  it("an IPv6 address is hashed as given, with no /64 normalisation", () => {
+    expect(anonymousClaimPayload("2001:db8::1", SECRET)).toBe(expectedFor("2001:db8::1"));
+    // Two addresses in the same /64 stay two visitors.
+    expect(anonymousClaimPayload("2001:db8::1", SECRET)).not.toBe(
+      anonymousClaimPayload("2001:db8::2", SECRET),
+    );
+  });
+
+  it("is deterministic per (secret, ip) and distinct across IPs and across secrets", () => {
+    expect(anonymousClaimPayload("203.0.113.7", SECRET)).toBe(
+      anonymousClaimPayload("203.0.113.7", SECRET),
+    );
+    expect(anonymousClaimPayload("203.0.113.7", SECRET)).not.toBe(
+      anonymousClaimPayload("203.0.113.8", SECRET),
+    );
+    expect(anonymousClaimPayload("203.0.113.7", SECRET)).not.toBe(
+      anonymousClaimPayload("203.0.113.7", "another-secret"),
+    );
+  });
+
+  it("the raw IP appears nowhere in the payload", () => {
+    expect(anonymousClaimPayload("203.0.113.7", SECRET)).not.toContain("203");
+  });
+
+  it("is domain-separated: the pseudonym never equals the MAC of a claim minted over it", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_800_000_000 * 1000));
+    const payload = anonymousClaimPayload("203.0.113.7", SECRET);
+    const claim = mintTenantClaim({ userId: payload }, SECRET);
+    const mac = claim.split(".")[2];
+    expect(payload.slice("public:".length)).not.toBe(mac.slice(0, 32));
+    // And it is minted without a guard refusal (dot-free, non-empty).
+    expect(claim.startsWith(`${payload}.`)).toBe(true);
+  });
+
+  it.each(FIXTURE.cases.filter((c) => c.ip !== undefined))(
+    "committed fixture case $name: the per-IP payload is exactly what the shipped derivation produces",
+    ({ ip, secret, payload }: ParityCase) => {
+      expect(anonymousClaimPayload(ip as string, secret)).toBe(payload);
+    },
+  );
+
+  it("the fixture carries a per-IP case, a csv case and a malformed public: case (a trimmed fixture would vacuously pass)", () => {
+    const names = FIXTURE.cases.map((c) => c.name);
+    expect(names).toEqual(
+      expect.arrayContaining(["public-per-ip", "csv-scoped", "public-malformed-suffix"]),
+    );
+    for (const c of FIXTURE.cases) {
+      expect(typeof c.bucket_process_key).toBe("string");
+      expect(c.bucket_process_key.length).toBeGreaterThan(0);
+    }
+  });
 });

@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.133.74.0] - 2026-11-24 — Phase 240 CONNECTTRUTH: validating a key or a CSV gets a true answer, and anonymous and CSV traffic get their own rate tiers
+
+Analytics service (`routers/process_key.py`, `routers/exchange.py`, `routers/internal.py`, `services/rate_limit.py`, `services/csv_validator.py`, `services/error_contract.py`, `services/app_error_handlers.py`, `docs/STATUS_CONTRACT.md`) and the Vercel edge (`src/lib/tenant-claim.ts`, `process-key-client.ts`, `ratelimit.ts`, `wizardErrors.ts`, the `verify-strategy` and `csv-finalize` routes). No migration, no visual change. Covers CONN-05, CONN-06, RLIM-01 and RLIM-02, per the founder rulings of 2026-11-24. Built from 30 phase commits (eight plans, their five merge commits, two docs fixes, one test pin, one security fix and two review fixes), each mapped below by hash.
+
+### Added
+- **A per-IP anonymous tier on `/process-key` (RLIM-01).** The verify-strategy teaser now mints its anonymous claim at Vercel as `public:<32 hex>`, the first 32 hex of an HMAC-SHA256 of the client IP from `getClientIp` (new `anonymousClaimPayload` in `tenant-claim.ts`), so the raw IP never reaches Python. Python keys that claim as `process_key:anon:<iphash>` at 30/hour per IP, behind one claim classifier: bare `public`, an unknown IP, or a malformed `public:*` payload falls back to the old shared anonymous bucket and is never read as a tenant. (`596b73838`, `1f3d090a1`)
+- **An anonymous aggregate of 200/hour (`process_key:anon-all`).** It sits under the 500/hour platform ceiling and above the per-IP buckets, so many IPs together cannot drain the ceiling for signed-in users. The decorators run identity, then the aggregate, then the ceiling, so a request refused per IP spends no aggregate or ceiling token. Closes the security review's HIGH. (`a8a47d41e`)
+- **A CSV-scoped tier of 60/minute per user (RLIM-02).** When `flow_type` is `csv`, the claim chokepoint signs a `csv:<user uuid>` scope, and `/process-key` gives it its own bucket at or above the edge's 20/minute, instead of the tenant tier's 100/hour that it shared with keys/sync and finalize-wizard. A cross-language fixture (`tests/fixtures/tenant-claim-parity.json`) pins the TS and Python claim grammars to each other. (`7d45020ae`, `35d3c1181`, `7595a2a0b`, `38e85676c`)
+- **The CSV month-name date parse (CONN-06).** A month-name cell (such as `12 Mar 2024`) in a numeric-date column is read in every position, column format and schema, and a blank date cell no longer reaches the month-name reader, and the existing date normalization flag names the month-name dates it read. (`60435fe80`, `1b2f40483`, `4fa5231d5`)
+
+### Changed
+- **Every permanent `POST /api/validate-key` 400 answers the flat `{detail, code, recoverable: false}` body (CONN-05).** sFOX 401/403 (`AUTH_FAILED`), MT5 bad server (`MT5_WRONG_SERVER`), MT5 master password (`MT5_MASTER_PASSWORD`), the go-dark gates (new `VENUE_DISABLED`) and the unsupported-exchange arm (new `INVALID_REQUEST`) now go through `VenueTransientHTTPException`, as the ccxt `AuthenticationError` arm already did. `detail` is byte-identical, so the wizard's copy and verdict do not change; the two new codes classify as `UNKNOWN` in the wizard. One test per venue pins it, against a shared contract fixture read by both pytest and vitest. (`5bea89132`, `30ea0092d`, `2f7ec1dde`)
+- **MT5 `rotate-secret` refuses a dark venue first.** `rotate_key_secret` in `routers/internal.py` answers `VENUE_DISABLED` in the flat shape before any decrypt or probe. A census pins that no raw 400 remains on the validate-key path. (`e3f814f24`)
+- **A stated `permanent=True` is honoured on the sync validation arms (the 140.1.2 review's M-03).** The 424 venue-transient pre-gate, the 403 `_envelope_error` call and `_run_validate_only` in `process_key.py` read an adapter's `permanent=True`, so the sync and worker paths cannot give two verdicts for one rejection. Only `True` is honoured; `False` or absent keeps the code-set rule. (`ff7703797`)
+- **csv-finalize throttles on its own edge limiter.** New `csvFinalizeLimiter` (20 per 60 s) replaces its use of `csvValidateLimiter`, and the stale `csvValidateLimiter` docblock, which still cited the old `/csv/validate` 30/hour cap, now cites the tier it rides. A test pins the edge and upstream CSV limits to each other. (`3eaa4fcfc`, `477febd98`)
+- **The saturation alert follows the re-key.** It fires for the shared anonymous bucket and the `anon-all` aggregate only; a per-IP refusal emits nothing. A hygiene test asserts no IP, pseudonym, claim or bucket key reaches a 429 body, its headers or the handler's log line, and the `get_remote_address` scan now covers every non-test module, not only `routers/`. (`1d71f82f6`)
+- **`docs/STATUS_CONTRACT.md` cites by symbol.** The `VenueTransientHTTPException` raise sites, the R-2 vocabulary and the S-18 precedent are now found by symbol or code text instead of line numbers, the flat 400 arms are recorded, and the prose says five classes, matching the table. (`a109a9643`)
+
+### Security
+- **`tenant_or_platform_key` folds per-IP anonymous claims into the shared anonymous bucket on the single-limit routes (security review MEDIUM).** Those routes have no aggregate, so a per-IP bucket there would have let many IPs multiply the anonymous allowance. Only `/process-key`, which has the aggregate, keys per IP. (`fe8515052`)
+- ⚠️ **Accepted risk AR-1: CSV-scoped traffic is no longer backstopped by the 500/hour platform ceiling.** By the founder's RLIM-02 ruling the CSV tier is exempt from the ceiling, strictly: the exemption applies only to a signed `csv:<uuid>` scope, never to a tenant or anonymous claim. CSV traffic is bounded by the edge 20/minute per user and the upstream 60/minute per user, not by a platform-wide cap. (`f15c238fd`)
+
+### Fixed
+- **A month-name cell on the ambiguous and out-of-order exits is parsed, not rejected as unreadable (review WR-01).** (`2a1194ba4`)
+- **A day-first-only cell is not blanked by the month-first write-back (silent-failure hunt round 2).** The write-back keys on the cells the month-first reading could read, and keeps the earlier reading for the rest. (`3ccd52607`)
+
+### Tests
+- New: `test_process_key_anon_ip_tier.py`, `test_process_key_csv_tier.py`, `test_process_key_permanence_plumbing.py`, `test_validate_key_permanent_400.py` (with `fixtures/validate_key_permanent_400_contract.json`), `tests/lib/csv-limit-agreement.test.ts` and `tests/lib/validate-key-permanent-400-parity.test.ts`. `test_raw_5xx_census.py` now counts 27 constructions over the status set {400, 424}.
+- The tests-subtree scan exclusion pin in `seam-venue-vocabulary.invariant.test.ts` moves from 65 to 68 sites for the permanence plumbing fixtures. (`34fdebf51`)
+- Every new gate was proven able to fail (PROOF-01): RED on a neutered byte copy with its named arm, restored with `cp`, `cmp` clean, then GREEN. The records are in the plan SUMMARYs.
+
+### Notes
+- **Deploy skew, benign.** Vercel deploys before Railway, so for a few minutes the new `public:<hash>` and `csv:<uuid>` claims reach the old Python, which reads them as tenant claims at 100/hour. No request is refused that the old tiers would have allowed.
+- Review: three rounds of gsd-code-reviewer and silent-failure-hunter, MEDIUM and above only. WR-01 and its round-2 follow-up were fixed; round 3 is clean. Every LOW and INFO is recorded in the phase review only. Verification passed 5/5, and the security audit is SECURED with no open threats.
+- Phase 240's records (plan SUMMARYs, review, verification, security) follow in a separate records PR. Plan merges: `aea10947d`, `b22cb3b46`, `3e0bd6dd1`, `25bd0174b`, `86c87f44b`.
+
+### Removed
+- `TODOS.md` entries deleted, whole, as closed by this ship: `[170.1-CSV-ODD-SPELLING-REJECTED]` (the month-name parse shipped with tests, CONN-06); "verify-strategy teaser: per-IP front door cannot see the shared anon bucket" (RLIM-01); "csv-validate: 12× over the shared `/process-key` tenant tier + stale docblock citation" (RLIM-02); the section "v1.16 Phase-140.1.2 review — findings routed onward" (its three items: the M-03 permanence plumbing, the M-07 two-body-shapes asymmetry, and the STATUS_CONTRACT coordinate sweep, CONN-05); and the "`STATUS_CONTRACT.md` not-seam-reachable coordinate drift" bullet, whose coordinates are now cited by symbol. No live pointer outside `.planning/` named any of them.
+
 ## [0.133.73.0] - 2026-11-24 — Phase 231 BYBITREADS plan 06: the Bybit derive anchor counts every stable coin, through the same rule as the current-equity read
 
 Analytics service only (`services/exchange.py` and four test files). No migration, no API change, no frontend change. Covers VREAD-01, the last open requirement of Phase 231; plans 01-05 shipped in v0.133.61.6 (#1314) and v0.133.65.0 (#1321). Built from 6 phase commits (one feature, two test commits, three review fixes), each mapped below by hash.
