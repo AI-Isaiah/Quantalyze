@@ -116,6 +116,10 @@ interface ExchangeConnection {
   // connected with; NULL for every ccxt venue. Rendered in both the active
   // and disconnected sections for exchange === "mt5" only.
   venue_account_id: string | null;
+  // Migration 20261125132334 (Phase 225 plan 13, CONN-03). The broker server the
+  // key reads: identity input for accountIdentityTokens (one login on two set
+  // servers is two accounts). Never rendered.
+  venue_server: string | null;
   // Migration 20260925120000 (Phase 167.1.2 D-11 / D-05). The duplicate
   // marker the daily poll's identity stamper writes, read by accountShareNote
   // for the note on an active row, and the owner's departed-history choice.
@@ -163,6 +167,7 @@ type InitialKey = Omit<
   | "last_429_at"
   | "disconnected_at"
   | "venue_account_id"
+  | "venue_server"
   | "account_shared_with_api_key_id"
   | "account_share_kind"
   | "history_inclusion"
@@ -176,6 +181,7 @@ type InitialKey = Omit<
   last_429_at?: string | null;
   disconnected_at?: string | null;
   venue_account_id?: string | null;
+  venue_server?: string | null;
   account_shared_with_api_key_id?: string | null;
   account_share_kind?: string | null;
   history_inclusion?: string | null;
@@ -664,6 +670,7 @@ function normalizeInitialKey(
     // M1: preserve local null (reconnect in-flight) against stale server snapshot.
     disconnected_at: disconnectedAt,
     venue_account_id: k.venue_account_id ?? null,
+    venue_server: k.venue_server ?? null,
     account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
     account_share_kind: k.account_share_kind ?? null,
     history_inclusion: k.history_inclusion ?? null,
@@ -790,6 +797,7 @@ export function AllocatorExchangeManager({
     id: k.id,
     exchange: k.exchange,
     venue_account_id: k.venue_account_id,
+    venue_server: k.venue_server,
     account_shared_with_api_key_id: k.account_shared_with_api_key_id,
     account_share_kind: k.account_share_kind,
     is_active: k.is_active,
