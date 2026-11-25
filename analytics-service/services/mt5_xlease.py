@@ -614,16 +614,25 @@ async def acquire_terminal_xlease(
             rpc_bound = _MT5_XLEASE_RPC_TIMEOUT_S
             if remaining is not None:
                 rpc_bound = min(rpc_bound, max(remaining, _MT5_XLEASE_MIN_ATTEMPT_S))
-            # The call is a FUTURE that outlives this await: `asyncio.wait` neither
-            # cancels it on a timeout nor when this task is cancelled, so the RPC's
-            # outcome stays observable (Pitfall 2). It joins `pending` BEFORE the
-            # await, so a cancellation mid-call is covered too.
-            fut: asyncio.Future[bool] = asyncio.ensure_future(
-                backend.acquire(digest, token, holder_n, site_n, ttl_s)
-            )
-            fut.add_done_callback(_consume_future)
-            pending.add(fut)
+            if pending:
+                # CR-01: an earlier call outlived its RPC bound and is STILL in flight.
+                # Wait on it again instead of starting another: a hung database would
+                # otherwise get a new pool thread (up to 120 s each) every poll, and
+                # `pending` would grow without limit. At most one call is ever pending.
+                fut = next(iter(pending))
+            else:
+                # The call is a FUTURE that outlives this await: `asyncio.wait` neither
+                # cancels it on a timeout nor when this task is cancelled, so the RPC's
+                # outcome stays observable (Pitfall 2). It joins `pending` BEFORE the
+                # await, so a cancellation mid-call is covered too.
+                fut = asyncio.ensure_future(
+                    backend.acquire(digest, token, holder_n, site_n, ttl_s)
+                )
+                fut.add_done_callback(_consume_future)
+                pending.add(fut)
             done, _ = await asyncio.wait({fut}, timeout=rpc_bound)
+            #: The exception class name when this wait ended with no answer.
+            failure: str | None = None
             if fut in done:
                 pending.discard(fut)
                 try:
@@ -631,10 +640,8 @@ async def acquire_terminal_xlease(
                 except Exception as exc:  # noqa: BLE001 — see below
                     if is_missing_rpc(exc):
                         # DEC-04-A: the RPC is not deployed. Loud, never latched
-                        # (the next acquisition asks again). An earlier poll still in
-                        # flight may land after this; release it as on any abandon.
+                        # (the next acquisition asks again).
                         _note_unavailable(XLEASE_ACQUIRE_RPC, site_n)
-                        _release_late_grants(pending, backend, digest, token)
                         return XLeaseHold(
                             backend=backend,
                             digest=digest,
@@ -647,40 +654,45 @@ async def acquire_terminal_xlease(
                     # Any OTHER backend failure fails closed, but a blip is tolerated
                     # for the budget (unbounded) or to the deadline (bounded): the
                     # caller never proceeds unserialized.
-                    error_now = time.monotonic()
-                    if first_error_at is None:
-                        first_error_at = error_now
-                    if not error_logged:
-                        error_logged = True
-                        # Class name only: a PostgREST message can echo a URL.
-                        logger.warning(
-                            "mt5_xlease: the lease acquire RPC failed (exc_class=%s "
-                            "site=%s); retrying",
-                            type(exc).__name__,
-                            site_n,
-                            extra={
-                                "event_type": "mt5_xlease_rpc_error",
-                                "rpc": XLEASE_ACQUIRE_RPC,
-                                "site": site_n,
-                                "exc_class": type(exc).__name__,
-                            },
-                        )
-                    if (
-                        bound_s is None
-                        and error_now - first_error_at >= _MT5_XLEASE_ERROR_BUDGET_S
-                    ):
-                        raise XLeaseUnavailable() from None
+                    failure = type(exc).__name__
                 else:
                     first_error_at = None  # the database answered: the window restarts
                     if granted:
                         break
                     refusals += 1
-            # else: the call outlived its RPC bound (neither an answer nor an error,
-            # so it neither opens nor clears the error window). It stays in `pending`; the next
-            # poll reuses the same token, so a late grant is idempotent for it.
+            else:
+                # The call outlived its RPC bound: no answer, so it counts toward the
+                # error window exactly like a raised error (DEC-04-C) (CR-01).
+                failure = "TimeoutError"
+            if failure is not None:
+                error_now = time.monotonic()
+                if first_error_at is None:
+                    first_error_at = error_now
+                if not error_logged:
+                    error_logged = True
+                    # Class name only: a PostgREST message can echo a URL.
+                    logger.warning(
+                        "mt5_xlease: the lease acquire RPC failed (exc_class=%s "
+                        "site=%s); retrying",
+                        failure,
+                        site_n,
+                        extra={
+                            "event_type": "mt5_xlease_rpc_error",
+                            "rpc": XLEASE_ACQUIRE_RPC,
+                            "site": site_n,
+                            "exc_class": failure,
+                        },
+                    )
+                if (
+                    bound_s is None
+                    and error_now - first_error_at >= _MT5_XLEASE_ERROR_BUDGET_S
+                ):
+                    raise XLeaseUnavailable() from None
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0.0:
                 raise XLeaseBoundExpired() from None
+            if pending:
+                continue  # the in-flight call is awaited next; no new poll to space out
             sleep_s = _MT5_XLEASE_POLL_S + random.uniform(0.0, _MT5_XLEASE_POLL_JITTER_S)
             if remaining is not None:
                 sleep_s = min(sleep_s, remaining)

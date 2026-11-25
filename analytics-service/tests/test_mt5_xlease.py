@@ -25,7 +25,7 @@ from postgrest.exceptions import APIError
 from services import mt5_client, mt5_concurrency, mt5_xlease
 from services.mt5_client import HOLDER_UNATTRIBUTED, _mt5_epoch_for, mt5_terminal_holder
 from services.mt5_handover import SITE_DERIVE, SITE_HOLDINGS
-from tests.xlease_fakes import FakeXLeaseBackend
+from tests.xlease_fakes import FakeXLeaseBackend, sleep_forever
 
 _XLEASE_LOGGER = "quantalyze.analytics.mt5_xlease"
 _KEY = "h:1"
@@ -259,10 +259,10 @@ async def test_late_grant_after_bound_expiry_is_released(monkeypatch, fast_poll)
     assert not fake.holds(_digest()), "the terminal stayed held after a late grant"
 
 
-async def test_late_grant_after_a_normal_hold_is_released_again(monkeypatch) -> None:
-    """An acquire that timed out client-side, then a retry that was granted and
-    released: the first call landing AFTER the hold released re-takes the row, and
-    the cleanup callback must release it again."""
+async def test_a_slow_acquire_is_awaited_not_resent_and_released_once(monkeypatch) -> None:
+    """CR-01 replaced the old 're-poll while the first call is still in flight' shape:
+    a call that outlives its RPC bound is AWAITED again, never joined by a second RPC,
+    so there is one token, one in-flight call and (once the hold ends) one release."""
     fake = FakeXLeaseBackend()
     first = {"seen": False}
 
@@ -277,17 +277,19 @@ async def test_late_grant_after_a_normal_hold_is_released_again(monkeypatch) -> 
     monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_POLL_S", 0.01)
     monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_POLL_JITTER_S", 0.005)
 
-    async with mt5_concurrency.mt5_terminal_lease(_KEY):
-        pass
+    async def _hold() -> None:
+        async with mt5_concurrency.mt5_terminal_lease(_KEY):
+            assert fake.holds(_digest()), "the slow call's grant was lost"
+
+    await asyncio.wait_for(_hold(), timeout=3.0)
     assert not fake.holds(_digest())
 
-    await asyncio.sleep(0.8)
-    tokens = {c[2] for c in fake.calls}
-    assert len(tokens) == 1, "one acquisition must use one token on every poll"
-    assert fake.count("acquire") == 2
-    assert fake.calls[-1][0] == "release" and fake.count("release") == 2, (
-        f"the late-landing acquire was never released (calls={[c[0] for c in fake.calls]})"
+    await asyncio.sleep(0.2)
+    assert fake.count("acquire") == 1, (
+        f"a second acquire RPC was started while the first was still pending "
+        f"({fake.count('acquire')} calls)"
     )
+    assert fake.count("release") == 1
     assert not fake.holds(_digest()), "a late grant wedged the terminal after a normal hold"
 
 
@@ -754,26 +756,36 @@ async def test_the_fallback_hold_makes_no_renew_and_no_release_call(quick_renew)
     assert lost == [] and not hold.lost
 
 
-async def test_a_late_grant_from_an_earlier_poll_is_released_when_the_fallback_is_taken(
+async def test_cr01_no_new_acquire_rpc_starts_while_an_earlier_one_is_pending(
     monkeypatch, fast_poll
 ) -> None:
-    """Poll 1 outlives its RPC bound and is granted AFTER poll 2 learns the RPC is
-    missing (the migration rolled back mid-acquisition). Without releasing the pending
-    future that late grant would hold the row for a whole TTL."""
-    backend = _ScriptedBackend([_answers(True, delay_s=0.3), _raises(_missing_rpc_error())])
-    mt5_xlease.set_xlease_backend_for_tests(backend)
+    """The call outlives its RPC bound five times over. Each timed-out wait used to
+    launch ANOTHER RPC (a pool thread each, up to 120 s apiece, 33 in two seconds in the
+    reviewer's probe). The in-flight call must be awaited instead, so `pending` is at
+    most one call however long the database hangs."""
+    in_flight = {"now": 0, "max": 0, "calls": 0}
+
+    async def _slow_then_answers() -> bool:
+        in_flight["calls"] += 1
+        in_flight["now"] += 1
+        in_flight["max"] = max(in_flight["max"], in_flight["now"])
+        try:
+            await asyncio.sleep(0.3)
+            return True
+        finally:
+            in_flight["now"] -= 1
+
+    mt5_xlease.set_xlease_backend_for_tests(_ScriptedBackend([_slow_then_answers]))
     monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.05)
 
-    hold = await _grant([])
-    assert hold.cross_process is False
-    await asyncio.sleep(0.6)
-
-    assert backend.calls.count("acquire") == 2
-    assert backend.calls.count("release") == 1, (
-        f"the late grant of the abandoned poll was never released (calls={backend.calls})"
-    )
+    # The deadman matters: the unfixed loop never reads a finished call it has already
+    # stopped waiting on, so it re-polls forever.
+    hold = await asyncio.wait_for(_grant([]), timeout=3.0)
     await hold.release()
-    assert backend.calls.count("release") == 1
+
+    assert in_flight["calls"] == 1 and in_flight["max"] == 1, (
+        f"overlapping acquire RPCs: {in_flight}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1065,3 +1077,62 @@ async def test_sf_m6_a_non_boolean_answer_is_counted_and_logged_as_a_backend_err
 
     errors = _events(caplog, "mt5_xlease_rpc_error")
     assert len(errors) == 1 and errors[0].exc_class == "TypeError"
+
+
+# --------------------------------------------------------------------------- #
+# Round-1 review fixes (230-REVIEW.md, CR-01 = SF-M2).
+# --------------------------------------------------------------------------- #
+async def test_cr01_a_hung_acquire_is_counted_logged_once_and_ends_unavailable(
+    monkeypatch, caplog, fast_poll
+) -> None:
+    """A database that HANGS (no answer, no error) used to leave an unbounded caller
+    waiting silently for as long as the hang lasted: no log line, no budget spent, and
+    the in-process lock held the whole time so every wizard validate answered busy. A
+    call that outlives its RPC bound is no answer, so it counts toward the error window
+    like a raised error (DEC-04-C) and the caller gets the classifiable error."""
+    fake = FakeXLeaseBackend()
+    fake.before["acquire"] = sleep_forever
+    _install(fake)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.05)
+    _small_budget(monkeypatch, 0.2)
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+    started = time.monotonic()
+
+    async def _attempt() -> None:
+        async with mt5_concurrency.mt5_terminal_lease(_KEY, site=SITE_DERIVE):
+            pytest.fail("the body must never run while the lease database hangs")
+
+    with pytest.raises(mt5_concurrency.Mt5TerminalLeaseUnavailableError):
+        await asyncio.wait_for(_attempt(), timeout=3.0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed >= 0.2, f"gave up at {elapsed:.2f}s, before the 0.2s error budget"
+    errors = _events(caplog, "mt5_xlease_rpc_error")
+    assert len(errors) == 1, f"expected one rpc_error record for the hang, got {len(errors)}"
+    assert errors[0].levelno == logging.WARNING
+    assert errors[0].exc_class == "TimeoutError" and errors[0].site == SITE_DERIVE
+    assert fake.count("acquire") == 1, "a hung call must be awaited, not re-sent"
+    assert not mt5_concurrency._mt5_terminal_lock_for(_KEY).locked()
+
+
+async def test_cr01_a_hang_that_then_answers_resets_the_window_and_grants(
+    monkeypatch, fast_poll
+) -> None:
+    """The budget is for CONSECUTIVE no-answers: a call that finally answers True after
+    several timed-out waits (all inside one budget) is a grant, not an outage."""
+    fake = FakeXLeaseBackend()
+    first = {"seen": False}
+
+    async def _slow_once() -> None:
+        if not first["seen"]:
+            first["seen"] = True
+            await asyncio.sleep(0.2)
+
+    fake.before["acquire"] = _slow_once
+    _install(fake)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.05)
+    _small_budget(monkeypatch, 1.0)
+
+    hold = await asyncio.wait_for(_grant([]), timeout=5.0)
+    assert hold.cross_process and fake.holds(_digest())
+    await hold.release()
