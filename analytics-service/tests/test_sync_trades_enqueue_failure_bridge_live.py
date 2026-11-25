@@ -381,3 +381,30 @@ def test_nothing_published_on_a_first_attempt_retries_and_reads_computing() -> N
     assert job["error_kind"] == "transient", job
     assert result.outcome == DispatchOutcome.FAILED, result
     assert result.error_kind == "transient", result
+
+
+def test_a_failed_row_with_old_figures_is_not_published_and_ends_failed() -> None:
+    """222-REVIEW WR-01: a strategy that was published and whose LATER recompute failed
+    reads ``failed`` with its old ``metrics_json`` still in place (the bridge's branch (b)
+    only touches the status and error columns). That is NOT published, so on the last
+    attempt the handler returns FAILED / transient and the row ends ``failed`` with the
+    stored transient sentence. A publish predicate collapsed to "has metrics_json" would
+    return DONE, the bridge's branch (c) would resurrect the row to ``complete`` with
+    stale figures and a NULL error, and this is the assertion that fails."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+
+    result, row, job = _drive(
+        admin,
+        tag="failed-figures",
+        seed_row={"computation_status": "failed", "metrics_json": _METRICS},
+    )
+
+    assert row is not None
+    assert row["computation_status"] == "failed", row
+    assert row["computation_error"] == _TRANSIENT_SENTENCE, row
+    assert row["metrics_json"] == _METRICS, row
+    assert job["status"] == "failed_final", job
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "transient", result

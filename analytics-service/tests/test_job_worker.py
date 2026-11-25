@@ -3400,6 +3400,29 @@ class TestSyncTradesEnqueueFailurePublishState:
         assert len(upserts) == 1 and upserts[0]["computation_status"] == "failed"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"computation_status": "failed", "metrics_json": {"sharpe": 1.0}},
+            {"computation_status": "pending", "metrics_json": {"sharpe": 1.0}},
+        ],
+        ids=["failed_with_old_figures", "pending_with_figures"],
+    )
+    async def test_a_non_success_row_with_old_figures_is_not_published(
+        self, row: dict, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """OQ4 / 222-REVIEW WR-01: published is a success status, or 'computing' WITH
+        metrics_json. A 'failed' row (a published strategy whose later recompute
+        failed: the bridge's branch (b) leaves the old metrics_json in place) and a
+        'pending' row are NOT published even though they carry figures. A predicate
+        collapsed to 'has metrics_json' would return DONE here, and the bridge's
+        branch (c) would then resurrect the row to 'complete'."""
+        result, upserts = await self._run(row, caplog)
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient"
+        assert len(upserts) == 1 and upserts[0]["computation_status"] == "failed"
+
+    @pytest.mark.asyncio
     async def test_unreadable_publish_state_writes_nothing_and_returns_done(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
