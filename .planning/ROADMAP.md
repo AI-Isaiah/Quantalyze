@@ -249,15 +249,21 @@ Plans:
 **Depends on:** none (independent of the MT5 parity phases). It shares files, not symbols, with three v1.22 phases, so each plan lists its write scope by symbol: `run_sync_trades_job` with 232 OKXTRADES (VREAD-08), `csv_validator.py` with 240 CONNECTTRUTH (CONN-06), and `routers/portfolio.py` with 236 FIGUREMATH (FIG-01/02). By tier order 232 and 236 merge first, and this phase re-bases on them. Its `computation_error_copy` migration runs in the one serial migration lane.
 **Success Criteria** (what must be TRUE):
 1. No string in `analytics-service` or in the `computation_error_copy` arms says "contact support"; each names the contact form or a remedy that works, and csv-finalize's `ENQUEUE_LOST_RACE_USER_COPY` is back in byte parity with the SQL ELSE arm, with the parity test reading the SQL arm instead of a hand-typed oracle.
-2. A total benchmark source failure (no price source and no recent cached day) writes a note distinct from the stale-cache note, and the page shows it with its own wording; a test drives both cases and tells them apart.
-3. When the follow-on analytics enqueue fails in `run_sync_trades_job`, the strategy's row does not read `complete` with no analytics; a test drives the failed enqueue through the bridge and asserts the stored status and error, shown RED before the fix.
+2. A total benchmark source failure (no price source and no recent cached day) writes a note distinct from the stale-cache note, and the page shows it with its own wording; a test drives both cases and tells them apart. ⛔ NARROWED 2026-11-25 (founder ruling OQ1, recorded in 222-CONTEXT.md): no page renders the note, so this is met by the stored value with `stale=false`, the amber-only-when-stale rule, and an adapter-level test that pins both; no card rebuild.
+3. When the follow-on analytics enqueue fails in `run_sync_trades_job`, the strategy's row does not read `complete` with no analytics; a test drives the failed enqueue through the bridge and asserts the stored status and error, shown RED before the fix. ⛔ NARROWED 2026-11-25 (founder rulings ERRC-03 option a, OQ2, OQ4, recorded in 222-CONTEXT.md): FAILED with error_kind `transient` only when nothing is published; a strategy at `complete`, `complete_with_warnings`, or `computing` with `metrics_json` counts as published, keeps its publish state, and gets no failed write.
 4. The migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, and every census it moves (schema snapshot, mutation floors, pins) moves in the same PR.
 5. The three TODOS entries above are deleted in the ship PR and named in its CHANGELOG entry.
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. The parity test reads the SQL arm, never a hand-typed oracle.
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [ ] 222-01-PLAN.md — migration: `computation_error_copy` arms name the contact form; csv-finalize parity read from the SQL; both pinning SQL gates moved
+- [ ] 222-02-PLAN.md — the five analytics-service sentences name the contact form; ast scan and per-function pins; wizardErrors quote
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 222-03-PLAN.md — a total benchmark source failure reads "no price source", not "stale"; the stale-gated tone rule beside the adapter
+- [ ] 222-04-PLAN.md — a failed follow-on enqueue fails a never-published strategy and leaves a published one alone, proven through the real bridge
 
 ### Phase 223: FLOWKINDS — each funding caller treats a malformed row by a recorded, tested decision, and the malformed count is on record first
 
