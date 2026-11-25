@@ -21,7 +21,7 @@ status: all_fixed
 - Skipped: 0
 - Not touched, by instruction: WR-02, IN-01, IN-02 (IN-02 is the same observation as SFH-01 and is closed by it), and every LOW/INFO item.
 
-**Where verification ran:** the main checkout of the isolated Phase 222 worktree, `/Users/helios-mammut/claude-projects/quantalyze-wt-222` on branch `gsd/phase-222-alerttruth`. The live module ran against the local-stack lane booted from that worktree (loopback only; no remote database touched). The lane's analytics container (logflare) would not turn healthy on this machine, so the lane was booted with `-x logflare,vector` through a throwaway copy of `scripts/local-stack/run.sh`. The copy was deleted straight after the boot, and `git status` shows no change under `scripts/`. The lane was stopped with `run.sh down` and 0 `supabase_*` containers remain.
+**Where verification ran:** the main checkout of the isolated Phase 222 worktree, `the phase 222 worktree` on branch `gsd/phase-222-alerttruth`. The live module ran against the local-stack lane booted from that worktree (loopback only; no remote database touched). The lane's analytics container (logflare) would not turn healthy on this machine, so the lane was booted with `-x logflare,vector` through a throwaway copy of `scripts/local-stack/run.sh`. The copy was deleted straight after the boot, and `git status` shows no change under `scripts/`. The lane was stopped with `run.sh down` and 0 `supabase_*` containers remain.
 
 ## Fixed Issues
 
@@ -140,7 +140,7 @@ _Iteration: 1_
 - Skipped: 0
 - Not touched, by instruction: R2-IN-01, R2-IN-02, R2-IN-03 (LOW/INFO).
 
-**Where verification ran:** the main checkout of the isolated Phase 222 worktree, `/Users/helios-mammut/claude-projects/quantalyze-wt-222` on branch `gsd/phase-222-alerttruth`. The live module ran against the local-stack lane booted from that worktree, loopback only (`http://127.0.0.1:54421`), with the lane handoff exported as `SUPABASE_TEST_URL`, `SUPABASE_TEST_SERVICE_KEY` and `LANE_DB_URL` the way CI's python job does. No remote database was touched. The lane's logflare container does not turn healthy on this machine, so it was booted with `-x logflare,vector` through a throwaway copy of `scripts/local-stack/run.sh` (`run-tmp-nolf.sh`). The copy was deleted after teardown, and `git status` shows no change under `scripts/`. `run.sh down` ran and 0 `supabase_*` containers remain.
+**Where verification ran:** the main checkout of the isolated Phase 222 worktree, `the phase 222 worktree` on branch `gsd/phase-222-alerttruth`. The live module ran against the local-stack lane booted from that worktree, loopback only (`http://127.0.0.1:54421`), with the lane handoff exported as `SUPABASE_TEST_URL`, `SUPABASE_TEST_SERVICE_KEY` and `LANE_DB_URL` the way CI's python job does. No remote database was touched. The lane's logflare container does not turn healthy on this machine, so it was booted with `-x logflare,vector` through a throwaway copy of `scripts/local-stack/run.sh` (`run-tmp-nolf.sh`). The copy was deleted after teardown, and `git status` shows no change under `scripts/`. `run.sh down` ran and 0 `supabase_*` containers remain.
 
 ### R2-WR-01: the enqueue-failure tail still returned FAILED when its UPDATE lost the race
 

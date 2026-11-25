@@ -28,18 +28,21 @@ files_reviewed_list:
   - supabase/schema/functions/computation_error_copy.sql
   - supabase/tests/test_sync_status_curated_sentence_survives.sql
   - supabase/tests/test_sync_status_marked_refresh_protected.sql
-# Counts and status below are the OPEN set after round 2 (see "## Round 2").
+# Counts and status below are the OPEN set after round 3 (see "## Round 3").
+# Round 2 counted warning 1 / info 3; its MEDIUM (R2-WR-01) was taken by the fixer in round 2 and is closed in round 3.
 # Round 1 counted warning 2 / info 2; its two MEDIUMs (WR-01, SFH-01) were taken by the fixer.
-round: 2
+round: 3
 round_2_reviewed: 2026-11-25T15:10:00Z
 round_2_scope: "git diff 84d7ce330..HEAD -- . ':!.planning' (8e82ab636, 1d5f488ff)"
+round_3_reviewed: 2026-11-25T14:28:44Z
+round_3_scope: "git diff 5d52587f3..HEAD -- . ':!.planning' (12b56c5e4)"
 findings:
   critical: 0
-  warning: 1
-  info: 3
-  total: 4
+  warning: 0
+  info: 6
+  total: 6
   necessity: 0
-status: issues_found
+status: clean
 ---
 
 # Phase 222: Code Review Report
@@ -297,3 +300,119 @@ Rated LOW because the offline chain pin fixes every string, and the serialised q
 _Round 2 reviewed: 2026-11-25T15:10:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+
+## Round 3
+
+**Reviewed:** 2026-11-25T14:28:44Z
+**Scope:** `git diff 5d52587f3..HEAD -- . ':!.planning'`. That is commit `12b56c5e4` (the R2-WR-01 fix), and it touches three files:
+- `analytics-service/services/job_worker.py`, the enqueue-failure tail of `run_sync_trades_job`
+- `analytics-service/tests/test_job_worker.py`
+- `analytics-service/tests/test_sync_trades_enqueue_failure_bridge_live.py`
+
+**Status:** clean. No MEDIUM or higher remains.
+
+**Evidence base.** This round measured the tests itself instead of relying on the fixer's log.
+- The local-stack lane was booted from this worktree with the unmodified `scripts/local-stack/run.sh up`. It is loopback only (`127.0.0.1:54421`), and the replay set was the phase's one migration.
+- The lane handoff was exported as CI's python job does it: `SUPABASE_TEST_URL`, `SUPABASE_TEST_SERVICE_KEY` and `LANE_DB_URL`.
+- GREEN at HEAD: the live module ran `8 passed`, and the offline gate set ran `31 passed`.
+- `mypy --strict services/job_worker.py`: no issues.
+- The lane was then stopped with `run.sh down`. 0 `supabase_*` containers and 0 volumes remain, and the tracked tree is unchanged.
+
+### What holds
+
+1. **R2-WR-01 is closed end to end.** Trace:
+   - **The race case (row published between the read and the write).** The conditional UPDATE matches 0 rows, so `.data == []` and `wrote` is False. The re-read sees the published row, so `_nothing_published = False` and the handler falls through to `DONE`. `mark_compute_job_done` (mark_compute_job_done.sql:39-43 sets `done` under the claim fence; :130 runs the bridge) then calls `sync_strategy_analytics_status`. A `done` job cannot enter `live_failures`, which selects `f.status = 'failed_final'` only. From there:
+     - With the publisher already finished, branch (c) keeps `complete_with_warnings` (the `computation_warned` arm) and writes no error.
+     - With the publisher still in flight, branch (a) runs. Its status CASE (sync_strategy_analytics_status.sql:646-654) keeps `complete_with_warnings` for a warned row, and turns a plain `complete` row into `computing` (`v_refresh_keep` is false while an unmarked job is in flight). It keeps `computation_warned`, because it clears that only for a `writer`-stamped error of an unprotected job, and this tail's payload is never stamped. The publisher's own `done` then resolves the row through branch (c).
+
+     Either way, the `failed_final` that let branch (b) write `failed` in round 2 is no longer produced. This is the same outcome as the published-at-first-read path, which round 1 traced.
+   - **Nothing published (no row).** The UPDATE matches 0 rows. The re-read finds no row, so the result is `False` and `_nothing_published` stays True. The handler returns `FAILED/transient` and `mark_compute_job_failed` runs the bridge, which INSERTs `computing` (branch (a), `failed_retry`) or `failed` with the curated transient sentence (branch (b), `failed_final`). This is unchanged from round 2.
+   - **Nothing published (a row that is not published, e.g. `failed` or `pending` with figures).** The UPDATE matches, so `wrote` is True and there is no re-read. The handler returns `FAILED`, and the result is unchanged.
+   - **Published at the first read, or that read unreadable.** The new block sits under `if _nothing_published:` and so is never reached. There is no write and the handler returns DONE. Unchanged.
+2. **`update()` really returns the matched rows in `.data` with this repo's client.**
+   - Production gets `ctx.supabase` from `_exchange_preflight`, which calls `get_supabase()` (job_worker.py:1866). That is a plain `create_client(url, service_key)` in services/db.py. `_force_http1` only rebuilds the httpx session with the same headers. There are no `ClientOptions` and no global `Prefer` header.
+   - Pinned and installed: `postgrest==2.33.0` / `supabase==2.33.0` (requirements.txt:172, :255). The installed `SyncRequestBuilder.update` signature defaults `returning=ReturnMethod.representation`, and `pre_update` sends `Prefer: return=representation`, so PostgREST echoes the patched rows. A zero-row PATCH returns `[]`.
+   - The live race test's client is `wrap_live_db_client(create_client(...))`, a transparent transport shim, so it measures the same `.data` shape.
+   - **Closure does not depend on that default.** Suppose a future `returning='minimal'` default made `.data` empty on every UPDATE (the trade `tests/test_mt5_session_episodes.py:150` records for another writer). Then `wrote` would always be False. A row that was really written then re-reads as `failed`, which is not published, so the handler still returns FAILED. The only cost is one extra read. The unsafe direction would be a truthy `.data` on a zero-row match, which PostgREST does not produce. Measured as mutation M4 below.
+3. **The tests can fail.** Each mutation below was applied to `job_worker.py` from a byte backup kept in the scratchpad, and run against the live lane plus the offline enqueue-failure, census and failed-status gates. After the last one the file was restored, and `cmp` against the backup was silent.
+
+   | mutation | result |
+   |---|---|
+   | M1: drop the re-read (`if False and not wrote …`) | RED: the race test `assert 'failed' == 'complete_with_warnings'`, which is bridge branch (b) over the row published in between |
+   | M2: a zero-row result means DONE with no re-read (`if not wrote:`) | RED: `test_nothing_published_ends_failed_with_the_retries_exhausted_sentence` `assert 'complete' == 'failed'`, and `test_nothing_published_on_a_first_attempt_retries_and_reads_computing` `assert 'complete' == 'computing'` |
+   | M3: always "wrote" (`return True`) | RED: the race test, `'failed' == 'complete_with_warnings'` |
+   | M4: never "wrote" (`return False`) | GREEN, `38 passed`. This is the safe direction (point 2), and it is expected |
+   | M5: unguarded FAILED return | RED: the race test, `'failed' == 'complete_with_warnings'` |
+
+   Every RED above comes from a row read AFTER the mark RPC and the bridge (`row` from `_drive`). The race test also asserts `result.outcome == DONE` and `job["status"] == "done"`. The race hook fires after every `_strategy_has_published_numbers` read, the re-read included, and it upserts the same row again each time, which is harmless.
+4. **The census and the founder rulings are unchanged.** There is still one payload-shaped write statement, the payload is unstamped and has the same five keys, and `EXPECTED_INERT_SITES` is untouched. The offline chain pin (`test_failed_write_is_conditional_on_nothing_published`) now filters out only the mock's `.data` bookkeeping call. The method sequence and every argument string are still pinned.
+5. **R2-IN-01 is narrowed.** The race test now runs as the last attempt and asserts after the bridge. If the UPDATE raised (for example a PostgREST 400 on the `not_.in_` / `or_` syntax), the `except` would keep `_nothing_published` True and return FAILED, and branch (b) would write `failed` over the race row. The race test would then go RED. That follows from the code path and was not run as a separate mutation. R2-IN-01's other half still stands: no live case shows the UPDATE matching and writing a non-published row.
+
+### Info (LOW; recorded here only, per the repo rule)
+
+#### R3-IN-01: No offline harness reaches the new `not wrote` branch. Only the live module gates it
+
+**Files:**
+- `analytics-service/tests/test_job_worker.py:3299-3370` (`_run`)
+- `analytics-service/tests/test_failed_status_logged.py:280-330`
+
+**Issue:** Both harnesses return a bare `MagicMock` from the UPDATE chain's `execute()`, so `.data` is a truthy `MagicMock` and `wrote` is always True. That holds even when the scripted publish read is "no row", which is a world where the UPDATE could not have matched. The re-read and the R2-WR-01 DONE path therefore run only in the live module.
+
+That module runs in CI: the roster entry is `_LANE_SUPABASE_FAIL_IN_CI` at `test_live_db_reach_roster.py:231`, and `ci.yml`'s python job exports `SUPABASE_TEST_URL` from the lane handoff at about `:5860`. It also hard-fails when the lane env is unset under `CI=true`. That is why this is INFO.
+
+**Fix (if taken):** in `_run`, set the UPDATE chain's `execute.return_value = MagicMock(data=[] if read is None else [{}])`. Then add an offline case where the re-read returns a published row and the handler returns DONE.
+
+#### R3-IN-02: If the re-read raises, the handler returns FAILED, the opposite of the first read's "unreadable means DONE" rule, and the log line then misdescribes what happened
+
+**File:** `analytics-service/services/job_worker.py:3025-3043`
+
+**Issue:** The re-read is inside the mark `try`. If it raises, `_nothing_published` stays True and the handler returns FAILED. On the last attempt, branch (b) then writes `failed`, and for a strategy published in that window this is the R2-WR-01 harm. The fixer disclosed this as a known limit.
+
+It needs four things at once: the enqueue failure, a lost race, a re-read failure and the last attempt. In the common no-row case, FAILED is the right outcome anyway.
+
+The `except` also logs "failed to mark strategy_analytics as failed … wizard may still hang". When it is the re-read that raised, the UPDATE either succeeded or matched nothing, so that sentence is wrong.
+
+**Fix (if taken):** give the re-read its own `try` and its own log line, and keep FAILED on its exception. Do not carry over the first read's "unreadable means DONE" rule here. In the common no-row case `wrote` is False, so DONE would send the bridge to branch (c), and the row would read `complete` with no analytics on a double fault. That is the SC-3 erasure this phase closes.
+
+#### R3-IN-03: A publisher that lands after the handler's last decision still reaches branch (b) on the last attempt
+
+**File:** `analytics-service/services/job_worker.py:3009-3055`, against `supabase/schema/functions/sync_strategy_analytics_status.sql` branch (b)
+
+**Issue:** The fix closes the window between the read and the write. Two shorter windows remain before `mark_compute_job_failed` takes its advisory lock:
+- **After a successful UPDATE.** The row was not published, and then a publisher lands.
+- **After a re-read that found no row.**
+
+On the last attempt, the bridge's branch (b) then writes `failed` over the newly published row. The `sync_trades` `failed_final` also keeps poisoning the row until a later `sync_trades` `done` supersedes it, because supersession is per kind.
+
+**Why this is not R2-WR-01's class.** It is the accepted ERRC-03 option (a) outcome, not a race. Take an ordinary last-attempt FAILED with no race at all. A publisher of another kind that finishes an hour later reaches the bridge through its own `mark_compute_job_done`. With nothing in flight, the unsuperseded `sync_trades` `failed_final` is a live, unprotected failure, so `v_failed_count > 0` and branch (b) (sync_strategy_analytics_status.sql:744-750, `SET computation_status = EXCLUDED.computation_status`) writes `failed`. The in-window publisher gets exactly that outcome, one call earlier. R2-WR-01 was different: there, the strategy was already published before the handler's decision, and the decision was taken on a stale read. Here the handler decided correctly on what existed when it decided.
+
+If the founder ever wants a later publish to clear a `sync_trades` `failed_final`, that is a change to the bridge's per-kind supersession, not to this handler.
+
+**Fix:** none needed now.
+
+### Round 3 verdict
+
+- **R2-WR-01:** closed. The live race test is RED under M1, M3 and M5. The no-row tests are RED under M2. Everything was GREEN at HEAD.
+- **SFH-01:** closed. Neither the handler's write nor the bridge it triggers marks a row published in between as `failed`.
+- **Open MEDIUM+:** 0. Status: `clean`.
+- **Recorded LOW/INFO:**
+  - R2-IN-01, now narrowed
+  - R2-IN-02
+  - R2-IN-03
+  - R3-IN-01
+  - R3-IN-02
+  - R3-IN-03
+
+_Round 3 reviewed: 2026-11-25T14:28:44Z_
+_Reviewer: Claude (gsd-code-reviewer)_
+_Depth: standard_
+
+## Silent-failure-hunter round 3 (appended by the orchestrator)
+
+### SFH-R3-01 (MEDIUM per SFH, disputed by the round-3 reviewer as R3-IN-02): re-read failure after a zero-row write returns FAILED
+
+**File:** `analytics-service/services/job_worker.py` (the R2-WR-01 re-read in the enqueue-failure tail of `run_sync_trades_job`).
+
+Triple fault: the enqueue fails, a concurrent job publishes between the publish read and the conditional write (so the write matches 0 rows), and the re-read itself raises. The handler then returns FAILED, and on the last attempt bridge branch (b) can write `failed` over the published row. The log line also says "wizard may still hang", which is misleading.
+
+**Disposition (orchestrator):** this survived three review rounds. The round-3 reviewer argues that treating an unreadable re-read as DONE would bring back the SC-3 outcome (`complete` with no analytics) for the far more common no-row case, so FAILED is the right default and only the log line is wrong. The two readings conflict and the window needs three faults together, so it is NOT fixed in this phase. Per the repo rule it is routed: the ship PR books a TODOS entry owned by Phase 251 SYNCSTORE (which already owns `run_sync_trades_job` and depends on 222). SFH-R3 LOWs (write-raises residual in the T-222-13 family; test filter note) are recorded only.
