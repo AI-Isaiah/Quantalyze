@@ -114,3 +114,9 @@ Audit evidence gathered this run (not copied from SUMMARY or review text): code 
 - [ ] migration-reviewer and rls-policy-auditor verdicts recorded, clean at MEDIUM+ (T-222-03 ship precondition, NOT yet met; see Ship Preconditions)
 
 **Approval:** secured 2026-11-25 at ASVS L1 on the in-tree controls. Merge is still gated on the unchecked reviewer-verdict item above.
+
+## Pre-merge reviewer verdicts (recorded by the orchestrator, 2026-11-25, at 80b5140a4)
+
+- migration-reviewer: CLEAN (0 CRITICAL / 0 HIGH / 0 MEDIUM). Ship note: re-pick the 20261127120000 stamp from origin/main and rewrite every reference (`grep -rIl 20261127120000`), keeping the entry last in both gates' RED-UNDER-SETUP lists.
+- rls-policy-auditor: CLEAN (0 findings; leak scopes none).
+- Both verdicts are bound to the migration text at this commit; a re-stamp that changes only the timestamp keeps them valid, any other edit to the migration needs a re-run.
