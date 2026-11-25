@@ -112,7 +112,7 @@ async def _run_live(
     fetch_raw = AsyncMock(side_effect=_real_read)
     job = {"id": "job-250", "kind": "sync_trades", "strategy_id": STRATEGY_ID}
 
-    patches = [
+    patches: list[Any] = [
         patch(
             "services.job_worker._exchange_preflight",
             new=AsyncMock(return_value=mock_ctx),
@@ -186,5 +186,6 @@ class TestBinanceFillsThroughTheSyncJob:
             venue, column=C_ISO, stored_fills=[C_ISO], symbols=["BTCUSDT"]
         )
 
+        assert fetch.await_args is not None
         assert fetch.await_args.kwargs["since_ms"] == C_MS
         assert _the_advance(rec)["p_last_fetched_ts"] == NOW_MINUS_5D_ISO
