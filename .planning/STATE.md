@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
-current_phase: 227
-current_phase_name: JOBLEDGER
+current_phase: 225
+current_phase_name: ONEACCOUNTONCE
 status: executing
-stopped_at: Phase 227 complete, shipped as #1325 (HEAL-01 sweep registered on PROD)
-last_updated: "2026-11-24T17:48:57.707Z"
-last_activity: 2026-11-24
-last_activity_desc: Phase 227 JOBLEDGER complete (verification passed, threats_open 0)
-state_head: 3dd2a6d8e4e3ce68b4d834c06ebbaf675f2d4842
+stopped_at: "Phase 225 plan 10 (migration B) executing"
+last_updated: "2026-11-25T08:29:29.206Z"
+last_activity: 2026-11-25
+last_activity_desc: Phase 225 execution started
+state_head: acb5e158986806e733453296dc6bced2efaed3b1
 progress:
   total_phases: 21
   completed_phases: 2
   total_plans: 67
-  completed_plans: 52
+  completed_plans: 59
   percent: 10
 ---
 
@@ -32,7 +32,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-23)
 
-**Current focus:** v1.22 TRUTH — data you can trust; roadmap created 2026-11-23 (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK (wave 0)
+**Current focus:** Phase 225 — ONEACCOUNTONCE
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -176,10 +176,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 231 (BYBITREADS) — IN PROGRESS (plans 01-05 shipped: v0.133.61.6 #1314, v0.133.65.0 #1321; plan 06 waits for Phase 229)
-Plan: 5 of 6
-Status: In progress; plan 06 (VREAD-01) blocked on Phase 229; other v1.22 phases run in parallel
-Last activity: 2026-11-24 — Phase 227 JOBLEDGER complete (v0.133.67.0, #1325; HEAL-01 sweep live on PROD)
+Phase: 225 (ONEACCOUNTONCE) — EXECUTING
+Plan: 10 of 12
+Status: Executing Phase 225
+Last activity: 2026-11-25 — Phase 225 execution started
 Progress: [█░░░░░░░░░] 10%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
