@@ -37,6 +37,10 @@
 --     same trigger raises, so dropping it reddens ACCT-d first;
 --   * RECON-tenant runs before the other-exchange key is inserted, so its
 --     sibling mutation cannot trip on that key first;
+--   * the three RECON-server-* arms run after every other RECON arm, on logins
+--     of their own: their twins edit only the server line of the reconnect
+--     refusal, and every earlier fixture carries a NULL server, on which the
+--     edited and the pristine line agree;
 --   * HIST-tenant is judged before HIST-retry on the same call: under its twin
 --     user A's own row stays failed_retry, which HIST-retry would otherwise
 --     report first;
@@ -62,7 +66,7 @@
 -- Usage:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_api_keys_account_identity.sql
 --
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260927180000_working_holder_rule_d18.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260927180000_working_holder_rule_d18.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql","supabase/migrations/20261125083433_api_keys_venue_server_index.sql"]}
 
 -- Reap fixtures orphaned by a crashed earlier run. Age-scoped so it can never
 -- touch a concurrent run's users.
@@ -988,6 +992,12 @@ DECLARE
   v_status   text;
   v_sync_err text;
   v_hist     text;
+  -- Phase 225 / CONN-03 plan 10 (RECON-server-*): synthetic logins, one per arm.
+  c_s_other  CONSTANT text := 'acct-identity-s1';
+  c_s_null   CONSTANT text := 'acct-identity-s2';
+  c_s_knull  CONSTANT text := 'acct-identity-s3';
+  k_s_dis    uuid;
+  k_s_live   uuid;
 BEGIN
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid_a, '00000000-0000-0000-0000-000000000000', 'test-acct-identity-r-' || v_run || '@quantalyze.test', now(), now()),
@@ -1011,7 +1021,7 @@ BEGIN
   --            migration 20260925120000 (IF FALSE). The UPDATE then reaches the
   --            unique index and fails 23505 with the INDEX's message, which the
   --            client cannot map to the named copy.
-  -- RED-UNDER-M: {"arm":"RECON-twin","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"  IF v_venue_acct IS NOT NULL AND EXISTS (","replace":"  IF FALSE AND EXISTS (","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"RECON-twin","apply":[{"kind":"edit","file":"supabase/migrations/20261125083433_api_keys_venue_server_index.sql","find":"  IF v_venue_acct IS NOT NULL AND EXISTS (","replace":"  IF FALSE AND EXISTS (","occurrences":1}]}
   v_err := NULL; v_msg := NULL;
   BEGIN
     v_ret := public.reconnect_allocator_api_key(k_old);
@@ -1028,7 +1038,7 @@ BEGIN
   --            sibling test in migration 20260925120000, so a DISCONNECTED
   --            sibling also blocks a reconnect — the predicate no longer tracks
   --            the unique index's live-rows predicate.
-  -- RED-UNDER-M: {"arm":"RECON-ok","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"       AND s.disconnected_at IS NULL\n       AND s.id <> p_api_key_id","replace":"       AND s.id <> p_api_key_id","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"RECON-ok","apply":[{"kind":"edit","file":"supabase/migrations/20261125083433_api_keys_venue_server_index.sql","find":"       AND s.disconnected_at IS NULL\n       AND s.id <> p_api_key_id","replace":"       AND s.id <> p_api_key_id","occurrences":1}]}
   UPDATE api_keys SET disconnected_at = now() WHERE id = k_new;
   UPDATE api_keys SET sync_error = 'acct identity test', sync_status = 'error' WHERE id = k_old;
   v_err := NULL; v_ret := NULL;
@@ -1051,7 +1061,7 @@ BEGIN
   -- and a later disconnect starts from the default rule.
   -- RED-UNDER: drop `history_inclusion = NULL` from the reconnect UPDATE in
   --            migration 20260925120000.
-  -- RED-UNDER-M: {"arm":"RECON-hist","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"        sync_status     = 'idle',\n        history_inclusion = NULL","replace":"        sync_status     = 'idle'","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"RECON-hist","apply":[{"kind":"edit","file":"supabase/migrations/20261125083433_api_keys_venue_server_index.sql","find":"        sync_status     = 'idle',\n        history_inclusion = NULL","replace":"        sync_status     = 'idle'","occurrences":1}]}
   SELECT history_inclusion INTO v_hist FROM api_keys WHERE id = k_old;
   IF v_hist IS NOT NULL THEN
     RAISE EXCEPTION 'TEST FAILED (RECON-hist): after a reconnect the key still carries history_inclusion = % from its past departure; a later disconnect would silently inherit that choice.', v_hist;
@@ -1062,7 +1072,7 @@ BEGIN
   -- must track it, or one tenant's key blocks another tenant's reconnect.
   -- RED-UNDER: drop the `s.user_id = v_uid` conjunct from the refusal's
   --            sibling test in migration 20260925120000.
-  -- RED-UNDER-M: {"arm":"RECON-tenant","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"     WHERE s.user_id = v_uid\n       AND s.exchange = v_exchange","replace":"     WHERE s.exchange = v_exchange","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"RECON-tenant","apply":[{"kind":"edit","file":"supabase/migrations/20261125083433_api_keys_venue_server_index.sql","find":"     WHERE s.user_id = v_uid\n       AND s.exchange = v_exchange","replace":"     WHERE s.exchange = v_exchange","occurrences":1}]}
   UPDATE api_keys SET disconnected_at = now() WHERE id = k_old;
   INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, disconnected_at, sync_status)
   VALUES (k_b, uid_b, 'okx', 'recon other tenant', 'enc', true, c_acct, NULL, 'idle');
@@ -1080,7 +1090,7 @@ BEGIN
   -- ----- RECON-other-exchange: the same account id on ANOTHER exchange is NOT a twin
   -- RED-UNDER: drop the `s.exchange = v_exchange` conjunct from the refusal's
   --            sibling test in migration 20260925120000.
-  -- RED-UNDER-M: {"arm":"RECON-other-exchange","apply":[{"kind":"edit","file":"supabase/migrations/20260925120000_api_keys_account_identity.sql","find":"       AND s.exchange = v_exchange\n","replace":"\n","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"RECON-other-exchange","apply":[{"kind":"edit","file":"supabase/migrations/20261125083433_api_keys_venue_server_index.sql","find":"       AND s.exchange = v_exchange\n","replace":"\n","occurrences":1}]}
   UPDATE api_keys SET disconnected_at = now() WHERE id = k_old;
   INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, disconnected_at, sync_status)
   VALUES (k_other, uid_a, 'bybit', 'recon other exchange', 'enc', true, c_acct, NULL, 'idle');
@@ -1095,9 +1105,74 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (RECON-other-exchange): a live key of this user on ANOTHER exchange with the same account id blocked the reconnect (SQLSTATE %, message %; returned %, disconnected_at %).', v_err, v_msg, v_ret, v_disc;
   END IF;
 
+  -- ----- RECON-server-other: a live sibling on ANOTHER server is NOT a twin ---------------
+  -- Phase 225 / CONN-03 (plan 10). The same login on two broker servers is two accounts, so
+  -- a live key on server 'b' must not block reconnecting this user's disconnected key on
+  -- server 'a'. The identity index admits the pair too (it keys on the server).
+  -- RED-UNDER: delete the server line from the refusal's sibling test in migration
+  --            20261125083433, which is the login-only test of 20260925120000: the sibling
+  --            on another server blocks the reconnect.
+  -- RED-UNDER-M: {"arm":"RECON-server-other","apply":[{"kind":"edit","file":"supabase/migrations/20261125083433_api_keys_venue_server_index.sql","find":"\n       AND (s.venue_server IS NULL OR v_venue_server IS NULL OR s.venue_server = v_venue_server)","replace":"","occurrences":1}]}
+  k_s_dis := gen_random_uuid(); k_s_live := gen_random_uuid();
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server, disconnected_at, sync_status)
+  VALUES (k_s_dis,  uid_a, 'okx', 'recon server a', 'enc', true, c_s_other, 'srv-a', now(), 'idle'),
+         (k_s_live, uid_a, 'okx', 'recon server b', 'enc', true, c_s_other, 'srv-b', NULL,  'idle');
+  v_err := NULL; v_msg := NULL; v_ret := NULL;
+  BEGIN
+    v_ret := public.reconnect_allocator_api_key(k_s_dis);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT disconnected_at INTO v_disc FROM api_keys WHERE id = k_s_dis;
+  IF v_err IS NOT NULL OR v_ret IS NOT TRUE OR v_disc IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (RECON-server-other): a live key of this user on the same login but ANOTHER server blocked the reconnect (SQLSTATE %, message %; returned %, disconnected_at %).', v_err, v_msg, v_ret, v_disc;
+  END IF;
+
+  -- ----- RECON-server-null: a live sibling with NO server is a wildcard and blocks -----------
+  -- A sibling whose server is not captured yet (NULL) may be the same account on any server,
+  -- so it still counts as the same account: the reconnect is refused by name.
+  -- RED-UNDER: rewrite the server line of the refusal's sibling test in migration
+  --            20261125083433 as COALESCE(s.venue_server, '') = COALESCE(v_venue_server, ''),
+  --            which drops the wildcard: a NULL sibling no longer matches a key with a server.
+  -- RED-UNDER-M: {"arm":"RECON-server-null","apply":[{"kind":"edit","file":"supabase/migrations/20261125083433_api_keys_venue_server_index.sql","find":"\n       AND (s.venue_server IS NULL OR v_venue_server IS NULL OR s.venue_server = v_venue_server)","replace":"\n       AND COALESCE(s.venue_server, '') = COALESCE(v_venue_server, '')","occurrences":1}]}
+  k_s_dis := gen_random_uuid(); k_s_live := gen_random_uuid();
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server, disconnected_at, sync_status)
+  VALUES (k_s_dis,  uid_a, 'okx', 'recon null sibling a', 'enc', true, c_s_null, 'srv-a', now(), 'idle'),
+         (k_s_live, uid_a, 'okx', 'recon null sibling b', 'enc', true, c_s_null, NULL,    NULL,  'idle');
+  v_err := NULL; v_msg := NULL; v_ret := NULL;
+  BEGIN
+    v_ret := public.reconnect_allocator_api_key(k_s_dis);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT disconnected_at INTO v_disc FROM api_keys WHERE id = k_s_dis;
+  IF v_err IS DISTINCT FROM '23505' OR v_msg IS DISTINCT FROM 'KEY_VENUE_ALREADY_CONNECTED' OR v_disc IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (RECON-server-null): reconnecting a key with a server while a live sibling on the same login has NO server was not refused with 23505 KEY_VENUE_ALREADY_CONNECTED, or the key came back live (SQLSTATE %, message %, disconnected_at %).', v_err, v_msg, v_disc;
+  END IF;
+
+  -- ----- RECON-server-keynull: reconnecting a key with NO server is blocked by a sibling with one ----
+  -- The wildcard is symmetric: the reconnecting key's own NULL server may be any server too.
+  -- RED-UNDER: delete the `v_venue_server IS NULL` leg from the server line of the refusal's
+  --            sibling test in migration 20261125083433.
+  -- RED-UNDER-M: {"arm":"RECON-server-keynull","apply":[{"kind":"edit","file":"supabase/migrations/20261125083433_api_keys_venue_server_index.sql","find":"\n       AND (s.venue_server IS NULL OR v_venue_server IS NULL OR s.venue_server = v_venue_server)","replace":"\n       AND (s.venue_server IS NULL OR s.venue_server = v_venue_server)","occurrences":1}]}
+  k_s_dis := gen_random_uuid(); k_s_live := gen_random_uuid();
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server, disconnected_at, sync_status)
+  VALUES (k_s_dis,  uid_a, 'okx', 'recon null key a', 'enc', true, c_s_knull, NULL,    now(), 'idle'),
+         (k_s_live, uid_a, 'okx', 'recon null key b', 'enc', true, c_s_knull, 'srv-b', NULL,  'idle');
+  v_err := NULL; v_msg := NULL; v_ret := NULL;
+  BEGIN
+    v_ret := public.reconnect_allocator_api_key(k_s_dis);
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_err = RETURNED_SQLSTATE, v_msg = MESSAGE_TEXT;
+  END;
+  SELECT disconnected_at INTO v_disc FROM api_keys WHERE id = k_s_dis;
+  IF v_err IS DISTINCT FROM '23505' OR v_msg IS DISTINCT FROM 'KEY_VENUE_ALREADY_CONNECTED' OR v_disc IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (RECON-server-keynull): reconnecting a key with NO server while a live sibling on the same login has a server was not refused with 23505 KEY_VENUE_ALREADY_CONNECTED, or the key came back live (SQLSTATE %, message %, disconnected_at %).', v_err, v_msg, v_disc;
+  END IF;
+
   PERFORM set_config('request.jwt.claims', '', true);
 
-  RAISE NOTICE 'PASS (RECON behavioural): reconnect into an occupied slot refused 23505 KEY_VENUE_ALREADY_CONNECTED and the key stays disconnected; with only a disconnected sibling the reconnect returns true, resets the key and clears its history_inclusion; another tenant''s key and another exchange''s key on the same account id do not block it.';
+  RAISE NOTICE 'PASS (RECON behavioural): reconnect into an occupied slot refused 23505 KEY_VENUE_ALREADY_CONNECTED and the key stays disconnected; with only a disconnected sibling the reconnect returns true, resets the key and clears its history_inclusion; another tenant''s key and another exchange''s key on the same account id do not block it; a live sibling on another server does not block it (RECON-server-other) while a sibling or a reconnecting key with no server does (RECON-server-null, RECON-server-keynull).';
 
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);
