@@ -1,7 +1,7 @@
-name: prod-prober (four arms, hourly)
+name: prod-prober (five arms, hourly)
 
 # =============================================================================
-# THE PERIODIC PRODUCTION PROBER — phase 164.1, four arms, one script.
+# THE PERIODIC PRODUCTION PROBER — phase 164.1, five arms, one script.
 #
 # pyapi06     the analytics service key, end to end: a keyed GET must be 200, an
 #             UNKEYED one must be refused with SERVICE_KEY_ABSENT, a wrong key
@@ -14,10 +14,15 @@ name: prod-prober (four arms, hourly)
 # mt5         one real round-trip into the mt5-gateway container, keeping -10004
 #             (bridge not attached) and -10005 (bridge attached, terminal not
 #             answering) apart — they have opposite remedies.
+# freshness   every key the daily derive touched in the last 3 days: its newest
+#             stored return day against its newest flow, terminal or NAV-mark
+#             day. A gap over the bound pages, unless every gap day is a day
+#             the derive itself stated it left out, or the key carries an
+#             anchor reason (phase 233; a read only, never a backfill).
 #
 # ⛔ THIS IS DELIBERATELY ITS OWN WORKFLOW, OUTSIDE ci.yml (D-18). It is not in
 # the `frontend` aggregator's needs list, not in its result loop, and nothing in
-# ci.yml references it. A four-arm production prober is EXPECTED to go red; that
+# ci.yml references it. A five-arm production prober is EXPECTED to go red; that
 # is its job. Railway waits on the main CI check-suite and SKIPS the analytics
 # deploy when it is red, so a prober inside that suite would let one outage
 # (a wedged MT5 terminal) block the very deploy that fixes another. The hazard
@@ -85,14 +90,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "probe = run all four arms against PROD; capture-manifest = read cron.job and upload the oracle as an artifact for human review (never a commit)"
+        description: "probe = run all five arms against PROD; capture-manifest = read cron.job and upload the oracle as an artifact for human review (never a commit)"
         type: choice
         options:
           - probe
           - capture-manifest
         default: probe
       arm:
-        description: "Narrowed DIAGNOSTIC run of ONE arm (pyapi06 | cron-obs | cron-drift | mt5). Leave EMPTY for the real gate — a narrowed run exits 2 by design, so it can never be mistaken for a pass."
+        description: "Narrowed DIAGNOSTIC run of ONE arm (pyapi06 | cron-obs | cron-drift | mt5 | freshness). Leave EMPTY for the real gate — a narrowed run exits 2 by design, so it can never be mistaken for a pass."
         type: string
         default: ""
 
@@ -108,8 +113,8 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     # Derived, not guessed: self-test is fixtures-only and finishes in under a
-    # second; the four live arms are four HTTP calls, two short SQL reads and
-    # ONE railway ssh capped at 120 s by the seam itself; setup is apt-get
+    # second; the five live arms are four HTTP calls, short SQL reads (the
+    # freshness arm adds two) and ONE railway ssh capped at 120 s by the seam itself; setup is apt-get
     # postgresql-client + supabase link + a single CLI tarball, ~2 min. Twenty
     # minutes is roughly 4x the expected wall clock. It must also be EXPLICIT:
     # GitHub's 360-minute default is itself the hazard analytics-deploy-verify.yml
@@ -249,7 +254,7 @@ jobs:
       # Stdout goes to a FILE and is `cat` back, rather than through `| tee`: a
       # PIPE makes `$?` the LAST command's status, and the log has to survive
       # into the issue step below. RUNNER_TEMP, never the workspace.
-      - name: Probe production (all four arms, aggregate, exit at the end)
+      - name: Probe production (all five arms, aggregate, exit at the end)
         id: probe
         if: inputs.mode != 'capture-manifest'
         env:

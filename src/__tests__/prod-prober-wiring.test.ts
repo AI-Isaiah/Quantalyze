@@ -859,6 +859,7 @@ describe("[164.1-05] kinds and floors", () => {
     "cron-secret-in-command",
     "cron-transport-error",
     "floor",
+    "freshness-stale",
     "manifest-invalid",
     "measure-fail",
     "mt5-ipc-timeout",
@@ -1140,14 +1141,16 @@ describe("[164.1-05] kinds and floors", () => {
     expect(runnerText).not.toContain("jobid: Number.parseInt(r.jobid, 10)");
   });
 
-  it("the arm floor is FOUR and the registry meets it", () => {
+  it("the arm floor is FIVE and the registry meets it", () => {
     // Pinned at 4 while only one arm existed, on purpose: an incomplete prober
     // must be LOUD. From here a `floor` defect means an arm was REMOVED.
-    expect(ARMS_FLOOR).toBe(4);
-    expect(ARMS.length).toBe(4);
+    // Raised 4 -> 5 in Phase 233 (FRESH-02) with the `freshness` arm.
+    expect(ARMS_FLOOR).toBe(5);
+    expect(ARMS.length).toBe(5);
     expect(ARMS.map((a: { name: string }) => a.name).sort()).toEqual([
       "cron-drift",
       "cron-obs",
+      "freshness",
       "mt5",
       "pyapi06",
     ]);
@@ -1918,7 +1921,9 @@ describe("[164.1-05] kinds and floors", () => {
     // (stuck, too few runs, committed failure rows) and four dedicated
     // scenarios (unparsable, psql failure, the runs floor, and an earlier
     // step's measure-fail beside a failing fan-out).
-    expect(SELF_TEST_SCENARIOS).toBe(91);
+    // ⭐ 91 -> 93 in Phase 233 (FRESH-02 tracer): the freshness arm's green
+    // fixture and its held-back red fixture
+    expect(SELF_TEST_SCENARIOS).toBe(93);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
