@@ -127,6 +127,23 @@ def _ids(fills: list[dict[str, Any]], symbol: str | None = None) -> set[str]:
     }
 
 
+class _NewestFirstSpotVenue(BinanceFillsVenue):
+    """A spot endpoint that serves the NEWEST `limit` rows of a window, the reading the spot
+    `myTrades` doc allows ("Otherwise most recent trades are returned"). Rows are returned
+    ascending, as the venue lists them; futures endpoints keep the base behaviour."""
+
+    def _serve(
+        self, kind: str, request: dict[str, Any], *, record: bool = True
+    ) -> list[dict[str, Any]]:
+        if kind != "spot":
+            return super()._serve(kind, request, record=record)
+        if record:
+            self.calls.append((kind, dict(request)))
+        limit = min(int(request.get("limit") or 500), 1000)
+        rows = super()._serve(kind, {**request, "limit": 1000}, record=False)
+        return rows[-limit:]
+
+
 class TestBinanceFillsWindowWalk:
     async def test_a_missing_start_walks_from_the_reach_never_a_startless_request(
         self, open_exchanges: list[Any]
@@ -652,6 +669,13 @@ class TestBinanceFillsStops:
       N27 `fetch_raw_trades` calls `_fetch_raw_trades_binance` without the keyword:
           test_the_read_budget_reaches_the_walk_through_fetch_raw_trades goes RED.
       (N24, N26 and N28 live in tests/test_binancefills_e2e.py.)
+
+    Round-1 review WR-02: a FULL spot page ends its window (the spot doc returns the most recent
+    trades unless `fromId` is set), named as a cap with the bound `window_start - 1`.
+      R1-N2 delete the `if is_spot:` stop (the pre-fix since-advance over a spot page):
+          test_a_full_spot_page_ends_the_window_below_every_unread_fill goes RED, both orders.
+      R1-N3 move the `if is_spot:` stop above the short-page `break`:
+          test_a_short_spot_page_is_not_a_stop goes RED.
     """
 
     async def test_a_capped_window_is_named_with_its_read_through_bound(
@@ -1039,3 +1063,78 @@ class TestBinanceFillsStops:
             param = inspect.signature(fn).parameters["read_deadline_s"]
             assert param.kind is inspect.Parameter.KEYWORD_ONLY
             assert param.default == 240.0
+
+    @pytest.mark.parametrize("newest_first", [True, False], ids=["newest-first", "oldest-first"])
+    async def test_a_full_spot_page_ends_the_window_below_every_unread_fill(
+        self,
+        open_exchanges: list[Any],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        newest_first: bool,
+    ) -> None:
+        """WR-02 (round-1 review): the spot `myTrades` doc says "If `fromId` is set, it will get
+        trades >= that `fromId`. Otherwise most recent trades are returned.", and ccxt sorts
+        client-side, so a full page for a window need not be its OLDEST rows. If it is the newest
+        rows, advancing `since` to the page's last row jumps past every older fill of the window,
+        unflagged, and the cursor stamps a fill after them. The walk therefore does not read past
+        a full spot page: the symbol is named in `binance_page_cap_symbols` and the recorded bound
+        sits below every fill it did not return, whichever order the venue serves.
+
+        Lowered page (3 rows). Seed S = 1795104000000 (2026-11-19T16:00:00Z); the walk starts one
+        overlap hour back at 1795100400000 (15:00:00Z), its one 24-hour window ends at the clock.
+        ETHBTC (spot only) holds five fills at S + 1 h .. S + 5 h (17:00Z .. 21:00Z). The expected
+        bound is the window start minus 1 ms, 1795100399999. The newest-first venue serves ids
+        3, 4, 5; the oldest-first one serves ids 1, 2, 3. Either way one request is sent."""
+        monkeypatch.setattr(ex, "BINANCE_FILLS_PAGE_LIMIT", 3)
+        seed_ms = NOW_MS - 20 * HOUR_MS
+        window_start_ms = seed_ms - HOUR_MS
+        fills_in_venue = [
+            venue_fill("spot", "ETHBTC", k, seed_ms + k * HOUR_MS) for k in range(1, 6)
+        ]
+        venue_cls = _NewestFirstSpotVenue if newest_first else BinanceFillsVenue
+        venue = venue_cls({("spot", "ETHBTC"): fills_in_venue})
+
+        with caplog.at_level("WARNING"):
+            fills, flags = await _read(open_exchanges, venue, ["ETHBTC"], seed_ms)
+
+        assert len(venue.calls_for("spot")) == 1, "the walk read past a full spot page"
+        assert flags.get("binance_page_cap_symbols") == ["ETHBTC"]
+        bound = flags.get("binance_read_through_ms")
+        assert bound == window_start_ms - 1
+        returned = _ids(fills)
+        assert len(returned) == 3
+        unread = [f for f in fills_in_venue if str(f["id"]) not in returned]
+        assert unread and all(bound < f["time"] for f in unread), (
+            "the bound is not below every fill the walk did not return"
+        )
+        assert "binance_partial_symbols" not in flags
+        assert any(
+            "full spot page" in record.getMessage() and "ETHBTC" in record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+        ), "the stop must be named in a WARNING"
+
+    async def test_a_short_spot_page_is_not_a_stop(
+        self, open_exchanges: list[Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WR-02 guard: only a FULL spot page ends a window. Lowered page (3 rows); ETHBTC holds
+        two fills an hour apart 4 days back and one fill 1 day back, each 24-hour window under
+        three rows. All three are read across the windows, nothing is stopped, and no cap or
+        read-through flag is recorded (a stop on every spot page would stall every spot name)."""
+        monkeypatch.setattr(ex, "BINANCE_FILLS_PAGE_LIMIT", 3)
+        venue = BinanceFillsVenue(
+            {
+                ("spot", "ETHBTC"): [
+                    venue_fill("spot", "ETHBTC", 1, NOW_MS - 4 * DAY_MS),
+                    venue_fill("spot", "ETHBTC", 2, NOW_MS - 4 * DAY_MS + HOUR_MS),
+                    venue_fill("spot", "ETHBTC", 3, NOW_MS - 1 * DAY_MS),
+                ]
+            }
+        )
+
+        fills, flags = await _read(open_exchanges, venue, ["ETHBTC"], NOW_MS - 5 * DAY_MS)
+
+        assert _ids(fills) == {"1", "2", "3"}
+        assert "binance_page_cap_symbols" not in flags
+        assert "binance_read_through_ms" not in flags
+        assert "binance_partial_symbols" not in flags
