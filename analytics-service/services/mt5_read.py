@@ -45,7 +45,8 @@ bounds it.
 Leaf-module invariant (mirrors the ``mt5_concurrency.py`` / ``mt5_probe.py``
 convention, and the Phase 151 precedent this move follows): this module's only
 in-tree imports are ``services.account_unit`` (itself a leaf), ``services.mt5_client``,
-``services.mt5_concurrency`` and ``services.mt5_probe``. ⛔ It MUST NEVER import ``services.job_worker`` — nor
+``services.mt5_concurrency``, ``services.mt5_handover`` (225-20: the site literal and the
+holder normaliser the verdict line uses) and ``services.mt5_probe``. ⛔ It MUST NEVER import ``services.job_worker`` — nor
 anything that does — because ``job_worker`` imports IT. That is also why the two
 deal-fetch margin constants below MOVED here out of ``job_worker`` rather than
 being imported back from it: importing them from their old home would have closed
@@ -78,7 +79,8 @@ from services.mt5_concurrency import (
     _MT5_HISTORY_WAIT_S,
     _Mt5PostReadVerificationError,
 )
-from services.mt5_probe import assert_expected_login
+from services.mt5_handover import SITE_DERIVE, normalize_mt5_holder
+from services.mt5_probe import assert_expected_login, normalise_mt5_server
 
 logger = logging.getLogger("quantalyze.analytics.mt5_read")
 
@@ -242,11 +244,67 @@ def _settle_deal_history(
         previous = count
 
 
+def log_mt5_poll_server_verdict(
+    info: dict[str, Any],
+    *,
+    requested_server: str,
+    site: str,
+    holder: str | None,
+) -> bool | None:
+    """Write ONE INFO line saying whether the terminal's session is on the broker
+    server the poll asked for, and return that verdict.
+
+    LOG-ONLY BY DESIGN (Phase 225 plan 20 / PR-2c0). CONTEXT Q6 item 2 (founder
+    ruling 2026-11-25): a connect on the same broker with the wrong server must be
+    refused at connect or validation time, and the gap plans "confirm by
+    measurement" that the existing validation already refuses it. Review WR-01
+    found the three poll reads check the login only and then stamp what they read.
+    PR-2c's ``assert_expected_server`` fails CLOSED on a mismatch AND on a missing
+    server, and it has never been measured whether ``account_info().server`` is
+    spelled the way the session requested it, for any broker. This line is that
+    measurement. The REFUSAL belongs to the follow-up plan that 225-20 Task 3
+    books, because it needs PR-2c's error type; nothing here refuses a poll,
+    raises, or changes what a poll returns or stamps.
+
+    The MT5 docs say ``account_info()`` returns a named tuple with ``login`` and
+    ``server`` fields (https://www.mql5.com/en/docs/python_metatrader5/mt5accountinfo_py)
+    and that ``login()``'s ``server`` is "the server name as it is specified in the
+    terminal" and optional (https://www.mql5.com/en/docs/python_metatrader5/mt5login_py).
+    Neither page says the two spellings are equal; that is what this line records.
+
+    The predicate mirrors PR-2c's: a reported server that is a ``str`` with a
+    non-blank ``strip()`` is compared with the requested one through
+    ``normalise_mt5_server`` (True or False). An absent, non-string or blank server
+    is ``not_captured`` (None), which is what PR-2c's bracket would refuse.
+
+    The line is a static message plus ``site``, the lease ``holder`` (through
+    ``normalize_mt5_holder``: a UUID key id or a literal, never a number) and the
+    verdict. ⛔ It carries NO login, broker server or password value, so an operator
+    maps a line to a key through the holder and a read-only database query. The
+    function is total over every shape of ``info["server"]`` (a dict lookup and a
+    string compare cannot raise) and does not mutate ``info``.
+    """
+    reported = info.get("server")
+    verdict: bool | None
+    if isinstance(reported, str) and reported.strip():
+        verdict = normalise_mt5_server(reported) == normalise_mt5_server(requested_server)
+    else:
+        verdict = None
+    logger.info(
+        "mt5 poll server verdict site=%s holder=%s session_server_matches_requested=%s",
+        site,
+        normalize_mt5_holder(holder),
+        "not_captured" if verdict is None else verdict,
+    )
+    return verdict
+
+
 def read_mt5_deal_ledger(
     session: Mt5Session,
     *,
     now: datetime,
     settle_history: bool = False,
+    holder: str | None = None,
 ) -> Mt5DealLedgerRead:
     """Log in and read the FULL deal history, bracketed by the MT5CONC-02 login
     assertions. Returns ``Mt5DealLedgerRead(info, deals, tick, tick_read_failed,
@@ -271,6 +329,9 @@ def read_mt5_deal_ledger(
     ``asyncio.wait_for`` is what catches a hang OUTSIDE a bounded call, and the
     caller's ``mt5_terminal_lease`` is what serializes the terminal-IPC region.
 
+    ⭐ 225-20 — ``holder`` is the lease holder (the key id), used ONLY for the
+    one server-verdict line this read writes (``log_mt5_poll_server_verdict``).
+
     ⛔ It is BLOCKING (``Mt5Client`` is blocking RPyC). Run it off the event loop.
     """
     session.client.login(
@@ -291,6 +352,17 @@ def read_mt5_deal_ledger(
     # ``Mt5AccountMismatchError`` (NOT an ``Mt5ClientError``, so the classify/stamp
     # arm can never absorb it) → the caller's dedicated no-stamp/no-persist branch.
     assert_expected_login(info, login=session.login)
+    # ⭐ 225-20 (PR-2c0) — LOG-ONLY server verdict on the snapshot whose login the
+    # bracket above just accepted. PRE only, so one line means one poll; the POST
+    # bracket below is unchanged (it belongs to the follow-up enforcement plan).
+    # The derive branch in job_worker is the only production caller
+    # (``git grep -n read_mt5_deal_ledger -- analytics-service/services`` at planning
+    # time: outside this module the code references are job_worker's import and the
+    # derive's ``asyncio.to_thread`` call, which passes the function without calling
+    # it; every other hit is a comment), so a second caller must add a site argument.
+    log_mt5_poll_server_verdict(
+        info, requested_server=session.server, site=SITE_DERIVE, holder=holder
+    )
     deals = session.client.history_deals_get(
         0, int(now.timestamp()) + _MT5_DEAL_FETCH_MARGIN_S
     )
