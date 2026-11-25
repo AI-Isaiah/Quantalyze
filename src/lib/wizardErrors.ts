@@ -5504,7 +5504,7 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
     ],
     [
       "VALIDATION_UNEXPECTED",
-      "Detail: 'Key validation failed unexpectedly. Contact support if this " +
+      "Detail: 'Key validation failed unexpectedly. Use the contact form if this " +
         "persists.' It is BY DEFINITION the unclassified residue of the Python " +
         "side's own classification, so mapping it to a specific wizard verdict " +
         "would manufacture a diagnosis the producer explicitly declined to make. " +

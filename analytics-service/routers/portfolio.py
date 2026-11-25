@@ -108,6 +108,10 @@ PORTFOLIO_COMPUTE_FAILED_COPY = (
 # `data_quality.benchmark_note` reach the account holder, and the exception text
 # stays on the operator surface (`data_quality.benchmark_error`, the log).
 BENCHMARK_NOTE_STALE = "benchmark unavailable: stale"
+# Phase 222 ERRC-02 (founder 2026-11-25): written on the `(None, True)` exit of
+# `get_benchmark_returns`, no price source and no cached day within 48 h. An
+# outage, not a lag, so the comparison's `stale` is False: muted, not amber.
+BENCHMARK_NOTE_NO_SOURCE = "benchmark unavailable: no price source"
 BENCHMARK_NOTE_THIN = "benchmark unavailable: fewer than 30 shared days"
 BENCHMARK_NOTE_ERROR = "benchmark unavailable: computation failed"
 
@@ -1044,7 +1048,9 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             benchmark_rets, benchmark_stale = await get_benchmark_returns(
                 "BTC", since=_bench_since
             )
-            if benchmark_rets is None or benchmark_stale:
+            if benchmark_rets is None:
+                benchmark_note = BENCHMARK_NOTE_NO_SOURCE
+            elif benchmark_stale:
                 benchmark_note = BENCHMARK_NOTE_STALE
             else:
                 # Phase 166.4.1 D-02: the 166.4 D-A interval pair, the same one
@@ -2824,5 +2830,5 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
             verification_id,
             _redact_credentials(str(exc), req),
         )
-        _fail_vr("Verification failed. Contact support if this persists.")
+        _fail_vr("Verification failed. Use the contact form if this persists.")
         raise HTTPException(status_code=500, detail="Strategy verification failed")

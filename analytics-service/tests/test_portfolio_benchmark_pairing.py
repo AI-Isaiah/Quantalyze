@@ -27,7 +27,7 @@ import datetime
 import json
 import pathlib
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -36,6 +36,13 @@ from fastapi import HTTPException
 
 from routers import portfolio as portfolio_mod
 from tests._curve_fixtures import curve_from_returns  # noqa: F401  (fixture vocabulary)
+from tests.test_benchmark import (
+    _NOW as _BENCH_NOW,
+    _cache_rows as _bench_cache_rows,
+    _run_sync as _bench_run_sync,
+    _supabase_returning as _bench_supabase_returning,
+    httpx_error as _bench_httpx_error,
+)
 from tests.test_correlation_residue_sites import _c6_supabase
 from tests.test_portfolio_compute_integration import (
     _curve_records,
@@ -213,6 +220,7 @@ def test_router_reads_the_public_pair_and_no_inner_join() -> None:
 # ---------------------------------------------------------------------------
 
 NOTE_STALE = "benchmark unavailable: stale"
+NOTE_NO_SOURCE = "benchmark unavailable: no price source"
 NOTE_THIN = "benchmark unavailable: fewer than 30 shared days"
 NOTE_ERROR = "benchmark unavailable: computation failed"
 
@@ -295,21 +303,23 @@ class TestNamedBenchmarkNotes:
         assert dq["partial_data"] is False
 
     @pytest.mark.asyncio
-    async def test_missing_benchmark_writes_the_named_stale_note(self):
+    async def test_missing_benchmark_writes_the_named_no_source_note(self):
         sb, _ = _two_strategy_fake()
-        # `get_benchmark_returns` returns (None, True) on total failure.
+        # `get_benchmark_returns` returns (None, True) on total failure: no price
+        # source and no recent cached day. That is an outage, not a lag, so the
+        # note names it and `stale` is False (Phase 222 ERRC-02).
         result = await _compute(sb, benchmark=None, stale=True)
         assert result["benchmark_comparison"] == {
             "symbol": "BTC",
             "correlation": None,
             "benchmark_twr": None,
             "portfolio_twr": result["total_return_twr"],
-            "stale": True,
-            "note": NOTE_STALE,
+            "stale": False,
+            "note": NOTE_NO_SOURCE,
         }
         dq = result["data_quality"]
         assert dq["benchmark_unavailable"] is True
-        assert dq["benchmark_note"] == NOTE_STALE
+        assert dq["benchmark_note"] == NOTE_NO_SOURCE
         assert dq["partial_data"] is False
 
     @pytest.mark.asyncio
@@ -376,6 +386,81 @@ class TestNamedBenchmarkNotes:
 # ---------------------------------------------------------------------------
 # Task 3 - a final update that matches no row raises (D-06)
 # ---------------------------------------------------------------------------
+
+
+async def _compute_through_real_benchmark(sb, *, cached_days_back: list[int]) -> dict:
+    """Run the portfolio compute with the REAL `get_benchmark_returns`.
+
+    Only the source layer under `services.benchmark` is patched (clock, cache
+    client, `db_execute`, the price fetch), so the exit the router sees is the
+    one the service produces, not one the test hand-types. The fetch always
+    fails; `cached_days_back` decides whether a cached day within 48 h exists.
+    """
+    with patch.object(portfolio_mod, "get_supabase", return_value=sb), \
+         patch("services.benchmark._utc_now", return_value=_BENCH_NOW), \
+         patch(
+             "services.benchmark.get_supabase",
+             return_value=_bench_supabase_returning(_bench_cache_rows(cached_days_back)),
+         ), \
+         patch("services.benchmark.db_execute", side_effect=_bench_run_sync), \
+         patch(
+             "services.benchmark.fetch_btc_daily_prices",
+             AsyncMock(side_effect=_bench_httpx_error()),
+         ):
+        return await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+
+@pytest.mark.usefixtures("_fresh_semaphore", "_router_pinned_in_sys_modules")
+class TestBenchmarkOutageIsNotStale:
+    """ERRC-02: an outage and a lag read differently, through the real service."""
+
+    @pytest.mark.asyncio
+    async def test_stale_cache_exit_writes_the_stale_note(self):
+        sb, _ = _two_strategy_fake()
+        # Exit (d): the fetch raised, a cached day 1 day old exists, so the
+        # service answers (cached series, True).
+        result = await _compute_through_real_benchmark(
+            sb, cached_days_back=list(range(1, 16))
+        )
+        bc = result["benchmark_comparison"]
+        assert bc == {
+            "symbol": "BTC",
+            "correlation": None,
+            "benchmark_twr": None,
+            "portfolio_twr": result["total_return_twr"],
+            "stale": True,
+            "note": NOTE_STALE,
+        }
+        dq = result["data_quality"]
+        assert dq["benchmark_unavailable"] is True
+        assert dq["benchmark_note"] == bc["note"]
+        assert dq["partial_data"] is False
+
+    @pytest.mark.asyncio
+    async def test_total_source_failure_writes_the_no_source_note(self):
+        sb, _ = _two_strategy_fake()
+        # Exit (e): the fetch raised and the newest cached day is 3 days old,
+        # past the 48 h bound, so the service answers (None, True).
+        result = await _compute_through_real_benchmark(
+            sb, cached_days_back=list(range(3, 23))
+        )
+        bc = result["benchmark_comparison"]
+        assert bc == {
+            "symbol": "BTC",
+            "correlation": None,
+            "benchmark_twr": None,
+            "portfolio_twr": result["total_return_twr"],
+            "stale": False,
+            "note": NOTE_NO_SOURCE,
+        }
+        dq = result["data_quality"]
+        assert dq["benchmark_unavailable"] is True
+        assert dq["benchmark_note"] == bc["note"]
+        assert dq["partial_data"] is False
+
+    def test_the_two_notes_differ(self):
+        # The point of the split: a hand-typed pair that must never collapse.
+        assert NOTE_STALE != NOTE_NO_SOURCE
 
 
 @pytest.mark.usefixtures("_fresh_semaphore", "_router_pinned_in_sys_modules")

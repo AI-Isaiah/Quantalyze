@@ -55,13 +55,16 @@ would assert something false:
   * the pg_cron reaper and ``set_wizard_composite_members`` are SQL, and the
     migration header's census says why neither needs a marker of its own;
   * ⛔ P1 — ``job_worker.run_sync_trades_job._mark_analytics_failed`` — is IN
-    the class and is deliberately UNSTAMPED (164.2-REVIEW WR-01). Its handler
-    returns ``DispatchOutcome.DONE``, so the bridge reaches it on branch (c),
-    which clears the sentence and both markers unconditionally: a marker there
-    is never read by any branch that consults one. It is counted separately
-    (``EXPECTED_INERT_SITES``) rather than left in the stamped total, because a
-    census that counts it as stamped is asserting a protection that does not
-    exist — which was the finding. See ``PROVENANCE_INERT_KEYS``.
+    the class and is deliberately UNSTAMPED. When nothing is published, the
+    handler returns FAILED (transient) (Phase 222 ERRC-03), so the row reads
+    'computing' between attempts and, at the last attempt, bridge branch (b)
+    consults the provenance markers. The founder ruled on 2026-11-25 (Phase
+    222) that the payload stays unstamped, so branch (b) stores the curated
+    transient sentence over it. When something is published, the handler writes
+    nothing at all. It is counted separately (``EXPECTED_INERT_SITES``) rather
+    than left in the stamped total, because a census that counts it as stamped
+    is asserting a protection the founder chose not to give it. See
+    ``PROVENANCE_INERT_KEYS``.
 
 ⚠️ SO A GREEN HERE DOES NOT MEAN "these sentences survive". It means each of
 them carries a well-formed marker pair. Whether a given marker is ever READ
@@ -147,20 +150,17 @@ PROVENANCE_EXEMPT_KEYS: Final[frozenset[str]] = _STAMP_OMISSION_EXEMPT_KEYS
 # P1 — the INERT carve-out (164.2-REVIEW WR-01)
 # ---------------------------------------------------------------------------
 # ``job_worker.run_sync_trades_job._mark_analytics_failed``. It writes a curated
-# sentence and it is DELIBERATELY UNSTAMPED, because a marker there is read by
-# nobody: the handler returns ``DispatchOutcome.DONE`` (the trades persisted),
-# ``main_worker.py:929`` maps DONE to ``mark_compute_job_done``, and that RPC's
-# ``PERFORM sync_strategy_analytics_status`` finds every job terminal-done and
-# takes branch (c) — which writes 'complete', a NULL sentence, NULL markers and
-# a fresh ``computed_at``, unconditionally. Stamping it asserts a protection
-# that does not exist, which is the false claim the review found.
+# sentence and it is DELIBERATELY UNSTAMPED. Since Phase 222 ERRC-03, when nothing
+# is published the handler returns FAILED (transient): ``mark_compute_job_failed``
+# leaves the job ``failed_retry`` (bridge branch (a), the row reads 'computing') and
+# then ``failed_final`` at the last attempt, where branch (b) consults the provenance
+# markers. The founder ruled on 2026-11-25 (Phase 222) that the payload stays
+# unstamped, so branch (b) stores the curated transient sentence over it. When
+# something is published, the handler writes nothing at all.
 #
-# The erasure itself is PRE-EXISTING (the 161.1 F1 class) and correcting it is
-# booked in TODOS.md as ``[SYNCTRADES-ENQUEUE-DONE]``; the writer's own comment
-# records why F1's FAILED-instead-of-DONE remedy does not transfer to a
-# ``sync_trades`` job. When that lands, this site is re-stamped and this
-# carve-out is DELETED — and it cannot be forgotten, because re-stamping moves
-# the site out of this signature and takes the count below to 0.
+# Re-stamping this site would make branch (b) keep the handler's own sentence
+# instead. That needs a NEW founder decision, not a count change: re-stamping moves
+# the site out of this signature, takes the count below to 0 and reddens this gate.
 #
 # ⭐ IDENTIFIED BY EXACT KEY SET *and* FILE, matching the JOB-01 census's own
 # carve-out (``_is_stamp_omission_exempt``), and the file half is load-bearing
@@ -188,8 +188,8 @@ PROVENANCE_INERT_KEYS: Final[frozenset[str]] = frozenset(
 #      P2-P5 (the derive guard's _upsert_error_only and _upsert, the composite
 #      guard's _upsert_error_only and _upsert).
 #    1 exempt — P11.
-#    1 inert — P1, see the block above. This was the tenth STAMPED site until
-#      164.2-REVIEW WR-01 measured its stamp unreadable.
+#    1 inert — P1, see the block above. Unstamped by founder ruling 2026-11-25
+#      (Phase 222), not counted as stamped.
 #    2 resets — analytics_runner._mark_complete and job_worker's composite
 #      headline_payload, the two success writers that blank the sentence.
 EXPECTED_STAMPED_SITES: Final[int] = 9
@@ -530,11 +530,11 @@ def test_provenance_census_counts() -> None:
         f"job_worker._mark_analytics_failed — see 164.2-REVIEW WR-01), found "
         f"{len(inert)}:\n  " + _where(inert)
         + "\n0 means P1 was re-stamped (or removed) without deleting this "
-        "carve-out. If TODOS [SYNCTRADES-ENQUEUE-DONE] has landed and the "
-        "handler now returns FAILED on that path, that is CORRECT — delete "
-        "PROVENANCE_INERT_* and raise EXPECTED_STAMPED_SITES back to 10 in the "
-        "same commit. If it has not landed, a stamp there is a protection that "
-        "branch (c) erases one RPC later.\n2 means a SECOND writer in "
+        "carve-out. The founder ruled on 2026-11-25 (Phase 222) that the "
+        "enqueue-failure payload stays unstamped, so branch (b) stores the "
+        "curated transient sentence over it; re-stamping it makes branch (b) keep "
+        "the handler's own sentence instead, which needs a new founder decision, "
+        "not a count change.\n2 means a SECOND writer in "
         f"{PROVENANCE_INERT_FILE} lost its markers and collapsed onto P1's "
         "signature — a defect being absorbed by a carve-out meant for one site."
     )

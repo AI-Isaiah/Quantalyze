@@ -224,14 +224,18 @@
 -- test_compute_jobs_error_kind_copy_parity.sql:252-271). The layer is spelled
 -- `IF FALSE AND v_fn !~ …`, which is the smallest edit that leaves the anchor's
 -- text in place so a reader can see exactly which assertion was stood down.
--- ⚠️ The apply list is byte-identical to
--- test_sync_status_marked_refresh_protected.sql:156: both carry 20260906120000
--- (appended there by plan 06's three-reviewer fix pass, because its own new arms
--- read these columns) and, since 2026-10-03, end at 20261003120000. 20260510173005 is deliberately ABSENT —
+-- ⚠️ The apply list is no longer byte-identical to
+-- test_sync_status_marked_refresh_protected.sql's, and the two differ before the
+-- last entry (the marked gate carries three later bridge migrations that this gate
+-- has no need of). Both carry 20260906120000 (appended there by plan 06's
+-- three-reviewer fix pass, because its own new arms read these columns) and, since
+-- 2026-11-27 (Phase 222), BOTH END with
+-- 20261125212222_computation_error_copy_contact_form.sql, which carries the
+-- permanent sentence c_perm is compared against. 20260510173005 is deliberately ABSENT —
 -- it is one of the three booked [REDUNDER-SAVEPOINT] migrations and aborts any
 -- lane; 20260510175507 is the repair migration and registers `process_key_long`
 -- on its own.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql","supabase/migrations/20261125212222_computation_error_copy_contact_form.sql"]}
 
 BEGIN;
 
@@ -262,8 +266,8 @@ DECLARE
   -- Asserting equality against the function would pass against a copy function
   -- that leaks its argument or returns its input — i.e. it would be an
   -- assertion that cannot fail for the reason we care about. Copied from
-  -- 20260826120000_computation_error_curated_copy.sql:285.
-  c_perm     TEXT := 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Contact support if you need this strategy computed.';
+  -- 20261125212222_computation_error_copy_contact_form.sql (the permanent arm).
+  c_perm     TEXT := 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Use the contact form if you need this strategy computed.';
 BEGIN
   -- ===== ARM 0 — applied-ness. ABSENCE IS A FAILURE, NOT A SKIP ===========
   -- RED-UNDER: drop the column on the live lane AFTER the apply list has run,

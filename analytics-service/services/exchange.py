@@ -1502,7 +1502,7 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
             exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         result["error"] = (
-            "Key validation failed unexpectedly. Contact support if this "
+            "Key validation failed unexpectedly. Use the contact form if this "
             "persists."
         )
         result["error_code"] = "VALIDATION_UNEXPECTED"

@@ -189,7 +189,7 @@
 -- [REDUNDER-SAVEPOINT] migrations and aborts any lane. Nothing is lost —
 -- 20260510175507 is the repair migration and registers `process_key_long` on
 -- its own.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","scripts/pg-lane/fixtures/37-fixture-side-compute-job-kinds.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql","supabase/migrations/20261009120000_sync_status_analytics_scope.sql","supabase/migrations/20261023120000_sync_status_runner_stamps_computed_at.sql","supabase/migrations/20261105120000_sync_status_protect_refused_derive.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","scripts/pg-lane/fixtures/37-fixture-side-compute-job-kinds.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql","supabase/migrations/20261009120000_sync_status_analytics_scope.sql","supabase/migrations/20261023120000_sync_status_runner_stamps_computed_at.sql","supabase/migrations/20261105120000_sync_status_protect_refused_derive.sql","supabase/migrations/20261125212222_computation_error_copy_contact_form.sql"]}
 
 BEGIN;
 
@@ -241,7 +241,7 @@ DECLARE
   -- `= computation_error_copy(<kind>)` would pass against a copy function that
   -- leaks its argument, i.e. it would be an assertion that cannot fail for the
   -- reason we care about.
-  c_perm     TEXT := 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Contact support if you need this strategy computed.';
+  c_perm     TEXT := 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Use the contact form if you need this strategy computed.';
   j          UUID;
   j_sib      UUID;
   tok        UUID;
@@ -458,7 +458,7 @@ BEGIN
   --       LITERALLY on purpose — asserting `= computation_error_copy('permanent')`
   --       would pass against a copy function that leaks its argument, i.e. it
   --       would be an assertion that cannot fail for the reason we care about.
-  IF v_error IS DISTINCT FROM 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Contact support if you need this strategy computed.' THEN
+  IF v_error IS DISTINCT FROM 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Use the contact form if you need this strategy computed.' THEN
     RAISE EXCEPTION 'ARM A FAILED: computation_error is % — a protected refresh failure must stay VISIBLE (the curated sentence for a permanent failure), not silent and not raw.', COALESCE(v_error, 'NULL');
   END IF;
   --   (3) the DIAGNOSIS is not lost — it survives on the operator surface.
@@ -679,7 +679,7 @@ BEGIN
   IF v_error LIKE '%IPC timeout%' OR v_error LIKE '%-10005%' THEN
     RAISE EXCEPTION 'ARM I FAILED (HONEST-01): raw operator text reached strategy_analytics.computation_error (%) across the bounce.', v_error;
   END IF;
-  IF v_error IS DISTINCT FROM 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Contact support if you need this strategy computed.' THEN
+  IF v_error IS DISTINCT FROM 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Use the contact form if you need this strategy computed.' THEN
     RAISE EXCEPTION 'ARM I FAILED: computation_error is % after the bounce — the protected failure stopped being VISIBLE, which is half of what b-prime promises.', COALESCE(v_error, 'NULL');
   END IF;
   IF v_raw IS DISTINCT FROM 'mt5 gateway IPC timeout (-10005)' THEN
