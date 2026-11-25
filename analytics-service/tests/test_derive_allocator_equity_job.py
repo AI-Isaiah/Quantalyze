@@ -5987,3 +5987,299 @@ async def test_no_capital_exit_a_candidate_fault_in_the_apply_loop_reverts_and_k
         r for r in caplog.records
         if "key-B-SECRET" in r.getMessage() or "65.0" in r.getMessage() or r.exc_info
     ]
+
+
+def _nc_compose_that_raises(
+    exc_with_candidate: BaseException,
+    exc_without: BaseException | None = None,
+    calls: list[dict[str, Any]] | None = None,
+) -> Any:
+    """A stand-in for ``compose_allocator_equity`` that raises ``exc_with_candidate`` only while the
+    call names a no-capital candidate (a single stored row cannot make the real compose do that),
+    raises ``exc_without`` (when given) on a call that names none, and is the real compose
+    otherwise. ``calls`` records the keyword arguments of every call."""
+    import services.allocator_equity_compose as compose_module
+
+    real = compose_module.compose_allocator_equity
+
+    def _wrapper(*args: Any, **kwargs: Any) -> dict:
+        if calls is not None:
+            calls.append({"args": args, **kwargs})
+        if kwargs.get("no_capital_exit_by_key"):
+            raise exc_with_candidate
+        if exc_without is not None:
+            raise exc_without
+        return real(*args, **kwargs)
+
+    return _wrapper
+
+
+def _nc_with_stale_row(seed: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    seed[DERIVED_TABLE].append(_nc_stale_curve_row())
+    return seed
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_candidate_fault_in_the_compose_reverts_and_keeps_the_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """NOCAP-02 / ROADMAP SC-2, the compose call. A ``ValueError`` (text: a key id) raised by the
+    compose while a candidate is named reverts every candidate once and composes on the inputs
+    exactly as stored: DONE on both runs against one fake, the stale row replaced and never
+    deleted, one count per candidate in play, the second compose call naming no candidate, and no
+    log record carrying the exception's text."""
+    import logging
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    calls: list[dict[str, Any]] = []
+    fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(ValueError("key-B-SECRET"), calls=calls),
+        ),
+        caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"),
+    ):
+        results = [await run_derive_allocator_equity_job(_nc_job()) for _ in range(2)]
+
+    assert [r.outcome.name for r in results] == ["DONE", "DONE"]
+    assert not [
+        x for x in fake.deletes if x[0] == DERIVED_TABLE and x[1].get("kind") == "equity_curve"
+    ], fake.deletes
+    curve = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve) == 2
+    assert len(calls) == 4
+    for first, second in (calls[0:2], calls[2:4]):
+        assert first["no_capital_exit_by_key"] == {"key-B": ("dust", _BTC_DAYS[2])}
+        assert not second.get("no_capital_exit_by_key")
+    for upsert in curve:
+        payload = _extract_payload(upsert[1])
+        assert "dropped_key" in payload["degrade_reasons"]
+        assert "no_capital_exited_keys" not in payload
+        assert _nc_refused(payload) == {"candidate_exception": 1}
+    warned = [r.getMessage() for r in caplog.records if "ValueError" in r.getMessage()]
+    assert len(warned) == 2, [r.getMessage() for r in caplog.records]
+    assert not [
+        r for r in caplog.records
+        if "key-B-SECRET" in r.getMessage() or "65.0" in r.getMessage() or r.exc_info
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_dispatch_ends_done_where_it_used_to_end_failed_unknown() -> None:
+    """NOCAP-02 through the dispatcher. The same compose fault used to leave ``dispatch`` with
+    FAILED / ``unknown`` (a retryable class) on every attempt while the previous row stayed stale;
+    now the job ends DONE and the row is the no-candidate payload. The control beside it: with NO
+    candidate in play the same ``ValueError`` still reaches the dispatcher as FAILED / ``unknown``,
+    so the catch hides nothing that is not a candidate's."""
+    from unittest.mock import patch
+
+    from services.job_worker import dispatch
+
+    fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(ValueError("key-B-SECRET")),
+        ),
+    ):
+        result = await dispatch(_nc_job())
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    curve = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve) == 1
+    assert _nc_refused(_extract_payload(curve[0][1])) == {"candidate_exception": 1}
+
+    # control: no candidate in play (book of one ordinary key), same fault -> today's path
+    control = _FakeSupabase(_nc_with_stale_row(_nc_assemble([])))
+    with (
+        patch("services.job_worker.get_supabase", return_value=control),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            side_effect=ValueError("key-B-SECRET"),
+        ),
+    ):
+        refused = await dispatch(_nc_job())
+    assert refused.outcome.name == "FAILED" and refused.error_kind == "unknown"
+    assert not [u for u in control.upserts if _is_equity_curve_upsert(u[1])]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_fault_with_no_candidate_in_play_propagates_unchanged() -> None:
+    """NOCAP-02 outcome table, row 3 (T-234-10). With no candidate in play a compose ``ValueError``
+    is not the rule's: ``run_derive_allocator_equity_job`` raises it exactly as before."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_nc_with_stale_row(_nc_assemble([])))
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            side_effect=ValueError("injected"),
+        ),
+        pytest.raises(ValueError, match="injected"),
+    ):
+        await run_derive_allocator_equity_job(_nc_job())
+    assert not [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_cancellation_is_never_caught_in_the_apply_loop_or_the_compose() -> None:
+    """NOCAP-02 edge (BaseException). ``asyncio.CancelledError`` is not an ``Exception``; raised from
+    the apply loop (the patched D-10 helper) or from the compose with a candidate in play it leaves
+    ``run_derive_allocator_equity_job`` untouched and nothing is upserted."""
+    import asyncio
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    loop_fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=loop_fake),
+        patch(
+            "services.job_worker._no_capital_exit_consumes_only_dust",
+            side_effect=asyncio.CancelledError(),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_derive_allocator_equity_job(_nc_job())
+    assert not [u for u in loop_fake.upserts if _is_equity_curve_upsert(u[1])]
+
+    compose_fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=compose_fake),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(asyncio.CancelledError()),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_derive_allocator_equity_job(_nc_job())
+    assert not [u for u in compose_fake.upserts if _is_equity_curve_upsert(u[1])]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_fault_in_the_stored_input_compose_keeps_todays_path() -> None:
+    """NOCAP-02 outcome table, rows 5 and 6. The compose on the inputs exactly as stored is not a
+    candidate's fault. A ``ValueError`` raised by every call propagates; a ``ValueError`` first and
+    a ``NavReconstructionError`` on the stored-input compose ends FAILED / permanent with the
+    ``compose_refused`` refusal record, the same as a refusal that is not the rule's."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+    from services.nav_twr import NavReconstructionError
+
+    fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            side_effect=ValueError("every call"),
+        ),
+        pytest.raises(ValueError, match="every call"),
+    ):
+        await run_derive_allocator_equity_job(_nc_job())
+    assert not [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+
+    refused = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=refused),
+        patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(
+                ValueError("first"), NavReconstructionError("allocator equity replay: injected")
+            ),
+        ),
+    ):
+        result = await run_derive_allocator_equity_job(_nc_job())
+    assert result.outcome.name == "FAILED" and result.error_kind == "permanent"
+    _assert_refusal_recorded(refused, _NOCAP_ALLOC, "compose_refused")
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_compose_revert_keeps_the_counts_of_the_other_keys() -> None:
+    """NOCAP-02 edge (cardinality). A book with a Deribit key whose live read says empty over a funded
+    60000.0 terminal (refused at selection, ``funded_terminal``) and the A3 candidate key-B, whose
+    compose faults: the revert adds one ``candidate_exception`` for the one candidate in play and
+    keeps the selection count of the other key, so the field reads exactly
+    ``{'candidate_exception': 1, 'funded_terminal': 1}`` (no ``compose_reverted``, which is the
+    ``NavReconstructionError`` route)."""
+    from unittest.mock import patch
+
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate("key-F", "deribit", d[:3], _nc_payload("dust", "deribit", 60_000.0, d[2])),
+        _nc_candidate(
+            "key-B", "deribit", d[:3],
+            _nc_payload(
+                "dust", "deribit", _NC_A3_TERMINAL, d[3],
+                flows={d[3]: 40.0}, dropped_pnl={d[3]: 10.0},
+                basis_flows={d[3]: 40.0}, basis_pnl={d[0]: 0.0, d[1]: 0.0, d[3]: 10.0},
+            ),
+        ),
+    ])
+    with patch(
+        "services.allocator_equity_compose.compose_allocator_equity",
+        _nc_compose_that_raises(ValueError("key-B-SECRET")),
+    ):
+        payload = await _compose_no_capital_book(book)
+    assert _nc_refused(payload) == {"candidate_exception": 1, "funded_terminal": 1}
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_capital_exited_keys" not in payload
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_an_apply_loop_fault_replaces_the_loops_own_counts() -> None:
+    """NOCAP-02 edge (cardinality, apply loop). The loop counts its own refusals into a loop-local
+    counter that joins the run's only when the loop completes, and a fault reverts EVERY candidate,
+    including one the loop had already applied. Key-F is refused at selection (before the loop; that
+    count is kept). In the loop key-B is refused by D-10 (a count the fault must discard), key-C
+    applies cleanly (the fault must revert it) and key-D's apply raises. The field then reads the
+    selection count and one ``candidate_exception`` per candidate in play, three, and never the
+    D-10 count of a loop that did not finish; no key leaves the book."""
+    from unittest.mock import patch
+
+    import services.job_worker as job_module
+
+    d = _BTC_DAYS
+    real = job_module._no_capital_exit_consumes_only_dust
+    seen: list[str] = []
+
+    def _fault_on_the_third_candidate(*args: Any, **kwargs: Any) -> bool:
+        seen.append(args[0])
+        if len(seen) == 3:
+            raise KeyError("key-D-SECRET")
+        return real(*args, **kwargs)
+
+    def _a3(key: str) -> dict[str, Any]:
+        return _nc_candidate(
+            key, "deribit", d[:3],
+            _nc_payload(
+                "dust", "deribit", _NC_A3_TERMINAL, d[3],
+                flows={d[3]: 40.0}, dropped_pnl={d[3]: 10.0},
+                basis_flows={d[3]: 40.0}, basis_pnl={d[0]: 0.0, d[1]: 0.0, d[3]: 10.0},
+            ),
+        )
+
+    book = _nc_assemble([
+        _nc_candidate("key-F", "deribit", d[:3], _nc_payload("dust", "deribit", 60_000.0, d[2])),
+        _nc_candidate(
+            "key-B", "deribit", d[:3],
+            _nc_payload("dust", "deribit", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
+        ),
+        _a3("key-C"),
+        _a3("key-D"),
+    ])
+    with patch(
+        "services.job_worker._no_capital_exit_consumes_only_dust", _fault_on_the_third_candidate
+    ):
+        payload = await _compose_no_capital_book(book)
+    assert len(seen) == 3
+    assert _nc_refused(payload) == {"candidate_exception": 3, "funded_terminal": 1}
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_capital_exited_keys" not in payload

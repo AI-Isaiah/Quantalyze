@@ -18324,6 +18324,30 @@ async def run_derive_allocator_equity_job(
             payload = _compose(no_capital_stored)
         except NavReconstructionError as exc_again:
             return await _compose_refused(exc_again)
+    except Exception as exc:  # noqa: BLE001 - a candidate's fault reverts; any other fault re-raises
+        # 234 NOCAP-02 (T-234-09, T-234-10): the same revert for an exception that is NOT a
+        # ``NavReconstructionError`` (a candidate's malformed inputs reading as a ``KeyError`` or
+        # ``ValueError`` inside the compose). It runs ONLY with a candidate in play: with none the
+        # fault is not the rule's and reaches the dispatcher exactly as before (``unknown``). The
+        # stored-input compose below keeps today's two outcomes (a ``NavReconstructionError`` is
+        # ``_compose_refused``; anything else propagates), and a ``BaseException`` that is not an
+        # ``Exception`` is never caught here. Counts and the class name only: a ``KeyError``'s
+        # text is the missing key, which can be a key id.
+        if no_capital_stored is None or not no_capital_exit_by_key:
+            raise
+        no_capital_refusals["candidate_exception"] += len(no_capital_exit_by_key)
+        logger.warning(
+            "derive_allocator_equity: compose raised %s with %d no-capital candidate(s) in "
+            "play for allocator %s — re-composing once with them reverted to %s",
+            type(exc).__name__,
+            len(no_capital_exit_by_key),
+            allocator_id,
+            DegradeReason.DROPPED_KEY.value,
+        )
+        try:
+            payload = _compose(no_capital_stored)
+        except NavReconstructionError as exc_again:
+            return await _compose_refused(exc_again)
 
     if departed_unavailable_counts:
         # SC-7 (D-06): the left-out departed history is a count in the payload, beside
