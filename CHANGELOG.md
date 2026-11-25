@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.133.76.3] - 2026-11-25 — fix: main CI is green again; the demo credential guard test stops timing out on the coverage shards, and a deep-link focus test stops racing
+
+`main` went red at `3c562fb1c` (CI run 45627845940) on two vitest failures. This PR fixes both. It also unblocks PR #1342, which hit the same timeout.
+
+### Fixed
+- **`check-demo-credential-digests.test.ts` no longer scans the tree in-process.** Its `beforeAll` called `scanTree()`, which reads every tracked file (about 12,300 files, 266 MB). That takes about 22 s locally. The CI vitest shards run with `--coverage`, so every byte went through v8-instrumented code, and the hook passed its 120 s limit ("Hook timed out in 120000ms").
+  - `scripts/check-demo-credential-digests.ts` gains a `--json` mode. It prints the scan result and verdict as one JSON object, with the same exit code as the plain run. It carries role, path and line only, like the human output.
+  - The test's `beforeAll` runs `npx tsx scripts/check-demo-credential-digests.ts --json` once, in a child process the coverage provider does not instrument, and the per-role, coverage and floor arms read that result.
+  - The CLI arm used to run a second whole-tree scan to check the OK line. It now asserts that the same child run exits 0 with an empty verdict. `npm run lint` still runs the plain command on every event.
+  - `--json` sets `process.exitCode` and returns, and does not call `process.exit()`. Measured: with a row planted to match thousands of times (a 10 MB payload), `exit()` truncated the piped JSON, and the test lost the role, path and line it must name.
+- **The `?add=` deep-link test in `AddAllocationFlow.test.tsx` awaits focus.** The amount input is focused in a passive effect after step 2 commits. `findByText` can resolve between that commit and the effect when the render is slow, as on a coverage shard. The test then read focus on `<body>`. This was a flake, not a break: neither the component nor the test had changed since #1256, and the shard passed on the earlier `main` runs. The arm now uses `waitFor`.
+
+### Tests
+- **Both guards still bite, measured with byte backups restored after each run:**
+  - A digest row pointed at a phrase in a tracked file turns the matching per-role arm and the CLI arm RED, naming 51 files by role, path and line.
+  - A 6-byte row pointed at a common word (48,213 matches) is RED with every offender listed.
+  - The deep-link arm stays RED when the amount focus is removed from the component.
+  - With the focus delayed by 30 ms, the old arm fails and the new one passes. That reproduces the CI failure.
+- Under `--coverage`, the digest test file takes about 20 s locally.
+
+### Notes
+- **The `afterAll` "path argument ... undefined" error is a symptom, not a separate bug, and stays unguarded.** It appears only when the first `beforeAll` fails: vitest then skips the second `beforeAll`, which creates the scratch directory, so `rmSync` gets `undefined`. Measured by making the first hook fail on purpose: the real error is reported first, and this one follows it.
+
 ## [0.133.76.1] - 2026-11-25 — records: Phases 229 MT5DERIVE2, 234 NOCAPITAL and 237 FACTSHEETHONEST closed (229's live soak exits 0; 237's two visual checks pass; 234's phase records)
 
 This is a records PR. It changes no source, test, workflow or migration file. It closes the human items that kept two shipped phases at `human_needed`, and ticks both complete: Phase 229 MT5DERIVE2 (#1328) has two items, the live soak and the 155.2 freeze check; Phase 237 FACTSHEETHONEST (#1316) has two visual checks. It also brings onto `main` the planning records of Phase 234 NOCAPITAL, which shipped as v0.133.76.0 (#1339), and ticks it complete.
