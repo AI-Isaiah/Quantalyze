@@ -54,7 +54,9 @@ from typing import Any
 
 import pytest
 
+from tests._binance_fills import column_after_advance
 from tests.test_okxtrades_cursor import (
+    CURSOR_AHEAD_TS,
     CURSOR_BEHIND_MS,
     CURSOR_BEHIND_TS,
     DAILY_NEWEST_DAY_START_ISO,
@@ -242,6 +244,33 @@ class TestBinanceFillsCursorGate:
             },
         )
         assert _the_advance(rec)["p_last_fetched_ts"] is None
+
+    async def test_a_stop_stamp_below_a_column_ahead_of_the_stored_fills_is_dropped_by_the_rpc(
+        self,
+    ) -> None:
+        # The NAMED EXCEPTION to SC-3 recorded at `_RAW_TRADE_INGESTION_ENABLED` (review WR-01):
+        # the column (2026-06-20) is ahead of the strategy's newest stored fill (2026-06-01), as
+        # one key backing two strategies makes it. The gate stamps the bounded newest persisted
+        # fill, 2026-06-02T09:00Z, but `advance_sync_cursor` only moves the column forward, so
+        # the stamp is dropped and the column stays. This pins the gap so the record cannot
+        # drift from the behaviour; closing it needs an RPC change, a migration, out of this
+        # phase's scope.
+        stamp = "2026-06-02T09:00:00+00:00"
+        supabase, rec = _make_supabase(trades_rows=DEFAULT_TRADES)
+        await _run_job(
+            supabase=supabase,
+            column=CURSOR_AHEAD_TS,
+            raw_fills=[
+                _bfill("fill-btc", stamp, "BTCUSDT"),
+                _bfill("fill-eth", HEALTHY_NEWER_TS, "ETHUSDT"),
+            ],
+            fills_flags={
+                "binance_page_cap_symbols": ["BTCUSDT"],
+                "binance_read_through_ms": SECOND_STOP_MS,
+            },
+        )
+        assert _the_advance(rec)["p_last_fetched_ts"] == stamp
+        assert column_after_advance(CURSOR_AHEAD_TS, stamp) == CURSOR_AHEAD_TS
 
     async def test_two_stopped_symbols_stamp_at_or_before_the_smaller_bound(
         self,

@@ -342,8 +342,15 @@ PARTITION_COLUMNS: Final[tuple[str, ...]] = (
 # quiet-prefix deadline known limit (founder ruling 2026-11-25 (UTC)): a sync
 # read stopped by its deadline over a prefix holding no stored fill leaves the
 # cursor where it was, named by `binance_deadline_symbols` on every such run
-# and bounded by the reach clamp. This is one of several venue conditions for
-# this switch and certifies nothing about OKX, Bybit or Deribit.
+# and bounded by the reach clamp. A second named exception, to SC-3, is accepted
+# the same way (round-1 review WR-01): a column ahead of the strategy's newest stored fill
+# (one key backing two strategies, pre-232 wall-clock stamps, deleted fills).
+# The bounded stop stamp is then below the column, `advance_sync_cursor` only
+# moves the column forward (migration 20260602173710) and drops it, the next
+# seed is again the column, and the stopped symbol's span between its bound and
+# the column is not re-read; only that run's stop flag names it. Closing it
+# needs an RPC change, outside this phase. This is one of several venue
+# conditions for this switch and certifies nothing about OKX, Bybit or Deribit.
 _RAW_TRADE_INGESTION_ENABLED: Final[bool] = (
     os.environ.get("USE_RAW_TRADE_INGESTION", "false").lower() == "true"
 )
