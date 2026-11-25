@@ -3557,7 +3557,10 @@ export const FILES_FLOOR = 93;
 // WAIVED_CEILING stays 0 - no waiver was added.
 // MERGED 2026-11-24: Phase 227 JOBLEDGER (910 -> 990 on its branch, +80 twinned arms) onto origin/main at 940 (Phase 225, +30): 940 + 80 = 1020.
 // The CI `sql-mutation` FULL run on the PR head is the measurement of the merged corpus. WAIVED_CEILING stays 0.
-export const ARMS_FLOOR = 1020;
+// RAISED 1020 -> 1021 2026-11-25 (Phase 225 plan 13, ONEACCOUNTONCE PR-2b-1): +1 twinned arm, 6v-owner-read, in test_api_keys_venue_identity_uniq.sql, a file that already counted toward FILES_FLOOR (the owner may read api_keys.venue_server through the column grant of migration 20261125132334). Arm 6v-no-grant keeps its id and its count; only its assertion and its twin changed (authenticated SELECT dropped from the false list, twin now GRANT UPDATE).
+// MEASURED: `--parse-only` printed `arms: 0/1021/0` and `coverage: files 93/120`; the exit-2-by-design DIAGNOSTIC run of that file printed `arms: 15/15/0   (executed/annotated/waived)`, `biting: 15`, `lane-invocations: 15` with every arm `RED (identity ok)` and `No defects in the narrowed scope`. CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the run that compares it again.
+// WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 1021;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
