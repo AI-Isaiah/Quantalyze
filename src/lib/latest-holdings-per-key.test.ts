@@ -884,6 +884,7 @@ describe("the account identity carries venue_server (225 CONN-03, CONTEXT Q6)", 
     apiKeySelects.length = 0;
     await fetchLatestHoldingsPerKey(fakeClient([mt5("k-a", "srv-a")], []), "user-1", COLS);
     expect(apiKeySelects).toHaveLength(1);
+    expect(apiKeySelects[0]).toBe(KEY_IDENTITY_COLUMNS);
     expect(apiKeySelects[0].split(",").map((c) => c.trim())).toContain("venue_server");
   });
 

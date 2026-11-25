@@ -227,6 +227,7 @@ import {
   notSyncingIdentityPendingKeyIds,
   identityPendingKeyIds,
   deriveKeyDataGapsField,
+  marksIncludedKeys,
 } from "./queries";
 import type { SupportedExchange } from "./utils";
 import { EMPTY_ANALYTICS } from "./utils";
@@ -2400,6 +2401,7 @@ describe("keyDataGaps: the server derives which key is missing which days (198 D
     id: string,
     over: Partial<{
       venue_account_id: string | null;
+      venue_server: string | null;
       sync_status: string | null;
       exchange: string;
     }> = {},
@@ -2412,6 +2414,7 @@ describe("keyDataGaps: the server derives which key is missing which days (198 D
     last_sync_at: "2026-10-09T00:00:00Z",
     disconnected_at: null,
     venue_account_id: "venue_account_id" in over ? over.venue_account_id! : `va-${id}`,
+    venue_server: over.venue_server ?? null,
     account_share_kind: null,
     account_shared_with_api_key_id: null,
   });
@@ -2523,6 +2526,44 @@ describe("keyDataGaps: the server derives which key is missing which days (198 D
     });
   });
 
+  // Phase 225 plan 15 (CONN-03, CONTEXT Q6): one login on two set servers is two
+  // accounts. The gap line must never name a key on another server of the login.
+  describe("duplicate_account lines read the server-aware identity (225 CONN-03)", () => {
+    const dupPhase07 = {
+      equityHistoryState: "rebuilding" as const,
+      equityHistoryRebuildReason: "duplicate_account" as const,
+      equityHistoryNotSyncingKeyIds: [],
+      failingKeyExits: [],
+      equityDailyPoints: [],
+    };
+
+    it("names only the two keys on L srv-a, never the key on L srv-b", () => {
+      const keys = [
+        key("K1", { venue_account_id: "L1", venue_server: "srv-a", exchange: "mt5" }),
+        key("K2", { venue_account_id: "L1", venue_server: "srv-a", exchange: "mt5" }),
+        key("K3", { venue_account_id: "L1", venue_server: "srv-b", exchange: "mt5" }),
+      ];
+      const out = deriveKeyDataGapsField(keys, dupPhase07, {}, "2026-10-12");
+      expect(out.map((g) => g.apiKeyIds)).toEqual([["K1", "K2"]]);
+    });
+
+    it("names nobody when the two keys are the same login on two servers", () => {
+      const keys = [
+        key("K1", { venue_account_id: "L1", venue_server: "srv-a", exchange: "mt5" }),
+        key("K2", { venue_account_id: "L1", venue_server: "srv-b", exchange: "mt5" }),
+      ];
+      expect(deriveKeyDataGapsField(keys, dupPhase07, {}, "2026-10-12")).toEqual([]);
+    });
+
+    it("does not group two exchanges that happen to share an account id", () => {
+      const keys = [
+        key("K1", { venue_account_id: "L1", exchange: "okx" }),
+        key("K2", { venue_account_id: "L1", exchange: "bybit" }),
+      ];
+      expect(deriveKeyDataGapsField(keys, dupPhase07, {}, "2026-10-12")).toEqual([]);
+    });
+  });
+
   describe("the ready arm", () => {
     it("runs a failing exit from the day after its last counted day to the curve's last day", () => {
       const keys = [key("K1"), key("K2")];
@@ -2616,5 +2657,91 @@ describe("shapeRowAnalytics — native_unit for the StrategyTable chip", () => {
       const out = shape({ computation_status, native_unit: "BTC", data_quality_flags: { native_unit: "BTC" } });
       expect(out.native_unit ?? null).toBeNull();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 225 plan 15 (CONN-03, CONTEXT Q6). marksIncludedKeys decides which
+// departed keys the drawn curve counts, with the same identity as the derive:
+// one login on two set servers is two accounts. The rows are the owner's key
+// list as getUserApiKeys returns it, so venue_server must reach the decision.
+// ---------------------------------------------------------------------------
+describe("marksIncludedKeys: the departed-history decision is server-aware (225 CONN-03)", () => {
+  const row = (
+    id: string,
+    over: { venue_server: string | null; disconnected_at?: string | null },
+  ) =>
+    ({
+      id,
+      user_id: "user-1",
+      exchange: "mt5",
+      label: id,
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: null,
+      account_balance_usdt: null,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: over.disconnected_at ?? null,
+      venue_account_id: "L1",
+      venue_server: over.venue_server,
+      account_shared_with_api_key_id: null,
+      account_share_kind: null,
+      history_inclusion: null,
+      account_currency: null,
+      account_balance_native: null,
+      account_balance_usdt_close_date: null,
+      history_reconstructed_at: null,
+      history_reconstruct_attempts: 0,
+    }) as unknown as Parameters<typeof marksIncludedKeys>[0][number];
+  const days = (from: string, to: string) => [
+    { date: from, value: 0.01 },
+    { date: to, value: 0.01 },
+  ];
+  const GONE = "2026-03-02T00:00:00Z";
+
+  it("a departed key on L srv-a beside a live key on L srv-b is its own account, so it counts", () => {
+    const out = marksIncludedKeys(
+      [
+        row("k-gone", { venue_server: "srv-a", disconnected_at: GONE }),
+        row("k-live", { venue_server: "srv-b" }),
+      ],
+      { "k-gone": days("2026-01-05", "2026-03-01"), "k-live": days("2026-01-01", "2026-03-10") },
+      ["k-live"],
+    );
+    // Under the login-only identity the live key (first day 2026-01-01) would
+    // bound the departed key to 2025-12-31 and it would not count.
+    expect(out.departedIncluded.has("k-gone")).toBe(true);
+  });
+
+  it("a departed key on the SAME server as the live key is still bounded by it", () => {
+    const out = marksIncludedKeys(
+      [
+        row("k-gone", { venue_server: "srv-a", disconnected_at: GONE }),
+        row("k-live", { venue_server: "srv-a" }),
+      ],
+      { "k-gone": days("2026-01-05", "2026-03-01"), "k-live": days("2026-01-01", "2026-03-10") },
+      ["k-live"],
+    );
+    expect(out.departedIncluded.has("k-gone")).toBe(false);
+  });
+
+  it("a departed key with no server beside live keys on srv-a and srv-b is account_unknown, so it does not count", () => {
+    const out = marksIncludedKeys(
+      [
+        row("k-gone", { venue_server: null, disconnected_at: GONE }),
+        row("k-a", { venue_server: "srv-a" }),
+        row("k-b", { venue_server: "srv-b" }),
+      ],
+      {
+        "k-gone": days("2026-01-01", "2026-03-01"),
+        "k-a": days("2026-02-01", "2026-03-10"),
+        "k-b": days("2026-02-01", "2026-03-10"),
+      },
+      ["k-a", "k-b"],
+    );
+    // Login-only would bound it to the day before the live keys and count it.
+    expect(out.departedIncluded.has("k-gone")).toBe(false);
   });
 });
