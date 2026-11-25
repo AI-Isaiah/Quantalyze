@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.133.77.0] - 2026-11-25 — Phase 225 ONEACCOUNTONCE PR-2b-1: an owner can read their own key's broker server
+
+This is the first of the gap-closure PRs for review finding CR-01 on PR-3 (migration B). It ships alone because a later PR selects `api_keys.venue_server` from the browser, and that read needs this grant live on PROD first. It holds one migration and no app code.
+
+### Changed
+- **Migration `20261125132334_api_keys_venue_server_owner_read.sql`.** Grants `SELECT (venue_server)` on `public.api_keys` to `authenticated`. The existing owner-only RLS policy `api_keys_owner` limits it to the key's own owner, the same way `venue_account_id` is granted. `anon` still gets nothing, and no browser role can write the column. The column comment is re-issued with its old "not granted" tail replaced. The self-verify reads only the catalogue and no table row. Founder ruling of 2026-11-25: "Owner-only read (Recommended)". It replaces plan 01's choice to leave the column ungranted, which was a planning choice, not a founder ruling.
+- A manual rollback is in `supabase/migrations/down/20261125132334-rollback.sql`. It is one transaction of its own.
+
+### Tests
+- `test_api_keys_venue_identity_uniq.sql`: the new arm `6v-owner-read` asserts that the owner's read grant exists (its twin revokes it). `6v-no-grant` now pins that `authenticated` has no INSERT or UPDATE and `anon` has nothing (its twin grants UPDATE). Every arm went RED with its own arm under its twin on the lane (`arms: 15/15/0`).
+- Census moves: `ARMS_FLOOR` 1020 -> 1021, with the gate-family-meta registry entry, `totalAnchored`, the synthetic FULL-log literals and the per-file row, and `armsSeen` moved to match. `stepsSeen` and `needles.length` do not move, because the new twins are `sql` steps. `FILES_FLOOR` stays 93 and `WAIVED_CEILING` stays 0.
+
+### Notes
+- **Reviews:** migration-reviewer and rls-policy-auditor both reported no CRITICAL, HIGH, MEDIUM or LOW finding. The RLS audit found `api_keys_owner` to be the only policy on the table. No view or SECURITY DEFINER function returns the column to a browser role.
+- **Deploy order:** nothing reads the column from the browser yet. The readers, the TypeScript identity twin and the column roster in `src/lib/constants.ts`, land in PR-2b-2 after this is applied on PROD.
+- **Known stale text, left for PR-2b-2:** the comment in `src/lib/sec-005-api-keys-projection.test.ts` still says the column is "granted to nobody". The baseline dump still carries the old column comment until the next re-dump.
 ## [0.133.76.4] - 2026-11-25 — records: Phases 251 SYNCSTORE and 252 DERIBITOPTIONS booked
 
 This is a records PR. It has no source, test, workflow or migration change. It books two v1.22 phases, 251 SYNCSTORE (founder ruling 2026-11-25) and 252 DERIBITOPTIONS (founder decision 2026-11-25, "Book it in v1.22 (Recommended)"), and brings onto main the debug session 252 cites.
