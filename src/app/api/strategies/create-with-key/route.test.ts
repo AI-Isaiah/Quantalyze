@@ -1546,6 +1546,23 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["a control-character-only value (non-blank to JS trim, blank to Python strip)", "\u001f"],
+    ["over the 128-character cap", "s".repeat(129)],
+  ])(
+    "founder ruling 2026-11-25: rejects an MT5 key whose server is %s, with KEY_MT5_WRONG_SERVER before validate, encrypt and the RPC",
+    async (_label, passphrase) => {
+      const POST = await importPost();
+      const res = await POST(makeReq({ ...MT5_BODY, passphrase }));
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("KEY_MT5_WRONG_SERVER");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+    },
+  );
+
   it("STILL 400s an invalid exchange value (three-layer lockstep: bogus never admitted)", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...MT5_BODY, exchange: "notanexchange" }));

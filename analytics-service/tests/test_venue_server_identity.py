@@ -26,7 +26,7 @@ from services.allocator_equity_derive import (
     account_identity_tokens,
     ambiguous_server_key_ids,
 )
-from services.mt5_validation import parse_mt5_credentials
+from services.mt5_validation import Mt5ValidationError, parse_mt5_credentials
 
 _SPEC = json.loads(
     (Path(__file__).parent / "fixtures" / "venue_server_identity.json").read_text(
@@ -57,6 +57,22 @@ def test_connect_raw_passphrase_is_stored_as_the_poll_reads_it(case: dict[str, A
     _login, _pw, server = parse_mt5_credentials("123456", "pw", case["raw"])
     session = SimpleNamespace(server=server)
     assert _mt5_session_server(session) == case["stored"]
+
+
+@pytest.mark.parametrize(
+    "raw_server",
+    [None, "", "   ", "\u00a0", "\x1f"],
+    ids=["none", "empty", "spaces", "nbsp", "control-char"],
+)
+def test_an_mt5_key_without_a_server_is_refused_as_wrong_server(raw_server: Any) -> None:
+    """Founder ruling 2026-11-25 (Phase 225 CONTEXT Q6, "Delete keys without
+    Server, dont accept keys without Server"): the offline credential parse
+    refuses a blank server as ``wrong_server`` before any probe. The TS connect
+    routes refuse the same set before any insert. Reddens if the blank-server
+    guard is dropped from ``parse_mt5_credentials``."""
+    with pytest.raises(Mt5ValidationError) as excinfo:
+        parse_mt5_credentials("123456", "pw", raw_server)
+    assert excinfo.value.kind == "wrong_server"
 
 
 def test_normalise_counts_code_points_like_the_databases_char_length() -> None:
