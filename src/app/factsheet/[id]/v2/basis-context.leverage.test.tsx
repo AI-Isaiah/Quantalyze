@@ -424,3 +424,30 @@ describe("SMTM-01 useBasisSeriesView + leverageEligibleFor — smoothed leverage
     expect(result.current.view).toBe(payload);
   });
 });
+
+// Phase 252 (DERIBITOPTIONS): a withheld headline has no stored figure for the re-derive to agree
+// with, so the what-if is withheld as for a chain-broken row (RESEARCH A3: closes the single-key case).
+describe("252 leverageEligibleFor — a withheld headline is leverage-ineligible", () => {
+  const eligibleBase = {
+    dataQuality: { composite: false },
+    periodsPerYear: 252,
+  } as unknown as FactsheetPayload;
+  const withheld = (extra: Record<string, unknown>) =>
+    ({ ...eligibleBase, dataQuality: { composite: false, headlineWithheld: true, ...extra } }) as unknown as FactsheetPayload;
+
+  it("a clean single-key payload stays eligible (the control: the conjunct is the only difference)", () => {
+    expect(leverageEligibleFor(eligibleBase, "cash_settlement")).toBe(true);
+  });
+
+  it("a single-key payload with a withheld headline and NO chain break is ineligible", () => {
+    const p = withheld({ headlineWithheldCause: "options_cash_wallet" });
+    expect(p.dataQuality?.twrChainBroken).toBeUndefined();
+    expect(leverageEligibleFor(p, "cash_settlement")).toBe(false);
+  });
+
+  it("every cause is ineligible, a chain-broken one included", () => {
+    for (const cause of ["recomputing", "failed", undefined]) {
+      expect(leverageEligibleFor(withheld({ twrChainBroken: true, headlineWithheldCause: cause }), "cash_settlement"), String(cause)).toBe(false);
+    }
+  });
+});

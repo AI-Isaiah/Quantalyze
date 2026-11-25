@@ -527,6 +527,71 @@ describe("the Withheld note in the strip and Main Metrics (D-03, UI-SPEC 1.3)", 
 });
 
 /**
+ * Phase 252 DERIBITOPTIONS plan 01: the options-book cause renders the "structural" note, a
+ * withheld note that does not heal on its own. Muted, never amber, no warning glyph (DESIGN.md
+ * reserves the warning colour for transient recoverable states), on an INTACT chain too, and it
+ * never names a chain break. Sentences HAND-TYPED.
+ */
+describe("252 — the options-book note (structural variant: muted, no glyph)", () => {
+  const OPTIONS_HEADLINE =
+    "Headline figures withheld: this strategy trades options, and its returns are measured on the cash wallet, which leaves out the market value of open option positions.";
+  const OPTIONS_PANEL =
+    "Withheld: this panel is measured on the cash wallet, which leaves out the market value of open option positions.";
+  // An intact chain: no `twrChainBroken` key, exactly what `applyHeadlineBasis` now returns.
+  const OPTIONS_DQ: DQ = { composite: true, headlineWithheld: true, headlineWithheldCause: "options_cash_wallet" };
+  const OPTIONS_CHAIN_DQ: DQ = { ...OPTIONS_DQ, twrChainBroken: true };
+
+  it.each([
+    ["an intact chain", OPTIONS_DQ],
+    ["a broken chain", OPTIONS_CHAIN_DQ],
+  ])("the strip, %s: the reason, muted, no glyph, and the seven headline cells read the em-dash", (_n, dq) => {
+    const { container } = renderBody(withHeadlineNaN(payloadWith(dq)));
+    const found = stripNotes(container).filter((p) => (p.textContent ?? "").trim() === OPTIONS_HEADLINE);
+    expect(found).toHaveLength(1);
+    expect(found[0].getAttribute("style")).toContain(MUTED);
+    expect(found[0].getAttribute("style")).not.toContain("color-warning");
+    expect(found[0].textContent).not.toContain("⚠");
+    expect(container.textContent).not.toMatch(/return chain|earlier history|Measured since/);
+    const values = [...container.querySelectorAll('[data-testid="factsheet-kpi-value"]')].map((e) => e.textContent);
+    expect(values).toEqual(["—", "—", "—", "—", "—", "—", "—"]);
+  });
+
+  it("Main Metrics: the same sentence once, muted, no glyph", () => {
+    const { container } = renderColumn(withHeadlineNaN(payloadWith(OPTIONS_DQ)));
+    const found = notes(container, OPTIONS_HEADLINE);
+    expect(found).toHaveLength(1);
+    expect(panelOf(found[0])).toBe("Main Metrics");
+    expect(found[0].getAttribute("style")).toContain(MUTED);
+    expect(found[0].getAttribute("style")).not.toContain("color-warning");
+    expect(found[0].textContent).not.toContain("⚠");
+  });
+
+  it("a withheld rail panel carries the panel sentence, muted, no glyph", () => {
+    const { container } = renderBody(withHeadlineNaN(payloadWith(OPTIONS_DQ)));
+    const panelNotes = [...container.querySelectorAll<HTMLElement>('[data-testid="panel-withheld-note"]')];
+    expect(panelNotes.length, "premise: at least one panel is withheld").toBeGreaterThan(0);
+    for (const n of panelNotes) {
+      expect((n.textContent ?? "").trim()).toBe(OPTIONS_PANEL);
+      expect(n.getAttribute("style")).toContain(MUTED);
+      expect(n.getAttribute("style")).not.toContain("color-warning");
+    }
+  });
+
+  it("CONTROL: a recomputing row still renders amber with the glyph", () => {
+    const dq: DQ = { composite: false, twrChainBroken: true, headlineWithheld: true, headlineWithheldCause: "recomputing" };
+    const { container } = renderColumn(withHeadlineNaN(payloadWith(dq)));
+    const found = notes(container, "⚠ Headline figures are being recomputed.");
+    expect(found).toHaveLength(1);
+    expect(found[0].getAttribute("style")).toContain(WARNING);
+  });
+
+  it("is withheld for the cash basis only: isHeadlineWithheld holds on cash and not on mark_to_market", () => {
+    expect(isHeadlineWithheld(OPTIONS_DQ, "cash_settlement")).toBe(true);
+    expect(isHeadlineWithheld(OPTIONS_DQ, "mark_to_market")).toBe(false);
+  });
+});
+
+/**
  * D-14 (founder, 2026-10-10, review round 2 R2-03). A chain-broken row whose
  * stored headline is withheld only because the analytics are in flight or
  * failed must not say "has not been measured yet". The sentences are HAND-TYPED.
@@ -691,7 +756,13 @@ describe("D-15 — a Withheld strip shows no alpha or IR figure (review WR-04)",
     expect(isHeadlineWithheld(WITHHELD_DQ, "mark_to_market")).toBe(false);
     expect(isHeadlineWithheld(WITHHELD_DQ, "smoothed_mtm")).toBe(false);
     expect(isHeadlineWithheld(undefined, "cash_settlement")).toBe(false);
-    expect(isHeadlineWithheld({ ...WITHHELD_DQ, twrChainBroken: false }, "cash_settlement")).toBe(false);
+    // Phase 252: `headlineWithheld` alone decides (the old reading also required `twrChainBroken`).
+    // The read path sets `headlineWithheld` only on a withheld verdict, and the options-book cause
+    // withholds an intact chain, so the chain key no longer gates it. A chain break WITHOUT the
+    // withheld flag is still not withheld.
+    expect(isHeadlineWithheld({ ...WITHHELD_DQ, twrChainBroken: false }, "cash_settlement")).toBe(true);
+    expect(isHeadlineWithheld({ composite: true, headlineWithheld: true }, "cash_settlement")).toBe(true);
+    expect(isHeadlineWithheld({ composite: false, twrChainBroken: true }, "cash_settlement")).toBe(false);
   });
 
   const RECOMPUTING_NOTE = "Headline figures are being recomputed.";

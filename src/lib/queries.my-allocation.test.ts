@@ -3062,6 +3062,52 @@ describe("getMyAllocationDashboard — total-record scalars (194 plan 11, D-15)"
     expect("record_observations" in strat).toBe(false);
     expect(JSON.stringify(strat)).not.toContain("headline_since");
   });
+
+  // Phase 252 plan 04: the Scenario composer's book-leg CAGR and Sharpe (`constituentFigure`) and
+  // the Holdings Sharpe (`gatedSharpe`) withhold on this field. The reason is read on the effective
+  // flags generation, the one `dqf` above already resolves for the unit and the curve flags.
+  describe("Phase 252: figure_withheld_by names an options book", () => {
+    const COMPUTED = "2026-11-20T10:00:00+00:00";
+
+    it("flags carrying the options reason mark the leg; every other leg carries null, never absent", async () => {
+      expect(
+        (await strategyOf({ data_quality_flags: { cumulative_method: "geometric", mtm_gated_reason: "unsmoothed_options_book" } }))
+          .figure_withheld_by,
+      ).toBe("options_cash_wallet");
+      for (const flags of [
+        { cumulative_method: "geometric", mtm_gated_reason: "mtm_basis_unavailable_for_venue" },
+        { cumulative_method: "geometric", mtm_gated_reason: "Unsmoothed_Options_Book" },
+        { cumulative_method: "geometric" },
+        null,
+      ]) {
+        expect((await strategyOf({ data_quality_flags: flags })).figure_withheld_by, JSON.stringify(flags)).toBeNull();
+      }
+    });
+
+    it("a derive-prestamped leg (no live marker) over a snapshot BOUND to computed_at that carries the reason is marked; a snapshot bound to another success is not", async () => {
+      const snapshot = (at: string) => ({
+        last_success_snapshot: {
+          computed_at: at,
+          flags: { cumulative_method: "geometric", mtm_gated_reason: "unsmoothed_options_book" },
+        },
+      });
+      expect(
+        (await strategyOf({ computed_at: COMPUTED, data_quality_flags: snapshot(COMPUTED) })).figure_withheld_by,
+      ).toBe("options_cash_wallet");
+      expect(
+        (await strategyOf({ computed_at: COMPUTED, data_quality_flags: snapshot("2026-11-10T10:00:00+00:00") }))
+          .figure_withheld_by,
+      ).toBeNull();
+    });
+
+    it("the reason never rides the payload except as the one named marker", async () => {
+      const strat = await strategyOf({
+        data_quality_flags: { cumulative_method: "geometric", mtm_gated_reason: "unsmoothed_options_book" },
+      });
+      expect(JSON.stringify(strat)).not.toContain("unsmoothed_options_book");
+      expect(JSON.stringify(strat)).not.toContain("mtm_gated_reason");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

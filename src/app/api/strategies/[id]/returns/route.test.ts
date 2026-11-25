@@ -1199,7 +1199,7 @@ describe("GET /api/strategies/[id]/returns", () => {
     // 164.6.6.2 plan 09 added `returns_unit` and `daily_returns_usd` (null for a
     // USD strategy) to the list; SFH-1 added the boolean `native_unpriced`.
     // 194.1 plan 09 added the three record scalars `figure_*`; R2 WR-01 added `figure_unreadable`.
-    // 237 FACT-02 added the boolean `analytics_updating`. Nothing else.
+    // 237 FACT-02 added the boolean `analytics_updating`; Phase 252 added `figure_withheld_by`. Nothing else.
     expect(Object.keys(body).sort()).toEqual([
       "analytics_updating",
       "asset_class",
@@ -1210,6 +1210,7 @@ describe("GET /api/strategies/[id]/returns", () => {
       "figure_observations",
       "figure_span_days",
       "figure_unreadable",
+      "figure_withheld_by",
       "is_composite",
       "native_unpriced",
       "returns_unit",
@@ -1711,6 +1712,58 @@ describe("GET /api/strategies/[id]/returns — 194.1 record scalars (B8)", () =>
     };
     await call();
     expect(captureSpy).not.toHaveBeenCalled();
+  });
+
+  // Phase 252 plan 03: an options book's stored figures are measured on the cash wallet, which
+  // leaves out open option positions. The values still reach the consumer (the series is shown);
+  // the field tells its figure gate to withhold the annualized pair, and ONLY for a rankable run
+  // whose EFFECTIVE flags carry the reason (strict equality, through the plan 252-01 predicate).
+  describe("252 figure_withheld_by (the options-book marker)", () => {
+    const OPTIONS_ROW = {
+      daily_returns: SERIES,
+      computation_status: "complete",
+      cagr: 0.5,
+      sharpe: 2.1,
+      series_start: "2024-01-01",
+      series_end: "2026-02-09",
+      record_observations: 800,
+    };
+
+    it("a rankable row whose effective flags carry the options reason answers options_cash_wallet and still serves the values", async () => {
+      STATE.analyticsRow = {
+        ...OPTIONS_ROW,
+        data_quality_flags: { cumulative_method: "simple", mtm_gated_reason: "unsmoothed_options_book" },
+      };
+      const body = await call();
+      expect(body.figure_withheld_by).toBe("options_cash_wallet");
+      expect(body.cagr).toBe(0.5);
+      expect(body.sharpe).toBe(2.1);
+    });
+
+    it("the same row without the reason, with another reason, or with a case variant answers null", async () => {
+      for (const flags of [
+        { cumulative_method: "simple" },
+        { cumulative_method: "simple", mtm_gated_reason: "mtm_basis_unavailable_for_venue" },
+        { cumulative_method: "simple", mtm_gated_reason: "Unsmoothed_Options_Book" },
+      ]) {
+        STATE.analyticsRow = { ...OPTIONS_ROW, data_quality_flags: flags };
+        expect((await call()).figure_withheld_by).toBeNull();
+      }
+    });
+
+    it("a non-rankable row carrying the reason answers null (the same rankable conjunction as figure_unreadable)", async () => {
+      STATE.analyticsRow = {
+        ...OPTIONS_ROW,
+        computation_status: "failed",
+        data_quality_flags: { cumulative_method: "simple", mtm_gated_reason: "unsmoothed_options_book" },
+      };
+      expect((await call()).figure_withheld_by).toBeNull();
+    });
+
+    it("the field is on a body with no analytics row at all, as null", async () => {
+      STATE.analyticsRow = null;
+      expect((await call()).figure_withheld_by).toBeNull();
+    });
   });
 });
 

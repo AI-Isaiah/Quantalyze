@@ -145,3 +145,47 @@ describe("constituentCell", () => {
     expect(constituentCell(2.1, full, fmt)).toBe("2.1");
   });
 });
+
+// Phase 252 plan 03: a constituent's OWN annualized figures are withheld through the figure-record
+// marker when its figures are measured on an options book's cash wallet. WHY: the composer's detail
+// row prints that strategy's stored CAGR and Sharpe; beside a withheld factsheet they would be the
+// very cash-wallet numbers the factsheet refuses. Blend-level figures are deliberately untouched.
+describe("252 figure_withheld_by on a constituent", () => {
+  const LONG = { figure_span_days: 800, figure_observations: 800, figure_crypto: true };
+
+  it("drawer path: the exact literal marks the record and the verdict is withheld despite a long span", () => {
+    const record = parseConstituentRecord({ ...LONG, figure_withheld_by: "options_cash_wallet" });
+    expect(record.withheldBy).toBe("options_cash_wallet");
+    expect(constituentFigure(undefined, { cagr: 0.5, sharpe: 2.1, record }).figureState).toBe("withheld");
+  });
+
+  it("drawer path: any other value, or the key absent, marks nothing and the record has no withheldBy key", () => {
+    for (const v of [null, undefined, "unsmoothed_options_book", "Options_Cash_Wallet", true, 1, ["options_cash_wallet"]]) {
+      const r = parseConstituentRecord({ ...LONG, figure_withheld_by: v });
+      expect(r, String(v)).toEqual({ spanDays: 800, observations: 800, crypto: true });
+    }
+    expect(parseConstituentRecord(LONG)).toEqual({ spanDays: 800, observations: 800, crypto: true });
+  });
+
+  it("book path: a book strategy carrying the marker is withheld and its record carries withheldBy", () => {
+    const f = constituentFigure({ ...LONG, figure_withheld_by: "options_cash_wallet" }, undefined);
+    expect(f.figureState).toBe("withheld");
+    expect(f.figureRecord.withheldBy).toBe("options_cash_wallet");
+  });
+
+  it("book path: a book strategy without it, or with null, is unchanged", () => {
+    for (const scalars of [LONG, { ...LONG, figure_withheld_by: null }]) {
+      const f = constituentFigure(scalars, undefined);
+      expect(f.figureState).toBe("full");
+      expect("withheldBy" in f.figureRecord).toBe(false);
+    }
+  });
+
+  it("the cell hands the raw value to no formatter once withheld", () => {
+    const fmt = vi.fn((v: number | null) => String(v));
+    const f = constituentFigure({ ...LONG, figure_withheld_by: "options_cash_wallet" }, undefined);
+    constituentCell(2.1, f, fmt);
+    expect(fmt).toHaveBeenCalledWith(null);
+    expect(fmt).not.toHaveBeenCalledWith(2.1);
+  });
+});

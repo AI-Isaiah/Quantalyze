@@ -360,7 +360,11 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
       .replace("data_quality_flags->last_success_snapshot->flags->>native_unit", "")
       // AMENDED 2026-11-07, Phase 194 plan 06 (D-15): ONE more flags scalar, the
       // date a chain-broken headline starts. A date string, never the blob.
-      .replace("data_quality_flags->>headline_since", "");
+      .replace("data_quality_flags->>headline_since", "")
+      // AMENDED 2026-11-25, Phase 252 (D-02): TWO more reason scalars, a closed-vocabulary string
+      // each, the live flags' and the snapshot's. Text scalars, never the blob or the snapshot object.
+      .replace("data_quality_flags->>mtm_gated_reason", "")
+      .replace("data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason", "");
     expect(withoutAllowed).not.toContain("data_quality_flags");
     // `metrics_json` may appear ONLY as the JSONB-key alias below — never as a
     // projected column (which would ship the entire blob to an anon reader).
@@ -432,6 +436,22 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
     }
   });
 
+  it("carries the options-book reason as TWO scalar aliases, each exactly once, never an object (phase 252 D-02, T-252-09)", async () => {
+    const { cols } = await captureSelect();
+    // WHY: the list judges the options-book withhold on the generation of the figures it shows, so
+    // it needs the live flags' reason and the snapshot's. Each is one `->>` text scalar of a closed
+    // vocabulary; the flags blob, the snapshot object and its `flags` object never cross to an
+    // anonymous reader (T-194-35).
+    for (const alias of [
+      "mtm_gated_reason:data_quality_flags->>mtm_gated_reason",
+      "last_success_mtm_gated_reason:data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason",
+    ]) {
+      expect(cols.split(alias).length - 1, alias).toBe(1);
+    }
+    // Both end in `->>`: a text scalar, so a nested object can never be the projected value.
+    expect(cols).not.toMatch(/mtm_gated_reason:data_quality_flags->(?!>mtm_gated_reason|last_success_snapshot->flags->>mtm_gated_reason)/);
+  });
+
   it("carries the D-15 record as exactly three scalar aliases, two dates and one count, never an array or a blob (phase 194 plan 06, T-194-10)", async () => {
     const { embed } = await captureSelect();
     // WHY: the list judges each row's TOTAL record (figure-gate.ts). That needs the
@@ -452,9 +472,11 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
       [
         "data_quality_flags->>cumulative_method",
         "data_quality_flags->>headline_since",
+        "data_quality_flags->>mtm_gated_reason",
         "data_quality_flags->>native_unit",
         "data_quality_flags->last_success_snapshot->>computed_at",
         "data_quality_flags->last_success_snapshot->flags->>cumulative_method",
+        "data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason",
         "data_quality_flags->last_success_snapshot->flags->>native_unit",
         "metrics_json->record_observations",
         "metrics_json->three_month",

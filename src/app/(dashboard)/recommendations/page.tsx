@@ -16,6 +16,7 @@ import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGat
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { drawdownTone } from "@/lib/factsheet/display-sign";
 import { analyticsHold } from "@/lib/analytics-hold";
+import { effectiveDataQualityFlags } from "@/lib/stored-analytics-result";
 import { ANALYTICS_UPDATING_LINE } from "@/lib/status-surface-copy";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { deriveMandateIsSet } from "@/lib/queries";
@@ -329,7 +330,15 @@ export default async function RecommendationsPage() {
       updatingById.set(r.strategy_id, hold.updating);
       seriesEndById.set(r.strategy_id, r.series_end ?? null);
       tradesFetchedAtById.set(r.strategy_id, r.trades_fetched_at ?? null);
-      scalarsById.set(r.strategy_id, r);
+      // Phase 252 plan 03 (W5): the options-book reason comes from the EFFECTIVE flags generation
+      // (live flags carrying the success marker, else the last-success snapshot bound to this
+      // row's computed_at), the same snapshot-aware rule as the list shaper and Compare, so a held
+      // re-run is judged on the flags of the numbers it shows. Only the reason string reaches the
+      // record; the blob stays server-side. It is not an alias on the select.
+      scalarsById.set(r.strategy_id, {
+        ...r,
+        mtm_gated_reason: effectiveDataQualityFlags(r).flags?.mtm_gated_reason,
+      });
     }
     if (classError) {
       assetClassReadOk = false;
@@ -404,10 +413,12 @@ export default async function RecommendationsPage() {
         // match SCORE is computed by the batch engine and is not a claim about
         // a current analytics run, so the recommendation itself stands.
         // CAGR and Sharpe also need a known asset class and a record that clears
-        // the minimum (B5 / D-15); Max DD is never gated by the record.
+        // the minimum (B5 / D-15); Max DD is never gated by the record's length (Phase 252: only by
+        // the options-book marker).
         cagr: computed && classKnown ? gatedValue(row.cagr, figureState) : null,
         sharpe: computed && classKnown ? gatedValue(row.sharpe, figureState) : null,
-        max_drawdown: computed ? row.max_drawdown : null,
+        // Phase 252: Max DD is a cash-wallet figure on an options book, withheld like CAGR and Sharpe.
+        max_drawdown: computed && !record.withheldBy ? row.max_drawdown : null,
         computed_at: computed ? (row.analytics_computed_at ?? null) : null,
         // Gated like the figures: an unverified run makes no age claim either.
         series_end: computed ? (seriesEndById.get(row.strategy_id) ?? null) : null,

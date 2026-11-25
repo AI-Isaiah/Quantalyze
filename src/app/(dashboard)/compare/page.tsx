@@ -7,7 +7,11 @@ import {
   EMPTY_ANALYTICS,
   extractAnalytics,
 } from "@/lib/queries";
-import { readHeadlineBasis } from "@/lib/factsheet/headline-basis";
+import {
+  isOptionsCashWalletReason,
+  OPTIONS_CASH_WALLET_CAUSE,
+  readHeadlineBasis,
+} from "@/lib/factsheet/headline-basis";
 import { usesLastSuccessSnapshot } from "@/lib/stored-analytics-result";
 import { annualizationPeriods } from "@/lib/closed-sets";
 import { figureRecord, type FigureRecord } from "@/lib/figure-gate";
@@ -34,6 +38,9 @@ export const metadata: Metadata = { title: "Compare strategies" };
  * `src/lib/types.ts` carries the two shared ones; the other two are compare-only.
  * `record_observations` (194 D-15) is the stored count of return observations, appended
  * at this page's own select call site; it too is consumed here and never placed on an item.
+ * Phase 252 appends the options-book reason the same way, as two scalar aliases: the live flags'
+ * `mtm_gated_reason` and the last success's. Both are alias inputs consumed here (the reason
+ * is picked from the row's one flags generation) and deleted before any item is built.
  */
 type CompareProjectedRow = Partial<StrategyAnalytics> & {
   record_observations?: number | null;
@@ -98,8 +105,11 @@ export default async function ComparePage({
             // 194 D-15: the stored observation count is appended HERE, not in
             // COMPARE_ANALYTICS_COLUMNS, so queries.ts and its exact-set pin stay as
             // they are. One scalar alias; `metrics_json` itself is never projected.
+            // Phase 252: the options-book reason, live and last-success, as two `->>` text
+            // aliases appended here for the same reason. The closed-vocabulary scalar is
+            // read, never the flags blob.
             .select(
-              `*, strategy_analytics (${COMPARE_ANALYTICS_COLUMNS}, record_observations:metrics_json->record_observations)`,
+              `*, strategy_analytics (${COMPARE_ANALYTICS_COLUMNS}, record_observations:metrics_json->record_observations, mtm_gated_reason:data_quality_flags->>mtm_gated_reason, last_success_mtm_gated_reason:data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason)`,
             )
             .in("id", strategyIds),
         )
@@ -154,6 +164,13 @@ export default async function ComparePage({
     // method, covered-from date) reads from the last success. Otherwise it reads
     // from the live aliases, as fetched. Never a mix of the two.
     const fromSnapshot = usesLastSuccessSnapshot(row);
+    // Phase 252 (CONTEXT: the reason is named on Compare): an options book's stored figures are
+    // measured on the cash wallet, so a column whose EFFECTIVE flags carry the reason shows no
+    // stored figure. The reason is picked from the same generation as the rest of the row, by the
+    // boolean above (no second `usesLastSuccessSnapshot` call), and only the predicate compares it.
+    const withheld = isOptionsCashWalletReason(
+      fromSnapshot ? row?.last_success_mtm_gated_reason : row?.mtm_gated_reason,
+    );
     effectiveHeadlineSince.set(
       strat.id,
       fromSnapshot ? row?.last_success_headline_since : row?.headline_since,
@@ -168,6 +185,7 @@ export default async function ComparePage({
         headlineSince: typeof headlineSince === "string" ? headlineSince : null,
         observations: row?.record_observations,
         periodsPerYear: annualizationPeriods(strat.asset_class),
+        ...(withheld ? { withheldBy: OPTIONS_CASH_WALLET_CAUSE } : {}),
       }),
     );
     const generation: Partial<StrategyAnalytics> = fromSnapshot
@@ -186,6 +204,8 @@ export default async function ComparePage({
     delete fetched.last_success_cumulative_method;
     delete fetched.last_success_twr_chain_broken;
     delete fetched.last_success_headline_since;
+    delete fetched.mtm_gated_reason;
+    delete fetched.last_success_mtm_gated_reason;
 
     return {
       kind: "strategy" as const,
@@ -199,12 +219,24 @@ export default async function ComparePage({
       // case. Fetched values always win — no fetched column is defaulted over.
       // The effective generation, when it is the snapshot's, wins over the
       // fetched live aliases for exactly the two fields it names.
-      analytics: {
-        ...EMPTY_ANALYTICS,
-        strategy_id: strat.id,
-        ...fetched,
-        ...generation,
-      } as StrategyAnalytics,
+      //
+      // Phase 252: a withheld column is composed from the defaults alone, plus its id, the
+      // fetched status and the named cause. The fetched figures and `returns_series` are not
+      // spread, so the cumulative return, the drawdown, the matrix and the overlay get nothing
+      // to print, and the overlay names the cause from `headline_withheld_cause`.
+      analytics: (withheld
+        ? {
+            ...EMPTY_ANALYTICS,
+            strategy_id: strat.id,
+            computation_status: fetched.computation_status ?? EMPTY_ANALYTICS.computation_status,
+            headline_withheld_cause: OPTIONS_CASH_WALLET_CAUSE,
+          }
+        : {
+            ...EMPTY_ANALYTICS,
+            strategy_id: strat.id,
+            ...fetched,
+            ...generation,
+          }) as StrategyAnalytics,
     };
   });
 

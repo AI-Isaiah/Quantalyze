@@ -166,6 +166,7 @@ function makeMarked(over: {
     figure_observations: null,
     figure_crypto: over.clearingRecord ? true : false,
     figure_unreadable: over.unreadable ?? false,
+    figure_withheld_by: null,
     strategy_analytics: over.analytics ?? null,
   };
 }

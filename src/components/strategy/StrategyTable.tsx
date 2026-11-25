@@ -58,7 +58,7 @@ import { isComputedAnalytics, deriveEmptySeriesState, isUntrustedKeySyncStatus }
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import { rowChipStatus } from "@/lib/strategy-health";
 import { listSeriesVerdict, type ListSeriesVerdictResult } from "@/lib/freshness";
-import { gateAnnualized, gatedValue, notShownLine, recordStartDay, trackMonths } from "@/lib/figure-gate";
+import { gateAnnualized, gatedValue, notShownLine, recordStartDay, trackMonths, withheldCellTitle } from "@/lib/figure-gate";
 import { compareWithMissingLast, isMissingFigure, rangeMatches } from "@/lib/list-figures";
 import {
   DEFAULTS,
@@ -318,8 +318,12 @@ function isDisplayedRow(s: StrategyWithAnalytics): boolean {
   return isComputedAnalytics(rowChipStatus(s)) || s.analytics.analytics_updating === true;
 }
 
+// Phase 252: a row `shapeRowAnalytics` blanked for the options-book withhold is DISPLAYED (it keeps
+// its sync line and owner actions) but takes no `#n` and sorts in the unranked partition: its
+// figures are measured on the cash wallet, and an ordinal would be a ranking claim sourced from
+// numbers the page refuses to print. Reads the shaper's marker and never re-derives the reason.
 function isRankedRow(s: StrategyWithAnalytics): boolean {
-  return isDisplayedRow(s);
+  return isDisplayedRow(s) && !s.analytics.headline_withheld_cause;
 }
 
 // Every column is always rendered, at every container width (2026-10-13 Phase
@@ -771,7 +775,10 @@ export function StrategyTable({
       // Displayed rows only: an undisplayed row has no figures, no series to date and no `#n`, and
       // the grid reads this map as "which cards carry a chip", so it must not hold a verdict for a
       // row that shows nothing. The comparator only asks about rows that are BOTH ranked.
-      if (isDisplayedRow(s)) {
+      // Phase 252: nor does a row blanked for the options-book withhold. Its `series_end` is blank
+      // BECAUSE of the withhold, so a verdict over it would read "the data date could not be read"
+      // and put a stale chip on a row whose real reason is named in its rank cell.
+      if (isDisplayedRow(s) && !s.analytics.headline_withheld_cause) {
         verdicts.set(s.id, listSeriesVerdict(s.analytics.series_end, s.asset_class, mountedAtMs));
       }
     }
@@ -1685,10 +1692,16 @@ export function StrategyTable({
                     const hasComputedAnalytics = isDisplayedRow(s);
                     // Phase 197 / CLAR-02: this row's data-age verdict (null on the owner mounts).
                     const seriesVerdict = seriesVerdicts?.get(s.id) ?? null;
+                    // Phase 252: a displayed row blanked for the options-book withhold names that reason
+                    // here (the sentence is figure-gate's, never retyped), unless a stale-series reason
+                    // applies. The shaped marker rows carry no verdict, so the sentence is what shows.
                     const notRankedText =
-                      hasComputedAnalytics && seriesVerdict
+                      (hasComputedAnalytics && seriesVerdict
                         ? notRankedReason(seriesVerdict.verdict, seriesVerdict.thresholdDays)
-                        : null;
+                        : null) ??
+                      (hasComputedAnalytics && s.analytics.headline_withheld_cause
+                        ? withheldCellTitle(record)
+                        : null);
                     // Phase 162 / HONEST-03, UI-SPEC C-6 — an `is_example` row
                     // NEVER claims a sync recency, whatever its status. The
                     // "Example" chip already carries the row's identity, and a

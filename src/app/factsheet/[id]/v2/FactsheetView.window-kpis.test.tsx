@@ -17,7 +17,7 @@ import type { DailyPrice, DailyReturn, FactsheetPayload } from "@/lib/factsheet/
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider, useXRange } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
-import { headlineCoverageNote, isoToMonthDay } from "./MetricsColumn";
+import { headlineCoverageNote, isoToMonthDay, windowCoverageNote } from "./MetricsColumn";
 import { useWindowedView, type WindowedView } from "./basis-context";
 import { pct, pctSigned, ratio as num } from "./format";
 
@@ -697,5 +697,87 @@ describe("RangeEyebrow reset to full history (D-03)", () => {
     await click("zoom");
     expect(screen.getByTestId("range-eyebrow-strip").textContent).toMatch(/^Full history/);
     expect(screen.queryByTestId("range-reset-strip")).toBeNull();
+  });
+});
+
+/**
+ * Phase 252 plan 02 (W3, orchestrator decision 2026-11-25, revision round 1): inside a selected
+ * range an options book's figures are withheld too, with the cash-wallet sentence in muted text;
+ * the charts still draw. A chain-broken Withheld row of another cause keeps its slice figures.
+ */
+describe("252: a selected range on an options book withholds its figures with the named reason", () => {
+  const NULL_SEVEN = { cumulative_return: null, volatility: null, max_drawdown: null, cagr: null, sharpe: null, sortino: null, calmar: null };
+  const OPTIONS_DQ = { composite: true, headlineWithheld: true, headlineWithheldCause: "options_cash_wallet" } as const;
+  /** HAND-TYPED: the range sentence (muted, no glyph). */
+  const RANGE_SENTENCE =
+    "Figures for this range are withheld: the record is measured on the cash wallet, which leaves out the market value of open option positions.";
+  const optionsRow = () => build400(400, 399, { dataQuality: OPTIONS_DQ, metricsByBasis: { cash_settlement: NULL_SEVEN } });
+  const paragraphsWith = (container: HTMLElement, text: string) =>
+    [...container.querySelectorAll<HTMLElement>("p")].filter((p) => (p.textContent ?? "").trim() === text);
+
+  it("windowCoverageNote: the structural range sentence for any range start on the cash basis, none off it", () => {
+    for (const start of ["2024-01-01", "2024-06-01", "2025-01-01"]) {
+      expect(windowCoverageNote(OPTIONS_DQ, "cash_settlement", start), start).toEqual({ variant: "structural", text: RANGE_SENTENCE });
+    }
+    expect(windowCoverageNote({ ...OPTIONS_DQ, twrChainBroken: true }, "cash_settlement", "2024-06-01")?.text).toBe(RANGE_SENTENCE);
+    expect(windowCoverageNote(OPTIONS_DQ, "smoothed_mtm", "2024-06-01")).toBeNull();
+    expect(windowCoverageNote(OPTIONS_DQ, "mark_to_market", "2024-06-01")).toBeNull();
+  });
+
+  it("windowCoverageNote: a chain-broken Withheld row of another cause and a Dated row keep today's sentences", () => {
+    const recomputing = { composite: false, twrChainBroken: true, headlineWithheld: true, headlineWithheldCause: "recomputing" } as const;
+    expect(windowCoverageNote(recomputing, "cash_settlement", "2024-06-01")).toEqual({
+      variant: "withheld",
+      text: "The record has a break in the return chain at a date this view cannot name, so this range may span it. Its figures compound across any break inside it.",
+    });
+    expect(windowCoverageNote({ composite: false, twrChainBroken: true, headlineCoversFrom: "2024-06-01" }, "cash_settlement", "2024-06-01")).toBeNull();
+    expect(windowCoverageNote({ composite: false }, "cash_settlement", "2024-06-01")).toBeNull();
+  });
+
+  it("the strip: the seven cells and alpha and IR read the dash, and one muted range note names the reason", async () => {
+    const payload = optionsRow();
+    expect(payload.dataQuality?.twrChainBroken).toBeUndefined();
+    const { container } = mount(payload, [100, 299]);
+    await click("zoom");
+    const cells = stripCells();
+    expect(Object.keys(cells), "premise: seven cells plus alpha and IR").toHaveLength(9);
+    for (const [label, value] of Object.entries(cells)) expect(value, label).toBe("—");
+    const found = paragraphsWith(container, RANGE_SENTENCE);
+    expect(found, "one on the KPI strip, one in the rail's Main Metrics").toHaveLength(2);
+    for (const p of found) {
+      expect(p.getAttribute("style")).toContain("var(--color-text-muted, #64748B)");
+      expect(p.textContent).not.toContain("⚠");
+    }
+  });
+
+  it("the strip: no cell carries a tone inside the range", async () => {
+    mount(optionsRow(), [100, 299]);
+    await click("zoom");
+    for (const v of screen.getAllByTestId("factsheet-kpi-value")) {
+      expect(v.getAttribute("style") ?? "", "a dash conveys no signal").not.toMatch(/--color-(positive|negative)/);
+    }
+  });
+
+  it("the equity chart still draws its series inside the range (only the figures are withheld)", async () => {
+    const { container } = mount(optionsRow(), [100, 299]);
+    await click("zoom");
+    expect(container.querySelectorAll("svg").length, "charts keep drawing").toBeGreaterThan(0);
+    expect(container.querySelector('svg[aria-label*="quity" i], svg[role="img"]'), "an svg chart is mounted").not.toBeNull();
+  });
+
+  it("controls: a chain-broken Withheld row of another cause keeps its slice figures; a clean row is unchanged", async () => {
+    const recomputing = build400(400, 399, {
+      dataQuality: { composite: false, twrChainBroken: true, headlineWithheld: true, headlineWithheldCause: "recomputing", headlineGuardReasons: ["negative_nav"] },
+      metricsByBasis: { cash_settlement: NULL_SEVEN },
+    });
+    const a = mount(recomputing, [100, 299]);
+    await click("zoom");
+    expect(stripCells().Sharpe, "chain-broken Withheld keeps its slice").not.toBe("—");
+    a.unmount();
+    const b = mount(build400(), [100, 299]);
+    await click("zoom");
+    expect(stripCells().Sharpe).not.toBe("—");
+    expect(paragraphsWith(b.container, RANGE_SENTENCE)).toHaveLength(0);
+    b.unmount();
   });
 });

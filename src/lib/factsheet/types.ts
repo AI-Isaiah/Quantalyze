@@ -932,8 +932,13 @@ export type FactsheetCommon = {
      * "Headline figures are being recomputed." for the first and says nothing for
      * the second, because the page already states the failed status once. A
      * payload cached before this field reads as absent, i.e. the original note.
+     *
+     * Phase 252 DERIBITOPTIONS: `options_cash_wallet` is the third cause. The row's
+     * `mtm_gated_reason` names an options book measured on the cash wallet, so the
+     * note says that and nothing about a chain break; the row need not be chain-broken
+     * (then {@link twrChainBroken} is absent). Absent still means the original cause.
      */
-    headlineWithheldCause?: "recomputing" | "failed";
+    headlineWithheldCause?: "recomputing" | "failed" | "options_cash_wallet";
     /**
      * Phase 164.6.6.3.3 (D-01) — present only on a chain-broken row whose stored
      * cash headline is overlaid and that has at least one guard reason (Dated and

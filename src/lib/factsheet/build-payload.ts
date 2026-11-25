@@ -799,6 +799,10 @@ type WindowFields = Pick<ComputeResult, "mtd" | "ytd" | "p3m" | "p6m" | "p1y" | 
  * beside them already read "—" (`headlineBenchSource`), so the strategy and the
  * benchmark columns follow one rule: the seven stored headline scalars and the
  * seven trailing windows are withheld together.
+ *
+ * Phase 252: the options-book cause (`options_cash_wallet`) withholds the windows for the same
+ * reason, since they compound the same cash-wallet series. It needs no chain break, so the gate
+ * reads `headlineWithheld` alone (only `applyHeadlineBasis` sets it).
  */
 function withSuffixWindows<T extends WindowFields>(
   metrics: T,
@@ -902,7 +906,7 @@ function buildFromBuildableSeries(
     dayBasis,
     calendarDense,
     headlineCoversFrom: suffixStart,
-    headlineWithheld: opts?.dataQuality?.twrChainBroken === true && opts.dataQuality.headlineWithheld === true,
+    headlineWithheld: opts?.dataQuality?.headlineWithheld === true,
   });
 
   // Phase 169.5 (SC3, D-09, D-21): the ONE BTC input of this build. The route's

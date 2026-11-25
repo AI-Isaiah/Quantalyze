@@ -492,7 +492,7 @@ describe("ComparePage — a holding whose recorded price is a fixed value (CR-01
   });
 });
 
-// Phase 190 plan 07 (T-190-22): the seven scalar expressions over
+// Phase 190 plan 07 (T-190-22), widened by Phase 252 to nine: the scalar expressions over
 // `data_quality_flags` the compare projection may carry. Never the blob, the
 // `last_success_snapshot` object or its `flags` object.
 const ALLOWED_FLAG_ALIAS_EXPRESSIONS = [
@@ -503,6 +503,9 @@ const ALLOWED_FLAG_ALIAS_EXPRESSIONS = [
   "data_quality_flags->last_success_snapshot->flags->>cumulative_method",
   "data_quality_flags->last_success_snapshot->flags->>twr_chain_broken",
   "data_quality_flags->last_success_snapshot->flags->>headline_since",
+  // Phase 252: the options-book reason, live and last-success.
+  "data_quality_flags->>mtm_gated_reason",
+  "data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason",
 ];
 const ALLOWED_FLAG_ALIASES_RE = new RegExp(
   ALLOWED_FLAG_ALIAS_EXPRESSIONS.map((e) => e.replace(/[>-]/g, (c) => `\\${c}`)).join("|"),
@@ -656,6 +659,9 @@ describe("ComparePage — one flags generation per row (phase 190 plan 07)", () 
     "last_success_cumulative_method",
     "last_success_twr_chain_broken",
     "last_success_headline_since",
+    // Phase 252: the options-book reason, live and last-success.
+    "mtm_gated_reason",
+    "last_success_mtm_gated_reason",
   ];
 
   const compareRow = (id: string, aliases: Record<string, unknown>) => {
@@ -684,7 +690,7 @@ describe("ComparePage — one flags generation per row (phase 190 plan 07)", () 
   });
 
   // ---- the projection ---------------------------------------------------
-  it("the compare projection carries computed_at and the five generation aliases, each exactly once, and no object", async () => {
+  it("the compare projection carries computed_at and the seven generation aliases, each exactly once, and no object", async () => {
     strategySelectCalls.length = 0;
     mockStrategyData = [compareRow(ID, {})];
     await render2(ID);
@@ -698,9 +704,14 @@ describe("ComparePage — one flags generation per row (phase 190 plan 07)", () 
       "last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method",
       "last_success_twr_chain_broken:data_quality_flags->last_success_snapshot->flags->>twr_chain_broken",
       "last_success_headline_since:data_quality_flags->last_success_snapshot->flags->>headline_since",
+      // Phase 252: the options-book reason, appended at this page's own select call site.
+      "mtm_gated_reason:data_quality_flags->>mtm_gated_reason",
+      "last_success_mtm_gated_reason:data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason",
     ]) {
       expect(parts.filter((p) => p === part), part).toHaveLength(1);
     }
+    // The shared projection constant (and its exact-set pin in queries.test.ts) is untouched.
+    expect(COMPARE_ANALYTICS_COLUMNS).not.toContain("mtm_gated_reason");
   });
 
   // ---- the live generation ----------------------------------------------
@@ -1195,5 +1206,150 @@ describe("ComparePage — the total record behind CompareTable (194 plan 10)", (
       expect(it.analytics).not.toHaveProperty("headline_since");
       expect(it).not.toHaveProperty("figureRecord");
     }
+  });
+});
+
+/**
+ * Phase 252 (CONTEXT: the reason is named on Compare). A column whose EFFECTIVE flags carry the
+ * options-book reason shows no stored figure: its annualized cells carry the withheld sentence, its
+ * cumulative return and drawdown cells show the em dash, the overlay gets no series and a marker,
+ * and the matrix gets no series. The sentences are typed by hand. Every other column renders as
+ * before.
+ */
+describe("ComparePage — an options book's column shows no figure and says why (252 plan 05)", () => {
+  const ID = "11111111-2222-4333-8444-555555555555";
+  const COMPUTED_AT = "2026-10-30T10:00:00.123456+00:00";
+  const SAME_INSTANT = "2026-10-30T10:00:00.123Z";
+  const ONE_SECOND_OFF = "2026-10-30T10:00:01.123Z";
+  const SENTENCE = "Withheld: measured on the cash wallet, which leaves out open option positions.";
+  const NAME = "Strategy Options";
+
+  const series = Array.from({ length: 400 }, (_, i) => ({
+    date: new Date(Date.parse("2025-01-01T00:00:00Z") + i * 86_400_000).toISOString().slice(0, 10),
+    value: 1 + i * 0.0005,
+  }));
+
+  const optionsRow = (aliases: Record<string, unknown>) => {
+    const base = makeSampleStrategy(ID, NAME);
+    return {
+      ...base,
+      asset_class: "crypto",
+      strategy_analytics: {
+        ...base.strategy_analytics,
+        computed_at: COMPUTED_AT,
+        cagr: 0.25,
+        returns_series: series,
+        ...aliases,
+      },
+    };
+  };
+
+  const cell = async (label: string): Promise<HTMLElement> => {
+    const tr = Array.from(document.querySelectorAll("tbody tr")).find(
+      (r) => r.querySelector("td")?.textContent === label,
+    );
+    return tr!.querySelectorAll("td")[1] as HTMLElement;
+  };
+
+  const renderPage = async () => {
+    const ComparePage = await getComparePage();
+    const Page = await ComparePage({ searchParams: Promise.resolve({ ids: ID }) });
+    render(Page as React.ReactElement);
+  };
+
+  beforeEach(() => {
+    adminAnswer = { kind: "none" };
+    overlayItems = [];
+    matrixItems = [];
+    mockHoldingData = [];
+    mockStrategyError = null;
+    strategySelectCalls.length = 0;
+  });
+
+  const expectWithheld = async () => {
+    await renderPage();
+    for (const label of ["CAGR", "Sharpe", "Volatility"]) {
+      const c = await cell(label);
+      expect(c.textContent, label).toBe(`—${SENTENCE}`);
+      expect(c.querySelector("span.font-metric")?.getAttribute("title"), label).toBe(SENTENCE);
+    }
+    for (const label of ["Cumulative Return", "Max Drawdown"]) {
+      expect((await cell(label)).textContent, label).toBe("—");
+    }
+    const o = overlayItems[0];
+    expect(o.analytics.headline_withheld_cause).toBe("options_cash_wallet");
+    expect(o.analytics.returns_series).toBeNull();
+    expect(matrixItems[0].analytics.returns_series).toBeNull();
+    for (const it of [...overlayItems, ...matrixItems]) {
+      expect(it.analytics).not.toHaveProperty("mtm_gated_reason");
+      expect(it.analytics).not.toHaveProperty("last_success_mtm_gated_reason");
+    }
+  };
+
+  it("a LIVE flagged row: dashes, the sentence on the annualized cells, no series for the overlay or the matrix", async () => {
+    mockStrategyData = [optionsRow({ mtm_gated_reason: "unsmoothed_options_book" })];
+    await expectWithheld();
+  });
+
+  it("a HELD flagged row (live reason gone, last-success reason bound to computed_at) is withheld the same way", async () => {
+    mockStrategyData = [
+      optionsRow({
+        mtm_gated_reason: null,
+        cumulative_method: null,
+        last_success_computed_at: SAME_INSTANT,
+        last_success_cumulative_method: "geometric",
+        last_success_mtm_gated_reason: "unsmoothed_options_book",
+      }),
+    ];
+    await expectWithheld();
+  });
+
+  it("a snapshot bound to ANOTHER success with the live reason absent: the live generation stands, figures shown", async () => {
+    mockStrategyData = [
+      optionsRow({
+        mtm_gated_reason: null,
+        cumulative_method: null,
+        last_success_computed_at: ONE_SECOND_OFF,
+        last_success_cumulative_method: "geometric",
+        last_success_mtm_gated_reason: "unsmoothed_options_book",
+      }),
+    ];
+    await renderPage();
+    expect((await cell("Sharpe")).textContent).toContain("1.50");
+    expect((await cell("Cumulative Return")).textContent).not.toBe("—");
+    expect(overlayItems[0].analytics).not.toHaveProperty("headline_withheld_cause");
+  });
+
+  it("a bound snapshot IS the row's generation: its other reason wins over a live options reason, so figures are shown", async () => {
+    // One generation per row, never a mix: the prestamp wrote the live reason, the bound snapshot is
+    // the success that wrote the stored figures, and its reason is not the options reason.
+    mockStrategyData = [
+      optionsRow({
+        mtm_gated_reason: "unsmoothed_options_book",
+        cumulative_method: null,
+        last_success_computed_at: SAME_INSTANT,
+        last_success_cumulative_method: "geometric",
+        last_success_mtm_gated_reason: "mtm_basis_unavailable_for_venue",
+      }),
+    ];
+    await renderPage();
+    expect((await cell("Sharpe")).textContent).toContain("1.50");
+    expect(overlayItems[0].analytics).not.toHaveProperty("headline_withheld_cause");
+  });
+
+  it.each([
+    ["another mtm_gated_reason value", "mtm_basis_unavailable_for_venue"],
+    ["a case variant", "Unsmoothed_Options_Book"],
+    ["a padded string", " unsmoothed_options_book"],
+    ["absent", undefined],
+    ["null", null],
+  ])("NOT a trigger (%s): today's rendering, figures shown and the full series on the overlay", async (_l, reason) => {
+    mockStrategyData = [optionsRow({ mtm_gated_reason: reason })];
+    await renderPage();
+    expect((await cell("Sharpe")).textContent).toContain("1.50");
+    expect((await cell("Cumulative Return")).textContent).toBe("+35.00%");
+    expect(overlayItems[0].analytics).not.toHaveProperty("headline_withheld_cause");
+    expect(Array.isArray(overlayItems[0].analytics.returns_series)).toBe(true);
+    expect(matrixItems[0].analytics.returns_series).toHaveLength(400);
   });
 });

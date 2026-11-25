@@ -24,7 +24,7 @@ import type { DailyPrice, DailyReturn, FactsheetPayload } from "@/lib/factsheet/
 
 import { FactsheetProvider, useXRange } from "./factsheet-context";
 import { windowView } from "./basis-context";
-import { MetricsColumn } from "./MetricsColumn";
+import { MetricsColumn, headlineBenchSource, isRangeWithheld } from "./MetricsColumn";
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
@@ -442,5 +442,90 @@ describe("a clean row and a selected range read what they read before this plan 
     const w = windowView(built, 100, 299);
     expect("summarySince" in w.comparators.btc).toBe(false);
     expect("summarySince" in w.comparators.spx).toBe(false);
+  });
+});
+
+/**
+ * Phase 252 plan 02 (DERIBITOPTIONS): the options-book cause withholds on an INTACT chain, so the
+ * benchmark cells follow the strategy columns with no `twrChainBroken` on the payload, and (W3,
+ * orchestrator decision 2026-11-25) inside a selected range as well.
+ */
+describe("252: the options-cash-wallet cause withholds the headline benchmark cells", () => {
+  const OPTIONS: DQ = { composite: true, headlineWithheld: true, headlineWithheldCause: "options_cash_wallet" };
+  const OPTIONS_BROKEN: DQ = { ...OPTIONS, twrChainBroken: true, headlineGuardReasons: ["negative_nav"] };
+  const RECOMPUTING: DQ = { ...WITHHELD, headlineWithheldCause: "recomputing" };
+
+  it("headlineBenchSource: null for the cause on the cash basis at full history, with or without a chain break", () => {
+    const block = build().comparators.btc;
+    expect(block.summary, "premise: the whole-record summary exists").not.toBeNull();
+    expect(OPTIONS.twrChainBroken).toBeUndefined();
+    expect(headlineBenchSource(OPTIONS, "cash_settlement", false, block)).toBeNull();
+    expect(headlineBenchSource(OPTIONS_BROKEN, "cash_settlement", false, block)).toBeNull();
+  });
+
+  it("headlineBenchSource: null for the cause inside a selected range too (W3)", () => {
+    const block = build().comparators.btc;
+    expect(headlineBenchSource(OPTIONS, "cash_settlement", true, block)).toBeNull();
+    expect(headlineBenchSource(OPTIONS_BROKEN, "cash_settlement", true, block)).toBeNull();
+  });
+
+  it("headlineBenchSource: the smoothed and mark-to-market bases keep the summary (the basis carve-out)", () => {
+    const block = build().comparators.btc;
+    for (const basis of ["smoothed_mtm", "mark_to_market"] as const) {
+      expect(headlineBenchSource(OPTIONS, basis, false, block), basis).toBe(block.summary);
+      expect(headlineBenchSource(OPTIONS, basis, true, block), basis).toBe(block.summary);
+    }
+  });
+
+  it("headlineBenchSource: a chain-broken Withheld row of another cause keeps its range behaviour (summary in a range)", () => {
+    const block = build().comparators.btc;
+    expect(headlineBenchSource(RECOMPUTING, "cash_settlement", true, block)).toBe(block.summary);
+    expect(headlineBenchSource(RECOMPUTING, "cash_settlement", false, block)).toBeNull();
+    expect(headlineBenchSource(WITHHELD, "cash_settlement", true, block)).toBe(block.summary);
+  });
+
+  it("isRangeWithheld: true only for the options cause on the cash basis", () => {
+    expect(isRangeWithheld(OPTIONS, "cash_settlement")).toBe(true);
+    expect(isRangeWithheld(OPTIONS_BROKEN, "cash_settlement")).toBe(true);
+    expect(isRangeWithheld(OPTIONS, "smoothed_mtm")).toBe(false);
+    expect(isRangeWithheld(OPTIONS, "mark_to_market")).toBe(false);
+    expect(isRangeWithheld(RECOMPUTING, "cash_settlement")).toBe(false);
+    expect(isRangeWithheld({ ...WITHHELD, headlineWithheldCause: "failed" }, "cash_settlement")).toBe(false);
+    expect(isRangeWithheld(WITHHELD, "cash_settlement")).toBe(false);
+    expect(isRangeWithheld(DATED, "cash_settlement")).toBe(false);
+    expect(isRangeWithheld({ composite: false }, "cash_settlement")).toBe(false);
+    expect(isRangeWithheld(undefined, "cash_settlement")).toBe(false);
+  });
+
+  it("the rendered rail: every headline benchmark cell reads the em-dash on an intact chain", () => {
+    const { container } = mount(build(OPTIONS));
+    for (const [k, v] of Object.entries(headlineBenchCells(container))) expect(v, k).toBe(dash);
+  });
+
+  it("the rendered rail: the strategy's trailing windows read the em-dash beside them", () => {
+    const { container } = mount(build(OPTIONS));
+    expect(firstStrat(container, RETURNS)).toBe(dash);
+    for (const label of ["Year-to-date", "3 Month", "6 Month", "1 Year"]) {
+      expect(strat(container, RETURNS, label), label).toBe(dash);
+    }
+  });
+
+  it("the rendered rail inside a selected range: the benchmark cells read the em-dash too", async () => {
+    const { container } = mount(build(OPTIONS), [100, 299]);
+    await selectRange();
+    expect(container.textContent, "premise: a range is selected").toContain("hidden while a range is selected");
+    for (const [label, title] of [
+      ["Cumulative Return", MAIN],
+      ["CAGR", MAIN],
+      ["Sharpe", MAIN],
+      ["Max Drawdown", MAXDD],
+    ] as const) {
+      expect(bench(container, title, label), label).toBe(dash);
+    }
+  });
+
+  it("control: the same series on a clean row prints figures, so the dashes above are a decision and not an absence", () => {
+    const { container } = mount(build());
+    expect(bench(container, MAIN, "Cumulative Return")).not.toBe(dash);
   });
 });

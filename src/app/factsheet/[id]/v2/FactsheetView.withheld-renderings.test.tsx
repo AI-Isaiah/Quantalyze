@@ -57,6 +57,9 @@ const ALL_THREE = ["negative_nav", "dust_nav", "pnl_dominated"] as const;
 const PANEL_WITHHELD = `⚠ Withheld: this panel covers earlier history, which is unreliable (it includes ${R3}), and the span after it has not been measured yet.`;
 /** UI-SPEC FH237-PANEL-RECOMPUTING. HAND-TYPED. */
 const PANEL_RECOMPUTING = "⚠ Withheld while the headline figures are recomputed.";
+/** Phase 252 DERIBITOPTIONS: the options panel sentence, muted and with NO glyph. HAND-TYPED. */
+const PANEL_OPTIONS =
+  "Withheld: this panel is measured on the cash wallet, which leaves out the market value of open option positions.";
 
 const DAY = 86_400_000;
 const START = Date.UTC(2024, 0, 1);
@@ -92,6 +95,8 @@ const WITHHELD_DQ: DQ = {
 const RECOMPUTING_DQ: DQ = { ...WITHHELD_DQ, headlineWithheldCause: "recomputing" };
 const FAILED_DQ: DQ = { ...WITHHELD_DQ, headlineWithheldCause: "failed" };
 const CLEAN: DQ = { composite: false, insufficientWindow: false };
+/** Phase 252: the options-book cause on an INTACT chain (no `twrChainBroken`, no guard reasons). */
+const OPTIONS_DQ: DQ = { composite: true, headlineWithheld: true, headlineWithheldCause: "options_cash_wallet" };
 
 /** A comparator selected (the fixture BTC leg), so the EOY chart draws its benchmark bars too. */
 function payloadWithComparator(dataQuality: FactsheetPayload["dataQuality"]): FactsheetPayload {
@@ -545,5 +550,102 @@ describe("the rolling charts' hover note at the last point on a Withheld full-hi
         w.unmount();
       }
     });
+  }, SNAPSHOT_TIMEOUT_MS);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 252. The options-cash-wallet cause on an intact chain                       */
+/* -------------------------------------------------------------------------- */
+
+describe("252: an options book on an INTACT chain withholds every secondary rendering, with the muted options sentence", () => {
+  const NULL_SEVEN = { cumulative_return: null, volatility: null, max_drawdown: null, cagr: null, sharpe: null, sortino: null, calmar: null };
+  /** The payload as the read path builds it: the REAL builder, so the seven windows are nulled by it. */
+  function optionsPayload(dq: DQ = OPTIONS_DQ): FactsheetPayload {
+    const built = buildFactsheetPayload(META, dense(400), { dataQuality: dq, metricsByBasis: { cash_settlement: NULL_SEVEN } });
+    if (!built) throw new Error("buildFactsheetPayload returned null in test");
+    return { ...built, periodsPerYear: 365, activeComparator: "btc" } as FactsheetPayload;
+  }
+  const noteTextOf = (n: HTMLElement) => (n.textContent ?? "").trim();
+
+  it("premise: the payload carries no chain break, and its trailing windows are nulled by the builder", () => {
+    const p = optionsPayload();
+    expect(p.dataQuality?.twrChainBroken).toBeUndefined();
+    for (const k of ["mtd", "ytd", "p3m", "p6m", "p1y", "p3y", "p5y"] as const) expect(p.strategyMetrics[k], k).toBeNull();
+  });
+
+  it("End-of-Year Returns: one muted note with the options sentence, no glyph, no svg, no percent figure", async () => {
+    const w = await mountBody(optionsPayload());
+    const fig = mustFigure(w.container, "End-of-Year Returns");
+    const notes = [...fig.querySelectorAll<HTMLElement>('[data-testid="chart-withheld-note"]')];
+    expect(notes).toHaveLength(1);
+    expect(noteTextOf(notes[0])).toBe(PANEL_OPTIONS);
+    expect(notes[0].getAttribute("style") ?? "", "muted, not the warning colour").toContain("--color-text-muted");
+    expect(fig.querySelector("svg")).toBeNull();
+    expect(fig.textContent).not.toMatch(/\d%/);
+    w.unmount();
+  }, SNAPSHOT_TIMEOUT_MS);
+
+  it("Monthly Returns: every row's YTD cell reads the dash", async () => {
+    const w = await mountBody(optionsPayload());
+    const cells = w.container.querySelectorAll('[data-testid="heatmap-ytd-withheld"]');
+    expect(cells.length, "premise: more than one year row").toBeGreaterThan(1);
+    for (const c of cells) expect((c.textContent ?? "").trim()).toBe("—");
+    w.unmount();
+  }, SNAPSHOT_TIMEOUT_MS);
+
+  it("Worst 10 Drawdown Periods: the title and one muted options note, no frame, band or percent", async () => {
+    const w = await mountBody(optionsPayload());
+    const fig = mustFigure(w.container, "Worst 10 Drawdown Periods");
+    const notes = fig.querySelectorAll<HTMLElement>('[data-testid="chart-withheld-note"]');
+    expect(notes).toHaveLength(1);
+    expect(noteTextOf(notes[0])).toBe(PANEL_OPTIONS);
+    expect(fig.querySelector("svg")).toBeNull();
+    expect(fig.textContent).not.toMatch(/\d%/);
+    w.unmount();
+  }, SNAPSHOT_TIMEOUT_MS);
+
+  it("the whole body names the options reason and never the chain-break wording or the recomputing sentence", async () => {
+    const w = await mountBody(optionsPayload());
+    const text = w.container.textContent ?? "";
+    expect(text).toContain(PANEL_OPTIONS);
+    expect(text).not.toContain("break in the return chain");
+    expect(text).not.toContain("recomputed");
+    expect(w.container.textContent).not.toContain("⚠ Withheld");
+    w.unmount();
+  }, SNAPSHOT_TIMEOUT_MS);
+
+  it("the strip's seven cells and the rail's trailing windows read the dash", async () => {
+    const w = await mountBody(optionsPayload());
+    const values = [...w.container.querySelectorAll<HTMLElement>('[data-testid="factsheet-kpi-value"]')];
+    expect(values.length, "the strip is mounted").toBeGreaterThanOrEqual(7);
+    for (const v of values) expect((v.textContent ?? "").trim(), "every strip cell reads the dash").toBe("—");
+    const returns = [...w.container.querySelectorAll("section")].find((s) => s.querySelector("h3")?.textContent === "Returns");
+    expect(returns, "the Returns panel is mounted").toBeDefined();
+    for (const label of ["Year-to-date", "3 Month", "6 Month", "1 Year"]) {
+      const tr = [...returns!.querySelectorAll("tr")].find((r) => r.querySelector("td")?.textContent === label);
+      expect(tr?.querySelectorAll("td")[1]?.textContent, label).toBe("—");
+    }
+    w.unmount();
+  }, SNAPSHOT_TIMEOUT_MS);
+
+  it("WR-02: inside a zoom the rolling charts print no avg label (the rail dashes the same figure); a chain-broken Withheld row keeps it (D-78)", async () => {
+    const avgLabels = (container: HTMLElement) =>
+      [...mustFigure(container, "Rolling Volatility").querySelectorAll("svg text")].filter((t) =>
+        /^avg /.test((t.textContent ?? "").trim()),
+      );
+    const zoom: [number, number] = [10, 300];
+    const options = await mountBody(optionsPayload(), zoom);
+    expect(avgLabels(options.container), "options cause: no printed cash-wallet average in a range").toHaveLength(0);
+    options.unmount();
+    const chainBroken = await mountBody(asBuilt(WITHHELD_DQ), zoom);
+    expect(avgLabels(chainBroken.container), "premise and D-78: a chain-break slice keeps its average").toHaveLength(1);
+    chainBroken.unmount();
+  }, SNAPSHOT_TIMEOUT_MS);
+
+  it("control: a clean row of the same series draws the End-of-Year chart, so the notes above are decisions", async () => {
+    const clean = payloadWithComparator(CLEAN);
+    const w = await mountBody(clean);
+    expect(mustFigure(w.container, "End-of-Year Returns").querySelector("svg")).not.toBeNull();
+    w.unmount();
   }, SNAPSHOT_TIMEOUT_MS);
 });

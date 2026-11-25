@@ -785,12 +785,16 @@ export function useAppliedLeverage(): AppliedLeverage {
  *   - `dataQuality.returnsConventionOverride` (SFH H-2): the stored figure was
  *     computed under a `simple` or active-day convention the re-derive cannot
  *     reproduce.
+ *   - `dataQuality.headlineWithheld` (Phase 252, any cause): a withheld headline has no
+ *     stored figure for the re-derive to agree with, so the what-if is withheld as for a
+ *     chain-broken row. Composites are already ineligible; this closes the single-key case.
  * The view then returns `base` by reference at every L, as for a composite.
  */
 export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): boolean {
   return (
     payload.dataQuality?.composite !== true &&
     payload.dataQuality?.twrChainBroken !== true &&
+    payload.dataQuality?.headlineWithheld !== true &&
     payload.dataQuality?.returnsConventionOverride !== true &&
     payload.periodsPerYear != null &&
     !(
@@ -904,7 +908,11 @@ export function mtmDisabledReasonCopy(reason?: string): string {
       // the range pointed past EOF — every past-EOF citation into that file is
       // that ONE event, not one independent rot per citer. Anchored on the symbol
       // instead: a name survives the next shrink, a coordinate does not.
-      return "Mark-to-market unavailable: composites that include options positions report cash settlement only.";
+      //
+      // Phase 252 (DERIBITOPTIONS): this reason also withholds the cash-wallet headline, so the
+      // earlier wording (that such composites report their cash basis) was false beside it. The sentence now says
+      // so. Steady tone (`mtmReasonTone`), and no flag name.
+      return "Mark-to-market unavailable: this strategy's open option positions are not valued at market prices, so its headline figures measured on the cash wallet are withheld.";
     case "mtm_basis_unavailable_for_venue":
       return "Mark-to-market unavailable for this venue.";
     case "mtm_summary_coverage_incomplete":

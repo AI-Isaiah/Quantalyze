@@ -463,3 +463,73 @@ describe("applyHeadlineBasis — the one implementation both arms call", () => {
     expect(out.headline.extra_key).toBe(5);
   });
 });
+
+/**
+ * Phase 252 DERIBITOPTIONS plan 01 — the options-book reason withholds the stored CASH headline
+ * (the cash-wallet series is the artefact the reason names) and ONLY that: `applyHeadlineBasis`
+ * rewrites `cash_settlement`, so a smoothed or mark-to-market basis stored behind the toggle is
+ * left as stored, and `headlineCoverageNote` returns null off the cash basis.
+ */
+describe("252 — the options-book composite through the read path", () => {
+  const OPTIONS_DQF = {
+    composite: true,
+    twr_chain_broken: true,
+    headline_since: "2025-12-16",
+    mtm_gated_reason: "unsmoothed_options_book",
+  };
+  const SMOOTHED = {
+    cumulative_return: 0.21,
+    volatility: 0.15,
+    max_drawdown: -0.09,
+    cagr: 0.3,
+    sharpe: 1.1,
+    sortino: 1.4,
+    calmar: 2.2,
+  };
+
+  async function readWithSmoothed(dqf: Record<string, unknown>) {
+    const out = await readCompositeFactsheet(mockAdmin(), {
+      strategyId: "s1",
+      dqf,
+      metricsJsonByBasis: { cash_settlement: LEGACY_CASH, smoothed_mtm: SMOOTHED },
+      returnsDenominatorConfig: null,
+    });
+    expect(out).not.toBeNull();
+    return out!.buildOpts;
+  }
+
+  it("the evidence row carries the withheld dataQuality and a redacted cash_settlement", async () => {
+    const opts = await readWithSmoothed(OPTIONS_DQF);
+    for (const key of SEVEN_KEYS) expect(opts.metricsByBasis?.cash_settlement?.[key], key).toBeNull();
+    expect(opts.dataQuality).toMatchObject({
+      composite: true,
+      twrChainBroken: true,
+      headlineWithheld: true,
+      headlineWithheldCause: "options_cash_wallet",
+    });
+    expect(opts.dataQuality?.headlineCoversFrom).toBeUndefined();
+  });
+
+  it("the same flags without the chain keys withhold too and carry no twrChainBroken", async () => {
+    const opts = await readWithSmoothed({ composite: true, mtm_gated_reason: "unsmoothed_options_book" });
+    for (const key of SEVEN_KEYS) expect(opts.metricsByBasis?.cash_settlement?.[key], key).toBeNull();
+    expect(opts.dataQuality).toMatchObject({ headlineWithheld: true, headlineWithheldCause: "options_cash_wallet" });
+    expect(opts.dataQuality).not.toHaveProperty("twrChainBroken");
+  });
+
+  it("basis carve-out: a stored smoothed_mtm object is left as stored, and the note is null off the cash basis", async () => {
+    const opts = await readWithSmoothed(OPTIONS_DQF);
+    expect(opts.metricsByBasis?.smoothed_mtm).toEqual(SMOOTHED);
+    expect(headlineCoverageNote(opts.dataQuality, "smoothed_mtm", "strip")).toBeNull();
+    expect(headlineCoverageNote(opts.dataQuality, "mark_to_market", "main")).toBeNull();
+    expect(headlineCoverageNote(opts.dataQuality, "cash_settlement", "strip")?.variant).toBe("structural");
+  });
+
+  it("the chain break alone, without the reason, is still the dated reading (the trigger is the reason, not the break)", async () => {
+    const { mtm_gated_reason: _reason, ...noReason } = OPTIONS_DQF;
+    const opts = await readWithSmoothed(noReason);
+    expect(opts.dataQuality).toMatchObject({ twrChainBroken: true, headlineCoversFrom: "2025-12-16" });
+    expect(opts.dataQuality?.headlineWithheld).toBeUndefined();
+    expect(opts.metricsByBasis?.cash_settlement?.cumulative_return).toBe(LEGACY_CASH.cumulative_return);
+  });
+});

@@ -631,14 +631,48 @@ describe("164.6.6.3.3 plan 08 — a Dated row's trailing windows cover the suffi
     expect(withheld).toEqual(wholeRec);
   });
 
-  it("WR-01: the withheld flag without twrChainBroken sets nothing (a clean row is never withheld)", () => {
-    const m = build({
-      composite: false,
-      insufficientWindow: false,
-      headlineWithheld: true,
-    }).strategyMetrics;
+  it("a clean row (no withheld flag, no chain break) is never withheld", () => {
+    const m = build({ composite: false, insufficientWindow: false }).strategyMetrics;
     expect(m.p3m).not.toBeNull();
     expect(m.mtd).not.toBeNull();
+  });
+
+  // Phase 252 plan 02: the window gate reads `headlineWithheld` alone. It used to need
+  // `twrChainBroken` as well, a state the read path never produced without it; the options-book
+  // cause withholds an INTACT chain, so the conjunct is gone. This case replaces the one that
+  // pinned the dropped conjunct (the flag without a chain break "sets nothing").
+  it("252: the withheld flag alone withholds all seven windows, with no chain break on the payload", () => {
+    const whole = build({ composite: false, insufficientWindow: false }).strategyMetrics;
+    for (const k of ["mtd", "ytd", "p3m", "p6m", "p1y"] as const) {
+      expect(whole[k], `premise: ${k} is a finite window on the whole record`).not.toBeNull();
+    }
+    const optionsDq = {
+      composite: true,
+      insufficientWindow: false,
+      headlineWithheld: true,
+      headlineWithheldCause: "options_cash_wallet",
+    } as BuildFactsheetOpts["dataQuality"];
+    expect(optionsDq?.twrChainBroken).toBeUndefined();
+    const withheld = build(optionsDq).strategyMetrics as unknown as Record<string, unknown>;
+    for (const k of WINDOW_KEYS) expect(withheld[k], `${k} must be withheld`).toBeNull();
+    // Only the windows move: every other field is the no-flag build's.
+    const wholeRec = { ...whole } as unknown as Record<string, unknown>;
+    for (const k of WINDOW_KEYS) {
+      delete withheld[k];
+      delete wholeRec[k];
+    }
+    expect(withheld).toEqual(wholeRec);
+  });
+
+  it("252: the options cause withholds the windows whether or not its chain is also broken", () => {
+    const chainBroken = build({
+      composite: true,
+      insufficientWindow: false,
+      twrChainBroken: true,
+      headlineWithheld: true,
+      headlineWithheldCause: "options_cash_wallet",
+    } as BuildFactsheetOpts["dataQuality"]).strategyMetrics;
+    for (const k of WINDOW_KEYS) expect(chainBroken[k], k).toBeNull();
   });
 
   it("a clean row keeps the whole-record windows", () => {
