@@ -232,3 +232,143 @@ The SF LOWs are recorded here only.
 | WR-01 / SF-M1 / SF-M2 / SF-M3 | **Waiting on a coordinator decision.** It refines the CONTEXT Q6 agent decision. Recommendation: refuse only when the ambiguous key would count (live, or a departed key whose history is included). In every other case, the card names the cause and the delete route and offers no toggle. Then one fixer round. |
 | SF-M4 | Recorded. The planned behaviour is that only the derive refuses (plan 14). PROD holds 0 such keys. |
 | IN-01..IN-09 and the SF LOWs | Recorded only. |
+
+## Round 2 (2026-11-25)
+
+**Scope:** the fixer commits `e3c96ce25` and `2182213bd`, `git diff 629de0d4c..2182213bd -- . ':!.planning'`, 9 files.
+**Tested at:** worktree HEAD `4811ea75b` on `gsd/phase-225-pr2b-2-pr`. Its source matches `2182213bd` apart from CHANGELOG.md, VERSION, package.json and the three `supabase/schema/` baseline files. I checked that by `git diff 2182213bd 4811ea75b --stat`, and the four `wizardErrors*` and `wizardKeyRosters` files are byte-equal.
+**Governing decision:** CONTEXT Q6, founder ruling 2026-11-25, verbatim "Delete keys without Server, dont accept keys without Server", MT5 only, part (a): refuse an MT5 key with an empty server, in TS and in Python, and name the cause.
+**Depth:** standard. I traced every MT5 write path and both client renderers of the new code, and ran 37 test files that read the touched routes.
+
+```yaml
+round: 2
+files_reviewed_list:
+  - analytics-service/services/allocator_equity_derive.py
+  - analytics-service/services/job_worker.py
+  - analytics-service/tests/test_venue_server_identity.py
+  - src/app/api/keys/validate-and-encrypt/route.test.ts
+  - src/app/api/keys/validate-and-encrypt/route.ts
+  - src/app/api/strategies/create-with-key/route.test.ts
+  - src/app/api/strategies/create-with-key/route.ts
+  - src/lib/departed-history.ts
+  - src/lib/venue-identity.test.ts
+findings:
+  critical: 2
+  warning: 0
+  info: 7
+  total: 9
+  necessity: 0
+status: issues_found
+```
+
+### What holds
+
+- **Non-MT5 keys are unaffected.** Both guards are `isMt5 && ...`. `isMt5` is `exchange.toLowerCase() === "mt5"`: see `validate-and-encrypt/route.ts:145` and `create-with-key/route.ts:1219`. An OKX passphrase never reaches `normaliseConnectedVenueServer`.
+- **The refusal comes before any side effect, in both routes.** Every statement ahead of it is a pure body check or another 400: `validate-and-encrypt/route.ts:248-253` and `create-with-key/route.ts:1295-1300`. In both routes it runs before the rate limiter, `validateKey`, `encryptKey`, the holder read and the insert or RPC.
+- **No other MT5 write path is open.**
+  - `composite/add-key` refuses every MT5 request outright with `COMPOSITE_MT5_UNSUPPORTED` (`route.ts:185`).
+  - `rotate-secret` changes only the password of an existing MT5 row and writes no `venue_server`.
+  - Only the two connect routes write `api_keys.venue_server`, and the column grant migration `20261125132334` keeps `authenticated` and `anon` off INSERT and UPDATE.
+- **The removals break no caller.** Nothing in `src/` or `scripts/` references `ambiguousServerKeyIds` or the `ambiguous` field. The shared fixture's `ambiguous` field is still replayed by Python (`test_venue_server_identity.py:118`). TS replays `tokens` only, which matches the deletion. `venue-identity.test.ts` and `departed-history.test.ts` pass.
+- **The new route tests can fail (by reading the code, not by a run).** Source was read-only for this review, so I did not neuter the guards. Without the new guard, `"\u001f"` passes the `trim()`-based three-credential check, and a 129-character server is under the 512 cap at `create-with-key/route.ts:1336`. Both requests would then reach the mocked `validateKey`, and the `not.toHaveBeenCalled()` assertions would fail.
+- Run results: the 4 changed TS test files pass 535/535, and `tests/test_venue_server_identity.py` passes 109/109.
+
+## Critical Issues (round 2)
+
+### CR-R2-01: The fix reddens 6 wizard-code invariant tests. CI's frontend shards fail.
+
+**Files:**
+- `src/app/api/keys/validate-and-encrypt/route.ts:248-253` and `src/app/api/strategies/create-with-key/route.ts:1295-1300`: the two new emitters.
+- `src/lib/wizardErrors.invariant.test.ts`: the pins they break.
+- `src/lib/wizardKeyRosters.ts:108`: `CREATE_WITH_KEY_OWN_CODES`.
+
+**Issue:** Each new arm is a literal `NextResponse.json({ code: "KEY_MT5_WRONG_SERVER", ... }, { status: 400 })`, and the emitter scanner counts it. At `629de0d4c` neither route contained the string `KEY_MT5_WRONG_SERVER`: `git show 629de0d4c:<route> | grep -c` gives 0 for both, against 1 each at HEAD. `npx vitest run src/lib/wizardErrors.invariant.test.ts` fails these 6 tests:
+
+1. `create-with-key: the site count is THIS ROUTE's hand-typed literal`: 14 sites against `expectedSites: 13` (`:279`).
+2. `keys/validate-and-encrypt: the site count ...`: 15 against `expectedSites: 14` (`:515`).
+3. `keys/validate-and-encrypt: every emitted code is admitted by THAT ROUTE's roster`: `KEY_MT5_WRONG_SERVER` is missing from `KNOWN_VALIDATE_AND_ENCRYPT_CODES` (`src/lib/wizardErrors.ts:6644`).
+4. `the two KEY-VALIDATION routes emit the SAME set of codes`: `create-with-key` now emits a code that `composite/add-key` does not.
+5. `the two SPLIT routes' emitted vocabulary is the hand-typed split set`: `EXPECTED_SPLIT_CODES` (`:988`) gained a member.
+6. `create-with-key: the tuple is the route's contract` (`:2263`): `emittedButNotInTuple: ["KEY_MT5_WRONG_SERVER"]`.
+
+The fixer ran only the changed test files, so it never saw these failures.
+
+**Fix:** Each of these is a real contract change, so update each pin. Do not relax any of them.
+
+1. Bump `expectedSites` to 14 (create-with-key) and 15 (validate-and-encrypt).
+2. Add `"KEY_MT5_WRONG_SERVER"` to `CREATE_WITH_KEY_OWN_CODES` (`wizardKeyRosters.ts:108`).
+3. Add it to `KNOWN_VALIDATE_AND_ENCRYPT_CODES` (`wizardErrors.ts:6644`), with a comment naming the founder ruling. This also fixes CR-R2-02.
+4. Add it to `EXPECTED_SPLIT_CODES`.
+5. Add it to `MIRROR_EXEMPT` (`:1338`) with a dated note. `composite/add-key` refuses MT5 outright with `COMPOSITE_MT5_UNSUPPORTED`, so it structurally cannot emit this code. That is the same reasoning as the existing `COMPOSITE_MT5_UNSUPPORTED` row, and the law above it requires exactly one side to emit an exempt code.
+
+Then run the whole `src/lib/` invariant and roster-render set, not only the route files.
+
+### CR-R2-02: On the validate-and-encrypt forms, "no server" renders as the UNKNOWN card with a Retry that cannot work
+
+**Files:**
+- `src/app/api/keys/validate-and-encrypt/route.ts:248-253`: the emitter.
+- `src/lib/wizardErrors.ts:6768-6829` (`recogniseValidateAndEncryptCode`) and `:6644` (the roster): the reader.
+- `src/components/exchanges/AllocatorExchangeManager.tsx:1522-1538` and `src/components/strategy/StrategyForm.tsx:206-229`: the renderers.
+
+**Issue:** This is user-facing and separate from the CI red. `recogniseValidateAndEncryptCode({ code: "KEY_MT5_WRONG_SERVER" }, 400)` falls through every arm:
+
+- It is not a key of the alias table.
+- It is not a `VENUE_WIRE_CODE_TO_VERDICT` row. `MT5_WRONG_SERVER` is deliberately exempt there (`wizardErrors.ts:5521-5524`), because the classifier cascade reaches it instead, and this route has no classifier call.
+- It is not in `KNOWN_VALIDATE_AND_ENCRYPT_CODES`.
+
+So the reader returns `{ UNKNOWN, recognised: false }`, and both dashboard forms render the UNKNOWN shell: "Try the last action again", with a Retry control and the curated cause "MT5 broker server is invalid". Retrying sends the same refused request. The ruling asks for the cause to be named, and this shows a generic fault card instead. The repo's own test proves it: `src/lib/wizardErrors.roster-render.test.tsx`, `validate-and-encrypt/KEY_MT5_WRONG_SERVER renders its own code, never the UNKNOWN card`, fails at HEAD.
+
+`create-with-key` (the wizard) does not have this problem. `KNOWN_CREATE_WITH_KEY_CODES` includes `CLASSIFIER_RETURNED_CODES`, which includes `KEY_MT5_WRONG_SERVER` (`wizardKeyRosters.ts:76`), so `ConnectKeyStep` renders the code's own card. That route is red in CI only.
+
+**Fix:** Add `KEY_MT5_WRONG_SERVER` to `KNOWN_VALIDATE_AND_ENCRYPT_CODES`, the same edit as CR-R2-01 step 3. The roster-render test then goes green, and it is the test that proves this fix.
+
+## Info (round 2)
+
+### IN-R2-01: The `KEY_MT5_WRONG_SERVER` copy claims a connection attempt that never ran
+
+**File:** `src/lib/wizardErrors.ts:1946-1959`
+The cause line reads "MT5 could not connect to the broker server name you entered". For a control-character-only or over-128 server, no probe ran. The fix lines (copy the exact server, watch for stray characters) are still the right remedy, and Python's blank-server path already maps to this code. Acceptable. A dedicated sentence would be more honest.
+
+### IN-R2-02: Error precedence moved: an MT5 server over 512 characters now gets `KEY_MT5_WRONG_SERVER`, not `KEY_INPUT_TOO_LONG`
+
+**File:** `src/app/api/strategies/create-with-key/route.ts:1295` runs before the 512 cap at `:1336`.
+No test pins the old order, and both answers are 400s that refuse the key. Recorded only.
+
+### IN-R2-03: Comments that the guard made stale
+
+**Files:**
+- `src/app/api/keys/validate-and-encrypt/route.ts:809-815`: "returns null for an over-length value rather than letting the CHECK refuse the insert".
+- `src/app/api/strategies/create-with-key/route.ts:1507-1513`: "128 cap, blank is null".
+- `src/lib/venue-identity.ts:27-30`: "the key matches as a wildcard".
+
+At these sites an MT5 `venueServer` can no longer be null. Each comment should say the early guard makes null unreachable for MT5.
+
+### IN-R2-04: The new Python test pins a guard that already existed, and its docstring overstates TS parity
+
+**File:** `analytics-service/tests/test_venue_server_identity.py:62-75`
+The blank-server check in `parse_mt5_credentials` (`services/mt5_validation.py:187-189`) predates this round, so the test adds a regression pin, not coverage of the fix. The docstring says "The TS connect routes refuse the same set". They refuse it with a different code: spaces and NBSP get `KEY_MISSING_REQUIRED_FIELD` from the `trim()`-based three-credential check, and only `\x1f` and over-128 values get `KEY_MT5_WRONG_SERVER`. Python does not refuse a server over 128 characters at all. That gap is harmless because Python never inserts a key.
+
+### IN-R2-05: Existing server-less MT5 keys can still be put back into service by paths with no server check
+
+**Files:** `create-with-key/route.ts` `handleReuseExistingKey` (returns before the new guard, `:1196`), the `reconnect_allocator_api_key` RPC (`AllocatorExchangeManager.tsx:1207`), and `keys/[id]/rotate-secret`.
+None of these accepts a new key, so ruling part (a) is met. They only stop mattering once part (b), the coordinator-confirmed delete of existing server-less MT5 keys, has run. Recorded so that (b) is not skipped on the strength of (a).
+
+### IN-R2-06: `loginIdentities` now returns a one-field object
+
+**File:** `src/lib/departed-history.ts:136-180`
+With `ambiguous` gone, the `{ identities }` wrapper is noise. Both callers (`:192` and `:229`) could take the `Map` directly. Cosmetic.
+
+### IN-R2-07: The doc comment on `loginIdentities` still describes ambiguity as a separate output
+
+**File:** `src/lib/departed-history.ts:119-135`
+"(null for an AMBIGUOUS key)" is accurate. The rest of the block still describes the ambiguous path at length even though nothing reads it in TS now. Cosmetic.
+
+---
+
+_Round 2 reviewed: 2026-11-25_
+_Reviewer: Claude (gsd-code-reviewer)_
+_Depth: standard_
+
+### Round 2 dispositions (2026-11-25)
+- CR-R2-01 and CR-R2-02 are FIXED in `fix(225): admit KEY_MT5_WRONG_SERVER to the connect-route rosters`. The fix adds the code to `KNOWN_VALIDATE_AND_ENCRYPT_CODES`, `CREATE_WITH_KEY_OWN_CODES`, `EXPECTED_SPLIT_CODES` and `MIRROR_EXEMPT`, and moves the site counts 13->14 and 14->15. The invariant and roster-render suites are green.
+- IN-R2-01..07 are Info, so they are recorded here only and not fixed. IN-R2-05 confirms that ruling (b), deleting the existing server-less MT5 key, must still run.
