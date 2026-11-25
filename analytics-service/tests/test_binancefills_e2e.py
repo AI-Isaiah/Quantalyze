@@ -55,6 +55,10 @@ C_PLUS_2D_MS = 1792756800000  # 2026-10-23T12:00:00Z
 C_PLUS_2D_ISO = "2026-10-23T12:00:00+00:00"
 NOW_MINUS_5D_MS = 1794744000000  # 2026-11-15T12:00:00Z
 NOW_MINUS_5D_ISO = "2026-11-15T12:00:00+00:00"
+NOW_MINUS_120D_MS = 1784808000000  # 2026-07-23T12:00:00Z (older than the 85-day reach)
+NOW_MINUS_120D_ISO = "2026-07-23T12:00:00+00:00"
+NOW_MINUS_60D_MS = 1789992000000  # 2026-09-21T12:00:00Z
+NOW_MINUS_60D_ISO = "2026-09-21T12:00:00+00:00"
 
 
 @pytest.fixture(autouse=True)
@@ -190,3 +194,38 @@ class TestBinanceFillsThroughTheSyncJob:
         for _kind, request in venue.calls:
             assert "startTime" in request and "endTime" in request, request
             assert 0 < request["endTime"] - request["startTime"] <= 604799999, request
+
+    async def test_a_seed_older_than_the_reach_is_clamped_named_and_not_held(self) -> None:
+        """SC-1 (CONTEXT [Window walk, R2-02] "A seed older than the venue's 3-month reach?"):
+        a cursor 120 days old, past the 85-day reach, with a stored fill there, and a venue
+        fill 60 days old. The venue is the default STRICT one (a start past its reach is
+        refused with ccxt.BadRequest), so a walk that sent the old seed would turn the
+        symbol partial and the stamp would stay None. The walk starts at the reach instead,
+        names the clamp in `binance_fills_reach_clamped`, never holds on it, and the stamp
+        reaches the fill past the clamp.
+
+        The job writes the drained flags through its `strategy_analytics` upsert
+        (`rec.analytics_upserts[-1]["data_quality_flags"]`), read here the same way
+        250-03's sibling gates read them."""
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [
+                    venue_fill("linear", "BTCUSDT", 1, NOW_MINUS_120D_MS),
+                    venue_fill("linear", "BTCUSDT", 2, NOW_MINUS_60D_MS),
+                ]
+            }
+        )
+        rec, fetch = await _run_live(
+            venue,
+            column=NOW_MINUS_120D_ISO,
+            stored_fills=[NOW_MINUS_120D_ISO],
+            symbols=["BTCUSDT"],
+        )
+
+        assert fetch.await_args is not None
+        assert fetch.await_args.kwargs["since_ms"] == NOW_MINUS_120D_MS
+        assert _the_advance(rec)["p_last_fetched_ts"] == NOW_MINUS_60D_ISO
+        assert rec.analytics_upserts, "the job wrote no data_quality_flags"
+        flags = rec.analytics_upserts[-1]["data_quality_flags"]
+        assert flags.get("binance_fills_reach_clamped") is True
+        assert "binance_partial_symbols" not in flags
