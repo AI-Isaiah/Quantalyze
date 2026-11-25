@@ -17920,6 +17920,17 @@ async def run_derive_allocator_equity_job(
             _live_map.update(_stored_map)
         no_capital_exit_by_key.clear()
         no_capital_refusals["candidate_exception"] += len(no_capital_candidates)
+        # A WARNING log reaches Sentry only as a breadcrumb, and a programming bug in the candidate
+        # path would otherwise downgrade a book with no event. ONE warning event: static message,
+        # tags are the job and the exception class only (no key id, no text, no amount).
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("exception_class", type(_nc_exc).__name__)
+            sentry_sdk.capture_message(
+                "derive_allocator_equity: an unexpected exception was raised while applying "
+                "no-capital candidates, reverted to the inputs as stored",
+                level="warning",
+            )
         logger.warning(
             "derive_allocator_equity: %s raised while applying %d no-capital candidate(s) of "
             "allocator %s - reverting them once to %s",
@@ -18352,6 +18363,16 @@ async def run_derive_allocator_equity_job(
         if no_capital_stored is None or not no_capital_exit_by_key:
             raise
         no_capital_refusals["candidate_exception"] += len(no_capital_exit_by_key)
+        # Same single Sentry warning event as the apply loop's handler: static message, tags are
+        # the job and the exception class only.
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("exception_class", type(exc).__name__)
+            sentry_sdk.capture_message(
+                "derive_allocator_equity: an unexpected exception was raised in the compose with "
+                "no-capital candidates in play, reverted to the inputs as stored",
+                level="warning",
+            )
         logger.warning(
             "derive_allocator_equity: compose raised %s with %d no-capital candidate(s) in "
             "play for allocator %s — re-composing once with them reverted to %s",

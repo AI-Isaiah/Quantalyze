@@ -6177,6 +6177,50 @@ async def test_no_capital_exit_dispatch_ends_done_where_it_used_to_end_failed_un
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["apply_loop", "compose"])
+async def test_no_capital_exit_a_candidate_fault_reaches_sentry_as_one_class_only_event(
+    site: str,
+) -> None:
+    """NOCAP-02 review IN-01 / SFH M1. A WARNING log reaches Sentry only as a breadcrumb, so a
+    programming bug in the candidate path (from the apply loop or from the compose) would downgrade a
+    book with no event. Each handler captures ONE warning event whose tags are the job and the
+    exception class only; the message is static and carries neither the exception's text (a
+    ``KeyError``'s text is a key id) nor any key id or amount."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fault = (
+        patch(
+            "services.job_worker._no_capital_exit_consumes_only_dust",
+            side_effect=KeyError("key-B-SECRET"),
+        )
+        if site == "apply_loop"
+        else patch(
+            "services.allocator_equity_compose.compose_allocator_equity",
+            _nc_compose_that_raises(KeyError("key-B-SECRET")),
+        )
+    )
+    fake = _FakeSupabase(_nc_with_stale_row(_nc_deribit_a3_book()))
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch("services.job_worker.sentry_sdk") as sentry,
+        fault,
+    ):
+        result = await run_derive_allocator_equity_job(_nc_job())
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+
+    assert sentry.capture_message.call_count == 1
+    args, kwargs = sentry.capture_message.call_args
+    assert kwargs.get("level") == "warning"
+    for secret in ("key-B", "SECRET", "65.0"):
+        assert secret not in args[0]
+    scope = sentry.new_scope.return_value.__enter__.return_value
+    tags = {call.args[0]: call.args[1] for call in scope.set_tag.call_args_list}
+    assert tags == {"compute_job_id": "j-nocap-fault", "exception_class": "KeyError"}
+
+
+@pytest.mark.asyncio
 async def test_no_capital_exit_a_fault_with_no_candidate_in_play_propagates_unchanged() -> None:
     """NOCAP-02 outcome table, row 3 (T-234-10). With no candidate in play a compose ``ValueError``
     is not the rule's: ``run_derive_allocator_equity_job`` raises it exactly as before."""
