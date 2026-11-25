@@ -538,7 +538,7 @@ async def test_no_park_after_a_probe_session_abandoned(
     transport = _RecordingMt5(_scenario())
     _install_real_mt5_client(router, transport)
 
-    def _fenced_probe(client, *, login, investor_pw, server, log_prefix):
+    def _fenced_probe(client, *, login, investor_pw, server, log_prefix, site):
         client.login(login, investor_pw, server)
         raise Mt5SessionAbandoned("account_info")
 
@@ -760,7 +760,7 @@ async def test_a_glitch_park_after_a_glitch_validation_logs_only_a_warning(
     transport = _glitch_park_transport(_scenario(), kind)
     _install_real_mt5_client(router, transport)
 
-    def _glitching_probe(client, *, login, investor_pw, server, log_prefix):
+    def _glitching_probe(client, *, login, investor_pw, server, log_prefix, site):
         client.login(login, investor_pw, server)
         raise Mt5ClientError(*_GLITCH_VALIDATION_ERROR)
 
@@ -785,7 +785,7 @@ _IPC_FAULT_VALIDATION_ERROR = (-10004, "No IPC connection")
 
 
 def _logging_in_then_raising(error: tuple[int, str]):
-    def _probe(client, *, login, investor_pw, server, log_prefix):
+    def _probe(client, *, login, investor_pw, server, log_prefix, site):
         client.login(login, investor_pw, server)
         raise Mt5ClientError(*error)
 
@@ -942,7 +942,7 @@ async def test_a_probe_that_raised_after_the_login_still_parks(
     transport = _RecordingMt5(_scenario())
     _install_real_mt5_client(router, transport)
 
-    def _raising_probe(client, *, login, investor_pw, server, log_prefix):
+    def _raising_probe(client, *, login, investor_pw, server, log_prefix, site):
         client.login(login, investor_pw, server)
         raise raised
 
@@ -1231,7 +1231,7 @@ async def test_the_worker_does_not_park_after_a_probe_session_abandoned(
     transport = _RecordingMt5(_scenario())
     _install_worker_transport(monkeypatch, transport)
 
-    def _fenced_probe(client, *, login, investor_pw, server, log_prefix):
+    def _fenced_probe(client, *, login, investor_pw, server, log_prefix, site):
         client.login(login, investor_pw, server)
         raise Mt5SessionAbandoned("account_info")
 

@@ -53,6 +53,7 @@ from services.mt5_read import (
     _MT5_DEAL_FETCH_MARGIN_S,
     _MT5_MAX_SERVER_UTC_OFFSET_S,
     Mt5HistoryUnsettledError,
+    log_mt5_poll_server_verdict,
     read_mt5_deal_ledger,
 )
 # The ONE offline transport double (tests/test_mt5_derive_branch.py). Imported
@@ -75,15 +76,24 @@ _DEALS: list[dict[str, Any]] = [
 ]
 
 
+_NO_SERVER: Any = object()  # the default: the snapshot carries no "server" field
+
+
 def _account(
-    login: int | None, *, equity: float = 110_500.0, currency: str = "USD"
+    login: int | None,
+    *,
+    equity: float = 110_500.0,
+    currency: str = "USD",
+    server: Any = _NO_SERVER,
 ) -> dict[str, Any]:
     """An ``account_info()`` snapshot. ``login=None`` OMITS the field entirely —
     the Pitfall-3 shape, where a bracket that used a default would silently
-    match."""
+    match. ``server`` is omitted unless given (225-20: the verdict line reads it)."""
     snap: dict[str, Any] = {"equity": equity, "balance": equity, "currency": currency}
     if login is not None:
         snap["login"] = login
+    if server is not _NO_SERVER:
+        snap["server"] = server
     return snap
 
 
@@ -933,3 +943,157 @@ def test_an_unclassifiable_currency_skips_the_wait_like_an_absent_equity(
     assert [d["ticket"] for d in deals] == [1]
     assert transport.calls.count("history_deals_get") == 1
     assert _mt5_read_never_sleeps_for_real.sleeps == []
+
+
+# ---------------------------------------------------------------------------
+# 225-20 (PR-2c0) — the poll's SERVER verdict: LOG-ONLY, measured before PR-2c's
+# bracket may refuse a session on it (CONTEXT Q6 item 2: confirm by measurement).
+#
+# What these pin, and why each can fail:
+#   * the verdict is the predicate PR-2c's `assert_expected_server` applies, so the
+#     measurement says what that refusal WOULD do (a spelling the terminal reports
+#     differently, or no server at all, is exactly what would be refused);
+#   * the verdict never changes what a poll returns (it is a measurement, not a gate);
+#   * the line carries a closed-set site and an attributed holder and NO login, server
+#     or password value (T-225-65).
+# ---------------------------------------------------------------------------
+_VERDICT_LOGGER = "quantalyze.analytics.mt5_read"
+_VERDICT_MSG = "mt5 poll server verdict"
+_REQUESTED_SERVER = "Broker-Live"  # what `_session()` binds
+_OTHER_SERVER = "Broker-Demo-7"
+_HOLDER_UUID_UPPER = "A1B2C3D4-0000-4000-8000-0000000000AB"
+_HOLDER_UUID = _HOLDER_UUID_UPPER.lower()
+
+
+def _verdict_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if _VERDICT_MSG in r.getMessage()]
+
+
+def _assert_no_secret(text: str) -> None:
+    folded = text.casefold()
+    for secret in (
+        _REQUESTED_SERVER, _OTHER_SERVER, str(_EXPECTED_LOGIN), str(_OTHER_LOGIN), "pw",
+    ):
+        assert secret.casefold() not in folded, (secret, text)
+
+
+@pytest.mark.parametrize(
+    ("reported", "expected", "label"),
+    [
+        pytest.param(_REQUESTED_SERVER, True, "True", id="matching"),
+        pytest.param("  broker-LIVE  ", True, "True", id="case-and-spaces-only"),
+        pytest.param(_OTHER_SERVER, False, "False", id="different-server"),
+        pytest.param(_NO_SERVER, None, "not_captured", id="absent"),
+        pytest.param(None, None, "not_captured", id="none"),
+        pytest.param("", None, "not_captured", id="empty"),
+        pytest.param("   ", None, "not_captured", id="blank"),
+        pytest.param(123, None, "not_captured", id="non-string"),
+    ],
+)
+def test_the_verdict_is_the_pr2c_predicate_and_writes_one_info_line(
+    caplog: pytest.LogCaptureFixture, reported: Any, expected: bool | None, label: str
+) -> None:
+    """True only for a non-blank string equal to the requested server after trim and
+    case-fold; False for a different non-blank string; not_captured for everything
+    PR-2c's bracket would refuse for being unreadable. One INFO record, on this
+    module's logger, with the three fields in a fixed order."""
+    info = _account(_EXPECTED_LOGIN, server=reported)
+    before = dict(info)
+
+    with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER):
+        got = log_mt5_poll_server_verdict(
+            info,
+            requested_server=_REQUESTED_SERVER,
+            site="derive_broker_dailies",
+            holder=_HOLDER_UUID_UPPER,
+        )
+
+    assert got is expected
+    assert info == before, "the verdict must not mutate the snapshot"
+    records = _verdict_records(caplog)
+    assert len(records) == 1, [r.getMessage() for r in caplog.records]
+    (record,) = records
+    assert record.name == _VERDICT_LOGGER
+    assert record.levelno == logging.INFO
+    assert record.getMessage() == (
+        f"{_VERDICT_MSG} site=derive_broker_dailies holder={_HOLDER_UUID} "
+        f"session_server_matches_requested={label}"
+    )
+    _assert_no_secret(record.getMessage())
+    _assert_no_secret(str(record.args))
+
+
+def test_a_holder_that_is_not_a_uuid_or_literal_is_written_as_unattributed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A digit-only holder is shaped like an account number; it must never reach the
+    line. `normalize_mt5_holder` is the house rule for that."""
+    with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER):
+        log_mt5_poll_server_verdict(
+            _account(_EXPECTED_LOGIN, server=_REQUESTED_SERVER),
+            requested_server=_REQUESTED_SERVER,
+            site="sync_trades_balance",
+            holder=str(_EXPECTED_LOGIN),
+        )
+        log_mt5_poll_server_verdict(
+            _account(_EXPECTED_LOGIN, server=_REQUESTED_SERVER),
+            requested_server=_REQUESTED_SERVER,
+            site="sync_trades_balance",
+            holder=None,
+        )
+
+    messages = [r.getMessage() for r in _verdict_records(caplog)]
+    assert len(messages) == 2
+    for message in messages:
+        assert "holder=unattributed" in message
+        assert "site=sync_trades_balance" in message
+        _assert_no_secret(message)
+
+
+def _read_with_server(
+    caplog: pytest.LogCaptureFixture, reported: Any, *, holder: str | None = None
+) -> tuple[Any, dict[str, Any], list[logging.LogRecord]]:
+    account = _account(_EXPECTED_LOGIN, server=reported)
+    transport = _FakeMt5Transport(account=account, deals=_DEALS)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER):
+        got = read_mt5_deal_ledger(_session(transport), now=_NOW, holder=holder)
+    return got, account, _verdict_records(caplog)
+
+
+def test_the_read_returns_the_same_data_whatever_the_verdict_and_logs_one_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A False and a not_captured poll return exactly what a True one returns: the
+    verdict is a measurement. Exactly ONE record per read even though the POST
+    bracket also reads `account_info()`: a second line per poll would double every
+    count Task 3 reports."""
+    runs = {
+        "True": _read_with_server(caplog, _REQUESTED_SERVER, holder=_HOLDER_UUID_UPPER),
+        "False": _read_with_server(caplog, _OTHER_SERVER, holder=_HOLDER_UUID_UPPER),
+        "not_captured": _read_with_server(caplog, _NO_SERVER, holder=_HOLDER_UUID_UPPER),
+    }
+
+    for label, (got, account, records) in runs.items():
+        assert got.info == account, label
+        assert [d["ticket"] for d in got.deals] == [1], label
+        assert got.tick_read_failed is False, label
+        assert len(records) == 1, (label, [r.getMessage() for r in records])
+        message = records[0].getMessage()
+        assert f"session_server_matches_requested={label}" in message
+        assert "site=derive_broker_dailies" in message
+        assert f"holder={_HOLDER_UUID}" in message
+        _assert_no_secret(message)
+    ref = runs["True"][0]
+    for label in ("False", "not_captured"):
+        assert runs[label][0].deals == ref.deals
+        assert runs[label][0].tick == ref.tick
+
+
+def test_a_read_without_a_holder_attributes_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _got, _account_snap, records = _read_with_server(caplog, _REQUESTED_SERVER)
+
+    assert len(records) == 1
+    assert "holder=unattributed" in records[0].getMessage()

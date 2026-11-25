@@ -914,6 +914,7 @@ async def _validate_mt5_key_probe(
                     investor_pw=investor_pw,
                     server=server,
                     log_prefix="validate_key",
+                    site=SITE_VALIDATE_WIZARD,
                 )
             finally:
                 # Set by THIS thread when `run_probe` exits, however it exits.
