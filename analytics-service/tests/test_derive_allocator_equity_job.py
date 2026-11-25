@@ -6442,3 +6442,93 @@ async def test_no_capital_exit_an_apply_loop_fault_replaces_the_loops_own_counts
     assert _nc_refused(payload) == {"candidate_exception": 3, "funded_terminal": 1}
     assert "dropped_key" in payload["degrade_reasons"]
     assert "no_capital_exited_keys" not in payload
+
+
+# ---------------------------------------------------------------------------
+# 225 CONN-03 (plan 14, CONTEXT Q6): one login on two broker servers is two
+# accounts, and a key whose server is unknown on a login with two servers is
+# refused by name.
+#
+# The stock ``_FakeTable.select`` returns rows unprojected, so a derive whose
+# ``_load_keys`` forgot a column would still see it. ``_ProjectingSupabase``
+# projects every ``api_keys`` read to the columns the select names, as PostgREST
+# does, so dropping ``venue_server`` from the select turns these tests RED.
+# ---------------------------------------------------------------------------
+
+
+class _ProjectingTable(_FakeTable):
+    def __init__(self, name: str, store: "_FakeSupabase") -> None:
+        super().__init__(name, store)
+        self._columns: list[str] | None = None
+
+    def select(self, *_a: Any, **_k: Any) -> "_ProjectingTable":
+        if _a and isinstance(_a[0], str) and _a[0] != "*":
+            self._columns = [c.strip() for c in _a[0].split(",")]
+        super().select(*_a, **_k)
+        return self
+
+    def execute(self) -> Any:
+        result = super().execute()
+        if self._name == "api_keys" and self._columns is not None:
+            result.data = [
+                {c: row[c] for c in self._columns if c in row} for row in result.data
+            ]
+        return result
+
+
+class _ProjectingSupabase(_FakeSupabase):
+    def table(self, name: str) -> _FakeTable:
+        return _ProjectingTable(name, self)
+
+    def from_(self, name: str) -> _FakeTable:
+        return _ProjectingTable(name, self)
+
+
+def _server_book(
+    alloc: str, keys: list[dict[str, Any]], with_inputs: tuple[str, ...]
+) -> _ProjectingSupabase:
+    """``keys`` plus flat returns and a ``key_inputs`` row for every id in ``with_inputs``."""
+    csv: list[dict] = []
+    derived: list[dict] = [_stale_curve(alloc)]
+    for key_id in with_inputs:
+        key_csv, key_ki = _series_rows(alloc, key_id, 1_000.0)
+        csv += key_csv
+        derived.append(key_ki)
+    return _ProjectingSupabase(
+        {"api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived}
+    )
+
+
+def _mt5_key(key_id: str, alloc: str, server: str | None, **extra: Any) -> dict[str, Any]:
+    return _gate_key(
+        key_id, alloc, exchange="mt5", venue_account_id="L-1", venue_server=server, **extra
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_live_keys_on_one_login_and_two_servers_compose_as_two_accounts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CR-01 test (i). Once one owner may hold the same MT5 login on two servers, the
+    login-only identity unioned the two keys, ``account_identity_collisions`` found two
+    counted keys on one token, and the derive refused the book with no end. They are two
+    accounts, so the book composes both."""
+    import logging
+
+    alloc = "alloc-two-servers"
+    caplog.set_level(logging.INFO, logger="quantalyze.analytics.job_worker")
+    fake = _server_book(
+        alloc,
+        [_mt5_key("key-A", alloc, "srv-a"), _mt5_key("key-B", alloc, "srv-b")],
+        ("key-A", "key-B"),
+    )
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    assert _refusal_upserts(fake) == []
+    payload = _composed_payload(fake)
+    assert payload["inputs"]["n_keys"] == 2, "two servers are two accounts, both counted"
+    assert payload["curve"][-1]["equity_usd"] == pytest.approx(2_000.0, rel=1e-6)
+    assert "account_identity_collision" not in str(payload)
+    assert "account_identity_collision" not in caplog.text
+    assert any(
+        name == "api_keys" and "venue_server" in str(cols) for name, cols in fake.selects
+    ), "the derive's key select must read venue_server"

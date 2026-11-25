@@ -22,6 +22,10 @@ from services.account_identity import (
     pick_same_account_holder,
     same_venue_server,
 )
+from services.allocator_equity_derive import (
+    account_identity_tokens,
+    ambiguous_server_key_ids,
+)
 from services.mt5_validation import parse_mt5_credentials
 
 _SPEC = json.loads(
@@ -36,6 +40,7 @@ def test_the_shared_fixture_is_not_vacuous() -> None:
     assert len(_SPEC["connect"]) > 0
     assert len(_SPEC["same"]) > 0
     assert len(_SPEC["pick"]) > 0
+    assert len(_SPEC["tokens"]) > 0
 
 
 @pytest.mark.parametrize("case", _SPEC["normalise"], ids=lambda c: repr(c["in"])[:40])
@@ -82,3 +87,16 @@ def test_pick_same_account_holder(case: dict[str, Any]) -> None:
 @pytest.mark.parametrize("case", _SPEC["pick"], ids=lambda c: c["name"])
 def test_pick_does_not_depend_on_row_order(case: dict[str, Any]) -> None:
     assert _pick_id(case, list(reversed(case["rows"]))) == case["expect"]
+
+
+@pytest.mark.parametrize("case", _SPEC["tokens"], ids=lambda c: c["name"])
+@pytest.mark.parametrize("order", ["given", "reversed"])
+def test_account_identity_tokens_and_ambiguity(case: dict[str, Any], order: str) -> None:
+    """225 CONN-03, CONTEXT Q6: one login on two set servers is two accounts, a key
+    with no server joins only a login with at most one distinct set server, and a
+    key that cannot be placed has no token (and is named by ``ambiguous_server_key_ids``).
+    Each case runs in the given order and reversed: a token that depended on row
+    order would answer differently."""
+    keys = list(case["keys"]) if order == "given" else list(reversed(case["keys"]))
+    assert account_identity_tokens(keys) == case["tokens"]
+    assert ambiguous_server_key_ids(keys) == frozenset(case["ambiguous"])
