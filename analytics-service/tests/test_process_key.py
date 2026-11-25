@@ -4706,6 +4706,129 @@ def test_sync_pipeline_abandoned_session_is_a_coded_transient_never_a_500(client
 
 
 # ---------------------------------------------------------------------------
+# Phase 230 (MT5D-02) — the same two call sites, for the cross-process lease.
+#
+# `Mt5TerminalLeaseUnavailableError` (the lease failed closed because its database
+# is unreachable) subclasses `Mt5TerminalBusyError`, itself a plain `Exception`.
+# Neither is an `Mt5SessionAbandoned`, so before this phase's arm both left the two
+# validate sites as the bodyless 500 the WIZFORM-ABANDON arms above exist to
+# remove (R-1: "service-permanent, do not retry", the inverse of the truth: the
+# next submission simply finds the lease reachable). Both go to the same 424
+# NETWORK_UNAVAILABLE / `recoverable: True` envelope, and no lease text reaches
+# the body.
+# ---------------------------------------------------------------------------
+
+_LEASE_RAISE_TEXT = "lease-rpc-host-10.0.0.9-digest-feedface"
+
+
+def _lease_raise_params():
+    from services.mt5_concurrency import (
+        Mt5TerminalBusyError,
+        Mt5TerminalLeaseUnavailableError,
+    )
+
+    return [
+        pytest.param(Mt5TerminalLeaseUnavailableError, id="lease-unavailable"),
+        pytest.param(Mt5TerminalBusyError, id="plain-busy"),
+    ]
+
+
+@pytest.mark.parametrize("exc_type", _lease_raise_params())
+def test_validate_only_lease_failure_is_a_coded_transient_never_a_500(
+    client, monkeypatch, exc_type
+):
+    """Site 1 — `_run_validate_only`, the wizard's validate-and-encrypt leg."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    fake = _build_supabase_mock(existing_row=None)
+
+    mt5_adapter = MagicMock()
+    mt5_adapter.validate = AsyncMock(side_effect=exc_type(_LEASE_RAISE_TEXT))
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=mt5_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "onboard",
+                "source": "mt5",
+                "context": {
+                    "wizard_session_id": "wiz-lease-validate-only",
+                    "user_id": "u1",
+                    "api_key": "123456",
+                    "api_secret": "investor-pw",
+                    "passphrase": "Broker-Demo",
+                    "step": "validate",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 424, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == "NETWORK_UNAVAILABLE"
+    assert body["recoverable"] is True
+    assert body["correlation_id"] == _TEST_CID
+    assert _LEASE_RAISE_TEXT not in r.text
+
+    from services import exchange as exchange_svc
+
+    assert body["code"] not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
+
+
+@pytest.mark.parametrize("exc_type", _lease_raise_params())
+def test_sync_pipeline_lease_failure_is_a_coded_transient_never_a_500(
+    client, exc_type
+):
+    """Site 2 — the synchronous pipeline's validate. The second member of the
+    class; a fix that covered only `_run_validate_only` leaves it open."""
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-lease")
+
+    leasing_adapter = MagicMock()
+    leasing_adapter.validate = AsyncMock(side_effect=exc_type(_LEASE_RAISE_TEXT))
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=leasing_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-lease-sync",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 424, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == "NETWORK_UNAVAILABLE"
+    assert body["recoverable"] is True
+    assert body["correlation_id"] == _TEST_CID
+    assert body["debug_context"]["verification_id"] == "ver-lease"
+    assert _LEASE_RAISE_TEXT not in r.text
+
+    from services import exchange as exchange_svc
+
+    assert body["code"] not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
+
+
+# ---------------------------------------------------------------------------
 # 161-03 / WIZERR-13 — the SUBMIT path forwards the per-row DATA half.
 #
 # The wizard's CSV panel (`CsvValidationEnvelope.tsx`) has always read
