@@ -48,7 +48,7 @@ Surfaces (columns):
 
 | Spec                                          | Role(s) covered     | Mechanism |
 |-----------------------------------------------|---------------------|-----------|
-| `discovery-watchlist.spec.ts`                  | Allocator           | Hard-coded `matratzentester24@gmail.com` test allocator. |
+| `discovery-watchlist.spec.ts`                  | Allocator           | Hard-coded `<pair-A-login: redacted 2026-11-25, Phase 241>` test allocator. |
 | `discovery-prefs-isolation.spec.ts`            | Allocator A vs B    | `seedTestAllocator()` → two fresh allocators. test.skip when seed-env not wired. |
 | `discovery-sparkline-regression.spec.ts`       | Allocator           | Same hard-coded allocator fixture. |
 | `discovery-hide-examples-default.spec.ts`      | Allocator (fresh)   | `seedTestAllocator()`; test.skip when seed-env not wired. |

@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.133.74.4] - 2026-11-25 — records: Phase 241 DEMOCREDS phase records and the archived-record credential scrub
+
+This is a records PR. It has no source, test, workflow or migration change. It ships first by founder ruling (2026-11-24): the whole-tree digest guard in the code PR that follows scans every tracked file, so the archived records must lose the demo-credential literals before that guard reaches `main`.
+
+### Security
+- **Archived records scrubbed (plan 01, SECR-02).** 12 archived planning files from v0.15, v0.16, v0.17, v1.0 and v1.20 lose every demo login and password literal of the two retired demo pairs. Each literal is replaced by a placeholder that names its role (Pair A login or password, Pair B login or password). History is not rewritten; the literals stay in old commits, which is why the code PR adds a guard against reintroduction.
+- **Pair B deleted on TEST (2026-11-24) and PROD (2026-11-25).** The seed allocator account was removed on PROD by one census-pinned SQL statement through the PROD MCP plus a GoTrue admin-API delete, behind the founder's recorded go. Post-verify: Pair B absent, Pair A present, the 4 sibling keys on the shared venue account intact. The dated counts are in `241-04-SUMMARY.md`.
+
+### Added
+- **Phase directory** `.planning/phases/241-democreds-.../`. It holds:
+  - CONTEXT, RESEARCH, PATTERNS, VALIDATION and the PROD measurement (counts only);
+  - four PLANs and four SUMMARYs;
+  - the Pair B delete chain, census, existence and catalog queries, the admin-API delete tool and the lane rehearsal (tokens only, no literal or id);
+  - REVIEW (two rounds, the last clean), SECURITY (`threats_open: 0`) and VERIFICATION (`human_needed`).
+
+### Changed
+- **`ROADMAP.md` Phase 241:** the four-plan list in three waves, the 2026-11-24 founder ruling that narrows SC-1 (Pair A is kept), and a Progress row reading verified human_needed, code PR pending.
+- **`REQUIREMENTS.md` SECR-01:** the same narrowing, as a dated note. SECR-01 and SECR-02 stay unticked until the code PR lands and the founder resets Pair A.
+
+### Notes
+- **Waiting on the founder:** Pair A (the shared e2e login) is kept because it is in active PROD use. Its password reset is a founder step and is carried as the open `human_verification` item in `241-VERIFICATION.md`. Until then the leaked password still works.
+- **Next:** the code PR with the digest guard in `npm run lint`, the e2e test without its literals, and the deletion of the closed demo-credential TODOS entry.
 ## [0.133.74.3] - 2026-11-25 — fix: rate-limit log lines stay capturable after logging is reconfigured
 
 Main went red at `017ba2e08` (run 45579286889) on `test_a_per_ip_refusal_leaks_no_identity_in_body_headers_or_the_handler_log`, which #1334 shipped. It passed alone and on rerun. This fixes the cause in the service module, not the test order.

@@ -230,7 +230,7 @@ _Verifier: Claude (gsd-verifier)_
 
 ## Playwright MCP Verification Addendum (2026-05-01T13:05:00Z)
 
-Live in-browser verification using Playwright MCP against `npm run dev` on `http://localhost:3001`, signed in as `demo-allocator@quantalyze.test` (non-admin role).
+Live in-browser verification using Playwright MCP against `npm run dev` on `http://localhost:3001`, signed in as `<pair-B-login: redacted 2026-11-25, Phase 241>` (non-admin role).
 
 ### SC-1 / SC-2 evidence — correlation_id consistency end-to-end
 

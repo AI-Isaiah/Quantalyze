@@ -148,6 +148,7 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 ### Security: demo credentials (SECRETSHYGIENE; in v1.22 by founder exception, F-10)
 
 - [ ] **SECR-01**: The two demo accounts no longer exist on TEST or PROD, and the deletion is recorded with its date (F-3). (covers: 158-OPS-03, HIGH entry)
+  ⛔ **CORRECTED 2026-11-24 (founder ruling, Phase 241 CONTEXT and ROADMAP):** narrowed. The seed allocator account is deleted on TEST and PROD. The shared e2e login stays, because it is in active PROD use, and the founder resets its password so the leaked credential is dead. The sentence above is kept as lineage.
 - [ ] **SECR-02**: No tracked file contains either demo password literal. The absence guard checks a digest instead of the literal and is shown RED by planting a matching literal. Removing the text alone does not close the entry, and history is not rewritten. (covers: 158-OPS-03, HIGH entry)
 
 ### CI and tooling: MT5 soak (MT5SOAK)
