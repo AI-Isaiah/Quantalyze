@@ -1,0 +1,66 @@
+{
+  "_comment": "Every value here is synthetic. Book A, counted keys k1 and k2, five union days 2025-01-01 .. 2025-01-05 (d1..d5). HAND DERIVATION. k1 terminal 1160 on d5, one flow of 100 on d4, P by day d1..d5 = 0, 10, -20, 30, 40. Levels rolled back with level(prev) = level(day) - F(day) - P(day): L5 = 1160, L4 = 1160 - 0 - 40 = 1120, L3 = 1120 - 100 - 30 = 990, L2 = 990 - 0 + 20 = 1010, L1 = 1010 - 0 - 10 = 1000. k1 stored returns P/L(prev): d2 10/1000 = 0.01, d3 -20/1010 = -0.019801980198019802, d4 30/990 = 0.030303030303030304, d5 40/1120 = 0.03571428571428571. k2 terminal 525 on d5, no flow, P by day = 0, 5, -5, 0, 25. L5 = 525, L4 = 525 - 25 = 500, L3 = 500 - 0 = 500, L2 = 500 + 5 = 505, L1 = 505 - 5 = 500. k2 stored returns: d2 5/500 = 0.01, d3 -5/505 = -0.009900990099009901, d4 0/500 = 0, d5 25/500 = 0.05. Book return r(d) = sum of P over sum of previous levels: d2 (10 + 5)/(1000 + 500) = 15/1500 = 0.01; d3 (-20 - 5)/(1010 + 505) = -25/1515 = -0.0165016501650165; d4 (30 + 0)/(990 + 500) = 30/1490 = 0.020134228187919462; d5 (40 + 25)/(1120 + 500) = 65/1620 = 0.040123456790123455. d1 has no previous union day: omitted no_stored_base_level. Published 4, explained 4, withheld 0, omitted 1. The live anchor of k1 (1170) only steps its last level and moves no day.",
+  "book": {
+    "label": "A",
+    "returns": [
+      {"date": "2025-01-02", "r": 0.01},
+      {"date": "2025-01-03", "r": -0.0165016501650165},
+      {"date": "2025-01-04", "r": 0.020134228187919462},
+      {"date": "2025-01-05", "r": 0.040123456790123455}
+    ],
+    "flags": {},
+    "degrade_reasons": [],
+    "inputs": {"n_keys": 2}
+  },
+  "keys": {
+    "k1": {
+      "composed_day_pnl": [
+        {"utc_day_iso": "2025-01-01", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-02", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-03", "pnl_usd": -20},
+        {"utc_day_iso": "2025-01-04", "pnl_usd": 30},
+        {"utc_day_iso": "2025-01-05", "pnl_usd": 40}
+      ],
+      "composed_flows": [{"utc_day_iso": "2025-01-04", "flow_usd": 100}],
+      "dropped_day_pnl": [],
+      "returns_stamp": [
+        {"utc_day_iso": "2025-01-02", "return": 0.01},
+        {"utc_day_iso": "2025-01-03", "return": -0.019801980198019802},
+        {"utc_day_iso": "2025-01-04", "return": 0.030303030303030304},
+        {"utc_day_iso": "2025-01-05", "return": 0.03571428571428571}
+      ],
+      "realized_terminal_day": "2025-01-05",
+      "realized_terminal_usd": 1160,
+      "anchor_usd": 1170,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    },
+    "k2": {
+      "composed_day_pnl": [
+        {"utc_day_iso": "2025-01-01", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-02", "pnl_usd": 5},
+        {"utc_day_iso": "2025-01-03", "pnl_usd": -5},
+        {"utc_day_iso": "2025-01-04", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-05", "pnl_usd": 25}
+      ],
+      "composed_flows": [],
+      "dropped_day_pnl": [],
+      "returns_stamp": [
+        {"utc_day_iso": "2025-01-02", "return": 0.01},
+        {"utc_day_iso": "2025-01-03", "return": -0.009900990099009901},
+        {"utc_day_iso": "2025-01-04", "return": 0.0},
+        {"utc_day_iso": "2025-01-05", "return": 0.05}
+      ],
+      "realized_terminal_day": "2025-01-05",
+      "realized_terminal_usd": 525,
+      "anchor_usd": 525,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    }
+  },
+  "declared": {"counted": ["k1", "k2"]}
+}
