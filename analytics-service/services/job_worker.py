@@ -329,6 +329,18 @@ PARTITION_COLUMNS: Final[tuple[str, ...]] = (
 # can produce rollout-window inconsistency (workers spawned mid-deploy with
 # different env values processing different jobs differently). Tests can
 # still flip behavior via monkeypatch on this module attribute.
+#
+# Phase 250 BINANCEFILLS (SC-4): do not turn USE_RAW_TRADE_INGESTION on while a
+# Binance key syncs until Phase 250's SC-1 to SC-3 are on main (the
+# window-walking Binance fills read, the non-holding unlisted-symbol flag
+# beside the holding partial-symbol flag, and the page-cap and deadline
+# read-through stamp). One named exception to SC-1 ships with it and this
+# switch accepts it rather than waits for it, the
+# quiet-prefix deadline known limit (founder ruling 2026-11-25 (UTC)): a sync
+# read stopped by its deadline over a prefix holding no stored fill leaves the
+# cursor where it was, named by `binance_deadline_symbols` on every such run
+# and bounded by the reach clamp. This is one of several venue conditions for
+# this switch and certifies nothing about OKX, Bybit or Deribit.
 _RAW_TRADE_INGESTION_ENABLED: Final[bool] = (
     os.environ.get("USE_RAW_TRADE_INGESTION", "false").lower() == "true"
 )

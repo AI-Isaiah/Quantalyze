@@ -348,3 +348,69 @@ class TestBinanceFillsCursorGate:
             fills_flags={"binance_page_cap_symbols": ["BTCUSDT"]},
         )
         assert _the_advance(rec)["p_last_fetched_ts"] == DAILY_NEWEST_DAY_START_ISO
+
+    # ---- SC-2: unlisted and clamp never hold; a transient failure does -----
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            {"binance_unlisted_symbols": ["DOGEUSDT"]},
+            {"binance_fills_reach_clamped": True},
+        ],
+        ids=["unlisted-symbols", "reach-clamped"],
+    )
+    async def test_a_non_holding_flag_alone_stamps_the_newest_fill(
+        self, flags: dict[str, Any]
+    ) -> None:
+        # SC-2: a venue-unlisted symbol raises ccxt.BadSymbol on EVERY run, so
+        # holding on it would freeze the cursor of every healthy symbol for
+        # good. The reach clamp only says the walk started at the venue's
+        # reach. Neither leaves an unread span behind the newest fill.
+        supabase, rec = _make_supabase(trades_rows=DEFAULT_TRADES)
+        await _run_job(
+            supabase=supabase,
+            column=CURSOR_BEHIND_TS,
+            raw_fills=[
+                _bfill("fill-btc", B_TS, "BTCUSDT"),
+                _bfill("fill-eth", HEALTHY_NEWER_TS, "ETHUSDT"),
+            ],
+            fills_flags=dict(flags),
+        )
+        assert _the_advance(rec)["p_last_fetched_ts"] == HEALTHY_NEWER_TS
+
+    async def test_a_transiently_failed_symbol_holds_then_is_reread_clean(
+        self,
+    ) -> None:
+        # SC-2 refuse-then-clean (the 232 shape with Binance symbols): ETHUSDT
+        # failed with anything other than BadSymbol, BTCUSDT's fill came back.
+        # Run 1 holds, so run 2 re-reads from the held cursor and covers the
+        # span ETHUSDT never returned; the clean run stamps, so run 1's hold was
+        # the flag's doing.
+        shared_flags: dict[str, Any] = {}
+
+        supabase1, rec1 = _make_supabase(
+            trades_rows=DEFAULT_TRADES, flags=shared_flags
+        )
+        out1 = await _run_job(
+            supabase=supabase1,
+            column=CURSOR_BEHIND_TS,
+            raw_fills=[_bfill("fill-btc", B_TS, "BTCUSDT")],
+            fills_flags={"binance_partial_symbols": ["ETHUSDT"]},
+        )
+        stamped = _the_advance(rec1)["p_last_fetched_ts"]
+        assert stamped is None, "a partial-symbol read must hold the cursor"
+
+        supabase2, rec2 = _make_supabase(
+            trades_rows=DEFAULT_TRADES, flags=shared_flags
+        )
+        out2 = await _run_job(
+            supabase=supabase2,
+            column=stamped or CURSOR_BEHIND_TS,
+            raw_fills=[_bfill("fill-eth", HEALTHY_NEWER_TS, "ETHUSDT")],
+        )
+
+        assert out1.fetch_raw.call_args.kwargs["since_ms"] == CURSOR_BEHIND_MS
+        assert out2.fetch_raw.call_args.kwargs["since_ms"] == CURSOR_BEHIND_MS, (
+            "the clean run must re-read from the held cursor"
+        )
+        assert _the_advance(rec2)["p_last_fetched_ts"] == HEALTHY_NEWER_TS
