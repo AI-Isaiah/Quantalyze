@@ -2964,7 +2964,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                         "computation_error": (
                             "Analytics enqueue failed during sync. "
                             "The next scheduled sync will retry — "
-                            "contact support if this persists."
+                            "use the contact form if this persists."
                         ),
                         # ⛔ NO computation_error_source / computation_error_job_id.
                         # See the block above this `try`. A marker here is read by
@@ -12426,7 +12426,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         await _stamp_failed(
             f"Composite has {len(members)} member keys, above the safe maximum of "
             f"{_max_members} for the current derive-timeout budget. Reduce members "
-            "or contact support to raise the limit."
+            "or use the contact form to ask for a higher limit."
         )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
