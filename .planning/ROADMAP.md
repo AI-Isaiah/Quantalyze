@@ -322,6 +322,8 @@ Plans:
 **Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 225-10-PLAN.md — migration B: the index gains the server member and reconnect agrees, after the backfill census passes (PR-3)
 
+**Plan 13 founder ruling, 2026-11-25:** "Owner-only read (Recommended)": SELECT on `api_keys.venue_server` is granted to `authenticated`, owner-only through the existing RLS, like `venue_account_id`. Recorded in `225-CONTEXT.md` Q6.
+
 **Gap closure for CR-01 (founder ruling 2026-11-25, `225-CONTEXT.md` Q6): plans 13-18 ship as PR-2b-1, PR-2b-2 and PR-2c from origin/main before PR-3; plan 19 re-bases plan 10. Gap waves below are numbered within the gap set.**
 **Gap wave 1**
 - [ ] 225-13-PLAN.md — owners can read `venue_server` (column GRANT), after a founder decision checkpoint (PR-2b-1)
