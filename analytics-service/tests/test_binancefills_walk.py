@@ -52,11 +52,14 @@ from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock
 
+import inspect
+
 import ccxt
 import pytest
 import pytest_asyncio
 
 import services.exchange as ex
+from services.job_worker import TIMEOUT_PER_KIND
 from tests._binance_fills import (
     NOW_MS,
     recorded_markets,
@@ -590,6 +593,20 @@ class TestBinanceFillsStops:
       N29 count every full page toward the cap (the overlap exemption always false):
           tests/test_binancefills_e2e.py
           test_a_cap_stamp_whose_overlap_hour_is_full_resumes_past_the_cap goes RED.
+
+    Plan 07 adds the read DEADLINE as a third stop (SC-3, T-250-10): checked inside the semaphore
+    immediately before EVERY request, exempt overlap pages included, so no request passes it.
+    A stopped symbol keeps what it read and carries a bound by the same rule as the cap (the
+    newest fill read in the current window, else that window's start minus 1 ms, a symbol that
+    sent no request at the walk start minus 1 ms). The sync job reads with a longer budget than
+    the nightly reconcile (founder ruling 2026-11-25 UTC): the nightly must stay inside its 300 s
+    handler, the sync owns a cursor and needs the long budget to shrink the quiet-prefix region.
+      N13 delete the deadline check in `_fetch_one`:
+          test_a_deadline_stops_every_symbol_with_a_read_through_bound goes RED (all four cases,
+          case (d) because the exempt overlap page no longer stops the walk).
+      N27 `fetch_raw_trades` calls `_fetch_raw_trades_binance` without the keyword:
+          test_the_read_budget_reaches_the_walk_through_fetch_raw_trades goes RED.
+      (N24, N26 and N28 live in tests/test_binancefills_e2e.py.)
     """
 
     async def test_a_capped_window_is_named_with_its_read_through_bound(
@@ -808,3 +825,172 @@ class TestBinanceFillsStops:
             assert flags.get("binance_page_cap_symbols") == ["ETHUSDT"]
         else:
             assert "binance_page_cap_symbols" not in flags
+
+    @pytest.mark.parametrize(
+        ("since_ms", "symbols", "rows", "calls_allowed", "bound_ms", "named", "expected_ids"),
+        [
+            # (a) stopped mid-window with rows read. Page of 3, five fills S + 1 h .. S + 5 h,
+            # one request: the first page holds the first three, the second request is refused,
+            # the bound is the third fill, S + 3 h = 1794927600000 (2026-11-17T15:00:00Z).
+            pytest.param(
+                1794916800000,  # S 2026-11-17T12:00:00Z
+                ["BTCUSDT"],
+                {("linear", "BTCUSDT"): [1794916800000 + i * HOUR_MS for i in range(1, 6)]},
+                1,
+                1794927600000,
+                ["BTCUSDT"],
+                {"BTCUSDT": {"1", "2", "3"}},
+                id="a-mid-window-with-rows",
+            ),
+            # (b) stopped at a window start. S = NOW - 10 d = 1794312000000
+            # (2026-11-10T12:00:00Z), so the walk (start S - 1 h) has a second window. Two fills
+            # in the first window, one request: the window completes, the second window's first
+            # request is refused, the bound is the second window's start minus 1 ms,
+            # S - 1 h + 7 d - 1 ms - 1 ms = 1794913199998 (2026-11-17T10:59:59.998Z).
+            pytest.param(
+                1794312000000,
+                ["BTCUSDT"],
+                {("linear", "BTCUSDT"): [1794312000000 + HOUR_MS, 1794312000000 + 2 * HOUR_MS]},
+                1,
+                1794913199998,
+                ["BTCUSDT"],
+                {"BTCUSDT": {"1", "2"}},
+                id="b-at-a-window-start",
+            ),
+            # (c) two symbols, one request. The symbol that sent it completes its first window
+            # and stops at the next window start (bound 1794913199998); the other never started,
+            # so its bound is the walk start minus 1 ms, S - 1 h - 1 ms = 1794308399999
+            # (2026-11-10T10:59:59.999Z), the smaller one.
+            pytest.param(
+                1794312000000,
+                ["BTCUSDT", "ETHUSDT"],
+                {
+                    ("linear", "BTCUSDT"): [1794312000000 + HOUR_MS, 1794312000000 + 2 * HOUR_MS],
+                    ("linear", "ETHUSDT"): [1794312000000 + HOUR_MS, 1794312000000 + 2 * HOUR_MS],
+                },
+                1,
+                1794308399999,
+                ["BTCUSDT", "ETHUSDT"],
+                {"BTCUSDT": {"1", "2"}, "ETHUSDT": {"11", "12"}},
+                id="c-one-started-one-never-started",
+            ),
+            # (d) the deadline inside 250-06's exempt overlap pages (T-250-15, T-250-18), through
+            # `fetch_raw_trades` with since_ms = C = 1792584000000 (2026-10-21T12:00:00Z): the walk
+            # starts at C - 1 h = 1792580400000 and `pre_overlap_seed_ms` is C. Five fills in the
+            # hour below C (1792581000000, 1792581600000, 1792582200000, 1792582800000,
+            # 1792583400000: 11:10Z to 11:50Z, ten minutes apart) and one at 1792670400000
+            # (2026-10-22T12:00:00Z). One request: the first page is full and exempt (its last row
+            # is below C), the check refuses the second request, the bound is the third overlap
+            # fill, 1792582200000, below C.
+            pytest.param(
+                1792584000000,
+                ["BTCUSDT"],
+                {
+                    ("linear", "BTCUSDT"): [
+                        1792581000000,
+                        1792581600000,
+                        1792582200000,
+                        1792582800000,
+                        1792583400000,
+                        1792670400000,
+                    ]
+                },
+                1,
+                1792582200000,
+                ["BTCUSDT"],
+                {"BTCUSDT": {"1", "2", "3"}},
+                id="d-inside-the-exempt-overlap-pages",
+            ),
+        ],
+    )
+    async def test_a_deadline_stops_every_symbol_with_a_read_through_bound(
+        self,
+        open_exchanges: list[Any],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        since_ms: int,
+        symbols: list[str],
+        rows: dict[tuple[str, str], list[int]],
+        calls_allowed: int,
+        bound_ms: int,
+        named: list[str],
+        expected_ids: dict[str, set[str]],
+    ) -> None:
+        """SC-3, T-250-10 (CONTEXT [Budget]): once the read deadline has passed no request is
+        sent, every symbol is named in `binance_deadline_symbols` and keeps the fills it read, and
+        `binance_read_through_ms` is the smaller bound. The default (non-suspending) venue runs
+        the symbol tasks one after another; these arms pass no keyword, so the 240 s default
+        applies, and `_monotonic` is pinned to pass the deadline after exactly `calls_allowed`
+        venue calls. Which symbol sent the request is read from the venue's `calls` log, never
+        assumed (discovery comes from a set)."""
+        monkeypatch.setattr(ex, "BINANCE_FILLS_PAGE_LIMIT", 3)
+        venue = BinanceFillsVenue(
+            {
+                key: [
+                    venue_fill("linear", key[1], (0 if key[1] == "BTCUSDT" else 10) + i + 1, at)
+                    for i, at in enumerate(times)
+                ]
+                for key, times in rows.items()
+            }
+        )
+        monkeypatch.setattr(
+            ex, "_monotonic", lambda: 0.0 if len(venue.calls) < calls_allowed else 1e12
+        )
+
+        with caplog.at_level("WARNING"):
+            fills, flags = await _read(open_exchanges, venue, symbols, since_ms)
+
+        assert len(venue.calls) == calls_allowed, "a request was sent after the deadline"
+        assert sorted(flags.get("binance_deadline_symbols", [])) == sorted(named)
+        assert flags.get("binance_read_through_ms") == bound_ms
+        started = venue.calls[0][1]["symbol"]
+        assert _ids(fills) == expected_ids[started]
+        assert "binance_partial_symbols" not in flags
+        deadline_warnings = [
+            r for r in caplog.records if r.levelname == "WARNING" and "read deadline" in r.getMessage()
+        ]
+        assert len(deadline_warnings) == 1, "exactly one deadline WARNING per stopped read"
+
+    async def test_the_read_budget_reaches_the_walk_through_fetch_raw_trades(
+        self, open_exchanges: list[Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T-250-10, per caller: the public entry passes `read_deadline_s` to the Binance walk.
+        One stored linear symbol, no seed (the walk starts at the reach: 13 windows, one request
+        each on an empty venue), the clock pinned to 120 s per venue request and a FRESH venue
+        per read. Without the keyword the 240 s default stops the walk after exactly 2 requests
+        (the check `>=` fires at 240 s: request 3); with `BINANCE_SYNC_FILLS_READ_DEADLINE_S`
+        (840 s) after exactly 7 (840 / 120, request 8). Both name the symbol."""
+
+        async def _calls_with(**budget: float) -> tuple[int, dict[str, Any]]:
+            venue = BinanceFillsVenue({})
+            monkeypatch.setattr(ex, "_monotonic", lambda: float(len(venue.calls)) * 120.0)
+            exchange = await real_binance(venue)
+            open_exchanges.append(exchange)
+            await ex.fetch_raw_trades(
+                exchange, STRATEGY_ID, symbols_supabase(["BTCUSDT"]), since_ms=None, **budget
+            )
+            return len(venue.calls), ex.get_and_clear_last_dq_flags()
+
+        default_calls, default_flags = await _calls_with()
+        long_calls, long_flags = await _calls_with(
+            read_deadline_s=ex.BINANCE_SYNC_FILLS_READ_DEADLINE_S
+        )
+
+        assert default_calls == 2, f"the default budget sent {default_calls} requests"
+        assert long_calls == 7, f"the long budget sent {long_calls} requests"
+        assert default_flags.get("binance_deadline_symbols") == ["BTCUSDT"]
+        assert long_flags.get("binance_deadline_symbols") == ["BTCUSDT"]
+
+    def test_the_read_deadlines_are_pinned(self) -> None:
+        """Founder ruling 2026-11-25 (UTC): the sync gets about 14 of its 15 minutes for reading
+        (840 s), the nightly reconcile keeps the 240 s default; each budget sits below its
+        handler's timeout. A caller that passes no budget reads with the default, never with the
+        sync's, and never without one (the keyword is not None-able)."""
+        assert ex.BINANCE_FILLS_READ_DEADLINE_S == 240.0
+        assert ex.BINANCE_SYNC_FILLS_READ_DEADLINE_S == 840.0
+        assert ex.BINANCE_SYNC_FILLS_READ_DEADLINE_S < TIMEOUT_PER_KIND["sync_trades"]
+        assert ex.BINANCE_FILLS_READ_DEADLINE_S < TIMEOUT_PER_KIND["reconcile_strategy"]
+        for fn in (ex.fetch_raw_trades, ex._fetch_raw_trades_binance):
+            param = inspect.signature(fn).parameters["read_deadline_s"]
+            assert param.kind is inspect.Parameter.KEYWORD_ONLY
+            assert param.default == 240.0

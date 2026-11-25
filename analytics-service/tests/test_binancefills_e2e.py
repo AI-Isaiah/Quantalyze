@@ -27,6 +27,16 @@ and checked with `cmp`; later plans extend this list):
   N24 (250-07) hold the semaphore across a symbol's whole walk instead of per request:
      test_repeated_deadline_stops_advance_the_frontier_every_run goes RED (symbols beyond the
      five slots never start in a deadline-stopped run, so the bound sits at the walk start).
+  N26 (250-07) drop `read_deadline_s=` from `run_sync_trades_job`'s `fetch_raw_trades(` call:
+     test_the_sync_job_passes_the_long_read_budget goes RED.
+  N28 (250-07) give `run_reconcile_strategy_job`'s `fetch_raw_trades(` call the sync budget:
+     test_the_reconcile_job_keeps_the_default_read_budget goes RED.
+  (N13 and N27 live in tests/test_binancefills_walk.py.)
+
+READ BUDGET PER CALLER (250-07, founder ruling 2026-11-25 UTC). The sync job owns a cursor and
+needs the long budget (840 s of its 900 s handler timeout) to shrink the quiet-prefix deadline
+region; the nightly reconcile writes no cursor and must stay inside its 300 s handler, so it
+passes nothing and reads with the 240 s default.
 """
 
 from __future__ import annotations
@@ -39,7 +49,11 @@ import ccxt
 import pytest
 
 import services.exchange as ex
-from services.job_worker import DispatchOutcome, run_sync_trades_job
+from services.job_worker import (
+    DispatchOutcome,
+    run_reconcile_strategy_job,
+    run_sync_trades_job,
+)
 from tests._binance_fills import (
     DAY_MS,
     HOUR_MS,
@@ -50,10 +64,12 @@ from tests._binance_fills import (
     symbols_supabase,
     venue_fill,
 )
+from tests.test_job_worker_reconcile_audit import _build_mock_ctx, _StubReport
 from tests.test_okxtrades_cursor import (
     STRATEGY_ID,
     _make_supabase,
     _Recorder,
+    _run_job,
     _the_advance,
 )
 
@@ -642,3 +658,52 @@ class TestBinanceFillsThroughTheSyncJob:
             2026, 11, 19, 19, 0, tzinfo=timezone.utc
         )
         assert set(persisted) == set(time_by_id), "a venue fill was never persisted"
+
+
+class TestBinanceFillsReadBudgetPerCaller:
+    async def test_the_sync_job_passes_the_long_read_budget(self) -> None:
+        """T-250-10: the REAL `run_sync_trades_job` asks its fills read for the sync budget, for
+        every venue (only the Binance branch reads it). This module's hand-typed
+        `SYNC_READ_BUDGET_S`, the step of the ordering arm's clock, is pinned equal to it."""
+        supabase, _rec = _make_supabase(
+            trades_rows=[{"strategy_id": STRATEGY_ID, "is_fill": True, "timestamp": C_ISO}]
+        )
+
+        out = await _run_job(supabase=supabase, column=C_ISO, ingestion=True)
+
+        assert out.fetch_raw.await_args is not None
+        assert (
+            out.fetch_raw.await_args.kwargs.get("read_deadline_s")
+            == ex.BINANCE_SYNC_FILLS_READ_DEADLINE_S
+        )
+        assert SYNC_READ_BUDGET_S == ex.BINANCE_SYNC_FILLS_READ_DEADLINE_S
+
+    async def test_the_reconcile_job_keeps_the_default_read_budget(self) -> None:
+        """The nightly reconcile never reads with the sync budget: the REAL
+        `run_reconcile_strategy_job` passes no read budget (or the default), driven as
+        `test_owner_lookup_exception_does_not_abort_reconcile` drives it."""
+        ctx = _build_mock_ctx()
+
+        async def _db_execute_dispatch(fn: Any) -> Any:
+            return []
+
+        fetch_raw = AsyncMock(return_value=[])
+        with patch(
+            "services.job_worker._exchange_preflight", new=AsyncMock(return_value=ctx)
+        ), patch("services.job_worker.fetch_raw_trades", new=fetch_raw), patch(
+            "services.reconciliation.diff_strategy_fills",
+            return_value=_StubReport(status="clean"),
+        ), patch(
+            "services.job_worker.db_execute", new=AsyncMock(side_effect=_db_execute_dispatch)
+        ), patch("services.job_worker.log_audit_event", new=MagicMock()):
+            result = await run_reconcile_strategy_job(
+                {"id": "job-r-250", "kind": "reconcile_strategy", "strategy_id": "strat-1"}
+            )
+
+        assert result.outcome == DispatchOutcome.DONE
+        fetch_raw.assert_awaited_once()
+        assert fetch_raw.await_args is not None
+        assert (
+            fetch_raw.await_args.kwargs.get("read_deadline_s", ex.BINANCE_FILLS_READ_DEADLINE_S)
+            == ex.BINANCE_FILLS_READ_DEADLINE_S
+        )
