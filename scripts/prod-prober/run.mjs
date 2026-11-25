@@ -13,13 +13,13 @@
  *   node scripts/prod-prober/run.mjs --preflight-repoint [--manifest <p>] # ABORT non-zero on a
  *                                                                 # live-vs-manifest mismatch; WRITES NOTHING (plan 04)
  *
- * Registered arms (FOUR, equal to ARMS_FLOOR): pyapi06, cron-obs, cron-drift, mt5.
+ * Registered arms (FIVE, equal to ARMS_FLOOR): pyapi06, cron-obs, cron-drift, mt5, freshness.
  *
  * Exit codes:
  *   0  live run, every registered arm executed and measured, no defects, floors held
  *   1  at least one defect, a floor regression, or an ABSURDITY — the prober's
  *      two independent tallies of its own work disagree.
- *      ⚠️ The floor is now MET BY THE REGISTRY (4 arms / floor 4), so a `floor`
+ *      ⚠️ The floor is now MET BY THE REGISTRY (5 arms / floor 5), so a `floor`
  *      defect no longer means "not finished yet" — it means AN ARM WAS REMOVED.
  *   2  NARROWED DIAGNOSTIC RUN that found no defects. Deliberately NOT 0: a run
  *      that executed a subset of arms must never be mistakable for a passing
@@ -110,6 +110,7 @@ import * as MT5_MOD from "./arms/mt5.mjs";
 // rather than the ARM alone.
 import * as CRON_OBS_MOD from "./arms/cron-obs.mjs";
 import * as CRON_DRIFT_MOD from "./arms/cron-drift.mjs";
+import * as FRESHNESS_MOD from "./arms/freshness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = join(HERE, "fixtures");
@@ -124,6 +125,7 @@ const FIXTURE_ROOT = join(HERE, "fixtures");
 const SQL_ARM_MODULES = [
   { name: "cron-obs", module: CRON_OBS_MOD },
   { name: "cron-drift", module: CRON_DRIFT_MOD },
+  { name: "freshness", module: FRESHNESS_MOD },
 ];
 
 /**
@@ -134,21 +136,23 @@ const SQL_ARM_MODULES = [
 export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 
 /**
- * D-08 — the pinned arm floor. FOUR: pyapi06, cron-obs, cron-drift, mt5.
+ * D-08 — the pinned arm floor. FIVE: pyapi06, cron-obs, cron-drift, mt5, freshness.
  *
- * ✅ MET as of plan 04: the registry is exactly four, so a live run no longer
- * reports `floor`. From here a `floor` defect means an arm was REMOVED.
+ * ✅ MET: the registry is exactly five, so a live run no longer reports
+ * `floor`. From here a `floor` defect means an arm was REMOVED.
  *
  * ⚠️ This number was pinned at 4 while only ONE arm existed, on purpose: for
  * two plans a live run reported `1 registered arm(s) < floor 4` and exited 1,
  * because an incomplete prober must be LOUD. The alternative — ratcheting the
  * floor up as arms land — is a floor that can only ever agree with reality,
  * which is not a floor. Lowering this number is how an arm disappears quietly.
+ * ⭐ Phase 233 (FRESH-02) raised it 4 to 5 with the `freshness` arm, in the
+ * same commit as the registry, the wiring pins and the workflow text.
  */
-export const ARMS_FLOOR = 4;
+export const ARMS_FLOOR = 5;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 91;
+export const SELF_TEST_SCENARIOS = 93;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -177,6 +181,10 @@ export const SELF_TEST_SCENARIOS = 91;
  * success form; `cron-ledger-fanout-stuck` (a hung run), `-absent` (fewer than
  * 2 runs in 3h) and `-candidate-failed` (committed `candidate_enqueue_failed`
  * rows, since the fan-out no longer raises when every candidate fails).
+ *
+ * ⭐ Phase 233 (FRESH-02) added `freshness-stale` the same way: its fixture, its
+ * remedy, its `KIND_ASSERTIONS` entry and both scenario counters in ONE commit.
+ * Plan 233-04 adds `freshness-no-scope` by the same rule.
  */
 export const DEFECT_KINDS = [
   // harness-wide
@@ -209,16 +217,18 @@ export const DEFECT_KINDS = [
   "mt5-ssh-transport",
   "mt5-probe-timeout",
   "mt5-terminal-error",
+  // freshness (phase 233)
+  "freshness-stale",
   // floors — findings about the INSTRUMENT, not about production
   "floor",
   "absurdity",
 ];
 
 /**
- * The registered arms — FOUR, equal to `ARMS_FLOOR`. Removing one is a `floor`
+ * The registered arms — FIVE, equal to `ARMS_FLOOR`. Removing one is a `floor`
  * defect on the next run, which is the point.
  */
-export const ARMS = [PYAPI06_ARM, CRON_OBS_MOD.ARM, CRON_DRIFT_MOD.ARM, MT5_MOD.ARM];
+export const ARMS = [PYAPI06_ARM, CRON_OBS_MOD.ARM, CRON_DRIFT_MOD.ARM, MT5_MOD.ARM, FRESHNESS_MOD.ARM];
 
 /**
  * Per-NAME remedy for `credential-absent`. Names only — these strings are
@@ -315,7 +325,7 @@ function makeScrubber(arms, env) {
 // while GitHub silently drops the prober — the exact failure this phase
 // exists to close.
 //
-// This is a STEP, deliberately SEPARATE from the four registered arms
+// This is a STEP, deliberately SEPARATE from the five registered arms
 // (RESEARCH Finding 5): the arms enforce a read-only SQL discipline of their
 // own (`cron-obs.mjs`'s own header: "THIS ARM THEREFORE NEVER SELECTS
 // cron.job_run_details.status"), and a write folded into one of them would
@@ -367,7 +377,7 @@ export function countReturnedRows(stdout) {
 }
 
 /**
- * Write the prober's own contact row (D-02). Runs AFTER the four arms and
+ * Write the prober's own contact row (D-02). Runs AFTER the five arms and
  * AFTER the delta/seamInvocations/armsWithSeamActivity snapshot that feeds
  * the absurdity floor — see the call site in `runProber` for why that
  * ordering is load-bearing: a run in which every arm is credential-blocked
@@ -912,6 +922,24 @@ function fixtureSsh({ stdout = "", status = 0, stderr = "", timedOut = false, me
   };
 }
 
+/** The answer to both freshness reads when a bundle names none: one healthy key. */
+const FRESHNESS_GREEN_DEFAULT = {
+  scope: { derived: 1, withInputs: 1, withTerminal: 1 },
+  rows: [
+    {
+      venue: "deribit",
+      tag: "cccc0001",
+      newestReturn: "2026-11-23",
+      anchorNullReason: "",
+      newestFlow: "2026-11-24",
+      terminalDay: "2026-11-24",
+      markDay: "2026-11-24",
+      tinyDays: [],
+      hasInputs: true,
+    },
+  ],
+};
+
 /** A psql-shaped OK answer. */
 const sqlOk = (stdout) => ({ status: 0, stdout, stderr: "", timedOut: false, measureFail: null });
 
@@ -941,6 +969,18 @@ const sqlOk = (stdout) => ({ status: 0, stdout, stderr: "", timedOut: false, mea
  *                                            could not run.
  * @param {Array<object>} [data.cronJobRows]  answer for CRON_JOB_SQL
  * @param {string|null} [data.marker]         answer for DB_MARKER_SQL
+ * @param {{scope:{derived:number,withInputs:number,withTerminal:number},
+ *          rows:Array<{venue:string,tag:string,newestReturn:string,
+ *          anchorNullReason:string,newestFlow:string,terminalDay:string,
+ *          markDay:string,tinyDays:Array<string>,hasInputs:boolean}>}} [data.freshness]
+ *                                            answer for FRESHNESS_SCOPE_SQL
+ *                                            (scope, three integers) and
+ *                                            FRESHNESS_KEYS_SQL (rows, nine
+ *                                            columns; tinyDays rendered as a
+ *                                            JSON array, hasInputs as t/f).
+ *                                            Absent = GREEN (scope 1 1 1 and
+ *                                            one healthy row), so every
+ *                                            full-registry bundle stays green.
  */
 function fixtureSql(data) {
   return (query, opts = {}) => {
@@ -1005,6 +1045,31 @@ function fixtureSql(data) {
       }
       const rows = typeof c.rows === "number" ? c.rows : 1;
       return sqlOk(rows <= 0 ? "" : Array(rows).fill("1").join("\n") + "\n");
+    }
+
+    // The freshness arm's two reads (phase 233). Resolved BEFORE the generic
+    // `cron.job` branch, by the table only the per-key statement reads
+    // (`csv_daily_returns`) first and by `compute_jobs` second. Neither
+    // statement contains an earlier branch's substring. The default is GREEN.
+    if (q.includes("csv_daily_returns") || q.includes("compute_jobs")) {
+      const fr = data.freshness === undefined ? FRESHNESS_GREEN_DEFAULT : data.freshness;
+      if (q.includes("csv_daily_returns")) {
+        const lines = fr.rows.map((r) =>
+          [
+            r.venue,
+            r.tag,
+            r.newestReturn,
+            r.anchorNullReason,
+            r.newestFlow,
+            r.terminalDay,
+            r.markDay,
+            JSON.stringify(r.tinyDays),
+            r.hasInputs ? "t" : "f",
+          ].join(fieldSep),
+        );
+        return sqlOk(lines.length === 0 ? "" : `${lines.join("\n")}\n`);
+      }
+      return sqlOk(`${[fr.scope.derived, fr.scope.withInputs, fr.scope.withTerminal].join(fieldSep)}\n`);
     }
 
     if (q.includes("cron.job")) {
@@ -1206,6 +1271,20 @@ const ARM_FIXTURE_TABLE = [
       "terminal-info-null.txt": "mt5-terminal-error",
     },
   },
+  {
+    arm: FRESHNESS_MOD.ARM,
+    fixtureDir: "freshness",
+    green: "ok.json",
+    // FRESHNESS_SCOPE_SQL + FRESHNESS_KEYS_SQL. The judge compares stored days
+    // and never reads the clock, so no `clock` is needed.
+    greenSeamCalls: 2,
+    makeSeams: (data) => createSeams({ sqlRunner: fixtureSql({ freshness: data }) }),
+    red: {
+      // The held-back series end: ONE key, ONE cause (a gap over the bound with
+      // no stated day and no anchor reason).
+      "stale.json": "freshness-stale",
+    },
+  },
 ];
 
 /** The kinds an entry's red fixtures must cover. See the table's docblock. */
@@ -1235,7 +1314,15 @@ function allGreenSeams() {
   const mt5 = loadFixtureText("mt5", "ok.txt");
   if (!mt5.ok) return mt5;
 
-  const sqlData = { cronObs: cronObs.data, ttl: cronObs.data.ttl, cronJobRows: cronJob.data };
+  const freshness = loadFixture("freshness", "ok.json");
+  if (!freshness.ok) return freshness;
+
+  const sqlData = {
+    cronObs: cronObs.data,
+    ttl: cronObs.data.ttl,
+    cronJobRows: cronJob.data,
+    freshness: freshness.data,
+  };
   return {
     ok: true,
     seams: createSeams({
@@ -1288,6 +1375,7 @@ export async function selfTest() {
     "mt5-not-authorized": (d) => d.kind === "mt5-not-authorized",
     "mt5-ssh-transport": (d) => d.kind === "mt5-ssh-transport",
     "mt5-terminal-error": (d) => d.kind === "mt5-terminal-error",
+    "freshness-stale": (d) => d.kind === "freshness-stale",
     // ⚠️ Not reachable from the fixture table (see the mt5 entry's `kinds`
     // note) — its scenario applies this entry by hand, for the same reason the
     // table-driven ones do: the plan-05 coverage extractor reads THIS source
@@ -4940,7 +5028,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario("FULL GREEN: all FOUR registered arms run at the SHIPPING floor and the run exits 0 (D-08 met)");
+  scenario("FULL GREEN: all FIVE registered arms run at the SHIPPING floor and the run exits 0 (D-08 met)");
   // -------------------------------------------------------------------------
   {
     const built = allGreenSeams();
@@ -4962,20 +5050,20 @@ export async function selfTest() {
       pass =
         expect(ARMS.length === ARMS_FLOOR, `the registry equals the pinned floor (${ARMS.length} arms, floor ${ARMS_FLOOR})`) &&
         expect(
-          slots === 10 && names.length === 8,
-          `the four arms declare ${slots} credential SLOTS across ${names.length} distinct NAMES — the live no-credential run's ten credential-absent rows are these slots, not eight names double-counted`,
+          slots === 12 && names.length === 8,
+          `the five arms declare ${slots} credential SLOTS across ${names.length} distinct NAMES — the live no-credential run's twelve credential-absent rows are these slots, not eight names double-counted`,
         ) &&
         expect(
           names.every((n) => typeof SELFTEST_ENV[n] === "string" && SELFTEST_ENV[n].length > 0),
           `every one of the ${names.length} names is set in this scenario's environment [${names.sort().join(", ")}]`,
         ) &&
-        expect(r.exitCode === 0, `the all-green four-arm run exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
+        expect(r.exitCode === 0, `the all-green five-arm run exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
         expect(r.defects.length === 0, `ZERO defects (got ${r.defects.length})`) &&
-        expect(r.armsExecuted === 4, `all four arms executed (got ${r.armsExecuted})`) &&
+        expect(r.armsExecuted === 5, `all five arms executed (got ${r.armsExecuted})`) &&
         expect(r.armsBlocked === 0, `nothing was credential-blocked (got ${r.armsBlocked})`) &&
         expect(
-          lines.some((l) => l.startsWith("arms: 4/4/0")),
-          `the log prints "arms: 4/4/0" (got ${JSON.stringify(lines.find((l) => l.startsWith("arms: ")))})`,
+          lines.some((l) => l.startsWith("arms: 5/5/0")),
+          `the log prints "arms: 5/5/0" (got ${JSON.stringify(lines.find((l) => l.startsWith("arms: ")))})`,
         ) &&
         expect(
           ARMS.every((a) => (r.tallyByArm[a.name] || 0) >= 1),
@@ -4992,7 +5080,7 @@ export async function selfTest() {
   }
 
   // -------------------------------------------------------------------------
-  scenario("CROSS-ARM: a pyapi06 fault and an mt5 fault in ONE run both reach the table, and all four arms still ran (D-04)");
+  scenario("CROSS-ARM: a pyapi06 fault and an mt5 fault in ONE run both reach the table, and all five arms still ran (D-04)");
   // -------------------------------------------------------------------------
   {
     // The D-04 scenario above proves aggregation WITHIN one arm. This proves it
@@ -5034,10 +5122,10 @@ export async function selfTest() {
           r.defects.some((x) => x.kind === "mt5-ipc-timeout" && x.arm === "mt5"),
           "the ssh fault is in the table too — the run did not stop at the first, and it did not stop at the first TRANSPORT either",
         ) &&
-        expect(r.armsExecuted === 4, `all four arms still ran (got ${r.armsExecuted})`) &&
+        expect(r.armsExecuted === 5, `all five arms still ran (got ${r.armsExecuted})`) &&
         expect(
-          lines.some((l) => l.startsWith("arms: 4/4/0")),
-          `the log still prints "arms: 4/4/0" under two faults (got ${JSON.stringify(lines.find((l) => l.startsWith("arms: ")))})`,
+          lines.some((l) => l.startsWith("arms: 5/5/0")),
+          `the log still prints "arms: 5/5/0" under two faults (got ${JSON.stringify(lines.find((l) => l.startsWith("arms: ")))})`,
         ) &&
         expect(
           new Set(r.defects.map((x) => x.remedy)).size === 2,
@@ -5186,7 +5274,7 @@ export async function selfTest() {
     };
     const contactQueriesOf = (runner) => runner.seen.filter((q) => q.includes("INSERT INTO public.cron_runs"));
 
-    // ---- (a) GREEN: all four arms green -> exactly one contact write, ------
+    // ---- (a) GREEN: all five arms green -> exactly one contact write, ------
     //          status 'ok', and the run still exits 0. ----------------------
     {
       const pyapi06 = loadFixture("pyapi06", "ok.json");
@@ -5214,7 +5302,7 @@ export async function selfTest() {
         });
         const contactQueries = contactQueriesOf(sqlRunner);
         pass =
-          expect(r.exitCode === 0, `an all-green four-arm run with a working contact write still exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
+          expect(r.exitCode === 0, `an all-green five-arm run with a working contact write still exits 0 (got ${r.exitCode}; defects ${JSON.stringify(r.defects)})`) &&
           expect(r.defects.length === 0, `ZERO defects on the green run (got ${r.defects.length})`) &&
           expect(contactQueries.length === 1, `exactly ONE contact write was issued (got ${contactQueries.length})`) &&
           expect(
@@ -5282,7 +5370,7 @@ export async function selfTest() {
       const contactQueries = contactQueriesOf(sqlRunner);
       pass =
         expect(
-          r.armsExecuted === 0 && r.armsBlocked === 4,
+          r.armsExecuted === 0 && r.armsBlocked === 5,
           `every arm is credential-blocked and none executed (executed ${r.armsExecuted}, blocked ${r.armsBlocked})`,
         ) &&
         expect(contactQueries.length === 1, `the contact write STILL happened with every arm blocked (got ${contactQueries.length})`) &&
