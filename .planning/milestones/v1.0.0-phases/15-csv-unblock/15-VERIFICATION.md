@@ -144,7 +144,7 @@ None. Code review of all key files reveals:
 
 #### 1. Wizard happy path
 
-**Test:** Login as strategy-manager (`matratzentester24@gmail.com` / `Test12`) → navigate to `/strategies/new/wizard?source=csv` → type strategy name → pick format → upload valid 5-row CSV → click "Validate and continue" → verify Preview step renders metadata with typed name → click "Submit strategy" → verify Submit step renders summary → click final "Submit strategy" → verify redirect to `/strategies/[id]?wizard_submitted=1`
+**Test:** Login as strategy-manager (`<pair-A-login: redacted 2026-11-25, Phase 241>` / `<pair-A-password: redacted 2026-11-25, Phase 241>`) → navigate to `/strategies/new/wizard?source=csv` → type strategy name → pick format → upload valid 5-row CSV → click "Validate and continue" → verify Preview step renders metadata with typed name → click "Submit strategy" → verify Submit step renders summary → click final "Submit strategy" → verify redirect to `/strategies/[id]?wizard_submitted=1`
 **Expected:** Three-step CSV branch renders, user-typed strategy name displayed in Preview metadata + Submit summary + factsheet H1; TrustTierLabel renders 'CSV uploaded — verification pending' on factsheet
 **Why human:** Visual UX (3-column stepper, drag-drop zone, segmented format control), real-time form behavior (char counter, disabled CTA states), and end-to-end network flow with the analytics-service running require live browser verification
 

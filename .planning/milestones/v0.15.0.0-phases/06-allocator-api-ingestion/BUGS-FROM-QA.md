@@ -315,7 +315,7 @@ Exact column names depend on the `allocator_holdings` row shape — may need joi
 
 - `npm run dev` binds :3000; **if you see `address already in use`**, it's likely a stale Next from a previous session — `lsof -iTCP:3000 -sTCP:LISTEN -Fp | cut -c2- | xargs -r kill`.
 - `npm run worker:dev` binds :8080; same kill-stale pattern. After ISSUE-001 fix, `curl :8080/healthz` returns `{"status":"ok"}` within a few seconds of startup — if it stays `"stale"` you've got a zombie.
-- Test creds: `security find-generic-password -s quantalyze-test -a demo-allocator@quantalyze.test -w`.
+- Test creds: `security find-generic-password -s quantalyze-test -a <pair-B-login: redacted 2026-11-25, Phase 241> -w`.
 - Prod Supabase: project id `khslejtfbuezsmvmtsdn`. Use Supabase MCP `execute_sql` for forced-state checks.
 - Next's `.env.local` points at prod Railway analytics — `curl https://quantalyze-analytics-production.up.railway.app/api/encrypt-key -H "X-Service-Key: $ANALYTICS_SERVICE_KEY" …` reproduces any schema-contract issue directly.
 - `api_key_id = d5cd3afb-a500-404e-9a39-dc7916ec8bb8` (label "OKX Read-key (/qa)") is the test row from this session, currently `idle`. Real holdings in `allocator_holdings`.

@@ -743,6 +743,7 @@ Plans:
 - **Seed and drain coupling.** The coupling to those accounts is retired or redirected, decided explicitly in the plan.
 
 Removing the text alone does not close the item, and history is not rewritten. The literals are never quoted in a CHANGELOG, PR body or TODOS entry. The phase is in v1.22 by founder exception (F-10); the rest of the security tier is v1.23.
+⛔ **CORRECTED 2026-11-24 (founder ruling, deviation policy; also in `241-CONTEXT.md`): SC-1 is narrowed.** PROD measurement disproved the premise that both accounts are unused. The shared e2e login (pair A) holds the admin role, owns 1 of PROD's 2 published strategies and has a key that syncs daily. Ruling: keep pair A, and the founder resets its password himself, so the leaked credential is dead and scrubbed from the tree while the account stays. The seed allocator (pair B) is deleted on TEST (done 2026-11-24) and on PROD as originally planned. The SC-1 text below is kept as lineage.
 **Requirements**: SECR-01, SECR-02
 **Depends on:** nothing; it shares no seam. By tier order it follows the user-facing phases, and the founder may pull it forward.
 **Success Criteria** (what must be TRUE):
@@ -750,10 +751,18 @@ Removing the text alone does not close the item, and history is not rewritten. T
 2. No tracked file contains either demo password literal. The absence guard checks a digest, not the literal, and goes RED when a matching literal is planted in a byte copy. (SECR-02)
 3. The seed and drain paths that used the accounts are retired or redirected as the plan decides, and the suites that read them run green without the accounts.
 4. PROOF-01: the absence guard and any changed seed pin go RED on a neutered copy with the named arm first. Each is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY without quoting a literal.
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 241-01-PLAN.md — Records scrub: the 12 archived planning files lose every demo login and password literal, placeholders by role (SECR-02; ships first as a records PR)
+- [x] 241-03-PLAN.md — Pair B's delete chain and admin-API delete rehearsed on the local-stack lane, abort arms and PROOF-01 (SECR-01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 241-02-PLAN.md — The whole-tree digest guard in `npm run lint`, the e2e test without literals, and PROOF-01 for every guard arm (SECR-02, PROOF-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 241-04-PLAN.md — Pair B deleted on PROD behind the founder's go, TEST absence re-verified, Pair A kept, closed TODOS entry deleted (SECR-01)
 
 ### Phase 250: BINANCEFILLS — a Binance fills read walks every window and never stalls its cursor
 
@@ -798,7 +807,7 @@ Plans:
 | 238. NEVERCOMPUTED | 0/? | Not started | - |
 | 239. SURFACECACHE | 3/3 | Complete (shipped v0.133.72.0, #1332) | 2026-11-24 |
 | 240. CONNECTTRUTH | 8/8 | Complete (shipped v0.133.74.0, #1334) | 2026-11-25 |
-| 241. DEMOCREDS | 0/? | Not started | - |
+| 241. DEMOCREDS | 4/4 | Verified human_needed (Pair A reset is the founder's); code PR pending | - |
 | 250. BINANCEFILLS | 0/? | Not started | - |
 
 ## 📋 v1.23 HARDEN — security, alerting, tooling (planned; starts after TRUTH closes)

@@ -1026,8 +1026,8 @@ test.describe("Authenticated flows", () => {
   test.beforeEach(async ({ page }) => {
     // Login with test account
     await page.goto("/login");
-    await page.fill('input[name="email"], input[placeholder*="email" i]', "matratzentester24@gmail.com");
-    await page.fill('input[type="password"]', "Test12");
+    await page.fill('input[name="email"], input[placeholder*="email" i]', "<pair-A-login: redacted 2026-11-25, Phase 241>");
+    await page.fill('input[type="password"]', "<pair-A-password: redacted 2026-11-25, Phase 241>");
     await page.click('button:has-text("Sign in")');
     // Wait for redirect to discovery
     await page.waitForURL(/\/(discovery|strategies)/, { timeout: 10000 });
@@ -1069,7 +1069,7 @@ await page.route("**/api/keys/validate-and-encrypt", async (route) => {
 - The `page.route("**/api/keys/validate-and-encrypt", …)` interceptor pattern (Pitfall 5 mandate)
 
 **What to vary:**
-- Use seeded test credentials from helpers (NOT `matratzentester24@gmail.com` — that's the dev/staging account, not deterministic test data)
+- Use seeded test credentials from helpers (NOT `<pair-A-login: redacted 2026-11-25, Phase 241>` — that's the dev/staging account, not deterministic test data)
 - Walk a 5-step funnel sequence per CONTEXT D-15: signup → API key add → Performance tab populated → Scenario open + holding toggle → Bridge add + commit → outcome recorded
 - Assert all 5 PostHog events fired by polling a test-mode capture endpoint (CONTEXT D-15 + RESEARCH §Validation table line 1037)
 - Total spec timeout: <60s (RESEARCH §Validation Architecture)

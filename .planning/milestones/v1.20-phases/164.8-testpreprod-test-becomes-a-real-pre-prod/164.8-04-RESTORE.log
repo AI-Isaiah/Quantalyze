@@ -171,7 +171,7 @@ not assumed:
   * .env.local (repo root) likewise carries no Postgres DSN of any kind.
   * ~/.pgpass — does not exist.  ~/.pg_service.conf — does not exist.
   * macOS Keychain service `quantalyze-test` is an ACCOUNT, not a DSN:
-      acct = demo-allocator@quantalyze.test  (a login for e2e, created 2026-04-10)
+      acct = <pair-B-login: redacted 2026-11-25, Phase 241>  (a login for e2e, created 2026-04-10)
   * The credential exists ONLY as a GitHub repository secret, write-only from outside CI:
       gh secret list --repo AI-Isaiah/Quantalyze
       -> TEST_SUPABASE_DB_URL   2026-05-13T10:46:38Z

@@ -107,7 +107,7 @@ Force each sync_status state via Supabase `execute_sql` UPDATE and visually comp
 
 ### 2. SC1 end-to-end — fresh allocator sees holdings populate — **PASS**
 
-Ran with real OKX read-only key (passphrase `Test((!)12`) as `demo-allocator@quantalyze.test`. Add → Syncing → Synced in 41s. 3 holdings rows in `allocator_holdings` (types `{derivative, spot}`, symbols `{BTC, ETHUSDT, USDT}`). api_key_id = `d5cd3afb-a500-404e-9a39-dc7916ec8bb8` (left in idle after /qa; real holdings retained).
+Ran with real OKX read-only key (passphrase `Test((!)12`) as `<pair-B-login: redacted 2026-11-25, Phase 241>`. Add → Syncing → Synced in 41s. 3 holdings rows in `allocator_holdings` (types `{derivative, spot}`, symbols `{BTC, ETHUSDT, USDT}`). api_key_id = `d5cd3afb-a500-404e-9a39-dc7916ec8bb8` (left in idle after /qa; real holdings retained).
 
 <details><summary>Original SC1 instructions (kept for future reruns)</summary>
 
