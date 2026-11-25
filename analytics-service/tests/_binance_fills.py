@@ -47,7 +47,7 @@ from __future__ import annotations
 import copy
 import functools
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -159,6 +159,8 @@ class BinanceFillsVenue:
     - ``exclusive_end``: ``endTime`` excluded from the window (default inclusive).
     - ``ignore_end_for``: venue ids that are served ``[startTime, now]`` regardless of
       ``endTime`` and the window rule (a venue that ignores ``endTime``).
+    - ``effects``: a mutable dict from venue id to an exception raised on EVERY request for
+      that id (set and cleared by a test between runs); Phase 250 plan 05.
     """
 
     def __init__(
@@ -182,6 +184,7 @@ class BinanceFillsVenue:
         self.exclusive_end = exclusive_end
         self.ignore_end_for = ignore_end_for
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.effects: dict[str, BaseException] = {}
 
     def calls_for(self, kind: str) -> list[dict[str, Any]]:
         """The requests the ``kind`` endpoint received, oldest first."""
@@ -199,6 +202,8 @@ class BinanceFillsVenue:
     def _serve(self, kind: str, request: dict[str, Any]) -> list[dict[str, Any]]:
         self.calls.append((kind, dict(request)))
         venue_id = request["symbol"]
+        if venue_id in self.effects:
+            raise self.effects[venue_id]
         window = DAY_MS if kind == "spot" else WEEK_MS
         start = request.get("startTime")
         end = request.get("endTime")
@@ -242,25 +247,55 @@ class BinanceFillsVenue:
         return [copy.deepcopy(r) for r in picked[:limit]]
 
 
-async def real_binance(venue: BinanceFillsVenue, *, now_ms: int = NOW_MS) -> Any:
+async def real_binance(
+    venue: BinanceFillsVenue,
+    *,
+    now_ms: int = NOW_MS,
+    markets_loaded: bool = True,
+    market_order: Sequence[str] | None = None,
+) -> Any:
     """A real ``ccxt.async_support.binance`` on the recorded markets whose three fills
     endpoints are the venue's. ``await`` it; ``await ex.close()`` after use.
 
-    ``load_markets()`` is awaited once here (no network: the markets are already set).
-    Measured in ccxt 4.5.89 ``async_support/base/exchange.py``: the first
+    By default ``load_markets()`` is awaited once here (no network: the markets are already
+    set). Measured in ccxt 4.5.89 ``async_support/base/exchange.py``: the first
     ``load_markets()`` on an instance wraps its loader in a new Task and awaits it, a
     hidden suspension that would let another symbol's task run between a deadline check
     and its request. After the pre-warm the request path suspends only where the venue
     fake says so.
+
+    Additive switches (Phase 250 plan 05, defaults keep every earlier arm unchanged):
+    - ``markets_loaded=False``: the instance is returned as ``create_exchange`` returns it, with
+      ``markets`` None, so the REAL ``load_markets()`` runs lazily. Its ``fetch_markets`` is
+      replaced by a coroutine returning the recorded list and ``fetch_currencies`` by one
+      returning an empty dict (the real one needs credentials), so it still never touches the
+      network and no suspension is added beyond ccxt's own.
+    - ``market_order`` (with ``markets_loaded=True``): unified symbols (``BTC/USDT:USDT``) that
+      come FIRST, in the order given, in the iteration order of ``ex.markets``; the rest follow in
+      the order ccxt left them. ccxt's own ``set_markets`` key-sorts ``markets`` by symbol, so a
+      spot market (``BTC/USDT``) always precedes the swap sharing its stripped name
+      (``BTC/USDT:USDT``) and a last-write-wins map is right by iteration order alone; this
+      switch re-indexes ``ex.markets`` AFTER ``set_markets`` to put the spot market last, the
+      order the precedence rule must survive.
     """
     ex = ccxt_async.binance({"enableRateLimit": False})
-    ex.set_markets(recorded_markets())
+    markets = recorded_markets()
     ex.milliseconds = lambda: now_ms
     ex.fetch = AsyncMock(side_effect=AssertionError("a test reached the network through ccxt"))
     ex.fapiPrivateGetUserTrades = AsyncMock(side_effect=venue.fapi)
     ex.dapiPrivateGetUserTrades = AsyncMock(side_effect=venue.dapi)
     ex.privateGetMyTrades = AsyncMock(side_effect=venue.spot)
-    await ex.load_markets()
+    if markets_loaded:
+        ex.set_markets(markets)
+        await ex.load_markets()
+        if market_order:
+            assert set(market_order) <= set(ex.markets), set(market_order) - set(ex.markets)
+            first = list(market_order)
+            ordered = first + [sym for sym in ex.markets if sym not in first]
+            ex.markets = {sym: ex.markets[sym] for sym in ordered}
+    else:
+        ex.fetch_markets = AsyncMock(return_value=markets)
+        ex.fetch_currencies = AsyncMock(return_value={})
     return ex
 
 

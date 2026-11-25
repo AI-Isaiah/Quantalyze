@@ -727,6 +727,11 @@ class _BinanceSymbolRead(NamedTuple):
     advanced_plus1: bool
 
 
+def _binance_market_is_spot(market: Any) -> bool:
+    """True when a ccxt market dict says ``spot`` is True (anything else is non-spot)."""
+    return isinstance(market, dict) and market.get("spot") is True
+
+
 def _binance_fills_window_ms(exchange: ccxt.Exchange, ccxt_symbol: str) -> int:
     """The venue window for ``ccxt_symbol``: 24 hours when the resolved market is spot, else
     7 days (linear, inverse, and an unloaded or unresolved market)."""
@@ -2649,14 +2654,35 @@ async def _fetch_raw_trades_binance(
     # Build {normalized_symbol: ccxt_symbol} once. Per-symbol scans of
     # exchange.markets (~1500 entries on Binance) inside _fetch_one were
     # O(N_symbols × M_markets) per sync.
+    #
+    # Phase 250 BINANCEFILLS (SC-2, T-250-12): markets are loaded FIRST when they are not.
+    # The nightly reconcile and the onboarding read hand this function an exchange straight
+    # from ``create_exchange`` (markets None), so the map was empty, a stored ``BTCUSDT`` went to
+    # ccxt raw and ccxt routed it to the SPOT endpoint. Awaiting ``load_markets()`` here is
+    # what ccxt's own first ``fetch_my_trades`` does; an exception from it propagates, as that
+    # one would. A test double that sets ``markets = {}`` on an AsyncMock returns from the
+    # awaited mock and leaves the map empty, so the HEAD passthrough applies.
+    if not getattr(exchange, "markets", None):
+        await exchange.load_markets()
     ccxt_symbol_by_normalized: dict[str, str] = {}
     if hasattr(exchange, "markets") and exchange.markets:
-        for mkt_symbol in exchange.markets:
+        for mkt_symbol, mkt in exchange.markets.items():
+            # Same strip as ``normalize_symbol``'s CCXT branch.
             normalized = (
                 mkt_symbol.replace("/", "")
                 .replace(":USDT", "")
                 .replace(":USD", "")
             )
+            # RESEARCH Q1 measured 451 stripped-name collisions on the live metadata, every
+            # one a linear swap against a spot market (``BTC/USDT`` and ``BTC/USDT:USDT`` both
+            # strip to ``BTCUSDT``). A spot market never replaces an entry already mapped to a
+            # non-spot one, so the derivative wins by rule and not by iteration order; every
+            # other write is last-write-wins, as at HEAD.
+            existing = ccxt_symbol_by_normalized.get(normalized)
+            if existing is not None and _binance_market_is_spot(mkt):
+                existing_mkt = exchange.markets.get(existing)
+                if not _binance_market_is_spot(existing_mkt):
+                    continue
             ccxt_symbol_by_normalized[normalized] = mkt_symbol
 
     # Phase 250 BINANCEFILLS: ONE clock read per read, shared by every symbol (the module

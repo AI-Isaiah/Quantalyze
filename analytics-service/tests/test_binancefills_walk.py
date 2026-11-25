@@ -51,12 +51,14 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import ccxt
 import pytest
 import pytest_asyncio
 
 import services.exchange as ex
 from tests._binance_fills import (
     NOW_MS,
+    recorded_markets,
     BinanceFillsVenue,
     real_binance,
     symbols_supabase,
@@ -92,14 +94,27 @@ async def _read(
     venue: BinanceFillsVenue,
     symbols: list[str],
     since_ms: int | None,
+    **exchange_switches: Any,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """The REAL `fetch_raw_trades` on a venue-faked real ccxt.binance, then the drained flags."""
-    exchange = await real_binance(venue)
+    """The REAL `fetch_raw_trades` on a venue-faked real ccxt.binance, then the drained flags.
+    `exchange_switches` are `real_binance`'s additive keywords (`markets_loaded`, `market_order`)."""
+    exchange = await real_binance(venue, **exchange_switches)
     open_exchanges.append(exchange)
     fills = await ex.fetch_raw_trades(
         exchange, STRATEGY_ID, symbols_supabase(symbols), since_ms=since_ms
     )
     return fills, ex.get_and_clear_last_dq_flags()
+
+
+def _strip(unified_symbol: str) -> str:
+    """The stored-name strip `normalize_symbol` applies to a ccxt unified symbol."""
+    return unified_symbol.replace("/", "").replace(":USDT", "").replace(":USD", "")
+
+
+# The dated future's stored name, derived from the cassette with the same strip.
+_DATED_FUTURE_STRIP = next(
+    _strip(m["symbol"]) for m in recorded_markets() if m["type"] == "future"
+)
 
 
 def _ids(fills: list[dict[str, Any]], symbol: str | None = None) -> set[str]:
@@ -391,6 +406,12 @@ class TestBinanceFillsSymbols:
           test_an_unlisted_symbol_is_named_and_not_held goes RED.
       N8b compare `len(failed_symbols)` alone in the total-failure raise:
           test_every_symbol_unlisted_still_raises goes RED.
+      N14 remove the `load_markets()` call before the reverse map:
+          test_unloaded_markets_are_loaded_before_the_map goes RED.
+      N15 remove the spot precedence in the map build (last write wins):
+          test_a_strip_collision_resolves_to_the_derivative_whatever_the_order goes RED.
+      N23 widen the unlisted branch from `ccxt.BadSymbol` to every exception:
+          test_a_transient_failure_keeps_the_hold goes RED.
     """
 
     async def test_an_unlisted_symbol_is_named_and_not_held(
@@ -435,3 +456,109 @@ class TestBinanceFillsSymbols:
 
         assert set(excinfo.value.failed_symbols) == {"DELISTEDUSDT", "GONEUSDT"}
         ex.get_and_clear_last_dq_flags()
+
+    async def test_a_transient_failure_keeps_the_hold(
+        self, open_exchanges: list[Any]
+    ) -> None:
+        """T-250-09: only a BadSymbol skips without a hold. ETHUSDT is LISTED but its venue
+        requests raise `ccxt.NetworkError`, so it stays in the HOLDING `binance_partial_symbols`
+        (the cursor gate re-reads its span on the next clean run), never in the non-holding
+        unlisted flag. The healthy BTCUSDT fills are still returned."""
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [venue_fill("linear", "BTCUSDT", 1, NOW_MS - 3 * DAY_MS)],
+                ("linear", "ETHUSDT"): [venue_fill("linear", "ETHUSDT", 2, NOW_MS - 3 * DAY_MS)],
+            }
+        )
+        venue.effects["ETHUSDT"] = ccxt.NetworkError("simulated venue fault")
+
+        fills, flags = await _read(
+            open_exchanges, venue, ["BTCUSDT", "ETHUSDT"], NOW_MS - 5 * DAY_MS
+        )
+
+        assert flags.get("binance_partial_symbols") == ["ETHUSDT"]
+        assert "binance_unlisted_symbols" not in flags
+        assert _ids(fills) == {"1"}
+
+    async def test_unloaded_markets_are_loaded_before_the_map(
+        self, open_exchanges: list[Any]
+    ) -> None:
+        """SC-2 map (T-250-12): the reconcile and the onboarding read hand the walk an exchange
+        whose markets are NOT loaded. The reverse map was then empty, a stored `BTCUSDT` went to
+        ccxt raw and ccxt routed it to SPOT: the 7-day window was refused by the 24-hour spot rule
+        and 0 fills were read. With markets loaded first the stored name maps to
+        `BTC/USDT:USDT`, so the linear endpoint answers, the fill is returned and the spot
+        endpoint is never asked."""
+        venue = BinanceFillsVenue(
+            {("linear", "BTCUSDT"): [venue_fill("linear", "BTCUSDT", 1, NOW_MS - 3 * DAY_MS)]}
+        )
+
+        fills, flags = await _read(
+            open_exchanges, venue, ["BTCUSDT"], NOW_MS - 5 * DAY_MS, markets_loaded=False
+        )
+
+        assert _ids(fills) == {"1"}
+        assert len(venue.calls_for("linear")) >= 1
+        assert venue.calls_for("spot") == [], "a stored linear name was read from the spot endpoint"
+        assert "binance_partial_symbols" not in flags
+
+    @pytest.mark.parametrize(
+        "market_order",
+        [
+            pytest.param(None, id="recorded-order"),
+            pytest.param(["BTC/USDT:USDT", "BTC/USDT"], id="spot-listed-after-linear"),
+        ],
+    )
+    async def test_a_strip_collision_resolves_to_the_derivative_whatever_the_order(
+        self, open_exchanges: list[Any], market_order: list[str] | None
+    ) -> None:
+        """SC-2 map (T-250-12; RESEARCH Q1 measured 451 collisions on the live metadata, every
+        one a linear swap against a spot market): spot `BTC/USDT` and swap `BTC/USDT:USDT`
+        both strip to the stored name `BTCUSDT`. A last-write-wins map resolved it by which one
+        the venue listed last. The derivative wins by rule, so stored BTCUSDT reads the linear
+        endpoint whatever the order."""
+        venue = BinanceFillsVenue(
+            {("linear", "BTCUSDT"): [venue_fill("linear", "BTCUSDT", 1, NOW_MS - 3 * DAY_MS)]}
+        )
+
+        fills, flags = await _read(
+            open_exchanges,
+            venue,
+            ["BTCUSDT"],
+            NOW_MS - 5 * DAY_MS,
+            market_order=market_order,
+        )
+
+        assert _ids(fills) == {"1"}
+        assert venue.calls_for("spot") == [], "the spot market replaced the derivative"
+        assert "binance_partial_symbols" not in flags
+
+    @pytest.mark.parametrize(
+        ("stored", "kind", "venue_id"),
+        [
+            pytest.param("BTCUSDCC", "linear", "BTCUSDC", id="usdc-margined-linear"),
+            pytest.param("BTCUSD:BTC", "inverse", "BTCUSD_PERP", id="coin-margined-inverse"),
+            pytest.param(_DATED_FUTURE_STRIP, "linear", "BTCUSDT_261225", id="dated-future"),
+            pytest.param("BTCUSDC", "spot", "BTCUSDC", id="spot-usdc"),
+            pytest.param("ETHBTC", "spot", "ETHBTC", id="spot-only"),
+        ],
+    )
+    async def test_each_stored_shape_resolves_to_its_endpoint(
+        self, open_exchanges: list[Any], stored: str, kind: str, venue_id: str
+    ) -> None:
+        """SC-2 map (RESEARCH Q1 stored-shape table): every shape `normalize_symbol` stores
+        resolves through the loaded markets to its own endpoint, and only that endpoint is asked.
+        The dated future's stored form is derived from the cassette with the same strip
+        expression `normalize_symbol` uses. A spot name is read in 24-hour windows."""
+        venue = BinanceFillsVenue(
+            {(kind, venue_id): [venue_fill(kind, venue_id, 7, NOW_MS - 3 * HOUR_MS)]}
+        )
+
+        fills, flags = await _read(open_exchanges, venue, [stored], NOW_MS - 2 * DAY_MS)
+
+        assert _ids(fills) == {"7"}
+        assert len(venue.calls_for(kind)) >= 1
+        for other in {"linear", "inverse", "spot"} - {kind}:
+            assert venue.calls_for(other) == [], (stored, other)
+        assert "binance_partial_symbols" not in flags
+        assert "binance_unlisted_symbols" not in flags

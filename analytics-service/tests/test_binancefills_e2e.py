@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import ccxt
 import pytest
 
 import services.exchange as ex
@@ -55,6 +56,8 @@ C_PLUS_2D_MS = 1792756800000  # 2026-10-23T12:00:00Z
 C_PLUS_2D_ISO = "2026-10-23T12:00:00+00:00"
 NOW_MINUS_5D_MS = 1794744000000  # 2026-11-15T12:00:00Z
 NOW_MINUS_5D_ISO = "2026-11-15T12:00:00+00:00"
+NOW_MINUS_3D_MS = 1794916800000  # 2026-11-17T12:00:00Z
+NOW_MINUS_3D_ISO = "2026-11-17T12:00:00+00:00"
 NOW_MINUS_120D_MS = 1784808000000  # 2026-07-23T12:00:00Z (older than the 85-day reach)
 NOW_MINUS_120D_ISO = "2026-07-23T12:00:00+00:00"
 NOW_MINUS_60D_MS = 1789992000000  # 2026-09-21T12:00:00Z
@@ -270,3 +273,61 @@ class TestBinanceFillsThroughTheSyncJob:
         flags = rec.analytics_upserts[-1]["data_quality_flags"]
         assert flags.get("binance_unlisted_symbols") == ["DELISTEDUSDT"]
         assert "binance_partial_symbols" not in flags
+
+    async def test_a_transient_symbol_is_reread_on_the_next_clean_run(self) -> None:
+        """SC-2 transient (T-250-09): only a BadSymbol skips without a hold. ETHUSDT's venue
+        requests raise `ccxt.NetworkError` on run 1, so run 1 holds the cursor (stamp None) and
+        names ETHUSDT in the HOLDING `binance_partial_symbols`. With the fault cleared, run 2
+        reads ETHUSDT from the cursor C and stores BOTH its fills (the one at C + 2 days sits
+        inside the span run 1 could not read), then stamps the newest fill (BTCUSDT's, 3 days before now). No fill of the
+        transient symbol is skipped.
+
+        Run 2's stored fills are run 1's persisted fills plus the stored fill at C, and the
+        column is still C (run 1 held it)."""
+        venue = BinanceFillsVenue(
+            {
+                ("linear", "BTCUSDT"): [venue_fill("linear", "BTCUSDT", 1, NOW_MINUS_3D_MS)],
+                ("linear", "ETHUSDT"): [
+                    venue_fill("linear", "ETHUSDT", 11, C_PLUS_2D_MS),
+                    venue_fill("linear", "ETHUSDT", 12, NOW_MINUS_5D_MS),
+                ],
+            }
+        )
+        venue.effects["ETHUSDT"] = ccxt.NetworkError("simulated venue fault")
+        shared_flags: dict[str, Any] = {}
+
+        rec1, fetch1 = await _run_live(
+            venue,
+            column=C_ISO,
+            stored_fills=[C_ISO],
+            symbols=["BTCUSDT", "ETHUSDT"],
+            flags=shared_flags,
+        )
+
+        assert _the_advance(rec1)["p_last_fetched_ts"] is None, "a transient failure holds"
+        flags1 = rec1.analytics_upserts[-1]["data_quality_flags"]
+        assert flags1.get("binance_partial_symbols") == ["ETHUSDT"]
+        assert "binance_unlisted_symbols" not in flags1
+        persisted1 = [f["timestamp"] for batch in rec1.upserted_batches for f in batch]
+        assert persisted1, "the healthy symbol's fill still persists"
+
+        venue.effects.clear()
+        rec2, fetch2 = await _run_live(
+            venue,
+            column=C_ISO,
+            stored_fills=[C_ISO, *persisted1],
+            symbols=["BTCUSDT", "ETHUSDT"],
+            flags=shared_flags,
+        )
+
+        assert fetch2.await_args is not None
+        assert fetch2.await_args.kwargs["since_ms"] == C_MS
+        persisted2 = {
+            str(f["exchange_fill_id"]) for batch in rec2.upserted_batches for f in batch
+        }
+        assert {"11", "12"} <= persisted2, persisted2
+        assert _the_advance(rec2)["p_last_fetched_ts"] == NOW_MINUS_3D_ISO
+        # A clean run with nothing to name writes no flags at all; if it does write, the
+        # holding flag must not be re-recorded.
+        for upsert in rec2.analytics_upserts:
+            assert "binance_partial_symbols" not in upsert["data_quality_flags"]
