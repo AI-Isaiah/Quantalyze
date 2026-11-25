@@ -191,14 +191,16 @@ describe("SEC-005: api_keys column projection", () => {
     ]);
   });
 
-  // Phase 225 plan 01 (CONN-03, founder ruling Q2). Migration 20261123180000 adds
-  // api_keys.venue_server and grants it to nobody: the broker server is plaintext
-  // but the browser never reads it. A projection that named it would be a 42501 on
-  // every key read, so the allowlist must not carry it. The grant side is pinned in
-  // the SQL gate (arm 6v-no-grant); this is the browser-side half.
-  it("does not project api_keys.venue_server (the browser never reads the broker server)", () => {
-    expect(API_KEY_USER_COLUMNS_ARR).not.toContain("venue_server");
-    expect(API_KEY_USER_COLUMNS.split(", ")).not.toContain("venue_server");
+  // Phase 225 plan 15 (CONN-03). Plan 01's migration 20261123180000 added
+  // api_keys.venue_server and granted it to nobody. Plan 13's migration
+  // 20261125132334 reversed that on purpose (founder 2026-11-25, "Owner-only
+  // read"): the account identity is server-aware (CONTEXT Q6), so the TS twin of
+  // account_identity_tokens reads the column, and the grant now exists. The
+  // allowlist must carry it: a missing entry silently merges two servers of one
+  // login into one account. The live grant is checked by sec-005-live-probe.
+  it("projects api_keys.venue_server (the owner reads it since plan 13's grant)", () => {
+    expect(API_KEY_USER_COLUMNS_ARR).toContain("venue_server");
+    expect(API_KEY_USER_COLUMNS.split(", ")).toContain("venue_server");
   });
 
   it("no source file uses .from(\"api_keys\").select(\"*\") or api_keys(*) embed", () => {

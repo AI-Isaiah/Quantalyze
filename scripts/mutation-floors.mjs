@@ -1391,7 +1391,8 @@
 // SQLSTATE 42P01): its RED-UNDER-SETUP applied the reset_stalled_compute_jobs.sql snapshot that plan 02's migration had moved; the setup now applies plan 02's chain and the rerun above is green. WAIVED_CEILING stays 0 - no waiver was added.
 // MERGED 2026-11-24: Phase 227 JOBLEDGER (85 -> 92 on its branch, +7 files) onto origin/main at 86 (Phase 225, +1 file): 86 + 7 = 93.
 // The CI `sql-mutation` FULL run on the PR head is the measurement of the merged corpus.
-export const FILES_FLOOR = 93;
+// RAISED 93 -> 94 2026-11-25 (Phase 225 plan 16, ONEACCOUNTONCE PR-2b-2): +1 NEW annotated gate file, test_commit_scenario_batch_venue_server_identity.sql (commit_scenario_batch groups an owner's keys by the canonical (exchange, login, server) identity, migration 20261125151936). MEASURED: `--parse-only` printed `coverage: files 94/121` and `No static defects`; the exit-2-by-design DIAGNOSTIC run of that file printed `arms: 12/12/0   (executed/annotated/waived)`, `biting: 12`, `lane-invocations: 12` with every arm `RED (identity ok)` and `No defects in the narrowed scope`. CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the run that compares it again. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 94;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3560,7 +3561,10 @@ export const FILES_FLOOR = 93;
 // RAISED 1020 -> 1021 2026-11-25 (Phase 225 plan 13, ONEACCOUNTONCE PR-2b-1): +1 twinned arm, 6v-owner-read, in test_api_keys_venue_identity_uniq.sql, a file that already counted toward FILES_FLOOR (the owner may read api_keys.venue_server through the column grant of migration 20261125132334). Arm 6v-no-grant keeps its id and its count; only its assertion and its twin changed (authenticated SELECT dropped from the false list, twin now GRANT UPDATE).
 // MEASURED: `--parse-only` printed `arms: 0/1021/0` and `coverage: files 93/120`; the exit-2-by-design DIAGNOSTIC run of that file printed `arms: 15/15/0   (executed/annotated/waived)`, `biting: 15`, `lane-invocations: 15` with every arm `RED (identity ok)` and `No defects in the narrowed scope`. CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the run that compares it again.
 // WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 1021;
+// RAISED 1021 -> 1033 2026-11-25 (Phase 225 plan 16, ONEACCOUNTONCE PR-2b-2): +12 twinned arms, one per clause of the shared server-aware identity rule, in the NEW file test_commit_scenario_batch_venue_server_identity.sql (FILES_FLOOR 93 -> 94, see its block above): two-servers-two-accounts, same-server-pair-one-account, null-joins-single-server, null-ambiguous-own-account, all-null-one-account, two-nulls-ambiguous, three-servers-plus-null, other-exchange-same-login, exchange-partitions-server-count, exchange-case, marker-links-ambiguous-key, marker-links-keyless-key.
+// MEASURED: `--parse-only` printed `arms: 0/1033/0` and `coverage: files 94/121`; the exit-2-by-design DIAGNOSTIC run of that file printed `arms: 12/12/0   (executed/annotated/waived)`, `biting: 12`, `lane-invocations: 12` with every arm `RED (identity ok)` and `No defects in the narrowed scope`. NOT MEASURED by a FULL local run, so 1033 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the run that compares it with a real biting count.
+// WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 1033;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

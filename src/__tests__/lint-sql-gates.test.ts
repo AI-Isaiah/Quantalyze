@@ -1180,7 +1180,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): 111 -> 112, the has-password gate file (test_auth_user_has_password.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 112 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): 112 -> 113, the swap_account_slot gate file (test_swap_account_slot.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 113 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): 112 -> 119, the seven phase gate files (migrations 20261124120000 to 20261124120600). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 119 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
-    expect(res.out).toMatch(/scanned 120 file/);
+    // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): 120 -> 121, the server-aware identity gate file (test_commit_scenario_batch_venue_server_identity.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 121 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
+    expect(res.out).toMatch(/scanned 121 file/);
     expect(res.status, res.out).toBe(0);
   });
 

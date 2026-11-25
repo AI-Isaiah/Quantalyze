@@ -240,6 +240,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // Founder ruling 2026-11-25 (Phase 225 CONTEXT Q6, "Delete keys without Server,
+  // dont accept keys without Server"), MT5 only: an MT5 key whose server does not
+  // normalise to a stored value (control-character-only, which JS `trim()` keeps
+  // and Python `strip()` removes, or over the 128 cap) is refused by name before
+  // any worker call or write. Bybit, Deribit and OKX keys have no server by design.
+  if (isMt5 && normaliseConnectedVenueServer(passphrase) === null) {
+    return NextResponse.json(
+      { code: "KEY_MT5_WRONG_SERVER", error: "MT5 broker server is invalid" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
   if (!exchange || !api_key || (!isSfox && !api_secret)) {
     return NextResponse.json({ code: "KEY_MISSING_REQUIRED_FIELD", error: "Missing required fields" }, { status: 400, headers: NO_STORE_HEADERS });
   }

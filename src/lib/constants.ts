@@ -207,6 +207,15 @@ export const API_KEY_USER_COLUMNS_ARR = [
   // columns, so no key list selects a column PROD lacks (42501 on every read).
   "history_reconstructed_at",
   "history_reconstruct_attempts",
+  // Migration 20261125132334 (Phase 225 plan 13, CONN-03, PR-2b-1) — GRANT SELECT
+  // (venue_server) ON api_keys TO authenticated, owner-only through the existing
+  // RLS (founder 2026-11-25, "Owner-only read"). The broker server is part of the
+  // account identity: one login on two set servers is two accounts, and the TS
+  // twin of account_identity_tokens (accountIdentityTokens) needs it (CONTEXT Q6).
+  // No INSERT or UPDATE is granted; the service-role writers stay the only writers.
+  // ⛔ Code PR only: PROD applied the GRANT before this list gained the column, so
+  // no key list selects a column PROD lacks (42501 on every read).
+  "venue_server",
 ] as const;
 
 /**
@@ -258,7 +267,7 @@ export const RECONSTRUCT_IN_FLIGHT_STATUSES = [
 
 /** PostgREST projection string derived from the allowlist tuple. */
 export const API_KEY_USER_COLUMNS = API_KEY_USER_COLUMNS_ARR.join(", ") as
-  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at, venue_account_id, account_shared_with_api_key_id, account_share_kind, history_inclusion, account_currency, account_balance_native, account_balance_usdt_close_date, history_reconstructed_at, history_reconstruct_attempts";
+  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at, venue_account_id, account_shared_with_api_key_id, account_share_kind, history_inclusion, account_currency, account_balance_native, account_balance_usdt_close_date, history_reconstructed_at, history_reconstruct_attempts, venue_server";
 
 /** Single api_keys column name as a narrow string literal union type. */
 export type ApiKeyUserColumn = (typeof API_KEY_USER_COLUMNS_ARR)[number];

@@ -9,6 +9,8 @@ import {
   cleanEmptyPollDay,
   fetchLatestHoldingsPerKey,
   HOLDINGS_ROW_CAP,
+  keyAccountOf,
+  KEY_IDENTITY_COLUMNS,
   latestHoldingsPerKey,
   NATIVE_UNPRICED_KIND_PREFIX,
   nativeUnpricedDay,
@@ -101,6 +103,7 @@ type KeyDb = {
   user_id: string;
   exchange?: string;
   venue_account_id?: string | null;
+  venue_server?: string | null;
   account_share_kind?: string | null;
   account_shared_with_api_key_id?: string | null;
 };
@@ -116,6 +119,9 @@ type AuditDb = {
   // reads this flattened copy, which `poll()` keeps equal to the metadata's.
   "metadata->>final_status": unknown;
 };
+
+/** Every select string the fake saw on `api_keys`, in call order. */
+const apiKeySelects: string[] = [];
 
 function fakeClient(
   keys: KeyDb[],
@@ -134,6 +140,7 @@ function fakeClient(
       const chain = {
         select(c: string) {
           select = c;
+          if (table === "api_keys") apiKeySelects.push(c);
           return chain;
         },
         eq(c: string, v: unknown) {
@@ -180,6 +187,13 @@ function fakeClient(
             );
           }
           if (limit !== null) rows = rows.slice(0, limit);
+          // PostgREST returns only the selected columns. Projecting the key
+          // rows makes a column dropped from the select observable: the
+          // reader then sees `undefined`, as it would against the database.
+          if (table === "api_keys") {
+            const cols = select.split(",").map((c) => c.trim());
+            rows = rows.map((r) => Object.fromEntries(cols.map((c) => [c, r[c]])));
+          }
           resolve({ data: rows, error: null });
         },
       };
@@ -216,7 +230,7 @@ const h = (api_key_id: string, asof: string, symbol: string): HoldingDb => ({
 });
 const COLS = "api_key_id, asof, symbol";
 const KEY_SELECT =
-  "id, exchange, venue_account_id, account_share_kind, account_shared_with_api_key_id";
+  "id, exchange, venue_account_id, venue_server, account_share_kind, account_shared_with_api_key_id";
 
 describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
   it("returns each key's rows at its own latest asof, from an ascending table", async () => {
@@ -836,6 +850,52 @@ describe("fetchLatestHoldingsPerKey: accountByKey (170.4 plan 11, D-10)", () => 
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
     expect(ids(res.data as Row[])).toEqual(["key-new:2026-09-29:ETH-PERP"]);
     expect(res.accountByKey).toEqual({ "key-new": "account:key-new" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 225 CONN-03 (CONTEXT Q6, plan 15). One login on two set servers is two
+// accounts. The identity input is only as good as the select that feeds it:
+// a mock that returns every column would pass with `venue_server` dropped from
+// the select, so the fake above projects api_keys rows to the selected columns.
+// ---------------------------------------------------------------------------
+describe("the account identity carries venue_server (225 CONN-03, CONTEXT Q6)", () => {
+  const mt5 = (id: string, venue_server: string | null) => ({
+    id,
+    user_id: "user-1",
+    exchange: "mt5",
+    venue_account_id: "L1",
+    venue_server,
+  });
+
+  it("keyAccountOf puts two servers of one login in two accounts and a no-server key beside them in its own key:<id>", () => {
+    const base = { exchange: "mt5", venue_account_id: "L1", account_share_kind: null, account_shared_with_api_key_id: null };
+    const of = keyAccountOf([
+      { id: "k-a", venue_server: "srv-a", ...base },
+      { id: "k-b", venue_server: "srv-b", ...base },
+      { id: "k-c", venue_server: null, ...base },
+    ]);
+    expect(of("k-a")).toBe("account:k-a");
+    expect(of("k-b")).toBe("account:k-b");
+    expect(of("k-c")).toBe("key:k-c");
+  });
+
+  it("fetchLatestHoldingsPerKey's api_keys select names venue_server", async () => {
+    apiKeySelects.length = 0;
+    await fetchLatestHoldingsPerKey(fakeClient([mt5("k-a", "srv-a")], []), "user-1", COLS);
+    expect(apiKeySelects).toHaveLength(1);
+    expect(apiKeySelects[0]).toBe(KEY_IDENTITY_COLUMNS);
+    expect(apiKeySelects[0].split(",").map((c) => c.trim())).toContain("venue_server");
+  });
+
+  it("a key read that projects rows to the selected columns still splits two servers of one login", async () => {
+    const client = fakeClient(
+      [mt5("k-a", "srv-a"), mt5("k-b", "srv-b")],
+      [h("k-a", "2026-10-11", "BTC"), h("k-b", "2026-10-11", "ETH")],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.error).toBeNull();
+    expect(res.accountByKey).toEqual({ "k-a": "account:k-a", "k-b": "account:k-b" });
   });
 });
 

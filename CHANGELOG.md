@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.133.79.0] - 2026-11-25 — Phase 225 ONEACCOUNTONCE PR-2b-2: one MT5 login on two broker servers is two accounts in every reader
+
+This is the gap-closure PR for review finding CR-01 on PR-3 (migration B). After migration B, one owner may hold the same MT5 login on two different broker servers. Before this PR every same-owner reader grouped keys by login alone, so that owner's allocator book would refuse with ACCOUNT_IDENTITY_COLLISION. This PR applies two founder rulings of 2026-11-25, both recorded in the phase CONTEXT Q6:
+
+- the same login on two servers is two accounts;
+- "Delete keys without Server, dont accept keys without Server" (MT5 only).
+
+It depends on #1343 (the owner-read grant on `api_keys.venue_server`), which is on PROD.
+
+### Changed
+- **Python identity (plan 14).** `account_identity_tokens` and the new `_login_identities` in `services/allocator_equity_derive.py` give each key one canonical identity:
+  - the exchange (case-folded), the trimmed login, and the key's own server, compared exactly as stored;
+  - a key with no server takes its login's only server, or `''` when the login has none.
+
+  Two set servers are never joined, and a key with no server cannot re-join them. The derive's `_load_keys` and the match scorer's `api_keys` select now read `venue_server`.
+- **TypeScript identity (plan 15).** `accountIdentityTokens` and `loginIdentities` in `src/lib/departed-history.ts` follow the same rule and replay the shared fixture `venue_server_identity.json`, all 17 cases in both row orders. `venue_server` is added to the key column roster (`API_KEY_USER_COLUMNS`), `KEY_IDENTITY_COLUMNS`, the strict `ApiKey` schema, `marksIncludedKeys`, `deriveKeyDataGapsField` and the allocator key-card state. The sec-005 projection test now asserts that the column is projected.
+- **SQL identity (plan 16).** Migration `20261125151936_commit_scenario_batch_venue_server_identity.sql` re-bases `commit_scenario_batch` on `20261027120000` and changes only its identity CTEs (`login_servers`, `key_identity`, `account_edges`, `known_account`). SECURITY DEFINER, the pinned search_path and the REVOKE/GRANT pair are re-issued verbatim. The self-verify reads only the catalogue. A manual rollback is in `down/`, and the function snapshot is regenerated.
+- **No MT5 key without a server (founder ruling).** Both TypeScript connect routes now refuse an MT5 key whose server normalises to nothing, with the existing 400 `KEY_MT5_WRONG_SERVER`, before any validate, encrypt or write. That covers a control-character-only server and one over 128 characters. Python's `parse_mt5_credentials` already refuses a blank server, and a test now pins it.
+- **The wizard names the cause.** `KEY_MT5_WRONG_SERVER` is admitted to the validate-and-encrypt roster and the create-with-key own-code roster. Without it, the dashboard key forms showed the generic error card with a Retry that could never succeed (round-2 review CR-R2-01/02).
+- **Fail-loud tripwire.** The derive keeps a named refusal, `ACCOUNT_SERVER_AMBIGUOUS` (`account_server_ambiguous`), for a key with no server on a login that has two or more servers. It runs before the collision check. Under the ruling this state is unreachable for new keys, and the code comments say so. The reader maps the token to `derivation_rejected` through its existing ELSE arm.
+
+### Removed
+- The TypeScript helper `ambiguousServerKeyIds` and the `ambiguous` set in `loginIdentities`. Neither had a production caller.
+
+### Tests
+- The shared fixture's `tokens` section holds 17 cases, replayed in both Python and TypeScript. The Python end-to-end derive test shows two servers composing with no collision, and two servers plus a key with no server refusing by name, live or disconnected. Three scorer tests cover the server.
+- The new gate `test_commit_scenario_batch_venue_server_identity.sql` has 12 arms, one per rule clause. Its exchange-case arm stores an upper-case `'MT5'` row, which `api_keys_exchange_check` forbids on the real schema. The arm therefore lifts that CHECK inside its own transaction and restores it before the block ends; on the pg-lane, which has no such CHECK, the lift does nothing. Every arm went RED with its own arm under its twin. The TypeScript fingerprint parity test reproduces every gate literal.
+- The 8 existing fingerprint twins in the `sameday_empty` and `unpriced` gates now edit the new migration and still bite: 6/6 and 2/2 (plan 17).
+- Census moves: `FILES_FLOOR` 93 -> 94 and `ARMS_FLOOR` 1021 -> 1033, with every census moved to match. `WAIVED_CEILING` stays 0.
+- Both connect routes refuse a control-character server and a 129-character server before any side effect.
+
+### Notes
+- **Reviews:**
+  - migration-reviewer and rls-policy-auditor: clean.
+  - gsd-code-reviewer round 1: WR-02 (stale twins) was already fixed by plan 17. WR-01 and the silent-failure MEDIUMs about a server-less key blocking a book were resolved by the founder ruling instead of by code.
+  - Round 2 reviewed the fixer commits.
+- **PROD before merge**, read-only with the marker naming PROD first:
+  - authenticated can read `venue_server` and anon cannot;
+  - 0 owner, exchange and login groups with two or more servers;
+  - 0 keys with no server inside such a group;
+  - the 155.2 freeze is open.
+- **Expected drift:** `baseline-content-drift` reports `commit_scenario_batch/5` until the re-dump after the PROD apply. It is not allowlisted.
+- **Still to do under the same ruling:** the one existing MT5 key with no server on PROD is deleted through the product path once the coordinator confirms the scope.
+
 ## [0.133.78.1] - 2026-11-25 — records: Phases 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM move from v1.22 TRUTH to v1.23 HARDEN
 
 This is a records PR. It has no source, test, workflow or migration change. It records the founder's ruling of 2026-11-25 in chat, verbatim: "We will Move 157 and 155.2 into the next milestone". The version is the next free patch above main's v0.133.78.0 (#1346, now merged). Open PR #1348 holds v0.133.79.0.

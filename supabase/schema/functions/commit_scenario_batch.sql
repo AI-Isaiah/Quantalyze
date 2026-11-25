@@ -2,9 +2,9 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql
+-- source migration: 20261125151936_commit_scenario_batch_venue_server_identity.sql
 -- --------------------------------------------------------------------------
--- STEP 1: re-install the 5-arg body with the same-day-empty arm in the recompute
+-- STEP 1: re-install the 5-arg body with the server-aware identity CTEs
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.commit_scenario_batch(
   p_allocator_id uuid,
@@ -178,9 +178,10 @@ BEGIN
   --      is that day with no rows (Phase 167.1.2.1.2 D-02, empty_day and
   --      same_day_empty below);
   --   3. keys grouped by exchange account (accountIdentityTokens, the D-09
-  --      identity: a shared non-blank venue_account_id on one exchange, or an
-  --      account_shared_with_api_key_id marker of a shared kind, joined
-  --      transitively). A key with neither is its own account. Only the keys
+  --      identity: a shared non-blank venue_account_id on one exchange AND one
+  --      broker server (Phase 225 CONN-03), or an account_shared_with_api_key_id
+  --      marker of a shared kind, joined transitively). A key with neither is its
+  --      own account. Only the keys
   --      whose reading is the account's newest, and have rows on it,
   --      contribute (SFH-C4-01);
   --   4. the contributing keys' rows at their reading day, one token per
@@ -218,19 +219,52 @@ BEGIN
       SELECT k.id,
              lower(btrim(k.exchange)) AS exchange_norm,
              NULLIF(btrim(k.venue_account_id), '') AS venue_norm,
+             NULLIF(k.venue_server, '') AS server_norm,
              k.account_share_kind,
              k.account_shared_with_api_key_id
         FROM api_keys k
        WHERE k.user_id = p_allocator_id
     ),
+    login_servers AS (
+      -- per exchange account id on one exchange: how many distinct set servers
+      -- its keys carry, and the smallest of them (the single one when the count
+      -- is one). Computed from owner_keys only, so it never sees another owner.
+      SELECT o.exchange_norm,
+             o.venue_norm,
+             count(DISTINCT o.server_norm) AS server_ct,
+             min(o.server_norm COLLATE "C") AS only_server
+        FROM owner_keys o
+       WHERE o.venue_norm IS NOT NULL
+       GROUP BY o.exchange_norm, o.venue_norm
+    ),
+    key_identity AS (
+      -- one canonical identity per key that carries a login, the same answer as
+      -- the Python account_identity_tokens and the TypeScript accountIdentityTokens.
+      -- NULL means the key is ambiguous (no server on a login that carries two or
+      -- more), and it then joins no account by identity.
+      SELECT k.id,
+             k.exchange_norm,
+             k.venue_norm,
+             CASE
+               WHEN k.server_norm IS NOT NULL THEN k.server_norm
+               WHEN l.server_ct = 0 THEN ''
+               WHEN l.server_ct >= 2 THEN NULL
+               ELSE l.only_server
+             END AS identity_server
+        FROM owner_keys k
+        JOIN login_servers l
+          ON l.exchange_norm = k.exchange_norm
+         AND l.venue_norm    = k.venue_norm
+    ),
     account_edges AS (
-      -- one exchange account id on one exchange
+      -- one exchange account id on one exchange, on one broker server
       SELECT a.id AS a, b.id AS b
-        FROM owner_keys a
-        JOIN owner_keys b
-          ON b.exchange_norm = a.exchange_norm
-         AND b.venue_norm    = a.venue_norm
-         AND b.id           <> a.id
+        FROM key_identity a
+        JOIN key_identity b
+          ON b.exchange_norm   = a.exchange_norm
+         AND b.venue_norm      = a.venue_norm
+         AND b.identity_server = a.identity_server
+         AND b.id             <> a.id
       UNION
       -- a shared-account marker naming another key of this owner, both ways
       SELECT m.id, m.account_shared_with_api_key_id
@@ -246,7 +280,7 @@ BEGIN
          AND m.account_shared_with_api_key_id IN (SELECT id FROM owner_keys)
     ),
     known_account AS (
-      SELECT id FROM owner_keys WHERE venue_norm IS NOT NULL
+      SELECT id FROM key_identity WHERE identity_server IS NOT NULL
       UNION
       SELECT a FROM account_edges
     ),

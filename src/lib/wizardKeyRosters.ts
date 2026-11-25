@@ -123,6 +123,7 @@ export const CREATE_WITH_KEY_OWN_CODES = [
   "KEY_NOT_READ_ONLY",
   "KEY_HAS_TRADING_PERMS",
   "KEY_HAS_WITHDRAW_PERMS",
+  "KEY_MT5_WRONG_SERVER",
 ] as const satisfies readonly WizardErrorCode[];
 
 /**

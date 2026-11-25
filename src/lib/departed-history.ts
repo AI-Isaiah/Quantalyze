@@ -25,6 +25,12 @@ export interface DepartedHistoryKey {
   id: string;
   exchange: string;
   venue_account_id: string | null;
+  /**
+   * Phase 225 CONN-03 (CONTEXT Q6): the broker server a key reads. Part of the
+   * account identity: one login on two set servers is two accounts. Absent or
+   * null means no server recorded.
+   */
+  venue_server?: string | null;
   account_shared_with_api_key_id?: string | null;
   account_share_kind?: string | null;
   is_active?: boolean;
@@ -111,12 +117,89 @@ function dayBefore(day: string): string {
 }
 
 /**
+ * Phase 225 CONN-03, CONTEXT Q6 (founder ruling 2026-11-25 and the marked agent
+ * decision): each key's login identity (null for an AMBIGUOUS key). One
+ * canonical identity per key, never a pairwise wildcard: union-find is
+ * transitive, so a key with no server unioned pairwise with servers a and b
+ * would merge a and b again.
+ *
+ * - login: `venue_account_id` trimmed; a blank or non-string login has no
+ *   identity.
+ * - server: `venue_server` when it is a non-empty string, else none. Read as
+ *   stored, never trimmed or case-folded (every writer already stores the
+ *   normalised form).
+ * - for each (exchange case-blind, login), S is the set of distinct servers
+ *   among `keys`. A key's canonical server is its own, else "" when S is empty,
+ *   else the single member when S has one, else NONE: the key is AMBIGUOUS and
+ *   its identity is null.
+ */
+function loginIdentities(keys: readonly DepartedHistoryKey[]): {
+  identities: Map<string, string | null>;
+} {
+  const servers = new Map<string, Set<string>>();
+  const parsed = new Map<string, { pair: string; own: string | null } | null>();
+  for (const key of keys) {
+    const venue = key.venue_account_id;
+    if (typeof venue !== "string" || venue.trim() === "") {
+      parsed.set(key.id, null);
+      continue;
+    }
+    const pair = `${key.exchange.trim().toLowerCase()}\u0000${venue.trim()}`;
+    const own =
+      typeof key.venue_server === "string" && key.venue_server !== ""
+        ? key.venue_server
+        : null;
+    parsed.set(key.id, { pair, own });
+    if (own !== null) {
+      const seen = servers.get(pair) ?? new Set<string>();
+      seen.add(own);
+      servers.set(pair, seen);
+    }
+  }
+  const identities = new Map<string, string | null>();
+  for (const [id, item] of parsed) {
+    if (item === null) {
+      identities.set(id, null);
+      continue;
+    }
+    const { pair, own } = item;
+    if (own !== null) {
+      identities.set(id, `${pair}\u0000${own}`);
+      continue;
+    }
+    const seen = servers.get(pair);
+    if (seen === undefined || seen.size === 0) {
+      identities.set(id, `${pair}\u0000`);
+    } else if (seen.size === 1) {
+      identities.set(id, `${pair}\u0000${[...seen][0]}`);
+    } else {
+      identities.set(id, null);
+    }
+  }
+  return { identities };
+}
+
+/**
+ * Each key's login identity `exchange\0login\0canonical server`, or null for a
+ * key with no login or an ambiguous one (CONTEXT Q6, `loginIdentities`).
+ * Twins: Python `_login_identities` and the SQL `commit_scenario_batch`; the
+ * `tokens` section of analytics-service/tests/fixtures/venue_server_identity.json
+ * pins all three. Pure.
+ */
+export function accountLoginIdentity(
+  keys: readonly DepartedHistoryKey[],
+): Map<string, string | null> {
+  return loginIdentities(keys).identities;
+}
+
+/**
  * One token per exchange account, or null when the account is unknown. Two
- * keys read one account when they share a non-blank (exchange, venue id) —
- * exchange compared case-blind — or when one is MARKED against the other. The
- * marker is the stamper's evidence: a marked key's own venue id stays null
- * because the holder already holds the account's index slot. Twin of
- * `account_identity_tokens`.
+ * keys read one account when they share a login identity (`accountLoginIdentity`:
+ * exchange case-blind, login, canonical server; one login on two set servers is
+ * TWO accounts) or when one is MARKED against the other. The marker is the
+ * stamper's evidence: a marked key's own venue id stays null because the holder
+ * already holds the account's index slot. The token is `account:<smallest id>`.
+ * Twin of Python `account_identity_tokens` and SQL `commit_scenario_batch`.
  */
 export function accountIdentityTokens(
   keys: readonly DepartedHistoryKey[],
@@ -143,13 +226,13 @@ export function accountIdentityTokens(
 
   const known = new Set<string>();
   const byVenue = new Map<string, string>();
+  const { identities } = loginIdentities(keys);
   for (const key of keys) {
-    const venue = key.venue_account_id;
-    if (typeof venue !== "string" || venue.trim() === "") continue;
-    const pair = `${key.exchange.trim().toLowerCase()}\u0000${venue.trim()}`;
+    const identity = identities.get(key.id) ?? null;
+    if (identity === null) continue;
     known.add(key.id);
-    const seen = byVenue.get(pair);
-    if (seen === undefined) byVenue.set(pair, key.id);
+    const seen = byVenue.get(identity);
+    if (seen === undefined) byVenue.set(identity, key.id);
     else union(seen, key.id);
   }
   for (const key of keys) {

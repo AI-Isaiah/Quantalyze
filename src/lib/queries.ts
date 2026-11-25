@@ -93,7 +93,12 @@ import { deriveSyncFreshness } from "@/lib/sync-freshness/types";
 import { safeFraction } from "./units";
 import { drainById } from "./drain-by-id";
 import { isDiscoveryVisible, withPublishedOnly } from "./visibility";
-import { departedHistoryInclusion, isDepartedKey, type DepartedHistoryKey } from "./departed-history";
+import {
+  accountLoginIdentity,
+  departedHistoryInclusion,
+  isDepartedKey,
+  type DepartedHistoryKey,
+} from "./departed-history";
 import { MARKS_SINCE_FLAG, MARKS_TRAILING_SINCE_FLAG, parseMarksStart } from "./nav-marks-start";
 import { OPTIONS_ACTIVITY_FLAG, OPTIONS_CASH_BASIS_FLAG, isOptionsCashBasis } from "./options-cash-basis-flag";
 import { TINY_BASE_DAYS_FLAG, readTinyBaseDays } from "@/lib/tiny-base-flag";
@@ -3675,8 +3680,11 @@ export function buildPerKeyReturnsByApiKeyId(
  * the one input the dashboard does not hold is a departed key's saved balance
  * (`anchored`), which the derive reports as `departed_history_unavailable`, the
  * flag the read below fails closed on.
+ *
+ * Exported so the server-aware identity (225 CONN-03: `venue_server` is read
+ * into every key below) can be tested without driving the whole dashboard.
  */
-function marksIncludedKeys(
+export function marksIncludedKeys(
   apiKeys: ReadonlyArray<ApiKeyUserView>,
   perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
   allocatorEligibleApiKeyIds: ReadonlyArray<string>,
@@ -3692,6 +3700,7 @@ function marksIncludedKeys(
       id: k.id,
       exchange: k.exchange,
       venue_account_id: k.venue_account_id ?? null,
+      venue_server: k.venue_server ?? null,
       account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
       account_share_kind: k.account_share_kind ?? null,
       is_active: k.is_active,
@@ -4389,6 +4398,10 @@ export type EquityHistoryKey = {
   sync_status: string | null;
   disconnected_at: string | null;
   venue_account_id: string | null;
+  // Phase 225 (CONN-03, CONTEXT Q6): the broker server is part of the account
+  // identity. Optional so a key list that predates the column compiles; absent
+  // reads as no server. getUserApiKeys projects it (API_KEY_USER_COLUMNS).
+  venue_server?: string | null;
   account_share_kind: string | null;
   account_shared_with_api_key_id: string | null;
   // Phase 167.1.2.1 (D-04, D-09): optional so a key list that predates the
@@ -4513,6 +4526,24 @@ export function deriveKeyDataGapsField(
     const last = latestSeriesDay(perKeyReturnsByApiKeyId[key.id]);
     if (last !== null) lastSeriesDayByKey[key.id] = last;
   }
+  // 225 CONN-03 (CONTEXT Q6): group by the same server-aware identity the derive
+  // and the key card use (exchange case-blind, login, canonical server), so a gap
+  // line never names a key on another server of the same login. It also carries
+  // the exchange, so two exchanges with an equal account id no longer group,
+  // which is correct.
+  const loginIdentity = accountLoginIdentity(
+    apiKeys.map((key) => ({
+      id: key.id,
+      exchange: key.exchange,
+      venue_account_id: key.venue_account_id,
+      venue_server: key.venue_server ?? null,
+      disconnected_at: key.disconnected_at,
+      sync_status: key.sync_status,
+      history_inclusion: null,
+      first_returns_day: null,
+      last_returns_day: null,
+    })),
+  );
   return computeKeyDataGaps({
     ownKeyIds: apiKeys.map((key) => key.id),
     reason: phase07.equityHistoryRebuildReason,
@@ -4520,7 +4551,7 @@ export function deriveKeyDataGapsField(
     identityPendingKeyIds: identityPendingKeyIds(apiKeys),
     keyAccounts: apiKeys.map((key) => ({
       id: key.id,
-      accountId: knownVenueAccountId(key.venue_account_id) ? key.venue_account_id : null,
+      accountId: loginIdentity.get(key.id) ?? null,
       shareKind: key.account_share_kind,
       failing: failingToSync(key),
     })),

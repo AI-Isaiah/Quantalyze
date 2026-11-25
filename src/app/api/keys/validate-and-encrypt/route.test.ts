@@ -1104,6 +1104,30 @@ describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (
     },
   );
 
+  it.each([
+    ["a control-character-only value (non-blank to JS trim, blank to Python strip)", "\u001f"],
+    ["over the 128-character cap", "s".repeat(129)],
+  ])(
+    "founder ruling 2026-11-25: rejects an MT5 key whose server is %s, with KEY_MT5_WRONG_SERVER BEFORE any worker call",
+    async (_label, passphrase) => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeReq({
+          exchange: "mt5",
+          api_key: "5001234",
+          api_secret: "investor-password-123",
+          passphrase,
+          persist: true,
+        }),
+      );
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("KEY_MT5_WRONG_SERVER");
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      expect(mockEncryptKey).not.toHaveBeenCalled();
+    },
+  );
+
   it("forwards all THREE mt5 slots to validateKey then encryptKey on the happy path", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq(MT5_BODY));
