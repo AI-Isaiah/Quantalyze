@@ -15,11 +15,14 @@
  * the key's newest `key_inputs` row. The gap is whole UTC days.
  *
  * PAGE: `freshness-stale` when the gap exceeds `FRESHNESS_BOUND_DAYS`, UNLESS
- *   (1) every day after the newest return through the reference day is one of
- *       the derive's own stated left-out days (`key_inputs.tiny_base_days`),
- *       checked DAY BY DAY. A reason that covers only some of the gap days
- *       does not count (FRESH-01's third member: the diagnosed account is a
- *       28-day gap, every day stated, and that is a named reason, not a defect), or
+ *   (1) every day after the newest return, up to but NOT including the last
+ *       `FRESHNESS_BOUND_DAYS` days before the reference day (that tail is the
+ *       healthy derive lag, which the bound absorbs and which needs no stated
+ *       reason), is one of the derive's own stated left-out days
+ *       (`key_inputs.tiny_base_days`), checked DAY BY DAY. A reason that covers
+ *       only some of those days does not count (FRESH-01's third member: the
+ *       diagnosed account is a 28-day gap, every day stated, and that is a
+ *       named reason, not a defect), or
  *   (2) the key carries a non-empty `anchor_null_reason` (the derive said, in
  *       its own words, that it could not anchor the series).
  * No other reason exists. This arm never invents one.
@@ -306,11 +309,12 @@ export function judgeFreshness(rows, log = () => {}, tally = {}) {
       count("fresh");
       continue;
     }
-    // Reason (1), DAY BY DAY: every day after the newest return through the
-    // reference day must be one the derive stated it left out.
+    // Reason (1), DAY BY DAY: every day after the newest return must be one the
+    // derive stated it left out, EXCEPT the last FRESHNESS_BOUND_DAYS days up to
+    // the reference day, which the bound already absorbs as the healthy lag.
     const stated = new Set(r.tinyDays);
     const uncovered = [];
-    for (let n = newest + 1; n <= ref; n += 1) {
+    for (let n = newest + 1; n <= ref - FRESHNESS_BOUND_DAYS; n += 1) {
       if (!stated.has(dayText(n))) uncovered.push(dayText(n));
     }
     if (uncovered.length === 0) {
@@ -323,7 +327,8 @@ export function judgeFreshness(rows, log = () => {}, tally = {}) {
       subject,
       detail:
         `newest stored return ${r.newestReturn}, reference day ${dayText(ref)} (set by ${setBy}): gap ${gap} day(s), ` +
-        `bound ${FRESHNESS_BOUND_DAYS}; ${uncovered.length} of the ${gap} gap day(s) are not stated left-out days ` +
+        `bound ${FRESHNESS_BOUND_DAYS}; ${uncovered.length} of the ${gap - FRESHNESS_BOUND_DAYS} gap day(s) before the last ` +
+        `${FRESHNESS_BOUND_DAYS} are not stated left-out days ` +
         `(first ${uncovered[0]}, last ${uncovered[uncovered.length - 1]}) and the key carries no anchor reason.`,
     });
   }

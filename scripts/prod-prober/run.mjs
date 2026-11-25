@@ -152,7 +152,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 5;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 103;
+export const SELF_TEST_SCENARIOS = 104;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1306,6 +1306,9 @@ const ARM_FIXTURE_TABLE = [
       // count, and the bound is a boundary (gap 3 pages; ok.json's gap 2 does not).
       "partial-cover.json": "freshness-stale",
       "bound-plus-one.json": "freshness-stale",
+      // The bound absorbs the trailing days: a gap day just outside that window
+      // still pages (ok.json carries the sibling stated through that day).
+      "tail-edge-uncovered.json": "freshness-stale",
     },
   },
 ];

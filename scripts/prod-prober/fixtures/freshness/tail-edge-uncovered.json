@@ -1,0 +1,21 @@
+{
+  "_comment": "RED bound edge. One key, one cause: newest return 2026-11-10, newest flow and terminal day 2026-11-20 (reference day), no anchor reason. tinyDays states every day 2026-11-11 to 2026-11-20 EXCEPT 2026-11-18, which is the last day outside the bound's trailing window (reference day minus the bound of 2). The last two days (2026-11-19 and 2026-11-20) are covered by the bound; 2026-11-18 is not, so the key pages. ok.json carries the sibling that is stated through 2026-11-18 and reads covered. Expect exactly one freshness-stale naming 1 uncovered day. Every value here is synthetic.",
+  "scope": {
+    "derived": 1,
+    "withInputs": 1,
+    "withTerminal": 1
+  },
+  "rows": [
+    {
+      "venue": "deribit",
+      "tag": "ffff0001",
+      "newestReturn": "2026-11-10",
+      "anchorNullReason": "",
+      "newestFlow": "2026-11-20",
+      "terminalDay": "2026-11-20",
+      "markDay": "",
+      "tinyDays": ["2026-11-11", "2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15", "2026-11-16", "2026-11-17", "2026-11-19", "2026-11-20"],
+      "hasInputs": true
+    }
+  ]
+}

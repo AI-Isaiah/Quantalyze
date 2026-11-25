@@ -1932,7 +1932,9 @@ describe("[164.1-05] kinds and floors", () => {
     // ⭐ 100 -> 103 in Phase 233 plan 04 (FRESH-02 day-by-day rules): the red
     // partial-cover and bound-plus-one fixtures and the dedicated scenario
     // proving an anchor reason on one key never covers another.
-    expect(SELF_TEST_SCENARIOS).toBe(103);
+    // ⭐ 103 -> 104 in the Phase 233 review fix (WR-01): the red
+    // tail-edge-uncovered fixture; the covered-tail key rides in ok.json.
+    expect(SELF_TEST_SCENARIOS).toBe(104);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);
