@@ -123,3 +123,70 @@ _Depth: standard_
 **File:** `scripts/prod-prober/arms/freshness.mjs` (`judgeFreshness` not-judged outcomes; `run()` guards; `FRESHNESS_SCOPE_SQL`)
 **Issue:** `noInputs`, `noReturns` and `noReference` only log and count. `run()` gates on `derived === 0`, `with_terminal === 0` and the row count, never on `judged > 0` or on `with_inputs === derived`. A scope of one `coveredAnchor` key plus one `noInputs` key reads green with judged=0. `with_terminal` uses `payload ? 'realized_terminal_day'`, which counts a key that is present with a null value. Overlaps WR-02.
 **Fix:** raise a defect when a derived key cannot be judged (no inputs, no returns) and when judged is 0; count `with_terminal` only for a string-typed `realized_terminal_day`; self-test scenario per case.
+
+## Fix round 1
+
+Fixed in `scripts/prod-prober/arms/freshness.mjs`, its fixtures and self-test scenarios in `scripts/prod-prober/run.mjs`, and `src/__tests__/prod-prober-wiring.test.ts`. Each gate was neutered in a byte-backup copy (`cp file file.bak`), the self-test run for the RED line, the file restored with `cp`, `cmp` checked, and the self-test run again for GREEN. Final verification: `node scripts/prod-prober/run.mjs --self-test` printed `=== SELF-TEST PASSED: 107/107 scenarios, every arm's kinds fired on their own fixtures and nowhere else ===`, and `npx vitest run src/__tests__/prod-prober-wiring.test.ts src/__tests__/critical-regressions.test.ts` passed (2 files, 305 tests).
+
+### WR-01: the bound absorbs the trailing days
+
+**Commit:** `e728e56ca`
+**Applied fix:** when the gap exceeds `FRESHNESS_BOUND_DAYS`, the day-by-day loop now requires stated coverage only for days `newest < d <= ref - FRESHNESS_BOUND_DAYS`. The header rule (1) now says so, so the `:45-47` claim about the bound absorbing the non-atomic-write lag holds on the covered path. New fixtures: `ok.json` gained key `aaaa0007` (stated days cover everything except the last 2 days before the reference day, reads covered); new red fixture `tail-edge-uncovered.json` (misses the last required day, 2026-11-18, and pages). `SELF_TEST_SCENARIOS` 103 to 104.
+
+RED, neuter A (loop restored to `n <= ref`, so the covered-tail key pages):
+```
+SELF-TEST FAIL: the GREEN control exits 0 (got 1)
+```
+RED, neuter B (`n <= ref - FRESHNESS_BOUND_DAYS + 1`, one day too strict):
+```
+SELF-TEST FAIL: the GREEN control exits 0 (got 1)
+```
+RED, neuter C (`n <= ref - FRESHNESS_BOUND_DAYS - 1`, one day too lenient):
+```
+SELF-TEST FAIL: partial-cover.json exits 1 (got 0)
+SELF-TEST FAIL: bound-plus-one.json exits 1 (got 0)
+SELF-TEST FAIL: tail-edge-uncovered.json exits 1 (got 0)
+```
+Restore: `cmp freshness.mjs.bak freshness.mjs` printed nothing, `cmp exit 0` (after each neuter).
+GREEN:
+```
+=== SELF-TEST PASSED: 104/104 scenarios, every arm's kinds fired on their own fixtures and nowhere else ===
+```
+
+### WR-02 and SFH-01: a derived key that cannot be judged must not read healthy
+
+**Commit:** `1386eca14`
+**Applied fix:**
+- A key with a `key_inputs` row, no anchor reason and no stored return day pages as `freshness-stale` (gap is the whole series).
+- A derived key with no `key_inputs` row raises a `measure-fail` with its `venue#tag` subject.
+- When rows were read and fresh + covered_stated + stale is 0, a `measure-fail` on subject `freshness keys` names the not-judged counts (`covered_anchor`, `no_inputs`, `no_returns`, `no_reference`).
+- `FRESHNESS_SCOPE_SQL` counts `with_terminal` only where `jsonb_typeof(d.payload->'realized_terminal_day') = 'string'`.
+- `ok.json` lost its no-returns and no-inputs rows (no longer accepted shapes; scope now 5/5/5).
+- Three new `freshness:` scenarios (no stored return pages; no inputs row measure-fails; anchor-covered key plus no-inputs key exits 1 with two measure-fails naming the counts), plus one wiring pin for the `jsonb_typeof` text. `SELF_TEST_SCENARIOS` 104 to 107.
+- Messages print only `venue#tag`, days and counts.
+
+RED, neuter N1 (noReturns page removed):
+```
+SELF-TEST FAIL: a key with no stored return exits 1 (got 0)
+```
+RED, neuter N2 (noInputs measure-fail removed):
+```
+SELF-TEST FAIL: no key_inputs row: exits 1 (got 0)
+SELF-TEST FAIL: exactly two measure-fails, one per cause (got measure-fail)
+```
+RED, neuter N3 (judged-zero guard disabled):
+```
+SELF-TEST FAIL: exactly two measure-fails, one per cause (got measure-fail)
+```
+RED, neuter N4 (`with_terminal` back to the `?` operator), vitest pin:
+```
+× the scope statement counts realized_terminal_day only when it is a JSON string (a present-but-null key is not counted)
+AssertionError: expected false to be true // Object.is equality
+```
+Restore: `cmp` printed nothing after each, `cmp exit 0`.
+GREEN:
+```
+=== SELF-TEST PASSED: 107/107 scenarios, every arm's kinds fired on their own fixtures and nowhere else ===
+```
+
+**Not covered here:** the `with_terminal` SQL change is pinned by text only. No test runs it against a database, so its behaviour on a null-valued key is unmeasured. The `no_reference` not-judged state is unchanged (it still only logs and counts), because the round-1 task named only `noReturns` and `noInputs`.
