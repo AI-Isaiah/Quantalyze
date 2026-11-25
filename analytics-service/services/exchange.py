@@ -755,14 +755,26 @@ def _binance_market_is_spot(market: Any) -> bool:
     return isinstance(market, dict) and market.get("spot") is True
 
 
-def _binance_fills_window_ms(exchange: ccxt.Exchange, ccxt_symbol: str) -> int:
-    """The venue window for ``ccxt_symbol``: 24 hours when the resolved market is spot, else
-    7 days (linear, inverse, and an unloaded or unresolved market)."""
+def _binance_resolves_to_spot(exchange: ccxt.Exchange, ccxt_symbol: str) -> bool:
+    """True when ccxt will send ``ccxt_symbol`` to the spot endpoint.
+
+    The market is the one ``fetch_my_trades`` resolves with ``exchange.market()``: by unified
+    symbol, else by venue id with spot first. ``markets.get()`` alone misses a name given as a
+    venue id, which ccxt routes to spot (24 hour rule) while that lookup chose the 7-day window.
+    ``market()`` raises ``ccxt.BadSymbol`` for a name absent from the loaded markets, exactly as
+    ``fetch_my_trades`` would. An unloaded or empty ``markets`` (the test doubles) is not spot.
+    """
     markets = getattr(exchange, "markets", None)
     if isinstance(markets, dict) and markets:
-        market = markets.get(ccxt_symbol)
-        if isinstance(market, dict) and market.get("spot") is True:
-            return BINANCE_SPOT_FILLS_WINDOW_HOURS * 3_600_000
+        return _binance_market_is_spot(exchange.market(ccxt_symbol))
+    return False
+
+
+def _binance_fills_window_ms(exchange: ccxt.Exchange, ccxt_symbol: str) -> int:
+    """The venue window for ``ccxt_symbol``: 24 hours when the resolved market is spot, else
+    7 days (linear, inverse, and an unloaded market)."""
+    if _binance_resolves_to_spot(exchange, ccxt_symbol):
+        return BINANCE_SPOT_FILLS_WINDOW_HOURS * 3_600_000
     return BINANCE_FILLS_WINDOW_DAYS * 86_400_000
 
 

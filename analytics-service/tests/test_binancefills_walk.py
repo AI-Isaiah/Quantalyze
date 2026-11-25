@@ -416,6 +416,9 @@ class TestBinanceFillsSymbols:
           test_a_strip_collision_resolves_to_the_derivative_whatever_the_order goes RED.
       N23 widen the unlisted branch from `ccxt.BadSymbol` to every exception:
           test_a_transient_failure_keeps_the_hold goes RED.
+      R1-N1 (round-1 review SFH-3) choose the window with `exchange.markets.get(ccxt_symbol)`
+          instead of `exchange.market(ccxt_symbol)`:
+          test_a_name_ccxt_resolves_by_venue_id_is_windowed_by_that_market goes RED.
     """
 
     async def test_an_unlisted_symbol_is_named_and_not_held(
@@ -566,6 +569,48 @@ class TestBinanceFillsSymbols:
             assert venue.calls_for(other) == [], (stored, other)
         assert "binance_partial_symbols" not in flags
         assert "binance_unlisted_symbols" not in flags
+
+    async def test_a_name_ccxt_resolves_by_venue_id_is_windowed_by_that_market(
+        self, open_exchanges: list[Any]
+    ) -> None:
+        """SFH-3 (round-1 review): the window is chosen from the market ccxt will route to
+        (`exchange.market()`), not from `exchange.markets.get(name)`. `markets` is keyed by
+        unified symbol, so a name that is a VENUE ID misses `.get()` while ccxt resolves it by
+        id, spot first, and sends it to the spot endpoint, whose 24-hour rule refuses a 7-day
+        window for good (the holding `binance_partial_symbols`).
+
+        The recorded markets always map their own stored names, so the miss is built here: the
+        spot `ETH/BTC` entry is re-keyed, which drops the stored name `ETHBTC` from the reverse
+        map and leaves it resolvable by id only. Both fills (3 days apart) must be read through
+        24-hour windows from the spot endpoint, with nothing partial."""
+        venue = BinanceFillsVenue(
+            {
+                ("spot", "ETHBTC"): [
+                    venue_fill("spot", "ETHBTC", 1, NOW_MS - 4 * DAY_MS),
+                    venue_fill("spot", "ETHBTC", 2, NOW_MS - 1 * DAY_MS),
+                ]
+            }
+        )
+        exchange = await real_binance(venue)
+        open_exchanges.append(exchange)
+        exchange.markets = {
+            ("ETH/BTC#by-id-only" if sym == "ETH/BTC" else sym): market
+            for sym, market in exchange.markets.items()
+        }
+        assert exchange.markets.get("ETHBTC") is None
+        assert exchange.market("ETHBTC")["spot"] is True
+
+        fills = await ex.fetch_raw_trades(
+            exchange, STRATEGY_ID, symbols_supabase(["ETHBTC"]), since_ms=NOW_MS - 5 * DAY_MS
+        )
+        flags = ex.get_and_clear_last_dq_flags()
+
+        assert _ids(fills) == {"1", "2"}
+        assert "binance_partial_symbols" not in flags
+        requests = venue.calls_for("spot")
+        assert requests and all(
+            r["endTime"] - r["startTime"] < DAY_MS for r in requests
+        ), "a spot request spanned more than the 24-hour rule"
 
 
 class TestBinanceFillsStops:
