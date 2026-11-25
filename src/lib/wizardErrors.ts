@@ -6700,6 +6700,8 @@ export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
     // row here, is rendered by the dashboard forms.
     "KEY_VENUE_ALREADY_CONNECTED",
     "UNKNOWN",
+    // Phase 225 PR-2b-2: an MT5 key with no usable server is refused (400).
+    "KEY_MT5_WRONG_SERVER",
   ]);
 
 /**

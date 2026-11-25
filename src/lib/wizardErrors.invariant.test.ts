@@ -276,7 +276,7 @@ const ROUTES: readonly RouteUnderTest[] = [
     // untouched while the vocabulary moves (which `EXPECTED_SPLIT_CODES` above
     // is what records). If this number ever has to move for that arm again,
     // check first whether a guard was SPLIT in two: one refusal, one sentence.
-    expectedSites: 13,
+    expectedSites: 14, // 13 -> 14 (225 PR-2b-2): the MT5 no-server refusal, KEY_MT5_WRONG_SERVER.
   },
   {
     label: "composite/add-key",
@@ -512,7 +512,7 @@ const ROUTES: readonly RouteUnderTest[] = [
     rosterFile: join(REPO, "src", "lib", "wizardErrors.ts"),
     rosterName: "KNOWN_VALIDATE_AND_ENCRYPT_CODES",
     statusRe: "[45]\\d\\d",
-    expectedSites: 14,
+    expectedSites: 15, // 14 -> 15 (225 PR-2b-2): the MT5 no-server refusal, KEY_MT5_WRONG_SERVER.
     // 8 measured members as of 164.5.3-02 (7 until then; 6 until 164.2-05
     // admitted `RATE_LIMITED`); ~60% of 8 is 4.8, which still floors at 4 — the
     // SAME literal this row was already pinned at, unmoved on purpose. This
@@ -996,6 +996,9 @@ const EXPECTED_SPLIT_CODES: readonly string[] = [
   // it for an `mt5` exchange (ahead of the flag gate). Read off the law's own
   // failure message, not counted.
   "COMPOSITE_MT5_UNSUPPORTED",
+  // 2026-11-25, Phase 225 PR-2b-2: 7 -> 8. Both MT5 connect routes refuse a key
+  // whose server normalises to nothing (founder ruling: no MT5 key without a server).
+  "KEY_MT5_WRONG_SERVER",
 ];
 
 describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its route's roster", () => {
@@ -1338,6 +1341,8 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
   const MIRROR_EXEMPT: readonly string[] = [
     "PRESELECT_REQUEST_INVALID",
     "COMPOSITE_MT5_UNSUPPORTED",
+    // composite/add-key refuses MT5 outright, so it never reaches the server check.
+    "KEY_MT5_WRONG_SERVER",
   ];
 
   it("the two KEY-VALIDATION routes emit the SAME set of codes — they are structural mirrors", () => {
