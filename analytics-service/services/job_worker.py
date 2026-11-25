@@ -16730,6 +16730,29 @@ def _no_capital_exit_consumes_only_dust(
     )
 
 
+def _no_capital_ledger_level(
+    basis: tuple[Mapping[str, float], Mapping[str, float]] | None,
+) -> float | None:
+    """234 NOCAP-01 (DEC-02-A), 166.3.1 A2: the balance a key's OWN stored deal ledger implies,
+    ``sum(composed flow_usd) + sum(composed pnl_usd)``, or None when there is no independent proof.
+
+    ``basis`` is the ``(flows_by_day, pnl_by_day)`` pair ``read_writer_basis`` returns for the
+    key's own ``key_inputs`` row, or None. For MT5 the stored realized terminal copies the live
+    balance read, so A2 on it is circular; the writer builds both series from the deal ledger
+    (``history_deals_get``, a full-history fetch), never from ``account_info``, so their sum is
+    the balance the deals imply. Pure over stored numbers. None for no basis, or for a non-finite
+    total (an unreadable number is not evidence of an empty account).
+
+    The caller confirms emptiness one-sidedly, ``level <= DUST_NAV_FLOOR``, mirroring A2's ``<=``.
+    A ledger far below zero is not decided here: the replay's zero-start and non-positive checks
+    catch it downstream. Known bound (RESEARCH A7): a native-BTC MT5 key with a small non-zero
+    native terminal adds a bounded extra term to this sum; both live PROD exits are USD keys."""
+    if basis is None:
+        return None
+    total = float(sum(basis[0].values())) + float(sum(basis[1].values()))
+    return total if math.isfinite(total) else None
+
+
 async def run_derive_allocator_equity_job(
     job: dict[str, Any], *, _markers_rechecked: bool = False
 ) -> DispatchResult:
@@ -16763,6 +16786,7 @@ async def run_derive_allocator_equity_job(
     )
     from services.allocator_equity_derive import (
         FULL_HISTORY_VENUES,
+        LEDGER_PROOF_VENUES,
         SHARED_ACCOUNT_KINDS,
         WRITER_BASIS_WITHHELD_TOKENS,
         DegradeReason,
@@ -17554,6 +17578,12 @@ async def run_derive_allocator_equity_job(
                 # today's ``dropped_key`` rather than exiting while the book reads trustworthy.
                 elif _nc_terminal[1] > DUST_NAV_FLOOR:
                     no_capital_refusals["funded_terminal"] += 1
+                # 234 NOCAP-01 (DEC-02-D, negative equity): a terminal below -DUST_NAV_FLOOR is
+                # not an exit on any venue. The sign is recorded through the token (TODOS
+                # [166.3.1-NOCAP-MT5-A2-CIRCULAR] "records its sign"); exactly -DUST_NAV_FLOOR
+                # passes this gate, mirroring A2's boundary.
+                elif _nc_terminal[1] < -DUST_NAV_FLOOR:
+                    no_capital_refusals["negative_terminal"] += 1
                 else:
                     no_capital_candidates[api_key_id] = (str(_nc_reason), _nc_terminal)
     except (ValueError, TypeError, KeyError) as exc:
@@ -17763,6 +17793,25 @@ async def run_derive_allocator_equity_job(
         _nc_token, (_nc_p, _nc_p_level) = no_capital_candidates[_k]
         _nc_last = last_return_day[_k]
         _nc_end, _nc_level = _nc_p, _nc_p_level
+        # 234 NOCAP-01 (DEC-02-A/B, 166.3.1 A2 circular): on a venue whose stored terminal IS the
+        # live balance read (``LEDGER_PROOF_VENUES``), the terminal is no evidence the account is
+        # empty, so the key's OWN deal ledger must agree. Read from the key's own row basis
+        # (``writer_basis_raw``), never ``writer_basis_by_key``, which holds a stitched basis for
+        # a kept key. No own basis is no proof; a ledger above the dust floor says the account is
+        # funded. Either way the key keeps ``dropped_key`` with its stored inputs untouched, like
+        # a D-10 refusal. Runs BEFORE D-10: D-10 reasons about amounts walked back from a
+        # terminal that, here, is evidence only once the ledger confirms it. The venue read is the
+        # same expression ``full_history_keys`` uses. Counts only (no key id, no USD).
+        if (
+            str(rows_by_id[_k].get("exchange") or "").strip().lower() in LEDGER_PROOF_VENUES
+        ):
+            _nc_ledger_level = _no_capital_ledger_level(writer_basis_raw.get(_k))
+            if _nc_ledger_level is None:
+                no_capital_refusals["ledger_basis_absent"] += 1
+                continue
+            if _nc_ledger_level > DUST_NAV_FLOOR:
+                no_capital_refusals["ledger_level_funded"] += 1
+                continue
         # D-10 (review round 1 CR-01/WR-01): the exit is only as honest as what it consumes. The
         # amounts it names or drops must be the dust-sized ones D-08 measured; anything else
         # keeps today's ``dropped_key`` (D-02: no reconciliation gate is weakened by an exit).

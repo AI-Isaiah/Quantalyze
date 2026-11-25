@@ -4196,7 +4196,9 @@ def _nc_mt5_withdrawal_book() -> dict[str, list[dict]]:
             "key-C", "mt5", d[:3],
             _nc_payload(
                 "nonpositive", "mt5", 0.0, d[3],
-                flows={d[3]: -20_000.0}, dropped_pnl={d[3]: 0.0},
+                flows={d[0]: 20_000.0, d[3]: -20_000.0}, dropped_pnl={d[3]: 0.0},
+                basis_flows={d[0]: 20_000.0, d[3]: -20_000.0},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: 0.0},
             ),
         )
     ])
@@ -4214,7 +4216,12 @@ async def test_no_capital_exit_mt5_nonpositive_key_emptied_by_a_final_withdrawal
     book = _nc_assemble([
         _nc_candidate(
             "key-C", "mt5", d[:4],
-            _nc_payload("nonpositive", "mt5", 0.0, d[3], flows={d[3]: -20_000.0}),
+            _nc_payload(
+                "nonpositive", "mt5", 0.0, d[3],
+                flows={d[0]: 20_000.0, d[3]: -20_000.0},
+                basis_flows={d[0]: 20_000.0, d[3]: -20_000.0},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: 0.0},
+            ),
         )
     ])
     payload = await _compose_no_capital_book(book)
@@ -4239,7 +4246,12 @@ async def test_no_capital_exit_mt5_dust_key_with_a_small_positive_terminal() -> 
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
-            "key-D", "mt5", d[:3], _nc_payload("dust", "mt5", 80.0, d[2]),
+            "key-D", "mt5", d[:3],
+            _nc_payload(
+                "dust", "mt5", 80.0, d[2],
+                flows={d[0]: 4000.0}, basis_flows={d[0]: 4000.0},
+                basis_pnl={d[0]: 0.0, d[1]: -3200.0, d[2]: -720.0},
+            ),
             returns={d[1]: -0.8, d[2]: -0.9},
         )
     ])
@@ -4304,6 +4316,51 @@ async def test_no_capital_exit_a3_mt5_withdrawal_after_last_return() -> None:
     assert payload["no_capital_exited_keys"] == [
         {"api_key_id": "key-C", "reason": "nonpositive", "day": d[2]}
     ]
+
+
+def _nc_mt5_funded_ledger_book(*, venue: str = "mt5", api_exchange: str | None = None) -> dict:
+    """234 NOCAP-01: a FUNDED MT5 key whose live balance read zero for one tick. The stored
+    terminal copies that read (0.0 on day 4, token ``nonpositive``), so A2 on it is circular; the
+    key's OWN deal ledger says otherwise. Hand derivation of the ledger level over its own basis:
+    +80000.0 (day 1 deposit) - 20000.0 (day 4 withdrawal) + 0.0 of P&L = 60000.0, far above
+    DUST_NAV_FLOOR, so the account is not empty and the key may not exit. ``venue`` is the payload
+    venue, ``api_exchange`` the ``api_keys.exchange`` the job gates on (defaults to ``venue``)."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", venue, d[:3],
+            _nc_payload(
+                "nonpositive", venue, 0.0, d[3],
+                flows={d[0]: 80_000.0, d[3]: -20_000.0}, dropped_pnl={d[3]: 0.0},
+                basis_flows={d[0]: 80_000.0, d[3]: -20_000.0},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: 0.0},
+            ),
+        )
+    ])
+    if api_exchange is not None:
+        for row in book["api_keys"]:
+            if row["id"] == "key-C":
+                row["exchange"] = api_exchange
+    return book
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_transient_zero_over_a_funded_ledger_keeps_dropped_key() -> None:
+    """NOCAP-01 tracer, ROADMAP SC-1. For MT5 the stored realized terminal IS the live balance
+    read, so a funded account that reads zero for one tick stores a terminal of 0.0 and A2 passes
+    on its own echo. Written off as no-capital, the key would leave the book while the book reads
+    trustworthy (166.3.1 A2 was circular). The key's own deal ledger (+80000 deposit, -20000
+    withdrawal, 0 P&L = 60000.0) says the account holds money, so the key keeps ``dropped_key``:
+    untrustworthy, not named as exited, counted ``ledger_level_funded``. A is untouched."""
+    d = _BTC_DAYS
+    payload = await _compose_no_capital_book(_nc_mt5_funded_ledger_book())
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_key_exited" not in payload["flags"]
+    assert _nc_refused(payload) == {"ledger_level_funded": 1}
+    assert _nc_curve(payload) == {x: pytest.approx(100_000.0, abs=1e-9) for x in d}
 
 
 # --- guards: the rule may only make a book better (166.3.1 plan 09, Task 2) --------------------
@@ -4469,13 +4526,18 @@ async def test_no_capital_exit_anything_dated_after_the_terminal_day_stays_dropp
 async def test_no_capital_exit_anything_dated_after_the_terminal_day_stays_dropped_without_a_basis() -> None:
     """D-10 (1), the return-factor roll (no writer basis, the MT5 shape): the same refusal for a
     flow and a dropped-day P&L dated after the terminal day (day 3). Superseded by D-10 from the
-    pre-D-10 T-166.3.1-33 expectation that these were trimmed and the key exited."""
+    pre-D-10 T-166.3.1-33 expectation that these were trimmed and the key exited.
+    234 NOCAP-01 re-aim: this was an MT5 row with no writer basis. MT5 is in ``LEDGER_PROOF_VENUES``,
+    so such a row is now refused earlier as ``ledger_basis_absent`` and would never reach the D-10 bound.
+    The gate under test is venue-independent, so the key is a Deribit row written before D-06 (no
+    basis, outside the proof set, a full-history venue); every number is unchanged and the test
+    asserts ``consumes_more_than_dust`` again."""
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
-            "key-C", "mt5", d[:3],
+            "key-C", "deribit", d[:3],
             _nc_payload(
-                "dust", "mt5", _NC_DUST_TERMINAL, d[2],
+                "dust", "deribit", _NC_DUST_TERMINAL, d[2],
                 flows={d[3]: 40.0, d[4]: 30.0}, dropped_pnl={d[3]: 10.0},
             ),
         )
@@ -4496,13 +4558,18 @@ async def test_no_capital_exit_margin_call_then_liquidation_stays_dropped() -> N
     terminal is 50.0, under the dust floor, so A2 passes. The walk-back would put 4550.0 on L and
     book the 14500 loss as nothing: a TRUSTWORTHY book with the loss erased and the key leaving as
     a 4550 withdrawal. The consumed P&L is far above the dust floor, so the key keeps
-    ``dropped_key``, which is the honest answer."""
+    ``dropped_key``, which is the honest answer.
+    234 NOCAP-01 re-aim: this was an MT5 row with no writer basis. MT5 is in ``LEDGER_PROOF_VENUES``,
+    so such a row is now refused earlier as ``ledger_basis_absent`` and would never reach the D-10 bound.
+    The gate under test is venue-independent, so the key is a Deribit row written before D-06 (no
+    basis, outside the proof set, a full-history venue); every number is unchanged and the test
+    asserts ``consumes_more_than_dust`` again."""
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
-            "key-C", "mt5", d[:3],
+            "key-C", "deribit", d[:3],
             _nc_payload(
-                "dust", "mt5", 50.0, d[3],
+                "dust", "deribit", 50.0, d[3],
                 flows={d[3]: 10_000.0}, dropped_pnl={d[3]: -14_500.0},
             ),
         )
@@ -4521,12 +4588,17 @@ async def test_no_capital_exit_a_deposit_after_the_terminal_day_stays_blocked() 
     """D-10 (1), CR-01 reviewer Run 2. A dust key has its terminal day P == its last return day L
     (day 3), a stored terminal of 60.0 and a +50000 flow dated on day 5. On ``origin/main`` that
     flow is a blocking ``out_of_window_flow``; the exit trim turned it into nothing, so the book
-    read trustworthy with 50000 of capital gone. It keeps ``dropped_key`` and stays untrustworthy."""
+    read trustworthy with 50000 of capital gone. It keeps ``dropped_key`` and stays untrustworthy.
+    234 NOCAP-01 re-aim: this was an MT5 row with no writer basis. MT5 is in ``LEDGER_PROOF_VENUES``,
+    so such a row is now refused earlier as ``ledger_basis_absent`` and would never reach the D-10 bound.
+    The gate under test is venue-independent, so the key is a Deribit row written before D-06 (no
+    basis, outside the proof set, a full-history venue); every number is unchanged and the test
+    asserts ``consumes_more_than_dust`` again."""
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
-            "key-C", "mt5", d[:3],
-            _nc_payload("dust", "mt5", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
+            "key-C", "deribit", d[:3],
+            _nc_payload("dust", "deribit", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
         )
     ])
     payload = await _compose_no_capital_book(book)
@@ -4606,7 +4678,10 @@ async def test_no_capital_exit_dust_sized_final_days_still_exit() -> None:
             "key-C", "mt5", d[:3],
             _nc_payload(
                 "dust", "mt5", terminal, d[3],
-                flows={d[3]: deposit}, dropped_pnl={d[3]: -DUST_NAV_FLOOR},
+                flows={d[0]: 1.5 * DUST_NAV_FLOOR, d[3]: deposit},
+                dropped_pnl={d[3]: -DUST_NAV_FLOOR},
+                basis_flows={d[0]: 1.5 * DUST_NAV_FLOOR, d[3]: deposit},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: -DUST_NAV_FLOOR},
             ),
         )
     ])
@@ -4634,12 +4709,18 @@ async def test_no_capital_exit_inception_residual_stays_dropped() -> None:
     PROD book 1's MT5 key before the 164.6.6.2.3 recompute; it was re-measured clean on PROD on
     2026-10-16 (no equity-curve row carries ``inception_unreconciled``, book 1 is trustworthy,
     every connected MT5 key replays clean on its stored writer basis, far inside the band), and SC-9
-    is closed by recorded decision (D-11, founder 2026-10-16), not by a code change."""
+    is closed by recorded decision (D-11, founder 2026-10-16), not by a code change.
+
+    234 NOCAP-01 re-aim: this was an MT5 row with no writer basis. MT5 is in ``LEDGER_PROOF_VENUES``,
+    so such a row is now refused earlier as ``ledger_basis_absent`` and would never reach the zero-start check.
+    The gate under test is venue-independent, so the key is a Deribit row written before D-06 (no
+    basis, outside the proof set, a full-history venue); every number is unchanged and the test
+    asserts ``blocking_reason`` again."""
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
-            "key-D", "mt5", d[2:],
-            _nc_payload("dust", "mt5", 80.0, d[4], flows={d[1]: 79.88}),
+            "key-D", "deribit", d[2:],
+            _nc_payload("dust", "deribit", 80.0, d[4], flows={d[1]: 79.88}),
         )
     ])
     payload = await _compose_no_capital_book(book)
@@ -4801,7 +4882,12 @@ async def test_no_capital_exit_two_candidates_each_leave_on_their_own_day() -> N
                 ),
             ),
             _nc_candidate(
-                "key-D", "mt5", d[:5], _nc_payload("dust", "mt5", 80.0, d[4]),
+                "key-D", "mt5", d[:5],
+                _nc_payload(
+                    "dust", "mt5", 80.0, d[4],
+                    flows={d[0]: 4000.0}, basis_flows={d[0]: 4000.0},
+                    basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: -3200.0, d[4]: -720.0},
+                ),
                 returns={d[3]: -0.8, d[4]: -0.9},
             ),
         ],
@@ -4889,7 +4975,8 @@ async def test_no_capital_exit_refused_counts_each_key_once_on_its_own_route() -
     """NOCAP-03 cardinality. One book with three no-capital keys that each keep ``dropped_key`` by
     a DIFFERENT route stores exactly one count per route and nothing else: key-F's live read says
     empty over a funded 60000.0 terminal (A2), key-G has returns and a token but no stored terminal,
-    and key-H's terminal is on day 3 with a 50000.0 flow on day 5 (D-10). A count that doubled (a key
+    and key-H's terminal is on day 3 with a 50000.0 flow on day 5 (D-10; a Deribit row, because an
+    MT5 row with no basis is refused earlier as ``ledger_basis_absent``, 234 NOCAP-01). A count that doubled (a key
     counted at selection AND again in the apply loop or the compose) would show here."""
     d = _BTC_DAYS
     no_terminal = _nc_payload("dust", "mt5", 0.0, d[2])
@@ -4899,8 +4986,8 @@ async def test_no_capital_exit_refused_counts_each_key_once_on_its_own_route() -
         _nc_candidate("key-F", "mt5", d[:3], _nc_payload("dust", "mt5", 60_000.0, d[2])),
         _nc_candidate("key-G", "mt5", d[:3], no_terminal),
         _nc_candidate(
-            "key-H", "mt5", d[:3],
-            _nc_payload("dust", "mt5", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
+            "key-H", "deribit", d[:3],
+            _nc_payload("dust", "deribit", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
         ),
     ])
     payload = await _compose_no_capital_book(book)
@@ -4914,7 +5001,7 @@ async def test_no_capital_exit_refused_counts_each_key_once_on_its_own_route() -
     assert "no_capital_exited_keys" not in payload
 
 
-def test_no_capital_refusal_reasons_are_the_seven_plan_01_tokens() -> None:
+def test_no_capital_refusal_reasons_are_the_ten_plan_01_and_02_tokens() -> None:
     """NOCAP-03 closed set. The set is pinned whole so a token cannot be added or renamed without
     its writer and its test moving with it (each plan of phase 234 adds its tokens together with
     their writers and updates this pin in the same task). It is deliberately NOT a ``DegradeReason``
@@ -4928,6 +5015,7 @@ def test_no_capital_refusal_reasons_are_the_seven_plan_01_tokens() -> None:
     assert NO_CAPITAL_REFUSAL_REASONS == frozenset({
         "funded_terminal", "no_stored_terminal", "consumes_more_than_dust", "replay_refused",
         "blocking_reason", "segment_terminals_missing", "compose_reverted",
+        "negative_terminal", "ledger_basis_absent", "ledger_level_funded",
     })
     assert not NO_CAPITAL_REFUSAL_REASONS & {m.value for m in DegradeReason}
     assert not NO_CAPITAL_REFUSAL_REASONS & {m.value for m in DeriveRefusal}

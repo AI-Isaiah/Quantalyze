@@ -261,6 +261,13 @@ NO_CAPITAL_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
         "segment_terminals_missing",
         # job: a whole-compose refusal reverted every candidate to its stored inputs
         "compose_reverted",
+        # selection: the stored terminal is below -DUST_NAV_FLOOR (negative equity is not an exit)
+        "negative_terminal",
+        # apply loop: a ``LEDGER_PROOF_VENUES`` key whose own row carries no writer basis, so no
+        # independent proof that the account is empty
+        "ledger_basis_absent",
+        # apply loop: a ``LEDGER_PROOF_VENUES`` key whose own deal ledger sums above the dust floor
+        "ledger_level_funded",
     }
 )
 
@@ -1196,6 +1203,14 @@ EMPTIED_RESTART_FLOOR_USD = 100.0
 # Every other venue keeps the positional OUT_OF_WINDOW_FLOW rule unchanged: sfox is a
 # sampled NAV, and the ccxt venues carry retention caps (OKX ~90d, Bybit ~365d).
 FULL_HISTORY_VENUES: frozenset[str] = frozenset({"deribit", "mt5"})
+
+# 234 NOCAP-01: the venues whose stored realized terminal IS the live balance read, so the no-capital
+# exit's A2 check (terminal at or below the dust floor) is circular there: a funded account whose
+# balance reads zero for one tick stores a terminal of 0.0 and passes on its own echo. On these
+# venues the exit also needs the key's OWN stored deal ledger to agree the account is empty.
+# Deribit is out because its terminal is reconciled to inception at write time (native_nav's
+# inception gate); the ccxt venues cannot form a candidate and sfox stores no terminal.
+LEDGER_PROOF_VENUES: frozenset[str] = frozenset({"mt5"})
 
 
 @dataclass(frozen=True)
