@@ -164,7 +164,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [x] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit (completed 2026-11-24)
 - [x] **Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job** - Seam S3 owner: per-attempt failure record, first-hop drop, batch-mate reset, readmit ceiling signal, reclaim provenance, private strategies polled; migrations (completed 2026-11-24)
 - [ ] **Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key** - Sibling of 225 on seam S4, right after it: the rotated MT5 password reconnect and the KEY_ORPHANED copy for allocators
-- [ ] **Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently** - nav_twr.py empty-cohort refund, day-0 P&L and the D-15 band, basis-silent keys, writer-basis values; moves MT5 numbers (155.2 freeze)
+- [x] **Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently** - nav_twr.py empty-cohort refund, day-0 P&L and the D-15 band, basis-silent keys, writer-basis values; moves MT5 numbers (155.2 freeze) (completed 2026-11-25)
 - [ ] **Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason** - Data-gated on the JOBLEDGER records: the second-attempt cause fixed at its root, seven clean nights, the clock-switch replay
 - [x] **Phase 231: BYBITREADS — a Bybit read covers every coin, settle type, window and deposit exactly once, or refuses by name** - Census first; all-coin anchor, USDC and inverse positions, full trade window, on-chain deposit verdict; the static egress IP is a founder action (completed 2026-11-25)
 - [x] **Phase 232: OKXTRADES — an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades** - Mixed-currency daily bills, page-cap truncation, the trade cursor (completed 2026-11-24)
@@ -438,7 +438,7 @@ Plans:
 3. A day-level flow just under the previous day's NAV carries the large-flow annotation, or the founder's acceptance of the D-15 band is recorded with its reason. `FLOW_TIMING_LARGE_RATIO` is not widened to make a check pass. (MT5D-06)
 4. A timed MT5 key with no writer basis is counted or blocked with a named signal, never composed silently on the legacy roll. The writer-basis gate refuses a same-day re-derive pair whose per-day P&L does not match, as well as a calendar mismatch. (MT5D-07, HOLD-03) ⭐ NOTE 2026-11-24 (planning, recorded in 229-CONTEXT.md): the per-day comparison is a compose-side `returns_stamp` (each derive stores the per-day returns it wrote in its `key_inputs` row; the compose compares it per raw key before the stitch and refuses a differing pair as the blocking `key_inputs_mismatch`). `read_writer_basis` stays byte-unchanged, because editing it fires the open entry `167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY` and a post-stitch check reads the stitched series. Known limit: a correction confined to a day with no stored return that moves no other return leaves the pair content-consistent and is not refused; a row written before this change carries no stamp and is counted, not refused. ⭐ SCOPE NOTE 2026-11-24 (founder ruling on review MR-01 / SFH-229-01, recorded in 229-CONTEXT.md): "Exempt departed keys". Live keys still block. A departed key whose last `key_inputs` row carries `writer_basis_withheld` or a stale returns stamp stays out of `withheld_by_key` and `stamp_mismatch_days_by_key`; it is counted into a non-blocking benign flag with a counts-only log, in the spirit of D-22, because a departed key never re-derives and the block could never self-heal.
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy of `nav_twr.py` / the writer-basis symbols, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Money-math oracles import no production helper. The frozen spine is never re-baselined by re-running `regen_golden.py`. 226's soak, run against the changed derive, is recorded beside the merge.
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans complete
 
 Plans:
 **Wave 1**
@@ -453,7 +453,7 @@ Plans:
 - [x] 229-05-PLAN.md — A per-day `returns_stamp` in key_inputs; the compose refuses a same-terminal re-derive pair whose returns differ, never a healthy pair (HOLD-03)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 229-06-PLAN.md — Phase gate on the merged head, PROOF-01 ledger, and the founder's live soak recorded as verdict lines (closing)
+- [x] 229-06-PLAN.md — Phase gate on the merged head, PROOF-01 ledger, and the founder's live soak recorded as verdict lines (closing)
 
 ### Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason
 
@@ -795,7 +795,7 @@ Plans:
 | 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
 | 227. JOBLEDGER | 11/11 | Complete (shipped v0.133.67.0, #1325; HEAL-01 sweep registered on PROD) | 2026-11-24 |
 | 228. KEYANSWERS | 0/? | Not started | - |
-| 229. MT5DERIVE2 | 5/6 | Shipped v0.133.69.0 (#1328); human verification pending (229-06 Task 2, the founder's live soak) | - |
+| 229. MT5DERIVE2 | 6/6 | Complete (shipped v0.133.69.0, #1328; founder's live soak exit 0 and the 155.2 freeze check recorded 2026-11-25) | 2026-11-25 |
 | 230. MT5NIGHTLY | 0/? | Not started | - |
 | 231. BYBITREADS | 6/6 | Complete (plans 01-05 shipped v0.133.61.6 #1314 and v0.133.65.0 #1321; plan 06 shipped v0.133.73.0 #1333 after Phase 229) | 2026-11-25 |
 | 232. OKXTRADES | 4/4 | Complete (shipped v0.133.70.0, #1330) | 2026-11-24 |

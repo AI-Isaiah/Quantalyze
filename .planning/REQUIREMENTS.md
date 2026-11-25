@@ -60,10 +60,10 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [x] **MT5D-01**: Every failed attempt of a compute job leaves an append-only record of its cause, written before the re-claim clears `last_error`. The record tells a stall or watchdog reset apart from a real error, and stays readable after a later attempt succeeds. The deliberate `last_error` clear on re-claim stays. (covers: 175-NIGHTLY-MT5-DERIVE-CHECK)
 - [ ] **MT5D-02**: Once that record has collected real nightly runs, the named cause of MT5 `derive_broker_dailies` second attempts is fixed at its root, so that over seven consecutive nights every MT5 derive ends `done` with `attempts=1`. Raising retries or a watchdog threshold is not a close. (covers: 175-NIGHTLY-MT5-DERIVE-CHECK)
 - [ ] **MT5D-03**: The MT5 derive values that moved without explanation are replayed under both server-clock settings, and each moved value is attributed to the clock switch or to another named cause. (covers: 202-MT5-CLOCK-LEAD-01)
-- [ ] **MT5D-04**: A timed re-funding day with an empty cohort 0 keeps the return chain intact instead of being dropped by a guard. (covers: 164.6.6.2.3-EMPTY-COHORT0-REFUND)
-- [ ] **MT5D-05**: An inception day's P&L is booked, or flagged by name. It is never dropped as NaN without a flag. (covers: 164.6.6.2.3-INCEPTION-DAY0-PNL)
-- [ ] **MT5D-06**: A day-level flow just under the previous day's NAV either carries the large-flow annotation, or the band is recorded as accepted (founder ruling at plan time on the D-15 band). `FLOW_TIMING_LARGE_RATIO` is never widened to make a check pass. (covers: 164.6.6.2.3-D15-THRESHOLD-BAND)
-- [ ] **MT5D-07**: A timed MT5 key with no writer basis is counted or blocked with a named signal. It never composes silently on the legacy roll. (covers: 164.6.6.2.3-MT5-BASIS-SILENT-NONE)
+- [x] **MT5D-04**: A timed re-funding day with an empty cohort 0 keeps the return chain intact instead of being dropped by a guard. (covers: 164.6.6.2.3-EMPTY-COHORT0-REFUND)
+- [x] **MT5D-05**: An inception day's P&L is booked, or flagged by name. It is never dropped as NaN without a flag. (covers: 164.6.6.2.3-INCEPTION-DAY0-PNL)
+- [x] **MT5D-06**: A day-level flow just under the previous day's NAV either carries the large-flow annotation, or the band is recorded as accepted (founder ruling at plan time on the D-15 band). `FLOW_TIMING_LARGE_RATIO` is never widened to make a check pass. (covers: 164.6.6.2.3-D15-THRESHOLD-BAND)
+- [x] **MT5D-07**: A timed MT5 key with no writer basis is counted or blocked with a named signal. It never composes silently on the legacy roll. (covers: 164.6.6.2.3-MT5-BASIS-SILENT-NONE)
 - [ ] **MT5D-08**: An MT5 key whose sign-in keeps failing cannot claim an account's holder slot. (covers: 167.1.2-MT5-FAILING-HOLDER)
 
 ### Data integrity: venue reads (BYBITREADS, OKXTRADES)
@@ -88,7 +88,7 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 - [ ] **HOLD-01**: A Holdings row whose key is missing from the identity read fails loud. It never counts as an account of its own. (covers: 170.4-IDENTITY-READ-COMPLETENESS)
 - [ ] **HOLD-02**: Match scoring applies the native-unpriced marker per account, so for a multi-key account match AUM and unpriced days equal what Holdings reports. (covers: 170.4-MATCH-UNPRICED-PER-KEY)
-- [ ] **HOLD-03**: The writer-basis gate compares per-day values as well as the calendar, and refuses a same-day re-derive pair whose P&L does not match. (covers: 167.1.2.2.1-WRITER-BASIS-VALUES) ⭐ NOTE 2026-11-24 (planning, recorded in 229-CONTEXT.md): the per-day comparison is a compose-side `returns_stamp` (each derive stores the per-day returns it wrote in its `key_inputs` row; the compose compares it per raw key before the stitch and refuses a differing pair as the blocking `key_inputs_mismatch`). `read_writer_basis` stays byte-unchanged, because editing it fires the open entry `167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY` and a post-stitch check reads the stitched series. Known limit: a correction confined to a day with no stored return that moves no other return leaves the pair content-consistent and is not refused; a row written before this change carries no stamp and is counted, not refused.
+- [x] **HOLD-03**: The writer-basis gate compares per-day values as well as the calendar, and refuses a same-day re-derive pair whose P&L does not match. (covers: 167.1.2.2.1-WRITER-BASIS-VALUES) ⭐ NOTE 2026-11-24 (planning, recorded in 229-CONTEXT.md): the per-day comparison is a compose-side `returns_stamp` (each derive stores the per-day returns it wrote in its `key_inputs` row; the compose compares it per raw key before the stitch and refuses a differing pair as the blocking `key_inputs_mismatch`). `read_writer_basis` stays byte-unchanged, because editing it fires the open entry `167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY` and a post-stitch check reads the stitched series. Known limit: a correction confined to a day with no stored return that moves no other return leaves the pair content-consistent and is not refused; a row written before this change carries no stamp and is counted, not refused.
 - [ ] **HOLD-04**: When the dashboard's unpriced-marker read fails, the page shows a note and a Sentry event fires. Stale rows are never shown silently. (covers: 170.4-DASHBOARD-MARKER-READ-SILENT)
 - [ ] **HOLD-05**: Every failing key of a shared account is named in the missing-data message, even when another key with the same cause already prints a line. (covers: 198-SHARED-ACCOUNT-FALLBACK-UNNAMED)
 
@@ -304,10 +304,10 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | MT5D-01 | Phase 227 | Complete |
 | MT5D-02 | Phase 230 | Pending |
 | MT5D-03 | Phase 230 | Pending |
-| MT5D-04 | Phase 229 | Shipped (#1328), human verification pending |
-| MT5D-05 | Phase 229 | Shipped (#1328), human verification pending |
-| MT5D-06 | Phase 229 | Shipped (#1328), human verification pending |
-| MT5D-07 | Phase 229 | Shipped (#1328), human verification pending |
+| MT5D-04 | Phase 229 | Complete |
+| MT5D-05 | Phase 229 | Complete |
+| MT5D-06 | Phase 229 | Complete |
+| MT5D-07 | Phase 229 | Complete |
 | MT5D-08 | Phase 225 | Pending |
 | VREAD-01 | Phase 231 | Complete |
 | VREAD-02 | Phase 231 | Complete |
@@ -323,7 +323,7 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | FRESH-02 | Phase 233 | Pending |
 | HOLD-01 | Phase 235 | Pending |
 | HOLD-02 | Phase 235 | Pending |
-| HOLD-03 | Phase 229 | Shipped (#1328), human verification pending |
+| HOLD-03 | Phase 229 | Complete |
 | HOLD-04 | Phase 235 | Pending |
 | HOLD-05 | Phase 235 | Pending |
 | NOCAP-01 | Phase 234 | Pending |
