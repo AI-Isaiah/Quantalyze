@@ -158,7 +158,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 - [ ] **Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%** - The founder's scripted session on MM2, MM3 and FX-AI_V, Gate A and Gate B per account, every surface the same, every gap fixed at its root or ruled on; after 155, session after the 155.1 deploy
 - [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
-- [ ] **Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists** - User-facing error copy and the benchmark outage label, with a migration; independent of the MT5 parity phases
+- [x] **Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists** - User-facing error copy and the benchmark outage label, with a migration; independent of the MT5 parity phases (completed 2026-11-25)
 - [ ] **Phase 223: FLOWKINDS — each funding caller treats a malformed row by a recorded, tested decision, and the malformed count is on record first** - Flow-source half only (F-2, no composites): the funding callers' malformed-row decisions and the PROD malformed count; FLOWK-01 dropped
 - [ ] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23; also the seam S4 owner: server-qualified MT5 identity, the draft-clash answer, the failing-holder rule
 - [x] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit (completed 2026-11-24)
@@ -254,16 +254,16 @@ Plans:
 4. The migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, and every census it moves (schema snapshot, mutation floors, pins) moves in the same PR.
 5. The three TODOS entries above are deleted in the ship PR and named in its CHANGELOG entry.
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. The parity test reads the SQL arm, never a hand-typed oracle.
-**Plans:** 4 plans
+**Plans:** 4/4 plans complete
 
 Plans:
 **Wave 1**
-- [ ] 222-01-PLAN.md — migration: `computation_error_copy` arms name the contact form; csv-finalize parity read from the SQL; both pinning SQL gates moved
-- [ ] 222-02-PLAN.md — the five analytics-service sentences name the contact form; ast scan and per-function pins; wizardErrors quote
+- [x] 222-01-PLAN.md — migration: `computation_error_copy` arms name the contact form; csv-finalize parity read from the SQL; both pinning SQL gates moved
+- [x] 222-02-PLAN.md — the five analytics-service sentences name the contact form; ast scan and per-function pins; wizardErrors quote
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 222-03-PLAN.md — a total benchmark source failure reads "no price source", not "stale"; the stale-gated tone rule beside the adapter
-- [ ] 222-04-PLAN.md — a failed follow-on enqueue fails a never-published strategy and leaves a published one alone, proven through the real bridge
+- [x] 222-03-PLAN.md — a total benchmark source failure reads "no price source", not "stale"; the stale-gated tone rule beside the adapter
+- [x] 222-04-PLAN.md — a failed follow-on enqueue fails a never-published strategy and leaves a published one alone, proven through the real bridge
 
 ### Phase 223: FLOWKINDS — each funding caller treats a malformed row by a recorded, tested decision, and the malformed count is on record first
 
@@ -715,7 +715,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 155.2. LIVEPARITY | 13/17 | In progress | - |
 | 157. FOUNDER-CONFIRM | 1/3 | In progress | - |
-| 222. ALERTTRUTH | 0/? | Not started | - |
+| 222. ALERTTRUTH | 4/4 | Complete    | 2026-11-25 |
 | 223. FLOWKINDS | 0/? | Not started | - |
 | 225. ONEACCOUNTONCE | 4/12 | In progress (PR-1 shipped as #1315) | - |
 | 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
