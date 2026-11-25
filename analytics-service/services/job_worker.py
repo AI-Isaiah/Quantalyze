@@ -17161,11 +17161,13 @@ async def run_derive_allocator_equity_job(
     # The account is the identity token (venue id OR marker link), so a
     # departed holder and the live key marked against it are one account here.
     # 225 CONN-03 (CONTEXT Q6 agent decision): a key with no server on a login that carries
-    # two or more servers cannot be placed, live or disconnected. It runs BEFORE the collision
-    # check so the named cause wins over a collision the ambiguity could also produce, and it
-    # has its own token because the collision's line ("disconnect one of them") would not
-    # clear a key that is already disconnected. Token, allocator id and a count only
-    # (T-167.1.2-22): no key id, login, server or USD.
+    # two or more servers cannot be placed, live or disconnected. Unreachable for a new key
+    # under the founder ruling of 2026-11-25 (connect refuses an MT5 key without a server,
+    # existing ones are deleted); kept only to fail loud, behaviour unchanged. It runs
+    # BEFORE the collision check so the named cause wins over a collision the ambiguity
+    # could also produce, and it has its own token because the collision's line
+    # ("disconnect one of them") would not clear a key that is already disconnected.
+    # Token, allocator id and a count only (T-167.1.2-22): no key id, login, server or USD.
     ambiguous_keys = ambiguous_server_key_ids(key_rows)
     if ambiguous_keys:
         reason = DeriveRefusal.ACCOUNT_SERVER_AMBIGUOUS.value

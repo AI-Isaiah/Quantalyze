@@ -239,7 +239,9 @@ class DeriveRefusal(str, Enum):
     # The compose refused a structural input (the core's loud asserts).
     COMPOSE_REFUSED = "compose_refused"
     # 225 CONN-03 (CONTEXT Q6): a key with no broker server reads a login whose keys carry two
-    # or more servers, so its account cannot be placed.
+    # or more servers, so its account cannot be placed. Unreachable for a new key under the
+    # founder ruling of 2026-11-25 (connect refuses an MT5 key without a server, and existing
+    # ones are deleted); kept only as a fail-loud tripwire, behaviour unchanged.
     ACCOUNT_SERVER_AMBIGUOUS = "account_server_ambiguous"
 
 

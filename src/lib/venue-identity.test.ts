@@ -15,7 +15,6 @@ vi.mock("@/lib/audit", () => auditMock);
 
 import {
   accountIdentityTokens,
-  ambiguousServerKeyIds,
   type DepartedHistoryKey,
 } from "./departed-history";
 import {
@@ -132,7 +131,7 @@ describe("pickSameAccountHolder (the fixture's cases)", () => {
   });
 });
 
-// The TS twin of Python `account_identity_tokens` / `ambiguous_server_key_ids`
+// The TS twin of Python `account_identity_tokens`
 // (225 plan 14, plan 15). Every non-identity field of DepartedHistoryKey is null.
 const toHistoryKey = (k: TokenKey): DepartedHistoryKey => ({
   id: k.id,
@@ -148,11 +147,10 @@ const toHistoryKey = (k: TokenKey): DepartedHistoryKey => ({
   last_returns_day: null,
 });
 
-describe("accountIdentityTokens and ambiguousServerKeyIds (the fixture's tokens cases)", () => {
+describe("accountIdentityTokens (the fixture's tokens cases)", () => {
   const replay = (keys: TokenKey[], want: TokenCase) => {
     const historyKeys = keys.map(toHistoryKey);
     expect(Object.fromEntries(accountIdentityTokens(historyKeys))).toEqual(want.tokens);
-    expect([...ambiguousServerKeyIds(historyKeys)].sort()).toEqual([...want.ambiguous].sort());
   };
 
   it.each(spec.tokens)("$name", (c) => {
