@@ -119,6 +119,12 @@ Precondition: Tasks 1 and 2 committed (done) and PR-2c's CI green on its head SH
 
 Recorded results (to be filled by the orchestrator; no identifiers or credentials): log verdict counts: _pending_; pre-deploy attempt code and reading: _pending_; post-deploy wrong-server code: _pending_; post-deploy correct-server control: _pending_.
 
+**Wrong-server measurement, recorded 2026-11-25 (coordinator decision: this IS the plan 19 Task 3 step 6 measurement, and no repeat after deploy is required).** The founder made two attempts in the PROD add-key form, on main v0.133.79.1 with PR-2c not deployed. Both used one real MT5 account and its real investor password, on a sibling live server of the same broker that is not the account's stored server.
+- Both reached the validation terminal. `login()` answered in 344 ms and 523 ms, with `last_error` -6 both times (`RES_E_AUTH_FAILED`, "authorization failed", per the MT5 Python docs).
+- Both were refused at the login stage with HTTP 424 `SIGN_IN_FAILED`, which the wizard showed as `KEY_SIGN_IN_FAILED`. 0 keys were stored.
+- A third attempt, on the right server, was refused with `KEY_ORPHANED` before any validation call. That is correct: the signed-in user already holds that account.
+- Reading: the existing validation already refuses a wrong server at the broker's authorization step. PR-2c's session-server check remains defence in depth (225-CONTEXT.md Q6). Log verdict counts stay pending until the plan 20 Task 3 read.
+
 ## CHANGELOG theme for PR-2c
 
 The MT5 validation now proves the broker server the session is on, not only the login: a key is never stored with a server its validation session did not prove. Section vocabulary: `### Fixed` (a session on another server no longer validates), `### Tests` (server bracket on the wizard, the worker adapter and both TS connect routes), `### Notes` (the MT5 docs leave the already-connected case open; the bracket makes that irrelevant; Task 3's founder evidence pending). No `TODOS.md` entry is closed by this plan.
