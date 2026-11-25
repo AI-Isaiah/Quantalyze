@@ -433,10 +433,32 @@ def _load_declared(raw: Any, keys: Mapping[str, KeyInputs]) -> Declared:
     return Declared(counted, stitch, departed)
 
 
+def _refuse_id_shaped(path: str, raw: Any) -> None:
+    """Refuse a UUID-shaped string anywhere in the export, the ``_comment`` included.
+
+    The export is labelled by hand (``A``, ``k1``): an id in it means the labelling step was
+    skipped, and an id must never reach the reading or a tracked file. The error names the field
+    path only. A dict key is checked before the walk descends under it, so an id-shaped key is
+    reported as ``<key>`` and never echoed."""
+    if isinstance(raw, str):
+        if _UUID_RE.search(raw):
+            raise ExportError(f"{path}: id-shaped value refused")
+    elif isinstance(raw, dict):
+        for name in raw:
+            if isinstance(name, str) and _UUID_RE.search(name):
+                raise ExportError(f"{path}.<key>: id-shaped key refused")
+        for name, value in raw.items():
+            _refuse_id_shaped(f"{path}.{name}", value)
+    elif isinstance(raw, list):
+        for index, value in enumerate(raw):
+            _refuse_id_shaped(f"{path}[{index}]", value)
+
+
 def load_export(path: str) -> Export:
     """Read and strictly validate an export file."""
     with open(path, encoding="utf-8") as handle:
         raw = json.load(handle)
+    _refuse_id_shaped("export", raw)
     top = _obj("export", raw, ("_comment", "book", "keys", "declared"), ("book", "keys", "declared"))
     if "_comment" in top and not isinstance(top["_comment"], str):
         raise ExportError("export._comment: expected a string")
@@ -1184,10 +1206,113 @@ def emit_reading(analysis: Analysis) -> list[str]:
     return _render_rows(rows)
 
 
+# ── the read-only statements the orchestrator runs ───────────────────────────────────────────────
+
+# Each statement is a single SELECT or WITH, ends in ``;``, carries psql-style placeholders only
+# (``:'book_id'``) that the orchestrator fills in privately, and writes nothing. The ``api_keys``
+# columns in ``book_key_rows`` are the ones ``job_worker.run_derive_allocator_equity_job`` selects
+# in its ``_load_keys``; ``venue_account_id`` is replaced by a rank so that no account identifier
+# leaves the database. ``key_array_by_year`` serves the book's ``returns`` (``:'kind'`` =
+# ``equity_curve``, ``:'field'`` = ``returns``) and every per-key array, one year at a time.
+_SQL_STATEMENTS: Final[tuple[tuple[str, str, str], ...]] = (
+    (
+        "book_curve",
+        "the book's stored curve: everything but the returns array (fetch that with key_array_by_year)",
+        "SELECT payload -> 'flags' AS flags,\n"
+        "       payload -> 'degrade_reasons' AS degrade_reasons,\n"
+        "       payload -> 'inputs' AS inputs,\n"
+        "       payload -> 'unpriced_native_keys' AS unpriced_native_keys,\n"
+        "       payload -> 'no_capital_exited_keys' AS no_capital_exited_keys,\n"
+        "       payload -> 'failing_key_exits' AS failing_key_exits,\n"
+        "       jsonb_array_length(payload -> 'returns') AS n_returns\n"
+        "  FROM allocator_equity_derived\n"
+        " WHERE allocator_id = :'book_id' AND kind = 'equity_curve';",
+    ),
+    (
+        "book_key_kinds",
+        "the key_inputs rows under the book (one kind per key)",
+        "SELECT kind\n"
+        "  FROM allocator_equity_derived\n"
+        " WHERE allocator_id = :'book_id' AND kind LIKE 'key_inputs:%'\n"
+        " ORDER BY kind;",
+    ),
+    (
+        "key_scalars",
+        "one key's scalar fields (run once per :'key_kind')",
+        "SELECT payload -> 'realized_terminal_day' AS realized_terminal_day,\n"
+        "       payload -> 'realized_terminal_usd' AS realized_terminal_usd,\n"
+        "       payload -> 'anchor_usd' AS anchor_usd,\n"
+        "       payload -> 'anchor_null_reason' AS anchor_null_reason,\n"
+        "       payload -> 'options_cash_basis' AS options_cash_basis,\n"
+        "       payload -> 'writer_basis_withheld' AS writer_basis_withheld,\n"
+        "       payload -> 'tiny_base_days' AS tiny_base_days\n"
+        "  FROM allocator_equity_derived\n"
+        " WHERE allocator_id = :'book_id' AND kind = :'key_kind';",
+    ),
+    (
+        "key_array_by_year",
+        "one array field of one row, sliced to [:'from_day', :'to_day') (the day key is date or utc_day_iso)",
+        "SELECT jsonb_path_query_array(\n"
+        "         payload -> :'field',\n"
+        "         '$[*] ? ((@.date >= $lo && @.date < $hi) || (@.utc_day_iso >= $lo && @.utc_day_iso < $hi))',\n"
+        "         jsonb_build_object('lo', :'from_day'::text, 'hi', :'to_day'::text)\n"
+        "       ) AS slice\n"
+        "  FROM allocator_equity_derived\n"
+        " WHERE allocator_id = :'book_id' AND kind = :'kind';",
+    ),
+    (
+        "book_key_rows",
+        "the api_keys columns the compose job selects, account id replaced by a rank",
+        "SELECT id, is_active, sync_status, disconnected_at, exchange,\n"
+        "       dense_rank() OVER (ORDER BY exchange, venue_account_id) AS account_group,\n"
+        "       account_shared_with_api_key_id, account_share_kind, history_inclusion\n"
+        "  FROM api_keys\n"
+        " WHERE user_id = :'book_id'\n"
+        " ORDER BY account_group, id;",
+    ),
+)
+SQL_LABELS: Final[tuple[str, ...]] = tuple(label for label, _what, _sql in _SQL_STATEMENTS)
+
+
+def print_sql(labels: Sequence[str] = ()) -> str:
+    """The statements under their labels, ``;``-terminated; every statement when no label is given."""
+    by_label = {label: (what, sql) for label, what, sql in _SQL_STATEMENTS}
+    wanted = list(labels) if labels else list(SQL_LABELS)
+    parts: list[str] = []
+    for label in wanted:
+        if label not in by_label:
+            raise ValueError("unknown statement label")
+        what, sql = by_label[label]
+        parts.append(f"-- oracle ({label}): {what}\n{sql}\n")
+    return "\n".join(parts)
+
+
+_PRINT_SQL_USAGE: Final = "usage: deribit_book_oracle.py [--print-sql[=<label>,...] | --input <export.json>]"
+
+
+def _print_sql_main(args: Sequence[str]) -> int:
+    """``--print-sql`` takes no other argument: it touches no database and reads no export."""
+    if len(args) != 1:
+        print("failed: --print-sql takes no other argument", file=sys.stderr)
+        print(_PRINT_SQL_USAGE, file=sys.stderr)
+        return 2
+    labels = [x for x in args[0].partition("=")[2].split(",") if x] if "=" in args[0] else []
+    try:
+        text = print_sql(labels)
+    except ValueError:
+        print("failed: unknown --print-sql label (known: " + ", ".join(SQL_LABELS) + ")", file=sys.stderr)
+        return 2
+    sys.stdout.write(text)
+    return 0
+
+
 # ── entry point ────────────────────────────────────────────────────────────────────────────────
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    args_in = list(sys.argv[1:] if argv is None else argv)
+    if any(a == "--print-sql" or a.startswith("--print-sql=") for a in args_in):
+        return _print_sql_main(args_in)
     parser = argparse.ArgumentParser(
         prog="deribit_book_oracle",
         description="Independent per-day attribution oracle for the Deribit book (offline export).",

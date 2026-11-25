@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import ast
 import json
+import re
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -498,3 +500,106 @@ def test_every_day_has_exactly_one_class() -> None:
             else:
                 assert d.reason is None
                 assert d.day in analysis.export.book.returns
+
+
+# ── plan 233-05 Task 2: the reading cannot leak, and the orchestrator has its read-only SQL ─────
+#
+# Why each test matters (Rule 9):
+#   16. ``test_emitter_refuses_values_outside_vocabulary``: the reading is pasted into a tracked
+#       file on a public repository, so an id, an unrounded amount or free venue text must raise
+#       instead of printing. REVERT-PROOF: a ``_render_val`` that accepts any value passes them.
+#   17. ``test_print_sql_is_read_only_and_id_free`` and ``test_print_sql_takes_no_other_argument``:
+#       the statements the orchestrator runs against PROD are SELECT or WITH only, carry
+#       placeholders and no id, and the mode touches no export.
+#   18. ``test_export_with_id_shaped_value_is_refused``: an export that was not labelled by hand
+#       (an id anywhere, the ``_comment`` included) is refused by field path, never echoed.
+#       REVERT-PROOF: removing the loader's id refusal lets the export through.
+
+
+def test_emitter_refuses_values_outside_vocabulary() -> None:
+    an_id = str(uuid.uuid4())
+    for bad in (
+        oracle.Val("label", an_id),
+        oracle.Val("token", an_id),
+        oracle.Val("token", "free text from a venue"),
+        oracle.Val("token", "0.12345678901234"),
+        oracle.Val("count", 1234.5678),
+        oracle.Val("name", "not_in_any_closed_set"),
+        oracle.Val("date", an_id),
+    ):
+        with pytest.raises((ValueError, oracle.ExportError)):
+            oracle._render_rows([("oracle-book:", (("book", bad),))])
+    # The vocabulary itself still renders (the refusal is not a blanket refusal).
+    assert oracle._render_rows([("oracle-book:", (("book", oracle.Val("label", "A")),))]) == [
+        "oracle-book: book=A"
+    ]
+
+
+_WRITE_WORDS = re.compile(
+    r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do|execute|set|vacuum)\b",
+    re.IGNORECASE,
+)
+
+
+def test_print_sql_is_read_only_and_id_free(capsys: pytest.CaptureFixture[str]) -> None:
+    assert oracle.SQL_LABELS == (
+        "book_curve",
+        "book_key_kinds",
+        "key_scalars",
+        "key_array_by_year",
+        "book_key_rows",
+    )
+    assert oracle.main(["--print-sql"]) == 0
+    text = capsys.readouterr().out
+    assert text == oracle.print_sql()
+    headers = re.findall(r"^-- oracle \((\w+)\):", text, re.MULTILINE)
+    assert tuple(headers) == oracle.SQL_LABELS
+    blocks = [b for b in text.split("\n\n") if b.strip()]
+    assert len(blocks) == len(oracle.SQL_LABELS)
+    placeholders = {"book_id", "key_kind", "kind", "field", "from_day", "to_day"}
+    for block in blocks:
+        body = "\n".join(line for line in block.splitlines() if not line.startswith("--")).strip()
+        assert re.match(r"(?i)^(select|with)\b", body), body
+        assert body.endswith(";") and body.count(";") == 1, body
+        assert not _WRITE_WORDS.search(body), body
+        assert set(re.findall(r":'(\w+)'", body)) <= placeholders
+    assert not oracle._UUID_RE.search(text)
+    assert not oracle._LONG_DIGITS_RE.search(text)
+    # The account identifier is only ever used to rank, never selected.
+    assert text.count("venue_account_id") == 1
+    assert "dense_rank() OVER (ORDER BY exchange, venue_account_id) AS account_group" in text
+
+
+def test_print_sql_takes_no_other_argument(capsys: pytest.CaptureFixture[str]) -> None:
+    assert oracle.main(["--print-sql", "--input", str(_FIXTURES / "explained_two_keys.json")]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no other argument" in captured.err
+    assert oracle.main(["--print-sql=no_such_label"]) == 2
+    assert capsys.readouterr().out == ""
+    assert oracle.main(["--print-sql=book_key_rows"]) == 0
+    assert capsys.readouterr().out.count("-- oracle (") == 1
+
+
+def test_export_with_id_shaped_value_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    an_id = str(uuid.uuid4())
+
+    def in_comment(doc: dict[str, Any]) -> None:
+        doc["_comment"] = f"copied from {an_id}"
+
+    def in_flags(doc: dict[str, Any]) -> None:
+        doc["book"]["flags"] = {"note": an_id}
+
+    def as_key(doc: dict[str, Any]) -> None:
+        doc["declared"]["stitch_parent"] = {an_id: "k1"}
+
+    for mutate, expect in (
+        (in_comment, "export._comment: id-shaped value refused"),
+        (in_flags, "export.book.flags.note: id-shaped value refused"),
+        (as_key, "export.declared.stitch_parent.<key>: id-shaped key refused"),
+    ):
+        code = oracle.main(["--input", _variant(tmp_path, mutate)])
+        captured = capsys.readouterr()
+        assert code == 2
+        assert expect in captured.err
+        assert an_id not in captured.err and an_id not in captured.out
