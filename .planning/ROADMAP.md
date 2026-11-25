@@ -329,14 +329,14 @@ Plans:
 **Gap wave 1**
 - [ ] 225-13-PLAN.md — owners can read `venue_server` (column GRANT), after a founder decision checkpoint (PR-2b-1)
 - [ ] 225-14-PLAN.md — the Python twin: a server-aware `account_identity_tokens`, the derive reads `venue_server`, and the named `account_server_ambiguous` refusal (PR-2b-2)
-- [ ] 225-20-PLAN.md — the MT5 poll reads log whether the session is on the requested broker server, measured on PROD before PR-2c merges, and the poll-path refusal gets an owner (PR-2c0)
 
 **Gap wave 2** *(blocked on gap wave 1 completion)*
 - [ ] 225-15-PLAN.md — the TS twin: a server-aware `accountIdentityTokens` and every reader and key-card state carries `venue_server` (PR-2b-2)
-- [ ] 225-18-PLAN.md — the MT5 connect check proves the broker server, not only the login, with founder measurements before and after deploy, after plan 20's measurement (PR-2c)
+- [ ] 225-20-PLAN.md — the MT5 poll reads log whether the session is on the requested broker server, measured on PROD before PR-2c merges, and the poll-path refusal gets an owner (PR-2c0)
 
 **Gap wave 3** *(blocked on gap wave 2 completion)*
 - [ ] 225-16-PLAN.md — the SQL twin: `commit_scenario_batch` identity edges become server-aware, with a gate arm per rule clause (PR-2b-2)
+- [ ] 225-18-PLAN.md — the MT5 connect check proves the broker server, not only the login, with founder measurements before and after deploy, after plan 20's measurement (PR-2c)
 
 **Gap wave 4** *(blocked on gap wave 3 completion)*
 - [ ] 225-17-PLAN.md — re-point the existing fingerprint twins, record the drift row, and a read-only PROD check before PR-2b-2 merges (PR-2b-2)
