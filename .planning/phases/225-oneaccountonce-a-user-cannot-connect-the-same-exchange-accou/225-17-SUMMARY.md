@@ -137,3 +137,14 @@ None started by this plan. The pg-lane's throwaway cluster is removed by its own
 
 - Commit `826b2a4cd` is an ancestor of HEAD; both gate files are modified and committed.
 - Acceptance greps listed above hold. Task 3 is explicitly pending, not claimed.
+
+## PROD before PR-2b-2 (2026-11-25, partial)
+
+Run through the PROD Supabase MCP. Each step was one read-only query in its own call, never chained.
+
+1. Marker: the answer named PRODUCTION.
+2. `has_column_privilege` on `venue_server` SELECT: authenticated true, anon false.
+3. Groups of one owner, one exchange and one login with two or more distinct set servers: 0.
+4. Keys with no server inside such a group: 0.
+5. VAC-04: pending. It is read from the PR's migration-drift-check log once PR-2b-2 is open.
+6. 155.2 freeze: neither `155.2-12-SUMMARY.md` nor `155.2-14-SUMMARY.md` is on origin/main, so the freeze is open.
