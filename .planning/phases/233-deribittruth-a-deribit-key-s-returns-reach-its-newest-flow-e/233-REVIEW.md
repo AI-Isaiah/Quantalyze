@@ -505,3 +505,26 @@ _Depth: standard_
 ### Silent-failure-hunter lane, round 3
 
 Same finding as WR-06, reached independently: adding `+ v("noReturns")` to the guard sum kept the self-test at 108/108. The lane found no other MEDIUM+ in fix round 2.
+
+## Fix round 3
+
+**Commit:** `be927ae1c` (`fix(233): WR-06 pin the no-return half of the per-venue freshness guard`)
+
+### WR-06: fixed
+
+`scripts/prod-prober/run.mjs` gains one `freshness:` scenario: a fresh `deribit` row beside a lone `binance` row with `hasInputs` true, no anchor reason, `newestReturn` empty and a `newestFlow` day. It expects exit 1 with exactly one measure-fail on `freshness binance`, whose detail includes `no_returns=1` and `no binance key was judged`. `SELF_TEST_SCENARIOS` and its `toBe` pin in `src/__tests__/prod-prober-wiring.test.ts` are 109. Info items and production logic are untouched.
+
+### PROOF-01: neuters of `scripts/prod-prober/arms/freshness.mjs`, each from a byte backup
+
+Neuter 1: the judged sum became `v("fresh") + v("coveredStated") + v("stale") + v("coveredAnchor") + v("noReturns") === 0`.
+- RED: `SELF-TEST FAIL: binance has only a no_returns key: exits 1 (got 0)` ... `=== SELF-TEST FAILED ===`
+- Restore: `cp f.bak f`, then `cmp f f.bak` printed nothing and exited 0.
+
+Neuter 2: `count("noReturns", r.venue)` became `count("noReturns")`.
+- RED: `SELF-TEST FAIL: binance has only a no_returns key: exits 1 (got 0)` ... `=== SELF-TEST FAILED ===`
+- Restore: `cp f.bak f`, then `cmp f f.bak` printed nothing and exited 0.
+
+The `.bak` files were removed.
+
+GREEN: `=== SELF-TEST PASSED: 109/109 scenarios, every arm's kinds fired on their own fixtures and nowhere else ===`
+`npx vitest run src/__tests__/prod-prober-wiring.test.ts src/__tests__/critical-regressions.test.ts`: `Test Files  2 passed (2)`, `Tests  305 passed (305)`.
