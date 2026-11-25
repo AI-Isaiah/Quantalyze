@@ -38,12 +38,23 @@ the fake makes, switchable where it matters):
 Later plans add switches to ``BinanceFillsVenue`` additively, default off, and never change
 a default.
 
+``suspend_per_request`` (Phase 250 plan 07): every real request is a network round trip, so it
+suspends the calling task once. The default fake never suspends, and that changes the ORDER the
+per-symbol tasks run in. Planning measurement (2026-11-25, Python 3.12.13, a scratch model of
+this exact shape: N symbols gathered behind ``asyncio.Semaphore(5)`` that is held per request):
+with a venue call that never suspends the tasks ran DEPTH-FIRST (8 and 50 symbols: the fewest
+windows any symbol read was 0, the most 13); with one suspension per call they INTERLEAVED
+(fewest 6, most 7). Only the ordering arm of ``tests/test_binancefills_e2e.py``
+(``test_repeated_deadline_stops_advance_the_frontier_every_run``) builds the venue with the
+switch on. Every other arm keeps the default and must not assume interleaving.
+
 The markets cassette ``tests/cassettes/binance/markets.json`` holds twelve unified markets
 recorded from a public ``load_markets()`` at ccxt 4.5.89 with no credentials (the file
 carries its own ``recorded_at``, ``selection`` and ``source``). It holds no account data.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import functools
 import json
@@ -161,6 +172,9 @@ class BinanceFillsVenue:
       ``endTime`` and the window rule (a venue that ignores ``endTime``).
     - ``effects``: a mutable dict from venue id to an exception raised on EVERY request for
       that id (set and cleared by a test between runs); Phase 250 plan 05.
+    - ``suspend_per_request``: each endpoint appends the call to ``calls`` and then awaits
+      ``asyncio.sleep(0)`` once before answering (or raising), the suspension every real request
+      has; Phase 250 plan 07. Default off.
     """
 
     def __init__(
@@ -172,6 +186,7 @@ class BinanceFillsVenue:
         out_of_reach: str = "raise",
         exclusive_end: bool = False,
         ignore_end_for: frozenset[str] = frozenset(),
+        suspend_per_request: bool = False,
     ) -> None:
         assert out_of_reach in ("raise", "empty"), out_of_reach
         self._rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -183,6 +198,7 @@ class BinanceFillsVenue:
         self.out_of_reach = out_of_reach
         self.exclusive_end = exclusive_end
         self.ignore_end_for = ignore_end_for
+        self.suspend_per_request = suspend_per_request
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.effects: dict[str, BaseException] = {}
 
@@ -191,16 +207,28 @@ class BinanceFillsVenue:
         return [req for k, req in self.calls if k == kind]
 
     async def fapi(self, request: dict[str, Any]) -> list[dict[str, Any]]:
-        return self._serve("linear", request)
+        return await self._answer("linear", request)
 
     async def dapi(self, request: dict[str, Any]) -> list[dict[str, Any]]:
-        return self._serve("inverse", request)
+        return await self._answer("inverse", request)
 
     async def spot(self, request: dict[str, Any]) -> list[dict[str, Any]]:
-        return self._serve("spot", request)
+        return await self._answer("spot", request)
 
-    def _serve(self, kind: str, request: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _answer(self, kind: str, request: dict[str, Any]) -> list[dict[str, Any]]:
+        if not self.suspend_per_request:
+            return self._serve(kind, request)
+        # Record first, suspend once, then answer: the call is in the log before any other
+        # task can run, exactly as a request that has been sent and not yet answered.
         self.calls.append((kind, dict(request)))
+        await asyncio.sleep(0)
+        return self._serve(kind, request, record=False)
+
+    def _serve(
+        self, kind: str, request: dict[str, Any], *, record: bool = True
+    ) -> list[dict[str, Any]]:
+        if record:
+            self.calls.append((kind, dict(request)))
         venue_id = request["symbol"]
         if venue_id in self.effects:
             raise self.effects[venue_id]

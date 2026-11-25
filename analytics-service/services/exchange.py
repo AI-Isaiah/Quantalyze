@@ -708,6 +708,29 @@ BINANCE_FILLS_REACH_DAYS: int = 85
 #: precedent): a capped window stops that symbol's walk and carries a read-through bound.
 BINANCE_PAGE_CAP: int = 20
 BINANCE_FILLS_PAGE_LIMIT: int = 1000
+#: Phase 250 BINANCEFILLS (RESEARCH Q4, assumption A5): the default read budget, in seconds, of
+#: ``fetch_raw_trades`` and ``_fetch_raw_trades_binance`` (keyword ``read_deadline_s``). The
+#: nightly reconcile, which passes nothing, reads with it: 240 s leaves its 300 s handler timeout
+#: room for the DB scan and the diff, and is about 1,050 requests at the measured 229 ms per
+#: weight-5 request (measured against the throttler without network latency). Never None: the
+#: Binance fills read always has a deadline, unlike ``fetch_daily_pnl`` whose None means none.
+BINANCE_FILLS_READ_DEADLINE_S: float = 240.0
+#: Phase 250 BINANCEFILLS, founder ruling 2026-11-25 (UTC): "give the sync about 14 of its 15
+#: minutes for reading". Only ``run_sync_trades_job`` passes it (``read_deadline_s=``); 840 / 240 =
+#: 3.5, the ruling's "3.5x rarer" stall. WHERE THE CLOCK STARTS: inside ``_fetch_raw_trades_binance``
+#: once markets are loaded, and it covers the requests of the read only, while the 900 s
+#: ``TIMEOUT_PER_KIND["sync_trades"]`` wraps the whole handler. The other 60 s must hold the work
+#: before the clock (handler setup, the daily read, the high-water reads, symbol discovery,
+#: ``load_markets()``), the requests already past the check when the deadline passes (at most the
+#: five semaphore slots, each bounded by ccxt's 10 s default request timeout, which
+#: ``create_exchange`` does not override), and the work after the read (one amendment probe and one
+#: upsert per 100 fills, then the daily persist, the DQ stamp, the cursor RPC and the follow-on
+#: enqueue). The persist term grows with the fills read and no deadline bounds it, and the DB
+#: round-trip time from the worker is UNMEASURED, so 60 s holds a sparse read and not a fill-heavy
+#: read that also runs to its deadline (the SYNC HANDLER TAIL known limit): ``wait_for`` then
+#: cancels the handler before the cursor RPC, the upserted fills are kept, the job fails loudly as
+#: a timeout and the next run starts from the same cursor.
+BINANCE_SYNC_FILLS_READ_DEADLINE_S: float = 840.0
 
 
 class _BinanceSymbolRead(NamedTuple):
@@ -2498,12 +2521,15 @@ async def fetch_raw_trades(
     strategy_id: str,
     supabase: Client,
     since_ms: int | None = None,
+    *,
+    read_deadline_s: float = BINANCE_FILLS_READ_DEADLINE_S,
 ) -> list[dict[str, Any]]:
     """Fetch raw fill-level trades from the exchange.
 
     Returns a list of dicts normalized to the trades table schema with
     is_fill=True. Overlap window: subtracts 1 hour from since_ms for
     late-arriving fills; dedup is handled by the DB partial unique index.
+    ``read_deadline_s`` bounds the Binance fills read only; the other venues ignore it.
     """
     from services.db import db_execute
 
@@ -2526,6 +2552,7 @@ async def fetch_raw_trades(
             fills = await _fetch_raw_trades_binance(
                 exchange, strategy_id, supabase, effective_since,
                 pre_overlap_seed_ms=since_ms,
+                read_deadline_s=read_deadline_s,
             )
         elif exchange.id == "okx":
             fills = await _fetch_raw_trades_okx(exchange, effective_since)
@@ -2558,6 +2585,7 @@ async def _fetch_raw_trades_binance(
     since_ms: int | None,
     *,
     pre_overlap_seed_ms: int | None = None,
+    read_deadline_s: float = BINANCE_FILLS_READ_DEADLINE_S,
 ) -> list[dict[str, Any]]:
     """Binance: per-symbol iteration using fetch_my_trades.
 
@@ -2568,9 +2596,11 @@ async def _fetch_raw_trades_binance(
     ``limit=BINANCE_FILLS_PAGE_LIMIT``. No seed walks from ``BINANCE_FILLS_REACH_DAYS`` back;
     an older seed starts there and records the non-holding ``binance_fills_reach_clamped``.
     A row outside its window raises ``BinanceFillsOutOfWindow`` (the symbol fails and is
-    named in ``binance_partial_symbols``). A symbol's walk ends early only two ways, each a
+    named in ``binance_partial_symbols``). A symbol's walk ends early only three ways, each a
     ``_BinanceSymbolRead.stop`` with a ``read_through_ms`` bound: ``cap`` (``BINANCE_PAGE_CAP``
-    pages inside one window) and ``untimed`` (a full page whose last row has no timestamp).
+    pages inside one window), ``untimed`` (a full page whose last row has no timestamp) and
+    ``deadline`` (``read_deadline_s`` seconds after the read began, checked before EVERY request,
+    exempt overlap pages included).
     Flags are recorded here in the parent, never inside the gathered per-symbol tasks.
     ``pre_overlap_seed_ms`` is the caller's seed before ``OVERLAP_WINDOW_MS`` was subtracted: a
     full page that re-reads the hour below it does not count toward ``BINANCE_PAGE_CAP`` (None
@@ -2710,6 +2740,10 @@ async def _fetch_raw_trades_binance(
     else:
         walk_start_ms = since_ms
     walk_start_ms = min(walk_start_ms, read_now)
+    # Phase 250 BINANCEFILLS (T-250-10): ONE deadline for the read, taken once markets are loaded
+    # and before the tasks are built (the module attribute, so a test pin lands). It is checked
+    # inside the semaphore immediately before every request, so no request passes it.
+    deadline = _monotonic() + read_deadline_s
 
     async def _fetch_one(symbol: str) -> _BinanceSymbolRead:
         # Normalize symbol for CCXT: BTCUSDT -> BTC/USDT:USDT
@@ -2738,6 +2772,16 @@ async def _fetch_raw_trades_binance(
                 # heavy symbol can't monopolize a slot for 20 sequential RTTs
                 # while sibling symbols block.
                 async with sem:
+                    if _monotonic() >= deadline:
+                        # Send nothing; keep every row already read. Same stop shape as the
+                        # cap: complete through the newest fill read in this window, else
+                        # through this window's start minus 1 ms (a symbol that sent no
+                        # request is at the walk start). ``break`` skips the cap's while-else.
+                        stop = "deadline"
+                        read_through_ms = (
+                            window_newest if window_newest is not None else window_start - 1
+                        )
+                        break
                     batch = await exchange.fetch_my_trades(
                         ccxt_symbol,
                         since=current_since,
@@ -2861,6 +2905,7 @@ async def _fetch_raw_trades_binance(
     unlisted_symbols: list[str] = []
     cap_symbols: list[str] = []
     untimed_symbols: list[str] = []
+    deadline_symbols: list[str] = []
     stop_bounds: list[int] = []
     first_error: BaseException | None = None
     for idx, item in enumerate(results):
@@ -2899,7 +2944,9 @@ async def _fetch_raw_trades_binance(
             cap_symbols.append(item.symbol)
         elif item.stop == "untimed":
             untimed_symbols.append(item.symbol)
-        if item.stop in ("cap", "untimed") and item.read_through_ms is not None:
+        elif item.stop == "deadline":
+            deadline_symbols.append(item.symbol)
+        if item.stop in ("cap", "untimed", "deadline") and item.read_through_ms is not None:
             stop_bounds.append(item.read_through_ms)
         trades = item.trades
         for t in trades:
@@ -2950,6 +2997,14 @@ async def _fetch_raw_trades_binance(
         _record_dq_flag("binance_page_cap_symbols", list(cap_symbols))
     if untimed_symbols:
         _record_dq_flag("binance_untimed_page_symbols", list(untimed_symbols))
+    if deadline_symbols:
+        _record_dq_flag("binance_deadline_symbols", list(deadline_symbols))
+        # One WARNING per deadline-stopped read; counts and seconds only (T-250-13: no venue text).
+        logger.warning(
+            "Binance fills read strategy=%s stopped by its %.0f s read deadline: "
+            "%d of %d symbols stopped and are named in binance_deadline_symbols",
+            strategy_id, read_deadline_s, len(deadline_symbols), len(symbols),
+        )
     if stop_bounds:
         _record_dq_flag("binance_read_through_ms", min(stop_bounds))
 

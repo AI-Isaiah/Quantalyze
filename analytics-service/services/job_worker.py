@@ -116,6 +116,7 @@ from services.db import (
 )
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
+    BINANCE_SYNC_FILLS_READ_DEADLINE_S,
     BybitTradeWindowIncomplete,
     aclose_exchange,
     create_exchange,
@@ -2287,7 +2288,8 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 )
             try:
                 raw_fills = await fetch_raw_trades(
-                    ctx.exchange, strategy_id, ctx.supabase, since_ms=fills_since_ms
+                    ctx.exchange, strategy_id, ctx.supabase, since_ms=fills_since_ms,
+                    read_deadline_s=BINANCE_SYNC_FILLS_READ_DEADLINE_S,
                 )
                 fetch_raw_dq_flags = get_and_clear_last_dq_flags()
                 if fetch_raw_dq_flags:

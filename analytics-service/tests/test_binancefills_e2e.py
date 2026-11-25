@@ -24,6 +24,9 @@ and checked with `cmp`; later plans extend this list):
      forbidden fake) in tests/_binance_fills.py: tests/test_binancefills_harness.py
      test_a_since_only_linear_request_is_capped_at_seven_days_by_ccxt goes RED and the
      strict-xfail reproduction below is reported as a FAILED XPASS.
+  N24 (250-07) hold the semaphore across a symbol's whole walk instead of per request:
+     test_repeated_deadline_stops_advance_the_frontier_every_run goes RED (symbols beyond the
+     five slots never start in a deadline-stopped run, so the bound sits at the walk start).
 """
 
 from __future__ import annotations
@@ -38,9 +41,12 @@ import pytest
 import services.exchange as ex
 from services.job_worker import DispatchOutcome, run_sync_trades_job
 from tests._binance_fills import (
+    DAY_MS,
+    HOUR_MS,
     NOW_MS,
     BinanceFillsVenue,
     real_binance,
+    recorded_markets,
     symbols_supabase,
     venue_fill,
 )
@@ -63,6 +69,12 @@ NOW_MINUS_120D_MS = 1784808000000  # 2026-07-23T12:00:00Z (older than the 85-day
 NOW_MINUS_120D_ISO = "2026-07-23T12:00:00+00:00"
 NOW_MINUS_60D_MS = 1789992000000  # 2026-09-21T12:00:00Z
 NOW_MINUS_60D_ISO = "2026-09-21T12:00:00+00:00"
+
+# The budget `run_sync_trades_job` passes to its fills read (founder ruling 2026-11-25 UTC: "about 14
+# of its 15 minutes for reading"). Hand-typed so the ordering arm's clock step is not computed from
+# the constant under test; `test_the_sync_job_passes_the_long_read_budget` asserts it is equal to
+# `BINANCE_SYNC_FILLS_READ_DEADLINE_S`, so the two cannot drift apart.
+SYNC_READ_BUDGET_S = 840.0
 
 
 @pytest.fixture(autouse=True)
@@ -107,12 +119,18 @@ async def _run_live(
     }
 
     async def _real_read(
-        _job_exchange: Any, strategy_id: str, _job_supabase: Any, since_ms: int | None = None
+        _job_exchange: Any,
+        strategy_id: str,
+        _job_supabase: Any,
+        since_ms: int | None = None,
+        **read_kwargs: Any,
     ) -> list[dict[str, Any]]:
+        # `read_kwargs` carries whatever the job passes beyond the seed (the read budget), so
+        # the REAL walk reads with the budget the REAL job asked for.
         binance = await real_binance(venue)
         try:
             return await ex.fetch_raw_trades(
-                binance, strategy_id, symbols_supabase(symbols), since_ms=since_ms
+                binance, strategy_id, symbols_supabase(symbols), since_ms=since_ms, **read_kwargs
             )
         finally:
             await binance.close()
@@ -147,6 +165,26 @@ async def _run_live(
 
     assert result.outcome == DispatchOutcome.DONE
     return rec, fetch_raw
+
+
+EIGHT_LINEAR = [
+    # (stored name, venue id): the eight non-spot linear markets of the cassette.
+    ("BTCUSDT", "BTCUSDT"),
+    ("ETHUSDT", "ETHUSDT"),
+    ("BCHUSDT", "BCHUSDT"),
+    ("XRPUSDT", "XRPUSDT"),
+    ("LTCUSDT", "LTCUSDT"),
+    ("TRXUSDT", "TRXUSDT"),
+    ("BTCUSDCC", "BTCUSDC"),
+    (
+        next(
+            m["symbol"].replace("/", "").replace(":USDT", "").replace(":USD", "")
+            for m in recorded_markets()
+            if m["type"] == "future"
+        ),
+        "BTCUSDT_261225",
+    ),
+]
 
 
 class TestBinanceFillsThroughTheSyncJob:
@@ -505,3 +543,102 @@ class TestBinanceFillsThroughTheSyncJob:
         assert len(union) == 21_100, f"{len(union)} of 21100 venue fills persisted"
         first_missing = next((k for k in range(1, 21_101) if str(k) not in union), None)
         assert first_missing is None, f"first venue fill never persisted: {first_missing}"
+
+    async def test_repeated_deadline_stops_advance_the_frontier_every_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SC-3, T-250-17: with one suspension per venue request (as the network gives every
+        real request) the per-request semaphore INTERLEAVES the symbol tasks, so under a
+        deadline every symbol starts every run and the frontier moves. Held across a symbol's
+        whole walk (N24) the symbols beyond the five semaphore slots would never start, the
+        bound would sit at the walk start minus 1 ms, and the stamp would never move.
+
+        Fixture: eight symbols (more than the 5 slots); column C with a stored fill at C; every
+        symbol has a venue fill every 2 days from C + 1 day (2026-10-22T12:00:00Z) to
+        NOW - 1 day (2026-11-19T12:00:00Z), 15 fills, offset by its index in hours. A run reads
+        through the REAL sync job with the budget the job passes (840 s); the clock is pinned to
+        one tick of 70 s per venue request (840 / 12), so every run sends exactly 12 requests and
+        the 13th check stops it. A symbol's walk from its start to NOW is 5 requests (the 7-day
+        windows reach 28 days from C - 1 h, the fifth ends at NOW), so 12 requests across 8
+        symbols cannot reach now from the first run's start. Each deadline-stopped run covers a
+        prefix of about 7 days from its start and every symbol holds a fill every 2 days, so the
+        covered prefix always holds a stored fill after the column.
+
+        Run loop, at most 12 runs: each run's stored fills are the stored fill at C plus every
+        fill persisted so far, its column the previous run's stamp (flags are not shared across
+        runs: that would test the self-heal, not the producer)."""
+        step = SYNC_READ_BUDGET_S / 12
+        rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        time_by_id: dict[str, int] = {}
+        for idx, (_stored, venue_id) in enumerate(EIGHT_LINEAR):
+            fills = []
+            for k in range(15):
+                fill_id = (idx + 1) * 1000 + k + 1
+                at = C_MS + DAY_MS + 2 * DAY_MS * k + idx * HOUR_MS
+                fills.append(venue_fill("linear", venue_id, fill_id, at))
+                time_by_id[str(fill_id)] = at
+            rows[("linear", venue_id)] = fills
+        venue = BinanceFillsVenue(rows, suspend_per_request=True)
+        monkeypatch.setattr(ex, "_monotonic", lambda: float(len(venue.calls)) * step)
+        symbols = [stored for stored, _venue_id in EIGHT_LINEAR]
+
+        column = C_ISO
+        persisted: dict[str, str] = {}
+        stopped_runs = 0
+        prev_frontier: int | None = None
+        final_stamp: str | None = None
+        ended = False
+        for run in range(1, 13):
+            calls_before = len(venue.calls)
+            rec, _fetch = await _run_live(
+                venue,
+                column=column,
+                stored_fills=[C_ISO, *persisted.values()],
+                symbols=symbols,
+            )
+            run_calls = venue.calls[calls_before:]
+            flags = (
+                rec.analytics_upserts[-1]["data_quality_flags"] if rec.analytics_upserts else {}
+            )
+            for batch in rec.upserted_batches:
+                for f in batch:
+                    persisted[str(f["exchange_fill_id"])] = f["timestamp"]
+            stamp = _the_advance(rec)["p_last_fetched_ts"]
+            if "binance_deadline_symbols" not in flags:
+                final_stamp = stamp
+                ended = True
+                break
+
+            stopped_runs += 1
+            assert len(run_calls) == 12, f"run {run} sent {len(run_calls)} requests"
+            asked = {req["symbol"] for kind, req in run_calls if kind == "linear"}
+            assert asked == {venue_id for _s, venue_id in EIGHT_LINEAR}, (
+                f"run {run}: symbols that never sent a request: "
+                f"{sorted({v for _s, v in EIGHT_LINEAR} - asked)}"
+            )
+            frontier = flags.get("binance_read_through_ms")
+            assert isinstance(frontier, int), f"run {run} recorded no read-through bound"
+            if prev_frontier is not None:
+                assert frontier > prev_frontier, (
+                    f"run {run}: the frontier did not advance ({frontier} <= {prev_frontier})"
+                )
+            prev_frontier = frontier
+            assert stamp is not None, f"run {run} stamped nothing"
+            assert datetime.fromisoformat(stamp) > datetime.fromisoformat(column), (
+                f"run {run}: the stamp {stamp} did not pass its column {column}"
+            )
+            stamp_ms = int(datetime.fromisoformat(stamp).timestamp() * 1000)
+            unpersisted = [
+                fid for fid, at in time_by_id.items() if at <= stamp_ms and fid not in persisted
+            ]
+            assert not unpersisted, f"run {run}: stamped past unpersisted fills {unpersisted[:3]}"
+            column = stamp
+
+        assert ended, "no run reached now within 12 runs"
+        assert stopped_runs >= 3, f"only {stopped_runs} deadline-stopped runs before reaching now"
+        assert final_stamp is not None
+        # The newest venue fill: symbol 7's last, C + 29 days + 7 h = 1795114800000.
+        assert datetime.fromisoformat(final_stamp) == datetime(
+            2026, 11, 19, 19, 0, tzinfo=timezone.utc
+        )
+        assert set(persisted) == set(time_by_id), "a venue fill was never persisted"
