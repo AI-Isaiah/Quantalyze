@@ -16860,7 +16860,7 @@ async def run_derive_allocator_equity_job(
             supabase.table("api_keys")
             .select(
                 "id,is_active,sync_status,disconnected_at,"
-                "exchange,venue_account_id,"
+                "exchange,venue_account_id,venue_server,"
                 "account_shared_with_api_key_id,account_share_kind,"
                 "history_inclusion"
             )

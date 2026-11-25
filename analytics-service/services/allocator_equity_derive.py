@@ -493,28 +493,103 @@ def account_groups(
     return [grouped[root] for root in sorted(grouped, key=lambda r: str(grouped[r][0].get("id")))]
 
 
+def _login_identities(
+    keys: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, tuple[str, str, str] | None], frozenset[str]]:
+    """Each key's login identity ``(exchange_key, login, canonical server)``, or ``None``,
+    and the ids of the AMBIGUOUS keys.
+
+    225 CONN-03, CONTEXT Q6 (founder ruling 2026-11-25 and the marked agent decision). One
+    canonical identity per key, never a pairwise wildcard: union-find is transitive, so a key
+    with no server unioned pairwise with servers a and b would merge a and b again (CR-01).
+
+    * login: ``venue_account_id`` stripped; a blank or non-string login has no login identity.
+    * server: ``venue_server`` when it is a non-empty ``str``, else none. The stored bytes are
+      read as they are; nothing is trimmed or case-folded here, because every writer already
+      stores the normalised form and ``api_keys_venue_server_valid`` refuses a blank.
+    * for each ``(exchange_key, login)``, S is the set of distinct servers among ``keys``.
+    * canonical server: the key's own server if set; else ``""`` when S is empty; else the
+      single member when S has one member; else NONE, and the key is AMBIGUOUS (identity
+      ``None``, listed in the second return value).
+
+    Twins: ``accountIdentityTokens`` (src/lib/departed-history.ts) and the SQL
+    ``commit_scenario_batch``; ``tests/fixtures/venue_server_identity.json`` pins all three."""
+    servers: dict[tuple[str, str], set[str]] = defaultdict(set)
+    parsed: dict[str, tuple[str, str, str | None] | None] = {}
+    for row in keys:
+        key_id = str(row["id"])
+        venue_id = row.get("venue_account_id")
+        if not isinstance(venue_id, str) or not venue_id.strip():
+            parsed[key_id] = None
+            continue
+        exchange = row.get("exchange")
+        exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
+        server = row.get("venue_server")
+        own = server if isinstance(server, str) and server != "" else None
+        parsed[key_id] = (exchange_key, venue_id.strip(), own)
+        if own is not None:
+            servers[(exchange_key, venue_id.strip())].add(own)
+
+    identities: dict[str, tuple[str, str, str] | None] = {}
+    ambiguous: set[str] = set()
+    for key_id, item in parsed.items():
+        if item is None:
+            identities[key_id] = None
+            continue
+        exchange_key, login, own = item
+        if own is not None:
+            identities[key_id] = (exchange_key, login, own)
+            continue
+        seen = servers.get((exchange_key, login), set())
+        if not seen:
+            identities[key_id] = (exchange_key, login, "")
+        elif len(seen) == 1:
+            identities[key_id] = (exchange_key, login, next(iter(seen)))
+        else:
+            identities[key_id] = None
+            ambiguous.add(key_id)
+    return identities, frozenset(ambiguous)
+
+
+def ambiguous_server_key_ids(
+    keys: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """The ids of keys whose account cannot be placed: a non-blank login, no server, and two
+    or more distinct set servers on their ``(exchange, login)`` among ``keys``.
+
+    225 CONN-03, CONTEXT Q6 agent decision. Such a key may read any of the servers, so it
+    joins none of them (``account_identity_tokens`` gives it no token unless a marker links
+    it) and the allocator derive REFUSES the book with
+    ``DeriveRefusal.ACCOUNT_SERVER_AMBIGUOUS``, live or disconnected. Pure. The TS
+    ``keyAccountOf`` and the SQL ``key_account`` give such a key its own account."""
+    return _login_identities(keys)[1]
+
+
 def account_identity_tokens(
     keys: Sequence[Mapping[str, Any]],
 ) -> dict[str, str | None]:
     """Which keys read the same exchange account, as one token per account.
 
-    Two keys read one account when they carry the same non-blank
-    ``(exchange, venue_account_id)`` (case-blind exchange, as
-    ``account_identity_collisions``), or when one is MARKED against the other
-    (``account_share_kind`` duplicate / composite_member naming it in
-    ``account_shared_with_api_key_id``). The marker is the stamper's own
-    evidence (D-01, D-04): the marked key hit the holder's unique account index,
-    which is exactly why its own ``venue_account_id`` stays NULL. Reading the
-    NULL alone would call it an unknown account and let an owner's 'include'
-    count one account twice. A key with neither a venue id nor a marker link is
-    unknown (``None``). The marker kinds are ``SHARED_ACCOUNT_KINDS``, the set
-    ``account_groups`` reads (IN-03), never a copy. Pure.
+    Two keys read one account when they carry the same login identity
+    ``(exchange, venue_account_id, canonical server)`` (``_login_identities``; CONTEXT Q6:
+    one login on two different set servers is TWO accounts, a key with no server joins its
+    login only while that login carries at most one distinct set server), or when one is
+    MARKED against the other (``account_share_kind`` duplicate / composite_member naming it
+    in ``account_shared_with_api_key_id``). The marker is the stamper's own evidence
+    (D-01, D-04): the marked key hit the holder's unique account index, which is exactly why
+    its own ``venue_account_id`` stays NULL. Reading the NULL alone would call it an unknown
+    account and let an owner's 'include' count one account twice. A key with neither a login
+    identity nor a marker link is unknown (``None``); that includes an AMBIGUOUS key
+    (``ambiguous_server_key_ids``), which takes part in no login union. The marker kinds
+    are ``SHARED_ACCOUNT_KINDS``, the set ``account_groups`` reads (IN-03), never a copy.
+    The token is ``account:<smallest id>`` of the group, so it does not depend on row order.
+    Pure.
 
     Moved here from ``services/job_worker.py`` (170.4 review CR-01) so the match
     scorer groups keys by the SAME identity as the departed-history rule, the
     dashboard (``accountIdentityTokens``, src/lib/departed-history.ts) and the
-    commit RPC's ``contributing`` CTE. ``job_worker.account_identity_tokens``
-    delegates here; there is one implementation."""
+    commit RPC's ``contributing`` CTE (``commit_scenario_batch``).
+    ``job_worker.account_identity_tokens`` delegates here; there is one implementation."""
     ids = [str(row["id"]) for row in keys]
     parent = {key_id: key_id for key_id in ids}
 
@@ -530,19 +605,17 @@ def account_identity_tokens(
             parent[max(root_left, root_right)] = min(root_left, root_right)
 
     known: set[str] = set()
-    by_venue: dict[tuple[str, str], str] = {}
+    by_identity: dict[tuple[str, str, str], str] = {}
+    identities, _ambiguous = _login_identities(keys)
     for row in keys:
         key_id = str(row["id"])
-        venue_id = row.get("venue_account_id")
-        if isinstance(venue_id, str) and venue_id.strip():
-            exchange = row.get("exchange")
-            exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
-            pair = (exchange_key, venue_id.strip())
+        identity = identities[key_id]
+        if identity is not None:
             known.add(key_id)
-            if pair in by_venue:
-                _union(by_venue[pair], key_id)
+            if identity in by_identity:
+                _union(by_identity[identity], key_id)
             else:
-                by_venue[pair] = key_id
+                by_identity[identity] = key_id
     for row in keys:
         key_id = str(row["id"])
         holder = row.get("account_shared_with_api_key_id")
