@@ -569,6 +569,34 @@ def _consume_future(fut: asyncio.Future[Any]) -> None:
         fut.exception()
 
 
+def _log_gave_up(site: str, exc_class: str, started: float, attempts: int) -> None:
+    """ERROR, once, when an acquire gives up on the database (SF-M3).
+
+    ⭐ ``mt5_xlease_acquire_gave_up`` IS DISTINCT from the six other ``mt5_xlease_*``
+    events on purpose (plan 09 counts ``mt5_xlease_unavailable`` and
+    ``mt5_xlease_waited`` and a shared prefix match must not mix them in). The
+    ``rpc_error`` WARNING is one line at the FIRST failure; this one says the lease gave
+    up, after how long and how many tries, and on which failure class. Class name only:
+    a PostgREST message can echo a URL."""
+    duration_ms = int((time.monotonic() - started) * 1000)
+    logger.error(
+        "mt5_xlease: gave up acquiring the terminal lease after %d attempts "
+        "(exc_class=%s site=%s duration_ms=%d); the lease database did not answer",
+        attempts,
+        exc_class,
+        site,
+        duration_ms,
+        extra={
+            "event_type": "mt5_xlease_acquire_gave_up",
+            "rpc": XLEASE_ACQUIRE_RPC,
+            "site": site,
+            "exc_class": exc_class,
+            "duration_ms": duration_ms,
+            "attempts": attempts,
+        },
+    )
+
+
 # --------------------------------------------------------------------------- #
 # The acquire.
 # --------------------------------------------------------------------------- #
@@ -607,6 +635,7 @@ async def acquire_terminal_xlease(
     #: is answering. Only an unbounded caller is cut off by it (DEC-04-C).
     first_error_at: float | None = None
     error_logged = False
+    attempts = 0
 
     try:
         while True:
@@ -631,6 +660,7 @@ async def acquire_terminal_xlease(
                 fut.add_done_callback(_consume_future)
                 pending.add(fut)
             done, _ = await asyncio.wait({fut}, timeout=rpc_bound)
+            attempts += 1
             #: The exception class name when this wait ended with no answer.
             failure: str | None = None
             if fut in done:
@@ -687,6 +717,7 @@ async def acquire_terminal_xlease(
                     bound_s is None
                     and error_now - first_error_at >= _MT5_XLEASE_ERROR_BUDGET_S
                 ):
+                    _log_gave_up(site_n, failure, started, attempts)
                     raise XLeaseUnavailable() from None
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0.0:

@@ -1136,3 +1136,52 @@ async def test_cr01_a_hang_that_then_answers_resets_the_window_and_grants(
     hold = await asyncio.wait_for(_grant([]), timeout=5.0)
     assert hold.cross_process and fake.holds(_digest())
     await hold.release()
+
+
+# --------------------------------------------------------------------------- #
+# Round-1 review fixes (SF-M3): giving up is an ERROR that names what it gave up on.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("hang", "exc_class"), [(False, "RuntimeError"), (True, "TimeoutError")]
+)
+async def test_sf_m3_budget_exhaustion_logs_one_error_with_the_last_class_site_and_counts(
+    monkeypatch, caplog, fast_poll, hang, exc_class
+) -> None:
+    """The WARNING says 'retrying' once, at the first failure. When the budget then runs
+    out the job gets fixed text, and without this line nothing in the log said the lease
+    gave up, after how long, how many tries, or on what class of failure. The event is
+    NOT one of the six existing ``mt5_xlease_*`` names (plan 09 counts two of them)."""
+    fake = FakeXLeaseBackend()
+    if hang:
+        fake.before["acquire"] = sleep_forever
+    else:
+        fake.raises["acquire"] = RuntimeError(f"connection to {_SECRET} refused")
+    _install(fake)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.05)
+    _small_budget(monkeypatch, 0.2)
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+
+    with pytest.raises(mt5_xlease.XLeaseUnavailable) as raised:
+        await asyncio.wait_for(
+            mt5_xlease.acquire_terminal_xlease(
+                _KEY, holder=None, site=SITE_DERIVE, bound_s=None, on_lost=lambda: None
+            ),
+            timeout=5.0,
+        )
+
+    gave_up = _events(caplog, "mt5_xlease_acquire_gave_up")
+    assert len(gave_up) == 1, f"expected one give-up record, got {len(gave_up)}"
+    record = gave_up[0]
+    assert record.levelno == logging.ERROR
+    assert record.exc_class == exc_class and record.site == SITE_DERIVE
+    assert isinstance(record.duration_ms, int) and record.duration_ms >= 200
+    assert isinstance(record.attempts, int) and record.attempts >= 2
+    assert "SECRET-MARKER" not in record.getMessage() and _KEY not in record.getMessage()
+    assert str(raised.value) == "the cross-process terminal lease could not be reached", (
+        "the user/job text is fixed and must not change"
+    )
+    existing = {
+        "mt5_xlease_waited", "mt5_xlease_unavailable", "mt5_xlease_rpc_error",
+        "mt5_xlease_release_failed", "mt5_xlease_renew_failed", "mt5_xlease_lost",
+    }
+    assert "mt5_xlease_acquire_gave_up" not in existing
