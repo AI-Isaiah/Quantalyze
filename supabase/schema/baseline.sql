@@ -2900,9 +2900,10 @@ BEGIN
   --      is that day with no rows (Phase 167.1.2.1.2 D-02, empty_day and
   --      same_day_empty below);
   --   3. keys grouped by exchange account (accountIdentityTokens, the D-09
-  --      identity: a shared non-blank venue_account_id on one exchange, or an
-  --      account_shared_with_api_key_id marker of a shared kind, joined
-  --      transitively). A key with neither is its own account. Only the keys
+  --      identity: a shared non-blank venue_account_id on one exchange AND one
+  --      broker server (Phase 225 CONN-03), or an account_shared_with_api_key_id
+  --      marker of a shared kind, joined transitively). A key with neither is its
+  --      own account. Only the keys
   --      whose reading is the account's newest, and have rows on it,
   --      contribute (SFH-C4-01);
   --   4. the contributing keys' rows at their reading day, one token per
@@ -2940,19 +2941,52 @@ BEGIN
       SELECT k.id,
              lower(btrim(k.exchange)) AS exchange_norm,
              NULLIF(btrim(k.venue_account_id), '') AS venue_norm,
+             NULLIF(k.venue_server, '') AS server_norm,
              k.account_share_kind,
              k.account_shared_with_api_key_id
         FROM api_keys k
        WHERE k.user_id = p_allocator_id
     ),
+    login_servers AS (
+      -- per exchange account id on one exchange: how many distinct set servers
+      -- its keys carry, and the smallest of them (the single one when the count
+      -- is one). Computed from owner_keys only, so it never sees another owner.
+      SELECT o.exchange_norm,
+             o.venue_norm,
+             count(DISTINCT o.server_norm) AS server_ct,
+             min(o.server_norm COLLATE "C") AS only_server
+        FROM owner_keys o
+       WHERE o.venue_norm IS NOT NULL
+       GROUP BY o.exchange_norm, o.venue_norm
+    ),
+    key_identity AS (
+      -- one canonical identity per key that carries a login, the same answer as
+      -- the Python account_identity_tokens and the TypeScript accountIdentityTokens.
+      -- NULL means the key is ambiguous (no server on a login that carries two or
+      -- more), and it then joins no account by identity.
+      SELECT k.id,
+             k.exchange_norm,
+             k.venue_norm,
+             CASE
+               WHEN k.server_norm IS NOT NULL THEN k.server_norm
+               WHEN l.server_ct = 0 THEN ''
+               WHEN l.server_ct >= 2 THEN NULL
+               ELSE l.only_server
+             END AS identity_server
+        FROM owner_keys k
+        JOIN login_servers l
+          ON l.exchange_norm = k.exchange_norm
+         AND l.venue_norm    = k.venue_norm
+    ),
     account_edges AS (
-      -- one exchange account id on one exchange
+      -- one exchange account id on one exchange, on one broker server
       SELECT a.id AS a, b.id AS b
-        FROM owner_keys a
-        JOIN owner_keys b
-          ON b.exchange_norm = a.exchange_norm
-         AND b.venue_norm    = a.venue_norm
-         AND b.id           <> a.id
+        FROM key_identity a
+        JOIN key_identity b
+          ON b.exchange_norm   = a.exchange_norm
+         AND b.venue_norm      = a.venue_norm
+         AND b.identity_server = a.identity_server
+         AND b.id             <> a.id
       UNION
       -- a shared-account marker naming another key of this owner, both ways
       SELECT m.id, m.account_shared_with_api_key_id
@@ -2968,7 +3002,7 @@ BEGIN
          AND m.account_shared_with_api_key_id IN (SELECT id FROM owner_keys)
     ),
     known_account AS (
-      SELECT id FROM owner_keys WHERE venue_norm IS NOT NULL
+      SELECT id FROM key_identity WHERE identity_server IS NOT NULL
       UNION
       SELECT a FROM account_edges
     ),
@@ -3414,7 +3448,7 @@ $_$;
 ALTER FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") IS 'audit-2026-05-07 H-0974 / H-0976 / H-0977 + mig 131 idempotency dedup + B11 NEW-C18-10 portfolio-fingerprint precondition. SECURITY DEFINER RPC that commits a batch of <=50 scenario diffs in a single Postgres transaction. auth.uid() = p_allocator_id guard. Per-row ownership probe with asof + value_usd > 0 filter (mig 128 P1957). voluntary_modify uses single canonical percent_allocated encoding (mig 128 P1956). Idempotency-Key reservation lives in the same tx as the data inserts (mig 131). When p_portfolio_fingerprint is supplied, the CURRENT holdings token set is recompared against it (order-invariant, COLLATE "C", no value_usd filter) and a divergence returns ok:false code=portfolio_fingerprint_stale (route -> 409). Since 20260929120000 (Phase 167.1.2 SFH-R2-01) the current set is the one the My Allocation reader shows (fetchLatestHoldingsPerKey): each key''s rows at its own latest reading, one reading per exchange account, and no rows from a key whose newer clean poll read nothing. Since 20261011120100 (Phase 170.4 WR-02) a key whose service-written native_unpriced marker (allocator_equity_derived) is dated after its newest rows reads as a day with no rows, exactly as the reader does. Since 20261027120000 (Phase 167.1.2.1.2 D-02) a key whose newest poll of any outcome is a clean poll that read nothing on its rows'' own day reads as a day with no rows, as the reader does. On success, emits one scenario.commit audit_log row attributed to the allocator (fail-soft).';
+COMMENT ON FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") IS 'audit-2026-05-07 H-0974 / H-0976 / H-0977 + mig 131 idempotency dedup + B11 NEW-C18-10 portfolio-fingerprint precondition. SECURITY DEFINER RPC that commits a batch of <=50 scenario diffs in a single Postgres transaction. auth.uid() = p_allocator_id guard. Per-row ownership probe with asof + value_usd > 0 filter (mig 128 P1957). voluntary_modify uses single canonical percent_allocated encoding (mig 128 P1956). Idempotency-Key reservation lives in the same tx as the data inserts (mig 131). When p_portfolio_fingerprint is supplied, the CURRENT holdings token set is recompared against it (order-invariant, COLLATE "C", no value_usd filter) and a divergence returns ok:false code=portfolio_fingerprint_stale (route -> 409). Since 20260929120000 (Phase 167.1.2 SFH-R2-01) the current set is the one the My Allocation reader shows (fetchLatestHoldingsPerKey): each key''s rows at its own latest reading, one reading per exchange account, and no rows from a key whose newer clean poll read nothing. Since 20261011120100 (Phase 170.4 WR-02) a key whose service-written native_unpriced marker (allocator_equity_derived) is dated after its newest rows reads as a day with no rows, exactly as the reader does. Since 20261027120000 (Phase 167.1.2.1.2 D-02) a key whose newest poll of any outcome is a clean poll that read nothing on its rows'' own day reads as a day with no rows, as the reader does. On success, emits one scenario.commit audit_log row attributed to the allocator (fail-soft). Since the Phase 225 CONN-03 re-base the account grouping reads the canonical (exchange, login, server) identity, so one login on two set servers is two accounts, as in accountIdentityTokens and account_identity_tokens.';
 
 
 

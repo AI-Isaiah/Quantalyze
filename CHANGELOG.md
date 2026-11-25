@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.79.1] - 2026-11-25 — BASELINE: automated re-dump after the PROD apply of 2636fb1e
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `45678391811`, after the PROD apply of merge `2636fb1e`: sha256 `3629afc7…` → `60db287a…`.
+- Shape, old → new: tables 71 → 71, policies 154 → 154, function statements 144 → 144, distinct function names 142 → 142, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261125151936_commit_scenario_batch_venue_server_identity.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-25` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.79.0 → 0.133.79.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=338 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 144 — MATCH 141, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45678391811` succeeded, and this entry was composed by the `redump-pr` job. Run `45678391811` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.79.0] - 2026-11-25 — Phase 225 ONEACCOUNTONCE PR-2b-2: one MT5 login on two broker servers is two accounts in every reader
 
 This is the gap-closure PR for review finding CR-01 on PR-3 (migration B). After migration B, one owner may hold the same MT5 login on two different broker servers. Before this PR every same-owner reader grouped keys by login alone, so that owner's allocator book would refuse with ACCOUNT_IDENTITY_COLLISION. This PR applies two founder rulings of 2026-11-25, both recorded in the phase CONTEXT Q6:
