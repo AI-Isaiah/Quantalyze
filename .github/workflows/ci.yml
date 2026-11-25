@@ -4971,6 +4971,7 @@ jobs:
           #   test_ledger_refresh_fanout.sql                 41
           #   test_ledger_refresh_staleness.sql              14
           #   test_mt5_server_clock_readings.sql             24
+          #   test_mt5_terminal_lease.sql                     8
           #   test_okx_archive_rebuild.sql                   15
           #   test_ops_staleness_check.sql                   14
           #   test_orphan_reaped_attempt_record.sql            4
@@ -5337,6 +5338,13 @@ jobs:
           # Re-measured 2026-11-24 (Phase 227 JOBLEDGER, review round 2 fixes), one file GREW, read off its own
           #   first `ALL N ARMS EXECUTED` sentinel: test_first_hop_enqueue_sweep.sql 22 -> 23 (H10d). No file joined,
           #   so SENTINEL_FLOOR stays 37 and ARMS_FLOOR 578 -> 579 (+1).
+          # Re-measured 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06), ONE file joined:
+          #   test_mt5_terminal_lease.sql, NEW, 8 arms (L1 to L8): the MT5 terminal lease table and its
+          #   acquire, renew and release RPCs (migration 20261126120000). Read off the file's own
+          #   first `ALL N ARMS EXECUTED` sentinel with `grep -a -o -m1 'ALL [0-9]* ARMS EXECUTED'`
+          #   (`ALL 8 ARMS EXECUTED`). A new sentinel-bearing file changes the FILE SET, so
+          #   SENTINEL_FLOOR 37 -> 38 and ARMS_FLOOR 579 -> 587 (+8). The mutation runner's floors
+          #   move in the same plan (scripts/mutation-floors.mjs).
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_analytics_scope.sql             20
@@ -5349,8 +5357,8 @@ jobs:
           #   (test_allocator_trade_reads.sql 8, test_ledger_refresh_fanout.sql 31), so SENTINEL_FLOOR is 25
           #   and ARMS_FLOOR 386, re-derived by ci-anti-skip-gate.contract.test.ts on the merged tree, never
           #   by adding the moves.
-          SENTINEL_FLOOR=37  # files declaring a sentinel
-          ARMS_FLOOR=579     # 8 + 13 + 8 + 11 + 14 + 8 + 8 + 13 + 15 + 9 + 8 + 18 + 3 + 8 + 8 + 18 + 24 + 41 + 14 + 24 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 35 + 22 + 5 + 7 + 23 + 8 + 4 + 6
+          SENTINEL_FLOOR=38  # files declaring a sentinel
+          ARMS_FLOOR=587     # 8 + 13 + 8 + 11 + 14 + 8 + 8 + 13 + 15 + 9 + 8 + 18 + 3 + 8 + 8 + 18 + 24 + 41 + 14 + 24 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 35 + 22 + 5 + 7 + 23 + 8 + 4 + 6 + 8
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
