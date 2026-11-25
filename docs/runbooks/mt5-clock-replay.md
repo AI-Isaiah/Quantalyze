@@ -174,10 +174,13 @@ git diff --stat <reviewed sha> <deployed sha> -- \
   analytics-service/services/db.py analytics-service/services/encryption.py \
   analytics-service/services/mt5_validation.py analytics-service/services/mt5_client.py \
   analytics-service/services/mt5_read.py analytics-service/services/mt5_concurrency.py \
-  analytics-service/services/mt5_probe.py analytics-service/services/mt5_handover.py
+  analytics-service/services/mt5_probe.py analytics-service/services/mt5_handover.py \
+  analytics-service/services/mt5_xlease.py
 ```
 
 Empty means the section 5 review holds. Otherwise re-run the section 5 grep at the deployed sha before going on.
+`<reviewed sha>` is the branch head sha in the record in section 10 (it carries `mt5_xlease.py`, which
+`9ac57ef4` predates); compare against the deployed sha as long as that head's code is in the deployed tree.
 
 **(1) Marker query.** Run the CLAUDE.md marker query first, alone, and it must name PROD. Then every PROD
 statement below is a SELECT.
@@ -305,3 +308,39 @@ move is a trade's P&L crossing midnight; `moved_level_days` is the wider set.
 
 Counts per scope and the dates of the run. Never key ids, logins, amounts or server names; the capture, the
 ordinal map and the day sets stay in `$S`.
+
+## 10. Hand-off record
+
+Written by plan 10 of Phase 230 before the coordinator runs anything.
+
+- **Date:** 2026-11-25 (UTC).
+- **Branch head sha (code reviewed and proven):** `e588332ab552dea5a78f4a9e8be87399654c838f`, branch
+  `gsd/phase-230-mt5nightly`. Use this as `<reviewed sha>` in step (0).
+- **Script sha256 (`mt5_capture_230.py`, 4083 bytes):**
+  `36aa23fe598ec485791204ec546c5e077e9f610660541a423f8cf62fc1f674e0`. Check it with `shasum -a 256` on the
+  saved copy before step (3).
+- **Write review re-run at that sha:** the section 5 grep over the same module set, plus `mt5_xlease`.
+  Changed against `9ac57ef4`, so not "unchanged". The differences, each read:
+  - `services/mt5_xlease.py` is new and is now imported by `mt5_concurrency` at import time. Its one write-shaped
+    hit is the `.rpc(` call inside `_PostgrestXLeaseBackend._call`. It is reachable only through
+    `acquire_terminal_xlease` and the hold's renew and release, whose only caller in the service is
+    `mt5_terminal_lease` (`mt5_concurrency`, one call site). Import time does nothing but define names, validate
+    timing constants and build the backend object with no client (`get_supabase` is resolved at call time). The
+    script never calls `mt5_terminal_lease`.
+  - `services/db.py` gained `is_missing_rpc` (pure predicate). `services/mt5_handover.py` gained
+    `normalize_mt5_site` (pure). Neither writes.
+  - `services/mt5_concurrency.py` changed only inside `mt5_terminal_lease` (the lease body and its release
+    order). The script imports `mt5_derive_read_bound_s` and the two constants, which are unchanged.
+  - `mt5_handover._insert_handover_row` (the `cron_runs` insert) is still reachable only from
+    `record_mt5_terminal_handover`, which the script never calls.
+  - `mt5_client`, `mt5_read`, `mt5_validation`, `mt5_probe` and `encryption` have no diff against `9ac57ef4`.
+- **Offline proof:** the script ran against stubbed `get_supabase`, `get_kek`, `decrypt_credentials`,
+  `Mt5Client` and `read_mt5_deal_ledger` (real `mt5_validation`, `mt5_concurrency` and `Mt5Session`), with no
+  network, database or terminal. Proven: one `CAPTURE-JSON` line with `offset_s` 7200 and the keys in capture
+  order; progress lines carry ordinals and class names only; a read past the bound records `TimeoutError`, marks
+  the remaining key `Aborted` and stops; a mismatch-shaped exception records its class and the next key still
+  captures; every client built is closed; one SELECT on `api_keys` and no write-shaped call. An AST check prints
+  `capture-contract: OK` against sections 4 and 5. Seven deliberate breaks of the script (an extra stdout line,
+  no abort, no close, the message recorded instead of the class, a `holder` argument, an insert, an import of
+  `mt5_terminal_lease`) were each caught by the harness or the AST check.
+- **The script text reaches the coordinator only in plan 10's checkpoint message.** It is in no tracked path.
