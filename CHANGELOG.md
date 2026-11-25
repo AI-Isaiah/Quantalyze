@@ -44,6 +44,7 @@ The stored Python metrics, the factsheet engine, the Scenario planner, the OG sh
 - A closed-form annualization parity fixture shared by the Python and TypeScript engines (rtol 1e-9). The Python oracle imports no production helper.
 - The frozen spine is re-baselined as a reviewed act. Fixtures were moved by hand with dated blocks, and `regen_golden.py` was not run.
 - Every data-integrity and user-facing gate was neutered to RED and restored from a byte backup.
+- The NARROWCHARTS 1280 desktop fixtures (`e2e/fixtures/narrowcharts-desktop-1280.json` and the long-labels one) take the new rolling volatility and rolling Sharpe readings, the only svgs that moved. The average labels move by the ddof factor (66.1% to 66.4% at w = 126, i.e. x sqrt(126/125); the 30-day Sharpe -79.63 to -78.29, i.e. x sqrt(29/30)), and their axis ticks follow the new scale. The readings were taken from CI run 45720179371: a desktop mismatch now logs the whole reading as one line, so an intended change can be accepted without booting the local-stack lane.
 
 ### Removed
 - `TODOS.md` entries closed and deleted: `[194-ENGINE-CONSTANTS]`, `QUANTSTATS-0086-REDERIVE-01`, `167.1.2.2.1-CAGR-EMPTY-SPAN`, and the non-composite "Backbone-bypass parity surfaces" bullet.
