@@ -73,6 +73,13 @@ Requirements: ONCE-01, ONCE-02, ONCE-03, ONCE-04, CONN-01, CONN-03, MT5D-08.
   - **Reversibility:** costly. A deleted key and its data cannot be restored.
 - **Order.** These reader changes merge and deploy before migration B (PR-3).
 - **Reversibility:** costly. It changes which keys every same-owner reader treats as one account.
+- **A same-account refusal names what the account already holds, founder direction 2026-11-25.** Relayed by the coordinator. The founder's words, verbatim: "The same key can be used by many different accounts... It only becomes problematic, if one client, so one account forgets that it already ingested a key, and reingests it. This leads to duplicate counting and data that no one needs. ideally, we should even give a link to the strategy, and name the strategy, so that the account manager remembers, that they have already ingested the key."
+  - **Meaning.** Cross-account sharing of one key or account stays supported and unchanged. A same-account refusal must tell the caller which of THEIR OWN keys already holds the account:
+    - when that key has a strategy (`VENUE_ALREADY_CONNECTED` and similar), name the strategy and link to it;
+    - when it has none (`KEY_ORPHANED`), name the key (its nickname and when it was added) and link to the page where that key appears for this account. Which page that is gets verified for a manager, an allocator and a both-roles account.
+  - **Only ever the caller's own key and strategy, never another account's.** Every read stays owner-scoped.
+  - **Ships** as a small PR on the wizard refusal surface, beside the MT5 -6 copy follow-up.
+  - **Reversibility:** cheap. It is copy and links on a refusal, and changes no rule.
 - **Wrong-server connect, measured on PROD 2026-11-25 (founder attempts; PR-2c not deployed, main at v0.133.79.1).**
   - **What was tried.** The founder made 3 attempts in the PROD add-key form on one real MT5 account, using its real investor password. Two used a sibling live server of the same broker: a real server that other PROD keys legitimately use, but not the account's stored server. One used the account's own server.
   - **Wrong server, 2 attempts, 2 refusals.** Both reached the analytics validation terminal. `login()` returned in 344 ms and 523 ms, so the broker answered; this was not a timeout. `last_error` was -6 both times, which the MT5 Python docs list as `RES_E_AUTH_FAILED`, "authorization failed". Both were refused at the login stage (HTTP 424), and the wizard showed `KEY_SIGN_IN_FAILED`. 0 keys were stored. The `login()` docs define `server` as the trade server name. Each account lives on one trade server, so a sibling server of the same broker does not know the login and refuses authorization.
