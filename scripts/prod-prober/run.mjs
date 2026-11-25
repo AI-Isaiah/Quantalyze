@@ -152,7 +152,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 5;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 107;
+export const SELF_TEST_SCENARIOS = 108;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1805,27 +1805,21 @@ export async function selfTest() {
         pass;
     }
 
-    scenario("freshness: a derived key with a key_inputs row and NO stored return day pages as freshness-stale, never reads healthy");
+    scenario("freshness: a lone key with a key_inputs row and NO stored return day is not judged and not paged when a fresh key of its venue is judged");
     if (!frOk.ok) {
       pass = expect(false, frOk.reason) && pass;
     } else {
       const base = frOk.data.rows[0];
       const fresh = { ...clone(base), tag: "dddd0003" };
-      const blind = { ...clone(base), venue: "bybit", tag: "dddd0004", newestReturn: "", newestFlow: "2026-11-20", terminalDay: "", markDay: "", tinyDays: [] };
-      const r = await runFresh({ scope: { derived: 2, withInputs: 2, withTerminal: 2 }, rows: [fresh, blind] });
+      const idle = { ...clone(base), venue: base.venue, tag: "dddd0004", newestReturn: "", newestFlow: "2026-11-20", terminalDay: "", markDay: "", tinyDays: [] };
+      const lines = [];
+      const r = await runFresh({ scope: { derived: 2, withInputs: 2, withTerminal: 2 }, rows: [fresh, idle] }, lines);
       pass =
-        expect(r.exitCode === 1, `a key with no stored return exits 1 (got ${r.exitCode})`) &&
+        expect(r.exitCode === 0, `a new or idle key with no stored return beside a fresh key of its venue exits 0 (got ${r.exitCode})`) &&
+        expect(r.defects.length === 0, `no defect (got ${r.defects.map((d) => d.kind).join(", ") || "nothing"})`) &&
         expect(
-          r.defects.length === 1 && r.defects[0].kind === "freshness-stale",
-          `exactly one freshness-stale (got ${r.defects.map((d) => d.kind).join(", ") || "nothing"})`,
-        ) &&
-        expect(
-          r.defects[0] && r.defects[0].subject === "bybit#dddd0004",
-          `the subject is the blind key's venue#tag (got ${r.defects[0] && r.defects[0].subject})`,
-        ) &&
-        expect(
-          r.defects[0] && r.defects[0].detail.includes("no stored return day"),
-          `the detail names the missing series (got ${r.defects[0] && r.defects[0].detail})`,
+          lines.some((l) => l.includes("no_returns=1")),
+          "the key is still counted as no_returns on the summary line",
         ) &&
         pass;
     }
@@ -1847,29 +1841,33 @@ export async function selfTest() {
         pass;
     }
 
-    scenario("freshness: a scope of one anchor-covered key plus one key with no inputs judges nothing, so it exits non-zero with the not-judged counts named");
+    scenario("freshness: a venue whose only keys are not judged is a measure-fail on its own subject while another venue is fresh");
     if (!frOk.ok) {
       pass = expect(false, frOk.reason) && pass;
     } else {
       const base = frOk.data.rows[0];
-      const anchored = { ...clone(base), venue: "okx", tag: "dddd0007", newestReturn: "2026-10-01", anchorNullReason: "nonpositive", newestFlow: "2026-11-20", terminalDay: "2026-11-23", markDay: "", tinyDays: [] };
-      const bare = { venue: "unknown", tag: "dddd0008", newestReturn: "", anchorNullReason: "", newestFlow: "", terminalDay: "", markDay: "", tinyDays: [], hasInputs: false };
-      const r = await runFresh({ scope: { derived: 2, withInputs: 1, withTerminal: 1 }, rows: [anchored, bare] });
-      const guard = r.defects.find((d) => d.subject === "freshness keys");
+      const fresh = { ...clone(base), tag: "dddd0007" };
+      const blind = { ...clone(base), venue: "binance", tag: "dddd0008", newestReturn: "2026-11-10", newestFlow: "", terminalDay: "", markDay: "", tinyDays: [] };
+      const r = await runFresh({ scope: { derived: 2, withInputs: 2, withTerminal: 2 }, rows: [fresh, blind] });
       pass =
-        expect(r.exitCode === 1, `a run that judged nothing exits 1 (got ${r.exitCode})`) &&
+        onlyFrMeasureFail(r, "binance has only a no_reference key", "freshness binance") &&
         expect(
-          r.defects.length === 2 && r.defects.every((d) => d.kind === "measure-fail" && d.arm === "freshness"),
-          `exactly two measure-fails, one per cause (got ${r.defects.map((d) => d.kind).join(", ") || "nothing"})`,
+          r.defects[0] && r.defects[0].detail.includes("no_reference=1") && r.defects[0].detail.includes("no binance key was judged"),
+          `the defect names the venue and its not-judged counts (got ${r.defects[0] && r.defects[0].detail})`,
         ) &&
-        expect(
-          r.defects.some((d) => d.subject === "unknown#dddd0008"),
-          "the key with no inputs is named by its venue#tag",
-        ) &&
-        expect(
-          guard !== undefined && guard.detail.includes("none was judged") && guard.detail.includes("covered_anchor=1") && guard.detail.includes("no_inputs=1"),
-          `the judged-zero defect names the not-judged counts (got ${guard && guard.detail})`,
-        ) &&
+        pass;
+    }
+
+    scenario("freshness: a scope made only of anchor-covered keys is judged by a named reason and exits 0");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const base = frOk.data.rows[0];
+      const anchored = { ...clone(base), venue: "okx", tag: "dddd0009", newestReturn: "2026-10-01", anchorNullReason: "nonpositive", newestFlow: "2026-11-20", terminalDay: "2026-11-23", markDay: "", tinyDays: [] };
+      const r = await runFresh({ scope: { derived: 1, withInputs: 1, withTerminal: 1 }, rows: [anchored] });
+      pass =
+        expect(r.exitCode === 0, `an all-coveredAnchor scope exits 0 (got ${r.exitCode})`) &&
+        expect(r.defects.length === 0, `no defect (got ${r.defects.map((d) => d.kind).join(", ") || "nothing"})`) &&
         pass;
     }
 

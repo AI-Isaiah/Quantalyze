@@ -27,13 +27,19 @@
  *       its own words, that it could not anchor the series).
  * No other reason exists. This arm never invents one.
  *
- * A derived key that cannot be judged never reads healthy:
+ * A derived key that cannot be judged is never silent:
  *   - a key with a `key_inputs` row, no anchor reason and NO stored return day
- *     pages as `freshness-stale` (its gap is the whole series);
+ *     is NOT paged and NOT judged (counted as `no_returns`): that is the
+ *     derive's deliberate shape for a new or idle funded key with fewer than
+ *     two return days, and paging it would be a false alarm every hour;
  *   - a derived key with NO `key_inputs` row raises a `measure-fail`;
- *   - a run that read rows and judged none of them (judged means fresh, covered
- *     by stated days, or stale) raises a `measure-fail` naming the not-judged
- *     counts.
+ *   - PER VENUE, a venue present in the rows read none of whose keys was judged
+ *     (fresh, covered by stated days, stale, or covered by an anchor reason)
+ *     raises one `measure-fail` on subject `freshness <venue>` naming that
+ *     venue's not-judged counts, so a venue whose keys all fall to
+ *     `no_reference` / `no_returns` cannot read green behind another venue's
+ *     healthy keys. A key with no `key_inputs` row has no venue to attribute and
+ *     already raised its own `measure-fail`.
  *
  * ============================================================================
  * WHY IT LIVES IN THE PROBER AND NOT IN seam S5 (`ops_staleness_check`)
@@ -279,8 +285,13 @@ export function parseFreshnessRows(stdout) {
  * @returns {Array<{kind: string, subject: string, detail: string}>}
  */
 export function judgeFreshness(rows, log = () => {}, tally = {}) {
-  const count = (k) => {
+  const count = (k, venue) => {
     tally[k] = (tally[k] || 0) + 1;
+    if (venue !== undefined) {
+      tally.byVenue = tally.byVenue || {};
+      tally.byVenue[venue] = tally.byVenue[venue] || {};
+      tally.byVenue[venue][k] = (tally.byVenue[venue][k] || 0) + 1;
+    }
   };
   const defects = [];
   for (const r of rows) {
@@ -299,21 +310,15 @@ export function judgeFreshness(rows, log = () => {}, tally = {}) {
     }
     if (r.anchorNullReason !== "") {
       // Reason (2): the derive said it could not anchor the series.
-      count("coveredAnchor");
+      count("coveredAnchor", r.venue);
       continue;
     }
     const newest = dayNumber(r.newestReturn);
     if (newest === null) {
-      log(`freshness: ${subject} has no stored return day`);
-      count("noReturns");
-      count("stale");
-      defects.push({
-        kind: "freshness-stale",
-        subject,
-        detail:
-          "the key has a key_inputs row, no anchor reason and no stored return day at all: its gap is the whole " +
-          "series, and no stated left-out day covers a series that does not exist.",
-      });
+      // Not judged and not paged: the derive's key-mode exit for fewer than two
+      // return days still lands an anchored key_inputs row on purpose.
+      log(`freshness: ${subject} has no stored return day (not judged)`);
+      count("noReturns", r.venue);
       continue;
     }
     const candidates = [
@@ -323,14 +328,14 @@ export function judgeFreshness(rows, log = () => {}, tally = {}) {
     ].filter(([, n]) => n !== null);
     if (candidates.length === 0) {
       log(`freshness: ${subject} has no flow, terminal or mark day to compare (not judged)`);
-      count("noReference");
+      count("noReference", r.venue);
       continue;
     }
     const ref = Math.max(...candidates.map(([, n]) => n));
     const setBy = candidates.filter(([, n]) => n === ref).map(([name]) => name).join(" and ");
     const gap = ref - newest;
     if (gap <= FRESHNESS_BOUND_DAYS) {
-      count("fresh");
+      count("fresh", r.venue);
       continue;
     }
     // Reason (1), DAY BY DAY: every day after the newest return must be one the
@@ -342,10 +347,10 @@ export function judgeFreshness(rows, log = () => {}, tally = {}) {
       if (!stated.has(dayText(n))) uncovered.push(dayText(n));
     }
     if (uncovered.length === 0) {
-      count("coveredStated");
+      count("coveredStated", r.venue);
       continue;
     }
-    count("stale");
+    count("stale", r.venue);
     defects.push({
       kind: "freshness-stale",
       subject,
@@ -463,15 +468,20 @@ async function run({ seams, log, addDefect }) {
       `covered_stated=${t("coveredStated")} covered_anchor=${t("coveredAnchor")} no_inputs=${t("noInputs")} ` +
       `no_returns=${t("noReturns")} no_reference=${t("noReference")} stale=${t("stale")} venues ${venueText}`,
   );
-  if (parsed.rows.length > 0 && t("fresh") + t("coveredStated") + t("stale") === 0) {
-    addDefect(
-      "measure-fail",
-      "freshness",
-      "freshness keys",
-      `${parsed.rows.length} key row(s) were read and none was judged (fresh 0, covered_stated 0, stale 0); ` +
-        `not judged: covered_anchor=${t("coveredAnchor")} no_inputs=${t("noInputs")} no_returns=${t("noReturns")} ` +
-        `no_reference=${t("noReference")}. A run that judged nothing must not read healthy.`,
-    );
+  // Per venue: a venue none of whose keys was judged (coveredAnchor is a named
+  // reason, so it counts) must not read green because another venue was.
+  for (const [venue, c] of Object.entries(tally.byVenue || {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    const v = (k) => c[k] || 0;
+    if (v("fresh") + v("coveredStated") + v("stale") + v("coveredAnchor") === 0) {
+      addDefect(
+        "measure-fail",
+        "freshness",
+        `freshness ${venue}`,
+        `no ${venue} key was judged (fresh 0, covered_stated 0, stale 0, covered_anchor 0); not judged: ` +
+          `no_inputs=${v("noInputs")} no_returns=${v("noReturns")} no_reference=${v("noReference")}. ` +
+          "A venue that judged nothing must not read healthy behind another venue's keys.",
+      );
+    }
   }
 }
 
