@@ -3264,7 +3264,9 @@ describe("[233 FRESH-02] the freshness arm's SQL names are bound to the writers 
     const head = `CREATE TABLE IF NOT EXISTS "public"."${name}" (`;
     const at = BASELINE.indexOf(head);
     if (at < 0) return "";
-    return BASELINE.slice(at, BASELINE.indexOf("\n);", at));
+    const end = BASELINE.indexOf("\n);", at);
+    if (end < 0) return "";
+    return BASELINE.slice(at, end);
   };
   const KEY_INPUT_FIELDS = ["tiny_base_days", "anchor_null_reason", "venue", "flows", "utc_day_iso", "nav_mark", "mark_day"];
 
