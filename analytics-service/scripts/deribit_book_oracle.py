@@ -83,7 +83,7 @@ import json
 import math
 import re
 import sys
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Final
@@ -125,6 +125,16 @@ EXIT_CODES: Final[Mapping[str, int]] = {"CLEAN": 0, "STOP": 1, "VACUOUS": 3}
 # back through thousands of days.
 _BOOK_RETURN_REL_TOL: Final[float] = 1e-9
 _BOOK_RETURN_ABS_TOL: Final[float] = 1e-12
+
+# The vacuity floor: a run that explains no published day, or under this share of them, is
+# VACUOUS and never green. A stated choice: a mostly-withheld reading is more likely an oracle or
+# export defect than a founder question (plan 233-05 Task 3 step 7 re-routes it when the withheld
+# reasons are structural).
+_MIN_EXPLAINED_SHARE: Final[float] = 0.5
+
+# A REPORTING threshold taken from the CONTEXT measurement (the book's days above 30%). It picks
+# which days get an ``oracle-big-day:`` line and splits the cumulative; it never changes a class.
+_BIG_DAY_ABS_RETURN: Final[float] = 0.30
 
 # ── errors and small helpers ───────────────────────────────────────────────────────────────────
 
@@ -629,23 +639,78 @@ class Classification:
     annotations: dict[str, tuple[str, ...]]
 
 
+def _boundary_days(export: Export, repro: BookRepro, levels: Mapping[str, KeyLevels]) -> frozenset[str]:
+    """Days on a declared departure or stitch boundary: the boundary day and the next union day."""
+    out: set[str] = set()
+
+    def add_around(day: str) -> None:
+        out.add(day)
+        later = [d for d in repro.union if d > day]
+        if later:
+            out.add(later[0])
+
+    for last_day in export.declared.departed.values():
+        add_around(last_day)
+    for child, parent in export.declared.stitch_parent.items():
+        if child != parent and child in levels and levels[child].days:
+            add_around(levels[child].days[0])
+    return frozenset(out)
+
+
+def _structural_reason(
+    rep: DayRepro | None, keys: Mapping[str, KeyInputs], levels: Mapping[str, KeyLevels]
+) -> str | None:
+    """Why a day cannot be reproduced from the stored basis, else ``None``."""
+    if rep is None or not rep.participants:
+        return "no_stored_base_level"
+    if any(not levels[label].has_basis for label in rep.participants):
+        return "no_stored_base_level"
+    for label in rep.participants:
+        lv = levels[label]
+        if (
+            keys[label].writer_basis_withheld is not None
+            or not lv.writer_mode
+            or not lv.stamp_available
+            or rep.day in lv.stamp_bad_days
+        ):
+            return "key_basis_not_reproducible"
+    return None
+
+
 def classify_days(
     export: Export,
     repro: BookRepro,
     levels: Mapping[str, KeyLevels],
     key_set: KeySetCheck,
 ) -> Classification:
-    """Exactly one class per day of the span and of the published window."""
+    """Exactly one class per day of the span and of the published window.
+
+    A published day is explained only when the oracle reproduces its value AND every participating
+    key's basis holds (so a stamp that disagrees with P over the previous level withholds the day
+    even if the book value happens to match). Otherwise it is withheld under the first matching name
+    of ``WITHHELD_REASONS``: an unreproduced key set, then a day on a declared departure or stitch
+    boundary, then no stored base level, then a key basis that does not reproduce, then (plan
+    233-05 inserts ``emptied_stretch`` here) a plain attribution mismatch."""
     published = export.book.returns
+    boundary = _boundary_days(export, repro, levels)
     out: list[DayClass] = []
     for day in sorted(set(repro.union) | set(published)):
         rep = repro.days.get(day)
         oracle_value = rep.value if rep is not None else None
         if day in published:
             pub = published[day]
-            if rep is not None and oracle_value is not None and _close(oracle_value, pub):
+            structural = _structural_reason(rep, export.keys, levels)
+            value_ok = oracle_value is not None and _close(oracle_value, pub)
+            if not key_set.reproduced:
+                out.append(DayClass(day, "withheld", "key_set_not_reproducible", pub, oracle_value))
+            elif value_ok and structural is None:
                 out.append(DayClass(day, "explained", None, pub, oracle_value))
+            elif day in boundary:
+                out.append(DayClass(day, "withheld", "key_set_not_reproducible", pub, oracle_value))
+            elif structural is not None:
+                out.append(DayClass(day, "withheld", structural, pub, oracle_value))
             else:
+                # (plan 233-05: the ``emptied_stretch`` rule goes here, ahead of the plain mismatch)
                 out.append(DayClass(day, "withheld", "attribution_mismatch", pub, oracle_value))
             continue
         assert rep is not None
@@ -676,10 +741,22 @@ def analyse(export: Export) -> Analysis:
 
 
 def decide_verdict(analysis: Analysis) -> str:
+    """The verdict, decided in this order: an unreproduced key set is STOP (never VACUOUS, even
+    though it withholds every published day); a run that explains no published day, or under
+    ``_MIN_EXPLAINED_SHARE`` of them, is VACUOUS (never green); any withheld published day or
+    unexplained omission is STOP; otherwise CLEAN."""
+    if not analysis.key_set.reproduced:
+        return "STOP"
     days = analysis.classification.days
+    explained = [d for d in days if d.kind == "explained"]
     withheld = [d for d in days if d.kind == "withheld"]
+    published = len(explained) + len(withheld)
+    if not explained or len(explained) / published < _MIN_EXPLAINED_SHARE:
+        return "VACUOUS"
     unexplained = [d for d in days if d.kind == "omitted" and d.reason == "omission_unexplained"]
-    return "STOP" if withheld or unexplained else "CLEAN"
+    if withheld or unexplained:
+        return "STOP"
+    return "CLEAN"
 
 
 # ── the closed-vocabulary emitter ──────────────────────────────────────────────────────────────
@@ -696,7 +773,7 @@ _PREFIXES: Final[tuple[str, ...]] = (
     "oracle-verdict:",
 )
 _CLOSED_NAMES: Final[frozenset[str]] = frozenset(
-    WITHHELD_REASONS + OMITTED_REASONS + ANNOTATIONS + VERDICTS + ("yes", "no", "none", "reproduced", "not_reproduced")
+    WITHHELD_REASONS + OMITTED_REASONS + ANNOTATIONS + VERDICTS + ("yes", "no", "none", "reproduced", "not_reproduced", "not_computed")
 )
 _TOKEN_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SIG_RE: Final = re.compile(r"^-?\d+(\.\d+)?(e[+-]\d+)?$|^non-finite$")
@@ -740,11 +817,17 @@ def _tok(s: str) -> Val:
     return Val("token", s)
 
 
+def _nms(names: Sequence[str]) -> Val:
+    return Val("names", tuple(names))
+
+
 def _sig_text(x: object) -> str:
     if not isinstance(x, float) or isinstance(x, bool):
         raise ValueError("emitter: expected a float")
     rounded = sig3(x)
     text = rounded if isinstance(rounded, str) else f"{rounded:.3g}"
+    if "e" in text and isinstance(rounded, float) and 1.0 <= abs(rounded) < 1e6:
+        text = str(int(rounded))  # 3270, not 3.27e+03
     if not _SIG_RE.match(text):
         raise ValueError("emitter: sig3 outside vocabulary")
     return text
@@ -774,6 +857,10 @@ def _render_val(val: Val) -> str:
         if not isinstance(raw, str) or raw not in _CLOSED_NAMES:
             raise ValueError("emitter: name outside the closed sets")
         return raw
+    if val.kind == "names":
+        if not isinstance(raw, tuple) or not all(isinstance(n, str) and n in _CLOSED_NAMES for n in raw):
+            raise ValueError("emitter: names outside the closed sets")
+        return ",".join(raw) if raw else "none"
     if val.kind == "token":
         if not isinstance(raw, str) or not _TOKEN_RE.match(raw):
             raise ValueError("emitter: token outside vocabulary")
@@ -795,6 +882,14 @@ def _render_rows(rows: Sequence[Row]) -> list[str]:
     if _UUID_RE.search(text) or _LONG_DIGITS_RE.search(text):
         raise ValueError("emitter: identifier-shaped text in the reading")
     return lines
+
+
+def _product(returns: Iterable[float]) -> float:
+    """Compound a series of returns: the product of ``1 + r``."""
+    total = 1.0
+    for r in returns:
+        total *= 1.0 + r
+    return total
 
 
 def emit_reading(analysis: Analysis) -> list[str]:
@@ -828,9 +923,80 @@ def emit_reading(analysis: Analysis) -> list[str]:
             ),
         ),
     ]
+    for day in withheld:
+        assert day.reason is not None
+        rows.append(("oracle-withheld:", (("date", _dt(day.day)), ("reason", _nm(day.reason)))))
     for day in omitted:
         assert day.reason is not None
         rows.append(("oracle-omitted:", (("date", _dt(day.day)), ("reason", _nm(day.reason)))))
+    # Annotations are plan 233-05's: say so, so "explained without annotated days" is not misread.
+    rows.append(("oracle-annotation:", (("state", _nm("not_computed")),)))
+    pub_days = [d for d in cls.days if d.kind in ("explained", "withheld")]
+    annotated_days = set(cls.annotations)
+    rows.append(
+        (
+            "oracle-cumulative:",
+            (
+                ("published", _xv(_product(d.published for d in pub_days if d.published is not None))),
+                ("explained", _xv(_product(d.oracle for d in explained if d.oracle is not None))),
+                (
+                    "explained_unannotated",
+                    _xv(_product(d.oracle for d in explained if d.oracle is not None and d.day not in annotated_days)),
+                ),
+                (
+                    "published_without_big_days",
+                    _xv(
+                        _product(
+                            d.published
+                            for d in pub_days
+                            if d.published is not None and abs(d.published) <= _BIG_DAY_ABS_RETURN
+                        )
+                    ),
+                ),
+            ),
+        )
+    )
+    for day in pub_days:
+        if day.published is None or not abs(day.published) > _BIG_DAY_ABS_RETURN:
+            continue
+        rep = analysis.repro.days.get(day.day)
+        contributions = rep.contributions if rep is not None else {}
+        total = sum(abs(v) for v in contributions.values())
+        top = max(contributions, key=lambda label: abs(contributions[label])) if contributions else None
+        share = abs(contributions[top]) / total if top is not None and total > 0.0 else 0.0
+        rows.append(
+            (
+                "oracle-big-day:",
+                (
+                    ("date", _dt(day.day)),
+                    ("r", _sig(day.published)),
+                    ("key", _lab(top if top is not None else "none")),
+                    ("share", _sig(share)),
+                    ("annotations", _nms(cls.annotations.get(day.day, ()))),
+                ),
+            )
+        )
+    for reason in book.degrade_reasons:
+        rows.append(("oracle-degrade:", (("kind", _tok("degrade_reason")), ("name", _tok(reason)))))
+    for flag, value in book.flags.items():
+        fields: list[tuple[str, Val]] = [("kind", _tok("flag")), ("name", _tok(flag))]
+        if isinstance(value, bool):
+            fields.append(("state", _tok("true" if value else "false")))
+        elif isinstance(value, int) and value >= 0:
+            fields.append(("count", _cnt(value)))
+        rows.append(("oracle-degrade:", tuple(fields)))
+    for list_name, members in (
+        ("unpriced_native_keys", book.unpriced_native_keys),
+        ("no_capital_exited_keys", book.no_capital_exited_keys),
+        ("failing_key_exits", book.failing_key_exits),
+    ):
+        if members:
+            rows.append(
+                (
+                    "oracle-degrade:",
+                    (("kind", _tok("exit_list")), ("name", _tok(list_name)), ("count", _cnt(len(members)))),
+                )
+            )
     rows.append(
         (
             "oracle-verdict:",
