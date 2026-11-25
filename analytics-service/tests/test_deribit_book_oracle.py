@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import ast
 import json
+import re
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -60,7 +62,7 @@ def test_tracer_explained_book_reads_clean(capsys: pytest.CaptureFixture[str]) -
     code, lines = _run("explained_two_keys.json", capsys)
     assert code == 0
     assert _lines(lines, "oracle-book:") == [
-        "oracle-book: book=A published=4 explained=4 withheld=0 omitted=1 annotated=0"
+        "oracle-book: book=A published=4 explained=4 withheld=0 omitted=1 annotated=1"
     ]
     assert _lines(lines, "oracle-omitted:") == [
         "oracle-omitted: date=2025-01-01 reason=no_stored_base_level"
@@ -143,7 +145,7 @@ def test_withheld_attribution_mismatch(capsys: pytest.CaptureFixture[str]) -> No
     code, lines = _run("withheld_attribution_mismatch.json", capsys)
     assert code == 1
     assert _lines(lines, "oracle-book:") == [
-        "oracle-book: book=A published=4 explained=3 withheld=1 omitted=1 annotated=0"
+        "oracle-book: book=A published=4 explained=3 withheld=1 omitted=1 annotated=1"
     ]
     assert _lines(lines, "oracle-withheld:") == [
         "oracle-withheld: date=2025-01-04 reason=attribution_mismatch"
@@ -172,7 +174,7 @@ def test_withheld_key_basis_not_reproducible(capsys: pytest.CaptureFixture[str])
         "oracle-withheld: date=2025-01-03 reason=key_basis_not_reproducible"
     ]
     assert _lines(lines, "oracle-book:") == [
-        "oracle-book: book=A published=4 explained=3 withheld=1 omitted=1 annotated=0"
+        "oracle-book: book=A published=4 explained=3 withheld=1 omitted=1 annotated=1"
     ]
 
 
@@ -223,11 +225,14 @@ def _variant(tmp_path: Path, mutate: Callable[[dict[str, Any]], None]) -> str:
 def test_cumulative_line_telescopes_to_the_hand_value(capsys: pytest.CaptureFixture[str]) -> None:
     # 1 + r(d) = (sum of previous levels + P) / sum of previous levels, so the product over d2..d5
     # telescopes: (1515/1500)(1490/1515)(1520/1490)(1685/1620) = 1520 * 1685 / (1500 * 1620)
-    # = 2561200 / 2430000 = 1.0540, which reads x1.05 to three significant figures.
+    # = 2561200 / 2430000 = 1.0540, which reads x1.05 to three significant figures. The flow day
+    # d4 (k1 carries a 100 flow) is annotated, so the product over the unannotated days d2, d3 and
+    # d5 is (1515/1500)(1490/1515)(1685/1620) = 1490 * 1685 / (1500 * 1620) = 2510650 / 2430000
+    # = 1.0332, which reads x1.03.
     code, lines = _run("explained_two_keys.json", capsys)
     assert code == 0
     assert _lines(lines, "oracle-cumulative:") == [
-        "oracle-cumulative: published=x1.05 explained=x1.05 explained_unannotated=x1.05 "
+        "oracle-cumulative: published=x1.05 explained=x1.05 explained_unannotated=x1.03 "
         "published_without_big_days=x1.05"
     ]
     assert _lines(lines, "oracle-big-day:") == []
@@ -238,6 +243,8 @@ def test_big_day_and_degrade_lines(tmp_path: Path, capsys: pytest.CaptureFixture
     # (40 + 500)/(1120 + 500) = 540/1620 = 1/3, above the 0.30 reporting threshold; k2 holds
     # 500/540 = 0.926 of the day's absolute P&L. Cumulative: d2..d4 telescope to 1520/1500 and
     # d5 multiplies by 4/3: published = explained = 1.3511 -> x1.35; without the big day 1.0133 -> x1.01.
+    # The unannotated explained days are d2, d3, d5 (d4 is the flow day): (1515/1500)(1490/1515)(4/3)
+    # = (1490/1500)(4/3) = 1.3244 -> x1.32.
     def mutate(doc: dict[str, Any]) -> None:
         k2 = doc["keys"]["k2"]
         k2["composed_day_pnl"][-1]["pnl_usd"] = 500
@@ -255,7 +262,7 @@ def test_big_day_and_degrade_lines(tmp_path: Path, capsys: pytest.CaptureFixture
         "oracle-big-day: date=2025-01-05 r=0.333 key=k2 share=0.926 annotations=none"
     ]
     assert _lines(lines, "oracle-cumulative:") == [
-        "oracle-cumulative: published=x1.35 explained=x1.35 explained_unannotated=x1.35 "
+        "oracle-cumulative: published=x1.35 explained=x1.35 explained_unannotated=x1.32 "
         "published_without_big_days=x1.01"
     ]
     assert _lines(lines, "oracle-degrade:") == [
@@ -318,3 +325,281 @@ def test_a_non_string_comment_is_refused(tmp_path: Path, capsys: pytest.CaptureF
     code = oracle.main(["--input", _variant(tmp_path, lambda doc: doc.update(_comment=5))])
     assert code == 2
     assert "export._comment: expected a string" in capsys.readouterr().err
+
+
+# ── plan 233-05 Task 1: the remaining classes, annotations, carry and rotation ──────────────────
+#
+# Why each test matters (Rule 9):
+#   9.  ``test_withheld_emptied_stretch``: a published day the oracle cannot reproduce because a
+#       key sat in its emptied band is named for what it is, not as a plain mismatch.
+#   10. ``test_omitted_days_each_carry_their_own_name``: each omitted reason fires on its own day
+#       and the book still reads CLEAN, so an honest omission is never a STOP.
+#   11. ``test_omission_unexplained_is_stop``: a day the oracle computes inside the published
+#       window and the book lacks is the one omission that stops the reading.
+#       REVERT-PROOF: classifying it ``outside_published_window`` turns the reading CLEAN.
+#   12. ``test_capital_outside_base_is_named_and_never_nulled`` and
+#       ``test_annotation_never_nulls_a_day``: an annotation names capital the base may not hold
+#       and changes no class and no value (CONTEXT Q4, option (a)).
+#       REVERT-PROOF: dropping the annotated days from the explained set.
+#   13. ``test_carry_and_rotation``: an overlapped key that ended early carries its level with no
+#       P&L, a disjoint handoff rotates the earlier key out.
+#   14. ``test_emptied_constants_match_production``: the oracle's literal copies equal production's
+#       (the only place production is imported).
+#   15. ``test_closed_sets_are_exact`` and ``test_every_day_has_exactly_one_class``.
+
+
+def test_withheld_emptied_stretch(capsys: pytest.CaptureFixture[str]) -> None:
+    code, lines = _run("withheld_emptied_stretch.json", capsys)
+    assert code == 1
+    assert _lines(lines, "oracle-book:") == [
+        "oracle-book: book=A published=7 explained=5 withheld=2 omitted=1 annotated=0"
+    ]
+    assert _lines(lines, "oracle-withheld:") == [
+        "oracle-withheld: date=2025-01-07 reason=emptied_stretch",
+        "oracle-withheld: date=2025-01-08 reason=emptied_stretch",
+    ]
+    assert _lines(lines, "oracle-verdict:") == [
+        "oracle-verdict: verdict=STOP withheld_published=2 omission_unexplained=0 key_set=reproduced"
+    ]
+
+
+def test_omitted_days_each_carry_their_own_name(capsys: pytest.CaptureFixture[str]) -> None:
+    code, lines = _run("omitted_days.json", capsys)
+    assert code == 0
+    assert _lines(lines, "oracle-omitted:") == [
+        "oracle-omitted: date=2025-01-01 reason=no_stored_base_level",
+        "oracle-omitted: date=2025-01-04 reason=skipped_nonpositive_denominator",
+        "oracle-omitted: date=2025-01-05 reason=skipped_nonpositive_denominator",
+        "oracle-omitted: date=2025-01-06 reason=missing_return_inside_coverage",
+        "oracle-omitted: date=2025-01-09 reason=outside_published_window",
+    ]
+    assert _lines(lines, "oracle-book:") == [
+        "oracle-book: book=A published=4 explained=4 withheld=0 omitted=5 annotated=1"
+    ]
+    assert _lines(lines, "oracle-annotation:") == [
+        "oracle-annotation: name=key_sat_out days=1 explained_days=0 explained_cumulative=x1"
+    ]
+    assert _lines(lines, "oracle-verdict:") == [
+        "oracle-verdict: verdict=CLEAN withheld_published=0 omission_unexplained=0 key_set=reproduced"
+    ]
+
+
+def test_omission_unexplained_is_stop(capsys: pytest.CaptureFixture[str]) -> None:
+    code, lines = _run("omission_unexplained.json", capsys)
+    assert code == 1
+    assert _lines(lines, "oracle-omitted:") == [
+        "oracle-omitted: date=2025-01-01 reason=no_stored_base_level",
+        "oracle-omitted: date=2025-01-04 reason=omission_unexplained",
+    ]
+    assert _lines(lines, "oracle-verdict:") == [
+        "oracle-verdict: verdict=STOP withheld_published=0 omission_unexplained=1 key_set=reproduced"
+    ]
+
+
+def test_capital_outside_base_is_named_and_never_nulled(capsys: pytest.CaptureFixture[str]) -> None:
+    code, lines = _run("capital_outside_base.json", capsys)
+    assert code == 0
+    assert _lines(lines, "oracle-annotation:") == [
+        "oracle-annotation: name=capital_outside_base_options_cash days=4 explained_days=4 explained_cumulative=x1.05",
+        "oracle-annotation: name=capital_outside_base_flow_day days=1 explained_days=1 explained_cumulative=x1.02",
+    ]
+    # Hand: every day is annotated, so the unannotated explained cumulative is the empty product.
+    assert _lines(lines, "oracle-cumulative:") == [
+        "oracle-cumulative: published=x1.05 explained=x1.05 explained_unannotated=x1 published_without_big_days=x1.05"
+    ]
+
+
+def _analysis(name: str) -> oracle.Analysis:
+    return oracle.analyse(oracle.load_export(str(_FIXTURES / name)))
+
+
+def test_annotation_never_nulls_a_day() -> None:
+    analysis = _analysis("capital_outside_base.json")
+    annotated = set(analysis.classification.annotations)
+    assert annotated == {"2025-01-02", "2025-01-03", "2025-01-04", "2025-01-05"}
+    explained = {d.day for d in analysis.classification.days if d.kind == "explained"}
+    assert annotated <= explained
+    published = analysis.export.book.returns
+    assert set(published) == explained
+    pub_cum = 1.0
+    exp_cum = 1.0
+    for d in analysis.classification.days:
+        if d.kind == "explained" and d.oracle is not None:
+            pub_cum *= 1.0 + published[d.day]
+            exp_cum *= 1.0 + d.oracle
+    assert pub_cum == pytest.approx(exp_cum, rel=1e-9)
+
+
+def test_carry_and_rotation(capsys: pytest.CaptureFixture[str]) -> None:
+    code, lines = _run("carry_and_rotation.json", capsys)
+    assert code == 0
+    assert _lines(lines, "oracle-book:") == [
+        "oracle-book: book=A published=8 explained=8 withheld=0 omitted=1 annotated=0"
+    ]
+    assert _lines(lines, "oracle-withheld:") == []
+    # The rotation is detected from coverage alone (nothing is declared in the export).
+    analysis = _analysis("carry_and_rotation.json")
+    levels = {label: oracle.roll_key_levels(analysis.export.keys[label]) for label in ("k1", "k2", "k3")}
+    assert oracle._coverage_rotations(levels) == frozenset({"k1"})
+    assert analysis.export.declared.departed == {}
+
+
+def test_emptied_constants_match_production() -> None:
+    # The ONLY place production is imported: the oracle keeps literal copies so it imports nothing
+    # it judges, and this pin catches a copy that drifts from the founder's numbers.
+    from services import allocator_equity_derive as derive
+
+    assert oracle._EMPTIED_FRACTION == derive.EMPTIED_FRACTION
+    assert oracle._EMPTIED_NEGATIVE_FRACTION == derive.EMPTIED_NEGATIVE_FRACTION
+    assert oracle._EMPTIED_RESTART_FLOOR_USD == derive.EMPTIED_RESTART_FLOOR_USD
+
+
+def test_closed_sets_are_exact() -> None:
+    assert oracle.WITHHELD_REASONS == (
+        "key_set_not_reproducible",
+        "no_stored_base_level",
+        "key_basis_not_reproducible",
+        "emptied_stretch",
+        "attribution_mismatch",
+    )
+    assert oracle.OMITTED_REASONS == (
+        "no_stored_base_level",
+        "skipped_nonpositive_denominator",
+        "missing_return_inside_coverage",
+        "nonfinite_return",
+        "outside_published_window",
+        "omission_unexplained",
+    )
+    assert oracle.ANNOTATIONS == (
+        "capital_outside_base_options_cash",
+        "capital_outside_base_flow_day",
+        "key_sat_out",
+    )
+    assert len(set(oracle.WITHHELD_REASONS)) == 5
+    assert len(set(oracle.OMITTED_REASONS)) == 6
+
+
+def test_every_day_has_exactly_one_class() -> None:
+    fixtures = sorted(p.name for p in _FIXTURES.glob("*.json"))
+    assert len(fixtures) >= 11
+    for name in fixtures:
+        analysis = _analysis(name)
+        classes = analysis.classification.days
+        days = [d.day for d in classes]
+        span = set(analysis.repro.union) | set(analysis.export.book.returns)
+        assert len(days) == len(set(days)), f"{name}: a day carries two classes"
+        assert set(days) == span, f"{name}: a day of the span has no class"
+        for d in classes:
+            assert d.kind in ("explained", "withheld", "omitted")
+            if d.kind == "withheld":
+                assert d.reason in oracle.WITHHELD_REASONS, name
+                assert d.day in analysis.export.book.returns
+            elif d.kind == "omitted":
+                assert d.reason in oracle.OMITTED_REASONS, name
+                assert d.day not in analysis.export.book.returns
+            else:
+                assert d.reason is None
+                assert d.day in analysis.export.book.returns
+
+
+# ── plan 233-05 Task 2: the reading cannot leak, and the orchestrator has its read-only SQL ─────
+#
+# Why each test matters (Rule 9):
+#   16. ``test_emitter_refuses_values_outside_vocabulary``: the reading is pasted into a tracked
+#       file on a public repository, so an id, an unrounded amount or free venue text must raise
+#       instead of printing. REVERT-PROOF: a ``_render_val`` that accepts any value passes them.
+#   17. ``test_print_sql_is_read_only_and_id_free`` and ``test_print_sql_takes_no_other_argument``:
+#       the statements the orchestrator runs against PROD are SELECT or WITH only, carry
+#       placeholders and no id, and the mode touches no export.
+#   18. ``test_export_with_id_shaped_value_is_refused``: an export that was not labelled by hand
+#       (an id anywhere, the ``_comment`` included) is refused by field path, never echoed.
+#       REVERT-PROOF: removing the loader's id refusal lets the export through.
+
+
+def test_emitter_refuses_values_outside_vocabulary() -> None:
+    an_id = str(uuid.uuid4())
+    for bad in (
+        oracle.Val("label", an_id),
+        oracle.Val("token", an_id),
+        oracle.Val("token", "free text from a venue"),
+        oracle.Val("token", "0.12345678901234"),
+        oracle.Val("count", 1234.5678),
+        oracle.Val("name", "not_in_any_closed_set"),
+        oracle.Val("date", an_id),
+    ):
+        with pytest.raises((ValueError, oracle.ExportError)):
+            oracle._render_rows([("oracle-book:", (("book", bad),))])
+    # The vocabulary itself still renders (the refusal is not a blanket refusal).
+    assert oracle._render_rows([("oracle-book:", (("book", oracle.Val("label", "A")),))]) == [
+        "oracle-book: book=A"
+    ]
+
+
+_WRITE_WORDS = re.compile(
+    r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do|execute|set|vacuum)\b",
+    re.IGNORECASE,
+)
+
+
+def test_print_sql_is_read_only_and_id_free(capsys: pytest.CaptureFixture[str]) -> None:
+    assert oracle.SQL_LABELS == (
+        "book_curve",
+        "book_key_kinds",
+        "key_scalars",
+        "key_array_by_year",
+        "book_key_rows",
+    )
+    assert oracle.main(["--print-sql"]) == 0
+    text = capsys.readouterr().out
+    assert text == oracle.print_sql()
+    headers = re.findall(r"^-- oracle \((\w+)\):", text, re.MULTILINE)
+    assert tuple(headers) == oracle.SQL_LABELS
+    blocks = [b for b in text.split("\n\n") if b.strip()]
+    assert len(blocks) == len(oracle.SQL_LABELS)
+    placeholders = {"book_id", "key_kind", "kind", "field", "from_day", "to_day"}
+    for block in blocks:
+        body = "\n".join(line for line in block.splitlines() if not line.startswith("--")).strip()
+        assert re.match(r"(?i)^(select|with)\b", body), body
+        assert body.endswith(";") and body.count(";") == 1, body
+        assert not _WRITE_WORDS.search(body), body
+        assert set(re.findall(r":'(\w+)'", body)) <= placeholders
+    assert not oracle._UUID_RE.search(text)
+    assert not oracle._LONG_DIGITS_RE.search(text)
+    # The account identifier is only ever used to rank, never selected.
+    assert text.count("venue_account_id") == 1
+    assert "dense_rank() OVER (ORDER BY exchange, venue_account_id) AS account_group" in text
+
+
+def test_print_sql_takes_no_other_argument(capsys: pytest.CaptureFixture[str]) -> None:
+    assert oracle.main(["--print-sql", "--input", str(_FIXTURES / "explained_two_keys.json")]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no other argument" in captured.err
+    assert oracle.main(["--print-sql=no_such_label"]) == 2
+    assert capsys.readouterr().out == ""
+    assert oracle.main(["--print-sql=book_key_rows"]) == 0
+    assert capsys.readouterr().out.count("-- oracle (") == 1
+
+
+def test_export_with_id_shaped_value_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    an_id = str(uuid.uuid4())
+
+    def in_comment(doc: dict[str, Any]) -> None:
+        doc["_comment"] = f"copied from {an_id}"
+
+    def in_flags(doc: dict[str, Any]) -> None:
+        doc["book"]["flags"] = {"note": an_id}
+
+    def as_key(doc: dict[str, Any]) -> None:
+        doc["declared"]["stitch_parent"] = {an_id: "k1"}
+
+    for mutate, expect in (
+        (in_comment, "export._comment: id-shaped value refused"),
+        (in_flags, "export.book.flags.note: id-shaped value refused"),
+        (as_key, "export.declared.stitch_parent.<key>: id-shaped key refused"),
+    ):
+        code = oracle.main(["--input", _variant(tmp_path, mutate)])
+        captured = capsys.readouterr()
+        assert code == 2
+        assert expect in captured.err
+        assert an_id not in captured.err and an_id not in captured.out
