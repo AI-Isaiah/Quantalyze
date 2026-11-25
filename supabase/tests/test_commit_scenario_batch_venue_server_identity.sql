@@ -807,7 +807,7 @@ BEGIN
   DELETE FROM auth.users WHERE id = uid_a;
 END $vxcnt$;
 
--- ===== exchange-case: The exchange is compared case-blind: an 'MT5' key and an 'mt5' key on one login and server are one account. The pg-lane api_keys has no api_keys_exchange_check, so it stores the mixed-case value; on PROD the CHECK makes it unstorable and the case-fold is defence in depth. =====
+-- ===== exchange-case: The exchange is compared case-blind: an 'MT5' key and an 'mt5' key on one login and server are one account. On PROD api_keys_exchange_check makes the mixed-case value unstorable and the case-fold is defence in depth. The arm lifts that CHECK inside its own DO block (one transaction, so any failure rolls the lift back) and restores it before the block ends; the pg-lane has no such CHECK and the lift is a no-op there. =====
 -- Own allocator, own fixture (every key one spot row; at most one LIVE key per
 -- (owner, exchange, login), the rest disconnected, so the login-only identity index
 -- the lane carries cannot refuse a fixture insert). The reader's fingerprint (bound
@@ -831,7 +831,14 @@ DECLARE
   v_state_b text;
   v_msg_b   text;
   v_diffs   jsonb := jsonb_build_array(jsonb_build_object('kind', 'gate_unknown_kind'));
+  v_xcheck  text;
 BEGIN
+  SELECT pg_get_constraintdef(oid) INTO v_xcheck
+    FROM pg_constraint
+   WHERE conrelid = 'public.api_keys'::regclass AND conname = 'api_keys_exchange_check';
+  IF v_xcheck IS NOT NULL THEN
+    ALTER TABLE public.api_keys DROP CONSTRAINT api_keys_exchange_check;
+  END IF;
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid_a, '00000000-0000-0000-0000-000000000000', 'test-fpvs-' || v_run || '@quantalyze.test', now(), now());
   INSERT INTO profiles (id, display_name, email)
@@ -881,6 +888,9 @@ BEGIN
   DELETE FROM api_keys WHERE user_id = uid_a;
   DELETE FROM profiles WHERE id = uid_a;
   DELETE FROM auth.users WHERE id = uid_a;
+  IF v_xcheck IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE public.api_keys ADD CONSTRAINT api_keys_exchange_check %s', v_xcheck);
+  END IF;
 END $vcase$;
 
 -- ===== marker-links-ambiguous-key: A shared-account marker beats ambiguity: the no-server key marked 'duplicate' against the srv-a key shares srv-a's account even though its own identity is ambiguous, while srv-b stays its own account. =====

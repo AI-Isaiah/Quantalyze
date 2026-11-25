@@ -26,7 +26,7 @@ It depends on #1343 (the owner-read grant on `api_keys.venue_server`), which is 
 
 ### Tests
 - The shared fixture's `tokens` section holds 17 cases, replayed in both Python and TypeScript. The Python end-to-end derive test shows two servers composing with no collision, and two servers plus a key with no server refusing by name, live or disconnected. Three scorer tests cover the server.
-- The new gate `test_commit_scenario_batch_venue_server_identity.sql` has 12 arms, one per rule clause. Every arm went RED with its own arm under its twin. The TypeScript fingerprint parity test reproduces every gate literal.
+- The new gate `test_commit_scenario_batch_venue_server_identity.sql` has 12 arms, one per rule clause. Its exchange-case arm stores an upper-case `'MT5'` row, which `api_keys_exchange_check` forbids on the real schema. The arm therefore lifts that CHECK inside its own transaction and restores it before the block ends; on the pg-lane, which has no such CHECK, the lift does nothing. Every arm went RED with its own arm under its twin. The TypeScript fingerprint parity test reproduces every gate literal.
 - The 8 existing fingerprint twins in the `sameday_empty` and `unpriced` gates now edit the new migration and still bite: 6/6 and 2/2 (plan 17).
 - Census moves: `FILES_FLOOR` 93 -> 94 and `ARMS_FLOOR` 1021 -> 1033, with every census moved to match. `WAIVED_CEILING` stays 0.
 - Both connect routes refuse a control-character server and a 129-character server before any side effect.
