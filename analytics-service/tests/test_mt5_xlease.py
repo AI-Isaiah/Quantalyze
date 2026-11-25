@@ -259,10 +259,10 @@ async def test_late_grant_after_bound_expiry_is_released(monkeypatch, fast_poll)
     assert not fake.holds(_digest()), "the terminal stayed held after a late grant"
 
 
-async def test_a_slow_acquire_is_awaited_not_resent_and_released_once(monkeypatch) -> None:
-    """CR-01 replaced the old 're-poll while the first call is still in flight' shape:
-    a call that outlives its RPC bound is AWAITED again, never joined by a second RPC,
-    so there is one token, one in-flight call and (once the hold ends) one release."""
+async def test_late_grant_after_a_normal_hold_is_released_again(monkeypatch) -> None:
+    """An acquire that timed out client-side, then a retry that was granted and
+    released: the first call landing AFTER the hold released re-takes the row, and
+    the cleanup callback must release it again."""
     fake = FakeXLeaseBackend()
     first = {"seen": False}
 
@@ -277,19 +277,17 @@ async def test_a_slow_acquire_is_awaited_not_resent_and_released_once(monkeypatc
     monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_POLL_S", 0.01)
     monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_POLL_JITTER_S", 0.005)
 
-    async def _hold() -> None:
-        async with mt5_concurrency.mt5_terminal_lease(_KEY):
-            assert fake.holds(_digest()), "the slow call's grant was lost"
-
-    await asyncio.wait_for(_hold(), timeout=3.0)
+    async with mt5_concurrency.mt5_terminal_lease(_KEY):
+        pass
     assert not fake.holds(_digest())
 
-    await asyncio.sleep(0.2)
-    assert fake.count("acquire") == 1, (
-        f"a second acquire RPC was started while the first was still pending "
-        f"({fake.count('acquire')} calls)"
+    await asyncio.sleep(0.8)
+    tokens = {c[2] for c in fake.calls}
+    assert len(tokens) == 1, "one acquisition must use one token on every poll"
+    assert fake.count("acquire") == 2
+    assert fake.calls[-1][0] == "release" and fake.count("release") == 2, (
+        f"the late-landing acquire was never released (calls={[c[0] for c in fake.calls]})"
     )
-    assert fake.count("release") == 1
     assert not fake.holds(_digest()), "a late grant wedged the terminal after a normal hold"
 
 
@@ -756,35 +754,51 @@ async def test_the_fallback_hold_makes_no_renew_and_no_release_call(quick_renew)
     assert lost == [] and not hold.lost
 
 
-async def test_cr01_no_new_acquire_rpc_starts_while_an_earlier_one_is_pending(
+async def test_a_late_grant_from_an_earlier_poll_is_released_when_the_fallback_is_taken(
     monkeypatch, fast_poll
 ) -> None:
-    """The call outlives its RPC bound five times over. Each timed-out wait used to
-    launch ANOTHER RPC (a pool thread each, up to 120 s apiece, 33 in two seconds in the
-    reviewer's probe). The in-flight call must be awaited instead, so `pending` is at
-    most one call however long the database hangs."""
-    in_flight = {"now": 0, "max": 0, "calls": 0}
-
-    async def _slow_then_answers() -> bool:
-        in_flight["calls"] += 1
-        in_flight["now"] += 1
-        in_flight["max"] = max(in_flight["max"], in_flight["now"])
-        try:
-            await asyncio.sleep(0.3)
-            return True
-        finally:
-            in_flight["now"] -= 1
-
-    mt5_xlease.set_xlease_backend_for_tests(_ScriptedBackend([_slow_then_answers]))
+    """Poll 1 outlives its RPC bound and is granted AFTER poll 2 learns the RPC is
+    missing (the migration rolled back mid-acquisition). Without releasing the pending
+    future that late grant would hold the row for a whole TTL."""
+    backend = _ScriptedBackend([_answers(True, delay_s=0.3), _raises(_missing_rpc_error())])
+    mt5_xlease.set_xlease_backend_for_tests(backend)
     monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.05)
 
-    # The deadman matters: the unfixed loop never reads a finished call it has already
-    # stopped waiting on, so it re-polls forever.
-    hold = await asyncio.wait_for(_grant([]), timeout=3.0)
-    await hold.release()
+    hold = await _grant([])
+    assert hold.cross_process is False
+    await asyncio.sleep(0.6)
 
-    assert in_flight["calls"] == 1 and in_flight["max"] == 1, (
-        f"overlapping acquire RPCs: {in_flight}"
+    assert backend.calls.count("acquire") == 2
+    assert backend.calls.count("release") == 1, (
+        f"the late grant of the abandoned poll was never released (calls={backend.calls})"
+    )
+    await hold.release()
+    assert backend.calls.count("release") == 1
+
+
+async def test_cr2_01_a_hung_database_never_has_more_than_the_cap_of_calls_in_flight(
+    monkeypatch, fast_poll
+) -> None:
+    """CR-01's concern, kept: a database that never answers must not get a new pool
+    thread (up to 120 s each) on every poll with `pending` growing without limit. A
+    fresh call follows a timed-out wait (CR2-01), but only up to the cap."""
+    fake = FakeXLeaseBackend()
+    fake.before["acquire"] = sleep_forever
+    _install(fake)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.02)
+    _small_budget(monkeypatch, 0.4)  # about 20 timed-out waits, far more than the cap
+
+    with pytest.raises(mt5_xlease.XLeaseUnavailable):
+        await asyncio.wait_for(
+            mt5_xlease.acquire_terminal_xlease(
+                _KEY, holder=None, site=None, bound_s=None, on_lost=lambda: None
+            ),
+            timeout=5.0,
+        )
+
+    assert fake.count("acquire") == mt5_xlease._MT5_XLEASE_MAX_INFLIGHT, (
+        f"{fake.count('acquire')} acquire calls for a database that never answers; "
+        f"expected exactly the cap ({mt5_xlease._MT5_XLEASE_MAX_INFLIGHT})"
     )
 
 
@@ -1144,7 +1158,9 @@ async def test_cr01_a_hung_acquire_is_counted_logged_once_and_ends_unavailable(
     assert len(errors) == 1, f"expected one rpc_error record for the hang, got {len(errors)}"
     assert errors[0].levelno == logging.WARNING
     assert errors[0].exc_class == "TimeoutError" and errors[0].site == SITE_DERIVE
-    assert fake.count("acquire") == 1, "a hung call must be awaited, not re-sent"
+    assert 1 <= fake.count("acquire") <= mt5_xlease._MT5_XLEASE_MAX_INFLIGHT, (
+        "a hung database must not get an unbounded number of calls"
+    )
     assert not mt5_concurrency._mt5_terminal_lock_for(_KEY).locked()
 
 
@@ -1369,3 +1385,94 @@ async def test_wr01_a_successful_renew_moves_the_deadline_from_its_send_time(
     assert lost == [] and not hold.lost
     assert fake.count("renew") >= 4
     await hold.release()
+
+
+# --------------------------------------------------------------------------- #
+# Round-2 fixes (230-REVIEW.md, CR2-01 and WR2-01).
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def scaled_stuck(monkeypatch):
+    """The reviewer's 1:100 scale for the acquire path (RPC 15 -> 0.15, budget 60 ->
+    0.6, poll 0.5 -> 0.005) plus the renew timing of ``scaled_timing``."""
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_TTL_S", 0.9)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RENEW_INTERVAL_S", 0.2)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RPC_TIMEOUT_S", 0.15)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_LOST_AFTER_S", 0.7)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_ERROR_BUDGET_S", 0.6)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_POLL_S", 0.005)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_POLL_JITTER_S", 0.0025)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_MIN_ATTEMPT_S", 0.005)
+
+
+def _first_call_hangs(fake: FakeXLeaseBackend) -> None:
+    state = {"n": 0}
+
+    async def _hook() -> None:
+        state["n"] += 1
+        if state["n"] == 1:
+            await sleep_forever()
+
+    fake.before["acquire"] = _hook
+
+
+@pytest.mark.parametrize("bound", [None, 0.2])
+async def test_cr2_01_one_lost_response_is_survived_by_a_fresh_call_and_granted(
+    scaled_stuck, bound
+) -> None:
+    """THE LOSS CLASS THIS PHASE IS ABOUT. One acquire request whose response is lost (a
+    half-open pooled connection: httpx resolves it only at its 120 s read timeout, which
+    is later than the ~75 s the unbounded budget lasts) must not turn into
+    `XLeaseUnavailable`, a transient retry and `attempts > 1` on the derive row (DEC-04-C:
+    'a PostgREST blip must not burn a derive attempt'). The timeout is still counted and
+    logged, but a FRESH call with the same token follows it, so the next answer grants."""
+    fake = FakeXLeaseBackend()
+    _first_call_hangs(fake)
+    _install(fake)
+    started = time.monotonic()
+
+    hold = await asyncio.wait_for(
+        mt5_xlease.acquire_terminal_xlease(
+            _KEY, holder=None, site=SITE_DERIVE, bound_s=bound, on_lost=lambda: None
+        ),
+        timeout=5.0,
+    )
+    elapsed = time.monotonic() - started
+
+    # (`ttl_s` is `int(0.9) == 0` at this scale, so the row is checked by presence.)
+    assert hold.cross_process and _digest() in fake.rows
+    assert fake.count("acquire") == 2, "the stuck call was not followed by a fresh one"
+    assert elapsed < 0.4, f"granted after {elapsed:.2f}s"
+    assert len({c[2] for c in fake.calls}) == 1, "one acquisition must use one token"
+    await hold.release()
+
+
+async def test_cr2_01_the_renew_deadline_is_seeded_by_the_granting_calls_own_send_time(
+    scaled_stuck,
+) -> None:
+    """The first call hangs, the second (sent about 0.155 s later) grants. The row's
+    expiry was stamped when the SECOND call executed, so the loss deadline is measured
+    from its send time. Seeding it from the first call's send time would fence about
+    0.155 s early (at 0.70 instead of about 0.86) and burn the attempt for nothing."""
+    fake = FakeXLeaseBackend()
+    _first_call_hangs(fake)
+
+    async def _renews_hang() -> None:
+        await sleep_forever()
+
+    fake.before["renew"] = _renews_hang
+    _install(fake)
+    fenced_at: list[float] = []
+    t0 = time.monotonic()
+    hold = await mt5_xlease.acquire_terminal_xlease(
+        _KEY, holder=None, site=None, bound_s=None,
+        on_lost=lambda: fenced_at.append(time.monotonic() - t0),
+    )
+    await asyncio.sleep(1.2)
+    hold.stop_renewing()
+
+    assert fenced_at, "on_lost never fired"
+    assert fenced_at[0] > 0.78, (
+        f"fenced at {fenced_at[0]:.3f}s: the deadline was measured from the stuck "
+        "first call's send time, not the granting call's"
+    )
+    assert fenced_at[0] < 0.9, "fenced after the row's expiry"

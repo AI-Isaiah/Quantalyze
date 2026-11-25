@@ -92,9 +92,9 @@ def _validate_xlease_timing(
     TTL, lets a healthy holder expire between two renewals. ``rpc_timeout < renew``:
     a renew that can outlast its own interval stacks. ``ttl >= 2 * renew +
     rpc_timeout``: the self-fence deadline (``lost_after = ttl - renew``) is at least
-    one renew interval plus one RPC bound after a hold's last successful send, so the
-    first renew after it always gets its FULL ``rpc_timeout`` before the fence and a
-    single slow call never fences a healthy holder. ``rpc_timeout < error_budget``: one
+    one renew interval plus one RPC bound after the granting call's send, so a prompt
+    grant's first renew (sent one renew interval in) gets its FULL ``rpc_timeout``
+    before the fence and a single slow call never fences a healthy holder. ``rpc_timeout < error_budget``: one
     slow call must not by itself spend the budget an unbounded caller is allowed
     (DEC-04-C).
 
@@ -153,6 +153,14 @@ _MT5_XLEASE_LOST_AFTER_S: Final[float] = (
 #: ``wait_s`` would time out before the RPC future even started, turning a free
 #: lease into "busy". It overshoots the caller's bound by at most this much, once.
 _MT5_XLEASE_MIN_ATTEMPT_S: Final[float] = 0.5
+#: The most acquire calls one acquisition keeps in flight at once (CR2-01). A call that
+#: outlives its RPC bound is counted as an error and followed by a FRESH call (a lost
+#: response resolves only at httpx's 120 s read timeout, later than the unbounded error
+#: budget lasts), but never beyond this many, so a database that never answers still
+#: cannot grow `pending` or the pool-thread count without limit. About
+#: ``ceil(error budget / rpc timeout) + 1``: the calls an unbounded caller can start
+#: before its budget gives up.
+_MT5_XLEASE_MAX_INFLIGHT: Final[int] = 5
 
 #: DEC-04-C. How long an UNBOUNDED caller (a batch job) tolerates CONSECUTIVE backend
 #: errors on the acquire before it raises ``XLeaseUnavailable``: a PostgREST blip must not
@@ -672,9 +680,11 @@ async def acquire_terminal_xlease(
     #: reaches its deadline with NO answer met an outage, not a busy terminal (SF-M1).
     answered = False
     last_failure = ""
-    #: Monotonic send time of the acquire call currently awaited (at most one is ever in
-    #: flight); the granting call's value seeds the renew loop's loss deadline.
-    call_sent_at = started
+    #: Monotonic send time of each acquire call still in `pending`. The GRANTING call's
+    #: value seeds the renew loop's loss deadline: the row's expiry is stamped when that
+    #: call executes, not when an earlier, stuck one was sent (CR2-01).
+    sent_at_of: dict[asyncio.Future[bool], float] = {}
+    granted_sent_at = started
 
     try:
         while True:
@@ -682,58 +692,70 @@ async def acquire_terminal_xlease(
             rpc_bound = _MT5_XLEASE_RPC_TIMEOUT_S
             if remaining is not None:
                 rpc_bound = min(rpc_bound, max(remaining, _MT5_XLEASE_MIN_ATTEMPT_S))
-            if pending:
-                # CR-01: an earlier call outlived its RPC bound and is STILL in flight.
-                # Wait on it again instead of starting another: a hung database would
-                # otherwise get a new pool thread (up to 120 s each) every poll, and
-                # `pending` would grow without limit. At most one call is ever pending.
-                fut = next(iter(pending))
-            else:
-                # The call is a FUTURE that outlives this await: `asyncio.wait` neither
+            if len(pending) < _MT5_XLEASE_MAX_INFLIGHT:
+                # Each call is a FUTURE that outlives this await: `asyncio.wait` neither
                 # cancels it on a timeout nor when this task is cancelled, so the RPC's
                 # outcome stays observable (Pitfall 2). It joins `pending` BEFORE the
-                # await, so a cancellation mid-call is covered too.
-                call_sent_at = time.monotonic()
-                fut = asyncio.ensure_future(
+                # await, so a cancellation mid-call is covered too. A call that timed
+                # out stays in `pending` until the acquisition ends; it is waited on
+                # again with the fresh one, and a late grant is released only at the end
+                # (never at the timeout: same token, so that would free a live hold).
+                new_call = asyncio.ensure_future(
                     backend.acquire(digest, token, holder_n, site_n, ttl_s)
                 )
-                fut.add_done_callback(_consume_future)
-                pending.add(fut)
-            done, _ = await asyncio.wait({fut}, timeout=rpc_bound)
+                new_call.add_done_callback(_consume_future)
+                pending.add(new_call)
+                sent_at_of[new_call] = time.monotonic()
+            done, _ = await asyncio.wait(
+                set(pending), timeout=rpc_bound, return_when=asyncio.FIRST_COMPLETED
+            )
             attempts += 1
             #: The exception class name when this wait ended with no answer.
             failure: str | None = None
-            if fut in done:
+            missing_rpc = False
+            granted_sends: list[float] = []
+            for fut in done:
                 pending.discard(fut)
+                sent_at = sent_at_of.pop(fut)
                 try:
                     granted = fut.result()
                 except Exception as exc:  # noqa: BLE001 — see below
                     if is_missing_rpc(exc):
-                        # DEC-04-A: the RPC is not deployed. Loud, never latched
-                        # (the next acquisition asks again).
-                        _note_unavailable(XLEASE_ACQUIRE_RPC, site_n)
-                        return XLeaseHold(
-                            backend=backend,
-                            digest=digest,
-                            token=token,
-                            site=site_n,
-                            pending=pending,
-                            on_lost=on_lost,
-                            cross_process=False,
-                        )
-                    # Any OTHER backend failure fails closed, but a blip is tolerated
-                    # for the budget (unbounded) or to the deadline (bounded): the
-                    # caller never proceeds unserialized.
-                    failure = type(exc).__name__
+                        missing_rpc = True
+                    else:
+                        # Any OTHER backend failure fails closed, but a blip is
+                        # tolerated for the budget (unbounded) or to the deadline
+                        # (bounded): the caller never proceeds unserialized.
+                        failure = type(exc).__name__
                 else:
                     answered = True
                     first_error_at = None  # the database answered: the window restarts
                     if granted:
-                        break
-                    refusals += 1
-            else:
-                # The call outlived its RPC bound: no answer, so it counts toward the
-                # error window exactly like a raised error (DEC-04-C) (CR-01).
+                        granted_sends.append(sent_at)
+                    else:
+                        refusals += 1
+            if granted_sends:
+                # The EARLIEST send is the conservative base for the loss deadline.
+                granted_sent_at = min(granted_sends)
+                break
+            if missing_rpc:
+                # DEC-04-A: the RPC is not deployed. Loud, never latched (the next
+                # acquisition asks again). A call still in flight may land after this;
+                # release it as on any abandon.
+                _note_unavailable(XLEASE_ACQUIRE_RPC, site_n)
+                _release_late_grants(pending, backend, digest, token)
+                return XLeaseHold(
+                    backend=backend,
+                    digest=digest,
+                    token=token,
+                    site=site_n,
+                    pending=pending,
+                    on_lost=on_lost,
+                    cross_process=False,
+                )
+            if not done:
+                # No call finished within its RPC bound: no answer, so it counts toward
+                # the error window exactly like a raised error (DEC-04-C) (CR-01).
                 failure = "TimeoutError"
             if failure is not None:
                 last_failure = failure
@@ -769,8 +791,6 @@ async def acquire_terminal_xlease(
                     _log_gave_up(site_n, last_failure, started, attempts)
                     raise XLeaseUnavailable() from None
                 raise XLeaseBoundExpired() from None
-            if pending:
-                continue  # the in-flight call is awaited next; no new poll to space out
             sleep_s = _MT5_XLEASE_POLL_S + random.uniform(0.0, _MT5_XLEASE_POLL_JITTER_S)
             if remaining is not None:
                 sleep_s = min(sleep_s, remaining)
@@ -807,7 +827,7 @@ async def acquire_terminal_xlease(
         site=site_n,
         pending=pending,
         on_lost=on_lost,
-        granted_sent_at=call_sent_at,
+        granted_sent_at=granted_sent_at,
     )
     hold.start_renewing()
     return hold
