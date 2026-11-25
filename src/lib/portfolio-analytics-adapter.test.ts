@@ -214,6 +214,30 @@ describe("adaptPortfolioAnalytics", () => {
     expect("note" in (noNote?.benchmark_comparison ?? {})).toBe(false);
   });
 
+  // Phase 222 ERRC-02: a total benchmark source failure is stored as a named
+  // outage with stale false. The wire value must reach the page unchanged.
+  it("round-trips the no-source benchmark note with stale false", () => {
+    const parsed = adaptPortfolioAnalytics({
+      ...complete,
+      benchmark_comparison: {
+        symbol: "BTC",
+        correlation: null,
+        benchmark_twr: null,
+        portfolio_twr: 0.12,
+        stale: false,
+        note: "benchmark unavailable: no price source",
+      },
+    });
+    expect(parsed?.benchmark_comparison).toEqual({
+      symbol: "BTC",
+      correlation: null,
+      benchmark_twr: null,
+      portfolio_twr: 0.12,
+      stale: false,
+      note: "benchmark unavailable: no price source",
+    });
+  });
+
   it("handles a row with benchmark_comparison set to null", () => {
     const parsed = adaptPortfolioAnalytics(partialNullBenchmark);
     expect(parsed).not.toBeNull();
