@@ -18,6 +18,8 @@
 // @vitest-environment node
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 vi.mock("server-only", () => ({}));
 
@@ -698,19 +700,19 @@ describe("[OPS-06] csv-finalize: a missing service-role key fails LOUD and PRE-C
  * and free of a retry promise. They deliberately do NOT assert "the 40001
  * branch was taken" or "the constant was read" — an assertion shaped like the
  * fix survives the defect it is meant to catch. The exact-equality oracle is
- * INDEPENDENT of route.ts: it is a hand-typed sentence in this file (since
- * 2026-11-14, Phase 212; it used to be parsed out of
- * supabase/schema/functions/computation_error_copy.sql), so a route that
- * invented its own sentence fails here even if that sentence were jargon-free.
+ * INDEPENDENT of route.ts: it is parsed from the generated snapshot
+ * supabase/schema/functions/computation_error_copy.sql, never from the route,
+ * so a route that invented its own sentence fails here even if that sentence
+ * were jargon-free.
  *
- * ⚠️ ORACLE RE-CUT 2026-11-14 (Phase 212 WIZTRUTH, SC6/SC7; founder-pending
- * default recorded in 212-CONTEXT "Pending founder questions"). The SQL ELSE
- * arm still ends in the legacy support pointer, a channel that does not exist,
- * and fixing it needs a migration, which SC7 forbids. So the route's string now
- * names the contact form and this oracle no longer reads the SQL. The SQL
- * `computation_error_copy` arms (ELSE, permanent, transient, unknown) still
- * carry the old pointer and are booked for a later migration phase; the oracle
- * and the SQL are NOT in parity until then, on purpose.
+ * ⚠️ ORACLE RE-POINTED 2026-11-27 (Phase 222 ALERTTRUTH, ERRC-01). From
+ * 2026-11-14 (Phase 212 WIZTRUTH) the oracle was a hand-typed sentence, because
+ * the SQL ELSE arm still ended in the legacy support pointer and rewording it
+ * needed a migration that Phase 212 forbade. Phase 222's migration
+ * 20261127120000_computation_error_copy_contact_form.sql restored parity: the
+ * ELSE arm names the contact form and equals the route's string byte for byte.
+ * The oracle is parsed from the SQL snapshot again, and stays independent of
+ * route.ts.
  *
  * ⛔ AND THE COPY MUST NOT PROMISE AN AUTOMATIC RETRY. The review that raised
  * WR-07 proposed "…and will retry automatically". Since Phase 164.6
@@ -727,15 +729,33 @@ describe("[OPS-06] csv-finalize: a missing service-role key fails LOUD and PRE-C
  */
 
 /**
- * The oracle. A hand-typed sentence, deliberately NOT read from the SQL dump
- * (see the 2026-11-14 note in the header above). It claims nothing about
- * automatic retries, which is exactly what makes it true of a lost enqueue
- * race, and it names the contact form instead of the legacy support pointer.
- * The anti-vacuity case below pins its shape so an empty edit cannot make
- * every exact-equality assertion trivially agreeable.
+ * The oracle. Parsed from the @generated canonical dump of
+ * `computation_error_copy(TEXT)`, whose ELSE arm is the project's cautious
+ * default: it claims nothing about automatic retries, which is exactly what
+ * makes it true of a lost enqueue race, and since Phase 222 it names the
+ * contact form. Read at module scope so a parse failure is LOUD (the whole file
+ * fails to load) rather than silently yielding "" and making `toBe("")`
+ * vacuous. The anti-vacuity case below pins its shape as well.
  */
-const CURATED_DEFAULT_COPY: string =
-  "Analytics could not complete for this strategy. Retry the sync, or use the contact form if this persists.";
+const CURATED_DEFAULT_COPY: string = (() => {
+  const path = resolve(
+    process.cwd(),
+    "supabase/schema/functions/computation_error_copy.sql",
+  );
+  const sql = readFileSync(path, "utf8");
+  // The arms are `WHEN '<kind>' THEN\n  '<sentence>'`; the last is a bare
+  // `ELSE`. `ELSE` is upper-case in code and the only prose occurrence is
+  // lower-case ("Anything else:"), so this cannot match a comment.
+  const arm = sql.match(/\bELSE\s*\n\s*'([^']+)'/);
+  if (!arm) {
+    throw new Error(
+      `WR-07 oracle: could not parse the ELSE arm out of ${path}. If the dump ` +
+        `format changed, re-point this parse — do NOT delete it, or the route's ` +
+        `literal loses its only tie to the SQL it is a copy of.`,
+    );
+  }
+  return arm[1];
+})();
 
 describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something true", () => {
   const placeholderUpserts: Array<Record<string, unknown>> = [];
@@ -998,8 +1018,8 @@ describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something tr
    *       sync, or <the legacy support pointer> if this persists."
    *     Received: "Analytics could not be started. Please try again."
    *   That is the exact-equality assertion's whole reason to exist: the
-   *   sentence has to be the PROJECT's (parsed from the SQL until 2026-11-14,
-   *   hand-typed since), not one this file
+   *   sentence has to be the PROJECT's (parsed from the SQL again since
+   *   Phase 222; hand-typed 2026-11-14 to 2026-11-27), not one this file
    *   agrees with itself about. Restored: 19 passed.
    *
    * ⭐ RED DEMO (run 2026-09-24, Phase 164.6 OPS-08-TS, restored from a byte

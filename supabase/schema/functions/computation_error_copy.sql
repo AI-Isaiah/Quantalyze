@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260826120000_computation_error_curated_copy.sql
+-- source migration: 20261127120000_computation_error_copy_contact_form.sql
 -- --------------------------------------------------------------------------
 -- computation_error_copy — the ONLY value the status bridge may write to
 -- strategy_analytics.computation_error.
@@ -19,7 +19,7 @@
 -- the silent-failure mode the whole surface exists to avoid. (Measured: no
 -- failed_final writer at HEAD can produce a NULL kind — this is the belt for a
 -- future one.)
-CREATE OR REPLACE FUNCTION computation_error_copy(p_error_kind TEXT)
+CREATE OR REPLACE FUNCTION public.computation_error_copy(p_error_kind TEXT)
 RETURNS TEXT
 LANGUAGE sql
 IMMUTABLE
@@ -41,16 +41,16 @@ AS $copy$
     -- no automatic retry has happened and none is coming. Promising a retry
     -- here would be the thing that is false.
     WHEN 'permanent' THEN
-      'Analytics could not complete for this strategy, and retrying alone will not resolve it. Contact support if you need this strategy computed.'
+      'Analytics could not complete for this strategy, and retrying alone will not resolve it. Use the contact form if you need this strategy computed.'
     -- 'transient' and 'unknown' SHARE an arm, and the sameness is the honest
     -- part. Neither reaches 'failed_final' except through
     -- `v_attempts >= v_max_attempts`, so the one true statement about both is
     -- that the automatic retries were used up. Splitting them would spend two
     -- sentences implying a difference the user cannot act on.
     WHEN 'transient' THEN
-      'Analytics could not complete after several automatic retries. Retry the sync, or contact support if it keeps failing.'
+      'Analytics could not complete after several automatic retries. Retry the sync, or use the contact form if it keeps failing.'
     WHEN 'unknown' THEN
-      'Analytics could not complete after several automatic retries. Retry the sync, or contact support if it keeps failing.'
+      'Analytics could not complete after several automatic retries. Retry the sync, or use the contact form if it keeps failing.'
     -- 'orphaned' — the WORKER DIED holding the claim; the job itself never
     -- reached a verdict. Written ONLY by the hourly reaper
     -- (retention_compute_jobs_orphaned_running, re-registered by mig
@@ -74,6 +74,6 @@ AS $copy$
     -- Anything else: NULL, or a kind added after this migration. Says only what
     -- is true of every failure and claims nothing about retries.
     ELSE
-      'Analytics could not complete for this strategy. Retry the sync, or contact support if this persists.'
+      'Analytics could not complete for this strategy. Retry the sync, or use the contact form if this persists.'
   END
 $copy$;
