@@ -349,8 +349,16 @@ PARTITION_COLUMNS: Final[tuple[str, ...]] = (
 # moves the column forward (migration 20260602173710) and drops it, the next
 # seed is again the column, and the stopped symbol's span between its bound and
 # the column is not re-read; only that run's stop flag names it. Closing it
-# needs an RPC change, outside this phase. This is one of several venue
-# conditions for this switch and certifies nothing about OKX, Bybit or Deribit.
+# needs an RPC change, outside this phase. A third known gap is accepted the
+# same way (round-1 review WR-03, T-250-19), the sync handler tail: a
+# fill-heavy read that also runs to its 840 s deadline can overrun the 900 s
+# handler while it persists (one amendment SELECT and one upsert per 100 fills,
+# duplicates included), and `wait_for` then cancels before the cursor RPC. The
+# cursor did not move, so the next run reads the same span to the same frontier,
+# persists the same fills and times out again: a loud stall that repeats on
+# every run, not one failed run, until the account's fills thin out. There is
+# no fill-count stop. This is one of several venue conditions for this switch
+# and certifies nothing about OKX, Bybit or Deribit.
 _RAW_TRADE_INGESTION_ENABLED: Final[bool] = (
     os.environ.get("USE_RAW_TRADE_INGESTION", "false").lower() == "true"
 )
@@ -2310,6 +2318,9 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     else min(_fills_cursor_ms, _seed_bound_ms)
                 )
             try:
+                # 840 of the handler's 900 s (T-250-19): the persist after the read is
+                # unbounded by it, so a fill-heavy read that runs to its deadline times
+                # out and repeats on every later run (see `_RAW_TRADE_INGESTION_ENABLED`).
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=fills_since_ms,
                     read_deadline_s=BINANCE_SYNC_FILLS_READ_DEADLINE_S,
