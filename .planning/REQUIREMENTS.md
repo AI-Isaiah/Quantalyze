@@ -117,17 +117,17 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### User-facing: honest factsheets (FACTSHEETHONEST)
 
-- [ ] **FACT-01**: A withheld factsheet prints no whole-record reading beside rail figures that read as dashes. The three deferred D6 items are a founder ruling at plan time. (covers: 164.6.6.3.3-WITHHELD-RESIDUE)
-- [ ] **FACT-02**: During a re-run, every surface that shows a strategy's figures (share card, tear sheet, PDFs, returns API, recommendations, portfolios, composer) shows the same state as the factsheet: it stays published, with a quiet Updating line (Phase 190). A census test lists every reader of the recompute verdict. (covers: 190-RERUN-SURFACES-NOT-HOLDING)
+- [x] **FACT-01**: A withheld factsheet prints no whole-record reading beside rail figures that read as dashes. The three deferred D6 items are a founder ruling at plan time. (covers: 164.6.6.3.3-WITHHELD-RESIDUE)
+- [x] **FACT-02**: During a re-run, every surface that shows a strategy's figures (share card, tear sheet, PDFs, returns API, recommendations, portfolios, composer) shows the same state as the factsheet: it stays published, with a quiet Updating line (Phase 190). A census test lists every reader of the recompute verdict. (covers: 190-RERUN-SURFACES-NOT-HOLDING)
 - [ ] **FACT-03**: A never-computed analytics row never reads "Analytics last computed", and freshness checks never take its insert time as a compute time. Whether this uses a nullable `computed_at` (which reverses CONTEXT R-04) or a separate marker is a founder ruling at plan time. (covers: 166.5-COMPUTED-AT-NEVER-COMPUTED-DEFAULT)
-- [ ] **FACT-04**: The owner's private factsheet shows the data source of their own key-backed strategy, never "Data source —". (covers: 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED)
+- [x] **FACT-04**: The owner's private factsheet shows the data source of their own key-backed strategy, never "Data source —". (covers: 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED)
 - [ ] **FACT-05**: For a failed, stalled or never-started row, the /strategies note never tells the owner to wait. (covers: 170.1-STRATEGIES-NOTE-WAIT-WORDING)
 
 ### User-facing: cached state matches the truth (SURFACECACHE)
 
-- [ ] **CACHE-01**: A strategy published after its OG card was first requested shows its real card on the next request. A not-found card is never long-cached. (covers: 170.3-OG-NOTFOUND-CACHE)
+- [x] **CACHE-01**: A strategy published after its OG card was first requested shows its real card on the next request. A not-found card is never long-cached. (covers: 170.3-OG-NOTFOUND-CACHE)
 - [x] **CACHE-02**: The composer stores its selected range as dates, so a 12M preset always ends on the latest day and keeps the same dates when the series grows at the front. (covers: 201.1-COMPOSER-RANGE-AS-DATES)
-- [ ] **CACHE-03**: A failed BTC price read is never cached as a normal payload. The next view retries it, so the USD toggle is not disabled for the cache lifetime. (covers: 164.6.6.2.1-USDVIEW-READFAIL-CACHED)
+- [x] **CACHE-03**: A failed BTC price read is never cached as a normal payload. The next view retries it, so the USD toggle is not disabled for the cache lifetime. (covers: 164.6.6.2.1-USDVIEW-READFAIL-CACHED)
 - [x] **CACHE-04**: Discovery never ranks a BTC-unit return beside USD returns as if the two were comparable. (covers: 164.6.6.2.1-DISCOVERY-RANKING-HONESTY)
   ⛔ CORRECTED 2026-11-24 (founder ruling, Phase 239 CONTEXT): BTC-unit and USD returns are ranked together as pure performance, with no BTC price conversion; the "in BTC" chip stays. The line above is kept as lineage.
 
@@ -340,14 +340,14 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | FIG-03 | Phase 236 | Pending |
 | FIG-04 | Phase 236 | Pending |
 | FIG-05 | Phase 236 | Pending |
-| FACT-01 | Phase 237 | Shipped (#1316), human verification pending |
-| FACT-02 | Phase 237 | Shipped (#1316), human verification pending |
+| FACT-01 | Phase 237 | Complete |
+| FACT-02 | Phase 237 | Complete |
 | FACT-03 | Phase 238 | Pending |
-| FACT-04 | Phase 237 | Shipped (#1316), human verification pending |
+| FACT-04 | Phase 237 | Complete |
 | FACT-05 | Phase 238 | Pending |
-| CACHE-01 | Phase 237 | Shipped (#1316), human verification pending |
+| CACHE-01 | Phase 237 | Complete |
 | CACHE-02 | Phase 239 | Complete |
-| CACHE-03 | Phase 237 | Shipped (#1316), human verification pending |
+| CACHE-03 | Phase 237 | Complete |
 | CACHE-04 | Phase 239 | Complete |
 | CONN-01 | Phase 225 | Pending |
 | CONN-02 | Phase 228 | Pending |

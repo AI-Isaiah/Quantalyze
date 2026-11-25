@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
-current_phase: 229
-current_phase_name: MT5DERIVE2
+current_phase: 237
+current_phase_name: FACTSHEETHONEST
 status: executing
-stopped_at: "Phase 229 closed: the founder's live soak (exit 0) and the 155.2 freeze check recorded"
-last_updated: "2026-11-25T12:23:59.067Z"
+stopped_at: "Phases 229 and 237 closed: their human items are recorded"
+last_updated: "2026-11-25T12:37:58.360Z"
 last_activity: 2026-11-25
-last_activity_desc: "Phase 229 MT5DERIVE2 complete: both human items closed (live soak exit 0, 155.2 freeze satisfied)"
-state_head: 7589aef383478b0c43e758bfbb5f073ab3973a9b
+last_activity_desc: "Phases 229 MT5DERIVE2 and 237 FACTSHEETHONEST complete: human items closed (229 live soak exit 0; 237 both visual checks pass)"
+state_head: 32be13ce022aa607ea065660da6c65270dd94750
 progress:
   total_phases: 22
-  completed_phases: 8
+  completed_phases: 9
   total_plans: 93
   completed_plans: 79
-  percent: 36
+  percent: 41
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 229 (MT5DERIVE2) — COMPLETE (shipped v0.133.69.0, #1328); v1.22 phases run in parallel
-Plan: 6 of 6
-Status: Phase complete; the founder's live soak (229-06 Task 2, exit 0) and the 155.2 freeze check are recorded
-Last activity: 2026-11-25 — Phase 229 closed: live soak exit 0 on the deployed commit 549f3d97, 155.2 freeze satisfied
-Progress: [████░░░░░░] 36%
+Phase: 237 (FACTSHEETHONEST) — COMPLETE (shipped v0.133.63.0, #1316); 229 (MT5DERIVE2) also closed in the same records PR; v1.22 phases run in parallel
+Plan: 13 of 13
+Status: Phase complete; 237's two visual checks and 229's live soak (exit 0) and 155.2 freeze check are recorded
+Last activity: 2026-11-25 — Phases 229 and 237 closed: 229 live soak exit 0 on the deployed commit 549f3d97; 237 share card and Withheld factsheet checks pass
+Progress: [████░░░░░░] 41%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1836,7 +1836,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-23T18:28:35.274Z
-**Stopped At:** Phase 229 closed (live soak and 155.2 freeze check recorded)
+**Stopped At:** Phases 229 and 237 closed (human items recorded)
 **Resume File:** None
 
 **Last Date:** 2026-11-14T07:30:26.000Z

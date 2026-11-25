@@ -172,7 +172,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [ ] **Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key** - Seam S2 owner: transient-zero MT5 keys, any exception reverts, counted fallback flag, no residue reason
 - [ ] **Phase 235: HOLDINGSTRUTH — one account counts once on Holdings, match scoring and the dashboard, and every failing key is named** - Reads the identity value 225 settles: identity misses fail loud, per-account unpriced marker, dashboard marker read, shared-account keys named
 - [ ] **Phase 236: FIGUREMATH — every engine annualizes one way, CVaR is historical, and moved figures are re-derived and announced** - F-5 "365, ddof 1 everywhere", F-6 historical CVaR, quantstats 0.0.86, one CAGR span rule, fleet re-derive; moves published figures
-- [ ] **Phase 237: FACTSHEETHONEST — every surface shows a strategy's true state, and no cache re-serves a stale or failed one** - Owner of the OG route and payload builder: withheld residue, re-run holding on every surface, OG not-found cache, BTC price failure cache, owner data source
+- [x] **Phase 237: FACTSHEETHONEST — every surface shows a strategy's true state, and no cache re-serves a stale or failed one** - Owner of the OG route and payload builder: withheld residue, re-run holding on every surface, OG not-found cache, BTC price failure cache, owner data source (completed 2026-11-25)
 - [ ] **Phase 238: NEVERCOMPUTED — a strategy that never computed, failed or stalled never claims a compute time or tells its owner to wait** - computed_at on never-computed rows (founder ruling) and the /strategies note wording
 - [x] **Phase 239: SURFACECACHE — the composer range and the Discovery ranking reflect the current truth** - Composer range stored as dates; BTC-unit and USD returns ranked together as pure performance (founder ruling 2026-11-24) (completed 2026-11-24)
 - [x] **Phase 240: CONNECTTRUTH — validating a key or a CSV gets a true answer, and anonymous limits are fair** - One error code on every venue, CSV month-name cells, anonymous bucket fairness, edge and upstream CSV limits agree (completed 2026-11-25)
@@ -639,7 +639,7 @@ DBACC-01 (v1.23) edits this seam's whole-column select later and re-bases on it.
 3. A strategy published after its OG card was first requested shows its real card on the next request, and a not-found card is never long-cached. A failed BTC price read is not cached as a normal payload, and the next view retries it. Each case is driven by a good-after-bad-within-TTL test on the real cache wrapper. (CACHE-01, CACHE-03)
 4. The owner's private factsheet shows the data source of their own key-backed strategy, never "Data source —", while anon still reads only the published tier; owner and anon are tested per surface. (FACT-04)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 13 plans
+**Plans:** 13/13 plans complete
 **UI hint**: yes
 
 Plans:
@@ -803,7 +803,7 @@ Plans:
 | 234. NOCAPITAL | 0/? | Not started | - |
 | 235. HOLDINGSTRUTH | 0/? | Not started | - |
 | 236. FIGUREMATH | 0/? | Not started | - |
-| 237. FACTSHEETHONEST | 13/13 | Shipped v0.133.63.0 (#1316); human verification pending (2 visual checks) | - |
+| 237. FACTSHEETHONEST | 13/13 | Complete (shipped v0.133.63.0, #1316; both visual checks passed 2026-11-25) | 2026-11-25 |
 | 238. NEVERCOMPUTED | 0/? | Not started | - |
 | 239. SURFACECACHE | 3/3 | Complete (shipped v0.133.72.0, #1332) | 2026-11-24 |
 | 240. CONNECTTRUTH | 8/8 | Complete (shipped v0.133.74.0, #1334) | 2026-11-25 |
