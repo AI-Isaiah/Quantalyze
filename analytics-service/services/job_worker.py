@@ -2718,11 +2718,32 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     #     fill of the symbols that succeeded; review 232 CR-02 / SFH-01);
     #   * every fill timestamp parses (a fill that cannot be dated holds the
     #     cursor; never a partial maximum).
+    # Phase 250 BINANCEFILLS (SC-3): a Binance read that STOPPED early (a symbol
+    # hit the page cap, a full page had no timestamp to page past, the read
+    # deadline) records `binance_read_through_ms`, the instant every stopped
+    # symbol is complete through. The read still returns healthy symbols' fills
+    # newer than that instant, so the stamp is the newest PERSISTED fill at or
+    # before the bound, never a fill after it. The bound only selects among
+    # persisted fills (never a read-through instant, a window end or the clock
+    # is stamped) and it applies only when nothing above holds. A stop record
+    # whose bound is missing or malformed HOLDS the cursor: `_record_dq_flag`
+    # swallows its own exceptions, so a lost bound must never read as "no stop".
+    # `binance_unlisted_symbols` and `binance_fills_reach_clamped` never hold.
     _fills_incomplete = any(
         (key.startswith("sync_truncated_") or key == "binance_partial_symbols")
         and value
         for key, value in exchange_dq_flags.items()
     )
+    _read_through_raw = exchange_dq_flags.get("binance_read_through_ms")
+    _read_through: datetime | None = None
+    # `type(...) is int` excludes bool. Exact to the millisecond: the UTC epoch
+    # plus a timedelta, never a float division.
+    if type(_read_through_raw) is int and _read_through_raw >= 0:
+        try:
+            _epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            _read_through = _epoch + timedelta(milliseconds=_read_through_raw)
+        except OverflowError:
+            _read_through = None
     advance_fetched_cursor = (
         bool(raw_fills)
         and phase2_complete
@@ -2733,10 +2754,17 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     _p_last_fetched: str | None = None
     if advance_fetched_cursor:
         try:
-            _p_last_fetched = max(
+            _stamp_candidates = [
                 coerce_to_aware_utc(fill["timestamp"], "sync_trades")
                 for fill in raw_fills
-            ).isoformat()
+            ]
+            if _read_through is not None:
+                _stamp_candidates = [
+                    ts for ts in _stamp_candidates if ts <= _read_through
+                ]
+            _p_last_fetched = (
+                max(_stamp_candidates).isoformat() if _stamp_candidates else None
+            )
         except (KeyError, ValueError, TypeError, OverflowError, OSError) as exc:
             # A fill without a usable timestamp: hold the cursor. The log names
             # the strategy and the exception class only, never fill content.
