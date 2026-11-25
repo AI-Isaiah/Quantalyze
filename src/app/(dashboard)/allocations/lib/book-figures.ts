@@ -1,4 +1,5 @@
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { PERIODS_PER_YEAR_CRYPTO } from "@/lib/figure-conventions";
 import {
   figureRecord,
   gateAnnualized,
@@ -41,7 +42,8 @@ export const BOOK_FIGURES_SERIES_CAPTION =
  * The live baseline annualizes at the square root of 365
  * (`liveBaselineMetricsFromPerKeyDailies`), so its record is a crypto record.
  */
-const LIVE_BASELINE_PERIODS_PER_YEAR = 365;
+// F-5: the crypto risk clock, read from the one constant set.
+const LIVE_BASELINE_PERIODS_PER_YEAR = PERIODS_PER_YEAR_CRYPTO;
 
 export interface LiveBookFigures {
   ytdTwr: number | null;

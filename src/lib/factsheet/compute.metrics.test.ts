@@ -87,7 +87,7 @@ describe("compute — #597 asset-class annualization (periodsPerYear)", () => {
     // Sharpe = mean·N / (s·√N) = mean·√N / s ∝ √N.
     expect(crypto.sharpe!).toBeCloseTo(trad.sharpe! * k, 10);
     expect(crypto.sortino!).toBeCloseTo(trad.sortino! * k, 10);
-    // CAGR is calendar-based (days/365.25) — asset-class-invariant.
+    // CAGR is calendar-based (whole days / 365) — asset-class-invariant.
     expect(crypto.cagr).toBe(trad.cagr);
     // Max drawdown has no annualization term.
     expect(crypto.max_dd).toBe(trad.max_dd);
@@ -176,8 +176,26 @@ describe("compute — 169 D-11 calendar coverage for every return window", () =>
     expect(r.p1y).toBeNull();
     expect(r.p3y).toBeNull();
     expect(r.p5y).toBeNull();
-    // The headline length is unchanged: still the calendar clock.
-    expect(r.years).toBeCloseTo(165 / 365.25, 12);
+    // The headline length is the calendar clock: 166 consecutive dates span 165 whole
+    // days, over the 365-day year (F-5 / Q1).
+    expect(r.years).toBeCloseTo(165 / 365, 12);
+  });
+
+  it("a one-observation series keeps the one-day floor: years = 1 / 365 (Python's max(days, 1))", () => {
+    const r = compute([0.01], ["2026-06-01"]);
+    expect(r.years).toBeCloseTo(1 / 365, 15);
+  });
+
+  it.each([
+    ["first", ["garbage", "2026-06-02", "2026-06-03", "2026-06-04"]],
+    ["last", ["2026-06-01", "2026-06-02", "2026-06-03", "garbage"]],
+  ])("an unparseable %s date has no span: years, cagr and calmar are NaN, never the one-day-floor eq ** 365 - 1", (_which, dates) => {
+    // A drawdown exists, so calmar is defined by the drawdown and absent only through the cagr.
+    const r = compute([0.01, -0.02, 0.01, 0.01], dates);
+    expect(r.max_dd).toBeLessThan(0);
+    expect(Number.isNaN(r.years)).toBe(true);
+    expect(Number.isNaN(r.cagr)).toBe(true);
+    expect(Number.isNaN(r.calmar)).toBe(true);
   });
 
   it("a 6-year record shows every window, each the compounded return strictly after its cutoff", () => {
@@ -382,5 +400,68 @@ describe("compute — 169 D-11 calendar coverage for every return window", () =>
     expect(r.p3y).not.toBeNull();
     expect(r.p3y).toBeCloseTo(compoundAfter(rets, dates, CUTOFF.p3y), 12);
     expect(r.p5y).toBeNull();
+  });
+});
+
+/**
+ * Phase 236 plan 05 (FIG-01, F-5 "ddof 1 everywhere"): the annualized dispersion of compute() is
+ * the SAMPLE sd (divide by n - 1). The skew and kurtosis stay population moments (divide by n):
+ * they are not annualized, so F-5's annualization rule does not reach them.
+ *
+ * THE ORACLE IS NOT THE IMPLEMENTATION: every expected value is rebuilt below from explicit sums
+ * of squares and cubes, importing nothing from compute.ts, return-stats.ts or figure-conventions.ts.
+ */
+describe("compute — F-5 sample sd (ddof 1) for the annualized dispersion", () => {
+  /** [+0.02, -0.01] x 50: n = 100, mean 0.005, every deviation is exactly +-0.015. */
+  const alt = Array.from({ length: 100 }, (_, i) => (i % 2 === 0 ? 0.02 : -0.01));
+  const dates = Array.from({ length: 100 }, (_, i) => new Date(Date.UTC(2024, 0, i + 1)).toISOString().slice(0, 10));
+
+  /** Sum of squared deviations from the mean, written out. */
+  function sumSquares(xs: number[]): { mean: number; ss: number } {
+    let s = 0;
+    for (const x of xs) s += x;
+    const mean = s / xs.length;
+    let ss = 0;
+    for (const x of xs) ss += (x - mean) * (x - mean);
+    return { mean, ss };
+  }
+
+  it("ann_vol = sample sd x sqrt(periodsPerYear): 0.015 x sqrt(100/99) x sqrt(252)", () => {
+    // sum of squares = 100 x 0.015^2 = 0.0225; divided by n - 1 = 99, not n = 100.
+    const sampleSd = 0.015 * Math.sqrt(100 / 99);
+    const r = compute(alt, dates, 0, 252);
+    expect(r.ann_vol).toBeCloseTo(sampleSd * Math.sqrt(252), 12);
+    // And it is NOT the population figure the engine returned before F-5.
+    expect(Math.abs(r.ann_vol - 0.015 * Math.sqrt(252))).toBeGreaterThan(1e-4);
+  });
+
+  it("sharpe = mean x N / (sample sd x sqrt(N)): 0.005 / (0.015 x sqrt(100/99)) x sqrt(252)", () => {
+    const sampleSd = 0.015 * Math.sqrt(100 / 99);
+    const r = compute(alt, dates, 0, 252);
+    expect(r.sharpe).toBeCloseTo((0.005 / sampleSd) * Math.sqrt(252), 12);
+  });
+
+  it("the oracle's sum of squares agrees with the closed form (guards the test itself)", () => {
+    const { mean, ss } = sumSquares(alt);
+    expect(mean).toBeCloseTo(0.005, 15);
+    expect(ss).toBeCloseTo(0.0225, 15);
+  });
+
+  it("skew and kurtosis stay POPULATION moments (divide by n, standardised by the n-sd)", () => {
+    const skewed = Array.from({ length: 60 }, (_, i) => [0.03, -0.01, -0.01, 0.0, 0.02, -0.02][i % 6]);
+    const ds = Array.from({ length: 60 }, (_, i) => new Date(Date.UTC(2024, 0, i + 1)).toISOString().slice(0, 10));
+    const { mean, ss } = sumSquares(skewed);
+    const popSd = Math.sqrt(ss / skewed.length);
+    let m3 = 0;
+    let m4 = 0;
+    for (const x of skewed) {
+      m3 += Math.pow((x - mean) / popSd, 3);
+      m4 += Math.pow((x - mean) / popSd, 4);
+    }
+    const r = compute(skewed, ds, 0, 252);
+    expect(r.skew).toBeCloseTo(m3 / skewed.length, 10);
+    expect(r.kurt).toBeCloseTo(m4 / skewed.length - 3, 10);
+    // ann_vol on the same series is the sample figure, so the two sds differ on purpose.
+    expect(r.ann_vol).toBeCloseTo(Math.sqrt(ss / (skewed.length - 1)) * Math.sqrt(252), 12);
   });
 });

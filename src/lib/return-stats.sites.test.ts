@@ -135,7 +135,8 @@ describe("T1 analyzePriceSeries (holding Sharpe on /compare, Phase 167.1.1 D-03 
     const returns = levels.slice(1).map((v, i) => v / levels[i] - 1);
     const n = returns.length;
     const m = returns.reduce((x, y) => x + y, 0) / n;
-    const std = Math.sqrt(returns.reduce((x, y) => x + (y - m) ** 2, 0) / n);
+    // SAMPLE sd (n - 1): F-5 moved the compare adapter's vol off the divide-by-n (Phase 236 plan 05).
+    const std = Math.sqrt(returns.reduce((x, y) => x + (y - m) ** 2, 0) / (n - 1));
     let peak = levels[0];
     let maxDD = 0;
     for (const v of levels) {

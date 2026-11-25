@@ -26,12 +26,28 @@ import { buildComparatorBlock } from "./comparator-block";
 import { buildFactsheetPayload } from "./build-payload";
 import { bootstrapCI, MIN_SHARPE_RESAMPLES } from "./bootstrap";
 import { computeOgHeadline } from "./og-metrics";
-import { mean, stdDev } from "@/lib/portfolio-math-utils";
 import {
   CONSTANT_YIELDS,
   apyToDaily,
   navConstantYield,
 } from "@/__tests__/fixtures/dispersion-nav";
+
+/**
+ * Independent oracle (Phase 236 plan 05, F-5 "ddof 1 everywhere"): the arithmetic mean and the
+ * SAMPLE sd (sum of squared deviations over n - 1), written out so no production helper is
+ * imported. Summation order is left to right, the order the engines' own reduce uses.
+ */
+function mean(xs: number[]): number {
+  let t = 0;
+  for (const x of xs) t += x;
+  return t / xs.length;
+}
+function sampleSd(xs: number[]): number {
+  const m = mean(xs);
+  let ss = 0;
+  for (const x of xs) ss += (x - m) * (x - m);
+  return Math.sqrt(ss / (xs.length - 1));
+}
 
 const YIELD_IDS = Object.keys(CONSTANT_YIELDS);
 const N = 366;
@@ -91,11 +107,11 @@ describe("T13 compute: headline Sharpe, skew, kurtosis and ann_vol through retur
 
   it("T13 noisy series keeps compute's own arithmetic order to the last bit", () => {
     // compute's Sharpe is ((m - rf/ppy) * ppy) / (s * sqrt(ppy)) over the
-    // population sd; the shared module must reproduce it bitwise.
+    // sample sd (F-5, ddof 1); the shared module must reproduce it bitwise.
     const ppy = 365;
     const rf = 0.02;
     const m = mean(NOISY_A);
-    const s = stdDev(NOISY_A, false);
+    const s = sampleSd(NOISY_A);
     const got = compute(NOISY_A, DATES, rf, ppy);
     expect(got.sharpe).toBe(((m - rf / ppy) * ppy) / (s * Math.sqrt(ppy)));
     expect(got.ann_vol).toBe(s * Math.sqrt(ppy));
@@ -342,10 +358,10 @@ describe("T15 bootstrapCI: the Sharpe point, interval and histogram through retu
   });
 
   it("T15 noisy series keeps the bootstrap's own Sharpe arithmetic to the last bit", () => {
-    // headlineStats divides by n (population) and uses (m * ppy) / (s * sqrt(ppy)).
+    // headlineStats divides by n - 1 (sample sd, F-5) and uses (m * ppy) / (s * sqrt(ppy)).
     const ppy = 365;
     const m = mean(NOISY_A);
-    const s = stdDev(NOISY_A, false);
+    const s = sampleSd(NOISY_A);
     expect(bootstrapCI(NOISY_A, 50, 5, 42, ppy).sharpe.point).toBe((m * ppy) / (s * Math.sqrt(ppy)));
   });
 });
@@ -371,7 +387,7 @@ describe("T14 computeOgHeadline (the computed arm, no persisted scalars): the OG
   it("T14 noisy input: Sharpe in the card's own order, CAGR and max drawdown untouched", () => {
     const ppy = 365;
     const m = mean(NOISY_A);
-    const s = stdDev(NOISY_A, false);
+    const s = sampleSd(NOISY_A);
     // The drawdown and CAGR are not in the dispersion class: rebuild them here
     // the way the card does, so any change to that code goes red.
     let cum = 1;
@@ -385,7 +401,8 @@ describe("T14 computeOgHeadline (the computed arm, no persisted scalars): the OG
     }
     const t0 = Date.parse(DATES[0]);
     const t1 = Date.parse(DATES[N - 1]);
-    const years = (t1 - t0) / (365.25 * 86_400_000);
+    // Whole days first to last date, over 365 (F-5 / Q1), written out here so no production helper is imported.
+    const years = Math.floor((t1 - t0) / 86_400_000) / 365;
     const got = computeOgHeadline(rowsOf(NOISY_A), "crypto");
     expect(got.sharpe).toBe((m * ppy) / (s * Math.sqrt(ppy)));
     expect(got.maxDd).toBe(dd);

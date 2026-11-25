@@ -19,6 +19,7 @@ import {
 } from "./benchmarks";
 import { computeStyleDrift } from "./style-drift";
 import { annualizationPeriods } from "@/lib/closed-sets";
+import { CVAR_MIN_OBS } from "@/lib/figure-conventions";
 import { pearson } from "@/lib/return-stats";
 import { streakLengths, streakHistogram } from "./streak";
 import { calmarByYear } from "./calmar-by-year";
@@ -445,6 +446,13 @@ export function deriveSeriesBundle(
      * site cannot forget it.
      */
     figureRecord: FigureRecord | null;
+    /**
+     * Phase 236 FIG-03 (review CR-01): set by the callers whose `clipped` IS a whole record (the
+     * mark-to-market and smoothed bundles, the leverage what-if). Its `cvar95` is then NaN below
+     * CVAR_MIN_OBS observations, the same total-record floor `overlaid` carries. Absent for a
+     * selected window, which always shows CVaR.
+     */
+    totalRecordSeries?: true;
   },
 ): BasisSeriesBundle {
   const { periodsPerYear, isArithmetic, dayBasis, calendarDense, markets, strategyName } = args;
@@ -664,7 +672,7 @@ export function deriveSeriesBundle(
       args.figureRecord?.unreadable === true || (dates.length > 0 && !isReadableDay(dates[0]))
         ? { windows: [], benchName: "BTC", totalCatalogued: 0, droppedOutOfRange: 0, droppedPartial: 0, unreadable: true }
         : computeStressWindows(dates, stratRet, btcAl.returns, "BTC", markets, isArithmetic ? "arithmetic" : "geometric"),
-    strategyMetrics: bundleMetrics,
+    strategyMetrics: args.totalRecordSeries && stratRet.length < CVAR_MIN_OBS ? { ...bundleMetrics, cvar95: NaN } : bundleMetrics,
     correlations,
     correlationMatrix: { labels: correlationLabels, matrix: correlationMatrix },
   };
@@ -882,10 +890,22 @@ function buildFromBuildableSeries(
   // composite AND on a rankable single-key row (built from its persisted
   // top-level scalars by `readSingleKeyBasisOpts`); only where it is absent is
   // this a no-op (overlayBasisScalars returns base unchanged).
-  const overlaid = overlayStoredFigureDefs(
+  const overlaidFigures = overlayStoredFigureDefs(
     overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement),
     opts?.storedFigureDefs,
   );
+  // Phase 236 FIG-03 (F-6, CONTEXT Q2 "Total record only", founder 2026-11-25): CVaR is null on a
+  // TOTAL record with fewer than CVAR_MIN_OBS observations, and `overlaid` is where the whole-record
+  // figures are final, whether CVaR came from the stored row or the computed fallback. Both the
+  // strategy factsheet and the allocator-portfolio payload build through here. The count is every
+  // finite observation of the whole record (`stratRet`), the count Python floors on
+  // (`len(returns.dropna())` in `_historical_var_cvar`). It is NOT the stored `record_observations`,
+  // which on a chain-broken row counts only the post-break headline suffix (review CR-02).
+  // compute() and historicalVarCvar deliberately carry NO floor (they cannot tell a total record
+  // from a window), and nothing is applied to a narrowed-range computation: a zoomed window always
+  // shows CVaR. VaR is not floored.
+  const overlaid =
+    stratRet.length < CVAR_MIN_OBS ? { ...overlaidFigures, cvar95: NaN } : overlaidFigures;
   // Phase 164.6.6.3.3 (D-01 "window returns", D-12): on a Dated row every stored
   // headline scalar covers the post-break suffix from `headlineCoversFrom`, so the
   // trailing windows are recomputed on that same suffix. Left on the whole record
@@ -1037,6 +1057,7 @@ function buildFromBuildableSeries(
           missingSegments: deriveSegmentMarkers({ gap_spans: opts.mtmSeries.gapSpans }).missingSegments,
           benchmarkPrices,
           figureRecord: totalRecord,
+          totalRecordSeries: true,
         }),
       };
     }
@@ -1062,6 +1083,7 @@ function buildFromBuildableSeries(
           missingSegments: deriveSegmentMarkers({ gap_spans: opts.smoothedSeries.gapSpans }).missingSegments,
           benchmarkPrices,
           figureRecord: totalRecord,
+          totalRecordSeries: true,
         }),
       };
     }

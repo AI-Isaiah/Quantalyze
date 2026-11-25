@@ -30,6 +30,7 @@ import {
   blendPeriodsPerYear,
   calendarYears,
 } from "./closed-sets";
+import { wholeCalendarDays } from "./figure-conventions";
 import { ROLES } from "./types";
 
 // B8 — closed-set registry. These tests pin the registry's contents and the
@@ -315,21 +316,41 @@ describe("closed-sets registry", () => {
       expect(traditionalVol / unknownLegVol).toBeLessThan(0.84);
     });
 
-    it("calendarYears: elapsed span on the 365.25-day civil clock (the CAGR clock)", () => {
+    it("calendarYears: whole days of the first-to-last span over 365 (the CAGR clock, F-5 / Q1)", () => {
       const DAY = 86_400_000;
       const start = Date.UTC(2024, 0, 1);
-      // Exactly 365.25 days → 1.0 calendar years.
-      expect(calendarYears(start, start + 365.25 * DAY)).toBeCloseTo(1, 12);
-      // Half a civil year.
-      expect(calendarYears(start, start + (365.25 / 2) * DAY)).toBeCloseTo(0.5, 12);
-      // The OG-card CAGR eligibility boundary: ~347 days is < 0.95y (blocked),
-      // ~348 days clears it — proving the gate is calendar- not count-based.
+      // Exactly 365 days is exactly one calendar year.
+      expect(calendarYears(start, start + 365 * DAY)).toBe(1);
+      // 2024 is a leap year: 2024-01-01 to 2025-01-01 is 366 whole days.
+      expect(calendarYears(Date.parse("2024-01-01"), Date.parse("2025-01-01"))).toBe(366 / 365);
+      // Half a year of whole days.
+      expect(calendarYears(start, start + 73 * DAY)).toBe(73 / 365);
+      // The OG-card CAGR eligibility boundary: 0.95 * 365 = 346.75, so 346 days is
+      // < 0.95y (blocked) and 347 days clears it. The gate is calendar- not count-based.
       expect(calendarYears(start, start + 346 * DAY)).toBeLessThan(0.95);
-      expect(calendarYears(start, start + 348 * DAY)).toBeGreaterThanOrEqual(0.95);
+      expect(calendarYears(start, start + 347 * DAY)).toBeGreaterThanOrEqual(0.95);
       // Non-positive / non-finite spans collapse to 0 so callers gate on `> 0`.
       expect(calendarYears(start, start)).toBe(0);
       expect(calendarYears(start, start - DAY)).toBe(0);
       expect(calendarYears(NaN, start)).toBe(0);
+    });
+
+    it("calendarYears floors a span with a 12-hour residue to whole days (Python Timedelta.days)", () => {
+      const DAY = 86_400_000;
+      const start = Date.UTC(2024, 0, 1);
+      // 10.5 days is 10 whole days: the half day is not counted. A fractional-day
+      // span would read 10.5 / 365 here.
+      expect(calendarYears(start, start + 10.5 * DAY)).toBe(10 / 365);
+      // Just under one day is zero whole days, so no span at all.
+      expect(calendarYears(start, start + DAY - 1)).toBe(0);
+      expect(wholeCalendarDays(start, start + 10.5 * DAY)).toBe(10);
+      expect(wholeCalendarDays(start, start - DAY)).toBe(0);
+    });
+
+    it("calendarYears keeps an emptied stretch in the span (Q1): only the first and last dates count", () => {
+      // 2024-01-02 to 2024-03-04 with nothing observed in between is still 62 days.
+      // A span built from the observed dates alone would drop the empty month.
+      expect(calendarYears(Date.parse("2024-01-02"), Date.parse("2024-03-04"))).toBe(62 / 365);
     });
   });
 

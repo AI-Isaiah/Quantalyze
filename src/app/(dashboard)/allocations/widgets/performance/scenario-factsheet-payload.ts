@@ -130,6 +130,7 @@ import {
   ROLL_WINDOW_30D,
   ROLL_WINDOW_1Y_DAYS,
 } from "@/lib/factsheet/rolling";
+import { CVAR_MIN_OBS } from "@/lib/figure-conventions";
 import { coveredDays, figureRecord, firstUnreadableDate, gateAnnualized, gateRollingWindow } from "@/lib/figure-gate";
 import type { FigureRecord } from "@/lib/figure-gate";
 import { streakLengths, streakHistogram } from "@/lib/factsheet/streak";
@@ -459,7 +460,7 @@ function buildReturnsBody(
 
   // Populated path — mirror build-payload.ts:123-231 (csv arm), population
   // convention (periodsPerYear vol/Sharpe — 252 default / 365 crypto blend per
-  // #597 part 2 — and 365.25-calendar CAGR). compute() sets n = rets.length →
+  // #597 part 2 — and whole-day over 365 calendar CAGR). compute() sets n = rets.length →
   // PAYLOAD-04 automatic. The chart LINE is now full-res too (WR-01): the equity
   // line is `cumEq(rets)` — the same curve `equity_curve` downsamples, just
   // full-res/unrounded — and the underwater line is `drawdowns(cumEq(rets))`.
@@ -474,7 +475,11 @@ function buildReturnsBody(
   // those (`eq = cumEq(rets)`, `dd = drawdowns(eq)`, compute.ts:21-22), so we
   // reuse its `eq`/`dd` directly (no redundant second pass) — strategyDrawdowns
   // and the Worst-10 table (also off `dd`) are the SAME series by construction.
-  const { eq, dd, ...strategyMetrics } = compute(rets, datesR, 0, periodsPerYear);
+  const { eq, dd, ...computed } = compute(rets, datesR, 0, periodsPerYear);
+  // Phase 236 FIG-03 (A6, CONTEXT Q2, review CR-04): the blend's CVaR is null below CVAR_MIN_OBS on
+  // its whole common series, which is this payload's total record. compute() carries no floor. A
+  // zoomed window never reaches here: `windowView` re-derives it through `deriveSeriesBundle`.
+  const strategyMetrics = rets.length < CVAR_MIN_OBS ? { ...computed, cvar95: NaN } : computed;
 
   // 194 D-15 (2026-11-07): the blend's TOTAL record, built once from the dates the rolling
   // series run over, their count (the blend's overlap, not a stored count) and the

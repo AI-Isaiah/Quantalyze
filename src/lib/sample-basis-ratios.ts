@@ -41,6 +41,7 @@
  * OWN-BOOK daily returns (derived from the live equity levels) which can be
  * short, so it guards independently.
  */
+import { SD_DDOF } from "@/lib/figure-conventions";
 import { sharpe } from "@/lib/return-stats";
 
 /** Risk-corrected ratios on the cohort's sample basis (default 252; #597 parameterizes periodsPerYear). Null = insufficient data. */
@@ -78,7 +79,7 @@ export function sampleBasisRatios(
 
   // SAMPLE (ddof=1) Sharpe, the cohort/quantstats basis: the ONE TS Sharpe,
   // shared with computeScenario (Phase 166.1 D-17).
-  const sharpeRaw = sharpe(dailyReturns, { periodsPerYear, ddof: 1 });
+  const sharpeRaw = sharpe(dailyReturns, { periodsPerYear, ddof: SD_DDOF });
   const meanR = dailyReturns.reduce((s, r) => s + r, 0) / n;
 
   // Sortino: downside RMS divides by TOTAL observations (n), not the count of

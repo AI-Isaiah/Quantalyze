@@ -6,7 +6,7 @@ import { Term } from "@/components/ui/Term";
 import type { TermKey } from "@/lib/glossary";
 import { formatDay, formatMonth } from "@/lib/utils";
 import type { ComparatorBlock, ComparatorSummary, FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
-import { formatRecordLength } from "@/lib/factsheet/record-length";
+import { formatCagrSpan, formatRecordLength } from "@/lib/factsheet/record-length";
 import { recordCoversWindow } from "@/lib/factsheet/compute";
 import { COMPARATOR_CALENDARS, isPastCoverage, startsAfterCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { flatLegReason, pairedFloorReason } from "@/lib/factsheet/joint";
@@ -27,9 +27,10 @@ import {
   type FigureState,
   type RollingVerdict,
 } from "@/lib/figure-gate";
+import { CVAR_MIN_OBS } from "@/lib/figure-conventions";
 import { pct, pctSigned, ppDelta, ratio, signed } from "./format";
 import { usePayload, useActiveComparator, useXRange } from "./factsheet-context";
-import { useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, type Basis, type RangeScope } from "./basis-context";
+import { useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, type Basis, type RangeScope, type WindowedView } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
@@ -493,6 +494,28 @@ export function MetricsColumn({
         ? shortTrackNote(scenarioMode ? "blend" : selected ? "range" : "record", gateWindowSpan ?? figureRec.spanDays ?? 0)
         : null;
   const gv = (value: number | null | undefined) => gatedValue(value, gateState);
+  // Phase 236 plan 11 (FIG-04, CONTEXT Q1): the span CAGR covers, one muted line under the CAGR
+  // row, only while the CAGR itself shows. A selected range states its own window, the first and
+  // last dates compute() annualized on. At full history the span is the one the engine stored
+  // beside the stored CAGR (the retained suffix on a Dated row); the stored keys describe the cash
+  // headline, so another basis never prints it. Review CR-03 (Q1: "the factsheet states the span
+  // CAGR covers"): where no stored span describes the CAGR shown, the span is the first and last
+  // dates of the figures the CAGR was computed over, `m.start` / `m.end` (compute() annualizes
+  // over exactly those two dates, so an emptied stretch between them stays counted). That covers
+  // the allocator book, the mark-to-market and smoothed bases, a row whose headline was not
+  // admitted, an older row without the keys, the USD view and the Scenario composer. One case
+  // states nothing: a stored cash headline with no stored keys on a chain-broken record, because
+  // that stored CAGR covers the post-break suffix while `m.start` is the whole record's first day.
+  const storedCashHeadline = railBasis === "cash_settlement" && payload.metricsByBasis?.cash_settlement != null;
+  const storedSuffixUnknown = storedCashHeadline && payload.dataQuality?.twrChainBroken === true;
+  // Phase 252's `rw` dashes CAGR inside a range on an options-book row; the span line never prints under a dash.
+  const cagrSpanText =
+    gv(m.cagr) === null || (selected && isRangeWithheld(payload.dataQuality, railBasis))
+      ? null
+      : selected
+        ? formatCagrSpan(m.start, m.end)
+        : (railBasis === "cash_settlement" ? formatCagrSpan(payload.cagrStart, payload.cagrEnd) : null) ??
+          (storedSuffixUnknown ? null : formatCagrSpan(m.start, m.end));
   // 194 D-16 (review round 2 WR-01): the benchmark's annualized cells are measured over the
   // comparator's OWN covered span, which can be under a year while the strategy's record is not
   // (a comparator whose data starts late). Its cells then carry the same muted note, naming the
@@ -662,7 +685,7 @@ export function MetricsColumn({
           <Kpm>
             <Row term="dd_duration" label="Longest DD (days)" value={wr(count(m.longest_dd))} bench={wr(count(b?.longest_dd))} />
             <Row term="var_95" label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
-            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" note={cvarFloorNote(view)} />
             <Row label="Avg Win" value={wr(pctSigned(m.avg_win, 2))} bench="" />
             <Row label="Avg Loss" value={wr(pctSigned(m.avg_loss, 2))} bench="" />
             <Row term="skew" label="Skew" value={wr(signed(m.skew))} bench="" />
@@ -775,6 +798,13 @@ export function MetricsColumn({
           <Kpm>
             <Row label={withUnit("Cumulative Return", payload.returnsUnit ?? null)} value={rw(pctSigned(m.cum_ret, 2))} bench={pctSigned(hb?.cum_ret, 2)} />
             <Row term="cagr" label={withUnit("CAGR", payload.returnsUnit ?? null)} value={rw(pctSigned(gv(m.cagr), 2))} bench={pctSigned(gv(hb?.cagr), 2)} />
+            {cagrSpanText && (
+              <tr data-testid="cagr-span-row">
+                <td colSpan={3} className="pb-1.5 text-fixed-10 italic text-text-muted" data-testid="cagr-span">
+                  {cagrSpanText}
+                </td>
+              </tr>
+            )}
             <Row term="volatility" label="Ann. Volatility" value={rw(pct(gv(m.ann_vol), 2))} bench={pct(gv(hb?.ann_vol), 2)} />
             <Row term="sharpe" label="Sharpe" value={rw(ratio(gv(m.sharpe)))} bench={ratio(gv(hb?.sharpe))} accent />
             <Row term="sortino" label="Sortino" value={rw(ratio(gv(m.sortino)))} bench={ratio(gv(hb?.sortino))} />
@@ -833,7 +863,7 @@ export function MetricsColumn({
             <Row term="max_drawdown" label="Max Drawdown" value={rw(pct(m.max_dd, 2))} bench={pct(hb?.max_dd, 2)} accent />
             <Row term="dd_duration" label="Longest DD (days)" value={wr(count(m.longest_dd))} bench={wr(count(b?.longest_dd))} />
             <Row term="var_95" label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
-            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" note={cvarFloorNote(view)} />
             <Row label="Avg Win" value={wr(pctSigned(m.avg_win, 2))} bench="" />
             <Row label="Avg Loss" value={wr(pctSigned(m.avg_loss, 2))} bench="" />
           </Kpm>
@@ -1111,6 +1141,7 @@ function Row({
   accent,
   windowKey,
   term,
+  note,
 }: {
   label: string;
   value: string;
@@ -1120,10 +1151,15 @@ function Row({
   term?: TermKey;
   /** Phase 169.1 (D-27): the compute() field of a record-anchored return row. */
   windowKey?: "mtd" | "ytd" | "p3m" | "p6m" | "p1y";
+  /** Phase 236 (SFH #8): one muted line under the label that says why the value is a dash. */
+  note?: string;
 }) {
   return (
     <tr className="border-b border-border/30 last:border-0" data-window-key={windowKey}>
-      <td className="py-1.5 pr-2 text-text-2">{term ? <Term k={term}>{label}</Term> : label}</td>
+      <td className="py-1.5 pr-2 text-text-2">
+        {term ? <Term k={term}>{label}</Term> : label}
+        {note && <span className="block text-fixed-10 italic text-text-muted" data-testid="cvar-floor-note">{note}</span>}
+      </td>
       <td
         className={
           "py-1.5 px-2 text-right font-mono tabular-nums " +
@@ -1331,6 +1367,20 @@ export function RangeEyebrow({
  */
 export function isoToMonthDay(iso: string): string {
   return formatDay(iso);
+}
+
+/**
+ * Phase 236 FIG-03 (SFH #8): the CVaR 95% cell prints a bare dash below CVAR_MIN_OBS observations
+ * while VaR shows beside it. The note names that cause and no other: it appears only while the
+ * figure is not a number (NaN, or the null a JSON-cached payload turns it into) AND the record is
+ * under the floor. A selected window with enough observations always shows CVaR, so it never reaches
+ * the note; a WITHHELD window (a 1-day slice, or a payload with no annualization basis) dashes every
+ * metric for that cause, so it gets no note either. The 60 is the constant, never a literal.
+ */
+function cvarFloorNote(view: WindowedView): string | undefined {
+  return view.withheld === undefined && !Number.isFinite(view.strategyMetrics.cvar95) && view.strategyReturns.length < CVAR_MIN_OBS
+    ? `Needs ${CVAR_MIN_OBS} observations`
+    : undefined;
 }
 
 /**
@@ -1603,7 +1653,7 @@ function ExtendedMetricsPanel({
             <Row term="skew" label="Skew" value={wr(signed(m.skew))} bench="" />
             <Row term="kurtosis" label="Kurtosis (excess)" value={wr(ratio(m.kurt))} bench="" accent={m.kurt > 6} />
             <Row term="var_95" label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
-            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" note={cvarFloorNote(view)} />
             <Row term="percentile" label="P5 (daily)" value={wr(pctSigned(q.p05, 2))} bench="" />
             <Row term="percentile" label="P95 (daily)" value={wr(pctSigned(q.p95, 2))} bench="" />
             <Row label="Median (daily)" value={wr(pctSigned(q.p50, 2))} bench="" />

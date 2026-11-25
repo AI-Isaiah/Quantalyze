@@ -700,6 +700,17 @@ describe("252: an options book inside a selected range (the rail's one gate)", (
     expect(strat(container, "Max Drawdown", "Max Drawdown"), "Max Drawdown").toBe("—");
   });
 
+  // Phase 236 FIG-04 meets 252: the CAGR span line names the days a CAGR covers, so it never
+  // prints under a dashed CAGR. The clean row inside the same range is the premise that it shows.
+  it("the CAGR span line is absent inside a range where the CAGR is dashed (236 FIG-04)", async () => {
+    const clean = await mount(payloadWith(CLEAN), { zoom: ZOOM });
+    expect(clean.container.querySelector('[data-testid="cagr-span"]'), "premise: a clean row shows the span").not.toBeNull();
+    clean.unmount();
+    const { container } = await mount(optionsRow(), { zoom: ZOOM });
+    expect(strat(container, "Main Metrics", "CAGR")).toBe("—");
+    expect(container.querySelector('[data-testid="cagr-span"]')).toBeNull();
+  });
+
   it.each(PARTS)("Worst 10 Drawdowns inside a range, part=%s: the muted options note replaces the table", async (part) => {
     const { container } = await mount(optionsRow(), { part, zoom: ZOOM });
     const panel = readPanel(container);

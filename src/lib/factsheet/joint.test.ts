@@ -104,6 +104,27 @@ describe("jointMetrics", () => {
  * strategy's window, the paired-floor sentence adds "{CN} prices end Mon D, YYYY." (CN is the
  * comparator's display name, the date its last price day). Every sentence is typed by hand.
  */
+describe("jointMetrics: tracking error and information ratio on the sample sd (Phase 236 plan 05, F-5)", () => {
+  // Active series = strat - bench = [+0.03, -0.01] x 5: n = 10, mean 0.01, every deviation is
+  // exactly +-0.02. THE ORACLE IS NOT THE IMPLEMENTATION: the sample sd is 0.02 x sqrt(10/9),
+  // from the sum of squares 10 x 0.02^2 divided by n - 1 = 9, and nothing is imported from return-stats.
+  const bench = [0.01, 0.0, 0.01, 0.0, 0.01, 0.0, 0.01, 0.0, 0.01, 0.0];
+  const strat = [0.04, -0.01, 0.04, -0.01, 0.04, -0.01, 0.04, -0.01, 0.04, -0.01];
+  const sampleSd = 0.02 * Math.sqrt(10 / 9);
+
+  it("tracking_error = sample sd of the active series x sqrt(periodsPerYear)", () => {
+    const r = jointMetrics(strat, bench, 0, 252);
+    expect(r.tracking_error).toBeCloseTo(sampleSd * Math.sqrt(252), 12);
+    // The population reading (0.02 x sqrt(252)) is the one F-5 retired.
+    expect(Math.abs(r.tracking_error - 0.02 * Math.sqrt(252))).toBeGreaterThan(1e-3);
+  });
+
+  it("info_ratio = mean(active) x N / (sample sd x sqrt(N))", () => {
+    const r = jointMetrics(strat, bench, 0, 252);
+    expect(r.info_ratio).toBeCloseTo((0.01 / sampleSd) * Math.sqrt(252), 12);
+  });
+});
+
 describe("pairedFloorReason (D-08)", () => {
   it("names the day a record's comparator prices end", () => {
     expect(pairedFloorReason("SPX", 4, "record", 10, "2024-07-25")).toBe(

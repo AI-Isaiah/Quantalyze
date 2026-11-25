@@ -52,7 +52,11 @@ const BENCH = noise(N, 67890);
 const CENT_1PCT = navConstantYield(apyToDaily(0.01), N, 10_000, true);
 const YIELD_IDS = Object.keys(CONSTANT_YIELDS);
 
-/** Today's `jointMetrics` arithmetic, rebuilt from the inputs (population sd, means by summation). */
+/**
+ * Today's `jointMetrics` arithmetic, rebuilt from the inputs (means by summation). Beta and correlation
+ * ratios cancel the ddof and stay on n; the tracking error is a SAMPLE sd (divide by n - 1, F-5, moved by
+ * Phase 236 plan 05 from a divide by n, and so is the information ratio built on it).
+ */
 function referenceJoint(rets: number[], bench: number[], rf: number, ppy: number) {
   const n = rets.length;
   let sr = 0;
@@ -81,7 +85,7 @@ function referenceJoint(rets: number[], bench: number[], rf: number, ppy: number
     const d = rets[i] - bench[i] - (m - mb);
     teSum += d * d;
   }
-  const trackingError = Math.sqrt(teSum / n) * Math.sqrt(ppy);
+  const trackingError = Math.sqrt(teSum / (n - 1)) * Math.sqrt(ppy);
   return {
     beta,
     corr,
@@ -93,14 +97,14 @@ function referenceJoint(rets: number[], bench: number[], rf: number, ppy: number
   };
 }
 
-/** Today's rolling-window arithmetic, rebuilt from the inputs (population sd). */
+/** Today's rolling-window arithmetic, rebuilt from the inputs: the SAMPLE sd (n - 1, F-5, Phase 236 plan 05). */
 function windowStats(w: number[]) {
   let s = 0;
   for (const x of w) s += x;
   const m = s / w.length;
   let q = 0;
   for (const x of w) q += (x - m) * (x - m);
-  return { m, sd: Math.sqrt(q / w.length) };
+  return { m, sd: Math.sqrt(q / (w.length - 1)) };
 }
 
 describe("T16 jointMetrics on return-stats (D-07, D-17)", () => {

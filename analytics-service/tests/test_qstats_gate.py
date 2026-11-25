@@ -933,14 +933,13 @@ GREEN_NEEDLES: dict[str, str] = {
         import quantstats as qs
         def compute_all_metrics(r, dd):
             vol = qs.stats.volatility(r, prepare_returns=False)
-            var = qs.stats.value_at_risk(r, prepare_returns=False)
             tail = qs.stats.tail_ratio(r, prepare_returns=False)
             pf = qs.stats.profit_factor(r, prepare_returns=False)
             wr = qs.stats.win_rate(r, prepare_returns=False)
             aw = qs.stats.avg_win(r, prepare_returns=False)
             al = qs.stats.avg_loss(r, prepare_returns=False)
             details = qs.stats.drawdown_details(dd)
-            return vol, var, tail, pf, wr, aw, al, details
+            return vol, tail, pf, wr, aw, al, details
         """,
     "needle_green_commented_out_call": """
         import quantstats as qs
@@ -1011,7 +1010,7 @@ def test_qstats_gate_green_needle_is_silent(source: str) -> None:
 def _preparer_calls(monkeypatch: pytest.MonkeyPatch, name: str) -> list[str]:
     """Call ``quantstats.stats.<name>(trigger, prepare_returns=False)``; return preparer hits.
 
-    quantstats 0.0.81's stats functions reach the preparers as attributes of
+    quantstats 0.0.86's stats functions reach the preparers as attributes of
     ``quantstats.utils`` at call time, so patching that module's attributes is
     what the library itself looks up.
     """
@@ -1051,7 +1050,7 @@ def test_qstats_gate_kwarg_proven_leaf_never_reaches_a_preparer(
     )
 
 
-@pytest.mark.parametrize("name", ["cvar", "payoff_ratio"])
+@pytest.mark.parametrize("name", ["payoff_ratio"])
 def test_qstats_gate_calibration_non_honouring_functions_do_reach_a_preparer(
     name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1059,7 +1058,9 @@ def test_qstats_gate_calibration_non_honouring_functions_do_reach_a_preparer(
 
     Expected RED for the pin above, kept as its own GREEN row: if quantstats ever
     fixes these, the row fails and the fix gets read, rather than the spy
-    silently losing its only proof that it can fail.
+    silently losing its only proof that it can fail. `cvar` left this list when
+    0.0.86 made it honour the keyword (FIG-03, `test_fig03_cvar_honours_prepare_returns_false`);
+    `payoff_ratio` still accepts the keyword and reaches a preparer under 0.0.86.
     """
     assert name not in KWARG_PROVEN
     calls = _preparer_calls(monkeypatch, name)
@@ -1105,3 +1106,17 @@ def test_qstats_gate_census_that_cannot_be_built_is_a_named_line(
     conftest.pytest_terminal_summary(reporter)
     failed = [x for x in reporter.lines if x.startswith("qstats-gate census: FAILED TO BUILD")]
     assert len(failed) == 1 and "UnicodeDecodeError" in failed[0], reporter.lines
+
+
+def test_fig03_cvar_honours_prepare_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FIG-03 decision row `cvar(prepare_returns=False)` gate calibration.
+
+    Under 0.0.81 `cvar` accepted the keyword and dropped it (it was a
+    calibration row of the spy test above). 0.0.86's `conditional_value_at_risk`
+    honours it: no preparer is reached on the trigger series. It is deliberately
+    NOT added to `KWARG_PROVEN`: that set is held equal to the leaves
+    `services/metrics.py` calls, and stored CVaR is `_historical_var_cvar`, not a
+    quantstats call. This arm keeps the changed fact pinned, and it is the reason
+    the serenity oracle in `tests/test_metrics.py` may call `cvar` with the
+    keyword. RED under 0.0.81 (the preparer is reached)."""
+    assert _preparer_calls(monkeypatch, "cvar") == []

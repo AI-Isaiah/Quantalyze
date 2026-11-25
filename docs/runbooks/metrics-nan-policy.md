@@ -21,6 +21,11 @@ called `fillna(0)` while the other scalars used the raw NaN-bearing
 series — so two LPs reading the same factsheet would see a higher
 cumulative return number than the Sharpe / max-DD implied.
 
+- **quantstats 0.0.86 (Phase 236 FIG-03, `236-QUANTSTATS-DECISIONS.md`)**: the
+  library stopped zero-filling in `_prepare_returns`, so the stored
+  `common_sense_ratio`, `time_in_market` (observed-count denominator) and
+  `probabilistic_sharpe_ratio` now read the observed series too. A NaN day is
+  not a 0% return in any stored scalar.
 - **Producer site**: `analytics-service/services/metrics.py` —
   see the `NEW-C02-05` comment at the headline-scalar block.
 - **Closure test**: `analytics-service/tests/test_metrics.py` ::
@@ -85,7 +90,7 @@ change: equity-curve row *density* stays calendar-daily (~365 rows/yr), but
 the annualization *multiplier* is 252 on both paths.
 
 One deliberate carve-out: rolling alpha/beta (`_rolling_alpha_beta` and its
-wrappers) are left UN-annualized — quantstats 0.0.81 returns a per-period
+wrappers) are left UN-annualized — quantstats 0.0.86 returns a per-period
 regression intercept/slope series, not a periods-scaled quantity — so they do
 not thread `periods_per_year`. That is not a missed site.
 

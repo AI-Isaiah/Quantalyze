@@ -1,5 +1,5 @@
 {
-  "_readme": "computeScenario() output for constit_parity_fixture.json (NO window, periodsPerYear=365). portfolio_daily_returns is FULL-RES and UNROUNDED (compare curve A here at atol/rtol 1e-9). KPIs are ENGINE-ROUNDED per `rounding` below — the pytest tolerance must be ≥ the rounding granularity. Frozen-engine capture only; scenario.ts is byte-untouched.",
+  "_readme": "computeScenario() output for constit_parity_fixture.json (NO window, periodsPerYear=365). portfolio_daily_returns is FULL-RES and UNROUNDED (compare curve A here at atol/rtol 1e-9). KPIs are ENGINE-ROUNDED per `rounding` below — the pytest tolerance must be ≥ the rounding granularity. Frozen-engine capture only; scenario.ts is byte-untouched. Phase 236 plan 02 moved kpis.cagr 0.95092 -> 0.95003 by hand: (1+twr)^(365/119)-1 over the 119 whole days 2024-01-01..2024-04-29 (was 365.25/119), derived from portfolio_daily_returns below, not captured from the engine.",
   "effective_end": "2024-04-29",
   "effective_start": "2024-01-01",
   "equity_curve": [
@@ -105,7 +105,7 @@
     }
   ],
   "kpis": {
-    "cagr": 0.95092,
+    "cagr": 0.95003,
     "max_dd_days": 27,
     "max_drawdown": -0.03225,
     "sharpe": 11.34,

@@ -220,7 +220,7 @@ let lastPickerProps: {
 // basis) — the "helper tested ≠ wiring tested" gap the pure helper test can't see.
 let optimizerOnApply: ((weights: Record<string, number>) => void) | null = null;
 let optimizerStrategies:
-  | Array<{ id: string; name: string; dailyReturns: unknown }>
+  | Array<{ id: string; name: string; dailyReturns: unknown; asset_class?: string | null }>
   | null = null;
 // 194 D-15 — the composer's "Scenario blend" strip shows the annualised blend
 // figures only for a record that clears the gate, and most fixtures in this file
@@ -446,7 +446,7 @@ vi.mock("./CustomRangePicker", () => ({
 vi.mock("./WeightOptimizerSection", () => ({
   WeightOptimizerSection: vi.fn(
     (props: {
-      strategies: Array<{ id: string; name: string; dailyReturns: unknown }>;
+      strategies: Array<{ id: string; name: string; dailyReturns: unknown; asset_class?: string | null }>;
       onApply: (weights: Record<string, number>) => void;
     }) => {
       optimizerOnApply = props.onApply;
@@ -10891,6 +10891,16 @@ describe("ScenarioComposer — P61-BUG-1: added strategies join the per-key book
       expect.arrayContaining(["p61-key-A", "p61-key-B", P61_ADDED_ID]),
     );
     expect(basis).toHaveLength(3);
+
+    // Phase 236 plan 04 (FIG-01, CONTEXT A5): the optimizer annualizes on the blend's clock, so
+    // the composer must hand it each leg's asset_class. The per-key book legs are crypto
+    // (84-01); an added leg may carry any class (or null), but the KEY must be passed through.
+    const classOf = Object.fromEntries(optimizerStrategies!.map((s) => [s.id, s.asset_class]));
+    expect(classOf["p61-key-A"]).toBe("crypto");
+    expect(classOf["p61-key-B"]).toBe("crypto");
+    for (const leg of optimizerStrategies!) {
+      expect(Object.prototype.hasOwnProperty.call(leg, "asset_class")).toBe(true);
+    }
 
     // A long-only suggestion summing to 1 over the engine basis: 0.4 / 0.4 to the
     // two per-key units, 0.2 to the added leg. The ADDED sleeve is the

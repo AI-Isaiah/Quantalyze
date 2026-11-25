@@ -151,7 +151,8 @@ import type { NotBuildableReason } from "./fetch-and-build-payload";
 import { buildFactsheetPayload } from "./build-payload";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { withPublishedOrOwner } from "@/lib/visibility";
-import { gateAnnualized } from "@/lib/figure-gate";
+import { FIGURE_DEFS_VERSION, gateAnnualized } from "@/lib/figure-gate";
+import { CVAR_MIN_OBS } from "@/lib/figure-conventions";
 
 // Synthetic, UUID-shaped ids: `withPublishedOrOwner` fails closed on a non-UUID.
 const OWNER_ID = "00000000-0000-4000-8000-0000000000a1";
@@ -1216,10 +1217,12 @@ describe("164.6.6.2.1 plan 11 — a native strategy ships a server-built USD pay
   it("BLEED GATE: the USD figures come from the converted series, never the persisted BTC scalars", async () => {
     // 1463 native days make a USD series of 1461 calendar days between its first and last
     // date (the first native day has no prior close and is dropped), so
-    // years = 1461 / 365.25 = 4 EXACTLY. Every native return is 0.0, so the USD
+    // years = 1461 / 365 = 4.0027 (whole days over the 365-day year, F-5 / Q1; the
+    // leap day makes it just over 4). Every native return is 0.0, so the USD
     // equity is the close ratio 87846 / 60000 = 1.4641 = 1.1^4 whatever the
     // closes in between. Hand arithmetic: cumulative return 0.4641, CAGR
-    // 1.4641^(1/4) - 1 = 0.1. The row's persisted CAGR is the sentinel 9.99.
+    // 1.4641^(365 / 1461) - 1 (the 1.1^4 ratio over 1461 / 365 years). The
+    // row's persisted CAGR is the sentinel 9.99.
     seed(
       single({
         daily_returns: flatNative(1463, "2020-01-01"),
@@ -1233,7 +1236,8 @@ describe("164.6.6.2.1 plan 11 — a native strategy ships a server-built USD pay
     const payload = await usdOf();
     const usd = payload.usdView!.payload;
     expect(usd.dates).toHaveLength(1462);
-    expect(Math.abs(usd.strategyMetrics.cagr - 0.1)).toBeLessThan(1e-12);
+    expect(Math.abs(usd.strategyMetrics.years - 1461 / 365)).toBeLessThan(1e-12);
+    expect(Math.abs(usd.strategyMetrics.cagr - (Math.pow(1.4641, 365 / 1461) - 1))).toBeLessThan(1e-12);
     expect(Math.abs(usd.strategyMetrics.cum_ret - 0.4641)).toBeLessThan(1e-12);
     expect(usd.strategyMetrics.cagr).not.toBe(9.99);
     // The sentinel is reachable: the native payload (not the USD one) wears it.
@@ -1660,7 +1664,7 @@ describe("194 plan 04 - stored figures and the figure record through fetchAndBui
   const SEVEN = { cumulative_return: 0.05, volatility: 0.12, max_drawdown: -0.04, cagr: 0.31, sharpe: 1.4, sortino: 2.1, calmar: 3.0 };
   const ALIASES = {
     six_month_return: 0.777,
-    figure_defs_version: 2,
+    figure_defs_version: FIGURE_DEFS_VERSION,
     three_month: 0.333,
     var_1d_95: -0.0555,
     cvar: -0.0888,
@@ -1686,7 +1690,9 @@ describe("194 plan 04 - stored figures and the figure record through fetchAndBui
   });
 
   it("a stored row with the marker: p6m, p3m, var95 and cvar95 equal the stored values, not compute()'s", async () => {
-    seed(single({ daily_returns: points(30), ...SEVEN, ...ALIASES }));
+    // CVAR_MIN_OBS rows: the CVaR floor counts the record's own observations (review CR-02), so the
+    // stored CVaR shows only on a record at the floor.
+    seed(single({ daily_returns: points(CVAR_MIN_OBS), ...SEVEN, ...ALIASES }));
     const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
     expect(payload?.strategyMetrics.p6m).toBe(0.777);
     expect(payload?.strategyMetrics.p3m).toBe(0.333);
@@ -1780,5 +1786,44 @@ describe("Phase 201 D-09, D-17 - payload.strategyName through the resolver", () 
   it("the builder takes no lane or viewer parameter (SL-1: every lane produces the same bytes)", () => {
     expect(fetchAndBuildPayload.length).toBeLessThanOrEqual(2);
     expect(fetchAndBuildPayloadWithReason.length).toBeLessThanOrEqual(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 236 plan 11 (CONTEXT Q1) - the span the stored CAGR covers reaches the payload through
+// the PRODUCTION fetch path, as two scalar arrow-path aliases (never `metrics_json` whole).
+// ---------------------------------------------------------------------------
+describe("236 plan 11 - the stored CAGR span through fetchAndBuildPayload", () => {
+  const SEVEN = { cumulative_return: 0.05, volatility: 0.12, max_drawdown: -0.04, cagr: 0.31, sharpe: 1.4, sortino: 2.1, calmar: 3.0 };
+
+  it("the strategies select carries both span keys as arrow paths and still no bare metrics_json", async () => {
+    seed(single({ daily_returns: points(30), ...SEVEN }));
+    await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    const select = fake.strategySelects.join(" ");
+    expect(select).toContain("cagr_start:metrics_json->cagr_start");
+    expect(select).toContain("cagr_end:metrics_json->cagr_end");
+    expect(select).not.toMatch(/metrics_json(?!_by_basis|->)/);
+  });
+
+  it("a row with the stored keys: the payload carries them verbatim", async () => {
+    seed(single({ daily_returns: points(30), ...SEVEN, cagr_start: "2024-03-14", cagr_end: "2025-11-02" }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.cagrStart).toBe("2024-03-14");
+    expect(payload?.cagrEnd).toBe("2025-11-02");
+  });
+
+  it("an old row without the keys carries none (absent, never the series' own first and last date)", async () => {
+    seed(single({ daily_returns: points(30), ...SEVEN }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect(payload?.cagrStart).toBeNull();
+    expect(payload?.cagrEnd).toBeNull();
+  });
+
+  it("a stored value that is not a day is dropped, both keys together", async () => {
+    seed(single({ daily_returns: points(30), ...SEVEN, cagr_start: "2024-03-14", cagr_end: "soon" }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.cagrStart).toBeNull();
+    expect(payload?.cagrEnd).toBeNull();
   });
 });

@@ -28,7 +28,32 @@ _VECTORS = json.loads(
 def test_historical_var_cvar_matches_hand_derived_vector(vec: dict) -> None:
     var, cvar = _historical_var_cvar(pd.Series(vec["returns"]))
     assert var == pytest.approx(vec["expected_var"], abs=1e-12)
-    assert cvar == pytest.approx(vec["expected_cvar"], abs=1e-12)
+    if len(vec["returns"]) < 60:
+        # F-6 / CONTEXT Q2: the stored CVaR is null on a total record under 60 observations. The
+        # section's `expected_cvar` stays the UNFLOORED tail mean because the TypeScript helper
+        # `historicalVarCvar` reads the same vectors and has no floor; the Python floor is pinned
+        # by the separate `cvar_floor` section below.
+        assert cvar is None
+    else:
+        assert cvar == pytest.approx(vec["expected_cvar"], abs=1e-12)
+
+
+@pytest.mark.parametrize("vec", _VECTORS["cvar_floor"]["vectors"], ids=lambda v: v["name"])
+def test_cvar_floor_vectors(vec: dict) -> None:
+    """F-6 and CONTEXT Q2: CVaR is null below 60 total observations, VaR is not floored.
+
+    The expected values are hand-derived in the fixture from the literal smallest returns. The
+    60 here is the founder's number written out, not read back from the module under test."""
+    var, cvar = _historical_var_cvar(pd.Series(vec["returns"], dtype="float64"))
+    if vec["expected_var"] is None:
+        assert var is None
+    else:
+        assert var == pytest.approx(vec["expected_var"], abs=1e-12)
+    if vec["expected_cvar"] is None:
+        assert cvar is None
+    else:
+        assert len(vec["returns"]) >= 60
+        assert cvar == pytest.approx(vec["expected_cvar"], abs=1e-12)
 
 
 def test_historical_var_cvar_empty_and_all_nan_give_none() -> None:
@@ -45,7 +70,7 @@ def test_compute_all_metrics_stores_historical_var_and_version_marker() -> None:
     rng = np.random.default_rng(194)
     r = _series(list(rng.normal(0.001, 0.01, 60)))
     mj = compute_all_metrics(r)["metrics_json"]
-    assert mj["figure_defs_version"] == FIGURE_DEFS_VERSION == 2
+    assert mj["figure_defs_version"] == FIGURE_DEFS_VERSION
     var, cvar = _historical_var_cvar(r)
     assert mj["var_1d_95"] == pytest.approx(var, abs=1e-12)
     assert mj["cvar"] == pytest.approx(cvar, abs=1e-12)

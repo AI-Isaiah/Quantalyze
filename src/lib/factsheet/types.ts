@@ -1105,6 +1105,16 @@ export type FactsheetCommon = {
    * never on a range. Absent means unknown and reads as the `null` figure state.
    */
   figureRecord?: FigureRecord | null;
+  /**
+   * Phase 236 plan 11 (CONTEXT Q1) - the ISO first and last day the STORED CAGR covers
+   * (`metrics_json.cagr_start` / `cagr_end`, written by the analytics engine beside the CAGR). On a
+   * Dated row that is the retained suffix, not the record. Null on a row stored before the keys
+   * existed (until the fleet re-derive), and on any payload not built from a stored row; the
+   * factsheet then states no span rather than inventing one. Read at full history only: a
+   * selected range states its own window.
+   */
+  cagrStart?: string | null;
+  cagrEnd?: string | null;
 };
 
 /**

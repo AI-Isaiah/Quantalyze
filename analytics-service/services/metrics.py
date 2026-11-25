@@ -18,6 +18,16 @@ from services.dispersion import (
     dispersion_is_residue as _dispersion_is_residue,
     residue_floor as _residue_floor,
 )
+# Phase 236 (F-5 / F-6): the one named constant set of the figure convention. The literals that
+# used to live here now come from `services.figure_conventions` (plan 236-01); the names other
+# modules import from this module keep resolving.
+from services.figure_conventions import (
+    CALENDAR_DAYS_PER_YEAR,
+    CVAR_MIN_OBS,
+    PERIODS_PER_YEAR_CRYPTO as PERIODS_PER_YEAR_CRYPTO,  # explicit re-export: job_worker and tests import it from here
+    PERIODS_PER_YEAR_TRADITIONAL,
+    SD_DDOF,
+)
 
 logger = logging.getLogger("quantalyze.analytics.metrics")
 
@@ -30,7 +40,7 @@ logger = logging.getLogger("quantalyze.analytics.metrics")
 # this constant via `compute_all_metrics(..., periods_per_year=...)`. The ONE
 # path it deliberately does NOT govern is the rolling-greeks helper
 # (`_rolling_alpha_beta` and its `_rolling_alpha`/`_rolling_beta` wrappers):
-# rolling alpha/beta are left UNannualized in quantstats 0.0.81 (a per-period
+# rolling alpha/beta are left UNannualized in quantstats 0.0.86 (a per-period
 # regression intercept/slope series, not a periods-scaled quantity), so they
 # intentionally do not thread `periods_per_year` — that is not a missed site.
 # The default of 252 keeps
@@ -38,7 +48,7 @@ logger = logging.getLogger("quantalyze.analytics.metrics")
 # over per-asset divergence — user decision 2026-06-24). The param exists so a
 # future per-asset divergence is a one-line call-site change, never a function
 # rewrite. Mirrors the existing `optimizer.py:TRADING_DAYS = 252` precedent.
-DEFAULT_PERIODS_PER_YEAR = 252
+DEFAULT_PERIODS_PER_YEAR = PERIODS_PER_YEAR_TRADITIONAL
 
 # #597: annualization basis is an ASSET-CLASS property, not an ingestion detail.
 # crypto trades every calendar day (√365); traditional markets (equities/FX) trade
@@ -46,7 +56,8 @@ DEFAULT_PERIODS_PER_YEAR = 252
 # NOT NULL DEFAULT 'traditional', backfilled 'crypto' for api_key-sourced rows).
 # ponytail: unknown/None → the conservative 252 (the DB CHECK already constrains the
 # domain, so this only guards a missing-column read on an old schema).
-PERIODS_PER_YEAR_CRYPTO = 365
+# Phase 236: the value is `PERIODS_PER_YEAR_CRYPTO` in `services.figure_conventions`, imported
+# above and re-exported from this module (other modules import the name from `services.metrics`).
 
 
 def periods_per_year_for_asset_class(asset_class: str | None) -> int:
@@ -77,7 +88,8 @@ def blend_periods_per_year(asset_classes: Iterable[str | None]) -> int:
 # `years = len/periods` mis-reads a ~365-row record as ~1.45 years and
 # over-annualizes the return. Not 365.25 — matches the existing `365/252`
 # rescale-proof constant and the PROJECT.md wording ("365 / elapsed-calendar-days").
-_CALENDAR_DAYS_PER_YEAR = 365.0
+# Phase 236: the 365 is `CALENDAR_DAYS_PER_YEAR` in `services.figure_conventions` (plan 236-01).
+_CALENDAR_DAYS_PER_YEAR = float(CALENDAR_DAYS_PER_YEAR)
 
 # HARD-04 (#67, phase decision 2026-07-11): an annualization window under
 # ~MIN_ANNUALIZATION_DAYS calendar days is FLAGGED as insufficient (the
@@ -320,7 +332,8 @@ def sharpe_lift_gate(
 # last date). A row without this key (or with 1) was computed by the quantstats
 # parametric VaR and the 63 / 126-row windows; readers gate on it. The TS twin
 # lives in src/lib/figure-gate.ts (plan 03 pins the pair).
-FIGURE_DEFS_VERSION = 2
+# 3 = Phase 236 F-5/F-6 (365-day CAGR span in whole days, ddof 1, CVaR null below CVAR_MIN_OBS on the total record).
+FIGURE_DEFS_VERSION = 3
 SIX_MONTH_WINDOW_DAYS = 182
 THREE_MONTH_WINDOW_DAYS = 91
 
@@ -459,8 +472,11 @@ def _mirror_keys_defined_by(returns: pd.Series) -> frozenset[str]:
     days (a carry, market-making or option-selling shape, where all eight
     mirrors are finite) got no broken-mirror signal at all.
 
-    ``P(r)`` is the fillna(0) series the mirrors read; "raw" is ``returns`` as
-    given. The preconditions, each read off the mirror's own undefined arms and
+    ``P(r)`` is the fillna(0) series the fill-invariant mirrors read, ``O(r)``
+    (``_observed_returns_no_guess``) is the observed-rows series
+    ``common_sense_ratio`` and ``probabilistic_sharpe_ratio`` read since FIG-03,
+    and "raw" is ``returns`` as given. The preconditions, each read off the
+    mirror's own undefined arms and
     each NECESSARY (``test_q166r2_each_mirror_precondition_is_necessary`` holds
     one input per conjunct on which the mirror is non-finite):
 
@@ -472,9 +488,10 @@ def _mirror_keys_defined_by(returns: pd.Series) -> frozenset[str]:
     - ``kelly_criterion`` and ``cpc_index``: a losing day AND a winning day, so
       the payoff ratio is finite and non-zero.
     - ``common_sense_ratio``: a losing day (``profit_factor`` finite) and a
-      NON-ZERO 5% quantile (``tail_ratio``'s denominator). It need not be
-      negative: the round-1 ``< 0`` was stricter than the ratio.
-    - ``probabilistic_sharpe_ratio``: real dispersion on ``P(r)`` (the Sharpe
+      NON-ZERO 5% quantile of ``O(r)`` (``tail_ratio``'s denominator; gap days
+      are not zeros there). It need not be negative: the round-1 ``< 0`` was
+      stricter than the ratio.
+    - ``probabilistic_sharpe_ratio``: real dispersion on ``O(r)`` (the Sharpe
       base), and a POSITIVE estimated variance of the Sharpe estimator, computed
       here in the published form ``1 - g3*SR + ((g4 - 1)/4)*SR**2`` (Bailey and
       Lopez de Prado). The term is NaN, so the test is False, below 4 real
@@ -482,11 +499,13 @@ def _mirror_keys_defined_by(returns: pd.Series) -> frozenset[str]:
       is how the round-1 ``count() >= 4`` is carried now. Sample moments of a
       short, steady series can also make it negative (measured:
       ``[0.01, 0.01, 0.02, 0.02]``); the ratio is then undefined, not broken.
-    - ``serenity_index``: real raw dispersion (``std_returns``) and real
-      dispersion in the drawdown series (its value-at-risk needs a positive
-      scale). The second implies a losing day (with none the drawdown is all
-      0), and it also excludes a single loss followed by flat days, which holds
-      the drawdown constant.
+    - ``serenity_index``: real raw dispersion (``std_returns``) and a losing day
+      in ``P(r)`` (with none every drawdown is 0, so ulcer and the tail are 0 and
+      the denominator is 0). FIG-03 A2 dropped the old third conjunct, real
+      dispersion in the drawdown series: it existed because 0.0.81's parametric
+      value-at-risk needed a positive scale, and the historical tail has no such
+      need. A single loss followed by flat days holds the drawdown constant and
+      is now DEFINED (``[-0.1, 0, 0, 0, 0]`` gives -0.4 by hand).
 
     "Real dispersion" is ``_dispersion_is_real`` (above the residue floor), the
     same test each mirror's own guard applies. SUFFICIENCY, measured 2026-09-25
@@ -499,6 +518,7 @@ def _mirror_keys_defined_by(returns: pd.Series) -> frozenset[str]:
     a deterministic sample of that fuzz in the suite.
     """
     p = _prepared_returns_no_guess(returns)
+    o = _observed_returns_no_guess(returns)
     raw = returns.dropna()
     loss = bool((p < 0).any())
     win = bool((p > 0).any())
@@ -511,19 +531,17 @@ def _mirror_keys_defined_by(returns: pd.Series) -> frozenset[str]:
             defined.add("upi")
     if loss and win:
         defined.update(("kelly_criterion", "cpc_index"))
-    if loss and float(p.quantile(0.05)) != 0.0:
+    if loss and float(o.quantile(0.05)) != 0.0:
         defined.add("common_sense_ratio")
-    p_sd, p_mean = float(p.std()), float(p.mean())
-    if _dispersion_is_real(p_sd, p_mean):
-        sr = p_mean / p_sd
+    o_sd, o_mean = float(o.std()), float(o.mean())
+    if _dispersion_is_real(o_sd, o_mean):
+        sr = o_mean / o_sd
         g3 = float(raw.skew())
         g4 = float(raw.kurtosis()) + 3.0
         if 1.0 - g3 * sr + ((g4 - 1.0) / 4.0) * sr**2 > 0.0:
             defined.add("probabilistic_sharpe_ratio")
-    if _dispersion_is_real(float(raw.std()), float(raw.mean())):
-        dd = _drawdown_series_no_guess(returns)
-        if _dispersion_is_real(float(dd.std()), float(dd.mean())):
-            defined.add("serenity_index")
+    if loss and _dispersion_is_real(float(raw.std()), float(raw.mean())):
+        defined.add("serenity_index")
     return frozenset(defined)
 
 
@@ -567,7 +585,7 @@ def _safe_qstats_scalar(
     is a legitimately undefined ratio (D-09) and maps to None without a log.
 
     Since Phase 166 every ``fn`` is a module mirror from
-    ``_QSTATS_SINGLE_ARG_SCALARS`` (quantstats 0.0.81 minus the price guess),
+    ``_QSTATS_SINGLE_ARG_SCALARS`` (quantstats 0.0.86 minus the price guess),
     not a ``qs.stats`` function. Its only remaining quantstats calls are the
     kwarg-proven leaves.
 
@@ -769,7 +787,7 @@ def sanitize_metrics(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _max_drawdown_from_wealth(wealth: pd.Series) -> float:
-    """Max drawdown of a WEALTH curve — quantstats 0.0.81 ``max_drawdown`` minus the price guess.
+    """Max drawdown of a WEALTH curve — quantstats 0.0.86 ``max_drawdown`` minus the price guess.
 
     Caller: ``compute_all_metrics`` geometric-path ``max_dd`` (wealth built from
     ``returns.fillna(0)``, UNCLIPPED). Plan 166-03's ``_recovery_factor`` reuses it.
@@ -790,7 +808,7 @@ def _max_drawdown_from_wealth(wealth: pd.Series) -> float:
     a ``prepare_returns=`` kwarg in the pinned 0.0.81 (in-env signature sweep,
     2026-08-21), so inline pandas is the only closure (D-04 / the P114 pattern).
 
-    MATH PARITY — quantstats 0.0.81 ``max_drawdown`` / ``to_drawdown_series``
+    MATH PARITY — quantstats 0.0.86 ``max_drawdown`` / ``to_drawdown_series``
     minus the guess. ``_prepare_prices(r, base=1.0)`` calls ``to_prices``, which
     is ``base + base * compsum(r)`` == ``(1 + r).cumprod()``; both functions then
     prepend a phantom inception point at the baseline and take
@@ -818,7 +836,7 @@ def _max_drawdown_from_wealth(wealth: pd.Series) -> float:
 
 
 def _drawdown_series_from_wealth(wealth: pd.Series) -> pd.Series:
-    """Drawdown (underwater) SERIES of a WEALTH curve — quantstats 0.0.81 ``to_drawdown_series`` minus the price guess.
+    """Drawdown (underwater) SERIES of a WEALTH curve — quantstats 0.0.86 ``to_drawdown_series`` minus the price guess.
 
     Caller: ``compute_all_metrics`` geometric-path ``dd_series`` (wealth is the
     chart ``cumulative``, derived from ``returns_for_chart`` floored at
@@ -838,7 +856,7 @@ def _drawdown_series_from_wealth(wealth: pd.Series) -> pd.Series:
 
 
 def _annualized_vol_sharpe(r: pd.Series, periods_per_year: int) -> tuple[float, float]:
-    """Annualized ``(vol, sharpe)`` — quantstats 0.0.81 ``volatility`` / ``sharpe`` minus the price guess.
+    """Annualized ``(vol, sharpe)`` — quantstats 0.0.86 ``volatility`` / ``sharpe`` minus the price guess.
 
     ``vol = r.std() * sqrt(periods_per_year)`` (pandas ddof=1, skipna) and
     ``sharpe = (r.mean() * periods_per_year) / vol`` — the P114 form (annualized
@@ -879,7 +897,7 @@ def _annualized_vol_sharpe(r: pd.Series, periods_per_year: int) -> tuple[float, 
 
     Returns RAW floats (NaN allowed); callers keep their own ``_safe_float``.
     """
-    sd = r.std()
+    sd = r.std(ddof=SD_DDOF)
     vol = float(sd * math.sqrt(periods_per_year))
     if math.isnan(vol):
         return vol, float("nan")
@@ -889,7 +907,7 @@ def _annualized_vol_sharpe(r: pd.Series, periods_per_year: int) -> tuple[float, 
 
 
 def _downside_rms(x: pd.Series) -> float:
-    """Downside RMS — the ``downside`` leg of quantstats 0.0.81 ``sortino``, on the skipna count.
+    """Downside RMS — the ``downside`` leg of quantstats 0.0.86 ``sortino``, on the skipna count.
 
     quantstats: ``sqrt((r[r < 0] ** 2).sum() / len(r))`` after ``_prepare_returns``'
     ``fillna(0)``. Here the denominator is ``int(x.count())``, the number of REAL
@@ -917,12 +935,22 @@ def _historical_var_cvar(returns: pd.Series) -> tuple[float | None, float | None
     ``src/lib/return-stats.ts``; both are pinned to one JSON fixture
     (``tests/fixtures/figure_parity_vectors.json``). Replaces the quantstats
     parametric call that used to set the stored ``var_1d_95`` and ``cvar``.
+
+    Phase 236 (F-6, CONTEXT Q2 "Total record only"): CVaR is ``None`` when there are
+    fewer than ``CVAR_MIN_OBS`` observations, because a 5% tail of a handful of days is
+    not an estimate. VaR is NOT floored (F-6 names CVaR only). This floor is correct ONLY
+    because the one stored caller, ``compute_all_metrics``, passes the TOTAL record (a
+    census arm in ``tests/test_annualization_census.py`` pins that call-site set); a
+    zoomed-window caller must never use it, since a zoomed window always shows CVaR.
+    The TS helper ``historicalVarCvar`` carries no floor for exactly that reason.
     """
     ordered = sorted(float(x) for x in returns.dropna())
     n = len(ordered)
     if n == 0:
         return None, None
     k = math.floor(0.05 * n)
+    if n < CVAR_MIN_OBS:
+        return ordered[min(k, n - 1)], None
     tail = ordered[: max(1, k)]
     return ordered[min(k, n - 1)], sum(tail) / len(tail)
 
@@ -982,25 +1010,34 @@ def _calendar_window_return(
     return _safe_float(bucket(valid[dates > cutoff]))
 
 
-def _cvar_of_tail(series: pd.Series, threshold: float) -> float:
-    """Mean of the tail below ``threshold`` — quantstats 0.0.81 ``conditional_value_at_risk``'s Series branch.
+def _cvar_of_tail(series: pd.Series, confidence: float = 0.95) -> float:
+    """Historical tail mean of ``series`` — quantstats 0.0.86 ``conditional_value_at_risk(method="historical")``.
 
-    quantstats: ``c_var = returns[returns < var].values.mean()``, falling back to
-    ``var`` when no observation lies below it; reproduced verbatim, minus the
-    empty-slice RuntimeWarning ``.values.mean()`` emits. The caller supplies the
-    threshold (a kwarg-closed ``value_at_risk``) and keeps the ``None``-threshold
-    branch. Named ``_cvar_of_tail`` so it cannot collide with a ``_cvar_tail``
-    local.
+    0.0.86 body (``_cvar_of``): ``series = series.dropna()``; NaN when empty;
+    ``tail = series[series <= series.quantile(alpha)]``; ``tail.mean()``, NaN
+    when the tail is empty, with ``alpha = 1 - confidence``. Reproduced
+    expression for expression (``1 - confidence`` is kept literal, so the
+    quantile is the same float 0.0.86 reads). FIG-03 decision row
+    ``_serenity_index`` / ``_cvar_of_tail`` (CONTEXT A2): the serenity CVaR leg
+    is the HISTORICAL tail of the drawdown series (F-6), never 0.0.86's
+    parametric default, and never the 0.0.81 mixed estimator (``dd < parametric
+    VaR``, falling back to the VaR) this function used to mirror. It is also
+    not the stored-``cvar`` floor-index rule (``_historical_var_cvar``): that is
+    a third estimator no live arm could pin.
 
-    Callers: ``compute_all_metrics`` ``cvar`` (operand ``returns``). Plan 166-03's
-    serenity mirror reuses it on a drawdown series.
+    Caller: ``_serenity_index`` only. Named ``_cvar_of_tail`` so it cannot
+    collide with a ``_cvar_tail`` local.
     """
-    tail = series[series < threshold]
-    return float(tail.mean()) if len(tail) > 0 else float(threshold)
+    valid = series.dropna()
+    if len(valid) == 0:
+        return float("nan")
+    alpha = 1 - confidence
+    tail = valid[valid <= valid.quantile(alpha)]
+    return float(tail.mean()) if len(tail) > 0 else float("nan")
 
 
 # ---------------------------------------------------------------------------
-# Phase 166 — quantstats 0.0.81 mirrors, MINUS the price guess
+# Phase 166 — quantstats 0.0.86 mirrors, MINUS the price guess
 # ---------------------------------------------------------------------------
 # The eight single-arg scalars `compute_qstats_scalars` dispatches persist to
 # `strategy_analytics.metrics_json` (WINDOWS.md entry 9). Phase 166 research Q2
@@ -1035,6 +1072,12 @@ def _prepared_returns_no_guess(r: pd.Series) -> pd.Series:
     ``replace([inf, -inf], NaN)``; ``fillna(0).replace([inf, -inf], NaN)``; then a
     tz normalisation of the index that no scalar reads. Reused by plans 166-04
     to 166-06.
+
+    FIG-03: 0.0.86 NO LONGER fills (``_observed_returns_no_guess`` is its form).
+    ``P(r)`` is kept only where a zero-filled and an observed series give the
+    same value: ``kelly_criterion`` and ``cpc_index`` (a zero return is excluded
+    from the win rate, the payoff and the profit factor), proven by the live
+    arms on a NaN-carrying fixture.
     """
     return (
         r.copy()
@@ -1044,8 +1087,24 @@ def _prepared_returns_no_guess(r: pd.Series) -> pd.Series:
     )
 
 
+def _observed_returns_no_guess(r: pd.Series) -> pd.Series:
+    """``O(r)``: quantstats 0.0.86 ``_utils._prepare_returns`` (rf=0 path) MINUS the price guess.
+
+    0.0.86 body, in order: ``data.copy()``; the price-detection guess (dropped
+    here); ``replace([inf, -inf], NaN)``; and NOTHING else. 0.0.86 stopped
+    zero-filling ("Missing observations stay NaN from here on", RESEARCH A7,
+    confirmed against the source, FIG-03 decision record). A NaN day is not a
+    0% return, so statistics run on the observed rows. ``P(r)`` above is kept
+    only for the mirrors whose value is fill-invariant (kelly, cpc: a zero
+    return is excluded from every ratio they take).
+
+    Callers: ``_common_sense_ratio``, ``_probabilistic_sharpe_ratio``.
+    """
+    return r.copy().replace([np.inf, -np.inf], np.nan)
+
+
 def _drawdown_series_no_guess(r: pd.Series) -> pd.Series:
-    """``DD(r)``: quantstats 0.0.81 ``to_drawdown_series`` MINUS the price guess.
+    """``DD(r)``: quantstats 0.0.86 ``to_drawdown_series`` MINUS the price guess.
 
     ``to_prices`` fills NaN with 0 before compounding, so the wealth curve is
     ``(1 + r.fillna(0)).cumprod()``. Phase 166 research measured max abs diff
@@ -1055,7 +1114,7 @@ def _drawdown_series_no_guess(r: pd.Series) -> pd.Series:
 
 
 def _recovery_factor(r: pd.Series) -> float:
-    """quantstats 0.0.81 ``recovery_factor`` (rf=0, Series input) minus the price guess.
+    """quantstats 0.0.86 ``recovery_factor`` (rf=0, Series input) minus the price guess.
 
     WHY INLINE: research Q2's spy saw ``recovery_factor(r, prepare_returns=False)``
     still reach ``_prepare_prices`` through ``max_drawdown``, which has no
@@ -1064,7 +1123,7 @@ def _recovery_factor(r: pd.Series) -> float:
     "kwarg-closable" reading in WINDOWS.md entry 9 and the 159-05 Residual table
     is REFUTED for this scalar.
 
-    MATH PARITY (0.0.81 body)::
+    MATH PARITY (0.0.86 body, unchanged from 0.0.81)::
 
         returns = _prepare_returns(returns)
         total_returns = returns.sum() - rf
@@ -1098,12 +1157,12 @@ def _recovery_factor(r: pd.Series) -> float:
 
 
 def _ulcer_index(r: pd.Series) -> float:
-    """quantstats 0.0.81 ``ulcer_index`` minus the price guess.
+    """quantstats 0.0.86 ``ulcer_index`` minus the price guess.
 
     WHY INLINE: ``ulcer_index`` has no ``prepare_returns=`` keyword, and research
     Q2's spy saw it reach ``_prepare_prices`` through ``to_drawdown_series``.
 
-    MATH PARITY (0.0.81 body)::
+    MATH PARITY (0.0.86 body, unchanged from 0.0.81)::
 
         dd = to_drawdown_series(returns)
         return np.sqrt(np.divide((dd**2).sum(), returns.shape[0] - 1))
@@ -1119,12 +1178,12 @@ def _ulcer_index(r: pd.Series) -> float:
 
 
 def _ulcer_performance_index(r: pd.Series) -> float:
-    """quantstats 0.0.81 ``ulcer_performance_index`` (rf=0, Series input) minus the price guess.
+    """quantstats 0.0.86 ``ulcer_performance_index`` (rf=0, Series input) minus the price guess.
 
     WHY INLINE: no ``prepare_returns=`` keyword; it inherits ``ulcer_index``'s
     transitive ``_prepare_prices`` call (research Q2).
 
-    MATH PARITY (0.0.81 body)::
+    MATH PARITY (0.0.86 body, unchanged from 0.0.81)::
 
         ulcer = ulcer_index(returns)
         if ulcer == 0: return nan
@@ -1142,53 +1201,59 @@ def _ulcer_performance_index(r: pd.Series) -> float:
 
 
 def _serenity_index(r: pd.Series) -> float:
-    """quantstats 0.0.81 ``serenity_index`` (rf=0, Series input) minus the price guess.
+    """quantstats 0.0.86 ``serenity_index`` (rf=0, Series input) minus the price guess, with a HISTORICAL CVaR leg.
 
     WHY INLINE: no ``prepare_returns=`` keyword; research Q2's spy saw two
-    ``_prepare_prices`` calls through ``to_drawdown_series``. Its ``cvar`` of the
-    drawdown series also prepares, but it cannot guess there (a drawdown series
-    is <= 0).
+    ``_prepare_prices`` calls through ``to_drawdown_series``.
 
-    MATH PARITY (0.0.81 body, Series branch)::
+    MATH PARITY (0.0.86 body, Series branch; the ONE difference is ``cvar``)::
 
         dd = to_drawdown_series(returns)
         std_returns = returns.std()
         if std_returns == 0: return nan
-        pitfall = -cvar(dd) / std_returns
+        pitfall = -cvar(dd) / std_returns          # 0.0.86: cvar(dd) is PARAMETRIC
         denominator = ulcer_index(returns) * pitfall
         if denominator == 0: return nan
         return (returns.sum() - rf) / denominator
 
+    FIG-03 decision row ``_serenity_index`` (CONTEXT A2, F-6 "CVaR is historical
+    CVaR"): ``cvar(dd)`` here is ``cvar(dd, method="historical")``, computed by
+    ``_cvar_of_tail``. 0.0.86 changed its default CVaR to the closed-form normal
+    expected shortfall, which would make this ratio a Gaussian figure; the
+    mirror deliberately does NOT adopt that default. Its live parity arm
+    recomposes serenity from live ``to_drawdown_series``, ``ulcer_index`` and
+    ``cvar(dd, method="historical")`` rather than calling ``serenity_index``.
+    The repo floor-index CVaR rule was considered and rejected (no live arm).
+
     ``returns.std()`` and ``returns.sum()`` are on the RAW series (skipna).
-    ``cvar(dd)`` is ``_cvar_of_tail(dd, value_at_risk(dd))``: the mean of the
-    drawdowns below the 95% VaR, falling back to the VaR. ``value_at_risk`` is
-    the kwarg-proven leaf (research Q2), called with ``prepare_returns=False``.
     The drawdown series carries no NaN, so skipping its fillna(0) changes
     nothing.
 
-    D-09: no losing day -> ulcer 0 and VaR of an all-zero series NaN -> NaN -> None.
+    D-09: no losing day -> every drawdown is 0, so ulcer is 0 and the historical
+    tail of the all-zero drawdown series is 0.0; the denominator is ``0 * -0.0``,
+    which the ``den == 0`` arm below maps to NaN -> None.
 
     ``std_returns == 0`` is tested through ``_dispersion_is_residue`` (Phase 166
     review, SFH HIGH-1 class): a constant LOSING series has a residue ``std()``
     (4.3e-19 for 250 days of -0.002, measured), the pitfall over it is ~1e16,
-    and 0.0.81's exact test let a fabricated ``-2.2e-18`` through. Reached by an
+    and the exact-zero test let a fabricated ``-2.2e-18`` through. Reached by an
     all-zero series (exact 0) and by any constant series (residue), including a
     constant yield taken as ``pct_change`` of a compounding NAV (round 2,
     ``_residue_floor``).
 
-    The ``denominator == 0`` arm is kept for 0.0.81 parity and has NO natural
-    input: ulcer is 0 only when every drawdown is 0, and then the VaR of the
-    all-zero drawdown series is NaN, so the denominator is NaN, not 0; and
-    whenever a drawdown exists the CVaR is strictly negative, so the pitfall is
-    not 0. ``test_q166r_serenity_undefined_arms_are_none_not_zero`` reaches it
-    by forcing ulcer to 0.
+    The ``denominator == 0`` arm is the no-losing-day path under the historical
+    tail (under 0.0.81 the VaR of an all-zero drawdown series was NaN, so the
+    denominator was NaN and this arm had no natural input): ulcer is 0 only when
+    every drawdown is 0, and then the tail mean is 0.0 too. Whenever a drawdown
+    exists the tail contains the deepest one, so the CVaR is strictly negative
+    and the pitfall is not 0. ``test_q166r_serenity_undefined_arms_are_none_not_zero``
+    reaches the arm by forcing ulcer to 0.
     """
     dd = _drawdown_series_no_guess(r)
     sd = r.std()
     if _dispersion_is_residue(sd, r.mean()):
         return float("nan")
-    var = qs.stats.value_at_risk(dd, confidence=0.95, prepare_returns=False)
-    pitfall = -_cvar_of_tail(dd, var) / sd
+    pitfall = -_cvar_of_tail(dd) / sd
     den = _ulcer_index(r) * pitfall
     if den == 0:
         return float("nan")
@@ -1196,7 +1261,7 @@ def _serenity_index(r: pd.Series) -> float:
 
 
 def _payoff_ratio_no_guess(p: pd.Series) -> float:
-    """quantstats 0.0.81 ``payoff_ratio`` (Series input) on an ALREADY-prepared ``p``.
+    """quantstats 0.0.86 ``payoff_ratio`` (Series input) on an ALREADY-prepared ``p``.
 
     WHY NOT CALL IT: 0.0.81 ``payoff_ratio(returns, prepare_returns=False)`` calls
     ``avg_loss(returns)`` and ``avg_win(returns)`` WITHOUT forwarding the keyword,
@@ -1204,7 +1269,7 @@ def _payoff_ratio_no_guess(p: pd.Series) -> float:
     finding F-5). ``win_loss_ratio`` is an alias of it and has the same hole.
     This composes the two kwarg-proven leaves directly instead.
 
-    MATH PARITY (0.0.81 body, Series branch)::
+    MATH PARITY (0.0.86 body, unchanged from 0.0.81, Series branch)::
 
         avg_loss_val = avg_loss(returns)
         avg_win_val = avg_win(returns)
@@ -1232,7 +1297,7 @@ def _payoff_ratio_no_guess(p: pd.Series) -> float:
 
 
 def _kelly_criterion(r: pd.Series) -> float:
-    """quantstats 0.0.81 ``kelly_criterion`` (Series input) minus the price guess.
+    """quantstats 0.0.86 ``kelly_criterion`` (Series input) minus the price guess.
 
     WHY INLINE: research Q2's spy saw ``kelly_criterion(r, prepare_returns=False)``
     still reach ``_prepare_returns`` through ``payoff_ratio`` and ``win_rate``.
@@ -1240,7 +1305,7 @@ def _kelly_criterion(r: pd.Series) -> float:
     table is REFUTED for this scalar. On the non-monotone trigger live
     quantstats returned 0.3890395480225989 for a series with no losing day.
 
-    MATH PARITY (0.0.81 body, Series branch)::
+    MATH PARITY (0.0.86 body, unchanged from 0.0.81, Series branch)::
 
         returns = _prepare_returns(returns)
         win_loss_ratio = payoff_ratio(returns)
@@ -1266,7 +1331,7 @@ def _kelly_criterion(r: pd.Series) -> float:
 
 
 def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
-    """Probabilistic Sharpe Ratio PSR(0): quantstats 0.0.81 ``probabilistic_ratio`` minus the price guess, with D-16's kurtosis fix.
+    """Probabilistic Sharpe Ratio PSR(0): quantstats 0.0.86 ``probabilistic_ratio`` minus the price guess.
 
     WHY INLINE: ``probabilistic_ratio`` has no ``prepare_returns=`` keyword, and
     research Q2's spy saw it reach ``_prepare_returns`` through ``sharpe``. On the
@@ -1283,6 +1348,12 @@ def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
                             + (((kurtosis_no - 3) / 4) * base**2)) / (n - 1))
         return norm.cdf((base - rf) / sigma_sr)
 
+    0.0.86 ADOPTED D-16 (FIG-03 decision row PSR): ``kurtosis_no = kurtosis + 3``
+    and variance ``1 - skew*base + ((kurtosis_no - 1)/4) * base**2``, the
+    published formula. The block above is the 0.0.81 body, kept as lineage; this
+    mirror's expression is the 0.0.86 one, algebraically equal, so the live
+    arm ``test_fig03_live_psr_matches_mirror`` now pins it directly.
+
     D-16 CORRECTION (research §Q5 F-2, founder-approved 2026-09-24). The
     variance term above expects the NON-excess fourth moment gamma4 (3 for a
     normal distribution): with it, ``1 + 0.5*SR**2 - g3*SR + ((gamma4 - 3)/4)*SR**2``
@@ -1294,12 +1365,11 @@ def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
     None. This mirror changes exactly ONE input: it feeds ``r.kurtosis() + 3``.
     The expression is otherwise the 0.0.81 one, in its order.
 
-    D-10 DISCLOSURE: this moves the persisted value on every series. The golden
+    D-10 DISCLOSURE: this moved the persisted value on every series. The golden
     ``metrics_json.metrics_json.probabilistic_sharpe_ratio`` moved with it, and
-    the before/after rows are in the plan 166-04 SUMMARY. The correctness anchor
-    is ``test_q166_psr_matches_the_published_formula``, which computes the
-    published formula from sample moments with scipy. It is NOT live quantstats,
-    which carries the defect, so PSR has no live-quantstats parity row.
+    the before/after rows are in the plan 166-04 SUMMARY. One anchor is
+    ``test_q166_psr_matches_the_published_formula`` (scipy, from sample
+    moments); since 0.0.86 live quantstats is the second.
 
     The base comes from the plan 166-01 primitive ``_annualized_vol_sharpe`` with
     ``periods_per_year=1``, which is ``mean / std`` bit-identically (D-04: no
@@ -1308,8 +1378,11 @@ def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
     ``np.sqrt`` is kept, so a negative inner term gives NaN -> None rather than
     an exception.
 
-    NaN CONVENTION: the base is on ``P(r)`` (fillna(0)). Skew, kurtosis and n
-    are on the RAW series, exactly as 0.0.81 computes them.
+    NaN CONVENTION (FIG-03 decision row PSR, CONTEXT A3 / Q3): the base is on
+    ``O(r)``, the observed rows, as 0.0.86's ``sharpe`` computes it (0.0.81
+    zero-filled it). Skew and kurtosis are on the RAW series (pandas skipna), and
+    ``n = len(series)`` counts NaN rows too, exactly as 0.0.86 does (kept: it is
+    upstream's own and moves PSR by a few parts in 1e4 at three gap days).
     """
     n = len(r)
     if n < 2:
@@ -1318,7 +1391,7 @@ def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
         # "scalar failed" WARNING. 0.0.81's numpy division gave NaN silently.
         # One observation defines no Sharpe, so this is undefined -> None.
         return float("nan")
-    base = _annualized_vol_sharpe(_prepared_returns_no_guess(r), 1)[1]
+    base = _annualized_vol_sharpe(_observed_returns_no_guess(r), 1)[1]
     skew_no = r.skew()
     gamma4 = r.kurtosis() + 3  # D-16: non-excess fourth moment
     sigma_sr = np.sqrt(
@@ -1329,7 +1402,7 @@ def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
 
 
 def _common_sense_ratio(r: pd.Series) -> float:
-    """quantstats 0.0.81 ``common_sense_ratio`` minus the price guess.
+    """quantstats 0.0.86 ``common_sense_ratio`` minus the price guess.
 
     WHY INLINE: research Q2's spy saw ``common_sense_ratio(r, prepare_returns=False)``
     still reach ``_prepare_returns`` through ``profit_factor`` and ``tail_ratio``.
@@ -1337,7 +1410,8 @@ def _common_sense_ratio(r: pd.Series) -> float:
     table is REFUTED for this scalar. On the canonical trigger live quantstats
     returned 0.0 for a series with no losing day.
 
-    MATH PARITY (0.0.81 body)::
+    MATH PARITY (0.0.86 body; the body text is unchanged from 0.0.81, only
+    ``_prepare_returns`` stopped filling)::
 
         returns = _prepare_returns(returns)
         return profit_factor(returns) * tail_ratio(returns)
@@ -1346,19 +1420,22 @@ def _common_sense_ratio(r: pd.Series) -> float:
     ``compute_all_metrics`` already makes for its own ``profit_factor`` and
     ``tail_ratio``, so neither gets a second implementation.
 
-    NaN CONVENTION: ``P(r)`` (fillna(0)).
+    NaN CONVENTION (FIG-03 decision row ``_common_sense_ratio``, CONTEXT A3):
+    ``O(r)``, observed rows only. A NaN day is not a 0% return, so it no longer
+    enters ``tail_ratio``'s quantiles as a zero. Moves the stored value only on
+    NaN-carrying series.
 
     D-09: no losing day -> ``profit_factor`` is +inf -> inf (or NaN) -> None.
     """
-    p = _prepared_returns_no_guess(r)
+    o = _observed_returns_no_guess(r)
     return float(
-        qs.stats.profit_factor(p, prepare_returns=False)
-        * qs.stats.tail_ratio(p, prepare_returns=False)
+        qs.stats.profit_factor(o, prepare_returns=False)
+        * qs.stats.tail_ratio(o, prepare_returns=False)
     )
 
 
 def _cpc_index(r: pd.Series) -> float:
-    """quantstats 0.0.81 ``cpc_index`` minus the price guess.
+    """quantstats 0.0.86 ``cpc_index`` minus the price guess.
 
     WHY INLINE: research Q2's spy saw ``cpc_index(r, prepare_returns=False)``
     still reach ``_prepare_returns`` through ``profit_factor``, ``win_rate`` and
@@ -1367,7 +1444,7 @@ def _cpc_index(r: pd.Series) -> float:
     trigger live quantstats returned 11.695887516415286 for a series with no
     losing day.
 
-    MATH PARITY (0.0.81 body)::
+    MATH PARITY (0.0.86 body, unchanged from 0.0.81)::
 
         returns = _prepare_returns(returns)
         return profit_factor(returns) * win_rate(returns) * win_loss_ratio(returns)
@@ -1894,10 +1971,11 @@ def _greeks_no_guess(
 # key). Phase 166 replaced the old (result_key, qs.stats attribute name) shape,
 # so there is no longer a `getattr` dispatch over the quantstats namespace.
 #
-# Every entry is a Phase 166 module mirror (0.0.81 minus the price guess). No
+# Every entry is a Phase 166 module mirror (0.0.86 minus the price guess). No
 # entry references a quantstats function object. The only quantstats calls left
 # inside the mirrors are leaves research Q2 proved honour `prepare_returns=False`
-# (avg_win, avg_loss, win_rate, profit_factor, tail_ratio, value_at_risk), each
+# (avg_win, avg_loss, win_rate, profit_factor, tail_ratio; `value_at_risk` left with
+# the serenity mirror's historical tail, FIG-03 A2), each
 # called with that keyword on an already-prepared series.
 #
 # Typing the key as the literal union of QstatsScalarsResult's float|None fields
@@ -2124,6 +2202,13 @@ def compute_all_metrics(
     # boundary source; suffix-honest, bit-identical Pi(1+r)-1 on the clean path).
     # returns_for_chart (fillna(0)) stays chart-only — it bridges gap days to
     # keep the equity curve continuous; the ranking scalar must not use it.
+    # Phase 236 (CONTEXT Q1): the first and last ISO days of the CAGR suffix, stored so the
+    # factsheet can state the span the CAGR covers. The geometric branch states its suffix. The
+    # simple convention's CAGR is `mean * periods_per_year`, which uses no span, so it states the
+    # first and last observed dates of the series that mean is taken over (CONTEXT, "Simple
+    # (capital-reset, arithmetic) convention").
+    _cagr_start_iso: str | None = None
+    _cagr_end_iso: str | None = None
     if cumulative_method == "simple":
         # Fix A — SIMPLE / capital-reset convention (allocated-capital mandate):
         # the whole cumulative/annualized/drawdown triple rides the arithmetic
@@ -2165,6 +2250,9 @@ def compute_all_metrics(
             if len(_cagr_basis) >= 1
             else _safe_float(float("nan"))
         )
+        if cagr is not None:
+            _cagr_start_iso = _cagr_basis.index[0].strftime("%Y-%m-%d")
+            _cagr_end_iso = _cagr_basis.index[-1].strftime("%Y-%m-%d")
         # HARD-04 (#67): DQ annotation ONLY — the `cagr` value above is untouched.
         # The simple path is NaN-free by its fail-loud contract (the interior-NaN
         # guard above), so the FULL returns index IS the annualization window (no
@@ -2234,6 +2322,9 @@ def compute_all_metrics(
             cagr = _safe_float(
                 (1.0 + total_return) ** (_CALENDAR_DAYS_PER_YEAR / _elapsed_days) - 1.0
             )
+            if cagr is not None:
+                _cagr_start_iso = _cagr_index[0].strftime("%Y-%m-%d")
+                _cagr_end_iso = _cagr_index[-1].strftime("%Y-%m-%d")
         # HARD-04 (#67): DQ annotation ONLY — the `cagr` expression above is NOT
         # touched. Flag when the RETAINED-suffix calendar span (the SAME days
         # total_return compounds — reusing the already-computed _elapsed_days) is
@@ -2540,6 +2631,11 @@ def compute_all_metrics(
     # 194 D-15: the record the stored annualised scalars are computed on, so a
     # chain-broken row counts from its headline start.
     metrics_json["record_observations"] = int(headline.dropna().shape[0])
+    # Phase 236 (CONTEXT Q1, FIG-04): the span the stored CAGR covers, first to last OBSERVED date
+    # of the CAGR suffix, so a stretch emptied by missing rows stays inside it. Additive keys (no
+    # schema or migration); both None whenever the CAGR is None.
+    metrics_json["cagr_start"] = _cagr_start_iso
+    metrics_json["cagr_end"] = _cagr_end_iso
 
     # MTD / YTD / 3M single-convention (arithmetic Σr on "simple", geometric
     # compound otherwise — byte-identical on the default geometric path).
@@ -2572,7 +2668,7 @@ def compute_all_metrics(
             exc_info=_should_emit_traceback("var_1m_99", exc),
         )
     # PR #181 take-2 red-team F1: `qs.stats.gini` does not exist on the
-    # pinned quantstats==0.0.81 (verified live: `hasattr(qs.stats, 'gini')
+    # pinned quantstats (verified live on 0.0.81 and again on 0.0.86: `hasattr(qs.stats, 'gini')
     # == False`). The sweep's WARNING wrapped this site but left the dead
     # call in place, producing one permanent Railway WARNING per analytics
     # run that operators cannot resolve. The gini metric has been missing
@@ -2671,11 +2767,12 @@ def compute_all_metrics(
     #         return sqrt(1 + 2 * corr.sum())
     #     smart_sharpe  = mean / (std(ddof=1) * penalty)      * sqrt(periods)
     #     smart_sortino = mean / (downsideRMS  * penalty)     * sqrt(periods)
-    # PRESERVED EXACTLY (pre-existing, deliberately NOT touched here): both call
-    # sites use quantstats' DEFAULT `periods=252` rather than `periods_per_year`,
-    # and `smart_sortino` uses rf=0 rather than MAR. Changing either would be an
-    # unrelated behaviour change riding a security fix — recorded as a finding
-    # instead.
+    # Phase 236 (CONTEXT A4, F-5 "risk is annualized by frequency"): both ratios scale by
+    # `sqrt(periods_per_year)`, the same clock the headline sharpe and sortino ride. They used
+    # to carry quantstats' default `periods=252` regardless of the strategy's frequency, so a
+    # crypto strategy's stored smart_sharpe and smart_sortino move by sqrt(365 / 252) at the
+    # next re-derive (a 252-clock strategy does not move). `smart_sortino` still uses rf=0
+    # rather than MAR, which stays as a recorded finding.
     # NaN convention: the autocorrelation penalty needs a dense array (`corrcoef`
     # propagates NaN), so the penalty and the moments are taken on `dropna()` —
     # the skipna reading used by the headline sharpe/sortino, in place of
@@ -2707,10 +2804,10 @@ def compute_all_metrics(
         # not only by `> 0.0`. A constant series' `std()` is float residue, and
         # the quotient over it persisted smart_sharpe = 4.6e15 (250 days of a
         # constant 0.001) while the headline sharpe was already None.
-        _smart_sd = float(_smart_r.std())
+        _smart_sd = float(_smart_r.std(ddof=SD_DDOF))
         _smart_sharpe_divisor = _smart_sd * _smart_penalty
         metrics_json["smart_sharpe"] = (
-            _safe_float((float(_smart_r.mean()) / _smart_sharpe_divisor) * math.sqrt(252))
+            _safe_float((float(_smart_r.mean()) / _smart_sharpe_divisor) * math.sqrt(periods_per_year))
             if _smart_sharpe_divisor > 0.0
             and _dispersion_is_real(_smart_sd, float(_smart_r.mean()))
             else None
@@ -2730,7 +2827,7 @@ def compute_all_metrics(
     try:
         _smart_sortino_downside = _downside_rms(_smart_r) * _smart_penalty
         metrics_json["smart_sortino"] = (
-            _safe_float((float(_smart_r.mean()) / _smart_sortino_downside) * math.sqrt(252))
+            _safe_float((float(_smart_r.mean()) / _smart_sortino_downside) * math.sqrt(periods_per_year))
             if _smart_sortino_downside > 0.0
             else None
         )
@@ -3353,7 +3450,9 @@ def compute_qstats_scalars(
         `time_in_market` previously used `qs.stats.exposure(returns)`, whose
         internal `_ceil(ex * 100) / 100` rounds UP to the nearest percent
         (e.g., 1 active day in 252 displays as 1% instead of 0.4%). We now
-        compute the unbiased fraction directly: `(returns != 0).sum() / len(returns)`.
+        compute the unbiased fraction directly: active days over OBSERVED days,
+        `(notna & != 0).sum() / notna.sum()` (FIG-03: the observed denominator is
+        quantstats 0.0.86's `_exposure` form; NaN gap days are not observations).
 
     All keys are always present in the output dict; the value is None when
     the underlying computation fails or input is missing.
@@ -3368,7 +3467,7 @@ def compute_qstats_scalars(
     Phase 166: the eight single-arg scalars come from
     ``_QSTATS_SINGLE_ARG_SCALARS`` (key -> callable). ``recovery_factor``,
     ``ulcer_index``, ``upi`` and ``serenity_index`` are inline mirrors of
-    quantstats 0.0.81 minus its price guess (``_recovery_factor``,
+    quantstats 0.0.86 minus its price guess (``_recovery_factor``,
     ``_ulcer_index``, ``_ulcer_performance_index``, ``_serenity_index``), and so
     are ``kelly_criterion``, ``probabilistic_sharpe_ratio``,
     ``common_sense_ratio`` and ``cpc_index`` (``_kelly_criterion``,
@@ -3445,11 +3544,15 @@ def compute_qstats_scalars(
     # H-0724: unbiased time-in-market fraction (qs.stats.exposure ceil-rounds UP).
     # NaN-aware: `returns != 0` evaluates `NaN != 0 → True` in pandas, which
     # would inflate the fraction whenever upstream CSV gaps inject NaN. Mirror
-    # qs.stats.exposure's `(~isnan(r)) & (r != 0)` predicate exactly.
+    # qs.stats.exposure's `(~isnan(r)) & (r != 0)` numerator, and (FIG-03
+    # decision row `time_in_market`, CONTEXT A3) its 0.0.86 OBSERVED-count
+    # denominator: a gap day is no observation, so it is not a day out of the
+    # market. The ceil-to-percent rounding stays declined (H-0724).
     try:
-        if returns_len:
+        observed = int(returns.notna().sum()) if returns is not None else 0
+        if observed:
             result["time_in_market"] = _safe_float(
-                (returns.notna() & (returns != 0)).sum() / returns_len
+                (returns.notna() & (returns != 0)).sum() / observed
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -3532,7 +3635,7 @@ def _rolling_sharpe(
     if len(returns) < window:
         return []
     roll_mean = returns.rolling(window).mean()
-    roll_std = returns.rolling(window).std()
+    roll_std = returns.rolling(window).std(ddof=SD_DDOF)
     ratio = np.where(roll_std > _residue_floor(roll_mean), roll_mean / roll_std, np.nan)
     ratio_series = pd.Series(ratio, index=returns.index)
     return _finalize_rolling(ratio_series * np.sqrt(periods_per_year))
@@ -3672,7 +3775,7 @@ def _rolling_volatility(
     """
     if len(returns) < window:
         return []
-    return _finalize_rolling(returns.rolling(window).std() * np.sqrt(periods_per_year))
+    return _finalize_rolling(returns.rolling(window).std(ddof=SD_DDOF) * np.sqrt(periods_per_year))
 
 
 def _rolling_calendar_stats(
@@ -3699,7 +3802,7 @@ def _rolling_calendar_stats(
     """
     roll = returns.rolling(f"{window_days}D")
     mean = roll.mean()
-    sd = roll.std()
+    sd = roll.std(ddof=SD_DDOF)
     count = roll.count()
     root = np.sqrt(periods_per_year)
 
@@ -3737,7 +3840,13 @@ def _finalize_rolling_calendar(series: pd.Series, window_days: int) -> list[Seri
 def _rolling_greeks(
     returns: pd.Series, benchmark: pd.Series, window: int
 ) -> pd.DataFrame:
-    """Rolling (alpha, beta): quantstats 0.0.81 ``rolling_greeks`` minus the price guess on BOTH legs, with a windowed alpha (D-06, D-17).
+    """Rolling (alpha, beta): quantstats 0.0.86 ``rolling_greeks`` minus the price guess on BOTH legs, with a windowed alpha (D-06, D-17).
+
+    FIG-03 (decision row ``_rolling_greeks`` alpha, ALREADY-ADOPTED): 0.0.86's
+    ``rolling_greeks`` takes the same windowed intercept (``means =
+    df.rolling(periods).mean()``), so D-17 is now upstream's own form and
+    ``test_fig03_live_rolling_alpha_matches_the_mirror`` pins it against live.
+    The 0.0.81 body below and the full-sample-means remarks are lineage.
 
     WHY INLINE: 0.0.81 ``rolling_greeks`` runs the benchmark through
     ``_prepare_benchmark`` -> ``_prepare_returns`` unconditionally, whatever

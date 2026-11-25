@@ -214,9 +214,11 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
     const block = build(STRATEGY, dates, opt(prices, ["2026-03-03"])).comparators.btc;
     // Hand-typed (170.6 review WR-05), computed outside the project code: the 95 covered
     // returns (every date except 03-03 and 03-04, each a 1-day close ratio), win rate 43 / 95,
-    // population-sd ann_vol on the 365 basis.
+    // sample-sd ann_vol on the 365 basis. 236-05 (F-5, ddof 1): was 0.3388644459328932, the
+    // population-sd value computed outside the project code; the sample sd is that sd x
+    // sqrt(n / (n - 1)) exactly, n = 95, so the new literal is 0.3388644459328932 x sqrt(95 / 94).
     expect(block.summary!.win_rate).toBeCloseTo(0.45263157894736844, 12);
-    expect(block.summary!.ann_vol).toBeCloseTo(0.3388644459328932, 12);
+    expect(block.summary!.ann_vol).toBeCloseTo(0.34066214791624716, 12);
   });
 
   it("D-58 missing BTC day at k: k null, k+1 bridged in the series but unpaired, summary and joint exclude them", () => {
@@ -239,9 +241,12 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
     const block = payload.comparators.btc;
     // Hand-typed (170.6 review WR-05), computed outside the project code: the 96 covered
     // returns (every date except 03-04; 03-05 is the 2-day ratio over the gap), win rate
-    // 44 / 96, population-sd ann_vol on the 365 basis.
+    // 44 / 96, sample-sd ann_vol on the 365 basis. 236-05 (F-5, ddof 1): was
+    // 0.33742174194520497 (population sd, computed outside the project code); the sample sd is
+    // that sd x sqrt(n / (n - 1)) exactly, n = 96, so the new literal is
+    // 0.33742174194520497 x sqrt(96 / 95).
     expect(block.summary!.win_rate).toBeCloseTo(0.4583333333333333, 12);
-    expect(block.summary!.ann_vol).toBeCloseTo(0.33742174194520497, 12);
+    expect(block.summary!.ann_vol).toBeCloseTo(0.3391929968552185, 12);
     const strat = strategyRows(dates).map((r) => r.value);
     const pairedIdx = dates.map((_, i) => i).filter((i) => i !== k && i !== k + 1);
     const want = jointMetrics(pairedIdx.map((i) => strat[i]), pairedIdx.map((i) => a.returns[i] as number), 0, 365);
@@ -294,34 +299,40 @@ describe("169.5-01 D-59: a comparator's summary annualizes on the smaller of the
   // the project code (a scratch script that re-implements the seeded close generator, the
   // pairing rule and the statistics from their definitions), never by `compute()`, so a
   // regression in the alignment or in `compute` moves the actual and not the expectation.
-  //   population sd of the covered per-day returns, ann_vol = sd * sqrt(basis),
+  //   sample sd (ddof 1, F-5) of the covered per-day returns, ann_vol = sd * sqrt(basis),
   //   sharpe = mean / sd * sqrt(basis) at rf 0, and the 365 reading typed beside it so the
   //   basis (smaller of the two) is what is pinned.
+  // 236-05 moved every literal below from its population-sd value (computed outside the project
+  // code as above) by the exact identity sd_sample = sd_population x sqrt(n / (n - 1)) with n = 70
+  // covered returns: ann_vol x sqrt(70 / 69), Sharpe x sqrt(69 / 70). The old values are in each
+  // case's "was" note.
 
   it("7-day strategy vs the weekday SPX shape: SPX ann_vol and sharpe on 252, joint on 365", () => {
     // Seed 777 weekday closes 2025-11-03 .. 2026-06-05, strategy 2026-03-02 .. 2026-06-05:
     // the 70 weekday returns (each a close over the previous close, Monday over Friday).
-    //   252: ann_vol 0.27231658986911744, sharpe 0.7385171259946766
-    //   365: ann_vol 0.32773306663876967 (the reading this must NOT be)
+    //   252: ann_vol 0.27428280016705486, sharpe 0.7332230281604359
+    //        (was 0.27231658986911744 and 0.7385171259946766)
+    //   365: ann_vol 0.330099401098633 (the reading this must NOT be; was 0.32773306663876967)
     const dates = days("2026-03-02", "2026-06-05");
     const block = build(STRATEGY, dates).comparators.spx;
-    expect(block.summary!.ann_vol).toBeCloseTo(0.27231658986911744, 12);
-    expect(block.summary!.sharpe).toBeCloseTo(0.7385171259946766, 12);
-    expect(block.summary!.ann_vol).not.toBeCloseTo(0.32773306663876967, 6);
+    expect(block.summary!.ann_vol).toBeCloseTo(0.27428280016705486, 12);
+    expect(block.summary!.sharpe).toBeCloseTo(0.7332230281604359, 12);
+    expect(block.summary!.ann_vol).not.toBeCloseTo(0.330099401098633, 6);
   });
 
   it("weekday strategy vs 7-day BTC (amendment): BTC ann_vol and sharpe on 252, never BTC's own 365", () => {
     // Seed 4242 7-day closes 2026-02-20 .. 2026-06-10, weekday strategy 2026-03-02 .. 2026-06-05:
     // 70 returns (day one is BTC's own 03-01 -> 03-02 return, every later one runs from the
     // previous strategy date, so Monday spans the weekend).
-    //   252: ann_vol 0.35486893203639935, sharpe -1.9919576662855796
-    //   365: ann_vol 0.42708482581620255 (the reading this must NOT be)
+    //   252: ann_vol 0.3574311958666103, sharpe -1.9776782157545196
+    //        (was 0.35486893203639935 and -1.9919576662855796)
+    //   365: ann_vol 0.430168510813199 (the reading this must NOT be; was 0.42708482581620255)
     const dates = weekdays("2026-03-02", "2026-06-05");
     const btc = closes("2026-02-20", "2026-06-10", false, 4242);
     const block = build(WEEKDAY_STRATEGY, dates, opt(btc)).comparators.btc;
-    expect(block.summary!.ann_vol).toBeCloseTo(0.35486893203639935, 12);
-    expect(block.summary!.sharpe).toBeCloseTo(-1.9919576662855796, 12);
-    expect(block.summary!.ann_vol).not.toBeCloseTo(0.42708482581620255, 6);
+    expect(block.summary!.ann_vol).toBeCloseTo(0.3574311958666103, 12);
+    expect(block.summary!.sharpe).toBeCloseTo(-1.9776782157545196, 12);
+    expect(block.summary!.ann_vol).not.toBeCloseTo(0.430168510813199, 6);
   });
 
   it("index 0 (D-64, 166.4 D-05): Saturday start null; Tuesday and Monday start the comparator's own return; BTC with no prior close null", () => {

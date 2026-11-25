@@ -62,7 +62,7 @@ function series(offsets: number[]): { date: string; value: number }[] {
 /** `n` consecutive calendar days. */
 const dense = (n: number) => series(Array.from({ length: n }, (_, i) => i));
 
-/** 166 observations spread evenly over 438 calendar days (438 / 365.25 = 1.1992). */
+/** 166 observations spread evenly over 438 calendar days (438 / 365 = 1.2000). */
 const sparse166 = () => series(Array.from({ length: 166 }, (_, i) => Math.round((i * 438) / 165)));
 
 function payloadOf(points: { date: string; value: number }[], periodsPerYear: number): FactsheetPayload {
@@ -121,6 +121,8 @@ describe("MetricsColumn states the record length on the calendar clock (D-12)", 
     const payload = payloadOf(sparse166(), 365);
     expect(payload.strategyMetrics.n).toBe(166);
     expect(payload.strategyMetrics.years.toFixed(2)).toBe("1.20");
+    // 438 whole days over the 365-day year (F-5 / Q1), exactly 1.2.
+    expect(payload.strategyMetrics.years).toBeCloseTo(438 / 365, 12);
     const { container } = renderColumn(payload);
     expect(rowValue(section(container, "Compound Performance"), "Years Observed")).toBe("1.20");
     // 194 D-15: the amber observation-count sentence is retired; the one note is `figure-gate-note` (MetricsColumn.figure-gate.test.tsx).

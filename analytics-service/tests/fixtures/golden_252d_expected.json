@@ -2687,6 +2687,8 @@
           "value": 0.0248
         }
       ],
+      "cagr_end": "2025-12-18",
+      "cagr_start": "2025-01-01",
       "common_sense_ratio": 0.9914493068835851,
       "consecutive_losses": 6,
       "consecutive_wins": 8,
@@ -2727,7 +2729,7 @@
           "trough_date": "2025-01-02"
         }
       ],
-      "figure_defs_version": 2,
+      "figure_defs_version": 3,
       "gain_pain": 0.033890679387509524,
       "info_ratio": -0.386871785356601,
       "kelly_criterion": 0.017170345942251242,
@@ -2765,7 +2767,7 @@
           "probability": 0.00010789231208035929
         }
       ],
-      "serenity_index": 0.019258489731125872,
+      "serenity_index": 0.01893104775322315,
       "skewness": -0.03235554930926252,
       "smart_sharpe": 0.20532593866123616,
       "smart_sortino": 0.2913298667073062,

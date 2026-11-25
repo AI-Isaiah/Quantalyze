@@ -54,6 +54,7 @@ def test_min_vol_ok_envelope(monkeypatch):
     body = {
         "series": {"A": _series(120, 1, 0.005), "B": _series(120, 2, 0.02)},
         "objective": "min_vol",
+        "periods_per_year": 252,
     }
     resp = client.post("/api/optimize-weights", json=body, headers={"X-Service-Key": KEY})
     assert resp.status_code == 200
@@ -69,10 +70,50 @@ def test_min_vol_ok_envelope(monkeypatch):
 def test_degenerate_returns_honest_absence(monkeypatch):
     client = _client(monkeypatch)
     # One strategy ⇒ ok:false, weights:null (never a fabricated vector).
-    body = {"series": {"A": _series(120, 3, 0.01)}, "objective": "min_vol"}
+    body = {"series": {"A": _series(120, 3, 0.01)}, "objective": "min_vol", "periods_per_year": 252}
     resp = client.post("/api/optimize-weights", json=body, headers={"X-Service-Key": KEY})
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is False
     assert data["weights"] is None
     assert data["reason"] == "few-strategies"
+
+
+# Phase 236 plan 04 (FIG-01, CONTEXT A5): the blend's frequency clock is part of the contract.
+# It is a closed set {252, 365} at this trust boundary (T-236-09).
+
+
+@pytest.mark.parametrize("clock", [252, 365])
+def test_the_route_hands_the_request_clock_to_the_optimizer(monkeypatch, clock):
+    import routers.optimizer as router_module
+
+    seen: list[int] = []
+    real = router_module.optimize_weights
+
+    def spy(series, objective, *, periods_per_year):
+        seen.append(periods_per_year)
+        return real(series, objective, periods_per_year=periods_per_year)
+
+    monkeypatch.setattr(router_module, "optimize_weights", spy)
+    client = _client(monkeypatch)
+    body = {
+        "series": {"A": _series(120, 1, 0.005), "B": _series(120, 2, 0.02)},
+        "objective": "min_vol",
+        "periods_per_year": clock,
+    }
+    resp = client.post("/api/optimize-weights", json=body, headers={"X-Service-Key": KEY})
+    assert resp.status_code == 200
+    assert seen == [clock]
+
+
+@pytest.mark.parametrize("bad", [None, 300, 0, 253, "365"])
+def test_the_route_rejects_a_missing_or_out_of_set_clock(monkeypatch, bad):
+    client = _client(monkeypatch)
+    body: dict = {
+        "series": {"A": _series(120, 1, 0.005), "B": _series(120, 2, 0.02)},
+        "objective": "min_vol",
+    }
+    if bad is not None:
+        body["periods_per_year"] = bad
+    resp = client.post("/api/optimize-weights", json=body, headers={"X-Service-Key": KEY})
+    assert resp.status_code == 422

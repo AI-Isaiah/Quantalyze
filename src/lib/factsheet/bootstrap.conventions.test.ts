@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { bootstrapCI } from "./bootstrap";
-import { arithmeticUnderwater, cumEq, drawdowns } from "./compute";
+import { arithmeticUnderwater, compute, cumEq, drawdowns } from "./compute";
 
 /**
  * Phase 169.1 plan 07 (D-34, D-36) — `bootstrapCI`'s optional cumulative method.
@@ -53,5 +53,28 @@ describe("bootstrapCI's cumulative method (D-34)", () => {
     for (const m of ["geometric", "arithmetic"] as const) {
       expect(bootstrapCI(twin, 2000, 5, 42, P, m).max_dd.point).toBe(bootstrapCI(rets, 2000, 5, 42, P, m).max_dd.point);
     }
+  });
+});
+
+/**
+ * Phase 236 plan 05 (FIG-01, F-5 "ddof 1 everywhere"): the band must centre on the headline. The point
+ * Sharpe is the SAMPLE-sd one `compute()` prints beside it, so the interval and the number it
+ * brackets cannot sit on different conventions.
+ *
+ * THE ORACLE IS NOT THE IMPLEMENTATION: the sample sd is a sum of squared deviations over n - 1,
+ * written out here.
+ */
+describe("bootstrapCI's point Sharpe is the sample-sd headline (F-5)", () => {
+  it("equals mean x N / (sample sd x sqrt(N)) and compute()'s Sharpe on the same series", () => {
+    let t = 0;
+    for (const x of rets) t += x;
+    const m = t / rets.length;
+    let ss = 0;
+    for (const x of rets) ss += (x - m) * (x - m);
+    const sampleSd = Math.sqrt(ss / (rets.length - 1));
+    const b = bootstrapCI(rets, 200, 5, 42, P);
+    expect(b.sharpe.point).toBeCloseTo((m * P) / (sampleSd * Math.sqrt(P)), 12);
+    const dates = rets.map((_, i) => new Date(Date.UTC(2024, 0, 1 + i)).toISOString().slice(0, 10));
+    expect(b.sharpe.point).toBeCloseTo(compute(rets, dates, 0, P).sharpe, 12);
   });
 });
