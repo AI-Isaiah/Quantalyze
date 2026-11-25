@@ -518,7 +518,7 @@ Plans:
 3. Every day of the founder's Deribit book cumulative return is explained by booked P&L and flows, or withheld by name, with no plausibility bound. The close is an attribution reading, not a tolerance. (DBOOK-01)
 4. A correction row carrying a capital reason never classifies as trading P&L, including one with a trading token and no capital word; each correction shape has its own fixture. (DBOOK-02)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 6 plans
+**Plans:** 7 plans
 
 Plans:
 **Wave 1**
@@ -532,6 +532,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 233-06-PLAN.md — FRESH-01: the 2026-11-26 PROD confirmation reading and the A5 record; diagnosis record resolved
+- [ ] 233-07-PLAN.md — DBOOK-01 gap closure: an emptied level is zero capital as the compose counts it, a counted key with no stored basis is withheld by name, the loader reads PROD's shapes, then the PROD re-reading
 
 ### Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key
 
