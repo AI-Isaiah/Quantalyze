@@ -178,6 +178,8 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [x] **Phase 240: CONNECTTRUTH — validating a key or a CSV gets a true answer, and anonymous limits are fair** - One error code on every venue, CSV month-name cells, anonymous bucket fairness, edge and upstream CSV limits agree (completed 2026-11-25)
 - [ ] **Phase 241: DEMOCREDS — the two demo accounts are gone, and their passwords are out of the tree behind a guard that still bites** - The only HIGH item (158-OPS-03), kept in v1.22 by founder exception: accounts deleted on TEST and PROD, digest absence guard
 - [ ] **Phase 250: BINANCEFILLS — a Binance fills read walks every window and never stalls its cursor** - Routed from 232 review (R2-01, R2-02, the BINANCE_PAGE_CAP stop); lands before `USE_RAW_TRADE_INGESTION` is turned on for Binance
+- [ ] **Phase 251: SYNCSTORE — run_sync_trades_job stores every run's daily P&L and refusal flags truthfully** - The four 232 OKXTRADES leftovers in `run_sync_trades_job`; after 222
+- [ ] **Phase 252: DERIBITOPTIONS — a Deribit options strategy's published figures are mark-to-market or withheld, never a cash-wallet artefact** - From the diagnosed `deribit-implausible-returns` debug session (mechanism B, cash-basis options): Quantum Drift's owner factsheet shows +1636172.7% cumulative, unwithheld; re-measures DEF-142.2-07
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -793,6 +795,40 @@ Plans:
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 251: SYNCSTORE — run_sync_trades_job stores every run's daily P&L and refusal flags truthfully
+
+**Goal:** Every run of `run_sync_trades_job` keeps the daily P&L it read and records its refusal flags truthfully. Booked by founder ruling 2026-11-25 from the four items Phase 232 OKXTRADES routed by name to 222 (`232-01-SUMMARY.md`, handoff-222), which fall outside 222's goal:
+1. the Phase-1 daily P&L store runs after the Phase-2 walk, so a first sync whose walk hits the 900 s handler timeout loses that run's Phase-1 daily P&L;
+2. the Phase-1 store proceeds under refusal flags;
+3. the public `daily_pnl_*` flags are never cleared by any run;
+4. with `USE_RAW_TRADE_INGESTION` off and Phase 1 fine, `needs_flag_write` is False, so a drained `daily_pnl_*` refusal flag (232-03's `daily_pnl_non_usd_okx` among them) never reaches `data_quality_flags` while `last_sync_at` still advances.
+**Requirements**: TBD
+**Depends on:** Phase 222 (it reorders `run_sync_trades_job`, which 222 edits)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 252: DERIBITOPTIONS — a Deribit options strategy's published figures are mark-to-market or withheld, never a cash-wallet artefact
+
+**Goal:** A Deribit strategy that trades options never publishes a headline figure measured against the cash wallet alone. Either its returns are measured on a mark-to-market basis in key mode, or its headline is withheld by name when its chain is broken and its figures cannot be trusted. Evidence (PROD, 2026-11-25): the owner factsheet of strategy Quantum Drift, a private ZAV-Composite with a Deribit options leg and a broken chain, shows cumulative return +1636172.7%, CAGR +514301268133036.3% and Calmar 10402151596756.16, annualized from 122 days and "measured since Dec 16, 2025", and its headline is NOT withheld.
+- **Root cause (diagnosed, not fixed).** `.planning/debug/deribit-implausible-returns.md` (status `diagnosed`, R11 verdict mechanism B): a key-mode Deribit derive always runs the `cash_settlement` basis (`DEFAULT_PNL_BASIS` in `deribit_txn.py`; the MTM and smoothed passes in `job_worker.py` are gated on `not is_key_mode`), so the TWR divides option P&L by the cash wallet, which excludes open option mark value. A long option prints a large loss on the buy day and a large gain on the close day, measured against a premium-shrunk wallet (key-A 2025-08-03 -78% then 08-04 +529%; key-B 2026-02-28 +169% on 1840 option trades). The session's `next_action`, "book the fix phase if A is confirmed", was never booked; this phase is that booking.
+- **The choice.** The discuss step decides between (a) a mark-to-market basis for Deribit options in key mode and (b) withholding the headline when the chain is broken and the figures are implausible, or a combination. It decides within Phase 194 D-05 (no plausibility bound is applied to a published figure) and the KPI-gate ruling (withhold KPIs only under about 3 months of total record; zoomed windows always show), so option (b) needs a named, non-numeric trigger, never a magnitude threshold.
+- **DEF-142.2-07 re-measured.** That entry's plan-04 census read 0 Deribit rows carrying `twr_chain_broken`; Quantum Drift suggests otherwise. The phase re-runs the census at HEAD on PROD (marker first), records the reading, and settles or carries the founder decision the entry holds.
+**Requirements**: none mapped (routed from the diagnosed debug session `deribit-implausible-returns`, mechanism B, and TODOS `DEF-142.2-07`)
+**Depends on:** nothing blocking. Founder decision 2026-11-25 (AskUserQuestion): "Book it in v1.22 (Recommended)". It shares the Deribit derive with 233 DERIBITTRUTH, whose book-cumulative criterion carries the same no-plausibility-bound rule, so plans list their write scope by symbol and the two phases do not edit the same function in parallel. User-facing: it moves published numbers. 155.2 freeze, conditional: if any MT5 number for MM2, MM3 or FX-AI_V moves (expected none, since the change is Deribit-only), it merges before 155.2 plan 12's recapture or after plan 14, never in between.
+**Success Criteria** (what must be TRUE):
+1. The discuss step records which remedy the phase takes (mark-to-market basis in key mode, a named withhold, or both) and why, citing Phase 194 D-05 and the KPI-gate ruling; no criterion below applies a numeric plausibility bound.
+2. A Deribit key-mode series built from an option buy and a later close, with no flow between them, yields daily returns that reflect the account's equity (option mark value included) or carries a named withhold reason that every surface honours. A fixture reproducing the debug session's 0.311 → 0.1605 → 0.165 → 0.528 wallet shape goes RED on today's code.
+3. Quantum Drift's owner factsheet, after a re-derive (never a backfill `UPDATE`), shows either mark-to-market figures or a withheld headline with its named reason; it never shows the cash-wallet cumulative, CAGR or Calmar. Every surface that reads the same series (factsheet, share card, OG image, Discovery) agrees.
+4. The `DEF-142.2-07` census is re-run on PROD at HEAD (marker query first) and its reading recorded: the count of Deribit rows carrying `twr_chain_broken`, total and published. The entry is either closed and deleted in the ship PR, or rewritten with the new number and its open founder decision.
+5. Every Deribit strategy or book whose published figures move is re-derived, and the moved figures are listed in the CHANGELOG entry. No MT5 figure moves; if one does, the 155.2 freeze rule above governs the merge.
+6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Progress (this milestone)
 
 | Phase | Plans Complete | Status | Completed |
@@ -819,6 +855,8 @@ Plans:
 | 240. CONNECTTRUTH | 8/8 | Complete (shipped v0.133.74.0, #1334) | 2026-11-25 |
 | 241. DEMOCREDS | 4/4 | Verified human_needed (Pair A reset is the founder's); code PR pending | - |
 | 250. BINANCEFILLS | 0/? | Not started | - |
+| 251. SYNCSTORE | 0/? | Not started | - |
+| 252. DERIBITOPTIONS | 0/? | Not started | - |
 
 ## 📋 v1.23 HARDEN — security, alerting, tooling (planned; starts after TRUTH closes)
 

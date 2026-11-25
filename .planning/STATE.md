@@ -11,11 +11,11 @@ last_activity: 2026-11-25
 last_activity_desc: "Phases 229 MT5DERIVE2, 234 NOCAPITAL and 237 FACTSHEETHONEST complete (229 live soak exit 0; 237 both visual checks pass; 234 shipped #1339)"
 state_head: 32be13ce022aa607ea065660da6c65270dd94750
 progress:
-  total_phases: 22
+  total_phases: 24
   completed_phases: 10
   total_plans: 97
   completed_plans: 83
-  percent: 45
+  percent: 42
 ---
 
 ## ⭐ STATE lineage
@@ -733,6 +733,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 - Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
 - Phase 250 added (2026-11-24, /gsd-phase add, founder ruling 2026-11-24, "R2-02: book a follow-up phase with /gsd-phase (plain add) for a windowed Binance fills read. It must land before USE_RAW_TRADE_INGESTION is turned on for Binance. Fold R2-01 and the BINANCE_PAGE_CAP no-flag item into the same phase's scope."): BINANCEFILLS, a Binance fills read walks every window and never stalls its cursor. Placed in v1.22 by hand: the handler appended it below the v1.22 Progress table with `Depends on: Phase 249` (a v1.23 phase); both were corrected. Number 250 because 242-249 are taken by v1.23.
+- Phase 251 added (2026-11-25, /gsd-phase add, founder ruling 2026-11-25): SYNCSTORE, the four 232 OKXTRADES leftovers in run_sync_trades_job; depends on 222
+- Phase 252 added (2026-11-25, /gsd-phase add, founder decision 2026-11-25, AskUserQuestion, "Book it in v1.22 (Recommended)"): DERIBITOPTIONS, a Deribit options strategy's published figures are mark-to-market or withheld, never a cash-wallet artefact. It books the fix the diagnosed debug session `deribit-implausible-returns` (mechanism B) named as its next action, now tracked so the phase can cite it. The handler appended the section below the v1.22 Progress table with `Depends on: Phase 250` and a TBD stub; all three were corrected by hand. Number 252 because 251 (SYNCSTORE) was already booked in the 222 worktrees; 251 is carried onto main in the same records PR.
 
 ### Decisions
 

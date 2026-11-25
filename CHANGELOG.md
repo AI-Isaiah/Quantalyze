@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.133.76.4] - 2026-11-25 — records: Phases 251 SYNCSTORE and 252 DERIBITOPTIONS booked
+
+This is a records PR. It has no source, test, workflow or migration change. It books two v1.22 phases, 251 SYNCSTORE (founder ruling 2026-11-25) and 252 DERIBITOPTIONS (founder decision 2026-11-25, "Book it in v1.22 (Recommended)"), and brings onto main the debug session 252 cites.
+
+### Added
+- **`ROADMAP.md` Phase 251 SYNCSTORE**, carried from the 222 branch (commit `fbe01744c`, booked there with `/gsd-phase` add, founder ruling 2026-11-25): `run_sync_trades_job` stores every run's daily P&L and refusal flags truthfully. Its goal names the four Phase 232 OKXTRADES leftovers routed to 222 that fall outside 222's goal (Phase-1 daily P&L lost when the Phase-2 walk times out, the Phase-1 store proceeding under refusal flags, public `daily_pnl_*` flags never cleared, and a drained refusal flag never reaching `data_quality_flags` while `last_sync_at` advances). Depends on 222. Applied by hand: section ordered before 252, a Progress row added, its `.gitkeep` dropped as for 250 and 252.
+- **`ROADMAP.md` Phase 252 DERIBITOPTIONS**, booked with `/gsd-phase` (plain add): a Deribit options strategy's published figures are mark-to-market or withheld, never a cash-wallet artefact. Evidence: on PROD the owner factsheet of strategy Quantum Drift (a private ZAV-Composite with a Deribit options leg and a broken chain) shows cumulative +1636172.7%, CAGR +514301268133036.3% and Calmar 10402151596756.16 from 122 days, with its headline not withheld. Six success criteria: the discuss step picks a mark-to-market basis in key mode, a named withhold, or both, within Phase 194 D-05 (no plausibility bound) and the KPI-gate ruling; a RED-first fixture of the cash-wallet option round trip; a re-derived Quantum Drift on every surface; the `DEF-142.2-07` census re-run on PROD; moved figures re-derived and listed; PROOF-01. User-facing, moves published numbers; the 155.2 freeze applies only if an MT5 number moves (none expected). Progress row added.
+- **`.planning/debug/deribit-implausible-returns.md`** (status `diagnosed`, R11 verdict mechanism B: the key-mode `cash_settlement` basis divides option P&L by a cash wallet that excludes open option mark value). It was untracked; it is now on main so the phase can cite it. PROD key and book id prefixes are replaced by labels (key-A, key-B, key-C, book-1) and a local scratchpad path is shortened, so the public tree carries no PROD ids or home paths.
+
+### Changed
+- **`STATE.md`:** Roadmap Evolution entries for Phases 251 and 252, and `progress.total_phases` 22 to 24 (percent 45 to 42). `state.json`: its `next` line now counts 24 phases. The handler's collateral flip of Phase 229's status was reverted before commit.
+
+### Notes
+- **Handler corrections, by hand:** `phase.add` appended the section below the v1.22 Progress table with `Depends on: Phase 250` and a `TBD (run /gsd-plan-phase ...)` stub. The section now sits above the table, depends on nothing blocking (it names its overlap with 233 DERIBITTRUTH), and carries the `- [ ] TBD — plans not listed yet` form rule 6e expects.
+- **Number 252, not 251:** the handler counts sibling worktrees, and 251 (SYNCSTORE) was already booked in the 222 worktrees; this PR carries both.
+- **Version 0.133.76.4:** re-picked from origin/main (0.133.76.3, the #1345 guard-timeout fix) after a rebase.
 ## [0.133.76.3] - 2026-11-25 — fix: main CI is green again; the demo credential guard test stops timing out on the coverage shards, and a deep-link focus test stops racing
 
 `main` went red at `3c562fb1c` (CI run 45627845940) on two vitest failures. This PR fixes both. It also unblocks PR #1342, which hit the same timeout.
