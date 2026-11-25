@@ -217,6 +217,7 @@ from services.mt5_read import (  # noqa: F401 — re-export for the derive regre
     _MT5_DEAL_FETCH_MARGIN_S,
     _MT5_MAX_SERVER_UTC_OFFSET_S,
     Mt5HistoryUnsettledError,
+    log_mt5_poll_server_verdict,
     read_mt5_deal_ledger,
 )
 from services.account_unit import (
@@ -853,6 +854,12 @@ async def _fetch_mt5_account_balance(
         # default-match (the derive branch's _assert_expected_login contract).
         if info.get("login") != session.login:
             raise Mt5AccountMismatchError(session.login, info.get("login"))
+        # 225-20 (PR-2c0) — LOG-ONLY server verdict, only once the login check has
+        # passed. It cannot raise, so it can never turn this read into a dropped
+        # balance snapshot (the swallow-all arm below).
+        log_mt5_poll_server_verdict(
+            info, requested_server=session.server, site=SITE_BALANCE, holder=api_key_id
+        )
         return info
 
     try:
