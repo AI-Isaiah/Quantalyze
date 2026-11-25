@@ -518,10 +518,15 @@ Plans:
 3. Every day of the founder's Deribit book cumulative return is explained by booked P&L and flows, or withheld by name, with no plausibility bound. The close is an attribution reading, not a tolerance. (DBOOK-01)
 4. A correction row carrying a capital reason never classifies as trading P&L, including one with a trading token and no capital word; each correction shape has its own fixture. (DBOOK-02)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 0 plans
+**Plans:** 6 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [ ] 233-01-PLAN.md — DBOOK-02: a correction is trading only when it names an instrument; one fixture per shape
+- [ ] 233-02-PLAN.md — FRESH-02 tracer (and FRESH-01's reader): fifth prod-prober arm `freshness` end to end, floor 5
+- [ ] 233-03-PLAN.md — DBOOK-01 tracer: independent book attribution oracle, withheld classes, key-set check and verdict order
+- [ ] 233-04-PLAN.md — FRESH-02 expansion: silent-green guards, day-by-day and boundary fixtures, SQL names bound to their writers
+- [ ] 233-05-PLAN.md — DBOOK-01 expansion: remaining classes and annotations, leak guards and --print-sql, then the orchestrator's PROD reading
+- [ ] 233-06-PLAN.md — FRESH-01: the 2026-11-26 PROD confirmation reading and the A5 record; diagnosis record resolved
 
 ### Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key
 
