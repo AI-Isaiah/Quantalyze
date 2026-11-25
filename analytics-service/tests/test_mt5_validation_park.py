@@ -100,11 +100,14 @@ _HOUSE_LOGIN = 700001
 _HOUSE_PASSWORD = "house-pw-FABRICATED-7x"
 _HOUSE_SERVER = "House-Fabricated-Demo"
 
+# Phase 225 plan 18: the session's server equals `_make_req`'s default passphrase,
+# so `run_probe`'s server bracket passes on every case that is not about it.
+_CLIENT_SERVER = "Broker-Demo"
 _MASTER_ACCOUNT = _FakeNamedTuple(
-    trade_allowed=True, balance=1000.0, login=_CLIENT_LOGIN
+    trade_allowed=True, balance=1000.0, login=_CLIENT_LOGIN, server=_CLIENT_SERVER
 )
 _INVESTOR_ACCOUNT = _FakeNamedTuple(
-    trade_allowed=False, balance=1000.0, login=_CLIENT_LOGIN
+    trade_allowed=False, balance=1000.0, login=_CLIENT_LOGIN, server=_CLIENT_SERVER
 )
 
 

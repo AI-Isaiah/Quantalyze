@@ -1351,7 +1351,9 @@ async def test_long_fetch_mt5_master_password_is_permanent(monkeypatch) -> None:
     _install_client(
         monkeypatch,
         {
-            "account": _FakeNamedTuple(trade_allowed=True, login=123456),
+            "account": _FakeNamedTuple(
+                trade_allowed=True, login=123456, server="SomeBroker-Live 5"
+            ),
             "order_check": _INVESTOR_ORDER_CHECK,
         },
     )

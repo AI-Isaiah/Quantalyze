@@ -3485,6 +3485,82 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       );
     });
 
+    // ── 225-18 (CONTEXT Q6 item 2): a key is never stored with a server its
+    // validation did not use. The analytics validate proves the server it is
+    // handed (run_probe's server bracket); these pin the TS half: the server
+    // validated is the server stored, and a refused validation stores nothing.
+    describe("[225-18] the stored server is the validated server", () => {
+      it("validateKey is handed the request's own passphrase, and p_venue_server is that same value normalised", async () => {
+        const POST = await importPost();
+        const res = await POST(
+          makeReq({ ...MT5_RECONNECT_BODY, passphrase: "  Broker-Live " }),
+        );
+
+        expect(res.status).toBe(200);
+        expect(validateKeyMock).toHaveBeenCalledTimes(1);
+        const validatedServer = validateKeyMock.mock.calls[0][3];
+        expect(validatedServer).toBe("  Broker-Live ");
+        // The stored server derives from the VALIDATED value, not from a second
+        // reading of the body, and the literal is the oracle for the normaliser.
+        expect(rpcCalls("create_wizard_strategy")[0][1]).toMatchObject({
+          p_venue_server: "broker-live",
+        });
+        // Validation ran BEFORE the only write.
+        expect(validateKeyMock.mock.invocationCallOrder[0]).toBeLessThan(
+          rpcMock.mock.invocationCallOrder[0],
+        );
+      });
+
+      it.each([
+        ["an auth refusal", new Error("Authentication failed. Check your API key and secret.")],
+        ["the transient answer to a session on another server", new Error("Network error reaching the exchange. Check connectivity and try again.")],
+        ["a wrong-server refusal", new Error("MT5 server was not recognised for this login")],
+      ])("%s from validateKey stores nothing: no encrypt, no RPC", async (_name, failure) => {
+        const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+        validateKeyMock.mockRejectedValue(failure);
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).not.toBe(200);
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+        consoleErr.mockRestore();
+      });
+
+      it("a replayed MT5 connect on a session that already holds a draft writes nothing, even when it names another server", async () => {
+        // The idempotency arm answers from the existing draft before validateKey.
+        // It is the one MT5 arm that returns without validating, and it must be
+        // read-only: the server in this body is not stored by it.
+        draftLookupMock.mockResolvedValueOnce({
+          data: { id: STRATEGY_ID, api_key_id: API_KEY_ID },
+          error: null,
+        });
+
+        const POST = await importPost();
+        const res = await POST(
+          makeReq({ ...MT5_RECONNECT_BODY, passphrase: "Some-Other-Server" }),
+        );
+
+        expect(res.status).toBe(200);
+        expect((await res.json()).deduped).toBe(true);
+        expect(validateKeyMock).not.toHaveBeenCalled();
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+      });
+
+      it("an MT5 validation that is not read-only stores nothing either", async () => {
+        validateKeyMock.mockResolvedValue({ valid: true, read_only: false });
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(400);
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+      });
+    });
+
     // WR-01 + SF-M3 (225 PR-2 review, orchestrator decision 1): INVERTED from "a
     // swap that FAILS after the draft exists ... still answers success". The
     // admitted key was created with no identity, so the unique index cannot catch
@@ -5913,6 +5989,38 @@ describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () =
     // Nothing reached the exchange and nothing was encrypted.
     expect(validateKeyMock).not.toHaveBeenCalled();
     expect(encryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("225-18: a reuse request that carries a login and a broker server still sends neither to the RPC (the stored server is never re-chosen here)", async () => {
+    // The reuse arm never validates, so it must never WRITE a server either: it
+    // adopts a key whose server an earlier validation already proved. Stray
+    // credential fields in the body are not read.
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...REUSE_BODY,
+        exchange: "mt5",
+        api_key: "5009999",
+        passphrase: "Some-Other-Server",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(rpcMock.mock.calls[0][0]).toBe("create_wizard_strategy_for_key");
+    expect(rpcMock.mock.calls[0][1]).toEqual({
+      p_user_id: MOCK_USER.id,
+      p_api_key_id: REUSE_KEY_ID,
+      p_placeholder_name: expect.any(String),
+      p_wizard_session_id: WIZARD_SESSION_ID,
+    });
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(apiKeyWrites()).toEqual([]);
   });
 
   it("the uid in EVERY filter and in the RPC comes from the SESSION, never from the body", async () => {

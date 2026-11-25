@@ -3163,6 +3163,62 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(PERSIST_STATE.inserts[0].venue_server).toBeNull();
   });
 
+  // ── 225-18 (CONTEXT Q6 item 2): the stored server is the validated server ──
+  // The analytics validate proves the server it is handed (run_probe's server
+  // bracket). These pin the TS half: the server that is stored is the one that
+  // was validated, and a refused validation stores nothing.
+  it("225-18: validateKey is handed the request's own passphrase, and the inserted venue_server is that same value normalised", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add({ passphrase: "  MetaQuotes-Demo  " }));
+
+    expect(res.status).toBe(200);
+    expect(mockValidateKey).toHaveBeenCalledTimes(1);
+    expect(mockValidateKey.mock.calls[0][3]).toBe("  MetaQuotes-Demo  ");
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    // The literal is the oracle for the normaliser; the call order shows the
+    // insert came after the validation it describes.
+    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
+    expect(mockValidateKey.mock.invocationCallOrder[0]).toBeLessThan(
+      mockEncryptKey.mock.invocationCallOrder[0],
+    );
+  });
+
+  it.each([
+    ["an auth refusal", new Error("Authentication failed. Check your API key and secret.")],
+    ["the transient answer to a session on another server", new Error("Network error reaching the exchange. Check connectivity and try again.")],
+    ["a wrong-server refusal", new Error("MT5 server was not recognised for this login")],
+  ])("225-18: %s from validateKey writes no api_keys row, calls no RPC and encrypts nothing", async (_name, failure) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockValidateKey.mockRejectedValue(failure);
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).not.toBe(200);
+    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  it("225-18: an MT5 validation that is not read-only writes nothing either", async () => {
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: false });
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(400);
+    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  it("225-18: an MT5 add that carries no broker server never reaches validateKey or a store", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add({ passphrase: "   " }));
+
+    expect(res.status).toBe(400);
+    expect(mockValidateKey).not.toHaveBeenCalled();
+    expect(PERSIST_STATE.inserts).toEqual([]);
+  });
+
   // ── Q3 / ONCE-02: never across owners ──────────────────────────────────────
   it("the same okx account held only by ANOTHER owner's key is inserted with the identity stamped, and the read carried the caller's user_id", async () => {
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true, venue_account_id: OKX_UID });
