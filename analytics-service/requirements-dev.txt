@@ -40,7 +40,7 @@ pyarrow==26.0.0
 # #1388 on xdist main, not in a release yet. Lift the cap only together with an
 # xdist release that carries #1388; tests/test_xdist_group_is_real.py goes red if
 # the group stops forming.
-pytest<9.2
+pytest<9.3
 pytest-cov
 pytest-asyncio
 pytest-mock
