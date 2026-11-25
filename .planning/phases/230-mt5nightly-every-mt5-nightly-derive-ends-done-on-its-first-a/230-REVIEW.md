@@ -356,3 +356,16 @@ MEDIUM 6, LOW 7. MEDIUM findings, all routed to the fixer round:
 - SF-M5: the self-fence can fire after the row has expired (same issue as WR-01).
 - SF-M6: a non-boolean RPC answer reads as "refused" and is polled forever without a log.
 LOW (recorded only): process-wide 900 s unavailable throttle; 42883 raised inside an RPC body reads as missing; balance-sync broad except; hold.lost unchecked at body exit; release False unlogged; process_key plain-busy copy; --days-out not-measured keys indistinguishable from nothing-moved.
+
+## Round-1 fixes (2026-11-26, gsd-code-fixer)
+
+| Finding | Commit | What changed |
+|---|---|---|
+| SF-M6 | `617731f5b` | A non-boolean lease RPC answer raises `TypeError` in `_PostgrestXLeaseBackend._call` and takes the backend-error path; it never reads as False. |
+| CR-01 = SF-M2 | `5436d53f4` | A call that outlives its RPC bound counts as a backend error (one `mt5_xlease_rpc_error`, `exc_class=TimeoutError`, spends the DEC-04-C budget). The in-flight call is awaited again, never joined by a new RPC, so at most one acquire call is pending. |
+| SF-M3 | `94524ccb1` | Budget exhaustion logs one ERROR, event `mt5_xlease_acquire_gave_up` (exc_class, site, duration_ms, attempts), before the unchanged fixed-text raise. |
+| SF-M1 (IN-01) | `4fca671de` | A bounded deadline with no answer at all raises `XLeaseUnavailable` (same give-up ERROR), so `mt5_concurrency` raises `Mt5TerminalLeaseUnavailableError`. The boot heal logs a distinct ERROR and records `lease_unavailable`; the liveness probe records `probe_failed`. A genuine refusal stays plain busy. |
+| WR-01 = SF-M5 | `4b40330e8` | Loss is a deadline from the send time of the last successful renew (the granting acquire for the first); the sleep and each renew are bounded by it. The `_validate_xlease_timing` docstring and message state what is guaranteed. |
+| SF-M4 (IN-03) | `a1362a215` | A missing renew RPC is logged through `_note_unavailable`, counts as a failed renew, and falls through to the loss deadline. Supersedes the plan-04 must-have "renew stops without bumping the epoch"; DEC-04-A (acquire fallback hold) is untouched. |
+
+Recorded only, not fixed (scope: round-1 list): IN-02, IN-04 (now moot, `pending` holds at most one call), IN-05, IN-06, IN-07 and the SF LOW items.
