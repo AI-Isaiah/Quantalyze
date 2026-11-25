@@ -16743,9 +16743,10 @@ def _no_capital_ledger_level(
     the balance the deals imply. Pure over stored numbers. None for no basis, or for a non-finite
     total (an unreadable number is not evidence of an empty account).
 
-    The caller confirms emptiness one-sidedly, ``level <= DUST_NAV_FLOOR``, mirroring A2's ``<=``.
-    A ledger far below zero is not decided here: the replay's zero-start and non-positive checks
-    catch it downstream. Known bound (RESEARCH A7): a native-BTC MT5 key with a small non-zero
+    The caller confirms emptiness over a two-sided band, ``-DUST_NAV_FLOOR <= level <= DUST_NAV_FLOOR``,
+    mirroring A2's ``<=``. A ledger above the band says the account is funded; one below it says the
+    stored deals miss funding (a withdrawal with no deposit). Neither proves the account empty, and
+    the replay does NOT catch the far-negative one downstream, so the caller refuses both. Known bound (RESEARCH A7): a native-BTC MT5 key with a small non-zero
     native terminal adds a bounded extra term to this sum; both live PROD exits are USD keys."""
     if basis is None:
         return None
@@ -17818,7 +17819,8 @@ async def run_derive_allocator_equity_job(
             # empty, so the key's OWN deal ledger must agree. Read from the key's own row basis
             # (``writer_basis_raw``), never ``writer_basis_by_key``, which holds a stitched basis for
             # a kept key. No own basis is no proof; a ledger above the dust floor says the account is
-            # funded. Either way the key keeps ``dropped_key`` with its stored inputs untouched, like
+            # funded, and one below ``-DUST_NAV_FLOOR`` says the stored deals miss funding (the band is
+            # two-sided; the replay does not catch the far-negative one). Either way the key keeps ``dropped_key`` with its stored inputs untouched, like
             # a D-10 refusal. Runs BEFORE D-10: D-10 reasons about amounts walked back from a
             # terminal that, here, is evidence only once the ledger confirms it. The venue read is the
             # same expression ``full_history_keys`` uses. Counts only (no key id, no USD).
@@ -17831,6 +17833,9 @@ async def run_derive_allocator_equity_job(
                     continue
                 if _nc_ledger_level > DUST_NAV_FLOOR:
                     _nc_loop_refusals["ledger_level_funded"] += 1
+                    continue
+                if _nc_ledger_level < -DUST_NAV_FLOOR:
+                    _nc_loop_refusals["ledger_level_negative"] += 1
                     continue
             # D-10 (review round 1 CR-01/WR-01): the exit is only as honest as what it consumes. The
             # amounts it names or drops must be the dust-sized ones D-08 measured; anything else

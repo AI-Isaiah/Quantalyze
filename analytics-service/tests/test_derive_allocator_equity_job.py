@@ -4363,6 +4363,60 @@ async def test_no_capital_exit_mt5_transient_zero_over_a_funded_ledger_keeps_dro
     assert _nc_curve(payload) == {x: pytest.approx(100_000.0, abs=1e-9) for x in d}
 
 
+def _nc_mt5_ledger_book(*, flows: dict[str, float], basis_pnl: dict[str, float] | None = None) -> dict:
+    """An MT5 ``nonpositive`` key whose terminal is 0.0 on day 4 and whose OWN basis is exactly
+    ``flows`` plus zero P&L on days 1 to 4, so its ledger level is ``sum(flows.values())``."""
+    d = _BTC_DAYS
+    return _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload(
+                "nonpositive", "mt5", 0.0, d[3],
+                flows=flows, dropped_pnl={d[3]: 0.0},
+                basis_flows=flows,
+                basis_pnl=basis_pnl or {d[0]: 0.0, d[1]: 0.0, d[2]: 0.0, d[3]: 0.0},
+            ),
+        )
+    ])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("withdrawal", [-20_000.0, -500_000.0])
+async def test_no_capital_exit_mt5_ledger_far_below_zero_is_refused_as_ledger_level_negative(
+    withdrawal: float,
+) -> None:
+    """NOCAP-01 review CR-01. The stored deals miss the funding (a withdrawal with no deposit), so
+    the ledger sums to ``withdrawal`` (-20000.0 / -500000.0 by hand), far below -DUST_NAV_FLOOR,
+    against a live terminal of 0.0. A far-negative ledger is not an empty account, it is a ledger
+    that cannot be trusted: the one-sided gate let it prove the key empty and the book read
+    trustworthy. The gate is two-sided: the key keeps ``dropped_key``, counted
+    ``ledger_level_negative``."""
+    payload = await _compose_no_capital_book(
+        _nc_mt5_ledger_book(flows={_BTC_DAYS[3]: withdrawal})
+    )
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert _nc_refused(payload) == {"ledger_level_negative": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_ledger_exactly_at_minus_the_dust_floor_still_exits() -> None:
+    """NOCAP-01 review CR-01, the boundary (at). A ledger of exactly ``-DUST_NAV_FLOOR`` (-100.0: a
+    -100.0 withdrawal and nothing else) is inside the band, mirroring A2's ``<=``: the key is not
+    refused as ``ledger_level_negative`` and exits as before."""
+    d = _BTC_DAYS
+    payload = await _compose_no_capital_book(
+        _nc_mt5_ledger_book(flows={d[3]: -DUST_NAV_FLOOR})
+    )
+
+    assert "ledger_level_negative" not in (_nc_refused(payload) or {})
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-C", "reason": "nonpositive", "day": d[2]}
+    ]
+
+
 @pytest.mark.asyncio
 async def test_no_capital_exit_mt5_without_its_own_basis_is_refused_as_ledger_basis_absent() -> None:
     """NOCAP-01. An MT5 key whose own row carries no writer basis has no independent proof the
@@ -5169,7 +5223,7 @@ def test_no_capital_refusal_reasons_are_the_eleven_plan_01_to_03_tokens() -> Non
     assert NO_CAPITAL_REFUSAL_REASONS == frozenset({
         "funded_terminal", "no_stored_terminal", "consumes_more_than_dust", "replay_refused",
         "blocking_reason", "segment_terminals_missing", "compose_reverted",
-        "negative_terminal", "ledger_basis_absent", "ledger_level_funded",
+        "negative_terminal", "ledger_basis_absent", "ledger_level_funded", "ledger_level_negative",
         "candidate_exception",
     })
     assert not NO_CAPITAL_REFUSAL_REASONS & {m.value for m in DegradeReason}
