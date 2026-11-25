@@ -215,7 +215,14 @@ class _PostgrestXLeaseBackend:
             return client.rpc(rpc_name, params).execute()
 
         result = await db_execute(_rpc)
-        return bool(result.data is True)
+        data = result.data
+        if not isinstance(data, bool):
+            # The three RPCs return `boolean`. Anything else (a NULL, a changed return
+            # type) is a broken contract: reading it as False would poll forever as
+            # "another process holds it" with nothing logged, so it raises and takes
+            # the visible backend-error path. The fixed text carries no answer value.
+            raise TypeError("the lease RPC answered something other than a boolean")
+        return data
 
     async def acquire(
         self, digest: str, token: uuid.UUID, holder: str, site: str, ttl_s: int

@@ -1000,3 +1000,68 @@ async def test_redaction_no_record_from_the_failure_paths_carries_the_exception_
             f"exception text reached a log record: {record.getMessage()!r}"
         )
         assert record.exc_info is None, "a log record carried a traceback"
+
+
+# --------------------------------------------------------------------------- #
+# Round-1 review fixes (230-REVIEW.md, SF-M6).
+# --------------------------------------------------------------------------- #
+class _StubRpcClient:
+    """A supabase-client stand-in whose ``.rpc(...).execute()`` answers ``data``."""
+
+    def __init__(self, data) -> None:
+        self._data = data
+
+    def rpc(self, _name, _params):
+        class _Call:
+            def __init__(self, data) -> None:
+                self._data = data
+
+            def execute(self):
+                class _Result:
+                    pass
+
+                result = _Result()
+                result.data = self._data
+                return result
+
+        return _Call(self._data)
+
+
+@pytest.mark.parametrize(("data", "answer"), [(True, True), (False, False)])
+async def test_sf_m6_a_boolean_rpc_answer_passes_through_unchanged(data, answer) -> None:
+    backend = mt5_xlease._PostgrestXLeaseBackend(client=_StubRpcClient(data))
+    assert await backend.acquire(_digest(), uuid.uuid4(), "house", SITE_DERIVE, 90) is answer
+
+
+@pytest.mark.parametrize("data", [None, "t", 1, [], {"acquire": True}])
+async def test_sf_m6_a_non_boolean_rpc_answer_raises_it_never_reads_as_refused(data) -> None:
+    """The three RPCs are declared ``boolean``. Anything else (a NULL, a changed return
+    type, a wrapped payload) is a broken contract, and reading it as ``False`` would make
+    the acquire poll forever as 'another process holds it' with nothing in the log. It
+    must raise, so it takes the visible backend-error path."""
+    backend = mt5_xlease._PostgrestXLeaseBackend(client=_StubRpcClient(data))
+    with pytest.raises(TypeError):
+        await backend.acquire(_digest(), uuid.uuid4(), "house", SITE_DERIVE, 90)
+    with pytest.raises(TypeError):
+        await backend.renew(_digest(), uuid.uuid4(), 90)
+
+
+async def test_sf_m6_a_non_boolean_answer_is_counted_and_logged_as_a_backend_error(
+    monkeypatch, caplog, fast_poll
+) -> None:
+    mt5_xlease.set_xlease_backend_for_tests(
+        mt5_xlease._PostgrestXLeaseBackend(client=_StubRpcClient(None))
+    )
+    _small_budget(monkeypatch, 0.2)
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+
+    with pytest.raises(mt5_xlease.XLeaseUnavailable):
+        await asyncio.wait_for(
+            mt5_xlease.acquire_terminal_xlease(
+                _KEY, holder=None, site=SITE_DERIVE, bound_s=None, on_lost=lambda: None
+            ),
+            timeout=10.0,
+        )
+
+    errors = _events(caplog, "mt5_xlease_rpc_error")
+    assert len(errors) == 1 and errors[0].exc_class == "TypeError"
