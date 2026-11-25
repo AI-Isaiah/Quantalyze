@@ -181,8 +181,11 @@ def test_importing_leaf_does_not_import_job_worker() -> None:
     probe = (
         "import sys; "
         "import services.mt5_concurrency; "
+        "import services.mt5_xlease; "
         "assert 'services.job_worker' not in sys.modules, "
         "'mt5_concurrency pulled services.job_worker into the import graph'; "
+        "assert 'main_worker' not in sys.modules, "
+        "'the lease modules pulled main_worker into the import graph'; "
         "print('LEAF_OK')"
     )
     result = subprocess.run(
@@ -494,6 +497,14 @@ def test_busy_error_cannot_be_absorbed_into_a_credential_verdict() -> None:
     message = str(mt5_concurrency.Mt5TerminalBusyError("the MT5 terminal was busy"))
     for leak in ("h:1", "18812", "localhost", "127.0.0.1"):
         assert leak not in message
+
+    # Phase 230 (MT5D-02): a lease OUTAGE is busy to every existing busy arm, and just
+    # as unable to become a credential verdict.
+    unavailable = mt5_concurrency.Mt5TerminalLeaseUnavailableError
+    assert issubclass(unavailable, mt5_concurrency.Mt5TerminalBusyError)
+    assert not issubclass(unavailable, Mt5ClientError)
+    for leak in ("h:1", "18812", "localhost", "127.0.0.1"):
+        assert leak not in str(unavailable("the MT5 terminal lease could not be reached"))
 
 
 # ---------------------------------------------------------------------------
