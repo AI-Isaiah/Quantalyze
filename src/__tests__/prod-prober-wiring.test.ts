@@ -1940,7 +1940,7 @@ describe("[164.1-05] kinds and floors", () => {
     // ⭐ 107 -> 108 in Phase 233 review fix round 2 (WR-03): the no-stored-return
     // scenario is now "not judged, exits 0", the judged-zero scenario became a
     // PER-VENUE guard scenario, and an all-coveredAnchor scope scenario was added.
-    expect(SELF_TEST_SCENARIOS).toBe(108);
+    expect(SELF_TEST_SCENARIOS).toBe(109);
     const { code, numbers, denominators } = await runSelfTestHeaders();
     expect(code, "the self-test must pass for its header count to mean anything").toBe(0);
     expect(numbers.length).toBe(SELF_TEST_SCENARIOS);

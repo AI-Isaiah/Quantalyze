@@ -152,7 +152,7 @@ export const MANIFEST_PATH = CRON_DRIFT_MOD.MANIFEST_PATH;
 export const ARMS_FLOOR = 5;
 
 /** The counted `--self-test` scenario set. See the renumbering warning on `selfTest`. */
-export const SELF_TEST_SCENARIOS = 108;
+export const SELF_TEST_SCENARIOS = 109;
 
 /**
  * Every defect this prober can report. EXPORTED so the plan-05 wiring test can
@@ -1854,6 +1854,23 @@ export async function selfTest() {
         expect(
           r.defects[0] && r.defects[0].detail.includes("no_reference=1") && r.defects[0].detail.includes("no binance key was judged"),
           `the defect names the venue and its not-judged counts (got ${r.defects[0] && r.defects[0].detail})`,
+        ) &&
+        pass;
+    }
+
+    scenario("freshness: a venue whose only key has no stored return day is a measure-fail on its own subject while another venue is fresh");
+    if (!frOk.ok) {
+      pass = expect(false, frOk.reason) && pass;
+    } else {
+      const base = frOk.data.rows[0];
+      const fresh = { ...clone(base), venue: "deribit", tag: "dddd0010" };
+      const idle = { ...clone(base), venue: "binance", tag: "dddd0011", hasInputs: true, anchorNullReason: "", newestReturn: "", newestFlow: "2026-11-20", terminalDay: "", markDay: "", tinyDays: [] };
+      const r = await runFresh({ scope: { derived: 2, withInputs: 2, withTerminal: 2 }, rows: [fresh, idle] });
+      pass =
+        onlyFrMeasureFail(r, "binance has only a no_returns key", "freshness binance") &&
+        expect(
+          r.defects[0] && r.defects[0].detail.includes("no_returns=1") && r.defects[0].detail.includes("no binance key was judged"),
+          `the defect names the venue and its no_returns count (got ${r.defects[0] && r.defects[0].detail})`,
         ) &&
         pass;
     }
