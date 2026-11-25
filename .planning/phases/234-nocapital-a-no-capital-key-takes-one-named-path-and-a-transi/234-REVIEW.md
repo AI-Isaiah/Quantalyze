@@ -1,6 +1,7 @@
 ---
 phase: 234-nocapital-a-no-capital-key-takes-one-named-path-and-a-transi
-reviewed: 2026-11-25T11:14:08Z
+reviewed: 2026-11-25T11:36:24Z
+round: 2
 depth: standard
 files_reviewed: 6
 files_reviewed_list:
@@ -11,212 +12,138 @@ files_reviewed_list:
   - analytics-service/tests/test_derive_allocator_equity_job.py
   - analytics-service/tests/test_allocator_equity_inception.py
 findings:
-  critical: 1
+  critical: 0
   warning: 1
-  info: 5
-  total: 7
+  info: 3
+  total: 4
   necessity: 0
 status: issues_found
 ---
 
-# Phase 234: Code Review Report
+# Phase 234: Code Review Report (round 2)
 
-**Reviewed:** 2026-11-25T11:14:08Z
+**Reviewed:** 2026-11-25T11:36:24Z
 **Depth:** standard
 **Files Reviewed:** 6
-**Status:** issues_found
+**Status:** issues_found (one WARNING: a test gap. No production defect found.)
 
 ## Summary
 
-Scope is `git diff 29e5448e9..HEAD -- analytics-service`, judged against `234-CONTEXT.md` and the
-four plans and SUMMARYs. The three phase suites pass at HEAD: `236 passed`.
+Scope:
 
-Checked and clean:
+- The round-1 fix commits: `git log -p e779994d4..HEAD -- analytics-service`, which covers 87463035f, 681a307d8, 041e42e0d and 6dc860523.
+- A re-scan of the whole phase diff: `git diff 29e5448e9..HEAD -- analytics-service`.
+- Judged against `234-CONTEXT.md`, including its "CORRECTED 2026-11-25" note.
 
-- **NOCAP-02 revert.** The apply-loop revert restores every map the loop writes: anchors, null
-  reasons, flows, dropped P&L, realized terminal, writer basis and departed end, and it clears
-  `no_capital_exit_by_key`.
-- **Compose arms.** The sibling `except NavReconstructionError` and `except Exception` arms do not
-  double-handle. An exception raised inside the first handler is not caught by the second.
-- **State after a compose revert.** No code after the compose reads the candidate-applied job maps
-  except the empty-curve branch, and that branch reaches the same verdict either way.
-- **Re-indent.** `git diff -w` of the apply loop shows only the new ledger gate, the try/except and
-  the counter rename.
-- **Strict `tiny_base_days` reader.** It matches the writer, which only stores canonical days:
-  `tiny_base_day_list` goes through `_parse_day`'s round-trip check.
-- **Out-of-window ruling.** The money math still holds after the change. A flow after the last
-  return day is still unioned into the roll days and subtracted; only the counter changes.
-- **NOCAP-03 cardinality.** Each key is counted once: selection, loop and compose are disjoint, and
-  a revert replaces the loop's or the compose's own counts.
+Test run at HEAD: the three phase suites plus `test_derive_refusal_rows.py` give `254 passed`.
 
-**The defects are in the new NOCAP-01 ledger proof.** Two shapes of stored ledger that carry no
-evidence of an empty account still pass it. Both were reproduced end to end through
-`run_derive_allocator_equity_job`: in each, a candidate exits and the book reads trustworthy. The
-first defect shows that a premise of the locked "lower side" decision is false.
+**How the fixes were checked.** Each fix was reverted or mutated in a throwaway copy of
+`analytics-service/`, and the three phase suites were run against each mutant. The worktree was
+not touched.
+
+- In that copy, `test_working_holder_status_set_matches_ts_and_sql` fails even with no mutation, because it reads TS and SQL files outside `analytics-service/`. Its failure is therefore not counted as a kill below.
+- Every round-1 fix is killed by its own new test.
+- Two narrower mutants and the band-width mutants survive. See WR-01 and IN-A/IN-B.
+
+**What the fixes did not break:**
+
+- **Band boundaries.** The production comparisons are strict (`> DUST_NAV_FLOOR`, `< -DUST_NAV_FLOOR`; `job_worker.py:17836`, `:17839`), so the band is inclusive on both sides: `-DUST_NAV_FLOOR <= level <= DUST_NAV_FLOOR`. That matches the docstring, the CONTEXT note, and the selection gate's `negative_terminal` boundary. There is no off-by-one.
+- **Sentry events (M1).** Both new captures (`job_worker.py:17926-17933`, `:18372-18379`) send a static message. Their only tags are `compute_job_id` and `exception_class`, the same shape as the existing capture at `:17201`.
+  - `sentry_init.py` sets `include_local_variables=False` and `send_default_pii=False`.
+  - `attach_stacktrace` is left at the SDK default (off), so a `capture_message` carries no frame.
+  - The live `_nc_exc` / `exc`, the key-id-keyed maps and the USD levels in the frame therefore cannot reach the event. Nothing leaks.
+- **Refusal payload shape (M2).**
+  - `refusal_payload` adds `inputs.no_capital_exit_refused` only when the counts are non-empty, so the default call is byte-identical.
+  - `tests/fixtures/derive_refusal_rows.json` is not in the diff, and `test_derive_refusal_rows.py` passes.
+  - The TS reader (`src/lib/queries.ts`, `untrustworthyRebuildReason`) reads `refusal` and `degrade_reasons`, never `inputs`.
+  - The `compose_empty` and `compose_empty_blocked` records already carried this field earlier in the phase, so the cross-runtime pin does not move.
+- **New closed token.** `ledger_level_negative` is a member of `NO_CAPITAL_REFUSAL_REASONS`, and the whole-set pin was updated. No `DegradeReason` or `DeriveRefusal` member moved, and no TS or SQL mirror of the set exists (grep over `src/`, `supabase/` and `scripts/`).
+
+**Re-scan of the full phase diff.** It found no new MEDIUM+ production defect.
+
+- `read_tiny_base_days` raises `TypeError` and `ValueError`. Both are inside the `except (ValueError, TypeError, KeyError)` corrupt-input arm (`job_worker.py:17598`), so neither escapes as a transient.
+- The apply-loop revert restores every map the loop writes. `tiny_base_days_by_key` and `writer_basis_raw` are never written by the loop.
+- The post-compose merge counts each key once per route.
+
+Necessity was assessed using `necessity-review.md`. No finding qualifies: every new guard sits on stored `key_inputs` data, which is a trust boundary.
+
+**The PROD re-measure was not repeated in this review.** The CONTEXT note records it: both live MT5 exits sit at a level of -1.6e-11 under the two-sided predicate.
+
+## Round 1 disposition
+
+| Item | Status | Evidence |
+|---|---|---|
+| CR-01: the one-sided ledger proof accepts a far-negative ledger | **Fixed** (87463035f) | `job_worker.py:17839-17841` refuses `level < -DUST_NAV_FLOOR` as `ledger_level_negative`. Reverting the branch turns both `[-20000.0]` and `[-500000.0]` arms of `test_no_capital_exit_mt5_ledger_far_below_zero_is_refused_as_ledger_level_negative` RED. Mutating `<` to `<=` turns `test_no_capital_exit_mt5_ledger_exactly_at_minus_the_dust_floor_still_exits` RED. The docstring and the CONTEXT line-69 rationale are corrected. |
+| WR-01: an empty writer basis counts as proof | **Fixed** (681a307d8) | `job_worker.py:16753`: `if basis is None or not basis[1]: return None`. Reverting it turns `test_no_capital_exit_mt5_empty_basis_lists_are_refused_as_ledger_basis_absent` and `test_no_capital_ledger_level_is_pure_over_the_stored_basis` RED. |
+| IN-01 / SFH M1: the catch-all handlers emit no Sentry event | **Fixed** (041e42e0d) | One class-only warning event in each handler. Replacing either capture with a no-op turns its own parametrised arm of `test_no_capital_exit_a_candidate_fault_reaches_sentry_as_one_class_only_event` RED. The test asserts exactly one call, `level="warning"`, the exact tag set, and that no key id, exception text or amount is in the message. No leak (see Summary). |
+| SFH M2: `_compose_refused` dropped the run's no-capital counts | **Fixed** (6dc860523) | `job_worker.py:18306-18309` passes `no_capital_refusal_field(no_capital_refusals) or None`. Reverting it turns `test_no_capital_exit_a_fault_in_the_stored_input_compose_keeps_todays_path` RED. Its control asserts the field is absent when no fallback ran. See IN-B for the part left unpinned. |
+| IN-02: a working no-capital key with inputs and no returns is uncounted | **Closed by decision** | The CONTEXT `[Review round 1, 2026-11-25]` entry excludes it by design: it never reaches selection, and it is the existing `no_anchor` + `missing_series` route. |
+| IN-03: only the D-10 refusal gets a log line | **Open (Info)** | Not changed. Under repo policy Info items are recorded, not fixed. |
+| IN-04: dead placeholder in a test helper | **Open (Info)** | Still at `test_allocator_equity_inception.py:379-380`. The file has no commits since round 1. |
+| IN-05: the "listed day inside the window" arm cannot fail on its premise | **Open (Info)** | Not changed (same file, no commits since round 1). |
 
 ## Narrative Findings (AI reviewer)
 
-## Critical Issues
-
-### CR-01: The one-sided ledger proof accepts a ledger that shows itself to be incomplete, and the downstream guard the decision relies on does not run
-
-**File:** `analytics-service/services/job_worker.py:17832` (gate), `analytics-service/services/job_worker.py:16733-16753` (`_no_capital_ledger_level` and its docstring)
-
-**Issue:**
-
-- The NOCAP-01 proof refuses only `ledger_level > DUST_NAV_FLOOR`, so any negative ledger sum counts as "proved empty".
-- RESEARCH's own identity is `sum(F + P) = terminal - prev0`, and the proof's premise is `prev0 ≈ 0` on a full-history MT5 ledger.
-- With a terminal of 0.0, a ledger of -20,000 means `prev0 = +20,000`: the stored deals are missing at least 20,000 of funding. Such a ledger is not evidence of an empty account.
-- The account could be emptied: the missing deposit was withdrawn. It could also be funded: an 80,000 deposit is missing, 20,000 was withdrawn, the true balance is 60,000 and the live read is a transient zero, which is exactly the NOCAP-01 defect. The proof cannot tell these apart, yet it lets the key exit.
-
-**The locked decision's premise fails.** CONTEXT `[Post-research]` (line 69) chose "Only the locked
-'at or below DUST_NAV_FLOOR'" because "a ledger level far below zero is already refused by the
-replay's zero-start and non-positive checks". The helper's docstring repeats this ("the replay's
-zero-start and non-positive checks catch it downstream").
-
-- The zero-start check (`replay_key_equity`, the `if opening_run:` block in `allocator_equity_derive.py`) runs only when `_opening_flow_run` is non-empty, that is, when a flow sits on the calendar day before the first return day. RESEARCH says the same: "whenever an opening flow run exists".
-- On the writer basis, the backward roll from a 0.0 terminal through a withdrawal gives positive earlier levels, so the non-positive refusal never fires either.
-
-**Reproduction.** A scratchpad test reusing `_nc_assemble`, `_nc_candidate`, `_nc_payload` and
-`_compose_no_capital_book` builds an MT5 `nonpositive` key with returns on d1-d3, a terminal of 0.0
-on d4, `composed_flows={d4: W}`, `composed_day_pnl` 0.0 on d1-d4, `dropped_pnl={d4: 0.0}`, and no
-deposit anywhere.
-
-| W | `is_trustworthy` | `degrade_reasons` | exited | field |
-|---|---|---|---|---|
-| -20,000 | True | `classified_rotation`, `window_truncated` | key-C exits on d3 | none |
-| -500,000 | True | same | key-C exits on d3 | none |
-
-In the -500,000 row key-C is composed at 500,000 on d1-d3 (20,000 in the -20,000 row) and then leaves; the curve totals also include key-A's 100,000. Nothing in the payload marks it.
-
-**Why it matters.** This is the circular-proof class the phase exists to close, moved from the terminal to
-the ledger. A funded MT5 key can leave a trustworthy book on a transient zero whenever its stored
-deal ledger under-counts funding by at least the balance. Nothing upstream stops such a ledger from
-being stored, and this was checked rather than assumed:
-
-- `combine_mt5_deal_ledger` (`broker_dailies.py`) calls `reconstruct_nav_and_twr(..., full_history=True)`.
-- In `chain_linked_twr` (`nav_twr.py`), `full_history` only decides whether day 0's near-zero base is flagged.
-- A day-0 base of +20,000 is not refused anywhere on the MT5 path; only Deribit's native core runs `_assert_inception_reconciled`.
-
-**This is a gap in the new gate, not a regression:** before this phase the same row exited on A2 alone, because a terminal of 0.0 is at or below the floor. The trigger needs an incomplete ledger. But the fix
-is one comparison, and the decision explicitly relied on a guard that is conditional.
-
-**Fix.** Make the proof two-sided, so it confirms what the premise needs: the ledger reaches about
-zero. Both live PROD exits sit at -1.6e-11 (CONTEXT gate reading) and still pass. Every re-fixtured
-MT5 book in the suite sums inside the band (0.0, 80.0, 0.5 x the floor), so no existing test flips:
-
-```python
-# job_worker.py, in the apply loop
-if abs(_nc_ledger_level) > DUST_NAV_FLOOR:
-    _nc_loop_refusals["ledger_level_funded"] += 1   # or a new closed token, e.g. "ledger_unreconciled"
-    continue
-```
-
-If a new token is added, update `NO_CAPITAL_REFUSAL_REASONS` and its whole-set pin
-(`test_no_capital_refusal_reasons_are_the_eleven_plan_01_to_03_tokens`). Then:
-
-- Add the reproduction above as a RED-then-GREEN arm.
-- Correct the docstring sentence and the CONTEXT line 69 rationale, both of which state a guard that does not exist for this shape.
-
-Limits of this fix, which should be recorded with it:
-
-- `abs()` narrows the hole but does not close it. A ledger missing a deposit D whose other deals net to about zero still sums near zero, while the real balance is D.
-- A native-BTC MT5 key's sum carries RESEARCH A7's extra term, which can be negative. The two-sided check may then refuse such a key (to `dropped_key`), which is the safe direction.
-
 ## Warnings
 
-### WR-01: A present but empty writer basis counts as proof of an empty account; the same row without the fields is refused
+### WR-01: The ledger band's width is unpinned: a 10x wider band, on either side, passes every test
 
-**File:** `analytics-service/services/job_worker.py:16750-16753`; the defect is pinned by `analytics-service/tests/test_derive_allocator_equity_job.py:4504`
+**File:** `analytics-service/services/job_worker.py:17836-17841` (the gate). The tests are in `analytics-service/tests/test_derive_allocator_equity_job.py`, `4366-4418` and `4350-4362`.
 
 **Issue:**
 
-- `read_writer_basis` returns `({}, {})` for a row that carries `composed_flows: []` and `composed_day_pnl: []`. Only both fields absent or null returns None.
-- `_no_capital_ledger_level(({}, {}))` returns `0.0`, which passes the proof. The unit test pins this: `assert _no_capital_ledger_level(({}, {})) == 0.0`.
-- The job's own definition of "has a writer basis" (`job_worker.py:17756`, `if _k in stitched_kept or not _pnl_by_day_map: continue`) treats an empty day-P&L map as no basis.
-- The writer never stores one: its gate requires `not _basis_day_pnl.empty`.
-- So an MT5 row with empty basis lists carries no ledger evidence at all, yet it is "proved empty". The same row without the two fields is refused as `ledger_basis_absent`. Stored `key_inputs` rows are a trust boundary; that is why every neighbouring reader is strict.
+- The two-sided band is the whole of the NOCAP-01 proof on MT5. It is a data-integrity gate: a ledger outside the band that passes lets a funded key exit while the book reads `is_trustworthy=True`.
+- The only arms near an edge are:
+  - inside the lower edge: exactly `-DUST_NAV_FLOOR` exits (`:4406`);
+  - far outside it: -20,000 and -500,000 (`:4385`);
+  - far outside the upper edge: the 60,000 tracer and the `'MT5'` case arm.
+- Nothing pins either edge from just outside, and nothing pins the upper edge's inclusion.
+- Mutants run against the three phase suites, all passing (241 passed, the scratch-only TS/SQL test deselected):
 
-**Reproduction.** An MT5 `nonpositive` key with returns on d1-d3, a terminal of 0.0 on d4, an
-event flow of -20,000 on d4 and `dropped_pnl={d4: 0.0}`, composed through the job:
+| Mutant | Effect | Result |
+|---|---|---|
+| `_nc_ledger_level > DUST_NAV_FLOOR` becomes `> 10 * DUST_NAV_FLOOR` | a +500 ledger proves an account empty | survives |
+| `_nc_ledger_level < -DUST_NAV_FLOOR` becomes `< -10 * DUST_NAV_FLOOR` | a -500 ledger proves an account empty | survives |
+| `> DUST_NAV_FLOOR` becomes `>= DUST_NAV_FLOOR` | a ledger of exactly +100.0 is refused | survives |
 
-| Row variant | Result |
-|---|---|
-| with `composed_flows=[]`, `composed_day_pnl=[]` | `is_trustworthy=True`, key-C exits, no refusal field |
-| without the fields | `dropped_key`, `{"ledger_basis_absent": 1}` |
+- A later refactor could swap in a different constant, for example `EMPTIED_RESTART_FLOOR_USD`, or a relative tolerance, and every test would stay green. This is the "a test that cannot fail when the business logic changes" class (CLAUDE.md Rule 9, and the repo's "data-integrity gates must be able to fail" rule).
 
-**Fix.** Treat a basis with no day P&L as no proof, matching the writer's gate and line 17756.
-Change the pinned assertion to `is None`.
+**Fix:** Add three arms with `_nc_mt5_ledger_book`, which already exists. Each arm's outcome
+below was checked against HEAD with a probe:
 
 ```python
-if basis is None or not basis[1]:
-    return None
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ledger", "refused"),
+    [
+        # upper edge, inclusive: passes the ledger gate. A +100 ledger against a 0.0 terminal implies
+        # a negative start, so the replay then refuses it (probe at HEAD: {"replay_refused": 1}).
+        # The arm pins that the LEDGER gate did not refuse it.
+        (DUST_NAV_FLOOR, {"replay_refused": 1}),
+        (DUST_NAV_FLOOR + 0.01, {"ledger_level_funded": 1}),       # just above: funded
+        (-DUST_NAV_FLOOR - 0.01, {"ledger_level_negative": 1}),    # just below: negative
+    ],
+)
+async def test_no_capital_exit_mt5_ledger_band_edges(ledger, refused) -> None:
+    d = _BTC_DAYS
+    payload = await _compose_no_capital_book(_nc_mt5_ledger_book(flows={d[3]: ledger}))
+    assert _nc_refused(payload) == refused
 ```
+
+Probe at HEAD: +100.0 gives `{"replay_refused": 1}`, +100.01 gives `{"ledger_level_funded": 1}`
+and -100.01 gives `{"ledger_level_negative": 1}`. The same results hold when the +ledger sits in
+the basis P&L on day 1 instead of a flow. Each arm goes RED under its mutant above: `>=` turns the
+first arm into `ledger_level_funded`, and each 10x widening turns its own just-outside arm into
+`replay_refused` or an exit.
 
 ## Info
 
-### IN-01: The candidate-fault arms leave no Sentry event and no stack, so a deterministic bug in the candidate path is absorbed silently
-
-**File:** `analytics-service/services/job_worker.py:17899`, `analytics-service/services/job_worker.py:18336`
-
-**Issue:**
-
-- Both new `except Exception` arms catch programming errors (`TypeError`, `AttributeError` and so on) as well as data faults, and log one WARNING. The class-only content is the locked NOCAP-02 decision.
-- The job's own comment at the `departed_history_unavailable` capture says a WARNING log reaches Sentry only as a breadcrumb.
-- So a regression in the apply loop or the compose turns every affected book into `dropped_key` on every run. The only trace is the `candidate_exception` count in the stored payload and a warning with no traceback.
-
-**Fix (compatible with the lock).** Add one `sentry_sdk.capture_message` with static text. Tag it
-with the job id and `type(exc).__name__`, the pattern the `departed_history_unavailable` capture
-already uses. Never include the exception text.
-
-### IN-02: NOCAP-03's "every route" does not count a working no-capital key with inputs and no return rows
-
-**File:** `analytics-service/services/allocator_equity_compose.py:698-703`
-
-**Issue:**
-
-- A working key with a `nonpositive` token, a `key_inputs` row and no return rows takes `NO_ANCHOR` + `MISSING_SERIES` + `DROPPED_KEY` in `null_anchor_without_returns`.
-- The selection gate requires `api_key_id in last_return_day`, so that key never reaches a count.
-- CONTEXT NOCAP-03 says the closed set "covers every route a no-capital key takes to `dropped_key`". Plan 01's route table does not record why this one is excluded.
-
-**Fix.** Record the exclusion in the plan or SUMMARY. A key with no history was never a D-08
-candidate, which is probably the right reason. Otherwise count it under its own token.
-
-### IN-03: Only the D-10 refusal gets a job log line
-
-**File:** `analytics-service/services/job_worker.py:17927-17934`
-
-**Issue:** The new `ledger_basis_absent`, `ledger_level_funded`, `negative_terminal`,
-`funded_terminal` and `no_stored_terminal` routes are counted in the payload, but unlike
-`consumes_more_than_dust` they are never logged.
-
-**Fix.** Log the whole merged counter once, counts only, instead of the single D-10 line.
-
-### IN-04: Dead placeholder code in a test helper
-
-**File:** `analytics-service/tests/test_allocator_equity_inception.py:379-380`
-
-**Issue:** `row = inputs["derived"] if "derived" in inputs else None  # placeholder, replaced below`
-followed by `del row` does nothing.
-
-**Fix.** Delete both lines.
-
-### IN-05: The "listed day inside the window" arm cannot fail on its own premise
-
-**File:** `analytics-service/tests/test_allocator_equity_inception.py:482-493`
-
-**Issue:**
-
-- The book has no flow on the listed in-window day (day 3), and an in-window flow is never counted anyway.
-- The arm only re-asserts that an unstated post-window flow counts, which `test_a_different_stated_day_keeps_the_post_window_flow_counted` already covers.
-- A mutation that exempted every listed day regardless of position would still pass it. That is Rule 9: a test should encode why the behaviour matters.
-
-**Fix.** Put the post-window flow's own day in the window as well, or delete the arm as a duplicate.
-Then add an arm with a flow on a listed in-window day, asserting the replay is byte-identical to the
-call without the list.
+- **IN-A: only the both-empty shape of WR-01 is pinned.** Weakening the fix to `not basis[0] and not basis[1]` survives the tests. The weakened form would accept a basis with flows present and an empty day P&L, which the writer never stores (`job_worker.py:16753`). An arm with `({d[3]: -50.0}, {})` asserting `is None` would pin the stated rule ("an empty day P&L is no basis").
+- **IN-B: M2 pins only `candidate_exception` on the refusal record.** A mutant that drops selection and loop counts (`funded_terminal`, `ledger_level_*` and others) from `_compose_refused`'s field, keeping only `compose_reverted` and `candidate_exception`, survives. Those counts are diagnostic, not user-facing. A compose refusal with one `funded_terminal` key and no candidate would pin it.
+- **IN-C: a stale test name.** `test_no_capital_refusal_reasons_are_the_eleven_plan_01_to_03_tokens` (`test_derive_allocator_equity_job.py:5227`) now asserts twelve tokens, including the round-2 `ledger_level_negative`.
 
 ---
 
-_Reviewed: 2026-11-25T11:14:08Z_
+_Reviewed: 2026-11-25T11:36:24Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
