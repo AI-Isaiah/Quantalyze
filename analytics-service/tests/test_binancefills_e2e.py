@@ -160,20 +160,15 @@ class TestBinanceFillsThroughTheSyncJob:
 
         assert _the_advance(rec)["p_last_fetched_ts"] == C_PLUS_2D_ISO
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "R2-02: ccxt caps a since-only linear request at since + 7 days, so a fill "
-            "past a 20-day quiet stretch is never read and the cursor stamps the stale "
-            "fill. Plan 250-03 (the window walk) removes this marker; strict mode turns "
-            "a pass that arrives early into a failure."
-        ),
-    )
     async def test_tracer_a_quiet_stretch_is_walked_and_the_cursor_stamps_the_newer_fill(
         self,
     ) -> None:
         """SC-1: a fill at the cursor, 20 quiet days, then a fill 5 days before now. The
-        walk reads past the quiet stretch and the cursor stamps the newer fill."""
+        walk reads past the quiet stretch and the cursor stamps the newer fill.
+
+        R2-02 history: this arm was a strict xfail (250-01) until the window walk landed;
+        250-03 promoted it. Every venue call must carry both bounds and span at most one
+        7-day venue window, so no request depends on ccxt's implicit linear-only cap."""
         venue = BinanceFillsVenue(
             {
                 ("linear", "BTCUSDT"): [
@@ -189,3 +184,9 @@ class TestBinanceFillsThroughTheSyncJob:
         assert fetch.await_args is not None
         assert fetch.await_args.kwargs["since_ms"] == C_MS
         assert _the_advance(rec)["p_last_fetched_ts"] == NOW_MINUS_5D_ISO
+
+        # 604799999 = 7 days - 1 ms: the longest span the walk may ask for in one request.
+        assert venue.calls, "the venue was never asked"
+        for _kind, request in venue.calls:
+            assert "startTime" in request and "endTime" in request, request
+            assert 0 < request["endTime"] - request["startTime"] <= 604799999, request

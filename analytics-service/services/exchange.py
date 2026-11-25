@@ -685,6 +685,58 @@ def _finite_positive_decimal(value: Any, *, label: str) -> Decimal | None:
 # number. Tests in test_exchange.py pin the contract.
 OVERLAP_WINDOW_MS = 3_600_000
 
+#: Phase 250 BINANCEFILLS (2026-11-25): the Binance fills read walks one window per request,
+#: each carrying an explicit end, because the venue rules are per window and ccxt's own
+#: implicit end is linear-only. Venue rules (RESEARCH Q1; the two futures Account Trade List
+#: pages were read through a summarising fetch, the spot ``myTrades`` section verbatim from
+#: binance-spot-api-docs rest-api.md): "If startTime and endTime are both not sent, then the
+#: last 7 days' data will be returned." / "The time between startTime and endTime cannot be
+#: longer than 7 days." (USD-M and COIN-M) / "The time between startTime and endTime can't be
+#: longer than 24 hours." (spot) / "Only support querying trade in the past 3 months" /
+#: limit default 500, maximum 1000.
+#: Read at call time, so tests lower them by monkeypatch (like OKX_BILLS_PAGE_CAP).
+BINANCE_FILLS_WINDOW_DAYS: int = 7
+BINANCE_SPOT_FILLS_WINDOW_HOURS: int = 24
+#: 85 days = 4 days under the shortest three calendar months (89 days: February, March and
+#: April of a common year, 28 + 31 + 30).
+#: The venue's exact reach rule is UNMEASURED, so the margin is an assumption (RESEARCH A1):
+#: too long and an out-of-reach start errors loudly and holds the cursor; too short and a
+#: 86 to 89 day old cursor is clamped (and flagged, never held) needlessly.
+BINANCE_FILLS_REACH_DAYS: int = 85
+#: Pages per WINDOW (it was a local inside the per-symbol read, per symbol). 20 x 1000 =
+#: 20K fills per window. Raising it is NOT a way to close the page-cap survivor (Phase 232
+#: precedent): a capped window stops that symbol's walk and carries a read-through bound.
+BINANCE_PAGE_CAP: int = 20
+BINANCE_FILLS_PAGE_LIMIT: int = 1000
+
+
+class _BinanceSymbolRead(NamedTuple):
+    """What one symbol's window walk hands back to the parent coroutine.
+
+    Every per-symbol fact travels here and is recorded by the PARENT: ``asyncio.gather`` runs
+    each per-symbol read in a Task holding a COPY of the context, so a ``_record_dq_flag``
+    inside it is lost (measured 2026-11-25). ``stop`` is None for a complete walk, else why
+    the walk ended early; ``read_through_ms`` is then the instant the symbol is complete
+    through (never later than a row the walk read).
+    """
+
+    symbol: str
+    trades: list[dict[str, Any]]
+    stop: Literal["cap", "untimed", "deadline"] | None
+    read_through_ms: int | None
+    advanced_plus1: bool
+
+
+def _binance_fills_window_ms(exchange: ccxt.Exchange, ccxt_symbol: str) -> int:
+    """The venue window for ``ccxt_symbol``: 24 hours when the resolved market is spot, else
+    7 days (linear, inverse, and an unloaded or unresolved market)."""
+    markets = getattr(exchange, "markets", None)
+    if isinstance(markets, dict) and markets:
+        market = markets.get(ccxt_symbol)
+        if isinstance(market, dict) and market.get("spot") is True:
+            return BINANCE_SPOT_FILLS_WINDOW_HOURS * 3_600_000
+    return BINANCE_FILLS_WINDOW_DAYS * 86_400_000
+
 
 class ColdStartSymbolDiscoveryError(Exception):
     """Raised when Binance cold-start symbol discovery (fetch_positions
@@ -773,6 +825,19 @@ class BinancePerSymbolFetchError(Exception):
             f"symbols (e.g. {failed_symbols[0] if failed_symbols else '<none>'}); "
             f"first error: {first_error!r}"
         )
+
+
+class BinanceFillsOutOfWindow(RuntimeError):
+    """The Binance fills read caught the venue serving a fill outside the window it asked for.
+
+    A venue that ignored ``endTime`` could otherwise place a window's rows (and the fills
+    cursor) past what was asked for, so the symbol fails and is named in the holding
+    ``binance_partial_symbols``; its rows are never returned. The text is static, with no
+    digit and no venue text.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Binance fills read refused: the venue served a fill outside the requested window")
 
 
 class FillRow(TypedDict):
@@ -2486,7 +2551,20 @@ async def _fetch_raw_trades_binance(
     supabase: Client,
     since_ms: int | None,
 ) -> list[dict[str, Any]]:
-    """Binance: per-symbol iteration using fetch_my_trades."""
+    """Binance: per-symbol iteration using fetch_my_trades.
+
+    Phase 250 BINANCEFILLS: each symbol walks since-aligned windows oldest first, from its
+    start to ``read_now`` (one ``_now_ms()`` for the read). Every request carries
+    ``params={"until": window_end}``; a window spans ``window - 1`` ms, ``window`` being 7
+    days (linear, inverse) or 24 hours (a spot-resolved name), and is paged with
+    ``limit=BINANCE_FILLS_PAGE_LIMIT``. No seed walks from ``BINANCE_FILLS_REACH_DAYS`` back;
+    an older seed starts there and records the non-holding ``binance_fills_reach_clamped``.
+    A row outside its window raises ``BinanceFillsOutOfWindow`` (the symbol fails and is
+    named in ``binance_partial_symbols``). A symbol's walk ends early only two ways, each a
+    ``_BinanceSymbolRead.stop`` with a ``read_through_ms`` bound: ``cap`` (``BINANCE_PAGE_CAP``
+    pages inside one window) and ``untimed`` (a full page whose last row has no timestamp).
+    Flags are recorded here in the parent, never inside the gathered per-symbol tasks.
+    """
     from services.db import db_execute, paginated_select
 
     # DISTINCT symbols across trades + position_snapshots. Paginated
@@ -2581,79 +2659,134 @@ async def _fetch_raw_trades_binance(
             )
             ccxt_symbol_by_normalized[normalized] = mkt_symbol
 
-    async def _fetch_one(symbol: str) -> tuple[str, list[dict[str, Any]]]:
+    # Phase 250 BINANCEFILLS: ONE clock read per read, shared by every symbol (the module
+    # attribute, so a test patch lands). The walk never sends a request without startTime:
+    # no seed walks from the venue's reach, and a seed older than the reach starts there and
+    # is flagged (non-holding) rather than read as quiet.
+    read_now = _now_ms()
+    reach_ms = read_now - BINANCE_FILLS_REACH_DAYS * 86_400_000
+    if since_ms is None:
+        walk_start_ms = reach_ms
+    elif since_ms < reach_ms:
+        _record_dq_flag("binance_fills_reach_clamped", True)
+        logger.warning(
+            "Binance fills read strategy=%s: seed %d is older than the venue reach %d, "
+            "starting at the reach",
+            strategy_id, since_ms, reach_ms,
+        )
+        walk_start_ms = reach_ms
+    else:
+        walk_start_ms = since_ms
+    walk_start_ms = min(walk_start_ms, read_now)
+
+    async def _fetch_one(symbol: str) -> _BinanceSymbolRead:
         # Normalize symbol for CCXT: BTCUSDT -> BTC/USDT:USDT
         ccxt_symbol = symbol
         if "/" not in ccxt_symbol:
             ccxt_symbol = ccxt_symbol_by_normalized.get(symbol, symbol)
 
-        # H-0662: Binance caps fetch_my_trades at 1000 rows per call.
-        # Paginate by advancing ``since`` past the last fill's timestamp
-        # until a short page returns or we hit the cap (20 × 1000 =
-        # 20K fills/symbol). Mirrors the OKX/Bybit page-cap contract.
-        BINANCE_PAGE_CAP = 20
+        window_ms = _binance_fills_window_ms(exchange, ccxt_symbol)
         all_trades: list[dict[str, Any]] = []
-        current_since = since_ms
-        for _page in range(BINANCE_PAGE_CAP):
-            # Hold the semaphore only across the network call so one
-            # heavy symbol can't monopolize a slot for 20 sequential RTTs
-            # while sibling symbols block.
-            async with sem:
-                batch = await exchange.fetch_my_trades(
-                    ccxt_symbol, since=current_since, limit=1000
-                )
-            if not batch:
-                break
-            all_trades.extend(batch)
-            if len(batch) < 1000:
-                break
-            last_ts = batch[-1].get("timestamp")
-            if not isinstance(last_ts, (int, float)):
-                # No cursor → can't safely advance without risking an
-                # infinite loop. Stop here.
+        stop: Literal["cap", "untimed", "deadline"] | None = None
+        read_through_ms: int | None = None
+        advanced_plus1 = False
+        window_start = walk_start_ms
+        while True:
+            # Every request carries an explicit end, so no window depends on ccxt's
+            # implicit (linear-only) cap. The next window starts at this one's end: a 1 ms
+            # overlap, absorbed by the trades unique index.
+            window_end = min(window_start + window_ms - 1, read_now)
+            current_since = window_start
+            window_newest: int | None = None
+            # H-0662: Binance caps fetch_my_trades at 1000 rows per call. Paginate by
+            # advancing ``since`` until a short page returns or the per-WINDOW page cap.
+            for _page in range(BINANCE_PAGE_CAP):
+                # Hold the semaphore only across the network call so one
+                # heavy symbol can't monopolize a slot for 20 sequential RTTs
+                # while sibling symbols block.
+                async with sem:
+                    batch = await exchange.fetch_my_trades(
+                        ccxt_symbol,
+                        since=current_since,
+                        limit=BINANCE_FILLS_PAGE_LIMIT,
+                        params={"until": window_end},
+                    )
+                if not batch:
+                    break
+                for row in batch:
+                    row_ts = row.get("timestamp")
+                    if not isinstance(row_ts, (int, float)) or isinstance(row_ts, bool):
+                        continue
+                    if row_ts < window_start or row_ts > window_end:
+                        raise BinanceFillsOutOfWindow()
+                    window_newest = (
+                        int(row_ts) if window_newest is None else max(window_newest, int(row_ts))
+                    )
+                all_trades.extend(batch)
+                if len(batch) < BINANCE_FILLS_PAGE_LIMIT:
+                    break
+                last_ts = batch[-1].get("timestamp")
+                if not isinstance(last_ts, (int, float)):
+                    # No cursor → can't safely advance without risking an
+                    # infinite loop. Stop this symbol here, complete through the
+                    # newest timestamp read in this window.
+                    logger.warning(
+                        "Binance fetch_my_trades %s: missing 'timestamp' "
+                        "on last fill, stopping pagination at %d fills",
+                        symbol, len(all_trades),
+                    )
+                    stop = "untimed"
+                    read_through_ms = (
+                        window_newest if window_newest is not None else window_start - 1
+                    )
+                    break
+                # NEW-C13-03: advance cursor WITHOUT +1. The pre-fix `int(last_ts)+1`
+                # permanently skips fills that share the last fill's millisecond
+                # across a page boundary — a busy pair with many same-ms fills can
+                # lose a whole cluster. The exchange_fill_id unique index deduplicates
+                # genuinely re-fetched boundary fills, so +1 is not needed for
+                # correctness.
+                #
+                # red-team/H-4 (NEW-C13-03 follow-up): the stuck-cursor guard that
+                # breaks with a DQ flag when next_since == current_since (same-ms
+                # full page) has a false positive: it fires for the legitimate case
+                # where a high-frequency burst of fills all share the same millisecond
+                # and span more than one page. Breaking would truncate all fills past
+                # page 1 of that burst. Instead, fall back to +1 for that single step
+                # to break past the stuck ms, then continue. The +1 causes at most one
+                # boundary fill to be re-fetched (harmless — deduped by the DB index).
+                next_since = int(last_ts)
+                if next_since == current_since:
+                    # Cursor did not advance — use +1 to break past the same-ms
+                    # cluster rather than stopping. The fact travels back in the
+                    # read (a flag recorded inside a gathered task is lost) so the
+                    # parent can emit the observability flag.
+                    advanced_plus1 = True
+                    logger.warning(
+                        "Binance fetch_my_trades %s: cursor stuck at same-ms "
+                        "(last_ts=%d == current_since) on a full page — "
+                        "advancing +1ms to break past cluster (may re-fetch "
+                        "boundary fill; dedup handles it)",
+                        symbol, next_since,
+                    )
+                    next_since = current_since + 1
+                current_since = next_since
+                if current_since > window_end:
+                    break  # the window is complete: nothing left to ask for in it
+            else:
                 logger.warning(
-                    "Binance fetch_my_trades %s: missing 'timestamp' "
-                    "on last fill, stopping pagination at %d fills",
-                    symbol, len(all_trades),
+                    "Binance fetch_my_trades %s: hit %d-page cap; "
+                    "possible truncation past %d fills",
+                    symbol, BINANCE_PAGE_CAP, len(all_trades),
                 )
+                stop = "cap"
+                read_through_ms = (
+                    window_newest if window_newest is not None else window_start - 1
+                )
+            if stop is not None or window_end >= read_now:
                 break
-            # NEW-C13-03: advance cursor WITHOUT +1. The pre-fix `int(last_ts)+1`
-            # permanently skips fills that share the last fill's millisecond
-            # across a page boundary — a busy pair with many same-ms fills can
-            # lose a whole cluster. The exchange_fill_id unique index deduplicates
-            # genuinely re-fetched boundary fills, so +1 is not needed for
-            # correctness.
-            #
-            # red-team/H-4 (NEW-C13-03 follow-up): the stuck-cursor guard that
-            # breaks with a DQ flag when next_since == current_since (same-ms
-            # full page) has a false positive: it fires for the legitimate case
-            # where a high-frequency burst of fills all share the same millisecond
-            # and span more than one page. Breaking would truncate all fills past
-            # page 1 of that burst. Instead, fall back to +1 for that single step
-            # to break past the stuck ms, then continue. The +1 causes at most one
-            # boundary fill to be re-fetched (harmless — deduped by the DB index).
-            next_since = int(last_ts)
-            if next_since == current_since:
-                # Cursor did not advance — use +1 to break past the same-ms
-                # cluster rather than stopping. Emit an observability flag so
-                # operators can see when this path is hit.
-                _record_dq_flag("binance_fill_cursor_advance_plus1", True)
-                logger.warning(
-                    "Binance fetch_my_trades %s: cursor stuck at same-ms "
-                    "(last_ts=%d == current_since) on a full page — "
-                    "advancing +1ms to break past cluster (may re-fetch "
-                    "boundary fill; dedup handles it)",
-                    symbol, next_since,
-                )
-                next_since = current_since + 1
-            current_since = next_since
-        else:
-            logger.warning(
-                "Binance fetch_my_trades %s: hit %d-page cap; "
-                "possible truncation past %d fills",
-                symbol, BINANCE_PAGE_CAP, len(all_trades),
-            )
-        return symbol, all_trades
+            window_start = window_end
+        return _BinanceSymbolRead(symbol, all_trades, stop, read_through_ms, advanced_plus1)
 
     tasks = [_fetch_one(s) for s in symbols]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -2688,7 +2821,7 @@ async def _fetch_raw_trades_binance(
                 "Binance fetch_my_trades failed for %s: %s", symbol, str(item)
             )
             continue
-        _symbol, trades = item
+        trades = item.trades
         for t in trades:
             normalized = _normalize_fill(t, exchange.id)
             if normalized is not None:
@@ -2696,6 +2829,11 @@ async def _fetch_raw_trades_binance(
                 # public contract (fetch_raw_trades returns list[dict]); dict()
                 # is a real conversion, not a cast.
                 fills.append(dict(normalized))
+
+    # The same-ms +1 step is recorded here, in the parent: a flag recorded inside a gathered
+    # per-symbol task writes to that task's copy of the context and never reaches the drain.
+    if any(isinstance(r, _BinanceSymbolRead) and r.advanced_plus1 for r in results):
+        _record_dq_flag("binance_fill_cursor_advance_plus1", True)
 
     if failed_symbols:
         # Partial-failure summary so the bad-symbol rate is visible in logs
