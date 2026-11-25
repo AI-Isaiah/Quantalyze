@@ -344,7 +344,7 @@ def test_p8_mt5_master_password_answers_the_coded_400(app_client, monkeypatch) -
     Driven through the REAL `classify_trade_capability` seam: the account says
     trade_allowed, the probe is a refusal, the terminal itself is healthy, so the
     refusal is attributable to the account and the verdict is `trade_capable`."""
-    _arrange_mt5(monkeypatch, account={"trade_allowed": True, "login": 123456})
+    _arrange_mt5(monkeypatch, account={"trade_allowed": True, "login": 123456, "server": "Broker-Demo"})
     client = _handler_globals("/api/validate-key")["Mt5Client"].return_value
     client.order_check = MagicMock(
         return_value={"retcode": 10017, "comment": "Trade disabled"}

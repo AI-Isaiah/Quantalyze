@@ -247,7 +247,11 @@ _METRICS_SENTINEL = MetricsSnapshot(
 
 # login=123456 matches the parsed login from _req's api_key="123456" so the RED-TEAM
 # login bracket (account_info().login == expected, pre+post) passes on the happy path.
-_INVESTOR_ACCOUNT = _FakeNamedTuple(trade_allowed=False, balance=1000.0, login=123456)
+# server="Broker-Demo" matches _req's passphrase, so the Phase 225 plan 18 server
+# bracket in run_probe passes on the happy path too.
+_INVESTOR_ACCOUNT = _FakeNamedTuple(
+    trade_allowed=False, balance=1000.0, login=123456, server="Broker-Demo"
+)
 # An investor order_check is rejected with the DOCUMENTED investor code
 # TRADE_RETCODE_TRADE_DISABLED (10017) — [DOC] enum_trade_return_codes.
 #
@@ -435,11 +439,52 @@ def test_validate_disconnected_terminal_is_transient_never_readonly(
     assert fake.shutdown_calls == 0
 
 
+@pytest.mark.parametrize(
+    "session_server", ["MyBroker-Live", None, "", "   "], ids=["another", "none", "empty", "blank"]
+)
+def test_validate_session_not_on_the_requested_server_propagates_the_mismatch(
+    monkeypatch, session_server
+) -> None:
+    """Phase 225 plan 18 (CONTEXT Q6 item 2): the worker adapter calls the same
+    `run_probe` as the wizard, so a session that answers the requested login on
+    ANOTHER server (or reports none) must leave `validate` as the original
+    `Mt5ServerMismatchError`, never as a `ValidationResult`.
+
+    `pytest.raises` rules out `valid=True` AND an `auth_failed`/`wrong_server`
+    verdict (no result is returned at all); the type checks rule out a re-raise as
+    an `Mt5ClientError`, which `classify_mt5_login_error` would read as the user's
+    fault. `close()` still runs, and no server value reaches the message."""
+    from services.mt5_client import Mt5AccountMismatchError, Mt5ServerMismatchError
+
+    fields = {"trade_allowed": False, "balance": 1000.0, "login": 123456}
+    if session_server is not None:
+        fields["server"] = session_server
+    fake = _install_client(
+        monkeypatch,
+        {
+            "account": _FakeNamedTuple(**fields),
+            "order_check": _INVESTOR_ORDER_CHECK,
+            "terminal": _HEALTHY_TERMINAL,
+        },
+    )
+
+    with pytest.raises(Mt5ServerMismatchError) as excinfo:
+        asyncio.run(Mt5Adapter().validate(_req()))
+
+    assert type(excinfo.value) is Mt5ServerMismatchError
+    assert isinstance(excinfo.value, Mt5AccountMismatchError)
+    assert not isinstance(excinfo.value, Mt5ClientError)
+    assert "MyBroker-Live" not in str(excinfo.value)
+    assert "Broker-Demo" not in str(excinfo.value)
+    assert fake.close_calls == 1
+    assert fake.shutdown_calls == 0
+
+
 def test_validate_master_via_trade_allowed_rejected(monkeypatch) -> None:
     fake = _install_client(
         monkeypatch,
         {
-            "account": _FakeNamedTuple(trade_allowed=True, login=123456),
+            "account": _FakeNamedTuple(trade_allowed=True, login=123456, server="Broker-Demo"),
             "order_check": _INVESTOR_ORDER_CHECK,
             "terminal": _HEALTHY_TERMINAL,
         },
@@ -461,7 +506,7 @@ def test_validate_master_via_order_check_retcode_rejected(monkeypatch) -> None:
     fake = _install_client(
         monkeypatch,
         {
-            "account": _FakeNamedTuple(trade_allowed=False, login=123456),
+            "account": _FakeNamedTuple(trade_allowed=False, login=123456, server="Broker-Demo"),
             "order_check": _FakeNamedTuple(retcode=10009, comment="Done"),
             "terminal": _HEALTHY_TERMINAL,
         },
