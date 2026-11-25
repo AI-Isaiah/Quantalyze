@@ -737,25 +737,84 @@ describe("[OPS-06] csv-finalize: a missing service-role key fails LOUD and PRE-C
  * fails to load) rather than silently yielding "" and making `toBe("")`
  * vacuous. The anti-vacuity case below pins its shape as well.
  */
+const COPY_SNAPSHOT_PATH = resolve(
+  process.cwd(),
+  "supabase/schema/functions/computation_error_copy.sql",
+);
+const COPY_SNAPSHOT_SQL: string = readFileSync(COPY_SNAPSHOT_PATH, "utf8");
+
 const CURATED_DEFAULT_COPY: string = (() => {
-  const path = resolve(
-    process.cwd(),
-    "supabase/schema/functions/computation_error_copy.sql",
-  );
-  const sql = readFileSync(path, "utf8");
   // The arms are `WHEN '<kind>' THEN\n  '<sentence>'`; the last is a bare
   // `ELSE`. `ELSE` is upper-case in code and the only prose occurrence is
   // lower-case ("Anything else:"), so this cannot match a comment.
-  const arm = sql.match(/\bELSE\s*\n\s*'([^']+)'/);
+  const arm = COPY_SNAPSHOT_SQL.match(/\bELSE\s*\n\s*'([^']+)'/);
   if (!arm) {
     throw new Error(
-      `WR-07 oracle: could not parse the ELSE arm out of ${path}. If the dump ` +
+      `WR-07 oracle: could not parse the ELSE arm out of ${COPY_SNAPSHOT_PATH}. If the dump ` +
         `format changed, re-point this parse — do NOT delete it, or the route's ` +
         `literal loses its only tie to the SQL it is a copy of.`,
     );
   }
   return arm[1];
 })();
+
+/**
+ * Phase 222 ERRC-01: every sentence `computation_error_copy` can return, parsed
+ * from the same snapshot. The ELSE parity case above pins ONE arm to the
+ * route; this pin keeps ALL FIVE off the legacy support pointer and on the
+ * contact form (UI-SPEC: ContactPointerText links the lowercase substring
+ * `contact form`). Each arm is parsed by shape, and a parse that finds fewer
+ * than the four WHEN arms plus ELSE fails naming the missing arm, so an arm
+ * the regex cannot see is never silently unpinned.
+ */
+const COPY_ARMS: Record<string, string> = (() => {
+  const arms: Record<string, string> = {};
+  for (const m of COPY_SNAPSHOT_SQL.matchAll(
+    /\bWHEN\s+'([a-z_]+)'\s+THEN\s*\n\s*'([^']+)'/g,
+  )) {
+    arms[m[1]] = m[2];
+  }
+  const elseArm = COPY_SNAPSHOT_SQL.match(/\bELSE\s*\n\s*'([^']+)'/);
+  if (elseArm) arms.ELSE = elseArm[1];
+  return arms;
+})();
+
+describe("every computation_error_copy arm names the contact form", () => {
+  it.each(["permanent", "transient", "unknown", "orphaned", "ELSE"])(
+    "the snapshot parses the %s arm (anti-vacuity)",
+    (arm) => {
+      expect(
+        COPY_ARMS[arm],
+        `arm ${arm} was not parsed out of ${COPY_SNAPSHOT_PATH}`,
+      ).toBeTruthy();
+    },
+  );
+
+  it.each(["permanent", "transient", "unknown", "orphaned", "ELSE"])(
+    "the %s arm never carries the legacy support pointer",
+    (arm) => {
+      expect(
+        COPY_ARMS[arm],
+        `arm ${arm} carries the legacy support pointer`,
+      ).not.toMatch(/contact support/i);
+    },
+  );
+
+  it.each(["permanent", "transient", "unknown", "ELSE"])(
+    "the %s arm names the contact form",
+    (arm) => {
+      expect(
+        COPY_ARMS[arm],
+        `arm ${arm} does not contain the lowercase substring "contact form"`,
+      ).toContain("contact form");
+    },
+  );
+
+  it("the orphaned arm stays retry-positive and offers no channel", () => {
+    expect(COPY_ARMS.orphaned).toContain("retry the sync");
+    expect(COPY_ARMS.orphaned).not.toContain("contact form");
+  });
+});
 
 describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something true", () => {
   const placeholderUpserts: Array<Record<string, unknown>> = [];
