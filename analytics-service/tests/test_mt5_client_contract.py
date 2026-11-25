@@ -547,6 +547,23 @@ def test_login_passes_ipc_timeout_below_rpyc_timeout():
     assert MT5_LOGIN_TIMEOUT_MS < MT5_REQUEST_TIMEOUT_S * 1000
 
 
+def test_login_passes_the_requested_server_to_mt5():
+    """Phase 225 plan 18 (CONTEXT Q6 item 2): the broker server the caller asked
+    for must reach MetaTrader5's own login() as the `server=` keyword, together
+    with the login and password. The MT5 docs (mql5.com/en/docs/python_metatrader5/
+    mt5login_py) say that without it "the last used server is applied
+    automatically", so a login that dropped the keyword would sign the terminal
+    into whichever server it last used and a wrong server could never be refused.
+    The router tests mock the whole client; this is the seam below them."""
+    connect, fake, _rec = _make({"login": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.login(123, password="pw", server="Other-Server-7")
+    login_arg, kwargs = fake.login_calls[0]
+    assert login_arg == 123
+    assert kwargs["server"] == "Other-Server-7"
+    assert kwargs["password"] == "pw"
+
+
 def test_connect_receives_request_timeout():
     """The ctor request_timeout_s must be threaded into connect(timeout=...) — that
     is the rpyc sync_request_timeout knob. The value stays strictly ABOVE the MT5

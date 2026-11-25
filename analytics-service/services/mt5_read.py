@@ -80,7 +80,7 @@ from services.mt5_concurrency import (
     _Mt5PostReadVerificationError,
 )
 from services.mt5_handover import SITE_DERIVE, normalize_mt5_holder
-from services.mt5_probe import assert_expected_login, normalise_mt5_server
+from services.mt5_probe import assert_expected_login, mt5_session_server_verdict
 
 logger = logging.getLogger("quantalyze.analytics.mt5_read")
 
@@ -272,10 +272,11 @@ def log_mt5_poll_server_verdict(
     terminal" and optional (https://www.mql5.com/en/docs/python_metatrader5/mt5login_py).
     Neither page says the two spellings are equal; that is what this line records.
 
-    The predicate mirrors PR-2c's: a reported server that is a ``str`` with a
+    The predicate IS PR-2c's: ``mt5_probe.mt5_session_server_verdict``, the one
+    ``assert_expected_server`` refuses on. A reported server that is a ``str`` with a
     non-blank ``strip()`` is compared with the requested one through
     ``normalise_mt5_server`` (True or False). An absent, non-string or blank server
-    is ``not_captured`` (None), which is what PR-2c's bracket would refuse.
+    is ``not_captured`` (None), which that bracket refuses.
 
     The line is a static message plus ``site``, the lease ``holder`` (through
     ``normalize_mt5_holder``: a UUID key id or a literal, never a number) and the
@@ -284,12 +285,7 @@ def log_mt5_poll_server_verdict(
     function is total over every shape of ``info["server"]`` (a dict lookup and a
     string compare cannot raise) and does not mutate ``info``.
     """
-    reported = info.get("server")
-    verdict: bool | None
-    if isinstance(reported, str) and reported.strip():
-        verdict = normalise_mt5_server(reported) == normalise_mt5_server(requested_server)
-    else:
-        verdict = None
+    verdict = mt5_session_server_verdict(info, server=requested_server)
     logger.info(
         "mt5 poll server verdict site=%s holder=%s session_server_matches_requested=%s",
         site,
