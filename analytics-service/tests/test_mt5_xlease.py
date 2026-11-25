@@ -24,7 +24,7 @@ import pytest
 from services import mt5_client, mt5_concurrency, mt5_xlease
 from services.mt5_client import HOLDER_UNATTRIBUTED, _mt5_epoch_for, mt5_terminal_holder
 from services.mt5_handover import SITE_DERIVE, SITE_HOLDINGS
-from tests.xlease_fakes import FakeXLeaseBackend, GrantingXLeaseBackend
+from tests.xlease_fakes import FakeXLeaseBackend
 
 _XLEASE_LOGGER = "quantalyze.analytics.mt5_xlease"
 _KEY = "h:1"
@@ -432,3 +432,176 @@ async def test_redaction_nothing_a_full_hold_writes_carries_the_terminal_key(
     for leak in leaks:
         assert leak not in haystack, f"{leak!r} reached a row, a log line or an exception"
     assert all(row.holder == HOLDER_UNATTRIBUTED or row.holder for row in fake.rows.values())
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 — renewal while the body runs, the self-fence, timing validation, reset.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def quick_renew(monkeypatch):
+    """Renew every 50 ms and call the lease lost after 250 ms of silence."""
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_RENEW_INTERVAL_S", 0.05)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_LOST_AFTER_S", 0.25)
+    monkeypatch.setattr(mt5_xlease, "_MT5_XLEASE_TTL_S", 2.0)
+
+
+async def _grant(lost: list[int]) -> mt5_xlease.XLeaseHold:
+    return await mt5_xlease.acquire_terminal_xlease(
+        _KEY, holder=None, site=SITE_DERIVE, bound_s=None, on_lost=lambda: lost.append(1)
+    )
+
+
+async def test_renew_a_long_body_keeps_its_lease_by_renewing_with_its_own_token(
+    quick_renew,
+) -> None:
+    fake = FakeXLeaseBackend()
+    _install(fake)
+
+    async with mt5_concurrency.mt5_terminal_lease(_KEY, site=SITE_DERIVE):
+        await asyncio.sleep(0.35)  # seven renew intervals
+        assert fake.holds(_digest()), "the lease lapsed under a body that was still running"
+
+    acquire_token = next(c[2] for c in fake.calls if c[0] == "acquire")
+    renews = [c for c in fake.calls if c[0] == "renew"]
+    assert len(renews) >= 2, f"expected at least two renews, got {len(renews)}"
+    assert {c[2] for c in renews} == {acquire_token}, "a renew used a token it never acquired"
+
+
+async def test_lost_when_renew_answers_false_fences_the_body_and_stops_renewing(
+    quick_renew, caplog
+) -> None:
+    fake = FakeXLeaseBackend()
+    _install(fake)
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+    epoch_before = _mt5_epoch_for(_KEY)
+
+    async with mt5_concurrency.mt5_terminal_lease(_KEY, site=SITE_DERIVE):
+        # Another process takes the row (its expiry on the database clock passed):
+        # this holder's next renew is answered False.
+        fake.rows[_digest()].owner_token = uuid.uuid4()
+        await asyncio.sleep(0.3)
+        assert _mt5_epoch_for(_KEY) == epoch_before + 1, (
+            "a lost lease did not bump the terminal epoch while the body still ran"
+        )
+        renews_when_lost = fake.count("renew")
+        await asyncio.sleep(0.2)
+        assert fake.count("renew") == renews_when_lost, "renewal continued after the loss"
+
+    lost = [r for r in caplog.records if getattr(r, "event_type", "") == "mt5_xlease_lost"]
+    assert len(lost) == 1 and lost[0].levelno == logging.ERROR
+    assert _KEY not in lost[0].getMessage()
+    assert lost[0].site == SITE_DERIVE
+
+
+async def test_lost_on_silence_runs_the_same_path_once_lost_after_elapses(
+    quick_renew, caplog
+) -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["renew"] = RuntimeError(f"connection to {_KEY} refused")
+    _install(fake)
+    caplog.set_level(logging.INFO, logger=_XLEASE_LOGGER)
+    lost: list[int] = []
+
+    hold = await _grant(lost)
+    await asyncio.sleep(0.12)
+    assert lost == [], "the lease was called lost before LOST_AFTER elapsed"
+    await asyncio.sleep(0.4)
+
+    assert lost == [1], "silence past LOST_AFTER must run on_lost exactly once"
+    assert hold.lost
+    records = [r for r in caplog.records if getattr(r, "event_type", "") == "mt5_xlease_lost"]
+    assert len(records) == 1
+    assert _KEY not in "".join(r.getMessage() for r in caplog.records)
+    await hold.release()
+
+
+async def test_renew_task_never_lets_an_exception_escape_and_dies_with_the_holder(
+    quick_renew,
+) -> None:
+    fake = FakeXLeaseBackend()
+    fake.raises["renew"] = RuntimeError("boom")
+    _install(fake)
+    hold = await _grant([])
+    task = hold._renew_task
+    assert task is not None
+    await asyncio.sleep(0.4)
+    assert task.done() and not task.cancelled() and task.exception() is None, (
+        "an exception inside the renew loop escaped the task (it would reach "
+        "main.lifespan's crash handler)"
+    )
+
+    healthy = FakeXLeaseBackend()
+    _install(healthy)
+    hold2 = await _grant([])
+    task2 = hold2._renew_task
+    assert task2 is not None
+    await hold2.release()
+    await asyncio.sleep(0)
+    assert task2.cancelled() or task2.done(), "releasing the hold left its renew task alive"
+    await hold.release()
+
+
+async def test_stop_on_exit_no_renew_happens_after_a_normal_exit(quick_renew) -> None:
+    fake = FakeXLeaseBackend()
+    _install(fake)
+
+    async with mt5_concurrency.mt5_terminal_lease(_KEY):
+        await asyncio.sleep(0.2)
+
+    renews_at_exit = fake.count("renew")
+    await asyncio.sleep(0.3)
+    assert fake.count("renew") == renews_at_exit, "a renew fired after the lease exited"
+    assert not fake.holds(_digest())
+
+
+async def test_cancelling_the_holder_cancels_its_renew_task(quick_renew) -> None:
+    fake = FakeXLeaseBackend()
+    _install(fake)
+    entered = asyncio.Event()
+
+    async def _holder() -> None:
+        async with mt5_concurrency.mt5_terminal_lease(_KEY):
+            entered.set()
+            await asyncio.sleep(3600)
+
+    task = asyncio.create_task(_holder())
+    await asyncio.wait_for(entered.wait(), timeout=10.0)
+    await asyncio.sleep(0.12)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    renews_at_cancel = fake.count("renew")
+    await asyncio.sleep(0.3)
+    assert fake.count("renew") == renews_at_cancel
+
+
+@pytest.mark.parametrize(
+    ("poll", "renew", "ttl", "rpc", "named"),
+    [
+        (0.5, 0.5, 90.0, 5.0, "_MT5_XLEASE_POLL_S"),  # poll not below renew
+        (0.0, 20.0, 90.0, 15.0, "_MT5_XLEASE_POLL_S"),  # poll not above zero
+        (0.5, 90.0, 90.0, 15.0, "_MT5_XLEASE_RENEW_INTERVAL_S"),  # renew not below ttl
+        (0.5, 20.0, 90.0, 20.0, "_MT5_XLEASE_RPC_TIMEOUT_S"),  # rpc not below renew
+        (0.5, 20.0, 50.0, 15.0, "_MT5_XLEASE_TTL_S"),  # ttl below 2*renew + rpc
+    ],
+)
+def test_timing_each_broken_inequality_raises_and_the_shipped_values_pass(
+    poll: float, renew: float, ttl: float, rpc: float, named: str
+) -> None:
+    with pytest.raises(ValueError, match=named):
+        mt5_xlease._validate_xlease_timing(poll, renew, ttl, rpc)
+    mt5_xlease._validate_xlease_timing(
+        mt5_xlease._MT5_XLEASE_POLL_S,
+        mt5_xlease._MT5_XLEASE_RENEW_INTERVAL_S,
+        mt5_xlease._MT5_XLEASE_TTL_S,
+        mt5_xlease._MT5_XLEASE_RPC_TIMEOUT_S,
+    )
+
+
+async def test_reset_clears_the_clients_cleanup_task_set() -> None:
+    task = asyncio.create_task(asyncio.sleep(3600))
+    mt5_xlease._CLEANUP_TASKS.add(task)
+    mt5_concurrency.reset_terminal_state_for_tests()
+    assert mt5_xlease._CLEANUP_TASKS == set()
+    await asyncio.sleep(0)
+    assert task.cancelled()
