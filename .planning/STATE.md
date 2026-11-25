@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
-current_phase: 237
-current_phase_name: FACTSHEETHONEST
+current_phase: 234
+current_phase_name: NOCAPITAL
 status: executing
-stopped_at: "Phases 229 and 237 closed: their human items are recorded"
+stopped_at: "Phases 229, 234 and 237 closed: 229 and 237 human items recorded; 234 records landed"
 last_updated: "2026-11-25T12:37:58.360Z"
 last_activity: 2026-11-25
-last_activity_desc: "Phases 229 MT5DERIVE2 and 237 FACTSHEETHONEST complete: human items closed (229 live soak exit 0; 237 both visual checks pass)"
+last_activity_desc: "Phases 229 MT5DERIVE2, 234 NOCAPITAL and 237 FACTSHEETHONEST complete (229 live soak exit 0; 237 both visual checks pass; 234 shipped #1339)"
 state_head: 32be13ce022aa607ea065660da6c65270dd94750
 progress:
   total_phases: 22
-  completed_phases: 9
-  total_plans: 93
-  completed_plans: 79
-  percent: 41
+  completed_phases: 10
+  total_plans: 97
+  completed_plans: 83
+  percent: 45
 ---
 
 ## ⭐ STATE lineage
@@ -176,11 +176,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 237 (FACTSHEETHONEST) — COMPLETE (shipped v0.133.63.0, #1316); 229 (MT5DERIVE2) also closed in the same records PR; v1.22 phases run in parallel
-Plan: 13 of 13
-Status: Phase complete; 237's two visual checks and 229's live soak (exit 0) and 155.2 freeze check are recorded
-Last activity: 2026-11-25 — Phases 229 and 237 closed: 229 live soak exit 0 on the deployed commit 549f3d97; 237 share card and Withheld factsheet checks pass
-Progress: [████░░░░░░] 41%
+Phase: 234 (NOCAPITAL) — COMPLETE (shipped v0.133.76.0, #1339); 229 (MT5DERIVE2) and 237 (FACTSHEETHONEST) also closed in the same records PR; v1.22 phases run in parallel
+Plan: 4 of 4
+Status: Phase complete; 234's records landed (verification passed, SECURITY 15/15 closed); 237's two visual checks and 229's live soak (exit 0) and 155.2 freeze check are recorded
+Last activity: 2026-11-25 — Phases 229, 234 and 237 closed: 229 live soak exit 0 on the deployed commit 549f3d97; 237 share card and Withheld factsheet checks pass; 234 shipped v0.133.76.0 (#1339)
+Progress: [█████░░░░░] 45%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1836,7 +1836,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-23T18:28:35.274Z
-**Stopped At:** Phases 229 and 237 closed (human items recorded)
+**Stopped At:** Phases 229, 234 and 237 closed (records PR)
 **Resume File:** None
 
 **Last Date:** 2026-11-14T07:30:26.000Z

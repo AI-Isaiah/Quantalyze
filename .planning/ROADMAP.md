@@ -169,7 +169,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [x] **Phase 231: BYBITREADS — a Bybit read covers every coin, settle type, window and deposit exactly once, or refuses by name** - Census first; all-coin anchor, USDC and inverse positions, full trade window, on-chain deposit verdict; the static egress IP is a founder action (completed 2026-11-25)
 - [x] **Phase 232: OKXTRADES — an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades** - Mixed-currency daily bills, page-cap truncation, the trade cursor (completed 2026-11-24)
 - [ ] **Phase 233: DERIBITTRUTH — a Deribit key's returns reach its newest flow, every book day is explained or withheld, and stale series page on every venue** - From the wave-0 diagnosis: stale-returns root fix, per-venue freshness check, correction classifier, book cumulative
-- [ ] **Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key** - Seam S2 owner: transient-zero MT5 keys, any exception reverts, counted fallback flag, no residue reason
+- [x] **Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key** - Seam S2 owner: transient-zero MT5 keys, any exception reverts, counted fallback flag, no residue reason (completed 2026-11-25)
 - [ ] **Phase 235: HOLDINGSTRUTH — one account counts once on Holdings, match scoring and the dashboard, and every failing key is named** - Reads the identity value 225 settles: identity misses fail loud, per-account unpriced marker, dashboard marker read, shared-account keys named
 - [ ] **Phase 236: FIGUREMATH — every engine annualizes one way, CVaR is historical, and moved figures are re-derived and announced** - F-5 "365, ddof 1 everywhere", F-6 historical CVaR, quantstats 0.0.86, one CAGR span rule, fleet re-derive; moves published figures
 - [x] **Phase 237: FACTSHEETHONEST — every surface shows a strategy's true state, and no cache re-serves a stale or failed one** - Owner of the OG route and payload builder: withheld residue, re-run holding on every surface, OG not-found cache, BTC price failure cache, owner data source (completed 2026-11-25)
@@ -572,10 +572,20 @@ Python only, no migration. This is the allocator book path, not composite work.
 2. Any exception raised by a no-capital candidate leaves the previous row intact across retries; a test raises an exception that is not a `NavReconstructionError`. (NOCAP-02)
 3. A fallback to `dropped_key` stores a payload flag naming why and is counted per run, not only logged. A refused candidate leaves no residue reason in the stored payload. (NOCAP-03, NOCAP-04)
 4. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 234-01-PLAN.md — Every no-capital fallback is counted by name in the stored payload, and a refused holed candidate leaves no residue reason (NOCAP-03, NOCAP-04)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 234-02-PLAN.md — An MT5 no-capital exit needs the key's own deal ledger to agree; a negative terminal is never an exit (NOCAP-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 234-03-PLAN.md — Any exception from a candidate reverts once to the stored inputs and keeps the row across retries (NOCAP-02)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 234-04-PLAN.md — A flow on a stated tiny-base tail day after the last return is not out_of_window_flow (founder ruling 2026-11-24)
 
 ### Phase 235: HOLDINGSTRUTH — one account counts once on Holdings, match scoring and the dashboard, and every failing key is named
 
@@ -800,7 +810,7 @@ Plans:
 | 231. BYBITREADS | 6/6 | Complete (plans 01-05 shipped v0.133.61.6 #1314 and v0.133.65.0 #1321; plan 06 shipped v0.133.73.0 #1333 after Phase 229) | 2026-11-25 |
 | 232. OKXTRADES | 4/4 | Complete (shipped v0.133.70.0, #1330) | 2026-11-24 |
 | 233. DERIBITTRUTH | 0/? | Not started | - |
-| 234. NOCAPITAL | 0/? | Not started | - |
+| 234. NOCAPITAL | 4/4 | Complete (shipped v0.133.76.0, #1339; verification passed, SECURITY 15/15 closed) | 2026-11-25 |
 | 235. HOLDINGSTRUTH | 0/? | Not started | - |
 | 236. FIGUREMATH | 0/? | Not started | - |
 | 237. FACTSHEETHONEST | 13/13 | Complete (shipped v0.133.63.0, #1316; both visual checks passed 2026-11-25) | 2026-11-25 |

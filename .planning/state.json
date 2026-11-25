@@ -71,7 +71,7 @@
     {
       "number": "234",
       "name": "NOCAPITAL",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "235",
@@ -117,7 +117,7 @@
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 1 of 22 · 41% · executing"
+    "reason": "Phase 1 of 22 · 45% · executing"
   },
   "updated_at": "2026-11-25T12:37:58.500Z"
 }
