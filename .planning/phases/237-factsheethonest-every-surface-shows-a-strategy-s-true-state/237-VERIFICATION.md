@@ -1,7 +1,7 @@
 ---
 phase: 237-factsheethonest-every-surface-shows-a-strategy-s-true-state
 verified: 2026-11-24T00:30:00Z
-status: human_needed
+status: passed
 score: 5/5 must-haves verified
 verified_at_sha: c8b0d44f956d3c4ada2bb462c1f1ab00336f96de
 drift_subjects:
@@ -25,13 +25,7 @@ drift_subjects:
 behavior_unverified: 0
 overrides_applied: 0
 gaps: []
-human_verification:
-  - test: "Render the share card for a strategy that is mid re-run over a stored success: open /api/og/factsheet/<held id> locally (or on a preview) and look at the 1200x630 image."
-    expected: "The three stat figures are the last computed ones, and the quiet line 'Updating with the latest data. These figures are from the last completed computation.' sits directly under the stat row (after the figure note if one renders), legible and not clipped. The response header is Cache-Control: public, max-age=60, s-maxage=60."
-    why_human: "Image layout in the rendered PNG. Tests assert the JSX and the header; nothing can see the pixels. 237-VALIDATION.md lists this as the one Manual-Only verification."
-  - test: "On a real Withheld factsheet (chain-broken, headline withheld) open the full-history view, then zoom a range."
-    expected: "Worst 10 Drawdowns, EOY Returns, Calmar by Year and Style Drift (with its KS line) each show one panel-specific Withheld sentence in place of their table. The EOY bar chart labels, the heatmap YTD column and the Worst 10 chart bands are withheld, and the rolling chart's last hover value is a dash. Inside a zoom, Worst 10 Drawdowns keeps its slice and the other three stay withheld. A failed-cause row shows none of these panels and no note. Spacing and voice match the Main Metrics Withheld note."
-    why_human: "UI-hint phase: visual hierarchy, note placement and the absence of leftover whole-record figures across about ten renderings are not judged by jsdom assertions."
+human_verification: []
 ---
 
 > **verified_at_sha rebound 2026-11-24 (records PR).** The verdict was issued on phase-branch commit `ba46be5ce`, which is not reachable from `main` after the squash merge. It is rebound to the merge commit `c8b0d44f9` (#1316) so that `scripts/verification-drift-report.mjs` can diff from a reachable commit. None of the files listed in `drift_subjects` differs between the two commits. The phase's own changes since `ba46be5ce` are two test pins, updated after CI's first run on #1316: the JOB-01 census row for `analytics-hold.ts`, and the live anon OG probe's expected `no-store`. The other differences come from unrelated phases that merged first (#1314, #1315). None of this changes what was verified.
@@ -40,7 +34,7 @@ human_verification:
 
 **Phase Goal:** Every surface shows a strategy's true state (withheld, re-running or owner-private), and no cache re-serves a stale or failed one. This phase owns the factsheet seam: the OG route, `fetch-and-build-payload.ts` and `v2/page.tsx`.
 **Verified:** 2026-11-24, source at `ba46be5ce09ce67e746fceda84194f70de712d95`
-**Status:** human_needed (automated checks all pass; two visual checks remain)
+**Status:** passed (human_needed until the post-merge closure of 2026-11-25 at the end of this report)
 **Re-verification:** No, initial verification.
 
 Note on HEAD: the branch tip moved to `45c106594` (`docs(237): security audit SECURED`) while this ran. `git diff --stat ba46be5ce HEAD -- src` is empty, so the verified source is the current source. `237-SECURITY.md` (21 threats, 0 open) was written at `ba46be5ce`.
@@ -145,3 +139,20 @@ No gaps. All five roadmap success criteria hold in code, are exercised by tests 
 
 _Verified: 2026-11-24_
 _Verifier: Claude (gsd-verifier)_
+
+
+## Post-merge closure (2026-11-25)
+
+Both visual items are closed. Status moves from human_needed to passed. The coordinator ran both in Chrome on 2026-11-25 against a local stack at `origin/main` `8507564ef` (v0.133.74.3), seeded with three strategies: one held (mid re-run over a stored success), one Withheld (chain-broken, headline withheld) and one failed. The stack is torn down. This is the coordinator's relayed reading, not a verifier re-run.
+
+**Item 1, the share card for the held strategy: PASS.** The 1200x630 PNG from `/api/og/factsheet/<held id>` shows the last computed figures (Sharpe 0.42, CAGR +8.2%, Max DD -33.4%). "Updating with the latest data. These figures are from the last completed computation." sits directly under the stat row, legible and not clipped. Response header: `Cache-Control: public, max-age=60, s-maxage=60`.
+
+**Item 2, the Withheld factsheet: PASS.**
+- Full history: EOY Returns, Calmar by Year, Worst 10 Drawdowns and Style Drift each show the amber "Withheld: this panel covers earlier history…" sentence in place of their table. The EOY bar chart and the Worst 10 Drawdown Periods chart are withheld. The Monthly Returns YTD column is "–" in every year. Rolling Sharpe hover: Nov 24 2026 (the last index) shows "–"; Nov 22 shows +1.61.
+- Inside a zoom (Feb 26 2025 – Nov 24 2026): Worst 10 Drawdowns shows its slice table. EOY, Calmar by Year and Style Drift stay withheld (panel notes EOY RETURNS, CALMAR BY YEAR and STYLE DRIFT), and the Worst 10 chart stays withheld.
+- Failed cause: "The detailed factsheet for this strategy is not available yet…" with no panels and no notes.
+- Spacing and voice match the Main Metrics Withheld note.
+
+**Observed, not a failure: all four panels use the same sentence.** The expected outcome says "one panel-specific Withheld sentence". The contract it points to is one string: `237-UI-SPEC.md` defines a single FH237-PANEL-WITHHELD sentence ("Withheld: this panel covers earlier history, which is unreliable (it includes {R}), and the span after it has not been measured yet."), and `MetricsColumn.tsx` renders it from the one `headlineCoverageNote(…, "panel")` slot. So "panel-specific" means panel-level wording, as opposed to the headline sentence, not different wording for each panel. The identical text matches the spec. It is recorded here as observed.
+
+_Closure recorded: 2026-11-25 (records PR; coordinator evidence)._
