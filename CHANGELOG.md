@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.133.75.0] - 2026-11-25 — Phase 241 DEMOCREDS: the demo passwords are out of the tree behind a guard that still bites
+
+This is the code PR of Phase 241 (SECR-01, SECR-02, PROOF-01). It follows the records PR #1337, which scrubbed the archived planning files first so this guard could land green. No migration, no UI and no published number moves.
+
+### Security
+- **Whole-tree demo-credential digest guard.** `scripts/check-demo-credential-digests.ts` runs at the end of `npm run lint`. It reads every `git ls-files` path, every byte, binaries and itself included, with no path allowlist. It slides a window over each file and compares a rolling fingerprint, then a sha256, against four digest rows, one per role (Pair A login and password, Pair B login and password). Logins compare case-insensitively, passwords exactly. It stores digests only, never a literal. A failure prints role, path and line, never the matched bytes. `frontend-lint` is unfiltered, so the guard also runs on docs-only pushes, where a pasted literal is most likely to arrive.
+- **The e2e admin-gate test no longer carries Pair A's login or password.** Its first arm now checks the e2e spec for quoted-credential shapes (a const named for an email or password bound to a string, a quoted page.fill value, a quoted email) instead of searching for the two values.
+
+### Tests
+- `src/__tests__/check-demo-credential-digests.test.ts` (17 arms): one live-tree arm per role, the lint wiring (the guard must be chained with `&&` and not followed by `||` or `;`), the command-line run (exit 0 and the OK line), `verdict()` over every failure kind, EMPTY-SCAN, unreadable paths, coverage against an independent `git ls-files` count, file and byte floors, a runtime-digested canary, case folding (with uppercase text ahead of the literal, so dropping the fold on the byte that leaves the window goes red), CRLF/offset/EOF/NUL edges, one-byte-short, failure-text redaction and rolling-against-direct fingerprints.
+- PROOF-01: every guard arm was neutered on a byte copy, seen RED with the named arm first, and restored with `cp` and `cmp`. The record is in the phase's 02 SUMMARY.
+
+### Fixed
+- **Review round 1 (two MEDIUMs).** WR-01: the command-line verdict and exit were untested and the entry guard could miss a run through a symlinked directory; `verdict()` is now exported and pinned, a subprocess arm asserts the OK line, and the entry guard compares realpaths. WR-02: dropping case folding on the leaving byte alone went unnoticed; the case arm now catches it. Round 2 was clean.
+
+### Removed
+- **TODOS entry "[158-OPS-03/SEC] ROTATE the two leaked demo accounts"**, closed by this phase. Pair B (the seed allocator) is deleted on TEST (2026-11-24) and PROD (2026-11-25), and both pairs' literals are out of the tree behind this guard. The 15 other `[158-OPS-03]` entries stay; they cover different topics.
+
+### Notes
+- **Waiting on the founder:** Pair A (the shared e2e login) is kept because it is in active PROD use, by founder ruling of 2026-11-24. Its password reset is the founder's step and is the open `human_verification` item in `241-VERIFICATION.md`. Until then the leaked password still works.
+- **Known limit, accepted:** a sha256 of a short password can be brute-forced offline. The literals are already in public history; the table is a tripwire against reintroduction, not secrecy. The guard cannot see a literal inside UTF-16 text, compressed streams, or percent- or JSON-escaped forms (review INFO findings).
+- LOW review findings (row-shape arm, a fourth e2e regex shape) are recorded in `241-REVIEW.md` only.
+
 ## [0.133.74.4] - 2026-11-25 — records: Phase 241 DEMOCREDS phase records and the archived-record credential scrub
 
 This is a records PR. It has no source, test, workflow or migration change. It ships first by founder ruling (2026-11-24): the whole-tree digest guard in the code PR that follows scans every tracked file, so the archived records must lose the demo-credential literals before that guard reaches `main`.
