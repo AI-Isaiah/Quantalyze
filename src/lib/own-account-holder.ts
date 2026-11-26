@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { buildFactsheetHref } from "@/lib/factsheet/origin";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { isUuid } from "@/lib/utils";
 
 /**
  * WHO ALREADY HOLDS THIS ACCOUNT, as told to the person who just tried to add it
@@ -37,6 +38,16 @@ export type AccountHolder = {
   added_at?: string;
   /** A real in-app route. */
   href: string;
+  /**
+   * The stored key's own id. Only on `kind: "key"`, and only on the
+   * `KEY_ORPHANED` refusal of `strategies/create-with-key`, which adds it so the
+   * wizard can finish setup on that key in place (its reuse arm) instead of
+   * sending the person to `/strategies` to find the row (founder 2026-11-26).
+   * `readOwnAccountHolder` never sets it. It is the caller's own key uuid, which
+   * `/api/keys` and the "No strategy yet" rows already hand them; it is not the
+   * venue identity (no login, no server).
+   */
+  api_key_id?: string;
 };
 
 type Db = Pick<SupabaseClient, "from">;
@@ -188,5 +199,9 @@ export function parseAccountHolder(raw: unknown): AccountHolder | null {
     name: r.name.trim(),
     ...(typeof r.added_at === "string" ? { added_at: r.added_at } : {}),
     href: r.href,
+    // Only a key holder's id, and only uuid-shaped: it becomes a request body.
+    ...(r.kind === "key" && isUuid(r.api_key_id)
+      ? { api_key_id: r.api_key_id }
+      : {}),
   };
 }

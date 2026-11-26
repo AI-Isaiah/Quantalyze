@@ -467,9 +467,17 @@ async function resolveByVenueIdentity(
   const otherUse = await resolveOtherKeyUse(supabase, userId, liveKeyId, secrets);
   if (otherUse.kind === "unresolved") return { kind: "read_failed" };
   if (otherUse.kind === "held" || otherUse.kind === "orphaned") {
+    const holder = await readOwnAccountHolder(supabase, userId, liveKeyId, HOLDER_LOG_LABEL);
     return {
       ...otherUse,
-      holder: await readOwnAccountHolder(supabase, userId, liveKeyId, HOLDER_LOG_LABEL),
+      // Founder 2026-11-26: on KEY_ORPHANED the named key also carries its id,
+      // so the wizard finishes setup ON it (the reuse arm) instead of linking
+      // to `/strategies`. Only on a key holder, so a faulted holder read keeps
+      // today's byte-identical body; and only for the orphan, never `held`.
+      holder:
+        otherUse.kind === "orphaned" && holder?.kind === "key"
+          ? { ...holder, api_key_id: liveKeyId }
+          : holder,
       ...rotateField,
     };
   }
@@ -786,6 +794,11 @@ function venueDraftInProgressResponse(
  * and, from the rotate leg, the caller's OWN password outcome (`key_secret`).
  * It still takes NO IDENTITY: no login, server, key id or password can reach
  * it, which is the property the sentence below was written to guarantee.
+ * ⛔ CORRECTED 2026-11-26 (founder, finish setup in place): "no key id" is no
+ * longer true. A key holder now carries the caller's OWN stored key's uuid
+ * (`api_key_id`, set in `resolveByVenueIdentity`), so the wizard can finish
+ * setup on that key through the reuse arm. Still no login, server or password:
+ * the venue identity never reaches this builder.
  *
  * ⛔ IT TAKES NO PARAMETERS, WHICH IS THE STRUCTURAL REASON NO VENUE ID CAN
  * LEAK INTO IT (T-154-06-C / T-212-04). `code` FIRST, as a literal: the order
@@ -795,9 +808,9 @@ function keyOrphanedResponse(
   holder?: AccountHolder | null,
   secretOutcome?: KeySecretOutcome | null,
 ): NextResponse {
-  // The caller's OWN stored key: nickname, date added, and the page where it is
-  // listed (`own-account-holder.ts`). Not an identity: no login, server or key id
-  // rides it. Built above the literal to keep the emitter inside the scanner's
+  // The caller's OWN stored key: nickname, date added, the page where it is
+  // listed and (2026-11-26) its own uuid (`own-account-holder.ts`). Not the venue
+  // identity: no login or server rides it. Built above the literal to keep the emitter inside the scanner's
   // `error:` window. Phase 228: plus the caller's OWN password outcome, when the
   // rotate leg answered.
   const extra = { ...holderField(holder), ...keySecretField(secretOutcome) };

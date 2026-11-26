@@ -169,6 +169,25 @@ describe("parseAccountHolder", () => {
     });
   });
 
+  // Founder 2026-11-26: the KEY_ORPHANED key holder carries the stored key's id
+  // so the wizard can finish setup on it. It becomes a request body, so only a
+  // key holder's uuid-shaped id survives the parse.
+  it("keeps a key holder's uuid api_key_id and drops it anywhere else", () => {
+    const ID = "55555555-5555-4555-8555-555555555555";
+    expect(parseAccountHolder({ kind: "key", name: "Test", href: "/strategies", api_key_id: ID })).toEqual({
+      kind: "key",
+      name: "Test",
+      href: "/strategies",
+      api_key_id: ID,
+    });
+    expect(
+      parseAccountHolder({ kind: "key", name: "Test", href: "/strategies", api_key_id: "not-a-uuid" }),
+    ).not.toHaveProperty("api_key_id");
+    expect(
+      parseAccountHolder({ kind: "strategy", name: "Fund", href: "/factsheet/s-1", api_key_id: ID }),
+    ).not.toHaveProperty("api_key_id");
+  });
+
   it.each([
     ["an absolute URL", { kind: "key", name: "T", href: "https://evil.example/x" }],
     ["a protocol-relative URL", { kind: "key", name: "T", href: "//evil.example" }],

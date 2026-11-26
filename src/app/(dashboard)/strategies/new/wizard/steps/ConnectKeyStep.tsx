@@ -425,6 +425,9 @@ export interface PreselectedKey {
   keyLabel: string;
 }
 
+/** The two facts the reuse POST and its step advance need about a stored key. */
+type ReuseTarget = Pick<PreselectedKey, "id" | "exchange">;
+
 /**
  * The unvalidated credential draft the user has typed so far. Reported to the
  * parent via `onDraftChange` so a transition OUT of this component (multi-key
@@ -715,6 +718,14 @@ export function ConnectKeyStep({
   // the name above: set from the SAME response as `errorCode` and cleared with
   // it, so a link from attempt 1 is never drawn under attempt 2's failure.
   const [existingHolder, setExistingHolder] = useState<AccountHolder | null>(null);
+  /**
+   * Founder 2026-11-26 — the stored key a credential-form `KEY_ORPHANED` named
+   * with its id, which "Finish setup on …" builds on. Held apart from the error
+   * state on purpose: the reuse POST clears `errorCode` and `existingHolder`
+   * when it starts, and a failed or unanswered reuse must leave the button there
+   * to try again. Cleared only by the next credential submit.
+   */
+  const [orphanTarget, setOrphanTarget] = useState<{ id: string; name: string } | null>(null);
   // Phase 228 / CONN-02 — the password outcome a same-account MT5 reconnect
   // answered with ("we updated the password on your key X"). Set from the SAME
   // response as `errorCode`, and cleared with it (every submit, and the
@@ -1127,6 +1138,7 @@ export function ConnectKeyStep({
     // way.
     setExistingStrategyName(null);
     setExistingHolder(null);
+    setOrphanTarget(null);
     setKeyOutcome(null);
     // 164.6.5-07 / D-14 — cleared with the code it belongs to, for the same
     // reason: a retry rendering the previous attempt's id is the defect D-14
@@ -1222,7 +1234,13 @@ export function ConnectKeyStep({
             ? data.strategy_name
             : null,
         );
-        setExistingHolder(parseAccountHolder(data.holder));
+        const holder = parseAccountHolder(data.holder);
+        setExistingHolder(holder);
+        setOrphanTarget(
+          code === "KEY_ORPHANED" && holder?.kind === "key" && holder.api_key_id !== undefined
+            ? { id: holder.api_key_id, name: holder.name }
+            : null,
+        );
         // Phase 228 / CONN-02 — from the SAME response as the code, so an
         // outcome only ever describes the refusal it arrived with. Credential
         // arm only: the reuse arm sends no password and so never rotates.
@@ -1385,9 +1403,14 @@ export function ConnectKeyStep({
    * surprise that needs explaining: the user asked for THIS key and got this
    * key's draft. Adding a second copy variant for a notice nobody needs would be
    * the fabrication, not the omission.
+   *
+   * Founder 2026-11-26 — `key` is the saved-key summary's preselected key by
+   * default, or the stored key a `KEY_ORPHANED` refusal named on the credential
+   * form, so "Finish setup" builds on that key here instead of sending the
+   * person to `/strategies` to find its row.
    */
-  async function handleContinueWithKey() {
-    if (!preselectKey || continuing) return;
+  async function handleContinueWithKey(key: ReuseTarget | null = preselectKey) {
+    if (!key || continuing) return;
     // Cleared together, for the reason each state's own docblock gives: a code,
     // a wait and a strategy name from a previous attempt must never be rendered
     // against this one.
@@ -1414,7 +1437,7 @@ export function ConnectKeyStep({
           // wrong about.
           body: JSON.stringify({
             wizard_session_id: wizardSessionId,
-            reuse_api_key_id: preselectKey.id,
+            reuse_api_key_id: key.id,
           }),
         },
         {
@@ -1471,7 +1494,7 @@ export function ConnectKeyStep({
         // The venue the OWNER'S OWN page told us this key is on. The response
         // carries none, and inventing one from the display label would be the
         // client owning exchange naming.
-        exchange: preselectKey.exchange,
+        exchange: key.exchange,
       });
       // ⛔ No `setContinuing(false)` on success: `onSuccess` unmounts this step,
       // and re-enabling the button first opens a double-submit window on a draft
@@ -1703,7 +1726,7 @@ export function ConnectKeyStep({
         >
           <Button
             type="button"
-            onClick={handleContinueWithKey}
+            onClick={() => void handleContinueWithKey()}
             disabled={continuing}
             data-testid="wizard-preselect-continue"
           >
@@ -1939,6 +1962,28 @@ export function ConnectKeyStep({
               setKeyOutcome(null);
             }}
           />
+        )}
+
+        {/* Founder 2026-11-26 — the stored key this refusal named, finished in
+            place through the reuse arm (the request "Continue with this key"
+            sends). Only when the route named the key's id; otherwise the
+            envelope's link to the Strategies page stands, as before. */}
+        {orphanTarget !== null && (
+          <div>
+            <Button
+              type="button"
+              onClick={() =>
+                void handleContinueWithKey({
+                  id: orphanTarget.id,
+                  exchange: attemptExchange ?? exchange,
+                })
+              }
+              disabled={continuing}
+              data-testid="wizard-orphan-finish-setup"
+            >
+              {continuing ? "Continuing..." : `Finish setup on “${orphanTarget.name}”`}
+            </Button>
+          </div>
         )}
 
         {/* 153.4-04 / D-05 — the long wait, made legible. Mounted 300 ms after

@@ -4526,11 +4526,21 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(JSON.parse(text)).toEqual({
         code: "KEY_ORPHANED",
         error: "This key is already stored, but no strategy uses it.",
-        holder: { kind: "key", name: "Test", added_at: "2026-11-19T10:00:00Z", href: "/strategies" },
+        // ⛔ CORRECTED 2026-11-26 (founder, finish setup in place): this body used
+        // to be pinned to carry no key id. The key holder now carries the
+        // caller's OWN stored key's id, so the wizard can finish setup on it
+        // through the reuse arm instead of linking to /strategies. The other
+        // owner's row (same id, different owner) is still never named.
+        holder: {
+          kind: "key",
+          name: "Test",
+          added_at: "2026-11-19T10:00:00Z",
+          href: "/strategies",
+          api_key_id: EXISTING_KEY_ID,
+        },
       });
       expect(text).not.toContain("Other Owner Desk");
       expect(text).not.toContain(OTHER_OWNER_ID);
-      expect(text).not.toContain(EXISTING_KEY_ID);
       noWriteWasMade();
     });
 
@@ -5277,6 +5287,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
             name: KEY_LABEL,
             added_at: ADDED_AT,
             href: "/strategies",
+            // Founder 2026-11-26: the stored key's own id, for "Finish setup" in place.
+            api_key_id: EXISTING_KEY_ID,
           });
           expect(profilesReads, `role ${role}: the route read profiles`).toEqual([]);
           bodies.push(text);

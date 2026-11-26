@@ -1415,6 +1415,21 @@ const SIZE_MB_PLACEHOLDER = "{sizeMb}";
 const KEY_ORPHANED_DISCONNECT_FIX =
   "To connect this account with new credentials instead, choose “Disconnect” on that row. The stored key is kept on record but no longer used, and connecting the account again then works.";
 
+/**
+ * `KEY_ORPHANED`'s first bullet, held ONCE for the same reason as the Disconnect
+ * bullet above: `formatKeyError` recognises it BY CONTENT and swaps it when the
+ * refusal names the stored key's id (`holder.api_key_id`). The wizard then
+ * finishes setup on that key in place, so the sentence must not send the person
+ * to the Strategies page to find the row (founder 2026-11-26).
+ */
+const KEY_ORPHANED_FINISH_FIX =
+  "To finish setting up with the account you already stored, open the Strategies page and find its row marked “No strategy yet” (below your strategies, on the last page if the list is paged). Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.";
+
+/** The first bullet when the wizard can finish setup on the named key in place. */
+function keyOrphanedFinishFixInPlace(nickname: string): string {
+  return `To finish setting up with your key “${nickname}”, choose “Finish setup” below. It builds the strategy from the stored key, with no credentials to enter again.`;
+}
+
 /** The same bullet, naming the key to Disconnect (curly quotes like “Disconnect”). */
 function keyOrphanedDisconnectFixNamed(nickname: string): string {
   return `To connect this account with new credentials instead, choose “Disconnect” on the row for your key “${nickname}”. The stored key is kept on record but no longer used, and connecting the account again then works.`;
@@ -2862,8 +2877,13 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // list" was only half the truth. The in-wizard "Finish setup" switch is not
     // offered from this refusal: the saved-key step is chosen by the host that
     // mounts the wizard (`preselectKey`), which the credential form cannot reach.
+    // ⛔ CORRECTED 2026-11-26 (founder: "finish setup" landed on the overview, not
+    // in the wizard): the sentence above is kept as lineage. When the refusal
+    // names the stored key's id (`holder.api_key_id`), the credential form DOES
+    // offer "Finish setup" in place, through the reuse arm, and `formatKeyError`
+    // swaps this bullet for one that points at it (`keyOrphanedFinishFixInPlace`).
     fix: [
-      "To finish setting up with the account you already stored, open the Strategies page and find its row marked “No strategy yet” (below your strategies, on the last page if the list is paged). Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
+      KEY_ORPHANED_FINISH_FIX,
       "Or connect this strategy with a different account — one whose key is not already stored here.",
       KEY_ORPHANED_DISCONNECT_FIX,
       "If the Strategies page does not list this key, send the correlation id below through the contact form.",
@@ -4916,6 +4936,9 @@ export function holderLink(
   if (holder.kind === "strategy") {
     return { label: `Open “${holder.name}”`, href: holder.href };
   }
+  // Founder 2026-11-26: with the stored key's id the wizard offers "Finish setup"
+  // in place, so no link sends the person to the overview to find the row.
+  if (code === "KEY_ORPHANED" && holder.api_key_id !== undefined) return null;
   return {
     label:
       code === "KEY_ORPHANED"
@@ -5011,13 +5034,20 @@ export function formatKeyError(
     // with several keys reads WHICH row to act on. Found by content, and only
     // for a non-blank name: otherwise the table's bullet stands unchanged.
     const nickname = context.holder.name.trim();
+    // Founder 2026-11-26: with the stored key's id the wizard finishes setup in
+    // place, so the first bullet points at that control, not at the Strategies page.
+    const inPlace = context.holder.api_key_id !== undefined && nickname.length > 0;
     return {
       ...base,
       cause: `You already stored this account as your key "${context.holder.name}"${added}. ` + base.cause,
       ...(nickname.length > 0
         ? {
             fix: base.fix.map((f) =>
-              f === KEY_ORPHANED_DISCONNECT_FIX ? keyOrphanedDisconnectFixNamed(nickname) : f,
+              f === KEY_ORPHANED_DISCONNECT_FIX
+                ? keyOrphanedDisconnectFixNamed(nickname)
+                : inPlace && f === KEY_ORPHANED_FINISH_FIX
+                  ? keyOrphanedFinishFixInPlace(nickname)
+                  : f,
             ),
           }
         : {}),

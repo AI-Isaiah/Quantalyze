@@ -2326,6 +2326,102 @@ describe("[154.1 / WIZCONT-02] ConnectKeyStep — an already-connected account r
     expect(link).toHaveTextContent("finish setup on “Test”");
   });
 
+  /**
+   * Founder 2026-11-26 (PROD, the "Test" MT5 key). Re-entering an account you
+   * already stored answered KEY_ORPHANED with a link to the /strategies overview,
+   * so "finish setup" dropped the founder on the list to hunt for the row and
+   * click "Finish setup" again. When the refusal names the stored key's id, the
+   * wizard finishes setup ON that key in place: the same reuse POST the saved-key
+   * summary's "Continue with this key" sends, then the step advance. The link to
+   * the overview is not offered beside it.
+   */
+  it("KEY_ORPHANED with the stored key's id finishes setup in place: the reuse POST, then onSuccess, and no link to the overview", async () => {
+    const STORED = "55555555-5555-4555-8555-555555555555";
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            code: "KEY_ORPHANED",
+            error: "This key is already stored, but no strategy uses it.",
+            holder: { kind: "key", name: "Test", href: "/strategies", api_key_id: STORED },
+          },
+          409,
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { strategy_id: "66666666-6666-4666-8666-666666666666", api_key_id: STORED },
+          200,
+        ),
+      );
+    const onSuccess = vi.fn();
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_ORPHANED");
+    expect(screen.queryByTestId("error-envelope-holder-link")).toBeNull();
+    expect(envelope).not.toHaveTextContent("open the Strategies page");
+    expect(envelope).toHaveTextContent("To finish setting up with your key “Test”, choose “Finish setup” below.");
+
+    const finish = screen.getByTestId("wizard-orphan-finish-setup");
+    expect(finish).toHaveTextContent("Finish setup on “Test”");
+    await act(async () => {
+      fireEvent.click(finish);
+    });
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1));
+    const reuseInit = fetchSpy.mock.calls[1][1] as RequestInit;
+    expect(fetchSpy.mock.calls[1][0]).toBe("/api/strategies/create-with-key");
+    expect(JSON.parse(reuseInit.body as string)).toEqual({
+      wizard_session_id: SESSION,
+      reuse_api_key_id: STORED,
+    });
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        strategyId: "66666666-6666-4666-8666-666666666666",
+        apiKeyId: STORED,
+      }),
+    );
+  });
+
+  // Review M1: a failed reuse (our own hop) must not take the only remedy away.
+  it("a failed in-place Finish setup shows its error and keeps the button to try again", async () => {
+    const STORED = "55555555-5555-4555-8555-555555555555";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            code: "KEY_ORPHANED",
+            error: "This key is already stored, but no strategy uses it.",
+            holder: { kind: "key", name: "Test", href: "/strategies", api_key_id: STORED },
+          },
+          409,
+        ),
+      )
+      .mockRejectedValueOnce(new Error("offline"));
+    const onSuccess = vi.fn();
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const finish = await screen.findByTestId("wizard-orphan-finish-setup");
+    await act(async () => {
+      fireEvent.click(finish);
+    });
+
+    const envelope = await screen.findByTestId("error-envelope");
+    await vi.waitFor(() => expect(envelope).toHaveAttribute("data-error-code", "SERVICE_UNREACHABLE"));
+    const again = screen.getByTestId("wizard-orphan-finish-setup");
+    expect(again).toBeEnabled();
+    expect(again).toHaveTextContent("Finish setup on “Test”");
+    expect(onSuccess).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
   it("[228-02 / CONN-04] KEY_ORPHANED's Disconnect bullet names the key when the holder is a key", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(
