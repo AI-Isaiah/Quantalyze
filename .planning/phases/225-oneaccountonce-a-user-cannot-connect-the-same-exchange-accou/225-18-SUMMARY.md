@@ -125,6 +125,12 @@ Recorded results (to be filled by the orchestrator; no identifiers or credential
 - A third attempt, on the right server, was refused with `KEY_ORPHANED` before any validation call. That is correct: the signed-in user already holds that account.
 - Reading: the existing validation already refuses a wrong server at the broker's authorization step. PR-2c's session-server check remains defence in depth (225-CONTEXT.md Q6). Log verdict counts stay pending until the plan 20 Task 3 read.
 
+**Third wrong-server attempt, recorded 2026-11-26 (relayed by the main session; no identifiers here).** Around 10:08Z on PRODUCTION the founder tried one of their own MT5 accounts with a sibling live server of the same broker that IS on the known-server list.
+- The broker refused the sign-in: the wizard showed `KEY_MT5_SIGN_IN_REFUSED`. 0 keys were stored. Correlation id `wizard:fac935c1-7c6e-4bc6-b896-8d4a6101235d`.
+- Most likely pre-#1344-deploy. Measured on Railway: PR-2c's merge commit `2aa1a0cbb` deployed to the worker service at 10:07:12Z, while the analytics service's deployment of that SHA was still `WAITING` on main CI, and its live deployment was `c7e1fe682` (v0.133.87.0). So the refusal came from the broker's authorization step, not from PR-2c's session-server bracket, the same reading as the 2026-11-25 attempts.
+- Two earlier attempts the same morning used server names NOT on the known-server list. Both were stopped before any broker call with `KEY_MT5_SERVER_UNKNOWN`, which is correct.
+- Reading: a wrong server is refused before storage on every path measured so far (pre-broker for an unknown name, at the broker's sign-in for a known sibling). The post-deploy positive control (the CORRECT server must answer the already-connected code, not a transient) is still not recorded.
+
 ## CHANGELOG theme for PR-2c
 
 The MT5 validation now proves the broker server the session is on, not only the login: a key is never stored with a server its validation session did not prove. Section vocabulary: `### Fixed` (a session on another server no longer validates), `### Tests` (server bracket on the wizard, the worker adapter and both TS connect routes), `### Notes` (the MT5 docs leave the already-connected case open; the bracket makes that irrelevant; Task 3's founder evidence pending). No `TODOS.md` entry is closed by this plan.
