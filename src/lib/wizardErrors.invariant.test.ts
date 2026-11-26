@@ -276,6 +276,14 @@ const ROUTES: readonly RouteUnderTest[] = [
     // untouched while the vocabulary moves (which `EXPECTED_SPLIT_CODES` above
     // is what records). If this number ever has to move for that arm again,
     // check first whether a guard was SPLIT in two: one refusal, one sentence.
+    // ⭐ 14 STAYS AT Phase 228 (CONN-02), MEASURED, not assumed. The rotate leg adds
+    // two `code`-first emitters (`SEAM_MISCONFIGURED` at 503 and
+    // `keySecretNotConfirmedResponse`'s `UNKNOWN` at 500), and the plan expected
+    // 14 -> 16. Neither is derived: this row's `statusRe` is "400" on purpose (see
+    // `RouteUnderTest.statusRe`), so a 503 and a 500 emitter are outside the
+    // predicate exactly like the route's other 409/500/503 answers. The four 409
+    // builders gained an `extra` spread, not a new site. Re-measured at Task 2: the
+    // run is green at 14 with both literals present.
     expectedSites: 14, // 13 -> 14 (225 PR-2b-2): the MT5 no-server refusal, KEY_MT5_WRONG_SERVER.
   },
   {
