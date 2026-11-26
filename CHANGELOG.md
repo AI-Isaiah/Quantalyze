@@ -9,6 +9,7 @@
 - `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-26` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.91.0 → 0.133.91.1.
 - The gates on the composed tree, verbatim: `baseline-currency: carried=341 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 147 — MATCH 144, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
 
+- `scripts/dump-sql-functions.ts`: the three Phase 230 `snapshot-only` `NAME_SET_RATCHET` rows (`acquire_mt5_terminal_lease`, `renew_mt5_terminal_lease`, `release_mt5_terminal_lease`) are deleted. This re-dump was their clearing condition, and the snapshot gate reported each one `ratchet-stale` until they were removed.
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45807605366` succeeded, and this entry was composed by the `redump-pr` job. Run `45807605366` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
