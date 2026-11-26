@@ -2142,6 +2142,32 @@ def _emit_audit(
 # Per-kind handlers
 # ---------------------------------------------------------------------------
 
+#: The refusal keys beside the verdict's reasons that the queued sync owns on
+#: `strategy_analytics.data_quality_flags` (Phase 251 SYNCSTORE items 3 and 4).
+_DAILY_PNL_REFUSAL_COMPANIONS: Final[frozenset[str]] = frozenset(
+    {"daily_pnl_fetch_error_class", "daily_pnl_unsupported_venue"}
+)
+
+
+def _is_sync_owned_daily_pnl_key(key: str) -> bool:
+    """True for a `daily_pnl_*` flag key the queued `sync_trades` handler owns.
+
+    The handler owns the refusal keys (Phase 251 CONTEXT Items 3 and 4): on every
+    run where the ccxt daily read ran, the stored owned keys are replaced by that
+    run's drained set, so a clean read clears what an earlier refusal wrote. The
+    reason set comes from the shared `daily_pnl_read_verdict` (a one-key mapping
+    asks the verdict whether the key is a reason), so a reason added to the verdict
+    later is owned automatically; the two companions are listed by name.
+    `daily_pnl_malformed_*` is NOT owned: the derive owns it from a full-history
+    read (founder decision D-12), so the queued sync merges it as drained and never
+    removes it.
+    """
+    return (
+        key in _DAILY_PNL_REFUSAL_COMPANIONS
+        or key in daily_pnl_read_verdict({key: True}).reasons
+    )
+
+
 async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     """Decrypt the strategy's API key, fetch daily PnL from the exchange,
     and persist via the sync_trades RPC.
@@ -2191,6 +2217,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # and survive the ``fetch_raw_trades`` reset for the
     # strategy_analytics stamp below.
     exchange_dq_flags: dict[str, Any] = {}
+    # The daily read's own drained buffer (the ccxt arm reassigns it). It stays
+    # separate from `exchange_dq_flags` because the verdict below reads the daily
+    # read alone; the fills read's flags are never a reason to refuse the store.
+    daily_pnl_dq_flags: dict[str, Any] = {}
     try:
         # --- Phase flags (shared by the mt5 and ccxt arms below) ---
         # H-0691: `phase2_failed` tracks BOTH fetch failures (caught below)
@@ -2205,6 +2235,15 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # set to the *fetched* count not the *persisted* count; (b) last_sync_at
         # advancing past the unpersisted window permanently; (c) no DQ flag.
         phase1_failed = False
+        # Phase 251 SYNCSTORE: the daily read was REFUSED by the shared verdict
+        # (`daily_pnl_read_verdict`), so nothing was stored. Distinct from
+        # `phase1_failed` (a store that was attempted and raised): a refusal holds
+        # `last_sync_at` and the fills cursor and reports 0 rows, but it is not a
+        # persist failure and never stamps `phase1_daily_pnl_persist_failed`.
+        phase1_read_refused = False
+        # Phase 251: the ccxt daily read ran (set only in the ccxt arm, directly
+        # after its drain). MT5 fetches no daily P&L, so it never sets this.
+        phase1_read_ran = False
 
         if isinstance(ctx.exchange, Mt5Session):
             # MT5SYNC-02 (hotfix 2026-08-06): mt5 is non-ccxt — pre-fix this
@@ -2252,8 +2291,76 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             # get clobbered by ``fetch_raw_trades``' entry-seam reset on
             # the same asyncio task.
             daily_pnl_dq_flags = get_and_clear_last_dq_flags()
+            phase1_read_ran = True
             if daily_pnl_dq_flags:
                 exchange_dq_flags.update(daily_pnl_dq_flags)
+
+            # Phase 251 SYNCSTORE items 1 and 2. The verdict is the one shared
+            # reader of the daily buffer (the cron tick and the derive read the
+            # same one), so the queued sync cannot drift from them. A swallowed
+            # venue rate limit is re-raised into the outer 429 arm (static text,
+            # no venue string), exactly as the derive does; a degraded read is
+            # REFUSED, because `sync_trades` deletes the payload's own [min, max]
+            # span before it inserts, so storing it would overwrite real daily
+            # rows with partial or foreign ones. Anything else is stored NOW,
+            # before the balance read and the Phase-2 fills walk, so a run
+            # cancelled or raised in that walk has already kept its daily rows.
+            phase1_verdict = daily_pnl_read_verdict(daily_pnl_dq_flags)
+            if phase1_verdict.rate_limited:
+                raise ccxt.RateLimitExceeded(
+                    "sync_trades: daily P&L read was rate limited"
+                )
+            elif phase1_verdict.reasons:
+                phase1_read_refused = True
+                logger.warning(
+                    "sync_trades: daily P&L read for strategy %s was refused (%s) "
+                    "- nothing was stored and last_sync_at was held",
+                    strategy_id, ",".join(phase1_verdict.reasons),
+                )
+            elif trades:
+                # Persist trades atomically via sync_trades RPC.
+                #
+                # PostgREST JSONB shape: pass `trades` (list[dict]) directly. The
+                # supabase Python client serializes the params dict via json.dumps
+                # internally - if we pre-serialize via json.dumps(trades), PostgREST
+                # receives a JSON STRING (the literal "[...]" text) and casts it to
+                # a JSONB scalar string, not a JSONB array. Then
+                # `jsonb_array_elements(p_trades)` inside migration 007's sync_trades
+                # function fails with 22023 "cannot extract elements from a scalar".
+                # Pass the raw list - supabase-py does the serialization once.
+                #
+                # Phase 1 wrapped in try/except: a 22023 (or any other persist
+                # failure on the daily-PnL DELETE+INSERT path) must NOT abort Phase
+                # 2's raw-fill ingestion below - raw fills are the canonical
+                # fill-level data that downstream analytics + the wizard's
+                # verify-data gate count on.
+                def _sync() -> int:
+                    res = ctx.supabase.rpc(
+                        "sync_trades",
+                        {"p_strategy_id": strategy_id, "p_trades": trades},
+                    ).execute()
+                    # sync_trades returns the integer inserted-row count on
+                    # res.data; narrow via isinstance (a non-int means SQL contract
+                    # drift -> 0, the same value the old `res.data or 0` produced
+                    # for a falsy/absent count).
+                    return res.data if isinstance(res.data, int) else 0
+
+                try:
+                    inserted = await db_execute(_sync)
+                    logger.info(
+                        "sync_trades: persisted %s rows for strategy %s",
+                        inserted, strategy_id,
+                    )
+                except Exception as persist_exc:
+                    # NEW-C12-02: set flag so (a) last_sync_at is NOT advanced past
+                    # the unpersisted window, (b) trade_count reflects 0 persisted
+                    # rows, and (c) a DQ flag is emitted below for the health card.
+                    phase1_failed = True
+                    logger.warning(
+                        "sync_trades Phase 1 (daily PnL) failed for strategy %s - "
+                        "continuing to Phase 2 raw-fill ingestion: %s",
+                        strategy_id, str(persist_exc),
+                    )
             account_balance = await fetch_usdt_balance(ctx.exchange)
 
         # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
@@ -2406,47 +2513,6 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
-
-    # Persist trades atomically via sync_trades RPC.
-    #
-    # PostgREST JSONB shape: pass `trades` (list[dict]) directly. The supabase
-    # Python client serializes the params dict via json.dumps internally — if
-    # we pre-serialize via json.dumps(trades), PostgREST receives a JSON STRING
-    # (the literal "[…]" text) and casts it to a JSONB scalar string, not a
-    # JSONB array. Then `jsonb_array_elements(p_trades)` inside migration 007's
-    # sync_trades function fails with 22023 "cannot extract elements from a
-    # scalar". Pass the raw list — supabase-py does the serialization once.
-    #
-    # Phase 1 wrapped in try/except: a 22023 (or any other persist failure on
-    # the daily-PnL DELETE+INSERT path) must NOT abort Phase 2's raw-fill
-    # ingestion below — raw fills are the canonical fill-level data that
-    # downstream analytics + the wizard's verify-data gate count on.
-    if trades:
-        def _sync() -> int:
-            res = ctx.supabase.rpc(
-                "sync_trades",
-                {"p_strategy_id": strategy_id, "p_trades": trades},
-            ).execute()
-            # sync_trades returns the integer inserted-row count on res.data;
-            # narrow via isinstance (a non-int means SQL contract drift → 0, the
-            # same value the old `res.data or 0` produced for a falsy/absent count).
-            return res.data if isinstance(res.data, int) else 0
-
-        try:
-            inserted = await db_execute(_sync)
-            logger.info(
-                "sync_trades: persisted %s rows for strategy %s", inserted, strategy_id
-            )
-        except Exception as e:
-            # NEW-C12-02: set flag so (a) last_sync_at is NOT advanced past
-            # the unpersisted window, (b) trade_count reflects 0 persisted
-            # rows, and (c) a DQ flag is emitted below for the health card.
-            phase1_failed = True
-            logger.warning(
-                "sync_trades Phase 1 (daily PnL) failed for strategy %s — "
-                "continuing to Phase 2 raw-fill ingestion: %s",
-                strategy_id, str(e),
-            )
 
     # Persist raw fills (Phase 2, after exchange is closed).
     #
@@ -2611,6 +2677,8 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     #     with last_sync_at; since Phase 211 the daily read seeds from the
     #     stored daily high-water, so this now only re-fetches FILLS, which the
     #     exchange_fill_id dedup absorbs);
+    #   * the daily read was not refused (Phase 251: a refused read stored no
+    #     daily span, so the fills cursor is held with `last_sync_at`);
     #   * no `sync_truncated_*` flag is true (Phase 232 ruling Q7: a truncated
     #     read stored an incomplete window, so its newest fill is not a
     #     stored-through mark) and `binance_partial_symbols` is not set (a
@@ -2668,6 +2736,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         and phase2_complete
         and not phase2_failed
         and not phase1_failed
+        and not phase1_read_refused
         and not _fills_incomplete
     )
     _p_last_fetched: str | None = None
@@ -2768,13 +2837,17 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # `phase2_complete` only flipped True when at least one batch was
     # persisted (gated by the `if raw_fills:` block above), so a healthy
     # strategy with no new fills would carry a stale phase2_fill_ingestion_failed=True
-    # flag forever (HIGH code-review finding). We skip the read entirely
-    # only when Phase 2 was not run at all (_RAW_TRADE_INGESTION_ENABLED
-    # is False).
+    # flag forever (HIGH code-review finding). We skip the read only when neither
+    # Phase 2 ran (_RAW_TRADE_INGESTION_ENABLED is False) nor the ccxt Phase-1
+    # daily read ran (an MT5 run with ingestion off): the ccxt daily read is a
+    # second reason to read, because its refusal flags (Phase 251) are owned by
+    # this block and a clean read clears the ones an earlier refusal wrote.
     phase2_success = _RAW_TRADE_INGESTION_ENABLED and not phase2_failed
     # NEW-C12-02: phase1_failed also requires a flag write to surface via
     # the admin health card (it has no pre-existing path for daily-PnL failures).
-    needs_flag_write = phase2_failed or phase2_success or phase1_failed
+    needs_flag_write = (
+        phase2_failed or phase2_success or phase1_failed or phase1_read_ran
+    )
     if needs_flag_write:
         def _load_existing_flags() -> dict[str, Any]:
             res = (
@@ -2793,8 +2866,9 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             # through one() makes this the intended empty-flags path (flag_load_failed
             # stays False, no spurious write) — what the author wrote `res.data or {}`
             # to mean, and what test_sync_trades_feature_flag_on already asserts (skip
-            # the upsert). Deliberate latent-bug fix; only reachable when
-            # USE_RAW_TRADE_INGESTION is on (off by default in prod).
+            # the upsert). Deliberate latent-bug fix; reachable whenever this block
+            # reads: with USE_RAW_TRADE_INGESTION on, and (Phase 251) on every ccxt
+            # run, since the Phase-1 daily read is a reason to read as well.
             row = one(res) or {}
             return dict(row.get("data_quality_flags") or {})
 
@@ -2802,18 +2876,25 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         try:
             existing_flags = await db_execute(_load_existing_flags)
         except Exception as load_exc:  # noqa: BLE001
-            # If the read fails, fall back to a fresh dict — we'd rather
-            # potentially overwrite stale flags than skip the signal entirely
-            # (analytics_runner re-emits its flags on the next computation).
+            # If the read fails, fall back to a fresh dict. Whether that dict is
+            # then upserted depends on the run (see the write decision below): a
+            # run where Phase 2 ran still writes its recovery payload (the
+            # analytics_runner re-emits its flags on the next computation), a run
+            # where it did not writes nothing.
             logger.warning(
                 "sync_trades: failed to load existing data_quality_flags for "
-                "strategy %s — proceeding with new-flag-only upsert: %s",
+                "strategy %s — continuing with an empty flag set: %s",
                 strategy_id, load_exc,
             )
             existing_flags = {}
             flag_load_failed = True
 
         flag_was_set = existing_flags.get("phase2_fill_ingestion_failed") is True
+        # Phase 251: `write_needed` only ACCUMULATES. It used to be assigned in
+        # every arm of the chain below, so the Phase-2 arm's trailing reset to
+        # False erased the True a Phase-1 persist failure had just set, and the
+        # `phase1_daily_pnl_persist_failed` stamp was never written.
+        write_needed = False
 
         # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — merge the DQ flags
         # drained from ``fetch_raw_trades`` (binance_partial_symbols,
@@ -2825,8 +2906,39 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # cross-clobber is not a concern. ``exchange_dq_flags`` is {} on
         # the clean path (most common) so this is a no-op then.
         exchange_dq_flags_present = bool(exchange_dq_flags)
+        # Phase 251 items 3 and 4: on every run where the ccxt daily read ran,
+        # the stored owned `daily_pnl_*` refusal keys are REPLACED by this run's
+        # drained set: they are popped here, the drained set is merged in below,
+        # and the owned keys are compared before and after, so a run that changes
+        # no owned key makes no write of its own. `daily_pnl_malformed_*` is not
+        # owned (the derive owns it), so it is merged as drained and never popped.
+        owned_before = (
+            {k: v for k, v in existing_flags.items() if _is_sync_owned_daily_pnl_key(k)}
+            if phase1_read_ran
+            else {}
+        )
+        if phase1_read_ran:
+            for owned_key in [
+                k for k in existing_flags if _is_sync_owned_daily_pnl_key(k)
+            ]:
+                existing_flags.pop(owned_key, None)
         if exchange_dq_flags_present:
             existing_flags.update(exchange_dq_flags)
+        if phase1_read_ran:
+            # The stored class is the verdict's sanitized identifier, never the
+            # raw drained string (a venue string must not reach the stored flags);
+            # absent when the verdict has none.
+            if "daily_pnl_fetch_error_class" in existing_flags:
+                sanitized_class = daily_pnl_read_verdict(daily_pnl_dq_flags).error_class
+                if sanitized_class is None:
+                    existing_flags.pop("daily_pnl_fetch_error_class", None)
+                else:
+                    existing_flags["daily_pnl_fetch_error_class"] = sanitized_class
+            owned_after = {
+                k: v for k, v in existing_flags.items() if _is_sync_owned_daily_pnl_key(k)
+            }
+            if owned_after != owned_before:
+                write_needed = True
 
         # NEW-C12-02: emit DQ flag when Phase-1 (daily-PnL) RPC failed so
         # the admin health card lights up (pre-fix had no flag path for this).
@@ -2834,8 +2946,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             existing_flags["phase1_daily_pnl_persist_failed"] = True
             existing_flags["phase1_failed_at"] = datetime.now(timezone.utc).isoformat()
             write_needed = True
-        elif existing_flags.get("phase1_daily_pnl_persist_failed"):
-            # Clear stale flag on a successful Phase-1 run.
+        elif existing_flags.get("phase1_daily_pnl_persist_failed") and not phase1_read_refused:
+            # Clear stale flag on a successful Phase-1 run. A refused read is not
+            # one (Phase 251): it stored nothing, so it must not assert a recovery
+            # that did not happen, and a stale flag stays until a run that stores.
             existing_flags.pop("phase1_daily_pnl_persist_failed", None)
             existing_flags.pop("phase1_failed_at", None)
             write_needed = True
@@ -2845,17 +2959,22 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             existing_flags["phase2_error"] = phase2_error_message or "unknown"
             existing_flags["phase2_failed_at"] = datetime.now(timezone.utc).isoformat()
             write_needed = True
-        else:
+        elif phase2_success:
             # Phase 2 ran without raising — clear the lingering flag if present.
+            # Phase 251: this arm is entered only when Phase 2 RAN. A run with
+            # ingestion off says nothing about its own stored `phase2_*` keys.
             # Red-team M-conf=8: when the read itself failed we cannot tell
             # from an empty dict whether the DB row carries a stale failure
             # flag. Write the recovery payload defensively in that case so a
             # recovered strategy whose read transiently blipped no longer
             # perma-stays in "needs attention" on the admin health card.
-            # PostgREST upsert merges JSONB keys, so emitting an EXPLICIT
-            # `phase2_fill_ingestion_failed=False` is required on the
-            # load-failed path (a pop here would not actually remove the
-            # stale key from the DB row since we never read it).
+            # The upsert sends the WHOLE merged object and REPLACES the stored
+            # column (tests/test_okxtrades_cursor.py `_FakeAnalytics.upsert` and
+            # the src/app/api/keys/sync/route.ts comment are the in-repo
+            # evidence), so a pop on the load-failed path would not remove the
+            # stale key from the DB row since we never read it: the explicit
+            # `phase2_fill_ingestion_failed=False` marker stays for runs where
+            # Phase 2 ran.
             if flag_was_set:
                 existing_flags.pop("phase2_fill_ingestion_failed", None)
                 existing_flags.pop("phase2_error", None)
@@ -2875,10 +2994,23 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 # signal (e.g. binance_partial_symbols, sync_truncated_*).
                 # Persist so the admin health card can see it.
                 write_needed = True
-            else:
-                write_needed = False
 
-        if write_needed:
+        # "Phase 2 ran" is `phase2_failed or phase2_success`, which equals
+        # `_RAW_TRADE_INGESTION_ENABLED` (MT5 included).
+        phase2_ran = phase2_failed or phase2_success
+        if write_needed and flag_load_failed and not phase2_ran:
+            # The flags could not be read on a run where the fills walk did not
+            # run. An upsert here would replace the whole column with a payload
+            # guessed from an empty dict (dropping every flag the analytics runner
+            # owns), so nothing is written. The next sync re-reads and re-derives
+            # the flags.
+            logger.warning(
+                "sync_trades: skipping the flag write for strategy %s — the "
+                "data_quality_flags could not be read on a run where the fills "
+                "walk did not run; the next sync re-reads and re-derives them",
+                strategy_id,
+            )
+        elif write_needed:
             def _stamp_phase2_flags() -> None:
                 ctx.supabase.table("strategy_analytics").upsert(
                     {
@@ -2917,7 +3049,8 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     #     Phase 211 it seeds the Phase-2 fills read ONLY (`fills_since_ms`);
     #     the Phase-1 daily-P&L read seeds from the stored high-water instead.
     #   • last_sync_at advances only when Phase-1 persisted rows (NEW-C12-02:
-    #     advancing past an unpersisted window loses the daily-PnL permanently).
+    #     advancing past an unpersisted window loses the daily-PnL permanently)
+    #     and the daily read was not refused (Phase 251: nothing was stored).
     #   • account_balance_usdt is written whenever present (no ordering).
     #
     # Error policy: this consolidates two writes (the old fetched-cursor write
@@ -2927,7 +3060,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # swallow-with-warning is safe and avoids a retry storm on a persistent
     # api_keys write fault. Not silent: the warning is surfaced loudly.
     _now_iso = datetime.now(timezone.utc).isoformat()
-    _p_last_sync = _now_iso if not phase1_failed else None
+    _p_last_sync = None if phase1_read_refused else (_now_iso if not phase1_failed else None)
 
     if _p_last_fetched is None and _p_last_sync is None and account_balance is None:
         # silent-failure/F-04: nothing to write (no stored-through fills stamp,
@@ -2935,9 +3068,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # distinguish it from a write-path regression that drops the update.
         logger.info(
             "sync_trades: advance_sync_cursor skipped — no columns to write "
-            "(advance_fetched_cursor=%s phase1_failed=%s account_balance=%s; "
-            "last_sync_at intentionally held for retry)",
-            advance_fetched_cursor, phase1_failed, account_balance,
+            "(advance_fetched_cursor=%s phase1_failed=%s phase1_read_refused=%s "
+            "account_balance=%s; last_sync_at intentionally held for retry)",
+            advance_fetched_cursor, phase1_failed, phase1_read_refused,
+            account_balance,
         )
     else:
         def _advance_cursor() -> bool:
@@ -3096,6 +3230,8 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # Nothing published: mark strategy_analytics 'failed', then return FAILED below.
         # Best-effort: if even this write fails, we log + swallow (the trades are already
         # persisted); the FAILED outcome below still lets the status bridge set the row.
+        # The write and the zero-row re-read sit in SEPARATE `try` scopes (251-02, SC-5),
+        # so each log line names the call that failed and the two outcomes differ.
         #
         # THE FAILED/DONE SPLIT (replaces the 164.2-REVIEW WR-01 erasure analysis):
         #   * nothing published -> FAILED / transient -> `mark_compute_job_failed` ->
@@ -3109,6 +3245,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         #     clear `computation_warned`). OQ4.
         #   * publish read failed -> NO write, DONE, plus the residual noted at the
         #     `except` above.
+        #   * zero-row write, then a re-read that RAISES -> NO further write, DONE, by
+        #     the same rule as a failed publish read (an unreadable state is not
+        #     'nothing published'); the T-222-13 residual applies. A write that itself
+        #     raises stays FAILED: the first read said nothing is published.
         # Why FAILED only when nothing is published: the 161.1 F1 remedy (an
         # unconditional FAILED) does not transfer to this handler. `sync_trades` is not
         # in the bridge's `is_protected` kind list (`derive_broker_dailies`,
@@ -3170,23 +3310,50 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     return bool(getattr(res, "data", None))
 
                 wrote = await db_execute(_mark_analytics_failed)
-                if not wrote and await db_read_with_retry(_strategy_has_published_numbers):
-                    logger.error(
-                        "sync_trades: follow-on enqueue failed for strategy %s, and the "
-                        "strategy was published between the publish read and the write "
-                        "— writing nothing and returning DONE so the status bridge "
-                        "keeps its publish state (R2-WR-01).",
-                        strategy_id,
-                    )
-                    _nothing_published = False
-            except Exception as mark_exc:  # noqa: BLE001
+            except Exception as write_exc:  # noqa: BLE001
+                # The write raised: its effect is unknown, but the first read said
+                # nothing is published, so FAILED cannot unpublish a figure. No
+                # re-read; the outcome stays FAILED below.
                 logger.exception(
-                    "sync_trades: failed to mark strategy_analytics as "
-                    "failed for strategy %s after enqueue failure — wizard "
-                    "may still hang. Error: %s",
+                    "sync_trades: the conditional failed-row write raised for "
+                    "strategy %s after the follow-on enqueue failed — the outcome "
+                    "stays FAILED so the status bridge records the failure. "
+                    "Error: %s",
                     strategy_id,
-                    mark_exc,
+                    write_exc,
                 )
+            else:
+                if not wrote:
+                    try:
+                        _published_in_between = await db_read_with_retry(
+                            _strategy_has_published_numbers
+                        )
+                    except Exception as reread_exc:  # noqa: BLE001
+                        # Same rule as the publish-read arm above: an unreadable
+                        # state is not 'nothing published' (T-222-13), so a
+                        # re-read hiccup must never become FAILED, which at the
+                        # last attempt lets bridge branch (b) write 'failed' over
+                        # a row that may be published. Nothing was written.
+                        logger.exception(
+                            "sync_trades: follow-on enqueue failed for strategy %s "
+                            "and the failed-row write matched zero rows; the "
+                            "re-read of the publish state then raised — nothing "
+                            "was written, returning DONE (an unreadable state is "
+                            "not 'nothing published'). Error: %s",
+                            strategy_id,
+                            reread_exc,
+                        )
+                        _nothing_published = False
+                    else:
+                        if _published_in_between:
+                            logger.error(
+                                "sync_trades: follow-on enqueue failed for strategy %s, and the "
+                                "strategy was published between the publish read and the write "
+                                "— writing nothing and returning DONE so the status bridge "
+                                "keeps its publish state (R2-WR-01).",
+                                strategy_id,
+                            )
+                            _nothing_published = False
 
             # Constant operator sentence naming the cause: no exception text, no ids
             # (T-222-11). Transient (OQ2): an enqueue fault is not a property of the
@@ -3206,7 +3373,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # Pre-fix a Phase-1 failure still reported len(trades) which gave a
         # false green signal (admin sees "N rows synced" with 0 persisted).
         outcome=DispatchOutcome.DONE,
-        trade_count=0 if phase1_failed else len(trades),
+        trade_count=0 if (phase1_failed or phase1_read_refused) else len(trades),
     )
 
 

@@ -31,6 +31,21 @@ is unset, ``pytest.fail`` when it is unset and ``CI == "true"`` (a silent skip i
 would read as green while proving nothing). The module WRITES, so it refuses any host
 that is not loopback, and it writes only its own throwaway user, strategy and job rows.
 ``conftest.py`` groups any module naming ``SUPABASE_TEST_URL`` into ``shared_test_db``.
+
+Phase 251 SYNCSTORE (plan 02) adds three arms, all CI-only (they skip locally):
+
+  * ``test_reread_failure_after_a_zero_row_write_keeps_the_published_row`` (SC-5): the
+    conditional failed-row write matches zero rows because a row was published after
+    the first publish read, and the re-read then raises. The handler returns DONE and
+    writes nothing, so the published row survives the mark RPC and the bridge.
+  * ``test_a_clean_sync_removes_a_stored_refusal_key_and_keeps_the_rest`` pins
+    RESEARCH assumption A1 at the real PostgREST upsert: the upsert REPLACES the jsonb
+    ``data_quality_flags`` column, which is what makes plan 01's pop of a stale
+    sync-owned refusal key work. The in-repo fake hard-codes that behaviour, so only
+    this arm would catch it being false.
+  * ``test_a_refused_first_sync_creates_a_row_carrying_only_the_refusal_key`` pins
+    RESEARCH Q2: with no ``strategy_analytics`` row, a refused first sync's flag-only
+    upsert creates one whose ``data_quality_flags`` is exactly the refusal key.
 """
 from __future__ import annotations
 
@@ -48,6 +63,7 @@ try:
 except ImportError:  # pragma: no cover
     create_client = None  # type: ignore[assignment]
 
+from services import exchange as exchange_module
 from services import job_worker
 from services.job_worker import DispatchOutcome, DispatchResult, run_sync_trades_job
 from tests.live_db_transport import wrap_live_db_client
@@ -164,6 +180,8 @@ def _drive(
     attempts_before_claim: int | None = None,
     publish_race_row: dict[str, Any] | None = None,
     after_handler: dict[str, Any] | None = None,
+    reread_raises: bool = False,
+    daily_flags: dict[str, Any] | None = None,
 ) -> tuple[DispatchResult, dict[str, Any] | None, dict[str, Any]]:
     """Run the REAL handler and the REAL mark RPCs for one sync_trades job.
 
@@ -177,7 +195,14 @@ def _drive(
     this row is written to strategy_analytics through the lane, so the handler decides
     from a read that is already stale. ``after_handler``, when given, receives the
     strategy_analytics row as the handler left it (``after_handler["row"]``), before
-    the mark RPC and the bridge run.
+    the mark RPC and the bridge run; it also carries ``data_quality_flags``.
+
+    ``reread_raises`` (251 SC-5) makes the SECOND ``_strategy_has_published_numbers``
+    read raise ``RuntimeError("simulated re-read failure")``: the re-read the handler
+    makes after its conditional failed-row write matched zero rows. ``daily_flags``
+    (251) makes the stubbed daily read plant each ``key: value`` through the real
+    ``services.exchange._record_dq_flag``, so the handler's own drain sees a refused
+    (or otherwise flagged) read; ``None`` keeps a clean read.
     """
     user_id: str | None = None
     strategy_id: str | None = None
@@ -225,23 +250,38 @@ def _drive(
         job = dict(claimed)
 
         real_read = job_worker.db_read_with_retry
+        publish_reads = [0]
 
         async def _racing_read(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            is_publish_read = fn.__name__ == "_strategy_has_published_numbers"
+            if is_publish_read:
+                publish_reads[0] += 1
+                if reread_raises and publish_reads[0] == 2:
+                    raise RuntimeError("simulated re-read failure")
             out = await real_read(fn, *args, **kwargs)
-            if publish_race_row is not None and fn.__name__ == "_strategy_has_published_numbers":
+            if publish_race_row is not None and is_publish_read:
                 admin.table("strategy_analytics").upsert(
                     {"strategy_id": strategy_id, **publish_race_row},
                     on_conflict="strategy_id",
                 ).execute()
             return out
 
+        if daily_flags is None:
+            daily_read: Any = AsyncMock(return_value=[{"test": "trade"}])
+        else:
+
+            async def daily_read(_exchange: Any, since_ms: Any = None) -> Any:
+                # The real buffer, so the handler's own drain sees what production's does.
+                for key, value in daily_flags.items():
+                    exchange_module._record_dq_flag(key, value)
+                return [{"test": "trade"}]
+
         with patch(
             "services.job_worker.db_read_with_retry", new=_racing_read
         ), patch(
             "services.job_worker._exchange_preflight", new=AsyncMock(return_value=ctx)
         ), patch(
-            "services.job_worker.fetch_all_trades",
-            new=AsyncMock(return_value=[{"test": "trade"}]),
+            "services.job_worker.fetch_all_trades", new=daily_read
         ), patch(
             "services.job_worker.fetch_usdt_balance",
             new=AsyncMock(return_value=10000.0),
@@ -254,7 +294,10 @@ def _drive(
         if after_handler is not None:
             after_handler["row"] = (
                 admin.table("strategy_analytics")
-                .select("computation_status, computation_warned, computation_error, metrics_json")
+                .select(
+                    "computation_status, computation_warned, computation_error, "
+                    "metrics_json, data_quality_flags"
+                )
                 .eq("strategy_id", strategy_id)
                 .single()
                 .execute()
@@ -485,3 +528,103 @@ def test_a_row_published_between_the_read_and_the_write_is_not_overwritten() -> 
     assert row["metrics_json"] == _METRICS, row
     assert result.outcome == DispatchOutcome.DONE, result
     assert job["status"] == "done", job
+
+
+def test_reread_failure_after_a_zero_row_write_keeps_the_published_row() -> None:
+    """251 SC-5 / T-251-09: nothing is published at the first read (no row), a
+    ``complete_with_warnings`` row lands before the failed write, so the conditional
+    write matches zero rows, and the re-read then RAISES. The handler returns DONE and
+    writes nothing: an unreadable state is not "nothing published" (T-222-13).
+
+    It runs as the LAST attempt on purpose. Before the fix the re-read's raise was
+    swallowed by a shared ``try`` and the handler returned FAILED; the last attempt
+    made that ``failed_final``, and bridge branch (b) wrote ``failed`` over the
+    published row. The row is therefore asserted AFTER the mark RPC and the bridge."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+
+    left: dict[str, Any] = {}
+    result, row, job = _drive(
+        admin,
+        tag="reread-raises",
+        seed_row=None,
+        publish_race_row={
+            "computation_status": "complete_with_warnings",
+            "computation_warned": True,
+            "metrics_json": _METRICS,
+        },
+        reread_raises=True,
+        after_handler=left,
+    )
+
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert job["status"] == "done", job
+    assert left["row"]["computation_status"] == "complete_with_warnings", left["row"]
+    assert row is not None
+    assert row["computation_status"] == "complete_with_warnings", row
+    assert row["computation_warned"] is True, row
+    assert row["computation_error"] is None, row
+    assert row["metrics_json"] == _METRICS, row
+
+
+def test_a_clean_sync_removes_a_stored_refusal_key_and_keeps_the_rest() -> None:
+    """251 RESEARCH assumption A1, the load-bearing fact behind plan 01's pop: the real
+    PostgREST upsert REPLACES the jsonb ``data_quality_flags`` column, so omitting a
+    stale sync-owned refusal key from the payload removes it. The mocked fake hard-codes
+    that, so nothing else would catch it being false (a deep merge would leave the
+    owned keys on the row forever).
+
+    The stored flags hold two sync-owned refusal keys (``daily_pnl_non_usd_okx`` and
+    ``daily_pnl_fetch_error_class``) plus ``daily_pnl_malformed_okx`` (the derive's,
+    never popped) and an unrelated key. A clean read leaves exactly the last two. The seeded row reads ``pending``, which is "nothing published", so the
+    tail's conditional write applies and the outcome is FAILED. The flags are read
+    BEFORE the mark RPC, so the bridge cannot affect them."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+
+    left: dict[str, Any] = {}
+    result, _row, _job = _drive(
+        admin,
+        tag="a1-pop",
+        seed_row={
+            "data_quality_flags": {
+                "daily_pnl_non_usd_okx": True,
+                "daily_pnl_fetch_error_class": "NetworkError",
+                "daily_pnl_malformed_okx": True,
+                "p251_unrelated_marker": "kept",
+            }
+        },
+        after_handler=left,
+    )
+
+    assert left["row"]["data_quality_flags"] == {
+        "daily_pnl_malformed_okx": True,
+        "p251_unrelated_marker": "kept",
+    }, left["row"]
+    assert result.outcome == DispatchOutcome.FAILED, result
+
+
+def test_a_refused_first_sync_creates_a_row_carrying_only_the_refusal_key() -> None:
+    """251 RESEARCH Q2: a refused first sync has no ``strategy_analytics`` row, and the
+    handler's flag-only upsert creates one whose ``data_quality_flags`` is exactly the
+    refusal key. The row it creates reads ``pending``, so the tail's conditional write
+    (the enqueue is failing here) matches it and the row reads ``failed``."""
+    _need_supabase()
+    _require_loopback_lane(SUPABASE_URL)
+    admin = _lane_client()
+
+    left: dict[str, Any] = {}
+    result, _row, _job = _drive(
+        admin,
+        tag="q2-first",
+        seed_row=None,
+        daily_flags={"daily_pnl_non_usd_okx": True},
+        after_handler=left,
+    )
+
+    assert left["row"]["data_quality_flags"] == {"daily_pnl_non_usd_okx": True}, left["row"]
+    assert left["row"]["computation_status"] == "failed", left["row"]
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert result.error_kind == "transient", result

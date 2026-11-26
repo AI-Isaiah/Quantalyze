@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.133.87.0] - 2026-11-26 — Phase 251 SYNCSTORE: run_sync_trades_job stores every run's daily P&L and records its refusal flags truthfully
+
+The queued trade sync (`run_sync_trades_job`) carried four leftovers that Phase 232 OKXTRADES routed out of its own scope, plus one review finding Phase 222 booked to this phase. A refused daily P&L read was stored anyway, the daily store waited behind the fills walk, refusal flags never reached `strategy_analytics.data_quality_flags` with raw ingestion off (the PROD default), and no run ever cleared them. All five are fixed in the one handler. No migration.
+
+### Fixed
+- **A refused daily P&L read stores nothing (item 2).** The handler now reads its daily flag buffer through the shared `daily_pnl_read_verdict`, the same reader the cron tick and the broker derive use. When the verdict names a reason (fetch error, Binance income fallback, OKX non-USD bill, a truncated or deadline read), `sync_trades` is not called, because its window-scoped DELETE would replace real daily rows with partial or foreign ones (the Binance fallback returns spot fills shaped as daily rows). `last_sync_at` and the fills cursor are held, `trade_count` is 0, and `phase1_daily_pnl_persist_failed` is not stamped, because nothing was persisted. The balance write and the follow-on enqueue are unchanged, and the job stays DONE: the follow-on derive re-reads the venue and refuses by name itself. A rate-limited read now reaches the handler's 429 arm, the same way the derive handles it, so the circuit breaker trips.
+- **The daily store runs before the fills walk (item 1).** A clean daily read is stored straight after the read, before `fetch_usdt_balance` and the Phase-2 fills walk. A walk that raises or hits the 15-minute handler timeout no longer loses that run's daily P&L.
+- **Refusal flags reach `data_quality_flags` and are cleared by a clean read (items 3 and 4).** The handler owns the verdict's reason keys plus `daily_pnl_fetch_error_class` and `daily_pnl_unsupported_venue` (`_is_sync_owned_daily_pnl_key`). On every ccxt run these stored keys are replaced by the run's drained set: written on a refusal, removed on a clean read. The write goes through the one existing upsert site, so the provenance censuses do not move. `daily_pnl_malformed_*` is not owned: the derive owns it from a full-history read, so the sync never removes it. The stored error class is the verdict's sanitized identifier, never the raw drained string. MT5 runs, which read no daily P&L, make no flag read.
+- **`write_needed` only accumulates.** The Phase-2 branch used to reset it to False after a Phase-1 persist failure had set it, so `phase1_daily_pnl_persist_failed` was never written in the common case. **Behaviour change:** that stamp now lands on a Phase-1 persist failure, with ingestion on or off.
+- **A failed flag read writes nothing on a run where Phase 2 did not run.** The upsert replaces the whole `data_quality_flags` column, so writing a payload guessed from an empty read would drop every flag the analytics runner owns. The run logs a warning and the next sync re-derives the flags. The existing recovery arm still runs when Phase 2 ran.
+- **`[222-SYNCTRADES-REREAD-FAILED]` (Phase 222 review SFH-R3-01).** In the enqueue-failure tail, the conditional failed-row write and the zero-row re-read now have separate `try` scopes. A re-read that raises after a zero-row write returns DONE and writes nothing, by the rule the same tail already applies to its first publish read: an unreadable state is not "nothing published" (residual T-222-13, unchanged). A write that raises still returns FAILED, because the first read found nothing published. Each log line names the call that failed, and the misleading "wizard may still hang" line is gone. This sides against the 222 round-3 reviewer's reading (keep FAILED), so the two unreadable-state arms behave the same.
+
+### Tests
+- `analytics-service/tests/test_sync_trades_store_truth.py` (new, 37 arms) drives the real handler with a stored-flags-aware fake. It covers: the store before the walk and under a cancel; every refusal reason, including a Binance spot-fill fixture and a Deribit-shaped pair; the 429 arm; the owned-key replace on a clean read, with malformed and unrelated keys kept; flags landing with ingestion off; the failed-read skip; the first-sync row; the sanitized class; the persist-failure stamp control; and the re-read and write outcomes. An AST pin requires every `daily_pnl_*` flag `services/exchange.py` records to be owned or `daily_pnl_malformed_*`.
+- `test_sync_trades_enqueue_failure_bridge_live.py` gains three local-stack arms: a raising re-read keeps a published row, a clean sync removes a stored refusal key and keeps the rest (the column-replacing upsert), and a refused first sync creates a `pending` row holding only the refusal key. They run in CI's `python` job.
+- Every gate was shown RED on pre-fix code or a neutered copy (20 neuter rows) and GREEN after a byte-backup restore. The records are in the plan SUMMARYs.
+
+### Removed
+- `TODOS.md` `[222-SYNCTRADES-REREAD-FAILED]`, closed by this phase.
+
+### Notes
+- **Known limits, recorded rather than fixed:**
+  - A queued Deribit sync is refused by name every run (`fetch_daily_pnl` has no Deribit branch) and holds `last_sync_at`. PROD had 0 Deribit `sync_trades` jobs in the 30 days to 2026-11-26.
+  - A run cancelled after the daily store loses its flag write. The next run re-derives the flags.
+  - A refused first sync creates a `strategy_analytics` row at `pending` that carries only the refusal key.
+  - With ingestion off, every ccxt sync now makes one extra `strategy_analytics` read.
+  - The derive pre-stamp and the CSV runner still rebuild `data_quality_flags` wholesale, so a sync-written refusal key can be replaced when the chain completes. That is the derive's ownership and out of scope.
+- **Booked, not fixed:** `[251-FLAG-WRITE-FAILURE-LOG]`. A failed flag upsert is logged at WARNING as a `phase2_*` stamp and names none of the keys it lost. This is the one MEDIUM from the silent-failure review: observability, not user-facing.
+- **Reviews:** gsd-code-reviewer found nothing at MEDIUM or above (5 LOW, 4 INFO); silent-failure-hunter found one MEDIUM (booked above). Verification passed 6/6. The security audit closed all 13 threats (ASVS L1).
+
 ## [0.133.86.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE: a same-account refusal names the caller's own strategy or stored key and links to it
 
 Founder direction 2026-11-25 (`225-CONTEXT.md`, "names what the account already holds"): one exchange account may sit on many platform accounts. It only goes wrong when one person forgets they already added it and adds it again. So a same-account refusal now tells that person which of their OWN strategies or keys already holds the account, and links to it.
@@ -165,7 +195,7 @@ Records only: no source, test, workflow or migration change.
 ### Notes
 - STATE progress was re-derived with 23 phases in v1.22: 11 complete (48%). `state.json` lists 251, 236 and 252 (both in progress) and 253.
 
-## [0.133.82.0] - 2026-11-26 — Phase 236 FIGUREMATH: every engine annualizes one way, CVaR is historical, and moved figures are named for the fleet re-derive
+## [0.133.87.0] - 2026-11-26 — Phase 236 FIGUREMATH: every engine annualizes one way, CVaR is historical, and moved figures are named for the fleet re-derive
 
 The stored Python metrics, the factsheet engine, the Scenario planner, the OG share card, the compare surface and the optimizer now follow one convention, F-5 "365, ddof 1 everywhere": a year is 365 days, risk is annualized by frequency (crypto 365, traditional 252), and every annualized dispersion is the sample standard deviation. CVaR is the historical figure and is null when the TOTAL record has fewer than 60 observations (founder ruling Q2, "Total record only"). A zoomed window always shows it. CAGR uses one span rule everywhere, first to last observed date in whole days over 365, and the factsheet now prints that span (Q1, "Keep calendar span, show it"). quantstats moves 0.0.81 to 0.0.86 and each upstream correction is adopted or kept per metric (Q3). The per-metric record is `236-QUANTSTATS-DECISIONS.md` in the phase directory, 16 rows. Requirements FIG-01 to FIG-04 are met in code. FIG-05's fleet re-derive is a PROD write handed to the coordinator through `docs/runbooks/figuremath-fleet-rederive.md`, and it is still pending (see Notes).
 
