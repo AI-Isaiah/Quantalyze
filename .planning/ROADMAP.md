@@ -387,6 +387,7 @@ Plans:
 This phase is 225's sibling on seam S4, ordered right after it. 225 kept the identity members that must ship with its refusal; nine requirements would not fit one phase's criteria (see 225).
 **Requirements**: CONN-02, CONN-04
 **Depends on:** Phase 225 merged. The same file and seam are involved: `resolveByVenueIdentity` and `keyOrphanedResponse`. Founder ruling at plan time on CONN-02.
+**Founder ruling (2026-11-26, CONN-02):** "Validate and update in place". On the MT5 same-account arms, a reconnect with a new password is validated, and on success the stored key's secret is rotated through the rotate-secret seam and the answer names the key. The founder accepted the trade-off: the up-to-120 s validation returns on those arms, which reverses 212-03 SC5 for MT5, and a connect request now changes an existing key. Recorded in `228-CONTEXT.md`.
 **Success Criteria** (what must be TRUE):
 1. Reconnecting an MT5 account with a rotated password gets a named answer, and what the answer says matches what `api_keys` holds afterwards. A mistyped password is never reported as success. (CONN-02)
 2. An allocator-role owner who hits `KEY_ORPHANED` is told, by name, which key to Disconnect; a test drives the allocator and manager roles. (CONN-04)
