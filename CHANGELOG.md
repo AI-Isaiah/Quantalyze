@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.133.98.3] - 2026-11-26 — Phase 235 Nyquist validation: one key's failed marker read in a multi-key book still raises the dashboard flag
+
+### Tests
+- **Phase 235 HOLD-04 (server half), the multi-key gap found by the Nyquist audit.** Every existing `markerReadError` test failed the whole `allocator_equity_derived` table, so every key's marker read failed together. If `fetchLatestHoldingsPerKey` had read only the first key's error, the suite would still have passed, and `holdingsUnpricedCheckFailed` would stay false for a real book whose second key's marker read failed. The dashboard would then show stale rows with no note. `src/lib/latest-holdings-per-key.test.ts` gets a new describe, `Phase 235 HOLD-04: one key's failed marker read in a multi-key book`, with two arms. Each fails ONE key's marker read through a kind-scoped wrapper, and asserts that exactly that key was failed:
+  - A1: a later key with rows. `markerReadError` carries its message, and both keys' rows are kept.
+  - A2: a later key with no rows. Its failure is not lost.
+- Shown able to fail. With the aggregation neutered to `readings[0]?.markerError ?? null`, A1 and A2 go RED and the other 93 arms stay green. The file was restored from a byte backup (`cmp` silent) and is green at 95/95.
+
+### Notes
+- Test-only. No production code changed. The phase's VALIDATION.md audit record follows in a separate records PR.
+
 ## [0.133.98.2] - 2026-11-26 — records: Phase 241 item 2 re-measurement and Phase 252 OG-card and charts decision; both stay human_needed
 
 ### Added
