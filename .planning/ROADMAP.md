@@ -392,11 +392,17 @@ This phase is 225's sibling on seam S4, ordered right after it. 225 kept the ide
 1. Reconnecting an MT5 account with a rotated password gets a named answer, and what the answer says matches what `api_keys` holds afterwards. A mistyped password is never reported as success. (CONN-02)
 2. An allocator-role owner who hits `KEY_ORPHANED` is told, by name, which key to Disconnect; a test drives the allocator and manager roles. (CONN-04)
 3. PROOF-01: each test goes RED on a neutered copy of the route arm it guards, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 4 plans
 **UI hint**: yes
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [ ] 228-01-PLAN.md — The rotate seam reports `secret_changed` (probe-then-compare, UTF-8 constant-time), and its seam call (`rotateKeySecret`) and owner-scoped persist (`persistRotatedMt5Secret`) are shared, with rotate-secret byte-identical (CONN-02)
+- [ ] 228-02-PLAN.md — The connect step renders the password outcome notice from `key_secret`, the F6 fallback strip stops claiming the credentials are connected, and KEY_ORPHANED's Disconnect bullet names the key (CONN-02, CONN-04)
+- [ ] 228-04-PLAN.md — The seam-budget census declares the create-with-key `mt5-rotate` branch and pins that it fits the browser deadline (CONN-02)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 228-03-PLAN.md — An MT5 reconnect whose fence picks the caller's own working holder on the exact server is validated and rotated in place and named; failures write nothing; KEY_ORPHANED is the same named answer for every role (CONN-02, CONN-04)
 
 ### Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently
 

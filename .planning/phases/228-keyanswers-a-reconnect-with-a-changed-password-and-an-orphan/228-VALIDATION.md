@@ -39,16 +39,16 @@ created: "2026-11-26"
 
 Task ids are filled by the planner; every requirement row in `228-RESEARCH.md`'s test map must map to at least one task.
 
-| Requirement | Behaviour | Test Type | Automated Command | File Exists | Status |
-|-------------|-----------|-----------|-------------------|-------------|--------|
-| CONN-02 / SC-1 | working same-account holder on the exact server: rotate in place, named answer, one owner-scoped UPDATE | route unit | `npx vitest run src/app/api/strategies/create-with-key/route.test.ts` | ✅ (extend) | ⬜ pending |
-| CONN-02 / SC-1 | mistyped, master or wrong-server password: named validation error, zero writes | route unit | same | ✅ (extend) | ⬜ pending |
-| CONN-02 | unchanged password: zero writes, `unchanged` answer | route unit + pytest | same; `pytest tests/test_mt5_rotate_secret_internal.py -q` | ✅ (extend) | ⬜ pending |
-| CONN-02 | rotate-secret route unchanged after the helper extraction | route unit | `npx vitest run "src/app/api/keys/[id]/rotate-secret/route.test.ts"` | ✅ | ⬜ pending |
-| CONN-02 / O2 | rotate leg fits the browser deadline | invariant | `npx vitest run src/lib/seam-budgets.invariant.test.ts` | ✅ (extend) | ⬜ pending |
-| CONN-02 | notice and F6 strip copy | component | ConnectKeyStep.test.tsx, WizardClient.test.tsx | ✅ (extend) | ⬜ pending |
-| CONN-04 / SC-2 | named Disconnect bullet, same for allocator / manager / both | route unit + formatKeyError unit | route.test.ts, wizardErrors tests | ✅ (extend) | ⬜ pending |
-| SC-3 | PROOF-01 transcript for every guard | process | recorded in plan SUMMARY | n/a | ⬜ pending |
+| Requirement | Behaviour | Test Type | Automated Command | File Exists | Plan / Task | Status |
+|-------------|-----------|-----------|-------------------|-------------|-------------|--------|
+| CONN-02 / SC-1 | working same-account holder on the exact server: rotate in place, named answer, one owner-scoped UPDATE | route unit | `npx vitest run src/app/api/strategies/create-with-key/route.test.ts` | ✅ (extend) | 228-03 T1, T2 | ⬜ pending |
+| CONN-02 / SC-1 | mistyped, master or wrong-server password: named validation error, zero writes | route unit | same | ✅ (extend) | 228-03 T2 | ⬜ pending |
+| CONN-02 | unchanged password: zero writes, `unchanged` answer | route unit + pytest | same; `pytest tests/test_mt5_rotate_secret_internal.py -q` | ✅ (extend) | 228-01 T1, T3; 228-03 T2 | ⬜ pending |
+| CONN-02 | rotate-secret route unchanged after the helper extraction | route unit | `npx vitest run "src/app/api/keys/[id]/rotate-secret/route.test.ts"` | ✅ | 228-01 T1, T2 | ⬜ pending |
+| CONN-02 / O2 | rotate leg fits the browser deadline | invariant | `npx vitest run src/lib/seam-budgets.invariant.test.ts` | ✅ (extend) | 228-04 T1, T2 | ⬜ pending |
+| CONN-02 | notice and F6 strip copy | component | ConnectKeyStep.test.tsx, WizardClient.test.tsx | ✅ (extend) | 228-02 T1, T3 | ⬜ pending |
+| CONN-04 / SC-2 | named Disconnect bullet, same for allocator / manager / both | route unit + formatKeyError unit | route.test.ts, wizardErrors tests | ✅ (extend) | 228-02 T2; 228-03 T3 | ⬜ pending |
+| SC-3 | PROOF-01 transcript for every guard | process | recorded in plan SUMMARY | n/a | every task (each SUMMARY) | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 

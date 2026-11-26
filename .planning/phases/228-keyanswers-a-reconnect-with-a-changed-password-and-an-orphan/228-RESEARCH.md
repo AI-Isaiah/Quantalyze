@@ -378,7 +378,7 @@ Recommended wire: existing codes + `key_secret: { outcome, name? }` on the four 
 | Dependency | Required By | Available | Version | Fallback |
 |------------|------------|-----------|---------|----------|
 | Node | vitest, tsc | yes | v25.8.1 | n/a |
-| `node_modules` in the 228 worktree | any vitest/tsc run here | **no** (`ls node_modules` fails) | n/a | the main checkout has `node_modules/.bin/vitest` (`/Users/helios-mammut/claude-projects/quantalyze/node_modules`); run `npm ci` in the worktree, or point a one-off `vitest` run at the main checkout's binary. Do not symlink over uncommitted work. |
+| `node_modules` in the 228 worktree | any vitest/tsc run here | **no** (`ls node_modules` fails) | n/a | the main checkout has `node_modules/.bin/vitest` (the main checkout's own `node_modules`); run `npm ci` in the worktree, or point a one-off `vitest` run at the main checkout's binary. Do not symlink over uncommitted work. |
 | pytest | Python tests | yes | 9.0.2 (baseline: `tests/test_mt5_rotate_secret_internal.py` 23 passed in 11 s from `analytics-service/`) | n/a |
 | mypy | Python type gate | yes | 2.0.0 | n/a |
 | ruff | hygiene only | yes | 0.15.7 | n/a |
