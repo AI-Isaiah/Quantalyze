@@ -147,6 +147,14 @@ EXPECTED_SIGN_IN_FAILED_DETAIL = (
     "the credential."
 )
 
+# Phase 225 (SIGNINREFUSED) - the login-stage -6 refusal's own detail, the wire body of
+# the C5 `mt5_sign_in_refused` case. Typed here independently of
+# `services/closed_sets.py`; the hoisted-copy pin below COMPARES the two.
+EXPECTED_MT5_SIGN_IN_REFUSED_DETAIL = (
+    "Your broker answered and refused this sign-in. Check the account number, the "
+    "investor password and the server name."
+)
+
 # Phase 164.6.6.3 plan 05 (D-09, D-10) - the known-server pre-check's own detail, the
 # wire body of C8. Typed here independently of `services/closed_sets.py`; the
 # hoisted-copy pin below COMPARES the two. Not an echo of the submitted server.
@@ -213,6 +221,7 @@ EXPECTED_FIXTURE_TRIGGERS = {
     "mt5_probe_timeout",
     "mt5_account_mismatch",
     "mt5_client_error_transient",
+    "mt5_sign_in_refused",
     "mt5_post_login_client_error",
     "mt5_server_unknown",
     "mt5_scrub_owed",
@@ -686,14 +695,17 @@ def test_c5_mt5_transient_client_error_carries_a_machine_code(
     ("code", "text"),
     [
         pytest.param(-10005, "IPC timeout", id="-10005-modal-login-dialog"),
-        pytest.param(-6, "Authorization failed", id="-6-res-e-auth-failed"),
+        pytest.param(0, "authorization failed", id="0-no-answer-code"),
     ],
 )
 def test_c5_mt5_login_stage_refusal_codes_share_the_sign_in_body(
     app_client, monkeypatch, code, text
 ) -> None:
-    """C5, the D-17 code set on the wire — a login-stage -10005 or -6 answers the
-    SAME body as the fixture's `mt5_client_error_transient` case. -10005 is the
+    """C5, the D-17 code set on the wire — a login-stage -10005 or 0 answers the
+    SAME body as the fixture's `mt5_client_error_transient` case. ⭐ Phase 225: a
+    login-stage -6 is NOT in this set any more, it answers `MT5_SIGN_IN_REFUSED`
+    (`test_c5_mt5_login_stage_minus_6_answers_sign_in_refused` below), and this
+    parametrization is what fails if that branch is widened past exactly -6. -10005 is the
     modal login dialog D-08 measured for a wrong password; before D-17 it was
     answered `NETWORK_UNAVAILABLE` / `recoverable: true`, which is the pre-phase
     Retry D-08 calls the harmful action.
@@ -713,6 +725,41 @@ def test_c5_mt5_login_stage_refusal_codes_share_the_sign_in_body(
         code="SIGN_IN_FAILED",
         recoverable=False,
     )
+
+
+def test_c5_mt5_login_stage_minus_6_answers_sign_in_refused(
+    app_client, monkeypatch
+) -> None:
+    """Phase 225 (SIGNINREFUSED) — a login-stage `last_error` of exactly -6
+    (`RES_E_AUTH_FAILED`) answers 424 `MT5_SIGN_IN_REFUSED`, `recoverable=False`,
+    through the real route and handler stack, as a raise that reaches no persistence.
+
+    MEASURED on PROD 2026-11-25: a wrong broker server with a real investor password
+    answered -6 within about 0.5 s. The broker answered and refused, so the answer
+    must not be `SIGN_IN_FAILED`, whose detail says the attempt "did not complete".
+    `recoverable` stays False for the same reason as C5's other case: a Retry re-sends
+    the SAME credential to the one shared terminal.
+
+    The sibling parametrization above (`-10005`, `0`) is the other half of this
+    pin: it fails if this branch is widened past exactly -6 or removed."""
+    from services.mt5_client import Mt5LoginRefusedError
+
+    _arrange_mt5(
+        monkeypatch,
+        login_raises=Mt5LoginRefusedError(-6, "Authorization failed"),
+    )
+
+    r = _post_validate_key(app_client, **_MT5_FIELDS)
+
+    _assert_flat_venue_body(
+        r,
+        trigger="mt5_sign_in_refused",
+        detail=EXPECTED_MT5_SIGN_IN_REFUSED_DETAIL,
+        code="MT5_SIGN_IN_REFUSED",
+        recoverable=False,
+    )
+    # The old, untrue claim for this code must not ride the body in any field.
+    assert "did not complete" not in r.text
 
 
 def test_c5_mt5_post_login_client_error_keeps_the_network_code(
@@ -1672,6 +1719,10 @@ def test_hoisted_copy_constants_match_the_literals_pinned_here() -> None:
     from services.closed_sets import MT5_TERMINAL_BUSY_DETAIL
 
     assert MT5_TERMINAL_BUSY_DETAIL == EXPECTED_MT5_TERMINAL_BUSY_DETAIL
+    # Phase 225 - the C5 `mt5_sign_in_refused` detail, hoisted in the same module.
+    from services.closed_sets import MT5_SIGN_IN_REFUSED_DETAIL
+
+    assert MT5_SIGN_IN_REFUSED_DETAIL == EXPECTED_MT5_SIGN_IN_REFUSED_DETAIL
     # Phase 218 - C9's detail, hoisted in the same module.
     from services.closed_sets import MT5_TERMINAL_NOT_READY_DETAIL
 

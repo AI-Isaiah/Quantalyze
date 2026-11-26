@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.133.85.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE: a login-stage MT5 -6 says the broker refused the sign-in and names the three things to check
+
+MT5 `last_error` -6 is `RES_E_AUTH_FAILED`, "authorization failed" (MT5 Python docs, `last_error()` table). On 2026-11-25 the founder made two PROD add-key attempts with a wrong broker server and a real investor password. Both got -6 back from `login()` in 344 ms and 523 ms, so the broker answered and refused. The wizard still showed `KEY_SIGN_IN_FAILED`, which says the attempt "did not get far enough for the venue to tell us why". That is untrue for -6. The phase CONTEXT records the decision this implements: the copy must say the broker refused the sign-in and name a wrong login, investor password and server as the things to check, without claiming the server is the cause, because -6 cannot tell them apart. It changes no gate.
+
+### Changed
+- **`_validate_mt5_key_probe` (`analytics-service/routers/exchange.py`)** now answers a login-stage refusal whose code is exactly -6 with **424 `MT5_SIGN_IN_REFUSED`**, `recoverable=False`. The detail is `MT5_SIGN_IN_REFUSED_DETAIL` (`services/closed_sets.py`): "Your broker answered and refused this sign-in. Check the account number, the investor password and the server name." The 424 status and the reasoning are the same as `SIGN_IN_FAILED`: a Retry re-sends the same credential to the one shared terminal. Every other login-stage code (0, -10005, …) keeps `SIGN_IN_FAILED` byte-unchanged.
+  - Only the validate surface (validate-key and rotate-secret) changes. The holdings poll, ingestion and the job worker classify -6 exactly as before.
+
+### Added
+- **`KEY_MT5_SIGN_IN_REFUSED` (`src/lib/wizardErrors.ts`).**
+  - Title: "Your broker refused this sign-in."
+  - The cause says the broker answered and refused, and that MT5 gives the same answer for a wrong account number, investor password and server.
+  - The fix list has one bullet per field. A "submit again" bullet is hidden on the saved-key summary screen. The last bullet points to the contact form for when all three fields are right.
+  - It offers no Retry.
+  - The code is wired into four places: a `VENUE_WIRE_CODE_TO_VERDICT` row (the wizard, create-with-key and add-key rosters derive from it), the rotate-secret dialog's `DASHBOARD_DIALOG_ROUTE_CODES`, and a named 424 arm in `recogniseValidateAndEncryptCode`. Without that arm, StrategyForm and AllocatorExchangeManager would render the recoverable `UNKNOWN` shell. `SIGN_IN_FAILED` and every other 424 stay unrecognised there.
+
+### Fixed
+- **Review M-1, fixed before ship.** The first draft of the card dropped the contact-form route that a -6 user had under `KEY_SIGN_IN_FAILED`, and its cause said the fault must be one of the three fields. -6 can also come back when all three are right, for example for a disabled account. The cause now reads "...so we cannot tell you which to check first", and a fifth bullet sends the correlation id through the contact form.
+
+### Tests
+- **Python.**
+  - End-to-end pins for -6 to `MT5_SIGN_IN_REFUSED`, in `test_mt5_validate.py` and through the real route stack in `test_validate_key_venue_transient.py`.
+  - The sibling parametrizations now carry -10005 and 0 only, so they fail if the branch widens past exactly -6.
+  - The contract fixture gets a C5 `mt5_sign_in_refused` case.
+  - `EXPECTED_SUBCLASS_CONSTRUCTION_SITES` moves 27 to 28 in `test_raw_5xx_census.py`.
+  - A cascade-needle sweep proves the new detail cannot be reclassified by substring.
+  - A hoisted-copy pin compares the detail against an independently typed literal.
+- **TypeScript.**
+  - Recogniser and copy tests: not recoverable, all three fields named, the contact route kept.
+  - Roster and invariant updates.
+  - The validate-key parity test.
+  - Route tests for validate-and-encrypt, rotate-secret and create-with-key.
+  - Surface tests for ConnectKeyStep, StrategyForm, AllocatorExchangeManager and UpdateMt5SecretDialog.
+
+### Notes
+- **`analytics-service/docs/STATUS_CONTRACT.md`** records the split beside S-27, as prose.
+- **Review LOWs recorded here, not fixed (repo rule: LOW and Info are never fixed or booked in `TODOS.md`):**
+  - The validate stage still logs the -6 as `outcome=transient`.
+  - STATUS_CONTRACT has no register row for the new code, and S-27's trigger text is not narrowed to "code is not -6".
+  - On the rotate-secret dialog, the card's account-number and server bullets name fields that dialog cannot edit. `KEY_MT5_WRONG_SERVER` has the same gap there today.
+  - The copy's statement that a wrong investor password also answers -6 rests on the MT5 docs and the CONTEXT decision. The only -6 measured on PROD is a wrong server, and this repo's measured wrong-password signal is -10005, which still answers `SIGN_IN_FAILED`.
+- Closes no `TODOS.md` entry. Does not depend on PR-2c (#1344), which also edits `routers/exchange.py`.
+
 ## [0.133.84.0] - 2026-11-26 — Phase 250 BINANCEFILLS: a Binance fills read walks every window from its cursor to now, and its cursor never stalls silently or because one symbol fails
 
 ### Fixed

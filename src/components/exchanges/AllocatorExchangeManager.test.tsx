@@ -3673,6 +3673,23 @@ describe("AllocatorExchangeManager — 212-08 Add key renders validate-and-encry
     expect(screen.queryByText(/your draft is saved/i)).not.toBeInTheDocument();
   });
 
+  // ⭐ Phase 225 (SIGNINREFUSED) - twin of StrategyForm's (k): the one named 424 that this
+  // form recognises. Its own copy, never the UNKNOWN shell, and no Retry.
+  it("a 424 MT5_SIGN_IN_REFUSED renders its own broker-refused copy, never UNKNOWN, and no Retry", async () => {
+    await submitAddKey(
+      jsonResponse(424, {
+        error: "CURATED-DETAIL-THAT-IS-NOT-THE-COPY",
+        code: "MT5_SIGN_IN_REFUSED",
+      }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "KEY_MT5_SIGN_IN_REFUSED");
+    expect(card.textContent).toContain("Your broker refused this sign-in.");
+    expect(card.textContent).toContain("a wrong account number, a wrong investor password and a wrong server");
+    expect(screen.queryByText("Try the last action again.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
   it("the request carries an X-Correlation-Id equal to the envelope's correlation id", async () => {
     await submitAddKey(jsonResponse(400, { error: "x", code: "KEY_NOT_READ_ONLY" }));
     const card = await screen.findByTestId("error-envelope");

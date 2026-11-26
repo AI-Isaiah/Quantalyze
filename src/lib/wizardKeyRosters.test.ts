@@ -30,6 +30,13 @@ import {
  * `VENUE_DRAFT_IN_PROGRESS`, the by-name refusal of an own-draft match, a deliberate
  * roster decision (founder D-23). Composites are out (F-2 / Q4), so the add-key array is
  * unchanged.
+ *
+ * +1 each at 2026-11-25 (Phase 225 SIGNINREFUSED): `KEY_MT5_SIGN_IN_REFUSED` arrives with its
+ * `VENUE_WIRE_CODE_TO_VERDICT` row (wire `MT5_SIGN_IN_REFUSED`, 424, `recoverable=False`),
+ * a deliberate roster decision: a login-stage MT5 `last_error` -6 at validation is the
+ * broker's own refusal, and without the row both forms would render UNKNOWN, whose copy
+ * offers a Retry. Inserted in sorted position in both arrays; the vacuity floors below did
+ * not move.
  */
 const FROZEN_CREATE_WITH_KEY_215: readonly string[] = [
   "DRAFT_ALREADY_EXISTS",
@@ -46,6 +53,7 @@ const FROZEN_CREATE_WITH_KEY_215: readonly string[] = [
   "KEY_MISSING_REQUIRED_FIELD",
   "KEY_MT5_MASTER_PASSWORD",
   "KEY_MT5_SERVER_UNKNOWN",
+  "KEY_MT5_SIGN_IN_REFUSED",
   "KEY_MT5_TERMINAL_BUSY",
   "KEY_MT5_TERMINAL_NOT_READY",
   "KEY_MT5_TERMINAL_UNRESPONSIVE",
@@ -89,6 +97,7 @@ const FROZEN_ADD_KEY_215: readonly string[] = [
   "KEY_MISSING_REQUIRED_FIELD",
   "KEY_MT5_MASTER_PASSWORD",
   "KEY_MT5_SERVER_UNKNOWN",
+  "KEY_MT5_SIGN_IN_REFUSED",
   "KEY_MT5_TERMINAL_BUSY",
   "KEY_MT5_TERMINAL_NOT_READY",
   "KEY_MT5_TERMINAL_UNRESPONSIVE",

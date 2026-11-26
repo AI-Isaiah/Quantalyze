@@ -2793,6 +2793,31 @@ describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream 
     });
   });
 
+  // Phase 225 (SIGNINREFUSED) — a login-stage MT5 -6 reaches this route as a 424 carrying
+  // seamCode `MT5_SIGN_IN_REFUSED`. The route forwards the code untouched and the client
+  // recogniser resolves the route's ACTUAL body to the broker-refused entry, never UNKNOWN.
+  it("a 424 MT5_SIGN_IN_REFUSED is forwarded and the client recogniser resolves it to KEY_MT5_SIGN_IN_REFUSED", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    const { recogniseValidateAndEncryptCode } = await import("@/lib/wizardErrors");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError(
+        "Your broker answered and refused this sign-in.",
+        424,
+        "MT5_SIGN_IN_REFUSED",
+      ),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    const body = await res.json();
+
+    expect(res.status).toBe(424);
+    expect(body.code).toBe("MT5_SIGN_IN_REFUSED");
+    expect(recogniseValidateAndEncryptCode(body, res.status)).toEqual({
+      code: "KEY_MT5_SIGN_IN_REFUSED",
+      recognised: true,
+    });
+  });
+
   it("a bare 4xx the classifier cannot name still answers UNKNOWN, and a 424 AUTH_FAILED keeps its own code", async () => {
     const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
     mockValidateKey.mockRejectedValue(

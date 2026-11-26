@@ -23,6 +23,7 @@ from services.closed_sets import (
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
     MT5_SERVER_UNKNOWN_DETAIL,
+    MT5_SIGN_IN_REFUSED_DETAIL,
     MT5_TERMINAL_BUSY_DETAIL,
     MT5_TERMINAL_NOT_READY_DETAIL,
 )
@@ -188,6 +189,11 @@ _MT5_VALIDATE_STAGE_TIMEOUT_S: Final[float] = MT5_VALIDATE_REQUEST_TIMEOUT_S + 5
 # Env-overridable following the mt5_concurrency.py derived-constant convention, so
 # Phase 155 can retune from measurement without a deploy of new code.
 _MT5_VALIDATE_DEADLINE_S: Final[float] = float(os.getenv("MT5_VALIDATE_DEADLINE_S", "75.0"))
+
+# Phase 225 (SIGNINREFUSED) - MT5 `last_error` -6, `RES_E_AUTH_FAILED` ("authorization
+# failed", MT5 Python docs `mt5lasterror_py`). The validate arm answers a login-stage -6
+# with the honest `MT5_SIGN_IN_REFUSED`; every other login-stage code keeps SIGN_IN_FAILED.
+_MT5_AUTH_FAILED_CODE: Final[int] = -6
 
 # Phase 218 (SELFHEAL) - the event-loop bound on the owed gate's inline scrub (the W-1
 # wait plus the blocking scrub together), about 5 x the measured 6 s scrub, per
@@ -1160,6 +1166,26 @@ async def _validate_mt5_key_probe(
             # shared terminal are the operation implicated in wedging and account
             # eviction (164.6.5 / 164.6.6) — so offering one would be the harmful
             # action, not merely a useless one (D-08).
+            # ⭐ Phase 225 (SIGNINREFUSED) — a login-stage `last_error` of exactly -6
+            # is `RES_E_AUTH_FAILED`, "authorization failed" (MT5 Python docs,
+            # `mt5lasterror_py`). MEASURED on PROD 2026-11-25: a wrong broker server
+            # with a real investor password answered -6 within ~0.5 s, so the broker
+            # ANSWERED and refused, and `SIGN_IN_FAILED_DETAIL`'s "did not complete"
+            # was false for it. Same shape (424, `recoverable=False`, same reasoning),
+            # new wire code and an honest detail. -6 is identical for a wrong login, a
+            # wrong investor password and a wrong server, so neither the detail nor the
+            # wizard copy claims one. ⛔ VALIDATE SURFACE ONLY: the holdings poll,
+            # ingestion and the job worker classify -6 through
+            # `is_mt5_login_refusal` / `classify_mt5_login_error`, which this branch
+            # does not touch. Every other login-stage code (0, -10005, …) falls
+            # through to `SIGN_IN_FAILED` below, byte-unchanged.
+            if e.code == _MT5_AUTH_FAILED_CODE:
+                raise VenueTransientHTTPException(
+                    status_code=424,
+                    code="MT5_SIGN_IN_REFUSED",
+                    detail=MT5_SIGN_IN_REFUSED_DETAIL,
+                    recoverable=False,
+                )
             raise VenueTransientHTTPException(
                 status_code=424,
                 code="SIGN_IN_FAILED",

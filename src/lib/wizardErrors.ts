@@ -618,6 +618,22 @@ export type WizardErrorCode =
   // wedging and account eviction (164.6.5 / 164.6.6), so the Retry is not
   // merely useless, it is the harmful action.
   | "KEY_SIGN_IN_FAILED"
+  // Phase 225 (SIGNINREFUSED) — the MT5 sibling of `KEY_SIGN_IN_FAILED` for the ONE
+  // login-stage answer that DOES say why: `login()` returned `last_error` -6,
+  // `RES_E_AUTH_FAILED` ("authorization failed", the MT5 Python docs'
+  // `mt5lasterror_py` table). MEASURED on PROD 2026-11-25: a wrong broker server
+  // with a real investor password answered -6 in about 0.5 s, so the broker DID
+  // answer and refuse, and `KEY_SIGN_IN_FAILED`'s "did not get far enough for the
+  // venue to tell us why" was false for it. Wire `MT5_SIGN_IN_REFUSED` (424,
+  // `recoverable=False`), minted by `_validate_mt5_key_probe` at the validate
+  // surface ONLY: the daily poll, ingestion and allocator positions classify -6
+  // exactly as before. -6 gives the same answer for a wrong login, a wrong
+  // investor password and a wrong server, so the copy names all three and never
+  // claims one of them. NOT recoverable, DERIVED: `actions` carries neither member
+  // of `RECOVERABLE_ACTIONS`, so no Retry renders, on `KEY_SIGN_IN_FAILED`'s
+  // reasoning (re-submitting the same credential against the one shared terminal is
+  // the harmful action).
+  | "KEY_MT5_SIGN_IN_REFUSED"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -3027,6 +3043,34 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["request_call", "expand_log"],
   },
 
+  // Phase 225 (SIGNINREFUSED) — see the union member's docblock. The copy is STATIC
+  // and may claim only what `last_error` -6 establishes: the broker answered and
+  // refused the sign-in. ⛔ It must NOT name the server as the cause, because -6 is
+  // the same answer for a wrong login, a wrong investor password and a wrong server,
+  // so all three are listed.
+  // ⚠️ Slot 3 ("submit again") is suppressed on the saved-key summary screen, which
+  // paints no credential form to resubmit at — `NOT_ON_PRESELECT_SURFACE`, reused
+  // from `KEY_SIGN_IN_FAILED`. Slots 0-2 name MT5 things and this code is only ever
+  // minted for MT5, so they are unconditional.
+  // ⛔ NEITHER member of `RECOVERABLE_ACTIONS`: no Retry (the wire says
+  // `recoverable=False` and the two agree).
+  KEY_MT5_SIGN_IN_REFUSED: {
+    title: "Your broker refused this sign-in.",
+    cause:
+      "Your broker answered and refused the sign-in. MT5 gives the same answer for a wrong account number, a wrong investor password and a wrong server, so we cannot tell you which to check first.",
+    fix: [
+      "Check the account number (login) is the account you want to connect.",
+      "Check the investor (read-only) password. Your broker can reset it, and changing the master password changes it too.",
+      "Check the server: copy it exactly from your MT5 terminal's login window. Another server of the same broker refuses the sign-in.",
+      "Then submit again with the corrected details. The same details unchanged get the same answer.",
+      "If all three are right and this keeps happening, send the correlation id below through the contact form.",
+    ],
+    // Index-aligned to `fix`.
+    fixRequires: [null, null, null, NOT_ON_PRESELECT_SURFACE, null],
+    docsHref: "/security#readonly-key",
+    actions: ["request_call", "expand_log"],
+  },
+
   SYNC_TIMEOUT: {
     title: "Sync is taking longer than expected.",
     cause:
@@ -5313,6 +5357,13 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // table's stated discipline that the wire answer stays the one the service
   // chose.
   ["SIGN_IN_FAILED", { code: "KEY_SIGN_IN_FAILED", status: 424 }],
+  // Phase 225 (SIGNINREFUSED) — minted by the SAME `_validate_mt5_key_probe` arm as
+  // `SIGN_IN_FAILED`, for a login-stage `last_error` of exactly -6 (broker answered
+  // and refused). Status 424 on the row, equal to the emitter's own, per this table's
+  // discipline. The row is not optional beside the mint, for the reason the
+  // `SIGN_IN_FAILED` row gives: the table is resolved BEFORE the substring cascade,
+  // and without a row the user lands on `UNKNOWN`, whose copy offers a Retry.
+  ["MT5_SIGN_IN_REFUSED", { code: "KEY_MT5_SIGN_IN_REFUSED", status: 424 }],
   // Phase 164.6.6.3 / item 9 (D-09, D-10) — minted by the Python known-server
   // pre-check in `_validate_mt5_key_probe`, before any client, lease or `login()`.
   // Status 424 on the row, equal to the emitter's own status, per this table's
@@ -6510,6 +6561,12 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // recoverable — and the founder gets a Retry control for a fault the
       // emitter marked `recoverable=False`.
       "KEY_SIGN_IN_FAILED",
+      // 225 (SIGNINREFUSED) — the -6 half of the same refusal, on the same footing
+      // as the row above: `rotate_key_secret` runs `_validate_mt5_key_probe`, which
+      // answers wire `MT5_SIGN_IN_REFUSED` (424, `recoverable=False`) for a login-stage
+      // `last_error` of -6, and the code reaches this route through `seamCode`. Omit
+      // this line and the dialog renders `UNKNOWN`, whose copy IS recoverable.
+      "KEY_MT5_SIGN_IN_REFUSED",
       // 164.6.5 / D-17 (review round 1 / CR-02) — the wedged-terminal verdict,
       // on the same footing as the row above. `_validate_mt5_key_probe` mints
       // wire `MT5_TERMINAL_UNRESPONSIVE` when the gateway terminal's IPC
@@ -6818,6 +6875,23 @@ export function recogniseValidateAndEncryptCode(
       if (row.status === 400 && row.code === wire) {
         return { code: row.code, recognised: true };
       }
+    }
+  }
+
+  // ⭐ Phase 225 (SIGNINREFUSED) — ONE named 424, recognised on purpose. The arm above
+  // leaves every 424 transient to the curated-cause path, because their copy is
+  // un-audited on these two forms and some state a wait nobody measured
+  // (`MT5_TERMINAL_BUSY`). `MT5_SIGN_IN_REFUSED` is the exception, and it is named, not
+  // a status rule: a login-stage MT5 `last_error` -6 is the broker's own refusal, its
+  // `KEY_MT5_SIGN_IN_REFUSED` copy states only that and lists the three things -6 cannot
+  // tell apart, and it offers NO Retry (`actions` has neither `clear_and_retry` nor
+  // `try_another_key`). Without this line both forms rendered UNKNOWN's shell, whose
+  // copy IS recoverable, over the honest sentence, which is the Retry the emitter's
+  // `recoverable=False` forbids. `SIGN_IN_FAILED` and every other 424 stay unrecognised.
+  if (status === 424 && wire === "MT5_SIGN_IN_REFUSED") {
+    const refused = VENUE_WIRE_CODE_TO_VERDICT.get(wire);
+    if (refused !== undefined && refused.status === 424) {
+      return { code: refused.code, recognised: true };
     }
   }
 
