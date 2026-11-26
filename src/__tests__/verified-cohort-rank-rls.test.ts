@@ -381,6 +381,7 @@ describe("Migration 20260626120000 — get_verified_cohort_rank (Phase 42 / PEER
         const { error: anErr } = await admin.from("strategy_analytics").insert({
           strategy_id: sid,
           computation_status: "complete",
+          computed_at: new Date().toISOString(),
           sharpe: metrics ? metrics.sharpe : null,
           sortino: metrics ? metrics.sortino : null,
           max_drawdown: metrics ? metrics.max_drawdown : null,

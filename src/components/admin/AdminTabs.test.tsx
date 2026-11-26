@@ -426,6 +426,29 @@ describe("AdminTabs — a never-computed row is not 'Computed <just now>' (166.5
     ]);
     expect(line).not.toMatch(/Computed —$/);
   });
+
+  // Phase 238 / NEVERCOMPUTED (FACT-03, UI-SPEC Test Contract 9, D6): since the backfill a
+  // never-computed row carries `computed_at` NULL instead of the insert-time default the cases
+  // above pin. A missing compute time must read as the dash, never as a date.
+  it.each(["computing", "failed", "pending"] as const)(
+    "NEVERCOMPUTED: a %s first-ever row with computed_at NULL and no figures reads 'Computed —', not a date",
+    async (status) => {
+      const line = await ownerLineFor([
+        { cagr: null, sharpe: null, max_drawdown: null, computation_status: status, computed_at: null },
+      ]);
+      expect(line).toMatch(/· Computed —$/);
+    },
+  );
+
+  it("NEVERCOMPUTED: even a row that holds figures reads 'Computed —' when computed_at is NULL (the date arm stands alone)", async () => {
+    // Defence in depth: the ever-computed gate says "computed", so only the date arm can keep a
+    // missing date from being printed as one ("just now", "Jan 1, 1970").
+    const line = await ownerLineFor([
+      { cagr: 0.2, sharpe: 1.5, max_drawdown: -0.1, computation_status: "complete", computed_at: null },
+    ]);
+    expect(line).toMatch(/· Computed —$/);
+    expect(line).not.toMatch(/just now|1970/);
+  });
 });
 
 /**

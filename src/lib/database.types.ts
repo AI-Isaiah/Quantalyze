@@ -2884,7 +2884,7 @@ export type Database = {
           computation_error_source: string | null
           computation_status: string
           computation_warned: boolean
-          computed_at: string
+          computed_at: string | null
           computing_started_at: string | null
           cumulative_return: number | null
           daily_returns: Json | null
@@ -2922,7 +2922,7 @@ export type Database = {
           computation_error_source?: string | null
           computation_status?: string
           computation_warned?: boolean
-          computed_at?: string
+          computed_at?: string | null
           computing_started_at?: string | null
           cumulative_return?: number | null
           daily_returns?: Json | null
@@ -2960,7 +2960,7 @@ export type Database = {
           computation_error_source?: string | null
           computation_status?: string
           computation_warned?: boolean
-          computed_at?: string
+          computed_at?: string | null
           computing_started_at?: string | null
           cumulative_return?: number | null
           daily_returns?: Json | null

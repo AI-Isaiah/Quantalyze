@@ -916,3 +916,64 @@ describe("phase 190 percentile cohort — a re-running row displays but does not
     expect(map![ID_RERUN]).toBeUndefined();
   });
 });
+
+// =========================================================================
+// Phase 238 / NEVERCOMPUTED (FACT-03, UI-SPEC Test Contract 9, D8) — the computed_at sort key.
+//
+// A never-computed row has `computed_at` NULL, and the sort reads it as `""`, the value an
+// empty-analytics row has always carried: the OLDEST end of the key (first under ascending, last
+// under descending), never a date in its own right. Reading NULL as anything else (a far-future
+// string sorts above every real date, "now" would lead a newest-first sort) would put a row that
+// never computed at the head of "most recently computed". Never-computed rows are pinned against
+// a row that really holds `computed_at: ""`, so the pin is "exactly where that row sorts".
+// =========================================================================
+
+describe("NEVERCOMPUTED - the computed_at sort files a never-computed row where an empty-analytics row sorts", () => {
+  const NAME_DATED = "Dated Computed";
+  const NAME_EMPTY = "Empty String Row";
+  const NAME_NEVER = "Never Computed Row";
+
+  function orderUnder(dir: "asc" | "desc", names: string[]): string[] {
+    const make = (name: string) => {
+      const row = clientRow(
+        name === NAME_DATED ? ID_LIVE : name === NAME_EMPTY ? ID_DEAD : ID_DEAD_2,
+        name,
+        "complete",
+        LIVE,
+      );
+      if (name === NAME_EMPTY) row.analytics.computed_at = "";
+      if (name === NAME_NEVER) row.analytics.computed_at = null;
+      return row;
+    };
+    const { unmount } = render(
+      <StrategyTable
+        strategies={names.map(make)}
+        categorySlug="stale-spec"
+        initialSort={{ key: "computed_at", dir }}
+      />,
+    );
+    const order = Array.from(document.querySelectorAll("tbody tr"))
+      .map((tr) => tr.textContent ?? "")
+      .map((t) => [NAME_DATED, NAME_EMPTY, NAME_NEVER].find((n) => t.includes(n)) ?? "")
+      .filter(Boolean);
+    unmount();
+    return order;
+  }
+
+  it.each([
+    ["desc", (never: string[]) => [NAME_DATED, ...never]],
+    ["asc", (never: string[]) => [...never, NAME_DATED]],
+  ] as const)(
+    "%s: a never-computed row takes the slot an empty-string row takes, on the old end of the key",
+    (dir, expected) => {
+      // Input order is never-then-empty, then the reverse. Equal keys keep input order, so
+      // the null row and the "" row are interchangeable: the pin is that they compare EQUAL.
+      expect(orderUnder(dir, [NAME_NEVER, NAME_EMPTY, NAME_DATED])).toEqual(
+        expected([NAME_NEVER, NAME_EMPTY]),
+      );
+      expect(orderUnder(dir, [NAME_EMPTY, NAME_NEVER, NAME_DATED])).toEqual(
+        expected([NAME_EMPTY, NAME_NEVER]),
+      );
+    },
+  );
+});

@@ -983,6 +983,7 @@ async function main() {
     const { error: aErr } = await supabase.from("strategy_analytics").upsert({
       strategy_id: profile.id,
       computation_status: "complete",
+      computed_at: new Date().toISOString(),
       benchmark: "BTC",
       cumulative_return: analytics.cumulative_return,
       cagr: analytics.cagr,

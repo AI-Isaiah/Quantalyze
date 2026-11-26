@@ -272,8 +272,11 @@ function drawdownColor(value: number | null | undefined): string {
 //
 // (a) the eventual gate is `isComputedAnalytics` ("this row has no computed
 //     metrics"), NEVER `!computed_at`. A LIVE pending/computing row carries a
-//     `computed_at` DEFAULT, so a `!computed_at` gate never fires for the very
-//     state it was written to catch; and EMPTY_ANALYTICS's `computed_at: ""`
+//     `computed_at` (the insert-time DEFAULT this was written against was dropped by
+//     Phase 238 FACT-03: a first-ever pending/computing row now carries NULL, but a
+//     re-run over a stored success keeps its last good date), so a `!computed_at` gate
+//     is the wrong question for the very state it was written to catch; and
+//     EMPTY_ANALYTICS's `computed_at: ""`
 //     is falsy, so that gate ALSO made every absent row chip-eligible forever.
 //
 // (b) the status is COERCED through `analyticsPresent`, the absent-row signal
@@ -1950,8 +1953,11 @@ export function StrategyTable({
                             {/* W-B — an uncomputed row must never claim
                                 "Synced …": EMPTY_ANALYTICS's `computed_at: ""`
                                 is falsy so absent rows were already badge-null,
-                                but a LIVE job's computed_at DEFAULT would
-                                render one. The SyncBadge component itself is
+                                but a LIVE job's insert-time computed_at (the
+                                DEFAULT dropped by Phase 238 FACT-03: a
+                                never-computed row now carries NULL and prints
+                                no date) would have rendered one. The SyncBadge
+                                component itself is
                                 untouched.
 
                                 STALE-01 — the gate is now UNCONDITIONAL. It
