@@ -12,6 +12,12 @@ import {
 import { KNOWN_CREATE_WITH_KEY_CODES } from "@/lib/wizardKeyRosters";
 import { buildEnvelope } from "@/lib/envelope";
 import { parseAccountHolder, type AccountHolder } from "@/lib/own-account-holder";
+import {
+  keySecretNoticeText,
+  parseKeySecretOutcome,
+  type KeySecretOutcome,
+} from "@/lib/key-secret-outcome";
+import { LiveRegion } from "@/components/ui/LiveRegion";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { ValidateWaitCard } from "../ValidateWaitCard";
 import {
@@ -709,6 +715,11 @@ export function ConnectKeyStep({
   // the name above: set from the SAME response as `errorCode` and cleared with
   // it, so a link from attempt 1 is never drawn under attempt 2's failure.
   const [existingHolder, setExistingHolder] = useState<AccountHolder | null>(null);
+  // Phase 228 / CONN-02 — the password outcome a same-account MT5 reconnect
+  // answered with ("we updated the password on your key X"). Set from the SAME
+  // response as `errorCode`, and cleared with it (every submit, and the
+  // envelope's Retry), so it never describes an earlier attempt. Never persisted.
+  const [keyOutcome, setKeyOutcome] = useState<KeySecretOutcome | null>(null);
   // UX-02: the wizard page-load correlation id — the fallback for the brief
   // window before any request has been made. See `requestCorrelationId`
   // below for the id an envelope actually prefers.
@@ -1116,6 +1127,7 @@ export function ConnectKeyStep({
     // way.
     setExistingStrategyName(null);
     setExistingHolder(null);
+    setKeyOutcome(null);
     // 164.6.5-07 / D-14 — cleared with the code it belongs to, for the same
     // reason: a retry rendering the previous attempt's id is the defect D-14
     // closes.
@@ -1182,6 +1194,9 @@ export function ConnectKeyStep({
         // Founder 2026-11-25 — the caller's own strategy or key; shape-checked
         // by `parseAccountHolder` below, never trusted as typed.
         holder?: unknown;
+        // Phase 228 / CONN-02 — the password outcome, on the same-account 409s
+        // only; shape-checked by `parseKeySecretOutcome` below.
+        key_secret?: unknown;
         code?: string;
         error?: string;
       }>(res, "credential");
@@ -1208,6 +1223,10 @@ export function ConnectKeyStep({
             : null,
         );
         setExistingHolder(parseAccountHolder(data.holder));
+        // Phase 228 / CONN-02 — from the SAME response as the code, so an
+        // outcome only ever describes the refusal it arrived with. Credential
+        // arm only: the reuse arm sends no password and so never rotates.
+        setKeyOutcome(parseKeySecretOutcome(data.key_secret));
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "connect_key",
@@ -1376,6 +1395,7 @@ export function ConnectKeyStep({
     setRetryAfterSeconds(null);
     setExistingStrategyName(null);
     setExistingHolder(null);
+    setKeyOutcome(null);
     setReuseRequestShapeRefused(false);
     // 164.6.5-07 / D-14 — same reset rule as the credential arm above; both
     // arms share this one piece of state (see its docblock).
@@ -1889,10 +1909,35 @@ export function ConnectKeyStep({
           </p>
         </div>
 
+        {/* Phase 228 / CONN-02 — the password outcome, ABOVE the refusal it
+            arrived with (UI-SPEC §1). A plain notice, not a variant of the
+            envelope: a verified write does not belong inside a red alert. It
+            carries NO role, because a `role="status"` that mounts together with
+            its text, beside the envelope's `role="alert"`, is often missed; the
+            always-mounted polite `LiveRegion` below carries the same sentence
+            instead and queues behind the refusal. Both read ONE builder. */}
+        <LiveRegion message={keyOutcome ? keySecretNoticeText(keyOutcome) : null} />
+        {keyOutcome && (
+          <p
+            data-testid="wizard-key-outcome-notice"
+            data-outcome={keyOutcome.outcome}
+            className={
+              keyOutcome.outcome === "updated"
+                ? "rounded-md border border-positive/30 bg-positive/5 px-3 py-2 text-body text-text-primary break-words"
+                : "rounded-md border border-border bg-page px-3 py-2 text-body text-text-primary break-words"
+            }
+          >
+            {keySecretNoticeText(keyOutcome)}
+          </p>
+        )}
+
         {errorEnvelope && (
           <WizardErrorEnvelope
             envelope={errorEnvelope}
-            onRetry={() => setErrorCode(null)}
+            onRetry={() => {
+              setErrorCode(null);
+              setKeyOutcome(null);
+            }}
           />
         )}
 

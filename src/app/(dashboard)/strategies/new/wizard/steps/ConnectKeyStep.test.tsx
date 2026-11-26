@@ -2990,3 +2990,240 @@ describe("[200-02 D-14] ConnectKeyStep — trust panel key storage", () => {
     expect(document.body.textContent).not.toMatch(/AES-256|Supabase Vault|KEK/);
   });
 });
+
+/**
+ * [228-02 / CONN-02] The password outcome a same-account reconnect answers with.
+ *
+ * The create-with-key 409 carries `key_secret: { outcome, name? }` beside its
+ * refusal code. The step renders ONE plain notice above the refusal envelope
+ * (never inside it: a verified write does not belong in a red alert), and a
+ * polite always-mounted LiveRegion carries the same sentence. Built against a
+ * mocked fetch; the route that produces the field is Plan 03.
+ */
+describe("[228-02 / CONN-02] ConnectKeyStep: the password outcome notice", () => {
+  const NOTICE = "wizard-key-outcome-notice";
+  const UPDATED_NAMED =
+    'We updated the password on your key "Gold book". No new key or strategy was created.';
+  const UPDATED_UNNAMED =
+    "We updated the password on your stored key for this account. No new key or strategy was created.";
+  const UNCHANGED_NAMED =
+    'Your key "Gold book" already uses this password and it signs in, so we changed nothing.';
+
+  // Synthetic identifiers: none of these may ever surface in the notice.
+  const LOGIN = "7700123";
+  const SERVER = "Fixture-Broker-Live9";
+  const KEY_ID = "9f1c2d3e-aaaa-bbbb-cccc-000000000228";
+
+  function conflict(keySecret: unknown, code = "VENUE_ALREADY_CONNECTED") {
+    return jsonResponse({ code, error: "x", key_secret: keySecret }, 409);
+  }
+
+  async function submit() {
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+  }
+
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("updated + named: the founder's sentence, positive recipe, no role, BEFORE the envelope", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      conflict({ outcome: "updated", name: "Gold book" }),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    const notice = await screen.findByTestId(NOTICE);
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(notice.textContent).toBe(UPDATED_NAMED);
+    expect(notice).toHaveAttribute("data-outcome", "updated");
+    expect(notice).toHaveClass("border-positive/30", "bg-positive/5");
+    expect(notice.hasAttribute("role")).toBe(false);
+    expect(
+      notice.compareDocumentPosition(envelope) & Node.DOCUMENT_POSITION_FOLLOWING,
+      "the outcome must read before the refusal it arrived with",
+    ).toBeTruthy();
+    // The refusal is untouched: the notice sits beside it, not in it.
+    expect(envelope).toHaveAttribute("data-error-code", "VENUE_ALREADY_CONNECTED");
+    expect(envelope).not.toContainElement(notice);
+  });
+
+  it("unchanged: the neutral recipe and the unchanged sentence", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      conflict({ outcome: "unchanged", name: "Gold book" }),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    const notice = await screen.findByTestId(NOTICE);
+    expect(notice.textContent).toBe(UNCHANGED_NAMED);
+    expect(notice).toHaveAttribute("data-outcome", "unchanged");
+    expect(notice).toHaveClass("border-border", "bg-page");
+    expect(notice).not.toHaveClass("border-positive/30");
+  });
+
+  it.each([
+    ["no name", { outcome: "updated" }],
+    ["a blank name", { outcome: "updated", name: "   " }],
+    ["a non-string name", { outcome: "updated", name: 7 }],
+  ])("%s: the unnamed sentence, never empty quotes or 'undefined'", async (_l, body) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(conflict(body));
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    const notice = await screen.findByTestId(NOTICE);
+    expect(notice.textContent).toBe(UPDATED_UNNAMED);
+    expect(notice.textContent).not.toContain('""');
+    expect(notice.textContent).not.toContain("undefined");
+  });
+
+  it("a non-ASCII nickname renders verbatim as text, never as markup", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      conflict({ outcome: "updated", name: "Konto Ü-7 <b>x</b>" }),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    const notice = await screen.findByTestId(NOTICE);
+    expect(notice.textContent).toContain('"Konto Ü-7 <b>x</b>"');
+    expect(notice.querySelector("b")).toBeNull();
+    expect(notice.querySelector("a")).toBeNull();
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["an unknown outcome", { outcome: "rotated", name: "K" }],
+    ["a string", "updated"],
+    ["null", null],
+  ])("%s key_secret: no notice, and the envelope renders as today", async (_l, ks) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(conflict(ks));
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    await screen.findByTestId("error-envelope");
+    expect(screen.queryByTestId(NOTICE)).toBeNull();
+  });
+
+  it("a seam refusal renders no notice: a mistyped password is never presented as a success", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_MT5_SIGN_IN_REFUSED", error: "x" }, 424),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_MT5_SIGN_IN_REFUSED");
+    expect(screen.queryByTestId(NOTICE)).toBeNull();
+  });
+
+  it("a master-password validation error renders only its envelope", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_MT5_MASTER_PASSWORD", error: "x" }, 400),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_MT5_MASTER_PASSWORD");
+    expect(screen.queryByTestId(NOTICE)).toBeNull();
+  });
+
+  it("lifecycle: a second submit removes the notice while it is in flight", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(conflict({ outcome: "updated", name: "Gold book" }));
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+    await screen.findByTestId(NOTICE);
+
+    // The next attempt never answers: only the clear-on-submit can remove it.
+    fetchSpy.mockImplementationOnce(() => new Promise<Response>(() => {}));
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    expect(
+      screen.queryByTestId(NOTICE),
+      "a notice described an earlier attempt while a new one was in flight",
+    ).toBeNull();
+  });
+
+  it("lifecycle: the envelope's Retry removes the notice", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      // UNKNOWN is the code whose envelope DOES offer Retry.
+      jsonResponse(
+        { code: "ZZ_NOT_A_WIZARD_CODE", key_secret: { outcome: "updated", name: "Gold book" } },
+        500,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+    await screen.findByTestId(NOTICE);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(screen.queryByTestId(NOTICE)).toBeNull();
+    expect(screen.queryByTestId("error-envelope")).toBeNull();
+  });
+
+  it("LiveRegion: a polite region is mounted EMPTY before any submit and carries the exact sentence after", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      conflict({ outcome: "updated", name: "Gold book" }),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+
+    // Before the response: the region already exists (a region mounted together
+    // with its text is frequently missed) and is empty.
+    const before = screen
+      .getAllByRole("status")
+      .filter((el) => el.getAttribute("aria-live") === "polite" && el.className === "sr-only");
+    expect(before.length).toBeGreaterThan(0);
+    expect(before.every((el) => el.textContent === "")).toBe(true);
+    const region = before[0];
+
+    await submit();
+    await screen.findByTestId(NOTICE);
+    // The SAME node, now carrying the visible sentence.
+    expect(region.isConnected).toBe(true);
+    expect(region.textContent).toBe(UPDATED_NAMED);
+    expect(region).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("G1: neither the notice, its attributes nor the LiveRegion carries a login, server or key id", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "VENUE_ALREADY_CONNECTED",
+          error: "x",
+          api_key_id: KEY_ID,
+          // Extra members on the field itself must not be passed through either.
+          key_secret: {
+            outcome: "updated",
+            name: "Gold book",
+            login: LOGIN,
+            server: SERVER,
+            api_key_id: KEY_ID,
+          },
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    const notice = await screen.findByTestId(NOTICE);
+    const region = screen
+      .getAllByRole("status")
+      .find((el) => el.textContent === UPDATED_NAMED);
+    expect(region).toBeDefined();
+    const surface = [
+      notice.outerHTML,
+      region!.outerHTML,
+    ].join("\n");
+    for (const id of [LOGIN, SERVER, KEY_ID]) {
+      expect(surface).not.toContain(id);
+    }
+  });
+});
