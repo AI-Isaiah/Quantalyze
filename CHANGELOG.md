@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.90.1] - 2026-11-26 — BASELINE: automated re-dump after the PROD apply of f34c9cac
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `45800983848`, after the PROD apply of merge `f34c9cac`: sha256 `e2976d39…` → `25b2314d…`.
+- Shape, old → new: tables 71 → 71, policies 154 → 154, function statements 144 → 144, distinct function names 142 → 142, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261126130000_strategy_analytics_computed_at_nullable.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-26` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.90.0 → 0.133.90.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=340 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 144 — MATCH 141, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45800983848` succeeded, and this entry was composed by the `redump-pr` job. Run `45800983848` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.90.0] - 2026-11-26 — Phase 238 NEVERCOMPUTED PR-2: a strategy that never computed carries no compute date
 
 `strategy_analytics.computed_at` was `NOT NULL DEFAULT now()`, so a strategy whose computation never completed still carried a compute time: the insert stamped one, and the factsheet fell back to a 1970 sentinel where no date existed. This PR-2 of Phase 238 (FACT-03) makes the column nullable, backfills the rows that never computed to NULL, and moves every reader to the null dash. PR-1 (FACT-05, #1331) shipped the remedy notes. Founder ruling 2026-11-24: "A: allow an empty date".
