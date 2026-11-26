@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, TypeVar, cast
+from typing import Any, Final, TypeVar, cast
 
 import httpx
 
@@ -190,6 +190,35 @@ def _is_gateway_timeout(exc: BaseException) -> bool:
     """
     code = getattr(exc, "code", None)
     return code in ("504", 504)
+
+
+# ---------------------------------------------------------------------------
+# Missing-RPC predicate (Phase 230 MT5NIGHTLY, plan 04, DEC-04-D)
+# ---------------------------------------------------------------------------
+# PostgREST reports a function missing from its schema cache as PGRST202, and
+# PostgreSQL itself reports SQLSTATE 42883; both mean "the RPC is not deployed".
+_SQLSTATE_UNDEFINED_FUNCTION: Final = "42883"
+_POSTGREST_UNDEFINED_FUNCTION: Final = "PGRST202"
+
+
+def is_missing_rpc(exc: BaseException) -> bool:
+    """True iff `exc` says the RPC does not exist: the structured SQLSTATE 42883
+    or PostgREST's PGRST202, on ``.code`` or ``.details["code"]``. Structured codes
+    only, never message text: a message that merely mentions a code (a proxy error
+    page, a log line) must not route a caller into a fallback.
+
+    TWIN of ``main_worker._is_missing_rpc`` (with its
+    ``_is_undefined_function_structured``). It lives here because
+    ``services/mt5_xlease.py`` is a leaf that may import this module but not
+    ``main_worker``, which imports half the service (DEC-04-D). The two copies are
+    pinned together by ``tests/test_db_is_missing_rpc.py`` over one exception-shape
+    matrix; change one and that test names the divergence.
+    """
+    codes = (_SQLSTATE_UNDEFINED_FUNCTION, _POSTGREST_UNDEFINED_FUNCTION)
+    if getattr(exc, "code", None) in codes:
+        return True
+    details = getattr(exc, "details", None)
+    return isinstance(details, dict) and details.get("code") in codes
 
 
 DB_READ_MAX_RETRIES = 3

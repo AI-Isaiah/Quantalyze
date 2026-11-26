@@ -147,6 +147,57 @@ def _handover_recorder_never_reaches_a_real_project(monkeypatch):
     yield
 
 
+# Phase 230 (MT5NIGHTLY, MT5D-02) — the cross-process terminal lease. `mt5_terminal_lease`
+# now calls three lease RPCs through `services.mt5_xlease`, and about 17 test modules drive
+# the real lease. Local runs load the TEST project's env at import (the note above), so an
+# unpatched lease would call the shared TEST project (T-230-08).
+#
+# ⛔ Why this GRANTS rather than refuses, unlike the handover sink above: the lease FAILS
+# CLOSED. A refusing sink would make every lease raise `Mt5TerminalLeaseUnavailableError`
+# and break every module that merely passes through the lease. So the default backend
+# answers True, and `get_supabase` stays refusing as the second wall: nothing reaches a
+# real project even if a test installs the production backend by mistake. A test ABOUT the
+# lease installs its own backend through `set_xlease_backend_for_tests`; this fixture runs
+# first, so theirs wins.
+#
+# Two scopes on purpose. The SESSION fixture covers a lease driven from a module- or
+# session-scoped fixture (several suites run a whole derive inside one, and a
+# function-scoped patch does not exist yet when those instantiate). The FUNCTION fixture
+# gives every test a fresh recording backend and restores the previous one afterwards.
+def _install_granting_xlease_defaults(patch: pytest.MonkeyPatch):
+    from services import mt5_xlease
+    from tests.xlease_fakes import GrantingXLeaseBackend
+
+    def _refuse_xlease_get_supabase():
+        raise RuntimeError("unit tests never call a lease RPC on a real project")
+
+    patch.setattr(mt5_xlease, "get_supabase", _refuse_xlease_get_supabase)
+    return mt5_xlease.set_xlease_backend_for_tests(GrantingXLeaseBackend())
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _xlease_session_default_never_reaches_a_real_project():
+    from services import mt5_xlease
+
+    with pytest.MonkeyPatch.context() as session_patch:
+        previous = _install_granting_xlease_defaults(session_patch)
+        try:
+            yield
+        finally:
+            mt5_xlease.set_xlease_backend_for_tests(previous)
+
+
+@pytest.fixture(autouse=True)
+def _xlease_backend_defaults_to_granting(
+    monkeypatch, _xlease_session_default_never_reaches_a_real_project
+):
+    from services import mt5_xlease
+
+    previous = _install_granting_xlease_defaults(monkeypatch)
+    yield
+    mt5_xlease.set_xlease_backend_for_tests(previous)
+
+
 # Phase 167.2.1.1.1 NAVMTM plan 06 (2026-10-26): every derive of an OKX, Deribit, MT5 or sFOX
 # key now stores that key's marked NAV through `nav_marks.write_nav_mark`, which INSERTS and
 # then RE-SELECTS the stored row. The ~35 suites that drive `run_derive_broker_dailies_job`

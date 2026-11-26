@@ -392,6 +392,11 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
+  // ⭐ 2026-11-26: the three Phase 230 MT5NIGHTLY plan 06 rows (`acquire_mt5_terminal_lease`,
+  // `renew_mt5_terminal_lease`, `release_mt5_terminal_lease`, `snapshot-only`, captured
+  // 2026-11-25) are DELETED: their clearing condition, a re-dump taken after
+  // 20261126140000_mt5_terminal_lease.sql applied to PROD, landed as v0.133.91.1, and the
+  // gate then reported each one `ratchet-stale`.
   // ⭐ 2026-11-24: the Phase 225 ONEACCOUNTONCE plan 04 row
   // (`swap_account_slot`, `snapshot-only`, captured 2026-11-23) is DELETED: its clearing
   // condition, a re-dump taken after 20261123180100_swap_account_slot.sql applied to PROD,

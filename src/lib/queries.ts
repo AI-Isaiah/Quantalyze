@@ -1047,7 +1047,8 @@ export function shapeRowAnalytics(
   // Phase 190 (D-02, D-05) — a row RE-COMPUTING over a stored success result
   // (`pending` / `computing` AND the evidence rule the factsheet uses) keeps the
   // last computed figures: the values it carries are the previous success's, and
-  // `computed_at` is that success's date (Phase 166.5). Decided here ONCE, with
+  // `computed_at` is that success's date (Phase 166.5; a never-computed row carries NULL,
+  // Phase 238 FACT-03, and never reaches this arm: it stores no result). Decided here ONCE, with
   // the same two predicates the factsheet's resolve stage applies, so a list row
   // and the factsheet of the same strategy can never disagree. The row is
   // flagged so the table can keep its `#n`; it is NOT rankable (OQ-2 default),

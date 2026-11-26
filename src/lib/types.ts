@@ -304,7 +304,10 @@ export interface MetricsJson {
 export interface StrategyAnalytics {
   id: string;
   strategy_id: string;
-  computed_at: string;
+  // NULL = never computed (Phase 238 FACT-03): a row that has not produced figures has no compute
+  // date, so the column is NULL rather than the insert time. Every reader needs a NULL arm, and
+  // a NULL date is never fresh.
+  computed_at: string | null;
   // JOB-01: NULL = "not currently computing". Writer-stamped in the SAME statement that
   // sets computation_status='computing'; cleared on every exit. The pg_cron reaper
   // reap_strategy_analytics_stuck_computing (migration 20260802120000) keys on this,

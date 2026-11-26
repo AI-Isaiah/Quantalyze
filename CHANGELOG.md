@@ -1,5 +1,127 @@
 # Changelog
 
+## [0.133.91.1] - 2026-11-26 — BASELINE: automated re-dump after the PROD apply of 9c26bf3f
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `45807605366`, after the PROD apply of merge `9c26bf3f`: sha256 `25b2314d…` → `b4f15e84…`.
+- Shape, old → new: tables 71 → 72, policies 154 → 154, function statements 144 → 147, distinct function names 142 → 145, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261126140000_mt5_terminal_lease.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-26` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.91.0 → 0.133.91.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=341 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 147 — MATCH 144, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+- `scripts/dump-sql-functions.ts`: the three Phase 230 `snapshot-only` `NAME_SET_RATCHET` rows (`acquire_mt5_terminal_lease`, `renew_mt5_terminal_lease`, `release_mt5_terminal_lease`) are deleted. This re-dump was their clearing condition, and the snapshot gate reported each one `ratchet-stale` until they were removed.
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45807605366` succeeded, and this entry was composed by the `redump-pr` job. Run `45807605366` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.133.91.0] - 2026-11-26 — Phase 230 MT5NIGHTLY: one database lease per MT5 terminal, so the nightly derive and the holdings poll never share it
+
+MT5 `derive_broker_dailies` jobs kept needing a second attempt. Phase 230 named the cause: the backfill worker's nightly derive and the API process's `poll_allocator_positions` logged the one shared Wine terminal into different accounts at the same moment. The MT5CONC-02 login bracket then refused the read. The in-process lock (`_MT5_TERMINAL_LOCKS`) is one `asyncio.Lock` per process, so across two Railway services it serialized nothing. The HEAL-02 heartbeat hypothesis is refuted. The fix is the founder's D-01, "Database lease": a token-fenced lease row per terminal, taken by every MT5 terminal user.
+
+### Added
+- **`public.mt5_terminal_leases` and three RPCs**, in migration `20261126140000_mt5_terminal_lease.sql`: `acquire_mt5_terminal_lease`, `renew_mt5_terminal_lease` and `release_mt5_terminal_lease`.
+  - There is one row per terminal, keyed by a sha256 digest of the terminal key, never a host or port. Each row carries an owner token, a holder (an `api_key_id` or a closed literal), a site and an expiry, all on the database clock.
+  - The RPCs are `SECURITY DEFINER` with a pinned `search_path` and EXECUTE for `service_role` only. RLS is enabled with no policy. `service_role` holds SELECT only, so writes go through the token-fenced RPCs alone.
+  - A catalogue self-verify block and the SQL gate `supabase/tests/test_mt5_terminal_lease.sql` cover them: 8 arms, each with a `RED-UNDER-M` twin, for exclusivity, expiry takeover, foreign-token refusal, release-then-renew, validation, grants and the CHECKs. Mirrors under `supabase/schema/functions/`, plus a manual rollback in `supabase/migrations/down/`.
+- **`analytics-service/services/mt5_xlease.py`, the lease client.** `mt5_concurrency.mt5_terminal_lease` takes the database lease after the in-process lock and releases it in the same `finally`, so every existing MT5 call site is covered without a site edit to the lease path.
+  - It uses one token per acquisition and renews every 20 s on a 90 s TTL.
+  - The self-fence (`bump_mt5_terminal_epoch`) is a deadline measured from the send time of the last successful renew, so it fires before the row can expire.
+  - A late grant is released by token.
+  - Timing constants are validated against each other at import.
+- **Seven log events:** `mt5_xlease_waited` (a cross-process wait, the positive signal for the nights), `mt5_xlease_unavailable`, `mt5_xlease_lost`, `mt5_xlease_rpc_error`, `mt5_xlease_acquire_gave_up`, `mt5_xlease_renew_failed` and `mt5_xlease_release_failed`. They carry class names and site literals only, never a key, host, port or exception text.
+- **`services.db.is_missing_rpc`.** It matches the structured codes 42883 and PGRST202 only and has a parity test against `main_worker`.
+- **`Mt5TerminalLeaseUnavailableError`**, a busy subclass, with these arms:
+  - the transient `classify_exception` arm, with fixed text;
+  - the holdings arm, which shows the existing "will retry" note and never stamps lease text into `sync_error`;
+  - the two `process_key` validate arms, which return 424 `NETWORK_UNAVAILABLE` with `recoverable: true`;
+  - the boot-heal and validation-liveness arms, which record a lease outage as not measured or probe-failed, never as a busy terminal.
+- **`mt5offset_dry_run --days-out`.** It writes per-ordinal moved-day sets to a scratch file for the clock-replay attribution.
+- **Runbooks:**
+  - `docs/runbooks/mt5-terminal-lease.md` covers what the lease is, what callers see, each log event, rollback, post-deploy checks (a) to (d), and the MT5D-02 nightly evidence: the marker query first, the night query, the pass, consecutive and discriminating rules, and the record format.
+  - `docs/runbooks/mt5-clock-replay.md` covers the capture contract, the write review (re-confirmed at the review-round head), the coordinator steps, the replay and the per-scope attribution. The capture script stays out of the tracked tree by design; the runbook carries its sha256.
+- **A live PostgREST test**, `analytics-service/tests/test_mt5_xlease_live.py`. It checks boolean answers, exactly one winner out of 8 racing clients per round, expiry takeover, and the production client holding the row for the body. It runs on CI's private local-stack lane and fails rather than skips under `CI=true`.
+
+### Changed
+- **A missing lease RPC degrades loudly to the in-process lock.** This is the deploy-order window, DEC-04-A. The ERROR is re-logged every 900 s and never latched.
+- **Every other lease error fails closed.** An unbounded caller tolerates a 60 s error budget and then raises lease-unavailable. A bounded caller that got no answer at all by its deadline also raises lease-unavailable, rather than busy.
+- **A hung acquire counts toward that budget.** Each acquisition keeps at most 5 calls in flight.
+- **A missing renew RPC mid-hold counts as a failed renew**, so the holder self-fences at the deadline.
+- `docs/runbooks/mt5-go-live.md` carries a dated CORRECTED note. The analytics-side cross-process gap is closed by the lease. The gateway's one-account-per-terminal constraint is not. Multi-replica analytics is not claimed.
+- **Census moves, read off runs:**
+  - `FILES_FLOOR` 94 to 95 and `ARMS_FLOOR` 1033 to 1041 in `scripts/mutation-floors.mjs`;
+  - `COMPARED_FLOOR` 144 to 147 and three snapshot-only `NAME_SET_RATCHET` rows in `scripts/dump-sql-functions.ts`, which the post-apply baseline re-dump clears;
+  - the `sql-tests` sentinel floor 37 to 38 and its `ARMS_FLOOR` 579 to 587 in `.github/workflows/ci.yml`;
+  - the lease types in `src/lib/database.types.ts`.
+
+### Fixed (review rounds)
+Three rounds of gsd-code-reviewer and silent-failure-hunter review ran; the last had no MEDIUM or above from either. The fixes:
+- **CR-01:** a hung acquire was silent and never spent the budget.
+- **CR2-01:** a single lost response burned the derive attempt.
+- **WR-01 and WR2-01:** the self-fence could fire after the row expired, and a late grant was fenced without one renew.
+- **SF-M1:** a bounded caller's lease outage read as "busy", which blinded the liveness monitor.
+- **SF-M3:** budget exhaustion had no ERROR line.
+- **SF-M4:** the renew loop ended unfenced on a missing renew RPC.
+- **SF-M6:** a non-boolean RPC answer read as "refused".
+
+migration-reviewer and rls-policy-auditor both came back with no MEDIUM or above.
+
+### Notes
+- **TODOS.md:**
+  - `[175-NIGHTLY-MT5-DERIVE-CHECK]` (MT5D-02) and `202-MT5-CLOCK-LEAD-01` (MT5D-03) are NOT closed by this ship. Each gets a dated line, and each is deleted only in the records PR that carries its evidence.
+  - New entry `[230-MT5-REGISTRY-CROSS-PROCESS-STALE]`: the per-process holder and settled registries are still not cross-process. This is pre-existing and not widened by the lease.
+- **Known limits:**
+  - MT5D-02 stays open until seven consecutive clean nights, counted from the first 00:40Z derive after BOTH services run the merge commit and the migration's PROD apply. The nights must include at least one logged `mt5_xlease_waited`, or the record says "not discriminating".
+  - MT5D-03 stays open until the coordinator runs the capture and replay.
+  - Multi-replica analytics is not claimed.
+- **Not run locally**, under the session's machine load limit: the local-stack lane, the full pytest and vitest suites, and the full mutation runner. Their evidence is this PR's CI at its head SHA: `sql-tests` names the migration on its `baseline-replay:` line, `python` runs the live module, and `sql-mutation` runs the full suite.
+- PROD tip at ship time: `20261125212222`, read through the MCP with the marker query first. This migration sorts after it and after origin/main's newest migration.
+- **Post-merge:**
+  - apply-test, then the PROD apply, with no human stop;
+  - Railway deploys both services;
+  - post-deploy checks (a) to (d);
+  - a records PR re-dumps `baseline.sql`.
+- **Re-stamped `20261126120000` -> `20261126140000`** (the migration, its down file and every reference). Phase 238's `20261126130000` merged first, and `migration-policy.yml` refuses a migration older than PROD's ledger tip. The lane replays 130000 then 140000; the two touch unrelated objects, so the order changes nothing.
+
+## [0.133.90.1] - 2026-11-26 — BASELINE: automated re-dump after the PROD apply of f34c9cac
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `45800983848`, after the PROD apply of merge `f34c9cac`: sha256 `e2976d39…` → `25b2314d…`.
+- Shape, old → new: tables 71 → 71, policies 154 → 154, function statements 144 → 144, distinct function names 142 → 142, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261126130000_strategy_analytics_computed_at_nullable.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-26` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.90.0 → 0.133.90.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=340 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 144 — MATCH 141, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45800983848` succeeded, and this entry was composed by the `redump-pr` job. Run `45800983848` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.133.90.0] - 2026-11-26 — Phase 238 NEVERCOMPUTED PR-2: a strategy that never computed carries no compute date
+
+`strategy_analytics.computed_at` was `NOT NULL DEFAULT now()`, so a strategy whose computation never completed still carried a compute time: the insert stamped one, and the factsheet fell back to a 1970 sentinel where no date existed. This PR-2 of Phase 238 (FACT-03) makes the column nullable, backfills the rows that never computed to NULL, and moves every reader to the null dash. PR-1 (FACT-05, #1331) shipped the remedy notes. Founder ruling 2026-11-24: "A: allow an empty date".
+
+### Changed
+- **Migration `20261126130000_strategy_analytics_computed_at_nullable.sql`.** Drops the `NOT NULL` and the `now()` default on `strategy_analytics.computed_at`, then sets it to NULL on rows that never completed and carry no figures. The analytics hold trigger is disabled and re-enabled inside the one transaction so the backfill is not refused by it, and a catalogue check proves the trigger is enabled again and the column is nullable with no default. Its guards use the shape `scripts/lint-migration-data-dependence.mjs` accepts (0 NEW). PROD scope measured on 2026-11-26 through read-only counts: 11 failed rows with no figures are backfilled; 7 failed rows with figures, 16 `complete` and 8 `complete_with_warnings` rows keep their date; 0 rows were pending or computing.
+- **`StrategyAnalytics.computed_at` is `string | null`**, and the generated `strategy_analytics` Row, Insert and Update types follow.
+- **The factsheet never shows 1970.** A never-computed factsheet reads the null dash in the Terms row and the footer stamp. The 1970 sentinel now lives in one file, `src/lib/factsheet/never-computed-stamp.ts`, and `isNeverComputedStamp` matches any instant-0 value, including the `+00:00` spelling PostgREST returns after a rollback.
+- **Seeders stamp `computed_at` on `complete` rows**, now that the column has no default: the e2e seed helper, `scripts/seed-demo-data.ts`, `scripts/seed-full-app-demo.ts` and two test seeders. Without this the e2e freshness chip and re-seeded demo strategies would show no compute date.
+- Comments that said `computed_at` is always a date now say a never-computed row carries NULL (`queries.ts`, `StrategyTable.tsx`, `stored-analytics-result.ts`).
+
+### Added
+- **Manual rollback** `supabase/migrations/down/20261126130000-rollback.sql`, proven on a throwaway cluster.
+
+### Tests
+- `src/__tests__/nevercomputed-backfill-sql-exec.test.ts` (17 cases) runs the migration and its rollback on a throwaway PostgreSQL cluster. Its fixture restores the pre-migration column shape itself, so it keeps passing after the baseline is re-dumped.
+- NULL-arm pins on the sync badge (all six title branches), the admin card, the wizard preview, the health score and the `computed_at` sort. Each pin was neutered, seen RED, and restored byte-equal.
+- `src/__tests__/computed-at-reader-census.test.ts` classifies every `computed_at` reader across TypeScript, Python and SQL, pins each reader's NULL arm, and fails on an unclassified or stale read.
+
+### Removed
+- `TODOS.md` entry `[166.5-COMPUTED-AT-NEVER-COMPUTED-DEFAULT]`, closed by this PR.
+
+### Notes
+- Reviews: gsd-code-reviewer and silent-failure-hunter, two rounds, no open MEDIUM or above (round 1 fixed three MEDIUMs: the seeders, the `+00:00` stamp spelling and the exec-test fixture). migration-reviewer and rls-policy-auditor: 0 MEDIUM or above. Verification 8/8 (human_needed for CI-only proofs); security 21/21 threats closed.
+- Lane order: Phase 233 DERIBITTRUTH (FRESH-02) merged first as #1360. The migration sits behind Phase 230's #1358 (`20261126120000`) in the serial migration lane.
+- **Known limits.** No earlier migration runs `DISABLE TRIGGER`, so the migration role's permission for it is proven only by the TEST `apply-test` after merge; a refusal rolls back on TEST and blocks the PROD apply. The local Docker lane was not run; CI's `sql-tests` lane is the replay. The status bridge can now create a first-ever `complete` row with a NULL `computed_at`; readers render it as never computed. The factsheet `FreshnessChip` still reads "Computed · not yet" for a never-computed row, which belongs to Phase 237.
+
 ## [0.133.89.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE PR-2c: MT5 validation proves the broker server, not only the login
 
 This is a gap-closure PR for review finding CR-01 on PR-3 (migration B). It covers the founder's ruling of 2026-11-25 that a same-broker connect with the wrong server must be refused at validation. It has no migration and no UI change.

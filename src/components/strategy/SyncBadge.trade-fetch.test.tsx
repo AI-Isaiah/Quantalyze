@@ -346,6 +346,94 @@ describe("SyncBadge — D-07: computedAt drives nothing visible", () => {
   });
 });
 
+/**
+ * Phase 238 / NEVERCOMPUTED (FACT-03, UI-SPEC Test Contract 9, D1) — a
+ * never-computed row has `computed_at` NULL, and the one place `SyncBadge`
+ * reads it is the tooltip's " Analytics last computed …" suffix. The existing
+ * null cases above cover only the healthy-fetch branch; this loops EVERY title
+ * branch, so a later edit that stands `now` (or any date) in for a missing
+ * compute time cannot hide behind a branch nobody pinned.
+ */
+describe("SyncBadge — NEVERCOMPUTED: a never-computed row never claims a compute time on any title branch", () => {
+  const BRANCHES = [
+    {
+      name: "track record, no trade fetch applicable",
+      seriesEnd: () => agoIso(10 * DAY),
+      tradesFetchedAt: () => null,
+      tradeFetchVenue: null,
+    },
+    {
+      name: "track record binding over a recorded trade fetch",
+      seriesEnd: () => agoIso(9 * DAY),
+      tradesFetchedAt: () => agoIso(1 * DAY),
+      tradeFetchVenue: "okx",
+    },
+    {
+      name: "trade fetch current",
+      seriesEnd: () => agoIso(1 * DAY),
+      tradesFetchedAt: () => agoIso(5 * HOUR),
+      tradeFetchVenue: "okx",
+    },
+    {
+      name: "trade fetch stale",
+      seriesEnd: () => agoIso(1 * DAY),
+      tradesFetchedAt: () => agoIso(9 * DAY),
+      tradeFetchVenue: "okx",
+    },
+    {
+      name: "trade fetch in the future",
+      seriesEnd: () => agoIso(1 * DAY),
+      tradesFetchedAt: () => aheadIso(2 * HOUR),
+      tradeFetchVenue: "okx",
+    },
+    {
+      name: "trade fetch never recorded",
+      seriesEnd: () => agoIso(1 * DAY),
+      tradesFetchedAt: () => null,
+      tradeFetchVenue: "okx",
+    },
+  ] as const;
+
+  it.each(BRANCHES)(
+    "NEVERCOMPUTED: $name — computedAt null adds no 'Analytics last computed' and changes no dot, label or render gate",
+    (branch) => {
+      const dated = render(
+        <SyncBadge
+          computedAt={agoIso(1 * HOUR)}
+          seriesEnd={branch.seriesEnd()}
+          tradesFetchedAt={branch.tradesFetchedAt()}
+          tradeFetchVenue={branch.tradeFetchVenue}
+        />,
+      );
+      const never = render(
+        <SyncBadge
+          computedAt={null}
+          seriesEnd={branch.seriesEnd()}
+          tradesFetchedAt={branch.tradesFetchedAt()}
+          tradeFetchVenue={branch.tradeFetchVenue}
+        />,
+      );
+
+      // The branch under test really renders (a null badge would pass vacuously).
+      const datedTitle = titleOf(dated.container);
+      expect(datedTitle).toMatch(/Analytics last computed 1h ago\.$/);
+
+      // The never-computed row renders the same badge: same gate, label, dot...
+      expect(never.container.firstElementChild).not.toBeNull();
+      expect(visibleText(never.container)).toBe(visibleText(dated.container));
+      expect(dotClass(never.container)).toBe(dotClass(dated.container));
+
+      // ...and its tooltip is the dated tooltip minus the suffix, with nothing
+      // (no 'now', no 1970, no placeholder) in its place.
+      const neverTitle = titleOf(never.container);
+      expect(neverTitle).not.toMatch(/Analytics last computed/);
+      expect(neverTitle).toBe(
+        datedTitle!.replace(/ Analytics last computed 1h ago\.$/, ""),
+      );
+    },
+  );
+});
+
 describe("SyncBadge — precedence between the trade fetch and the series end", () => {
   it("a worse series outranks a current fetch; the tooltip keeps the fetch age", () => {
     const { container } = render(

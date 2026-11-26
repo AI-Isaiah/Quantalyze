@@ -62,6 +62,11 @@ from services.metrics import periods_per_year_for_asset_class
 # would be one nobody can reason about. Two `adapter.validate` call sites below
 # had no enclosing try at all before this phase.
 from services.mt5_client import Mt5SessionAbandoned
+# Phase 230 (MT5D-02) — the cross-process lease can fail closed at entry
+# (`Mt5TerminalLeaseUnavailableError`, a subclass of `Mt5TerminalBusyError`). Both are
+# plain `Exception`s from the leaf `services.mt5_concurrency`, caught beside the
+# abandoned-session arm at both validate sites below.
+from services.mt5_concurrency import Mt5TerminalBusyError
 from services.rate_limit import (
     anon_aggregate_key,
     anon_bucket_key,
@@ -1165,7 +1170,13 @@ async def _run_validate_only(
     adapter = get_adapter(body.source)
     try:
         val = await adapter.validate(submission)
-    except Mt5SessionAbandoned:
+    except (Mt5SessionAbandoned, Mt5TerminalBusyError) as exc:
+        # ⭐ 2026-11-25 (Phase 230 MT5D-02): `Mt5TerminalBusyError` (and its subclass
+        # `Mt5TerminalLeaseUnavailableError`, the cross-process lease failing closed)
+        # is answered by this SAME arm: it is just as plain an `Exception`, so it left
+        # here as the same bodyless 500, and the next submission finds the lease
+        # reachable. No new code or copy is minted; `cause` logs the class name only.
+        #
         # ⭐ WIZFORM-ABANDON / D-40. Until this arm existed, `adapter.validate`
         # here had NO enclosing try at all (ast-verified), and
         # `Mt5SessionAbandoned` is a plain `Exception` by design (D-42, so no
@@ -1195,6 +1206,7 @@ async def _run_validate_only(
             "process_key.validate_only_session_abandoned",
             source=body.source,
             correlation_id=correlation_id,
+            cause=type(exc).__name__,
             duration_ms=int((time.monotonic() - started_at) * 1000),
         )
         return JSONResponse(
@@ -2067,7 +2079,10 @@ async def process_key(
     # validate
     try:
         val = await adapter.validate(submission)
-    except Mt5SessionAbandoned:
+    except (Mt5SessionAbandoned, Mt5TerminalBusyError) as exc:
+        # ⭐ 2026-11-25 (Phase 230 MT5D-02): the cross-process lease's busy and
+        # lease-unavailable raises ride this arm too; see `_run_validate_only`.
+        #
         # ⭐ WIZFORM-ABANDON / D-40 — the SECOND unguarded `adapter.validate`
         # site, and it is covered because the class is "an unguarded validate
         # call site", not "the one an author had in mind". See
@@ -2093,6 +2108,7 @@ async def process_key(
             source=body.source,
             verification_id=verification_id,
             correlation_id=correlation_id,
+            cause=type(exc).__name__,
         )
         return JSONResponse(
             status_code=424,

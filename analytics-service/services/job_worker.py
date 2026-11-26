@@ -186,6 +186,7 @@ from services.mt5_concurrency import (
     _mt5_bounded_restart,
     _mt5_terminal_lock_for,
     _Mt5PostReadVerificationError,
+    Mt5TerminalLeaseUnavailableError,
     mt5_derive_read_bound_s,
     mt5_terminal_lease,
 )
@@ -1257,6 +1258,13 @@ _MOVED_FLOW_PRICE_MIN_SECONDS: Final[float] = 10.0
 # Error classification
 # ---------------------------------------------------------------------------
 
+# Phase 230 (MT5D-02). The fixed text ``classify_exception`` ships for a cross-process
+# lease outage. A constant, never ``str(exc)``: the raise is OUR infrastructure and
+# carries nothing a job row, an admin UI or a log reader should be handed.
+MT5_LEASE_UNAVAILABLE_MESSAGE: Final[str] = (
+    "MT5 terminal lease unavailable; the job will retry"
+)
+
 # HTTP 4xx codes that should be retried instead of going straight to
 # failed_final. 408/429 are obvious upstream retries.
 _HTTP_TRANSIENT_4XX: frozenset[int] = frozenset({408, 429})
@@ -1327,6 +1335,20 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # writes again.
     if isinstance(exc, HandlerIOUnavailable):
         return ("transient", str(exc)[:500])
+
+    # Phase 230 (MT5D-02). The unbounded MT5 callers (the nightly derive, the holdings
+    # poll) enter ``mt5_terminal_lease`` with no ``wait_s``, so the one lease raise they
+    # can meet is ``Mt5TerminalLeaseUnavailableError``: the cross-process lease could not
+    # be reached and the lease failed CLOSED rather than drive the terminal unserialized.
+    # It is a plain ``Exception`` (never an ``Mt5ClientError``), so without this arm it
+    # falls through to ``unknown``. TRANSIENT: the queue retries the whole job, and the
+    # next attempt meets a reachable lease. A fixed message, no ``str(exc)``.
+    #
+    # ⛔ Deliberately the SUBCLASS only. A plain ``Mt5TerminalBusyError`` is the
+    # interactive validate path's contract (D-29) and no unbounded caller raises it, so
+    # it keeps landing on the catch-all (``test_a_plain_busy_raise_keeps_its_current_classification``).
+    if isinstance(exc, Mt5TerminalLeaseUnavailableError):
+        return ("transient", MT5_LEASE_UNAVAILABLE_MESSAGE)
 
     # Fernet InvalidToken means the DEK cannot be unwrapped with the
     # current KEK — either a key rotation mismatch or a corrupted row.

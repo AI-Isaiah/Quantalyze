@@ -5098,6 +5098,47 @@ async def test_a_BUSY_terminal_is_an_INFO_skip_and_never_a_warning(
     )
 
 
+async def test_sf_m1_a_lease_database_outage_is_an_ERROR_and_never_a_session_is_fine_skip(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Phase 230 round 1, SF-M1. `Mt5TerminalLeaseUnavailableError` SUBCLASSES the busy
+    error, so the busy arm answered a lease-DATABASE outage with "a busy terminal is
+    itself evidence the session is fine" and recorded `busy_skip`. Nothing was using the
+    terminal; the heal could not be taken. It must say so at ERROR, claim nothing about
+    the session, and record a reading that is not `busy_skip`. (The genuine-refusal
+    behaviour is pinned by the two tests above, unchanged.)"""
+    from services.mt5_concurrency import Mt5TerminalLeaseUnavailableError
+
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+
+    @asynccontextmanager
+    async def _unavailable(terminal_key: str, *, wait_s=None, holder=None, site=None):
+        raise Mt5TerminalLeaseUnavailableError("the MT5 terminal lease could not be reached")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(mt5_relogin, "mt5_terminal_lease", _unavailable)
+    recorded: list[str] = []
+
+    async def _record(kind: str, _code: object, **_k: object) -> None:
+        recorded.append(kind)
+
+    monkeypatch.setattr(mt5_relogin, "record_mt5_session_reading", _record)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    records = _outcome_records(caplog)
+    assert len(records) == 1, [r.getMessage() for r in records]
+    message = records[0].getMessage()
+    assert records[0].levelno == logging.ERROR, (records[0].levelname, message)
+    assert "session is fine" not in message and "busy terminal" not in message, message
+    assert "lease" in message and "could not be reached" in message, message
+    assert recorded == [mt5_relogin.KIND_LEASE_UNAVAILABLE], recorded
+    assert mt5_relogin.KIND_LEASE_UNAVAILABLE != mt5_session_episodes.KIND_BUSY_SKIP
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
 @pytest.mark.parametrize(
     "debt_owed",
     [

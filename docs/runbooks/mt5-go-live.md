@@ -134,6 +134,17 @@ The mechanism, so a future operator can *evaluate* this rather than obey it:
    own process, its own event loop, its own lock registry and its own `Lock` objects — so
    it serializes **nothing** against the first one.
 
+⭐ **CORRECTED 2026-11-25 (Phase 230 MT5NIGHTLY) — item 2 above no longer holds for the analytics
+side; it is kept as lineage.** A database lease now serializes the terminal ACROSS processes: every
+`mt5_terminal_lease` caller takes a row in `public.mt5_terminal_leases` after its in-process lock
+(`docs/runbooks/mt5-terminal-lease.md`). What did NOT change:
+- Item 1 stands. The gateway still runs ONE `ThreadedServer` with ONE `MetaTrader5` instance and ONE
+  logged-in account per terminal, so the gateway's one-account-per-terminal constraint is untouched.
+- The lease does not make the per-process holder registry and the per-process settled registries
+  cross-process. Each process still keeps its own view of who last logged in.
+- Multi-replica analytics is NOT claimed supported. That needs a measured test first; this note
+  records only that the cross-process gap in item 2 is closed, not that a second replica is safe.
+
 A second replica of either service therefore reintroduces exactly the interleaved
 `login()` race the lease was added to remove: two validations land on the ONE terminal,
 the second re-points it under the first, and a capability verdict can be judged against

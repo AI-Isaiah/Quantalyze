@@ -71,7 +71,11 @@ from services.mt5_client import (
     Mt5ClientError,
     mt5_terminal_key,
 )
-from services.mt5_concurrency import Mt5TerminalBusyError, mt5_terminal_lease
+from services.mt5_concurrency import (
+    Mt5TerminalBusyError,
+    Mt5TerminalLeaseUnavailableError,
+    mt5_terminal_lease,
+)
 from services.mt5_handover import (
     HOLDER_VALIDATION,
     SITE_VALIDATION_LIVENESS,
@@ -163,7 +167,8 @@ async def probe_validation_terminal(*, poll_interval_s: float) -> None:
     ORDER: the validation endpoint (absent -> a COUNTED ``gateway_not_configured``
     reading, never a silent skip), the short bounded lease on its key, the
     credential-free probe off the loop, then ``classify_reading`` and the tracker.
-    Every outcome is a reading: busy -> ``busy_skip``, the thread bound ->
+    Every outcome is a reading: busy -> ``busy_skip``, a lease database that could not be
+    reached -> ``probe_failed``, the thread bound ->
     ``budget_abandoned`` (the thread is NOT cancelled; the lease release bumps the
     generation and fences it), any other raise -> ``probe_failed``. Only a measured
     ``authorized`` reading can end an outage run.
@@ -186,6 +191,11 @@ async def probe_validation_terminal(*, poll_interval_s: float) -> None:
                         asyncio.to_thread(_probe_blocking, host, port),
                         timeout=_PROBE_THREAD_BOUND_S,
                     )
+            except Mt5TerminalLeaseUnavailableError:
+                # Phase 230 round 1 (SF-M1): a busy SUBCLASS, so it must come first. The
+                # lease database could not be asked, which is not "the terminal is in
+                # use" - the probe failed to run, and it is counted as such.
+                kind, code = KIND_PROBE_FAILED, None
             except Mt5TerminalBusyError:
                 kind, code = KIND_BUSY_SKIP, None
             except asyncio.TimeoutError:

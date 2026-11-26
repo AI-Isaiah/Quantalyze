@@ -1661,6 +1661,7 @@ async function main() {
     const { error } = await admin.from("strategy_analytics").insert({
       strategy_id: arch.id,
       computation_status: "complete",
+      computed_at: new Date().toISOString(),
       benchmark: "BTC",
       cumulative_return: payload.cumulative_return,
       cagr: payload.cagr,

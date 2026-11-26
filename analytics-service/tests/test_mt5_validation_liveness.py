@@ -260,6 +260,81 @@ async def test_a_lease_busy_for_every_tick_extends_the_run_and_pages_as_busy_ski
     assert fake.round_trips == []
 
 
+async def test_sf_m1_a_lease_database_outage_is_a_probe_failure_and_never_a_busy_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 230 round 1, SF-M1. ``Mt5TerminalLeaseUnavailableError`` is a busy SUBCLASS,
+    so the busy arm used to read a lease-database outage as "somebody is using the
+    terminal" and page it as `busy_skip`. The terminal is not busy; the probe could not
+    be taken at all, which is the `probe_failed` reading. Driven through the REAL lease
+    with a backend that errors, so the classification is the production one."""
+    from services import mt5_xlease
+    from tests.xlease_fakes import FakeXLeaseBackend
+
+    fake, constructions = _install_probe_client(monkeypatch, _AUTHORIZED)
+    outage = FakeXLeaseBackend()
+    outage.raises["acquire"] = RuntimeError("connection refused")
+    previous = mt5_xlease.set_xlease_backend_for_tests(outage)
+    monkeypatch.setattr(
+        mt5_validation_liveness, "_MT5_RELOGIN_LEASE_WAIT_DEFAULT_S", 0.01
+    )
+    readings: list[tuple[str, str]] = []
+
+    async def _spy(role: str, state: str, kind: str, code: object, **_k: object) -> None:
+        readings.append((state, kind))
+
+    monkeypatch.setattr(mt5_validation_liveness, "note_outage_reading", _spy)
+    try:
+        await asyncio.wait_for(
+            mt5_validation_liveness.probe_validation_terminal(poll_interval_s=_CADENCE_S),
+            timeout=10.0,
+        )
+    finally:
+        mt5_xlease.set_xlease_backend_for_tests(previous)
+
+    assert readings == [
+        (mt5_session_episodes.STATE_NOT_MEASURED, mt5_validation_liveness.KIND_PROBE_FAILED)
+    ], readings
+    assert constructions == [], "the terminal must not be touched without the lease"
+
+
+async def test_sf_m1_a_genuinely_refused_lease_is_still_a_busy_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control for the test above: the database ANSWERED, another process holds the
+    terminal, and the existing `busy_skip` reading is unchanged."""
+    import uuid
+
+    from services import mt5_xlease
+    from tests.xlease_fakes import FakeXLeaseBackend
+
+    _install_probe_client(monkeypatch, _AUTHORIZED)
+    held = FakeXLeaseBackend()
+    key = mt5_terminal_key(_HOST, int(_PORT))
+    assert await held.acquire(
+        mt5_xlease.terminal_lease_digest(key), uuid.uuid4(), "house", "derive", 3600
+    )
+    previous = mt5_xlease.set_xlease_backend_for_tests(held)
+    monkeypatch.setattr(
+        mt5_validation_liveness, "_MT5_RELOGIN_LEASE_WAIT_DEFAULT_S", 0.01
+    )
+    readings: list[str] = []
+
+    async def _spy(role: str, state: str, kind: str, code: object, **_k: object) -> None:
+        readings.append(kind)
+
+    monkeypatch.setattr(mt5_validation_liveness, "note_outage_reading", _spy)
+    try:
+        await asyncio.wait_for(
+            mt5_validation_liveness.probe_validation_terminal(poll_interval_s=_CADENCE_S),
+            timeout=10.0,
+        )
+    finally:
+        mt5_xlease.set_xlease_backend_for_tests(previous)
+
+    assert readings == [mt5_session_episodes.KIND_BUSY_SKIP], readings
+
+
 async def test_an_unconfigured_validation_gateway_is_counted_and_pages_at_the_threshold(
     monkeypatch: pytest.MonkeyPatch, mt5_outage_pages: list[Any]
 ) -> None:

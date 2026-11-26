@@ -63,6 +63,7 @@ import { STORED_CURVE_MAX_POINTS } from "./resolve-series";
 import { curveMethodFromFlags, curveRecordStart } from "./resolve-series";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload, FactsheetUsdView, IngestSource } from "./types";
+import { NEVER_COMPUTED_STAMP } from "./never-computed-stamp";
 
 /**
  * The visibility predicate injected into `fetchAndBuildPayload`. Structurally
@@ -989,7 +990,7 @@ async function buildFromResolved(
       { id },
     );
   }
-  const computedAt = analytics?.computed_at ?? "1970-01-01T00:00:00Z";
+  const computedAt = analytics?.computed_at ?? NEVER_COMPUTED_STAMP;
   // Phase 167.1.2.2.2 (TRADESYNC, D-06/D-07/D-02). Unlike `computedAt` there is
   // NO sentinel to invent: a missing stamp is `null`, which the TradeFetchLine
   // reads as "never fetched" (api-key venue) or "no claim" (everything else).

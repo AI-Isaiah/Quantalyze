@@ -238,3 +238,39 @@ describe("FactsheetPreview", () => {
     });
   });
 });
+
+// Phase 238 / NEVERCOMPUTED (FACT-03, UI-SPEC Test Contract 9, D2) — a never-computed row reaches
+// the wizard preview with `computedAt` NULL. The caption must then be each state's own dateless
+// line, and the `Data from exchange API · <date>` label must not render at all: a never-computed
+// strategy has no compute day to print, and a placeholder dash after that prefix would still
+// claim a data pull happened.
+describe("FactsheetPreview - NEVERCOMPUTED: a never-computed row prints no compute label", () => {
+  it.each([
+    ["draft", "Computed from your exchange trades — not yet admin-reviewed"],
+    ["pending", "Awaiting founder approval"],
+  ] as const)(
+    "%s with computedAt null shows its dateless caption and no 'Data from exchange API'",
+    (state, caption) => {
+      const { container } = render(
+        <FactsheetPreview
+          strategyName="X"
+          metrics={METRICS}
+          verificationState={state}
+          computedAt={null}
+        />,
+      );
+      expect(screen.getByText(caption)).toBeInTheDocument();
+      expect(container.textContent).not.toMatch(/Data from exchange API/);
+    },
+  );
+
+  it("verified with computedAt null prints no 'Data from exchange API' label either", () => {
+    const { container } = render(
+      <FactsheetPreview strategyName="X" metrics={METRICS} computedAt={null} />,
+    );
+    expect(screen.getByTestId("factsheet-verification-badge")).toHaveTextContent(
+      "Verified by Quantalyze",
+    );
+    expect(container.textContent).not.toMatch(/Data from exchange API/);
+  });
+});

@@ -75,7 +75,7 @@ export interface PendingStrategyRow {
     sharpe: number | null;
     max_drawdown: number | null;
     computation_status: string;
-    computed_at: string;
+    computed_at: string | null;
     // The four record scalar aliases (RECORD_SCALAR_ALIASES). Optional `unknown`:
     // `recordFromScalars` coerces each, and an absent one is a record of unknown span.
     series_start?: unknown;

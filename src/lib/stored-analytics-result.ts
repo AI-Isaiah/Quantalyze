@@ -8,9 +8,12 @@
  * "a stored success result" means. Row state only, never lane state: nothing
  * here reads a viewer, a cookie or a header.
  *
- * WHY the evidence is not `computed_at`: the column is `DEFAULT now() NOT NULL`,
- * so a row that never computed carries one too. It is used here only to BIND a
- * snapshot to the success that stored the row's numbers.
+ * WHY the evidence is not `computed_at`: the column is nullable and a row that never
+ * computed carries NULL (Phase 238 FACT-03; before it the column was `DEFAULT now()
+ * NOT NULL` and a never-computed row carried its insert time). A date therefore says
+ * only that some success once stamped the row, not that this row holds figures. It is
+ * used here only to BIND a snapshot to the success that stored the row's numbers, and a
+ * NULL date never binds one.
  */
 
 /**

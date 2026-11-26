@@ -402,6 +402,10 @@ async def test_the_park_never_changes_what_the_caller_sees(
     with_park, parked = await _run_wizard(router, scenario)
     assert len(parked.house_logins()) == 1, f"{verdict}: the park did not run"
 
+    # The first run schedules a detached post-verdict scrub that takes its OWN terminal lease and
+    # bumps the epoch on release. Reset with it still in flight and that bump lands inside the
+    # second run's connect, which then refuses as abandoned (424). Settle it first.
+    await _drain_scheduled_scrubs()
     mt5_concurrency.reset_terminal_state_for_tests()
     monkeypatch.delenv("MT5_LOGIN")
     without_park, unparked = await _run_wizard(router, scenario)
@@ -1259,6 +1263,10 @@ async def test_the_worker_validate_parks_on_the_house_account_inside_the_lease(
     assert transport.events[-1] == ("release",)
     assert mt5_client.mt5_terminal_holder(_VAL_KEY) == mt5_client.HOLDER_HOUSE
 
+    # The first run schedules a detached post-verdict scrub that takes its OWN terminal lease and
+    # bumps the epoch on release. Reset with it still in flight and that bump lands inside the
+    # second run's connect, which then refuses as abandoned (424). Settle it first.
+    await _drain_scheduled_scrubs()
     mt5_concurrency.reset_terminal_state_for_tests()
     monkeypatch.delenv("MT5_LOGIN")
     unparked = _RecordingMt5(_scenario(_MASTER_ACCOUNT))

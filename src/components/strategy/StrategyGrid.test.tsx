@@ -301,3 +301,32 @@ describe("StrategyGrid - the AUM label opens its definition without nesting a ta
     expect(within(link).getByText("AUM")).toBeTruthy();
   });
 });
+
+// Phase 238 / NEVERCOMPUTED (FACT-03, UI-SPEC Test Contract 9, D7) — the card's HealthScore pill
+// folds `computed_at` into a freshness component. A never-computed row has no compute time, so
+// that component must score 0 (the same as an unreadable date), never fresh and never even the
+// 25 an ancient compute earns. The pill reads out its score in its own title.
+describe("StrategyGrid - NEVERCOMPUTED: a never-computed card never scores fresh on its health pill", () => {
+  function healthOf(computedAt: string | null): number {
+    const fixture = makeStrategy({ id: STRATEGY_ID, name: "Alpha Card" });
+    fixture.analytics.computed_at = computedAt;
+    const { container, unmount } = render(<StrategyGrid strategies={[fixture]} />);
+    const pill = container.querySelector("[title^='Health score:']");
+    if (!pill) throw new Error("no HealthScore pill on the card");
+    const score = Number(/Health score: (\d+)\/100/.exec(pill.getAttribute("title") ?? "")?.[1]);
+    unmount();
+    expect(Number.isFinite(score)).toBe(true);
+    return score;
+  }
+
+  it("scores a null computed_at below a fresh compute AND below a 400-day-old one", () => {
+    const never = healthOf(null);
+    const fresh = healthOf(new Date(Date.now() - 60 * 60 * 1000).toISOString());
+    const ancient = healthOf(new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString());
+    // Non-vacuity: the two dated rows differ, so the freshness component is live on this card.
+    expect(fresh).toBeGreaterThan(ancient);
+    // Never-computed is the worst freshness, not "fresh" and not "old but real".
+    expect(never).toBeLessThan(ancient);
+    expect(never).toBeLessThan(fresh);
+  });
+});
