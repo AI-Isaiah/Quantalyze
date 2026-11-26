@@ -2266,6 +2266,85 @@ describe("[154.1 / WIZCONT-02] ConnectKeyStep — an already-connected account r
     ).toHaveTextContent('It is connected to "Helios Momentum".');
   });
 
+  // Founder 2026-11-25 — the refusal tells a person WHICH of their own things
+  // already holds the account and links to it, so they remember they already
+  // added it and stop re-adding it (which double-counts it).
+  it("links the caller's OWN strategy by name when the refusal carries a holder", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "VENUE_ALREADY_CONNECTED",
+          error: "This account is already connected to an existing strategy.",
+          strategy_name: "Helios Momentum",
+          holder: {
+            kind: "strategy",
+            name: "Helios Momentum",
+            href: "/factsheet/s-1?from=strategies",
+          },
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    const link = await screen.findByTestId("error-envelope-holder-link");
+    expect(envelope).toContainElement(link);
+    expect(link).toHaveAttribute("href", "/factsheet/s-1?from=strategies");
+    expect(link).toHaveTextContent("Open “Helios Momentum”");
+  });
+
+  it("KEY_ORPHANED names the stored key (nickname and date) and links to where it is listed", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "KEY_ORPHANED",
+          error: "This key is already stored, but no strategy uses it.",
+          holder: {
+            kind: "key",
+            name: "Test",
+            added_at: "2026-11-19T10:00:00Z",
+            href: "/strategies",
+          },
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_ORPHANED");
+    expect(envelope).toHaveTextContent('You already stored this account as your key "Test", added Nov');
+    expect(envelope).toHaveTextContent("19");
+    expect(envelope).toHaveTextContent("2026");
+    const link = screen.getByTestId("error-envelope-holder-link");
+    expect(link).toHaveAttribute("href", "/strategies");
+    expect(link).toHaveTextContent("finish setup on “Test”");
+  });
+
+  it("a holder with a hostile href is dropped: no link renders", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "KEY_ORPHANED",
+          error: "This key is already stored, but no strategy uses it.",
+          holder: { kind: "key", name: "Test", href: "https://evil.example/x" },
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await screen.findByTestId("error-envelope");
+    expect(screen.queryByTestId("error-envelope-holder-link")).toBeNull();
+  });
+
   it("and says nothing extra when it did NOT (TRAP-3, and the vacuity fence for the case above)", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(
