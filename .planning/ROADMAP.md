@@ -7,7 +7,7 @@
 - ✅ **v1.19 JOB/RATE** — Phases 143–146, 146.1, 146.2 (shipped 2026-08-20)
 - ✅ **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 207–220 (shipped 2026-11-23; 155.2's remaining work, 157 and 221–225 moved to v1.22 2026-11-23, then 221 and 224 to v1.23 by F-10, and 155.2 and 157 to v1.23 2026-11-25)
 - 🚧 **v1.22 TRUTH — data you can trust** — Phases 222, 223, 225, 226–241 (started 2026-11-23)
-- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249, 254 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
+- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249, 254, 255 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
 - ✅ **v1.17 MT5 — ingested, wizardable, surfaced** — Phases 147–154, 156 (shipped 2026-08-14)
 - ✅ **v1.16 Production Resilience & Reliability** — Phases 140–142 (shipped 2026-08-14)
 - Earlier milestones: see "Shipped Milestones" below.
@@ -100,7 +100,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 🚧 **v1.22 TRUTH — data you can trust — STARTED 2026-11-23, roadmapped.** 22 phases: the carried 222, 223 and 225, the new 226–241, and 250–252 booked later; 10 of them are complete (see the Progress table). ⛔ **CORRECTED 2026-11-25 (founder ruling in chat): 155.2 and 157 moved to v1.23 HARDEN.** Founder (2026-11-25): "We will Move 157 and 155.2 into the next milestone". Until then this paragraph read "no new phase started", counted 21 phases with 155.2 and 157 in, and named 226 MT5SOAK (since shipped) as the first phase to plan. The order, the seam owners, the 155.2 freeze window (which still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs) and the milestone-wide rules are in the v1.22 section below.
 
-📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"). Its section follows v1.22's.
+📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"), and 255 NULLANCHOR the same day (founder: "Keep it on, fix records"). Its section follows v1.22's.
 
 ⛔ **Do not advertise MT5 until Phase 155.2 passes.** Carried from v1.17 and v1.18 and unchanged by the close. No surface, copy or badge advertises MT5 or calls it verified before 155.2 passes (`milestones/v1.18-REQUIREMENTS.md` Out of Scope).
 
@@ -181,7 +181,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [x] **Phase 250: BINANCEFILLS — a Binance fills read walks every window and never stalls its cursor** - Routed from 232 review (R2-01, R2-02, the BINANCE_PAGE_CAP stop); lands before `USE_RAW_TRADE_INGESTION` is turned on for Binance (completed 2026-11-26)
 - [x] **Phase 251: SYNCSTORE — run_sync_trades_job stores every run's daily P&L and refusal flags truthfully** - The four 232 OKXTRADES leftovers in `run_sync_trades_job`; after 222 (completed 2026-11-26)
 - [ ] **Phase 252: DERIBITOPTIONS — a Deribit options strategy's published figures are mark-to-market or withheld, never a cash-wallet artefact** - From the diagnosed `deribit-implausible-returns` debug session (mechanism B, cash-basis options): Quantum Drift's owner factsheet shows +1636172.7% cumulative, unwithheld; re-measures DEF-142.2-07
-- [ ] **Phase 253: BINANCECURSOR — a stopped Binance fills read below a cursor that runs ahead of the stored fills is re-read, and its signal lasts** - Routed from 250 review rounds 1-3 (`[250-BINANCE-STOP-BELOW-CURSOR]`, MEDIUM, data-integrity) by founder ruling 2026-11-26; an RPC change, so a migration; the Binance `USE_RAW_TRADE_INGESTION` switch stays off until it closes
+- [x] **Phase 253: BINANCECURSOR — a stopped Binance fills read below a cursor that runs ahead of the stored fills is re-read, and its signal lasts** - Routed from 250 review rounds 1-3 (`[250-BINANCE-STOP-BELOW-CURSOR]`, MEDIUM, data-integrity) by founder ruling 2026-11-26; an RPC change, so a migration; the Binance `USE_RAW_TRADE_INGESTION` switch stays off until it closes (completed 2026-11-26)
 
 ### Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists
 
@@ -916,10 +916,13 @@ Plans:
 3. A sync-time `binance_*` flag (`binance_stop_below_cursor` and `binance_deadline_symbols` among them) survives the chained `derive_broker_dailies` write and the `run_csv_strategy_analytics` rebuild; an arm proves each.
 4. `USE_RAW_TRADE_INGESTION` stays off for Binance until criteria 1 to 3 are met on `main`, and the `_RAW_TRADE_INGESTION_ENABLED` comment and the `TODOS.md` entry are updated in the ship PR (the entry deleted and named in its CHANGELOG entry).
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 253-01-PLAN.md — the per-strategy re-read bound table and its fenced SECURITY DEFINER writer, with the 24-arm SQL gate (D-01, D-05)
+- [x] 253-02-PLAN.md — the worker reads the bound into the Binance fills seed and writes it back; the stop-plus-partial predicate (SC-1, SC-2)
+- [x] 253-03-PLAN.md — every census the new gate and function move, and the committed function snapshot (D-12)
+- [x] 253-04-PLAN.md — the sync-time `binance_*` flags survive the derive and the CSV rebuild, and a clean sync clears them (SC-3, SC-4)
 
 ### Progress (this milestone)
 
@@ -944,10 +947,10 @@ Plans:
 | 239. SURFACECACHE | 3/3 | Complete (shipped v0.133.72.0, #1332) | 2026-11-24 |
 | 240. CONNECTTRUTH | 8/8 | Complete (shipped v0.133.74.0, #1334) | 2026-11-25 |
 | 241. DEMOCREDS | 4/4 | Verified human_needed (Pair A reset is the founder's); code PR pending | - |
-| 250. BINANCEFILLS | 8/8 | Complete (shipped v0.133.84.0, #1355; verification passed, UAT 4/4; the Binance switch stays off until Phase 253 closes) | 2026-11-26 |
+| 250. BINANCEFILLS | 8/8 | Complete (shipped v0.133.84.0, #1355; verification passed, UAT 4/4; ⛔ corrected 2026-11-26: the switch is on in PROD and stays on by founder ruling, see 250-VERIFICATION) | 2026-11-26 |
 | 251. SYNCSTORE | 2/2 | Complete (shipped v0.133.87.0, #1359; verification passed 6/6, SECURITY 13/13 closed) | 2026-11-26 |
 | 252. DERIBITOPTIONS | 6/6 | Shipped v0.133.80.0 (#1351); human verification pending (post-deploy PROD factsheet check, founder copy check, the founder-gated wave-2 probe run, the ship-time PROD census re-take; a 2026-11-25 PROD reading is recorded in 252-05-SUMMARY and the v0.133.80.0 CHANGELOG) | - |
-| 253. BINANCECURSOR | 0/? | Not started | - |
+| 253. BINANCECURSOR | 4/4 | Complete (shipped v0.133.93.0, #1367; migration 20261126150000 applied to TEST and PROD in supabase-migrate run 45824919779; re-dump #1369; verification passed after founder rulings 2026-11-26, "Keep it on, fix records" and "Accept both"; `USE_RAW_TRADE_INGESTION` stays on, and PROD has no Binance key) | 2026-11-26 |
 
 ## 📋 v1.23 HARDEN — security, alerting, tooling (planned; starts after TRUTH closes)
 
@@ -975,6 +978,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 248: SQLGATES2 — SQL gate censuses fail when an axis drifts, and apply-test tells a seeded ledger row from an applied migration** - Derived census axes, enforced exemptions, provenance gate twins, the apply-test fix before the forward comment correction
 - [ ] **Phase 249: TESTLANES — every live-DB lane test executes, a fence timeout fails, lint agrees cold and warm, and the PROD image crash risk is measured** - Ledger to zero with no assertion weakened, no green skips, cache-proof lint, supautils measured locally on the PROD image version
 - [ ] **Phase 254: OPENINGDEPOSIT — a deposit dated the day before a key's first return is its opening deposit on every venue** - Booked 2026-11-26 by founder ruling ("Exempt it, book for v1.23") from an allocator book whose `out_of_window_flow` is a Bybit key's opening deposit dated one day before its first return; a narrow opening-run exemption in `replay_key_equity`, not a wider `FULL_HISTORY_VENUES`
+- [ ] **Phase 255: NULLANCHOR — an OKX, Bybit or Deribit fills read that fails after the daily store never leaves a span the next run skips** - Booked 2026-11-26 by founder ruling ("Keep it on, fix records") from 253 BINANCECURSOR's routed `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`, live today because `USE_RAW_TRADE_INGESTION` is on in PROD
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -1253,6 +1257,23 @@ Plans:
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 255: NULLANCHOR — an OKX, Bybit or Deribit fills read that fails after the daily store never leaves a span the next run skips
+
+**Goal:** A fills read on OKX, Bybit or Deribit that raises, is rate limited (429) or is cancelled after Phase 251's daily `sync_trades` store never leaves a span that the next run's seed skips, on a NULL `last_fetched_trade_timestamp` column and on a set column with no stored fill alike. This is `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`, which is live today: the Railway production `USE_RAW_TRADE_INGESTION` is `true` on both analytics services, and PROD holds OKX, Bybit and Deribit keys.
+- **Founder ruling 2026-11-26 (AskUserQuestion), verbatim: "Keep it on, fix records".** The switch stays on. This phase gives the entry its v1.23 owner. Booked with `/gsd-phase` add and placed in v1.23 HARDEN by hand, as Phase 254 was.
+- **Fix direction (from the `TODOS.md` entry, a decision for this phase):** an `advance_sync_cursor` anchor covers only the NULL column, because that RPC cannot lower a set column. Two directions cover both cases. One extends the Phase 253 per-strategy re-read bound to these venues: a provisional bound written at the seed before the daily store, and the daily store held when the bound cannot be recorded. The other holds the daily store until the fills read has run, which changes Phase 251's ordering. Holding the worker's own store does not stop `cron_sync` or `/fetch-trades` from storing daily rows.
+**Requirements**: TBD
+**Depends on:** nothing hard. It re-bases on Phase 253's bound table and RPC if it extends them.
+**Success Criteria** (what must be TRUE):
+1. For each of OKX, Bybit and Deribit, on a NULL column and on a set column with no stored fill, with a 429, a cancel and a plain raised read from the fills read after run 1 stored a daily row, run 2's walk start is at or before run 1's seed. Each arm is RED on `origin/main` today.
+2. Binance's Phase 253 behaviour and `advance_sync_cursor`'s callers do not regress, and a test pins that.
+3. The `TODOS.md` entry `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]` is deleted in the ship PR and named in its CHANGELOG entry.
+4. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Progress (HARDEN)
 
 | Phase | Plans Complete | Status | Completed |
@@ -1270,6 +1291,7 @@ Plans:
 | 248. SQLGATES2 | 0/? | Planned for v1.23 | - |
 | 249. TESTLANES | 0/? | Planned for v1.23 | - |
 | 254. OPENINGDEPOSIT | 0/? | Planned for v1.23 | - |
+| 255. NULLANCHOR | 0/? | Planned for v1.23 | - |
 
 ---
 

@@ -116,13 +116,13 @@
     {
       "number": "253",
       "name": "BINANCECURSOR",
-      "status": "pending"
+      "status": "complete"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 3 of 23 · 61% · executing"
+    "reason": "Phase 3 of 23 · 65% · executing"
   },
   "updated_at": "2026-11-26T11:52:30.019Z"
 }

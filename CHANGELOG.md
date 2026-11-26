@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.133.93.3] - 2026-11-26 — records: Phase 253 BINANCECURSOR complete; the raw-ingestion switch is on in PROD and stays on; Phase 255 NULLANCHOR booked for v1.23
+
+### Added
+- **Phase 253's planning records**, taken by path from the phase branch: `253-CONTEXT`, `RESEARCH`, `PATTERNS`, `VALIDATION` and `DISCUSSION-LOG`, plans and summaries 01 to 04, review rounds 1 to 3 with the fix record, `253-SECURITY` and `253-VERIFICATION`. The code shipped in #1367 (v0.133.93.0, merge `734e51f5`).
+- **Phase 255 NULLANCHOR, booked in v1.23 HARDEN** with `/gsd-phase` add and moved there by hand, as Phase 254 was. It owns `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`: on OKX, Bybit or Deribit, a fills read that raises, is rate limited or is cancelled after Phase 251's daily store leaves a span the next run's seed skips. This happens on a NULL cursor column and on a set column with no stored fill. The goal, the fix direction from the `TODOS.md` entry and four success criteria are in ROADMAP. The handler's `state.json` collateral (four phase statuses reset to `pending`) was reverted.
+
+### Changed
+- **Phase 253 is complete.** `253-VERIFICATION.md` is `passed`, and `phase complete 253` ran.
+  - Items 1 to 4 were open only on CI and ship, and all four are satisfied:
+    - `sql-tests` ran the new gate on the local-stack lane.
+    - `python` and `e2e-seeded` were green. Under `CI=true` their live-DB modules fail instead of skipping, so a green run means they ran.
+    - `sql-mutation` ran FULL: 96/96 files, `arms: 1074/1074/0`, `biting: 1074`, `No defects`.
+    - Supabase Migrate run `45824919779` applied `20261126150000` to TEST and then PROD. Re-dump #1369 brought `SNAPSHOT_MISSING` to 0.
+  - Items 5 to 7 are resolved by the founder's rulings below.
+  - `verified_at_sha` names the merge `734e51f5`, because the branch sha exists only on a local branch.
+- **Founder ruling 2026-11-26 (AskUserQuestion), verbatim: "Keep it on, fix records".** The Railway production variable `USE_RAW_TRADE_INGESTION` is `true` on both analytics services, and it stays on. PROD has 0 Binance `api_keys` (live: 5 okx, 1 bybit, 8 deribit, 11 mt5; MCP read 2026-11-26). The Binance gaps cannot fire today, but only because no Binance key exists. This ruling corrects every record that said the switch was off:
+  - **The v0.133.93.0 entry below says "`USE_RAW_TRADE_INGESTION` stays off for Binance" and "every residual below is dormant while it is off".** Both are wrong, and that entry is left as written. The switch was on in PROD then and is on now. The Binance residuals are dormant only while PROD has no Binance key. `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]` was never dormant on OKX, Bybit and Deribit.
+  - `253-VERIFICATION.md`: SC-4 and item 5 are corrected in a dated note.
+  - `250-VERIFICATION.md`: its SC-4 line "off in PROD" gets a dated ⛔ CORRECTED note, and the original stays as lineage. 250's ROADMAP Progress row no longer says the switch stays off.
+  - `TODOS.md`: `[253-BINANCE-SYMBOLS-ON-PUBLIC-FLAGS]` and `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` now trigger "before the first Binance key connects in PROD". `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]` is marked live today on OKX, Bybit and Deribit and is owned by Phase 255. Each carries a dated correction, and the old trigger text stays as lineage.
+- **Founder ruling 2026-11-26 (AskUserQuestion), verbatim: "Accept both".** Phase 253's items 6 and 7 are accepted: the cron-moves-seed residual `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]`, and the fail-closed cost of fix `6d0a48a7a`, which holds a Binance run's daily store while the bound RPC is down.
+- ROADMAP: 253's four plans are ticked, its overview bullet is `[x]`, and its Progress row is restored to prose after `phase complete` overwrote it. STATE: Current Position is corrected by hand, because `phase complete` had moved it to Phase 225 while phases run in parallel. The `progress:` block re-derived by the handler is kept. The 253 Deferred Verification row is removed, and Roadmap Evolution gains Phase 255. `state.json`: 253 is `complete`. The handler's resets of 230, 236, 238 and 252 to `pending` were reverted.
+- `253-04-SUMMARY.md` named a local scratch path. It now says the path is kept out of tracked text.
+
+### Notes
+- Phase 250 has no item still waiting on 253. Its ruling that the Binance switch stays off until 253 closes is superseded by "Keep it on, fix records".
+- No `TODOS.md` entry is closed here. #1367 already deleted `[250-BINANCE-STOP-BELOW-CURSOR]`.
+
 ## [0.133.93.2] - 2026-11-26 — records: Phase 225 ONEACCOUNTONCE PR-3 applied to PROD and read back, Phase 254 OPENINGDEPOSIT booked for v1.23
 
 Records only. No source, test, workflow or migration file changes.
