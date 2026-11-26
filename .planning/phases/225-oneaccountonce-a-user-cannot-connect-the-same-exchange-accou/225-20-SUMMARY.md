@@ -134,6 +134,18 @@ Review WR-01 amendment (the log-only verdict now also runs on the VALIDATION ter
 
 Note for the orchestrator: the PR-2c work branch carries its own, now stale, copy of 225-18-PLAN.md; the revised plan 18 is on the phase branch.
 
+## Task 3 reading, 2026-11-26 (verdict half only, relayed by the main session)
+
+Railway analytics logs, read by the main session around 2026-11-26 01:00Z: **3 of 3** captured `session_server_matches_requested=` lines read **True**, all at site `allocator_holdings`. **0 False, 0 not_captured.**
+
+What this reading does NOT yet cover, so it is recorded and not called a PASS under step 5:
+
+- No counts were relayed for `derive_broker_dailies`, `sync_trades_balance`, `validate_wizard` or `validate_worker`.
+- Per-key and per-server coverage (step 4) was not relayed: which live MT5 keys the 3 lines belong to, and whether every determinable live server has a True.
+- The `## Poll-path server enforcement: owner` heading (step 6) is therefore still not written.
+
+The other half of PR-2c's merge gate, the founder's wrong-server connect attempt, is relayed by the main session (2026-11-26) as still owed. Note the tension with the 2026-11-25 record in 225-CONTEXT.md, which treats the founder's two PROD wrong-server attempts (both refused at login with `last_error` -6) as plan 19 Task 3 step 6's measurement. PR #1344 (PR-2c, v0.133.82.0 at head `a1e38baf0`, 28/28 green) stays a DRAFT at the end of the merge queue until both halves are closed.
+
 ## Self-Check: PASSED
 
 - Files modified exist: `analytics-service/services/mt5_read.py`, `job_worker.py`, `allocator_positions.py`, and the three test files (FOUND).
