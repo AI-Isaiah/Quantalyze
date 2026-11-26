@@ -1379,9 +1379,9 @@ export function ConnectKeyStep({
    * question, holding the advisory lock while it answers.
    *
    * ⛔ `deduped` IS DELIBERATELY NOT FORWARDED. It is `true` on the arm that
-   * resolved onto an existing draft, and `WizardClient`'s strip for it reads
-   * "These credentials are already connected." — a sentence about credentials
-   * this arm never received, shown to a user who typed none. It is also not a
+   * resolved onto an existing draft, and `WizardClient`'s fallback strip for it
+   * talks about the details the user "just entered" — a sentence about
+   * credentials this arm never received, shown to a user who typed none. It is also not a
    * surprise that needs explaining: the user asked for THIS key and got this
    * key's draft. Adding a second copy variant for a notice nobody needs would be
    * the fabrication, not the omission.
