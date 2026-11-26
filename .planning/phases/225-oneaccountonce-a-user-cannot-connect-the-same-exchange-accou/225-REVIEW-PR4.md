@@ -189,3 +189,13 @@ still report this site's count.
 _Reviewed: 2026-11-26_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: deep_
+
+## Fix round 1
+
+Silent-failure-hunter round 1, plan 225-21. All three MEDIUM findings fixed in commit `ca6073ac4`.
+
+- **MEDIUM-1** (server refusal logged as a login-bracket mismatch, no key named): `run_derive_broker_dailies_job` and the `fetch_allocator_holdings` mt5 arm now log a distinct line for `Mt5ServerMismatchError` naming the server bracket, the exception class and the key id (no server value, no login). Fixed in `ca6073ac4`.
+- **MEDIUM-2** (persistent false refusal stops a key's data under a WARNING): the same line is `logger.error`, which these modules already send to Sentry. The bounded restart is kept and commented. Fixed in `ca6073ac4`.
+- **MEDIUM-3** (`_fetch_mt5_account_balance` swallow-all WARNING carried no key): `key=%s` added from `api_key_id`. Fixed in `ca6073ac4`.
+
+Tests: the derive and holdings site tests now assert the ERROR line (bracket, class, key, no login-bracket warning), and the balance site test asserts `key=`. Each assertion was proven RED by a byte-backed neuter (level back to warning, key arg replaced), restored and `cmp`-verified.
