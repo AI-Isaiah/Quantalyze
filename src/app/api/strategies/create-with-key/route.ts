@@ -1951,9 +1951,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // ACCIDENTAL token-less re-entry this fence is about, and it is not an
       // anti-forgery control. This is the residual CR-01 class that survives
       // Phase 156, at exactly this scope and no wider — logged in `TODOS.md`
-      // under "Phase 156 (CONNECT)". ⚠️ Distinct from TODOS **A-3**, which is
-      // about this value's SHAPE (a login is unique only within a broker
-      // server); this is about its PROVENANCE.
+      // under "Phase 156 (CONNECT)". ⚠️ Distinct from the former TODOS A-3,
+      // closed by Phase 225 PR-3 (the account index carries the broker
+      // server), which was about this value's SHAPE; this is about its
+      // PROVENANCE.
       //
       // ⚠️ DEPLOY ORDER: migration 20260812083206 must be LIVE before the
       // deployment carrying this line. PostgREST resolves rpc() by named

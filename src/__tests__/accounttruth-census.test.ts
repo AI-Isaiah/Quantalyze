@@ -661,6 +661,7 @@ CREATE TABLE public.api_keys (
   sync_status text DEFAULT 'idle',
   disconnected_at timestamptz,
   venue_account_id text,
+  venue_server text,
   account_shared_with_api_key_id uuid,
   account_share_kind text,
   history_inclusion text,
@@ -668,7 +669,7 @@ CREATE TABLE public.api_keys (
   CHECK (account_shared_with_api_key_id IS NULL OR account_shared_with_api_key_id <> id),
   CHECK (venue_account_id IS NULL OR btrim(venue_account_id) <> '')
 );
-CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq ON public.api_keys (user_id, exchange, venue_account_id)
+CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq ON public.api_keys (user_id, exchange, venue_account_id, (COALESCE(venue_server, '')))
   WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL;
 CREATE TABLE public.csv_daily_returns (
   id bigserial PRIMARY KEY,

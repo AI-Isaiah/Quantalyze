@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.133.92.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE PR-3: one MT5 login on two broker servers is two accounts at the database index
+
+PR-3, the last PR of Phase 225 (plans 10 and 19, CONN-03). It ships migration B, which plan 10 wrote and plan 19 re-based on a main that now carries PR-2b-1, PR-2b-2, PR-2c0 and PR-2c. Every same-owner reader and the MT5 connect validation already treat the broker server as part of the account. This PR lets the database index agree, so a user can connect one MT5 login on two different broker servers as two accounts.
+
+### Changed
+- **Migration `20261126140500_api_keys_venue_server_index.sql`.** It rebuilds `api_keys_user_exchange_venue_account_uniq` under the same name, adding `(COALESCE(venue_server, ''))` as a fourth key member. The predicate is unchanged. The DROP and CREATE run in one transaction under `lock_timeout = 3s`. The new key is strictly finer than the old one, so the build cannot fail on stored rows. Two null servers still collide. A null server beside a set server is admitted at the index and refused only by the app fences and by reconnect (below).
+- **`reconnect_allocator_api_key` agrees with the index.** It is re-based on its newest definition (20260925120000). Its live-sibling check now reads `AND (s.venue_server IS NULL OR v_venue_server IS NULL OR s.venue_server = v_venue_server)`, so a reconnect is refused by name exactly where the fences call two keys the same account. Every other line, the REVOKE/GRANT pair and the SECURITY DEFINER header are unchanged. A catalogue-only self-verify checks the index shape (`indnkeyatts = 4`), the SECURITY DEFINER flag, the pinned search_path, a single overload and EXECUTE for authenticated only.
+- **VAC-04 acknowledgement.** The `prod-body-ack` is `8ebf2301…`, reproduced through VAC-04's own path (`--extract-fn` on the PROD baseline dump, then `--diff-bodies`). Plan 10's original value was mis-derived and is replaced.
+
+### Added
+- **Manual rollback** `supabase/migrations/down/20261126140500-rollback.sql`. It restores the login-only index and the 20260925120000 body, checks only the catalogue, and is atomic however it is invoked. It warns that the coarser index refuses if one owner already holds two live keys on one login.
+
+### Tests
+- `test_api_keys_venue_identity_uniq.sql` gains five arms, each with its own twin: `6s-null-null`, `6s-two-servers`, `6s-same-server`, `6s-null-vs-set` and `6s-two-owners`. Plan 13's `6v` arms are kept as they are on main. Narrowed run: `arms: 20/20/0`, `biting: 20`.
+- `test_api_keys_account_identity.sql`: the five existing RECON twins now edit migration B, and four arms pin the wildcard rule: `RECON-server-other`, `RECON-server-null`, `RECON-server-keynull` and `RECON-server-same` (review WR-01, the equal-server leg). Narrowed run: `arms: 45/45/0`, `biting: 45`.
+- Every mutation census was re-based by measurement on the merged tree. `--parse-only` printed `arms: 0/1050/0` and `coverage: files 95/122`, so `ARMS_FLOOR` moves 1041 -> 1050, `FILES_FLOOR` stays 95 and `WAIVED_CEILING` stays 0. `accounttruth-census` carries the rebuilt index's `venue_server` member.
+
+### Fixed
+- **Review round 2, M1 (data integrity, wording).** Three comments in the migration said the index backstops the null-server case. They now say that a null-vs-set race is not caught by the index, and that current writers cannot produce that pair.
+
+### Removed
+- `TODOS.md` entry **A-3** ("`venue_account_id` is the MT5 login alone, but a login is only unique within a broker server"), closed by this PR. The two pointers to it (the Phase 156 provenance entry in `TODOS.md` and a comment in `create-with-key/route.ts`) now name it as closed.
+
+### Notes
+- **Migration name.** Main's newest migrations carry future-dated round names (`20261126130000`, `20261126140000`). No honest current UTC sorts after them before 14:00Z, so B is named `20261126140500`. It sorts after every migration on main and after the PROD ledger tip. The migration-policy allowlist is not used.
+- **Merge preconditions (plan 19 Task 3), read-only on PROD with the marker query first, 2026-11-26.** Gate A5: 0 live active MT5 keys without a server, and a daily poll ran after the PR-2 deploy. 0 owner, exchange and login groups with two or more servers. 0 ambiguous keys. Plan 13's column grant is live (authenticated true, anon false). `commit_scenario_batch` carries the server-aware identity. The analytics `/health` and Vercel production both report `2aa1a0cbb` (PR-2c). The PR-2c0 poll verdicts read PASS: 28 lines, all True, covering 11/11 live MT5 keys on 4/4 servers. The 155.2 freeze is open.
+- **Booked.** `[225-VENUE-SERVER-NORMALISED-CHECK]` (review M2, MEDIUM, defence in depth): the index compares `venue_server` byte for byte, and no CHECK enforces normalisation. Every writer normalises today, and PROD holds 0 non-normalised values. The poll-path server refusal (PR-2c review WR-01) is owned by follow-up gap plan 225-21, booked in the phase records.
+- **Known limits.** `reconnect_allocator_api_key` is still check-then-UPDATE with no lock. A concurrent null-vs-set race would pass the index, but it needs an MT5 key with no server: PROD holds 0 of those, live or disconnected, and the connect writers refuse one. The migration auto-applies to TEST and then to PROD on merge, with no human stop.
+- Reviews: gsd-code-reviewer, silent-failure-hunter, migration-reviewer and rls-policy-auditor (round 2). The one BLOCKER, the backdated name, is fixed by the rename. M1 is fixed and M2 is booked. RLS is clean, and the migration review is clean apart from the name. LOW and Info findings are recorded in the phase review files.
+
 ## [0.133.91.2] - 2026-11-26 — records: Phases 233 DERIBITTRUTH, 250 BINANCEFILLS and 251 SYNCSTORE closed, Phases 230 MT5NIGHTLY and 238 NEVERCOMPUTED records (human verification pending)
 
 Records only. No source, test, workflow or migration file changes.

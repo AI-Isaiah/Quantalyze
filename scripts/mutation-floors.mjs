@@ -3568,7 +3568,10 @@ export const FILES_FLOOR = 95;
 // RAISED 1033 -> 1041 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): +8 twinned arms, L1 to L8, in the NEW file test_mt5_terminal_lease.sql (FILES_FLOOR 94 -> 95, see its block above): one owner token per terminal digest with idempotent same-token acquire (L1), expired-lease takeover and fenced renew and release (L2, L3, L4), bad-input refusals (L5), grants and RLS (L6), distinct terminals independent (L7), table CHECKs (L8).
 // MEASURED: `--parse-only` printed `arms: 0/1041/0` and `coverage: files 95/122`; the FULL run printed `arms: 1041/1041/0   (executed/annotated/waived)`, `biting: 1041` and `lane-invocations: 1041` with every arm `RED (identity ok)`.
 // WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 1041;
+// RAISED 1041 -> 1050 2026-11-26 (Phase 225 plan 19, ONEACCOUNTONCE PR-3 re-base, round 2): re-bases plan 10's raise (1020 -> 1029, migration B) on top of main's Phase 225 plans 13 and 16 and Phase 230 plan 06 (1041 on main). +9 twinned arms in two files that already counted toward FILES_FLOOR (it stays 95): +5 in test_api_keys_venue_identity_uniq.sql (15 -> 20: 6s-null-null, 6s-two-servers, 6s-same-server, 6s-null-vs-set, 6s-two-owners) and +4 in test_api_keys_account_identity.sql (41 -> 45: RECON-server-other, RECON-server-null, RECON-server-keynull, RECON-server-same).
+// MEASURED on the merged tree: `node scripts/mutation-runner/run.mjs --parse-only` printed `arms: 0/1050/0   (executed/annotated/waived)`, `coverage: files 95/122` and `No static defects`; the exit-2-by-design DIAGNOSTIC runs of the two files printed `arms: 20/20/0`, `biting: 20`, `lane-invocations: 20` and `arms: 45/45/0`, `biting: 45`, `lane-invocations: 45`, every arm `RED (identity ok)`, `No defects in the narrowed scope`. 1050 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the run that compares it with a real biting count.
+// WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 1050;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

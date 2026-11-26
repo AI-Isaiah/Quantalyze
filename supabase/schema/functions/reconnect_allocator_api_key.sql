@@ -2,8 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260925120000_api_keys_account_identity.sql
--- ───── 4. reconnect_allocator_api_key — re-based on 20260422101911, +1 refusal
+-- source migration: 20261126140500_api_keys_venue_server_index.sql
+-- --------------------------------------------------------------------------
+-- STEP 2 - reconnect_allocator_api_key, re-based on 20260925120000, + the wildcard.
+-- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.reconnect_allocator_api_key(
   p_api_key_id UUID
 )
@@ -17,6 +19,7 @@ DECLARE
   v_already_disc TIMESTAMPTZ;
   v_exchange     TEXT;
   v_venue_acct   TEXT;
+  v_venue_server TEXT;
   v_uid          UUID := auth.uid();
 BEGIN
   IF v_uid IS NULL THEN
@@ -24,8 +27,8 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  SELECT user_id, disconnected_at, exchange, venue_account_id
-    INTO v_owner, v_already_disc, v_exchange, v_venue_acct
+  SELECT user_id, disconnected_at, exchange, venue_account_id, venue_server
+    INTO v_owner, v_already_disc, v_exchange, v_venue_acct, v_venue_server
     FROM api_keys WHERE id = p_api_key_id;
 
   IF v_owner IS NULL OR v_owner <> v_uid THEN
@@ -41,7 +44,14 @@ BEGIN
   -- Phase 167.1.2 Pitfall 5: a LIVE sibling already holds this account. Refuse
   -- by name before the UPDATE reaches api_keys_user_exchange_venue_account_uniq.
   -- A concurrent race past this check still hits the index and raises the SAME
-  -- SQLSTATE, so one client mapping covers both.
+  -- SQLSTATE, so one client mapping covers both, for the null-null and equal-server
+  -- pairs only. A concurrent race on a null-vs-set pair is NOT caught by the index.
+  -- PROD on 2026-11-26 held 0 MT5 keys with no server (live or disconnected), and the
+  -- connect writers refuse an MT5 key with no server (PR-2b-2, founder ruling CONTEXT
+  -- Q6), so that pair cannot arise from current writers.
+  -- Phase 225 / CONN-03: "the same account" now means the same login AND, when both
+  -- keys carry a server, the same server. A key whose server is not captured yet
+  -- (NULL) reads as a wildcard and still counts as the same account.
   IF v_venue_acct IS NOT NULL AND EXISTS (
     SELECT 1
       FROM api_keys s
@@ -50,6 +60,7 @@ BEGIN
        AND s.venue_account_id = v_venue_acct
        AND s.disconnected_at IS NULL
        AND s.id <> p_api_key_id
+       AND (s.venue_server IS NULL OR v_venue_server IS NULL OR s.venue_server = v_venue_server)
   ) THEN
     RAISE EXCEPTION 'KEY_VENUE_ALREADY_CONNECTED'
       USING ERRCODE = 'unique_violation',
