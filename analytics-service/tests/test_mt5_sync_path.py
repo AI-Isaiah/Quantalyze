@@ -541,6 +541,8 @@ async def test_the_balance_read_refuses_another_server_after_one_verdict_line(
     ]
     assert len(warnings) == 1, warnings
     assert "exc_class=Mt5ServerMismatchError" in warnings[0]
+    # review round 1 (MEDIUM-3): the failure WARNING names the key it is for.
+    assert f"key={API_KEY_ID}" in warnings[0]
     for blob in [lines[0], warnings[0]]:
         _assert_no_secret(blob)
 
@@ -617,11 +619,15 @@ async def test_the_holdings_read_refuses_another_server_into_the_transient_note(
         f"session_server_matches_requested={label}"
     )
     assert "shutdown" in transport.calls, "the arm's bounded terminal restart did not run"
-    warnings = [
-        r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
-    ]
-    assert any("on another broker server" in w for w in warnings), warnings
-    for blob in [*lines, *warnings, str(caught.value)]:
+    # review round 1 (MEDIUM-1/2): ERROR (reaches Sentry), naming the server bracket, the
+    # exception class and the key; not the login-bracket WARNING.
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, errors
+    assert "server bracket refused" in errors[0]
+    assert "Mt5ServerMismatchError" in errors[0]
+    assert f"key={API_KEY_ID}" in errors[0]
+    assert not any("login bracket rejected" in r.getMessage() for r in caplog.records)
+    for blob in [*lines, *errors, str(caught.value)]:
         _assert_no_secret(blob)
 
 
