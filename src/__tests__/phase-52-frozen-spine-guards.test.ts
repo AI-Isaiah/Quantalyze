@@ -255,6 +255,73 @@ const FROZEN_ISLANDS: string[] = [
   // Phase-90 TimeSeriesChart.tsx carve-outs above): under cash the view returns
   // the payload by reference so the render stays byte-identical, and the fix is
   // pinned by HistogramChart.basis.test.tsx / MasterBrush.basis.test.tsx.
+  //
+  // Phase 236 FIGUREMATH, 2026-11-25 - the figure spine is RE-BASELINED here as a
+  // reviewed act (FIG-05: never by re-running regen_golden.py in a constants PR).
+  // Decisions, quoted from 236-CONTEXT.md:
+  //   F-5 "Figures: one convention, '365, ddof 1 everywhere'. ... The TypeScript
+  //     engines move to match Python."
+  //   Q1 "Keep calendar span, show it (Recommended)": first to last observed date
+  //     of the same suffix, whole days, divided by 365.
+  //   Q2 "Total record only (Recommended)": CVAR_MIN_OBS = 60 on the total record.
+  // MOVED PINS (file: old -> new, plan; every new expected comes from an inline
+  // oracle that imports no production helper, none was read off engine output):
+  //   src/lib/scenario.test.ts: CAL_MS_PER_YEAR 365.25-day fractional span ->
+  //     whole days over 365 (CAL_DAYS_PER_YEAR), 236-02
+  //   src/lib/closed-sets.test.ts calendarYears: 365.25-day year, gate bounds 346
+  //     and 348 days -> 365 days = 1 exactly, bounds 346 and 347 days, 236-02
+  //   src/lib/scenario-blend07.test.ts NUMPY.cagr: 0.41303027742895404 ->
+  //     0.4126959321950805 (812 whole days / 365), 236-02
+  //   analytics-service/tests/fixtures/constit_parity_golden.json kpis.cagr:
+  //     0.95092 -> 0.95003 (119 whole days / 365), hand-edited, 236-02
+  //   analytics-service/tests/test_constit_blend_parity.py: 365.25 fractional ->
+  //     365 whole days, 236-02
+  //   src/lib/factsheet/og-metrics.test.ts: 365.25 / 299 and 365.25 / 28 ->
+  //     365 / 299 and 365 / 28, 236-02
+  //   src/lib/factsheet/return-stats.sites.test.ts: noisy-A years and the
+  //     population-sd oracles T13-T15 -> whole days / 365 and an inline sampleSd,
+  //     236-02 and 236-05
+  //   src/lib/factsheet/compute.metrics.test.ts: 165 / 365.25 -> 165 / 365,
+  //     plus a one-observation floor case, 236-10
+  //   src/lib/factsheet/compute.conventions.test.ts frozen A, B, C: years, cagr,
+  //     calmar (236-10) and ann_vol, sharpe (236-05), hand-edited, never -u
+  //   src/lib/factsheet/fetch-and-build-payload.test.ts: years 1461 / 365.25 = 4
+  //     EXACTLY -> 1461 / 365; cagr 0.1 -> 1.4641^(365/1461) - 1, 236-10
+  //   src/app/factsheet/[id]/v2/MetricsColumn.record-length.test.tsx: 438 / 365.25
+  //     -> 438 / 365, 236-10
+  //   src/lib/factsheet/allocator-portfolio-payload.test.ts: new year and CAGR pin
+  //     on 58 whole days, 236-10
+  //   src/lib/factsheet/__snapshots__/build-payload.test.ts.snap: years, cagr, calmar
+  //     (236-10) then 768 sample-sd numbers (236-05), each path verified by a repo-
+  //     free script before it was applied
+  //   build-payload.benchmark-opt, scenario-factsheet-payload, TimeSeriesChart.
+  //     coverage-gap, holding-compare-adapter, return-stats.sites-joint and
+  //     scenario-blend-adapter tests: population sd -> sample sd (n / (n - 1)
+  //     identities), 236-05
+  //   scenario-stress.test.ts golden CVaR: -0.080 -> null (20 < CVAR_MIN_OBS = 60),
+  //     widgets.signed-zero.test.tsx fixture 20 -> 60 returns, 236-07
+  //   analytics-service/tests/test_portfolio_metrics.py XIRR pins: 0.15636675 ->
+  //     0.15625176, 0.10007186 -> 0.10, 0.10007181 -> 0.10 (stdlib bisection and a
+  //     hand solve), test_e2_parity_oracle.py oracle 8 year divisor 365.25 -> 365,
+  //     236-04
+  //   analytics-service/tests/fixtures/golden_252d_expected.json: figure_defs_version
+  //     2 -> 3 (236-01), cagr_start and cagr_end added (236-03, first and last date
+  //     of the golden's own committed returns), serenity_index 0.019258489731125872
+  //     -> 0.01893104775322315 (236-06, decision row in 236-QUANTSTATS-DECISIONS.md)
+  //   the three short vectors of test_figure_parity.py's var_cvar test now expect
+  //     cvar None under 60 observations (the shared JSON is untouched), 236-03
+  // regen_golden.py was NOT run. The goldens moved by hand, only for figure_defs_version,
+  // the two span keys and the quantstats serenity_index key, each with its derivation;
+  // constit_parity_golden.json kpis.cagr was moved by hand from the stated whole-day
+  // derivation, not from capture output (a vitest run invokes the capture writer, whose
+  // generator now carries the hand-moved note so a capture run reproduces the file).
+  // No guard is deleted or inverted. The full list with strategies affected is
+  // 236-FIGURES-MOVED.md; the fleet re-derive is the coordinator's (FIG-05 stays
+  // pending on it).
+  // scenario.ts and compute.ts remain REVIEWED-EDIT carve-outs, not frozen islands:
+  // Phase 236 edits both (year length, sample sd, CAGR span) and each is pinned by
+  // its own suites plus annualization-census.test.ts. No island is added or removed
+  // here.
 ];
 
 describe("Phase 52 frozen-spine exit-gate guards", () => {

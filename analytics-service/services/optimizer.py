@@ -16,9 +16,10 @@ Design (locked in 28-CONTEXT.md):
     fully invested (sum w = 1). DETERMINISTIC: fixed equal-weight start, no random
     restart — identical input ⇒ identical weights (OPT-02), and a 1-day data
     extension moves weights by < a few %.
-  - Annualization: 252 (product-wide; matches metrics.py np.sqrt(252) and the
-    frontend computeScenario), so suggested weights fed back through the engine
-    are convention-consistent.
+  - Annualization: the BLEND's frequency clock, threaded per request as
+    ``periods_per_year`` (365 if any leg is crypto or unknown, else 252; Phase 236
+    CONTEXT A5, the same rule as the frontend ``blendPeriodsPerYear``). The module owns no
+    clock constant, so a caller cannot silently get one.
   - min-vol is the DEFAULT (robust). max-Sharpe is gated + caveated as in-sample-
     optimistic by the caller.
   - Degeneracy gate (OPT-02): need n comfortably > k (a sample covariance over
@@ -41,8 +42,6 @@ from scipy.optimize import minimize
 from services.dispersion import residue_floor
 
 logger = logging.getLogger("quantalyze.analytics.optimizer")
-
-TRADING_DAYS = 252
 
 Objective = Literal["min_vol", "max_sharpe"]
 
@@ -116,12 +115,33 @@ def ledoit_wolf_shrinkage(returns: npt.NDArray[np.float64]) -> npt.NDArray[np.fl
     return shrunk
 
 
+def _annualized_moments(
+    returns: npt.NDArray[np.float64], periods_per_year: int
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """The Ledoit-Wolf shrunk covariance and the mean, both scaled to ``periods_per_year``.
+
+    Both objectives are invariant to a positive scale of the covariance and the mean:
+    min-vol minimizes w'Sw, and the max-Sharpe ratio carries the clock as a constant factor
+    (sqrt(T)). So the clock moves no suggested weight beyond solver tolerance. It is threaded
+    anyway because Phase 236 CONTEXT A5 locks the frequency rule for this engine, and this
+    helper is the one place the scaled moments are built, so a test can pin the clock here.
+    """
+    return (
+        ledoit_wolf_shrinkage(returns) * periods_per_year,
+        returns.mean(axis=0) * periods_per_year,
+    )
+
+
 def optimize_weights(
     series_by_id: dict[str, list[tuple[str, float]]],
     objective: Objective = "min_vol",
+    *,
+    periods_per_year: int,
 ) -> OptimizerResult:
     """Suggest long-only, fully-invested weights for ``objective`` over the
     common-date overlap of ``series_by_id`` (id -> [(date, daily_return), ...]).
+
+    ``periods_per_year`` is the blend's frequency clock and has no default.
 
     Returns an ``OptimizerResult``; ``weights is None`` (ok=False) on any
     degenerate / under-sampled input — never a fabricated vector.
@@ -167,9 +187,8 @@ def optimize_weights(
     if np.any(col_std <= residue_floor(returns.mean(axis=0))):
         return OptimizerResult(ok=False, objective=objective, n=n, k=k, weights=None, reason="constant-series")
 
-    # 6. Ledoit-Wolf shrunk DAILY covariance, annualized to 252.
-    cov = ledoit_wolf_shrinkage(returns) * TRADING_DAYS
-    mean_annual = returns.mean(axis=0) * TRADING_DAYS
+    # 6. Ledoit-Wolf shrunk DAILY covariance, annualized on the blend's clock.
+    cov, mean_annual = _annualized_moments(returns, periods_per_year)
 
     # 6b. max-Sharpe on an all-losing book is a mean-variance pathology: it would
     # concentrate in the "least-negative-Sharpe" leg and present a confident

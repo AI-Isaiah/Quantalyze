@@ -134,12 +134,11 @@ EXCLUDED_DIRS = frozenset(
 #: The production modules allowed to import quantstats. Repo-relative to SERVICE_ROOT.
 COVERED_MODULES = frozenset({"services/metrics.py"})
 
-#: quantstats 0.0.81 LEAF functions whose ``prepare_returns=False`` is honoured all the
+#: quantstats 0.0.86 LEAF functions whose ``prepare_returns=False`` is honoured all the
 #: way down (research Q2 preparer-spy matrix). Held equal to the leaves the code calls.
 KWARG_PROVEN = frozenset(
     {
         "volatility",
-        "value_at_risk",
         "tail_ratio",
         "profit_factor",
         "win_rate",
@@ -157,7 +156,7 @@ EXEMPT: dict[str, str] = {
 }
 
 #: quantstats functions the service no longer calls: replaced by an inline mirror in
-#: services/metrics.py (0.0.81 minus the price guess). quantstats name -> (mirror, why).
+#: services/metrics.py (0.0.86 minus the price guess). quantstats name -> (mirror, why).
 MIRRORED: dict[str, tuple[str, str]] = {
     "recovery_factor": (
         "_recovery_factor",
@@ -186,7 +185,7 @@ MIRRORED: dict[str, tuple[str, str]] = {
     ),
     "serenity_index": (
         "_serenity_index",
-        "no prepare_returns kwarg; to_drawdown_series and cvar guess",
+        "no prepare_returns kwarg; to_drawdown_series guesses; historical CVaR leg (FIG-03 A2)",
     ),
     "r_squared": (
         "_r_squared",

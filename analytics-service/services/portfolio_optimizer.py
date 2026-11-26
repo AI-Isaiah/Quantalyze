@@ -10,6 +10,7 @@ from services.dispersion import (
     dispersion_is_residue,
     pairwise_correlation_or_none,
 )
+from services.figure_conventions import SD_DDOF
 from services.metrics import (
     DEFAULT_PERIODS_PER_YEAR,
     _safe_float,
@@ -364,7 +365,7 @@ def _compute_sharpe(
     # ~1e-16 std, never exactly 0, so an ``== 0`` guard let a ~1e13 Sharpe
     # through. Residue dispersion means no Sharpe. A NaN ``sd`` (one row) is
     # not residue; it gives a NaN quotient, which ``_safe_float`` maps to None.
-    sd = float(returns.std())
+    sd = float(returns.std(ddof=SD_DDOF))
     if dispersion_is_residue(sd, float(returns.mean())):
         return None
     return _safe_float(float((returns.mean() - rf) / sd * np.sqrt(periods_per_year)))

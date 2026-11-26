@@ -55,13 +55,13 @@ const NUMPY = {
   member_ids: ["mm", "neon1", "pokeokx", "uc244", "okx", "bybit"],
   n: 581,
   twr: 1.1567855193398886,
-  // #597 part 2 (Phase 84-06): CAGR now rides the CALENDAR clock — calendar-span
-  // years = (win_end − win_start)/365.25 = 812d/365.25 = 2.2231y, so
-  // cagr = (1+twr)^(1/2.2231) − 1 = 0.41303 (asset-class-invariant, gap-robust).
-  // Was 0.3956732 under the retired count clock (years = n/252 = 581/252). This is
-  // the deliberate value change re-derived from the SAME twr + window span (the
-  // [73-02] re-derive-not-blind-update rule), not a code-output paste.
-  cagr: 0.41303027742895404,
+  // CAGR rides the CALENDAR clock: whole days first to last date over 365 (F-5 / Q1, Phase 236).
+  // The span is 2023-10-11 to 2025-12-31 = 812 whole days, so years = 812/365 = 2.22466 and
+  // cagr = (1+twr)^(365/812) - 1 = 0.4126959321950805 (asset-class-invariant, gap-robust).
+  // Was 0.41303027742895404 on the 365.25-day year (Phase 84-06) and 0.3956732 under the
+  // retired count clock. Re-derived from the SAME twr and window span with Python's
+  // date arithmetic, not pasted from the engine (the [73-02] re-derive-not-blind-update rule).
+  cagr: 0.4126959321950805,
   volatility: 0.11463143681939332,
   sharpe: 2.9673497576496706,
   max_drawdown: -0.06029498416617718,

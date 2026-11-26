@@ -181,10 +181,14 @@ describe("169.5-02 SC3 / D-09: per-day chart series are null where the helper ha
 describe("169.5-02 D-59 (as amended): comparator rolling series on the smaller basis, over non-null window points", () => {
   it("a 7-day strategy against weekday SPX closes: literal rolling vol on the square root of 252, weekend null, day one inside the first window", () => {
     const spx = bundle(A_ROWS, 365, btcOpt(days("2024-12-31", 41))).comparators.spx;
-    // 2025-02-06, a Thursday: 22 non-null points in its window.
-    expect(spx.rollingVol![36]).toBeCloseTo(0.36895410296812775, 12);
-    // 2025-01-30: the window 0..29 holds index 0, day one's own SPX return (D-64).
-    expect(spx.rollingVol![29]).toBeCloseTo(0.37097644493599624, 12);
+    // 236-05 (F-5, ddof 1): every literal in this block moved from its population-sd value by the
+    // exact identity sd_sample = sd_population x sqrt(n / (n - 1)), n = the non-null points the
+    // window holds. The old values were computed outside the project code; n is read off the dates.
+    // 2025-02-06, a Thursday: 22 non-null points in its window. Was 0.36895410296812775.
+    expect(spx.rollingVol![36]).toBeCloseTo(0.3776365638909319, 12);
+    // 2025-01-30: the window 0..29 holds index 0, day one's own SPX return (D-64): the 22 weekdays
+    // 2025-01-01 .. 2025-01-30. Was 0.37097644493599624.
+    expect(spx.rollingVol![29]).toBeCloseTo(0.3797064968869725, 12);
     expect(spx.rollingVol![38]).toBeNull(); // Saturday 2025-02-08
     expect(spx.rollingSharpe![38]).toBeNull();
     expect(spx.rollingSortino![38]).toBeNull();
@@ -192,14 +196,16 @@ describe("169.5-02 D-59 (as amended): comparator rolling series on the smaller b
 
   it("BTC on a crypto strategy annualizes on the square root of 365 (literal)", () => {
     const btc = bundle(A_ROWS, 365, btcOpt(days("2024-12-31", 41))).comparators.btc;
-    expect(btc.rollingVol![36]).toBeCloseTo(0.36029285397447514, 12);
+    // Dense 30-day window, n = 30. Was 0.36029285397447514 (population sd); see the note above.
+    expect(btc.rollingVol![36]).toBeCloseTo(0.36645215234321044, 12);
   });
 
   it("BTC against a weekday strategy annualizes on the square root of 252, the smaller basis (literal)", () => {
     const dates = weekdays("2025-01-02", 40);
     const opt = btcOpt(days("2025-01-01", 57)); // every day 2025-01-01 .. 2025-02-26
     const btc = bundle(rows(dates), 252, opt).comparators.btc;
-    expect(btc.rollingVol![39]).toBeCloseTo(0.4820765121931783, 12);
+    // Dense 30-row window, n = 30. Was 0.4820765121931783 (population sd).
+    expect(btc.rollingVol![39]).toBeCloseTo(0.49031773330651024, 12);
   });
 });
 

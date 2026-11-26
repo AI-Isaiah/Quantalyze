@@ -2,14 +2,14 @@
  * Tests for the backbone-routed blend-panel adapter (`deriveBlendPanels`).
  *
  * SC-1: the scenario-planner blend panels derive from the ONE canonical
- * backbone (`factsheet/rolling.ts` POPULATION-std primitives + `quantileSummary`),
+ * backbone (`factsheet/rolling.ts` sample-std primitives + `quantileSummary`),
  * NOT the retired second-Sharpe sample-std stack.
  *
  * Two blocks:
  *   1. Behaviour pins — public-shape parity with the legacy `buildBlendPanels`,
  *      the re-homed `usableN` degenerate gate, and the output-shape (warmup-drop) seam.
- *   2. SC-4 parity pins — population-std closed-form values at 63/126/252 and the
- *      min/max whisker contract, mutation-falsifiable against a sample-std bleed.
+ *   2. SC-4 parity pins — sample-std closed-form values at 63/126/252 and the
+ *      min/max whisker contract, mutation-falsifiable against a population-std bleed.
  */
 import { describe, it, expect } from "vitest";
 import { deriveBlendPanels } from "@/lib/scenario-blend-adapter";
@@ -147,43 +147,43 @@ describe("deriveBlendPanels — public-shape + backbone-routing behaviour", () =
   });
 });
 
-// ── SC-4 parity pins — POPULATION-std at each window (mutation-falsifiable) ──
+// ── SC-4 parity pins — SAMPLE-std at each window (mutation-falsifiable) ──────
 //
-// WHY THIS MATTERS (CLAUDE.md Rule 9; 108-CONTEXT §Parity std): the retired
-// legacy module used SAMPLE std (÷ n−1); the canonical backbone
-// (`factsheet/rolling.ts::pstdev`) uses POPULATION std (÷ n). USER DECISION:
-// the backbone (population-std) value is canonical — one rolling-std path — so
-// these pins encode the POPULATION value, an INTENTIONAL convention unification,
-// NOT a regression.
+// WHY THIS MATTERS (CLAUDE.md Rule 9): the canonical backbone (`factsheet/rolling.ts`) is ONE
+// rolling-std path for the factsheet and the Scenario planner. 108-CONTEXT §Parity std fixed that
+// path on the POPULATION std (÷ n) and these pins encoded it. Phase 236 (F-5, "365, ddof 1
+// everywhere", plan 05) moved the whole path to the SAMPLE std (÷ n−1), matching the stored
+// engine and the 365-day calendar window, so the pins moved with it. That is the superseding
+// decision, not a regression; the earlier user decision it replaces is recorded in 236-05-SUMMARY.md.
 //
-// Closed-form derivation (never call the primitive under test — no circular
-// oracle): an EVEN-length window of alternating ±A has mean 0 and population
-// σ = A EXACTLY (Σ(x−0)² = w·A², ÷ w = A²). An ODD window w has mean ±A/w and
-// population σ = A·√(1 − 1/w²) (Σx² = w·A², minus w·mean² = A²/w, ÷ w). A
-// SAMPLE-std source multiplies σ by √(w/(w−1)); for w=126 that moves the
-// annualized value from 0.0075·√252 ≈ 0.119059 to ≈ 0.119534 — a shift at the
-// 4th decimal that FAILS the 6-decimal assertion. Mutating the adapter's vol
-// path by √(w/(w−1)) turns these RED (falsifiability spot-check performed once
-// locally, then reverted).
-describe("deriveBlendPanels — SC-4 population-std parity pins (63/126/252)", () => {
+// Closed-form derivation (never call the primitive under test — no circular oracle): an
+// EVEN-length window of alternating ±A has mean 0 and Σ(x−0)² = w·A², so the SAMPLE
+// σ = A·√(w/(w−1)). An ODD window w has mean ±A/w and Σ(x−mean)² = w·A² − A²/w, so
+// σ² = A²(w − 1/w)/(w−1) = A²(w+1)/w. The POPULATION value (÷ w) is A for even w and
+// A·√(1 − 1/w²) for odd w; for w=126 the move is from 0.0075·√252 ≈ 0.119059 to ≈ 0.119534,
+// a shift at the 4th decimal that FAILS the 6-decimal assertions below. Mutating the adapter's
+// vol path by √((w−1)/w) turns these RED (the bleed guard asserts it is not matched).
+describe("deriveBlendPanels — SC-4 sample-std parity pins (63/126/252)", () => {
   const sqrt252 = Math.sqrt(252);
-  // Expected POPULATION-std annualized rolling vol per window.
+  // Expected SAMPLE-std annualized rolling vol per window.
   const expectedVol = (w: number): number =>
     w % 2 === 0
-      ? A * sqrt252 // even window: σ = A exactly
-      : A * Math.sqrt(1 - 1 / (w * w)) * sqrt252; // odd window: σ = A·√(1−1/w²)
+      ? A * Math.sqrt(w / (w - 1)) * sqrt252 // even window: σ = A·√(w/(w−1))
+      : A * Math.sqrt((w + 1) / w) * sqrt252; // odd window: σ = A·√((w+1)/w)
+  // The retired POPULATION value, the mutation the pin must reject.
+  const populationVol = (w: number): number =>
+    w % 2 === 0 ? A * sqrt252 : A * Math.sqrt(1 - 1 / (w * w)) * sqrt252;
 
   for (const w of [63, 126, 252]) {
-    it(`rollingVol at window ${w} equals the POPULATION closed-form (sample-std bleed fails @6dp)`, () => {
+    it(`rollingVol at window ${w} equals the SAMPLE closed-form (population-std bleed fails @6dp)`, () => {
       const panels = deriveBlendPanels(ALT_320, w, 252);
       const want = expectedVol(w);
       // Fixture is perfectly alternating → EVERY window carries the same value.
       expect(panels.rollingVol[0].value).toBeCloseTo(want, 6);
       const mid = panels.rollingVol[Math.floor(panels.rollingVol.length / 2)];
       expect(mid.value).toBeCloseTo(want, 6);
-      // Mutation guard: the SAMPLE-std value (× √(w/(w−1))) must NOT match @6dp.
-      const sampleBleed = want * Math.sqrt(w / (w - 1));
-      expect(panels.rollingVol[0].value).not.toBeCloseTo(sampleBleed, 6);
+      // Mutation guard: the POPULATION-std value must NOT match @6dp.
+      expect(panels.rollingVol[0].value).not.toBeCloseTo(populationVol(w), 6);
     });
   }
 
@@ -281,12 +281,13 @@ describe("deriveBlendPanels — crypto √365 basis scaling (BLEND-01 guard)", (
     value: i % 2 === 0 ? 0.002 : 0.001,
   }));
 
-  it("basis 365: even-window rollingVol equals the POPULATION closed-form A·√365 (absolute, non-circular)", () => {
-    // ALT_320 even-window population σ = A exactly → rollingVol = A·√365. A
-    // basis-hardcode-to-252 mutant yields A·√252 ≈ 0.11906, failing this @6dp.
+  it("basis 365: even-window rollingVol equals the SAMPLE closed-form A·√(126/125)·√365 (absolute, non-circular)", () => {
+    // ALT_320 even-window (w = 126) sample σ = A·√(126/125) → rollingVol = that·√365. A
+    // basis-hardcode-to-252 mutant yields ≈ 0.11953, failing this @6dp.
     const panels = deriveBlendPanels(ALT_320, 126, 365);
-    expect(panels.rollingVol[0].value).toBeCloseTo(A * Math.sqrt(365), 6);
-    expect(panels.rollingVol[0].value).not.toBeCloseTo(A * Math.sqrt(252), 6);
+    expect(panels.rollingVol[0].value).toBeCloseTo(A * Math.sqrt(126 / 125) * Math.sqrt(365), 6);
+    expect(panels.rollingVol[0].value).not.toBeCloseTo(A * Math.sqrt(126 / 125) * Math.sqrt(252), 6);
+    expect(panels.rollingVol[0].value).not.toBeCloseTo(A * Math.sqrt(365), 6);
   });
 
   it("basis 365 scales rollingVol & rollingSharpe by exactly √(365/252) vs basis 252, point-for-point", () => {

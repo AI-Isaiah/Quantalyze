@@ -484,23 +484,6 @@ it or keep the hold with the reason measured. Adopt the new version and remove t
 in the same PR.
 ⛔ **Not a close:** shipping 2.2.0 to production on the strength of the lane being skipped or relaxed.
 
-### QUANTSTATS-0086-REDERIVE-01 — quantstats is held at 0.0.81; adopting 0.0.86 changes reported risk figures (booked 2026-10-05, Dependabot #953) (owned by Phase 236 FIGUREMATH, v1.22; REQUIREMENTS.md FIG-03, FIG-05; tagged 2026-11-23)
-
-**Why it is open.** Dependabot #953 bumped quantstats 0.0.81 → 0.0.86. Upstream 0.0.85/0.0.86 are
-statistical corrections, and the repo's own gates went red on them: `test_rank05_quantstats_pin_is_still_0_0_81`,
-the RANK-05 live-parity arm for `cvar` (−0.0279 → −0.0344 on the benign fixture), the Q166 parity
-arms for `serenity_index` and `common_sense_ratio`, `test_q166_rolling_greeks_alpha_differs_from_the_full_sample_form`,
-and the qstats-gate calibration arm for `cvar` (8 tests). The founder chose to hold quantstats and ship
-the rest of the group. `.github/dependabot.yml` ignores quantstats until this closes.
-
-**What closing it means.** Re-derive every inline mirror in `analytics-service/services/metrics.py`
-that cites 0.0.81 source against 0.0.86, decide per metric whether the new upstream figure is the one
-this product reports, move the pin, and remove the Dependabot ignore in the same PR. The reported
-CVaR and the other moved figures change for every strategy on its next recompute, so the PR says so
-in its CHANGELOG entry.
-⛔ **Not a close:** loosening the parity tolerance, or re-pinning the expected values without the
-per-metric decision.
-
 - [ ] **`[164.9.3.2.1-OQ1-DEPARTED-KEY-55006-DEFEATS-RETRY]` `set_departed_key_history_inclusion` turns the
       enqueue race-loss 40001 into a 55006 "try again", so the user is asked to retry a race PostgREST 14
       would have absorbed (booked 2026-10-02, Phase 164.9.3.2.1 review WR-02, RESEARCH open question 1).**
@@ -1863,12 +1846,6 @@ mismatch today, so this is hygiene rather than breakage; left untouched here to 
 surgical.
 
 ### Money-path correctness (latent / flag-gated / edge cases)
-- **Backbone-bypass parity surfaces** — `_compute_portfolio_analytics` (routers/portfolio.py:632)
-  and `equity_reconstruction.py` run independent Sharpe/TWR stacks; frontend TS
-  (`portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts`) and matching
-  (`match.py`) compute bespoke annualization/Sharpe. Parity-gated but real divergence risk —
-  absorb into the unified backbone.
-      ⭐ **Owned by Phase 236 FIGUREMATH, v1.22; REQUIREMENTS.md FIG-01, FIG-02; tagged 2026-11-23.**
 - **Deribit `correction` residual** — a capital-reason row carrying a trading token and no
   capital word still classifies as trading P&L. Tighten the word-boundary classifier.
       ⭐ **Owned by Phase 233 DERIBITTRUTH, v1.22; REQUIREMENTS.md DBOOK-02; tagged 2026-11-23.**
@@ -2667,20 +2644,6 @@ phase touching the materiality ratio.
 **Gate (what closes it):** the ratio reads the same wedge the writer rolls, with a test that fails
 first on an account with a nonzero `options_session_upl`.
 ⛔ **Not a close:** a note that the warning is "only a heuristic".
-
-### 167.1.2.2.1-CAGR-EMPTY-SPAN — the factsheet CAGR annualizes over calendar days, including emptied stretches (booked 2026-10-10, RESEARCH 3.4) (owned by Phase 236 FIGUREMATH, v1.22; REQUIREMENTS.md FIG-04; tagged 2026-11-23)
-
-**Why it is open.** An emptied stretch composes as zero capital with no return (SC-3), but the
-factsheet CAGR annualizes over the calendar span, so a book that was empty for long stretches reads
-a diluted CAGR. Recorded, not fixed.
-
-**Owner:** this phase's ROADMAP section as a recorded residual, until the orchestrator names a
-phase.
-**Trigger:** the first allocator-facing factsheet or book whose span contains an emptied stretch
-(the options-holding account's two stretches, 695 and 60 days on the scratch replay).
-**Gate (what closes it):** the CAGR denominator excludes emptied days, or the factsheet states the
-span it annualized over, with a test on a book with an emptied stretch.
-⛔ **Not a close:** removing the stretch from the chart.
 
 ### 167.1.2.2.1-DISCONNECTED-KEYS-OLD-WEDGE — disconnected Deribit keys cannot be re-derived and keep the old wedge (booked 2026-10-10)
 
@@ -4798,12 +4761,6 @@ Per D-04, what stays inert on purpose, byte-identical and pinned by `test_the_d0
 
 **Owner / Trigger:** unowned. Trigger: the next wizard contribution finalized on PROD. Closed when the SC-2 reading is recorded with `wizard_contributions_finalized_after_deploy` at least 1, SC-4 is observed on PROD, and the 390 px rendering is observed, or the founder rules otherwise.
 ## Phase 194 (FIGURETRUTH) — routed items (logged 2026-11-07)
-
-### [194-ENGINE-CONSTANTS] — the stored, factsheet and Scenario engines still annualise with different year lengths and standard-deviation conventions (booked 2026-11-07, Phase 194 RESEARCH Open Question 2, DATA INTEGRITY) (owned by Phase 236 FIGUREMATH, v1.22; REQUIREMENTS.md FIG-01, FIG-05; tagged 2026-11-23)
-
-**Reading.** The stored engine (`analytics-service/services/metrics.py`) annualises CAGR on 365 days and Sharpe with ddof 1. The factsheet's narrowed-range engine (`compute.ts`) uses 365.25 and ddof 0, and Scenario (`scenario.ts`) uses 365.25 and ddof 1. At full history the stored overlay makes the factsheet's seven headline scalars agree with the stored values (D-01); a narrowed range and a blend are computed by their own engine and are labelled as different engines, not reconciled. The D-14 residual (A-194-D14-02) is the same family: the factsheet's 126- and 30-row rolling windows use the population standard deviation (ddof 0) while the 365-day window uses the producer's sample standard deviation (ddof 1). Aligning the constants is not decided by any D-0x.
-
-**Owner / Trigger:** unowned. Trigger: a reading that shows a narrowed-range or blend figure beside a stored figure for the same period and the gap is traced to the year length or ddof, or the next phase that edits `compute.ts` `years`, `sharpeRatio` or `scenario.ts` `calendarYears`. Closed when one year length and one ddof are chosen for every engine and a parity test pins them, or the founder rules the difference intended.
 
 ### [194.1-CENSUS-HOLDINGDETAIL-REASON] — the figure-gate census excludes `HoldingDetail.tsx` as "dead: no importer", which is false, and its detector is import-only (booked 2026-11-08, Phase 194.1 VERIFICATION advisory)
 

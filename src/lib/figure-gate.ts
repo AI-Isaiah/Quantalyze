@@ -42,8 +42,9 @@ export const ONE_YEAR_DAYS = 365;
 /**
  * 194 D-02/D-03 (2026-11-07): the stored figure-definitions version (2 = historical VaR/CVaR,
  * calendar 3M/6M). Same value as `FIGURE_DEFS_VERSION` in metrics.py (pinned).
+ * 3 = Phase 236 F-5/F-6 (365-day CAGR span in whole days, ddof 1, CVaR null below CVAR_MIN_OBS on the total record).
  */
-export const FIGURE_DEFS_VERSION = 2;
+export const FIGURE_DEFS_VERSION = 3;
 
 export type FigureState = "withheld" | "short" | "full" | "null";
 

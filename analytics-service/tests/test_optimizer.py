@@ -29,8 +29,17 @@ from services.optimizer import (
     ledoit_wolf_shrinkage,
     SAMPLE_FLOOR,
     MIN_OBS_PER_STRATEGY,
-    TRADING_DAYS,
+    _annualized_moments,
 )
+from services import optimizer as optimizer_module
+from services.figure_conventions import (
+    PERIODS_PER_YEAR_CRYPTO,
+    PERIODS_PER_YEAR_TRADITIONAL,
+)
+
+# Any value is valid for tests that do not pin the clock: both objectives are invariant to a
+# positive scale of the covariance and the mean, so the clock never moves a suggested weight.
+_TRADITIONAL = PERIODS_PER_YEAR_TRADITIONAL
 
 
 def _dates(n: int) -> list[str]:
@@ -71,15 +80,15 @@ def _two_strategy_input(n: int, *, seed: int, vol_a: float, vol_b: float,
 
 def test_determinism_byte_identical():
     inp = _two_strategy_input(150, seed=1, vol_a=0.005, vol_b=0.02)
-    r1 = optimize_weights(inp, "min_vol")
-    r2 = optimize_weights(inp, "min_vol")
+    r1 = optimize_weights(inp, "min_vol", periods_per_year=_TRADITIONAL)
+    r2 = optimize_weights(inp, "min_vol", periods_per_year=_TRADITIONAL)
     assert r1.ok and r2.ok
     assert r1.weights == r2.weights  # identical, not just close
 
 
 def test_long_only_and_fully_invested():
     inp = _two_strategy_input(150, seed=2, vol_a=0.01, vol_b=0.015)
-    r = optimize_weights(inp, "min_vol")
+    r = optimize_weights(inp, "min_vol", periods_per_year=_TRADITIONAL)
     assert r.ok and r.weights is not None
     assert all(0.0 <= w <= 1.0 for w in r.weights.values())
     assert r.weights["A"] + r.weights["B"] == pytest.approx(1.0, abs=1e-6)
@@ -94,7 +103,7 @@ def test_min_vol_overweights_the_low_vol_strategy():
     # A is 4x lower vol than B, uncorrelated, both ~zero mean. Min-variance must
     # tilt toward A (a face-value / inverted objective would tilt to B and FAIL).
     inp = _two_strategy_input(180, seed=3, vol_a=0.004, vol_b=0.016)
-    r = optimize_weights(inp, "min_vol")
+    r = optimize_weights(inp, "min_vol", periods_per_year=_TRADITIONAL)
     assert r.ok and r.weights is not None
     assert r.weights["A"] > r.weights["B"]
     assert r.weights["A"] > 0.6  # clearly concentrated on the low-vol leg
@@ -112,16 +121,16 @@ def test_max_sharpe_all_losing_book_gates_to_no_positive_drift():
         "A": _series(dates, rng.normal(-0.005, 0.004, n)),
         "B": _series(dates, rng.normal(-0.004, 0.005, n)),
     }
-    r = optimize_weights(inp, "max_sharpe")
+    r = optimize_weights(inp, "max_sharpe", periods_per_year=_TRADITIONAL)
     assert not r.ok and r.weights is None and r.reason == "no-positive-drift"
     # min-vol is unaffected — variance exists regardless of drift sign.
-    assert optimize_weights(inp, "min_vol").ok is True
+    assert optimize_weights(inp, "min_vol", periods_per_year=_TRADITIONAL).ok is True
 
 
 def test_max_sharpe_overweights_the_high_sharpe_strategy():
     # A: positive drift, low vol (high Sharpe). B: ~zero drift, high vol (low Sharpe).
     inp = _two_strategy_input(180, seed=4, vol_a=0.006, vol_b=0.02, mean_a=0.001, mean_b=0.0)
-    r = optimize_weights(inp, "max_sharpe")
+    r = optimize_weights(inp, "max_sharpe", periods_per_year=_TRADITIONAL)
     assert r.ok and r.weights is not None
     assert r.weights["A"] > r.weights["B"]
 
@@ -138,8 +147,8 @@ def test_one_day_extension_moves_weights_only_slightly():
     b = rng.normal(0.0001, 0.013, n + 1)
     base = {"A": _series(dates[:n], a[:n]), "B": _series(dates[:n], b[:n])}
     extended = {"A": _series(dates, a), "B": _series(dates, b)}
-    r0 = optimize_weights(base, "min_vol")
-    r1 = optimize_weights(extended, "min_vol")
+    r0 = optimize_weights(base, "min_vol", periods_per_year=_TRADITIONAL)
+    r1 = optimize_weights(extended, "min_vol", periods_per_year=_TRADITIONAL)
     assert r0.ok and r1.ok and r0.weights and r1.weights
     l1 = sum(abs(r1.weights[k] - r0.weights[k]) for k in r0.weights)
     assert l1 < 0.10  # < a few % per leg — not chasing one new day of noise
@@ -151,13 +160,13 @@ def test_one_day_extension_moves_weights_only_slightly():
 
 def test_gate_few_strategies():
     inp = _two_strategy_input(150, seed=6, vol_a=0.01, vol_b=0.01)
-    r = optimize_weights({"A": inp["A"]}, "min_vol")  # only 1 strategy
+    r = optimize_weights({"A": inp["A"]}, "min_vol", periods_per_year=_TRADITIONAL)  # only 1 strategy
     assert not r.ok and r.weights is None and r.reason == "few-strategies"
 
 
 def test_gate_below_sample_floor():
     inp = _two_strategy_input(SAMPLE_FLOOR - 1, seed=7, vol_a=0.01, vol_b=0.01)
-    r = optimize_weights(inp, "min_vol")
+    r = optimize_weights(inp, "min_vol", periods_per_year=_TRADITIONAL)
     assert not r.ok and r.weights is None and r.reason == "below-sample-gate"
 
 
@@ -167,7 +176,7 @@ def test_gate_obs_per_strategy_with_many_strategies():
     n = 70
     dates = _dates(n)
     inp = {f"S{i}": _series(dates, rng.normal(0, 0.01, n)) for i in range(8)}
-    r = optimize_weights(inp, "min_vol")
+    r = optimize_weights(inp, "min_vol", periods_per_year=_TRADITIONAL)
     assert not r.ok and r.weights is None and r.reason == "below-sample-gate"
     assert r.n == n and r.k == 8
 
@@ -178,7 +187,7 @@ def test_gate_constant_series():
         "A": _series(dates, np.full(120, 0.001)),  # constant ⇒ zero variance
         "B": _series(dates, np.random.default_rng(9).normal(0, 0.01, 120)),
     }
-    r = optimize_weights(inp, "min_vol")
+    r = optimize_weights(inp, "min_vol", periods_per_year=_TRADITIONAL)
     assert not r.ok and r.weights is None and r.reason == "constant-series"
 
 
@@ -187,7 +196,7 @@ def test_gate_non_finite():
     bad = list(inp["A"])
     bad[50] = (bad[50][0], float("nan"))
     inp["A"] = bad
-    r = optimize_weights(inp, "min_vol")
+    r = optimize_weights(inp, "min_vol", periods_per_year=_TRADITIONAL)
     assert not r.ok and r.weights is None and r.reason == "non-finite"
 
 
@@ -198,7 +207,7 @@ def test_intersection_alignment_not_union():
     a = {"A": _series(full, rng.normal(0, 0.01, 200))}
     b_dates = full[30:]  # B starts 30 days later
     a["B"] = _series(b_dates, rng.normal(0, 0.01, len(b_dates)))
-    r = optimize_weights(a, "min_vol")
+    r = optimize_weights(a, "min_vol", periods_per_year=_TRADITIONAL)
     assert r.n == 170  # 200 - 30 overlap, NOT 200
 
 
@@ -226,7 +235,74 @@ def test_ledoit_wolf_shrinks_toward_identity_and_is_invertible():
     np.linalg.inv(shrunk)  # must not raise
 
 
-def test_ledoit_wolf_annualization_constant_is_252():
-    # Guard the product-wide convention the parity test also pins.
-    assert TRADING_DAYS == 252
+def test_min_obs_per_strategy_constant():
+    # Guard the per-strategy observation gate the parity test also pins.
     assert MIN_OBS_PER_STRATEGY == 10
+
+
+# =========================================================================
+# Phase 236 plan 04 (FIG-01, CONTEXT A5): the optimizer rides the BLEND's frequency clock
+# =========================================================================
+#
+# min_vol minimizes w'Sw and max_sharpe's ratio carries sqrt(T) as a constant factor, so
+# BOTH objectives are invariant to a positive scale of the covariance and the mean: the clock
+# moves no suggested weight beyond solver tolerance. A weight-vector assertion could not tell
+# 252 from 365, so these tests pin the clock itself, at the helper and at the hand-off.
+
+
+def _hand_returns() -> np.ndarray:
+    # Two columns, four rows. The column means are 0.02 and 0.01 by hand:
+    # (0.01 + 0.03 + 0.00 + 0.04) / 4 = 0.02 and (0.02 - 0.01 + 0.03 + 0.00) / 4 = 0.01.
+    return np.array(
+        [[0.01, 0.02], [0.03, -0.01], [0.00, 0.03], [0.04, 0.00]],
+        dtype=float,
+    )
+
+
+def test_annualized_moments_scale_by_the_threaded_clock():
+    r = _hand_returns()
+    daily_cov = ledoit_wolf_shrinkage(r)
+    cov365, mean365 = _annualized_moments(r, PERIODS_PER_YEAR_CRYPTO)
+    cov_trad, mean_trad = _annualized_moments(r, PERIODS_PER_YEAR_TRADITIONAL)
+    # The mean is the hand-derived daily mean times the clock: 0.02 * 365 = 7.3.
+    assert mean365[0] == pytest.approx(7.3, abs=1e-12)
+    assert mean365[1] == pytest.approx(3.65, abs=1e-12)
+    assert mean_trad[0] == pytest.approx(5.04, abs=1e-12)  # 0.02 * 252
+    # The covariance is the daily shrunk covariance times the clock, exactly.
+    assert np.allclose(cov365, daily_cov * 365.0, rtol=0, atol=1e-15)
+    assert np.allclose(cov_trad, daily_cov * 252.0, rtol=0, atol=1e-15)
+    # And the two clocks differ by exactly 365 / 252, so a fixed clock cannot pass both.
+    assert np.allclose(cov365 / cov_trad, 365.0 / 252.0, rtol=1e-12)
+
+
+@pytest.mark.parametrize("clock", [PERIODS_PER_YEAR_CRYPTO, PERIODS_PER_YEAR_TRADITIONAL])
+def test_optimize_weights_hands_its_clock_to_the_annualized_moments(monkeypatch, clock):
+    seen: list[int] = []
+    real = optimizer_module._annualized_moments
+
+    def spy(returns, periods_per_year):
+        seen.append(periods_per_year)
+        return real(returns, periods_per_year)
+
+    monkeypatch.setattr(optimizer_module, "_annualized_moments", spy)
+    inp = _two_strategy_input(150, seed=1, vol_a=0.005, vol_b=0.02)
+    r = optimize_weights(inp, "min_vol", periods_per_year=clock)
+    assert r.ok
+    assert seen == [clock]
+
+
+def test_the_clock_is_a_required_keyword():
+    inp = _two_strategy_input(150, seed=1, vol_a=0.005, vol_b=0.02)
+    with pytest.raises(TypeError):
+        optimize_weights(inp, "min_vol")  # type: ignore[call-arg]
+
+
+def test_the_clock_moves_no_suggested_weight():
+    # The scale-invariance note, as a test: 365 and 252 give the same weights within solver
+    # tolerance. This is why the clock is pinned at the hop and not here.
+    inp = _two_strategy_input(180, seed=3, vol_a=0.004, vol_b=0.016, mean_a=0.001, mean_b=0.0)
+    for objective in ("min_vol", "max_sharpe"):
+        a = optimize_weights(inp, objective, periods_per_year=PERIODS_PER_YEAR_CRYPTO)
+        b = optimize_weights(inp, objective, periods_per_year=PERIODS_PER_YEAR_TRADITIONAL)
+        assert a.ok and b.ok and a.weights is not None and b.weights is not None
+        assert a.weights["A"] == pytest.approx(b.weights["A"], abs=1e-3)

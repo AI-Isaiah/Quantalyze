@@ -87,9 +87,10 @@ describe("PARITY-01 structural guard — factsheet payload builder is single-sou
     // (#597 part 2 threaded the blend annualization basis as compute()'s 4th arg.)
     expect(builderSrc).toContain("compute(rets, datesR, 0, periodsPerYear)");
     // The equity/drawdown line is destructured off that compute() result
-    // (eq, dd, ...strategyMetrics) — never a re-derived second pass.
+    // (eq, dd, ...computed) — never a re-derived second pass. `computed` is what the
+    // total-record CVaR floor (236 CR-04) then turns into `strategyMetrics`.
     expect(builderSrc).toContain(
-      "...strategyMetrics } = compute(rets, datesR, 0, periodsPerYear)",
+      "...computed } = compute(rets, datesR, 0, periodsPerYear)",
     );
     // The Worst-10 table is off the SAME dd (shared factsheet helper).
     expect(builderCode).toContain("worstDrawdowns(");

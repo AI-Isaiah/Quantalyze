@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { Button } from "@/components/ui/Button";
 import type { DailyPoint } from "@/lib/scenario";
+import { blendPeriodsPerYear } from "@/lib/closed-sets";
 
 /**
  * Plan 28-02 (OPT-01 + OPT-02) — the user-visible "Suggested weights" section,
@@ -36,6 +37,8 @@ interface OptimizerStrategy {
   id: string;
   name: string;
   dailyReturns: DailyPoint[];
+  /** The leg's class: the blend's frequency clock reads it (Phase 236 CONTEXT A5). */
+  asset_class?: string | null;
 }
 
 interface OptimizeResult {
@@ -158,7 +161,9 @@ export function WeightOptimizerSection({ strategies, onApply }: WeightOptimizerS
       const res = await fetch("/api/scenario/optimize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ series, objective }),
+        // The optimizer annualizes on the BLEND's clock via the one shared rule (never a local
+        // ternary): 365 if any leg is crypto or unclassed, else 252.
+        body: JSON.stringify({ series, objective, periods_per_year: blendPeriodsPerYear(strategies) }),
       });
       if (!res.ok) {
         // A 4xx is the optimizer answering; anything else (5xx, or a status we

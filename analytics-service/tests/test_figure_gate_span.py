@@ -48,8 +48,10 @@ def test_blend_gate_crypto_unknown_leg_counts_as_crypto():
 def test_blend_clock_asymmetry_is_pinned_not_hidden():
     """The stored RISK clock still reads an unknown leg as 252, while the D-15 gate reads
     the same book as crypto. Moving the clock would move stored figures outside D-15's
-    scope; this pin makes the two-rule asymmetry deliberate and visible
-    ([194-ENGINE-CONSTANTS])."""
+    scope; this pin makes the two-rule asymmetry deliberate and visible. The unknown-leg
+    252 / 365 asymmetry between the languages (Python reads an unknown leg as 252, the
+    TypeScript blend clock as 365) is deliberate and unowned since Phase 236, which moved
+    the year length and the sd convention and left the frequency split alone."""
     assert blend_periods_per_year(["traditional", None]) == 252
     assert blend_gate_crypto(["traditional", None]) is True
 

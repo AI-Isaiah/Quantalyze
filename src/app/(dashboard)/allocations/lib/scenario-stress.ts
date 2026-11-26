@@ -48,6 +48,7 @@
 import { computeVaR, computeExpectedShortfall } from "@/lib/portfolio-stats";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { dispersion } from "@/lib/return-stats";
+import { CVAR_MIN_OBS } from "@/lib/figure-conventions";
 import { computeScenarioBenchmark, type BtcCloses } from "./scenario-benchmark";
 
 export interface ScenarioStress {
@@ -155,7 +156,8 @@ export function computeScenarioStress(
 function computeVarPath(
   portfolioDaily: DailyPoint[],
 ): { var: number | null; cvar: number | null } {
-  // 1. The engine emits [] for n<10 / constant / non-finite → scenario-side null.
+  // 1. The engine emits [] for n<10 / constant / non-finite → scenario-side null (var AND cvar).
+  //    Two floors, then: n<10 nulls both (the engine's); n<CVAR_MIN_OBS nulls CVaR alone (step 3).
   if (portfolioDaily.length === 0) return NULL_VAR;
 
   const values = portfolioDaily.map((d) => d.value);
@@ -188,8 +190,11 @@ function computeVarPath(
 
   // 3. Non-empty, non-constant series → the floor-quantile VaR + tail-mean CVaR.
   // NO leverage multiplier — leverage is baked into portfolio_daily_returns.
+  // Phase 236 FIG-03 (A6, CONTEXT Q2 "Total record only"): `portfolioDaily` is the blend's whole
+  // common series, its TOTAL record, so CVaR is null below CVAR_MIN_OBS observations. VaR keeps
+  // only the engine's own n<10 floor (F-6 names CVaR only).
   return {
     var: computeVaR(values, VAR_CONFIDENCE),
-    cvar: computeExpectedShortfall(values, VAR_CONFIDENCE),
+    cvar: values.length < CVAR_MIN_OBS ? null : computeExpectedShortfall(values, VAR_CONFIDENCE),
   };
 }

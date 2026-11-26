@@ -146,9 +146,20 @@ describe("buildAllocatorPortfolioFactsheetPayload", () => {
     // on the 252 default would fail the `=== p365` pins above).
     expect(p365!.strategyMetrics.sharpe).not.toBe(p252!.strategyMetrics.sharpe);
 
-    // CAGR is the CALENDAR clock (days/365.25) — asset-class-INVARIANT.
+    // CAGR is the CALENDAR clock (first to last date, whole days / 365: F-5 / Q1) —
+    // asset-class-INVARIANT.
     expect(alloc!.strategyMetrics.cagr).toBe(p252!.strategyMetrics.cagr);
     expect(p365!.strategyMetrics.cagr).toBe(p252!.strategyMetrics.cagr);
+    // The year length itself, written out from the dates with no production helper: the 59
+    // derived returns run 2025-01-02 to 2025-03-01 = 58 whole days over 365, and the CAGR is
+    // the compounded return over that span.
+    const firstMs = Date.parse(dailyReturns[0].date);
+    const lastMs = Date.parse(dailyReturns[dailyReturns.length - 1].date);
+    const spanDays = Math.floor((lastMs - firstMs) / 86_400_000);
+    expect(spanDays).toBe(58);
+    expect(alloc!.strategyMetrics.years).toBeCloseTo(58 / 365, 12);
+    const compounded = dailyReturns.reduce((acc, r) => acc * (1 + r.value), 1);
+    expect(alloc!.strategyMetrics.cagr).toBeCloseTo(Math.pow(compounded, 365 / 58) - 1, 10);
   });
 
   it("D-06: a supplied dailyReturns series is the Sharpe input and the $-curve is not converted", () => {

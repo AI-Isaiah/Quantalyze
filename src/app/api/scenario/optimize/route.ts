@@ -11,6 +11,7 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { PERIODS_PER_YEAR_CRYPTO, PERIODS_PER_YEAR_TRADITIONAL } from "@/lib/figure-conventions";
 // 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
 // capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
 // by `140.3-13a`. It is cited, never restated: two copies of a policy is how two
@@ -48,6 +49,13 @@ import { scrubSeamError } from "@/lib/seam-redaction";
 const MAX_STRATEGIES = 50;
 const MAX_POINTS_PER_SERIES = 6000; // ~24 years of trading days
 const OBJECTIVES = new Set(["min_vol", "max_sharpe"]);
+// Phase 236 plan 04 (FIG-01, CONTEXT A5; T-236-09): the blend's frequency clock is a closed set at
+// this trust boundary. Both values are the shared F-5 constants, never a literal (the Python
+// request model carries the same closed set and answers anything else with a 422).
+const PERIODS_PER_YEAR_SET: ReadonlySet<number> = new Set([
+  PERIODS_PER_YEAR_CRYPTO,
+  PERIODS_PER_YEAR_TRADITIONAL,
+]);
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
@@ -84,6 +92,7 @@ export async function POST(req: NextRequest) {
   let body: {
     series?: Record<string, Array<{ date?: unknown; value?: unknown }>>;
     objective?: unknown;
+    periods_per_year?: unknown;
   };
   try {
     body = await req.json();
@@ -98,6 +107,18 @@ export async function POST(req: NextRequest) {
   if (typeof objective !== "string" || !OBJECTIVES.has(objective)) {
     return NextResponse.json(
       { error: "objective must be 'min_vol' or 'max_sharpe'", code: "VALIDATION_FAILED" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // `typeof` first: a numeric string like "365" must not pass a Set lookup by coercion.
+  const periodsPerYear = body.periods_per_year;
+  if (typeof periodsPerYear !== "number" || !PERIODS_PER_YEAR_SET.has(periodsPerYear)) {
+    return NextResponse.json(
+      {
+        error: `periods_per_year must be ${PERIODS_PER_YEAR_TRADITIONAL} or ${PERIODS_PER_YEAR_CRYPTO}`,
+        code: "VALIDATION_FAILED",
+      },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -171,7 +192,12 @@ export async function POST(req: NextRequest) {
     // TS-04 / SC7 — the sharpest flip: /api/optimize-weights is 20/minute, a
     // PLATFORM ceiling until this claim appeared, so two allocators running
     // Scenario Composer could 429 each other. `user.id` is the server session's.
-    const result = await optimizeScenarioWeights(clean, objective as "min_vol" | "max_sharpe", { userId: user.id });
+    const result = await optimizeScenarioWeights(
+      clean,
+      objective as "min_vol" | "max_sharpe",
+      periodsPerYear as 252 | 365,
+      { userId: user.id },
+    );
     return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (err) {
     // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.
@@ -253,6 +279,16 @@ export async function POST(req: NextRequest) {
       if (err.status >= 500) {
         captureToSentry(err, {
           tags: { surface: "scenario-optimize", step: "upstream-5xx" },
+          extra: { upstream_status: err.status, objective, series_count: ids.length },
+        });
+      } else if (err.status === 422) {
+        // Phase 236 review round 1 (topic C): the one 4xx that is OUR defect. This route
+        // validates the request itself (the 400s above) and always sends `periods_per_year`,
+        // which the Python model requires, so a 422 here means the two request contracts
+        // drifted apart, not that a caller erred. Captured as contract drift; the flat 502
+        // below is unchanged, and an absent field is never defaulted on this side.
+        captureToSentry(err, {
+          tags: { surface: "scenario-optimize", step: "upstream-422-contract-drift" },
           extra: { upstream_status: err.status, objective, series_count: ids.length },
         });
       }

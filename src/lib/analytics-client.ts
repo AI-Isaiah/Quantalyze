@@ -912,11 +912,15 @@ export async function encryptKey(
 export async function optimizeScenarioWeights(
   series: Record<string, Array<{ date: string; value: number }>>,
   objective: "min_vol" | "max_sharpe",
+  // Phase 236 plan 04 (FIG-01, CONTEXT A5): the blend's frequency clock, `blendPeriodsPerYear` of
+  // the legs. Required, so no caller silently gets a default; the Python request model accepts
+  // only these two values.
+  periodsPerYear: 252 | 365,
   tenant: TenantIdentity,
 ): Promise<OptimizeWeightsResponse> {
   const data = await analyticsRequest(
     "/api/optimize-weights",
-    { series, objective },
+    { series, objective, periods_per_year: periodsPerYear },
     { budgetKey: "optimize-weights", tenantId: tenant.userId },
   );
   return parseResponse(OptimizeWeightsResponseSchema, data, "/api/optimize-weights");

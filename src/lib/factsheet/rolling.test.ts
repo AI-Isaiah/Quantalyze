@@ -7,6 +7,7 @@ import {
   ROLL_WINDOW_6MO,
   ROLL_WINDOW_90D,
   ROLL_WINDOW_30D,
+  rollingCalendarStats,
 } from "./rolling";
 
 describe("rolling helpers", () => {
@@ -127,5 +128,54 @@ describe("pickRollingWindow", () => {
     expect(pickRollingWindow(ROLL_WINDOW_30D + 4, tiers)).toMatchObject({
       enough: false,
     });
+  });
+});
+
+/**
+ * Phase 236 plan 05 (FIG-01, F-5 "ddof 1 everywhere"; closes A-194-D14-02): the 126- and 30-row
+ * windows are on the SAMPLE sd, the same one the 365-day calendar window has always used.
+ *
+ * THE ORACLE IS NOT THE IMPLEMENTATION: sums of squares are written out here and nothing is
+ * imported from return-stats.ts or figure-conventions.ts.
+ */
+describe("rolling windows on the sample sd (F-5)", () => {
+  /** Alternating +0.02 / -0.01: in any even window every deviation is exactly +-0.015. */
+  const alt = Array.from({ length: 300 }, (_, i) => (i % 2 === 0 ? 0.02 : -0.01));
+
+  function sampleVol(xs: number[], ppy: number): number {
+    let t = 0;
+    for (const x of xs) t += x;
+    const m = t / xs.length;
+    let ss = 0;
+    for (const x of xs) ss += (x - m) * (x - m);
+    return Math.sqrt(ss / (xs.length - 1)) * Math.sqrt(ppy);
+  }
+
+  it("the 126-row vol point is the sample sd x sqrt(periods): 0.015 x sqrt(126/125) x sqrt(252)", () => {
+    // 126 rows: sum of squares = 126 x 0.015^2; divided by n - 1 = 125, not n = 126.
+    const v = rollingVol(alt, 126, 252);
+    expect(v[125]).toBeCloseTo(0.015 * Math.sqrt(126 / 125) * Math.sqrt(252), 12);
+    expect(v[125]).toBeCloseTo(sampleVol(alt.slice(0, 126), 252), 12);
+  });
+
+  it("the 30-row Sharpe point is mean x N / (sample sd x sqrt(N))", () => {
+    const s = rollingSharpe(alt, 30, 252);
+    const w = alt.slice(0, 30);
+    const sd = sampleVol(w, 1);
+    expect(s[29]).toBeCloseTo((0.005 / sd) * Math.sqrt(252), 12);
+    // Not the population reading: 0.005 / 0.015 x sqrt(252).
+    expect(Math.abs(s[29]! - (0.005 / 0.015) * Math.sqrt(252))).toBeGreaterThan(1e-3);
+  });
+
+  it("a 126-row window and a 126-day calendar window read ONE sd on the same returns", () => {
+    // 126 consecutive daily dates: the calendar window at the last date holds exactly the 126
+    // returns a 126-row window holds. Before F-5 the row window divided by n and the calendar
+    // one by n - 1 (A-194-D14-02), so the two disagreed by sqrt(126/125).
+    const rets = alt.slice(0, 126);
+    const dates = rets.map((_, i) => new Date(Date.UTC(2024, 0, 1 + i)).toISOString().slice(0, 10));
+    const cal = rollingCalendarStats(rets, dates, 126, 252);
+    expect(cal.vol[125]).not.toBeNull();
+    expect(rollingVol(rets, 126, 252)[125]).toBeCloseTo(cal.vol[125]!, 12);
+    expect(rollingSharpe(rets, 126, 252)[125]).toBeCloseTo(cal.sharpe[125]!, 12);
   });
 });

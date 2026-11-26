@@ -1,0 +1,107 @@
+{
+  "_comment": "FIG-02 parity oracle (Phase 236 plan 08). Closed-form series read by BOTH tests/test_annualization_parity.py and src/__tests__/annualization-parity.test.ts. Expected values are derived from the closed forms in each vector's _comment and computed with plain math arithmetic, never from an engine. A series is the repeating pair [+0.02,-0.01] (even length, phase 0): mean 0.005, sample sd 0.015*sqrt(n/(n-1)). No vector carries a leg of an unknown asset class.",
+  "vectors": [
+    {
+      "name": "crypto_24_7",
+      "_comment": "n=730 consecutive calendar days, P=365. mean=0.005 (each pair sums to 0.01 over 2 obs). Every deviation is +-0.015 so SS=n*0.015^2 and sd=0.015*sqrt(n/(n-1)). sharpe=0.005/sd*sqrt(365). twr=(1.02*0.99)^(365)-1. span=last-first=729 days, cagr=(1+twr)^(365/729)-1.",
+      "asset_class": "crypto",
+      "periods_per_year": 365,
+      "start": "2023-01-01",
+      "calendar": "daily",
+      "pattern": [
+        0.02,
+        -0.01
+      ],
+      "n": 730,
+      "expected": {
+        "mean": 0.005,
+        "sd": 0.015010284540118105,
+        "sharpe": 6.3639610306789285,
+        "twr": 34.148655830681676,
+        "cagr": 4.943122124984882,
+        "n": 730,
+        "span_days": 729
+      }
+    },
+    {
+      "name": "weekday_gaps",
+      "_comment": "n=520 weekdays (104 whole weeks from Monday 2023-01-02 to Friday 2024-12-27); weekends have NO row. P=252. Same closed forms with n=520. span=104*7-3=725 days (last Friday minus first Monday), which is not n-1=519, so cagr=(1+twr)^(365/725)-1.",
+      "asset_class": "traditional",
+      "periods_per_year": 252,
+      "start": "2023-01-02",
+      "calendar": "weekdays",
+      "pattern": [
+        0.02,
+        -0.01
+      ],
+      "n": 520,
+      "expected": {
+        "mean": 0.005,
+        "sd": 0.015014443912831426,
+        "sharpe": 5.286412190337966,
+        "twr": 11.623949642874052,
+        "cagr": 2.5842215917455342,
+        "n": 520,
+        "span_days": 725
+      }
+    },
+    {
+      "name": "broken_chain_suffix",
+      "_comment": "200 prefix days of [+0.05,-0.02] on days 0..199, ONE NaN day (the interior break) on day 200, then a 300-day suffix of [+0.02,-0.01] on days 201..500. Only the suffix is the oracle series: n=300, span=500-201=299 days, P=365. mean=0.005, sd=0.015*sqrt(300/299), twr=(1.02*0.99)^150-1, cagr=(1+twr)^(365/299)-1. The engines that take the suffix themselves are fed the whole chain; the TS engines are fed the suffix (suffix_first_date).",
+      "asset_class": "crypto",
+      "periods_per_year": 365,
+      "start": "2023-01-01",
+      "calendar": "daily",
+      "pattern": [
+        0.02,
+        -0.01
+      ],
+      "n": 300,
+      "pre_break": {
+        "pattern": [
+          0.05,
+          -0.02
+        ],
+        "n": 200
+      },
+      "expected": {
+        "mean": 0.005,
+        "sd": 0.015025062674119,
+        "sharpe": 6.3577016578611465,
+        "twr": 3.3182218831474293,
+        "cagr": 4.964025507878934,
+        "n": 300,
+        "span_days": 299,
+        "suffix_first_date": "2023-07-21",
+        "suffix_len": 300,
+        "break_date": "2023-07-20"
+      }
+    },
+    {
+      "name": "emptied_stretch",
+      "_comment": "400 observations of the repeating pair on days 0..199 and 300..499; days 200..299 have NO row (an emptied stretch, never a NaN, so the chain is NOT broken). P=365. Q1: the calendar span INCLUDES the stretch, span=499 days, so cagr=(1+twr)^(365/499)-1. The pair phase restarts at 0 after the gap because the 200 observations before it are an even count. mean=0.005, sd=0.015*sqrt(400/399), twr=(1.02*0.99)^200-1.",
+      "asset_class": "crypto",
+      "periods_per_year": 365,
+      "start": "2023-01-01",
+      "calendar": "daily",
+      "pattern": [
+        0.02,
+        -0.01
+      ],
+      "n": 400,
+      "gap": {
+        "after_obs": 200,
+        "days": 100
+      },
+      "expected": {
+        "mean": 0.005,
+        "sd": 0.015018785229652764,
+        "sharpe": 6.360359004542643,
+        "twr": 6.031909485752926,
+        "cagr": 3.1648819275271673,
+        "n": 400,
+        "span_days": 499
+      }
+    }
+  ]
+}

@@ -91,6 +91,7 @@ import type { DailyPoint } from "./portfolio-math-utils";
 export type { DailyPoint } from "./portfolio-math-utils";
 import { coverageSpanOf, covers } from "./scenario-window";
 import { calendarYears } from "./closed-sets";
+import { SD_DDOF } from "./figure-conventions";
 import { dispersion, pearson, sharpe as returnStatsSharpe } from "@/lib/return-stats";
 
 export interface StrategyForBuilder {
@@ -584,8 +585,8 @@ export function computeScenario(
   }
 
   const twr = cumulative[n - 1] - 1;
-  // TWO CLOCKS (#597 / TWR-05 governing ruling; see compute.ts + metrics.py):
-  //   • RETURN / CAGR ride the CALENDAR clock — elapsed days / 365.25 — and are
+  // TWO CLOCKS (#597 / TWR-05 governing ruling; see metrics.py; compute.ts follows in plan 236-10):
+  //   • RETURN / CAGR ride the CALENDAR clock — whole days first to last date / 365 — and are
   //     asset-class / periodsPerYear-INVARIANT. Below, `years` is the real
   //     calendar span of the ACTUAL return axis (first→last commonDate), so a
   //     sparse/gappy track no longer over-annualizes the way n/periodsPerYear
@@ -609,11 +610,11 @@ export function computeScenario(
   // are the shared `dispersion` (SFH-M7): the same arithmetic this block did by
   // hand (sum / n, then sum of squared deviations / (n - 1)), except that a
   // float-residue sd reads exactly 0, as the factsheet's ann_vol does.
-  const { mean: meanR, sd: volDaily } = dispersion(portDaily, 1);
+  const { mean: meanR, sd: volDaily } = dispersion(portDaily, SD_DDOF);
   const volatility = volDaily * Math.sqrt(periodsPerYear);
   // The ONE TS Sharpe (Phase 166.1 D-17), sample basis: null when the blend has
   // no dispersion, including the float residue of a compounding constant yield.
-  const sharpe = returnStatsSharpe(portDaily, { periodsPerYear, ddof: 1 });
+  const sharpe = returnStatsSharpe(portDaily, { periodsPerYear, ddof: SD_DDOF });
 
   // Sortino: downside RMS divides by TOTAL observations (n), not by the
   // count of negative days. See the file-level behavior notes.

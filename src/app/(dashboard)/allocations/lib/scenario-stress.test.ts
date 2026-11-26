@@ -103,9 +103,29 @@ describe("computeScenarioStress — golden VaR/CVaR oracle (STRESS-02)", () => {
     expect(r.var).toBeCloseTo(-0.06, 10);
   });
 
-  it("golden CVaR — CVaR(95%) = mean of the 1 worst return = -0.080 (VaR element excluded), and CVaR <= VaR", () => {
+  it("golden CVaR — on the 20-day series CVaR is null: 20 < CVAR_MIN_OBS = 60 observations (236 FIG-03, A6) while VaR still shows", () => {
+    // This pin moved from -0.080 to null in plan 236-07 and the series did not change: the blend's
+    // total record is under the floor, so the dash. Its former value -0.080 is kept as the next test.
     const r = computeScenarioStress(port, closes(btc));
+    expect(r.var).toBeCloseTo(-0.06, 10);
+    expect(r.cvar).toBeNull();
+  });
+
+  it("golden CVaR — CVaR(95%) = mean of the 3 worst returns = -0.080 (VaR element excluded) on the series tripled to n = 60, and CVaR <= VaR", () => {
+    // Re-derived for the floor (236 FIG-03, A6): the same 20 values, each repeated 3 times, in the
+    // same shuffled order, so n = 60 = CVAR_MIN_OBS and the quantile structure is unchanged:
+    //   sorted = [-0.080 x3, -0.060 x3, -0.045 x3, ...]
+    //   k = max(1, floor(0.05 * 60)) = 3, tail = sorted[0:3] = [-0.080, -0.080, -0.080]
+    //   CVaR(95%) = -0.080 (identical to the 20-value derivation above)
+    //   VaR(95%)  = sorted[floor(0.05 * 60)] = sorted[3] = the first -0.060 = -0.060
+    const tripled = shuffled.flatMap((v) => [v, v, v]);
+    const d60 = manyDays(60);
+    const p60: DP[] = d60.map((date, i) => ({ date, value: tripled[i] }));
+    const b60: DP[] = d60.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.008 }));
+    const r = computeScenarioStress(p60, closes(b60));
+    expect(r.varN).toBe(60);
     expect(r.cvar).toBeCloseTo(-0.08, 10);
+    expect(r.var).toBeCloseTo(-0.06, 10);
     expect(r.cvar!).toBeLessThanOrEqual(r.var!);
   });
 
@@ -493,5 +513,37 @@ describe("computeScenarioStress — confidence is locked, label cannot drift (WR
     const r = computeScenarioStress(port, closes(btc));
     expect(r.var).toBeCloseTo(expectedVaR, 12);
     expect(r.var).toBe(-0.06);
+  });
+});
+
+// =========================================================================
+// 10. The CVaR floor on the blend's whole common series (236 FIG-03, A6)
+// =========================================================================
+
+describe("computeScenarioStress - CVaR is null below CVAR_MIN_OBS on the blend's total series (236 FIG-03, A6)", () => {
+  // Hand-derived, never read back from the implementation. The blend is the four smallest
+  // returns [-0.08, -0.06, -0.05, -0.02] followed by alternating +0.01 / +0.02 days.
+  //   n = 59: idx = floor(0.05 * 59) = 2, VaR95 = sorted[2] = -0.05; CVaR would be the mean of the
+  //           2 smallest = -0.07, but 59 < CVAR_MIN_OBS = 60, so cvar is null.
+  //   n = 60: idx = floor(0.05 * 60) = 3, VaR95 = sorted[3] = -0.02; k = 3, CVaR95 = the mean of the
+  //           3 smallest = (-0.08 - 0.06 - 0.05) / 3 = -0.19 / 3.
+  const blend = (n: number): DP[] =>
+    manyDays(n).map((date, i) => ({
+      date,
+      value: i < 4 ? [-0.08, -0.06, -0.05, -0.02][i] : i % 2 === 0 ? 0.01 : 0.02,
+    }));
+
+  it("a 59-day blend: cvar is null, the VaR is unchanged and still shows", () => {
+    const r = computeScenarioStress(blend(59), null);
+    expect(r.varN).toBe(59);
+    expect(r.cvar).toBeNull();
+    expect(r.var).toBeCloseTo(-0.05, 12);
+  });
+
+  it("a 60-day blend: cvar shows, the mean of the 3 smallest", () => {
+    const r = computeScenarioStress(blend(60), null);
+    expect(r.varN).toBe(60);
+    expect(r.cvar).toBeCloseTo(-0.19 / 3, 12);
+    expect(r.var).toBeCloseTo(-0.02, 12);
   });
 });

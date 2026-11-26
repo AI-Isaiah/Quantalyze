@@ -1136,7 +1136,7 @@ describe("[140.2-09 / TS-04 / SC7] analytics-client mints X-Tenant-Claim", () =>
       payload: "user-beta",
       reaches: "L-4 /api/optimize-weights — LIVE, flips; the SHARPEST at 20/minute",
       invoke: (m) =>
-        m.optimizeScenarioWeights({}, "min_vol", { userId: "user-beta" }),
+        m.optimizeScenarioWeights({}, "min_vol", 252, { userId: "user-beta" }),
     },
     {
       wrapper: "computePortfolioAnalytics",
@@ -1374,10 +1374,10 @@ describe("[140.2-09 / TS-04 / SC7] analytics-client mints X-Tenant-Claim", () =>
       // before this landed, so two allocators running Scenario Composer
       // concurrently could 429 each other.
       const headersA = await sentHeaders((m) =>
-        m.optimizeScenarioWeights({}, "min_vol", { userId: "tenant-a" }),
+        m.optimizeScenarioWeights({}, "min_vol", 252, { userId: "tenant-a" }),
       );
       const headersB = await sentHeaders((m) =>
-        m.optimizeScenarioWeights({}, "min_vol", { userId: "tenant-b" }),
+        m.optimizeScenarioWeights({}, "min_vol", 252, { userId: "tenant-b" }),
       );
 
       const claimA = headersA["X-Tenant-Claim"];
@@ -1409,7 +1409,7 @@ describe("[140.2-09 / TS-04 / SC7] analytics-client mints X-Tenant-Claim", () =>
 
     it("tenant A's claim does NOT verify as tenant B — the payload is bound by the MAC", async () => {
       const headersA = await sentHeaders((m) =>
-        m.optimizeScenarioWeights({}, "min_vol", { userId: "tenant-a" }),
+        m.optimizeScenarioWeights({}, "min_vol", 252, { userId: "tenant-a" }),
       );
       const [, exp, macA] = headersA["X-Tenant-Claim"].split(".");
 
@@ -1458,7 +1458,7 @@ describe("[140.2-09 / TS-04 / SC7] analytics-client mints X-Tenant-Claim", () =>
           scope: "optimize_weights",
           path: "/api/optimize-weights",
           invoke: (m, userId) =>
-            m.optimizeScenarioWeights({}, "min_vol", { userId }),
+            m.optimizeScenarioWeights({}, "min_vol", 252, { userId }),
         },
         {
           scope: "portfolio_optimizer",
@@ -1490,7 +1490,7 @@ describe("[140.2-09 / TS-04 / SC7] analytics-client mints X-Tenant-Claim", () =>
 
     it("a claim minted with the WRONG secret degrades to the platform bucket (why M44 must redden)", async () => {
       const headers = await sentHeaders((m) =>
-        m.optimizeScenarioWeights({}, "min_vol", { userId: "tenant-a" }),
+        m.optimizeScenarioWeights({}, "min_vol", 252, { userId: "tenant-a" }),
       );
       // The verifier holds INTERNAL_API_TOKEN. Verifying against the OTHER
       // secret in scope in this module is what swapping the MAC key would do in
@@ -1550,7 +1550,7 @@ describe("[140.2-09 / TS-04 / SC7] analytics-client mints X-Tenant-Claim", () =>
         vi.setSystemTime(new Date((exp - 300) * 1000));
         try {
           const headers = await sentHeaders((m) =>
-            m.optimizeScenarioWeights({}, "min_vol", { userId: payload }),
+            m.optimizeScenarioWeights({}, "min_vol", 252, { userId: payload }),
           );
           const [sentPayload, sentExp, mac] =
             headers["X-Tenant-Claim"].split(".");
@@ -2143,7 +2143,7 @@ describe("[140.4-09 / SEAMRIM-06] parseResponse's THROWN message is scrubbed, li
       })) as unknown as typeof globalThis.fetch);
     const mod = await import("./analytics-client");
     try {
-      await mod.optimizeScenarioWeights({}, "min_vol", TENANT);
+      await mod.optimizeScenarioWeights({}, "min_vol", 252, TENANT);
     } catch (err) {
       return err;
     }
@@ -2803,7 +2803,7 @@ describe("[164.1-02 / PYAPI-06] refuses before the fetch when ANALYTICS_SERVICE_
     return {
       fetchMock,
       call: () =>
-        mod.optimizeScenarioWeights({}, "min_vol", {
+        mod.optimizeScenarioWeights({}, "min_vol", 252, {
           userId: "user-under-test",
         }),
     };

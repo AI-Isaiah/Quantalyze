@@ -1,5 +1,11 @@
 import { z } from "zod";
 import type { Strategy } from "./types";
+import {
+  CALENDAR_DAYS_PER_YEAR,
+  PERIODS_PER_YEAR_CRYPTO,
+  PERIODS_PER_YEAR_TRADITIONAL,
+  wholeCalendarDays,
+} from "./figure-conventions";
 
 // ============================================================================
 // B8 — Closed-Set Discipline registry
@@ -14,7 +20,8 @@ import type { Strategy } from "./types";
 // Python mirror to land separately as B8b: analytics-service/services/closed_sets.py
 // (TRADE_SIDES, STABLECOINS, perp_quote).
 //
-// This module imports ONLY zod. Do not import from constants.ts / utils.ts /
+// This module imports ONLY zod, a type from ./types, and the zero-import leaf
+// ./figure-conventions. Do not import from constants.ts / utils.ts /
 // preferences.ts here — those modules re-export FROM this one, so importing
 // back would create a cycle.
 // ============================================================================
@@ -643,7 +650,7 @@ export function assetClassForExchange(
 export function annualizationPeriods(
   assetClass: string | null | undefined,
 ): number {
-  return assetClass === "crypto" ? 365 : 252;
+  return assetClass === "crypto" ? PERIODS_PER_YEAR_CRYPTO : PERIODS_PER_YEAR_TRADITIONAL;
 }
 
 /**
@@ -655,7 +662,7 @@ export function annualizationPeriods(
  *
  * SCOPE (#597 law — do not widen): this is the RISK basis only. Volatility,
  * Sharpe and Sortino ride this FREQUENCY clock; RETURN/CAGR ride the CALENDAR
- * clock (`calendarYears`, 365.25 days) and are asset-class-invariant. A change
+ * clock (`calendarYears`, whole days over 365; F-5 / Q1) and are asset-class-invariant. A change
  * here must never move a RETURN number.
  *
  * EMPTY vs ALL-UNKNOWN — two different answers, deliberately (RANK-06):
@@ -668,7 +675,7 @@ export function annualizationPeriods(
  *   strategy that IS traditional — it is a CALLER PROJECTION GAP (a select list
  *   that dropped the column; the v1.11 "per-key refs invisible to a naive diff"
  *   class). Resolving that gap to 252 understates a crypto blend's annualized
- *   vol by the √(365/252) factor (~17%) and correspondingly INFLATES its Sharpe
+ *   vol by the sqrt of the 365-to-252 ratio (~17%) and correspondingly INFLATES its Sharpe
  *   (~×1.20) on the allocator-facing ranking, i.e. the silent failure direction
  *   is the flattering one. Unknown therefore fails toward the CONSERVATIVE
  *   (crypto) clock: an over-stated vol is visible and honest, an under-stated
@@ -678,7 +685,7 @@ export function annualizationPeriods(
  * The blend sibling of `annualizationPeriods` — the ONE place that maps a set of
  * legs → periods, so every wave-2/3 blend KPI call site derives its basis from
  * here rather than hand-rolling a second rule (MD-01: no call site may grow a
- * local 365/252 ternary). NOTE the deliberate asymmetry with
+ * local 365-or-252 ternary). NOTE the deliberate asymmetry with
  * `annualizationPeriods`, whose unknown→252 default is unchanged: that helper
  * keys off a SINGLE strategy's own stored class, where "unknown" cannot arise
  * from a blend-leg projection gap.
@@ -697,22 +704,21 @@ export function blendPeriodsPerYear(
 ): number {
   // EMPTY → 252 falls out of `.some()` on an empty array — no guard needed.
   return legs.some((l) => l.asset_class === "crypto" || l.asset_class == null)
-    ? 365
-    : 252;
+    ? PERIODS_PER_YEAR_CRYPTO
+    : PERIODS_PER_YEAR_TRADITIONAL;
 }
 
 /**
- * Calendar-year span between two epoch-ms timestamps on the 365.25-day civil
- * clock. #597 / TWR-05: risk metrics ride the FREQUENCY clock
- * (`annualizationPeriods`, 365/252); CAGR rides the CALENDAR clock (elapsed
- * days / 365.25) and is asset-class-invariant. Mirrors compute.ts
- * (`days / 365.25`) and metrics.py. Returns 0 (never negative) when the span is
- * non-positive or non-finite, so callers can gate on `years > 0`.
+ * Calendar-year span between two epoch-ms timestamps: the WHOLE days from the first to the
+ * last observed date (floor, as Python's `Timedelta.days`), divided by
+ * `CALENDAR_DAYS_PER_YEAR` (F-5, 365; CONTEXT Q1). #597 / TWR-05: risk metrics ride the
+ * FREQUENCY clock (`annualizationPeriods`, 365 crypto or 252 traditional); CAGR rides the CALENDAR clock and is
+ * asset-class-invariant. An emptied stretch stays in the span: only the first and last
+ * observed dates count. Mirrors the stored CAGR in metrics.py. Returns 0 (never negative)
+ * when the span is non-positive or non-finite, so callers can gate on `years > 0`.
  */
 export function calendarYears(firstDateMs: number, lastDateMs: number): number {
-  const ms = lastDateMs - firstDateMs;
-  if (!Number.isFinite(ms) || ms <= 0) return 0;
-  return ms / (365.25 * 86_400_000);
+  return wholeCalendarDays(firstDateMs, lastDateMs) / CALENDAR_DAYS_PER_YEAR;
 }
 
 // --- Self-editable preference fields ---------------------------------------

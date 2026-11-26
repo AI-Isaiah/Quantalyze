@@ -1187,7 +1187,7 @@ describe("toWealth (pure constructor, RSC-safe home)", () => {
 });
 
 // =========================================================================
-// Plan 84-06 — CAGR rides the CALENDAR clock (days / 365.25), NOT the count
+// Plan 84-06 — CAGR rides the CALENDAR clock (whole days / 365), NOT the count
 // clock (n / periodsPerYear). This is a DELIBERATE VALUE change, re-derived
 // (never blind-updated) per the [73-02] metrics.py TWR-05 landing precedent.
 // The two-clocks ruling: RETURN/CAGR = calendar clock, asset-class-INVARIANT;
@@ -1208,11 +1208,13 @@ function buildMonthlyDates(startISO: string, n: number): string[] {
 /**
  * Independent calendar-year span — deliberately NOT importing calendarYears
  * from the source, so this fixture cannot tautologically mirror the
- * implementation. Pure Date.parse arithmetic on the 365.25-day civil clock.
+ * implementation. Pure Date.parse arithmetic: whole days from the first to the
+ * last observed date (floor, as Python's Timedelta.days), over 365 (F-5 / Q1).
  */
-const CAL_MS_PER_YEAR = 365.25 * 86_400_000;
+const CAL_DAYS_PER_YEAR = 365;
 function calendarYearsIndep(firstISO: string, lastISO: string): number {
-  return (Date.parse(lastISO) - Date.parse(firstISO)) / CAL_MS_PER_YEAR;
+  const wholeDays = Math.floor((Date.parse(lastISO) - Date.parse(firstISO)) / 86_400_000);
+  return wholeDays / CAL_DAYS_PER_YEAR;
 }
 
 describe("computeScenario — CAGR calendar clock (Plan 84-06, [73-02] precedent)", () => {
@@ -1246,6 +1248,28 @@ describe("computeScenario — CAGR calendar clock (Plan 84-06, [73-02] precedent
     // an order of magnitude here — ~0.13 calendar vs ~11 count — the
     // falsifiable half of this pin).
     expect(metrics.cagr).not.toBeCloseTo(retiredCountCagr, 2);
+  });
+
+  it("[emptied-stretch] a month with no observations stays in the CAGR span (Q1: first to last date)", () => {
+    // 20 weekdays, then nothing for ~10 weeks, then 20 more weekdays. The span is the
+    // first to the LAST observed date, so the empty stretch is inside the denominator.
+    const before = buildDates("2022-01-03", 20);
+    const after = buildDates("2022-03-14", 20);
+    const dates = [...before, ...after];
+    const strat = constantReturnStrategy("a", dates, 0.001);
+    const metrics = computeScenario([strat], defaultState([strat]), buildDateMapCache([strat]));
+
+    const twr = Math.pow(1.001, dates.length) - 1;
+    const spanYears = calendarYearsIndep(dates[0], dates[dates.length - 1]);
+    const expected = Math.pow(1 + twr, 1 / spanYears) - 1;
+    expect(metrics.cagr).toBeCloseTo(expected, 4);
+
+    // The same 40 observations with the stretch removed would span far fewer days and
+    // annualize much higher; the emptied-stretch figure must not equal that one.
+    const contiguous = buildDates("2022-01-03", dates.length);
+    const droppedYears = calendarYearsIndep(contiguous[0], contiguous[contiguous.length - 1]);
+    const droppedStretchCagr = Math.pow(1 + twr, 1 / droppedYears) - 1;
+    expect(metrics.cagr).not.toBeCloseTo(droppedStretchCagr, 2);
   });
 
   it("[invariance] CAGR is basis-INVARIANT (252 vs 365 identical) while Sharpe/vol ride the frequency clock", () => {

@@ -27,6 +27,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { annualizationPeriods, isCryptoExchange } from "@/lib/closed-sets";
+import { SD_DDOF } from "@/lib/figure-conventions";
 import { HoldingsUpdatedAtError, writtenAtMicros } from "@/lib/holdings-account-day";
 import { dispersion, sharpe as returnStatsSharpe } from "@/lib/return-stats";
 
@@ -456,8 +457,8 @@ const NULL_METRICS: PriceMetrics = {
  *   needs no adjacency.
  * - A daily return `p[i] / p[i-1] - 1` is taken ONLY when `asof[i]` is exactly
  *   the calendar day after `asof[i-1]`. A missing day breaks the chain, so no
- *   return spans a gap. Vol (`dispersion(returns, 0).sd * sqrt(periodsPerYear)`)
- *   and Sharpe (the return-stats `sharpe`, population sd) are over those
+ *   return spans a gap. Vol (the sample sd, `SD_DDOF`, times `sqrt(periodsPerYear)`)
+ *   and Sharpe (the return-stats `sharpe`, sample sd) are over those
  *   one-day returns only, and are null with fewer than 2 of them.
  * - Fewer than 2 points gives four nulls: uncomputable is null, never zero.
  */
@@ -480,9 +481,9 @@ export function analyzePriceSeries(
   const returns = adjacentDailyReturns(points).map(([, r]) => r);
   const vol =
     returns.length >= 2
-      ? dispersion(returns, 0).sd * Math.sqrt(periodsPerYear)
+      ? dispersion(returns, SD_DDOF).sd * Math.sqrt(periodsPerYear)
       : null;
-  const sharpe = returnStatsSharpe(returns, { periodsPerYear, ddof: 0 });
+  const sharpe = returnStatsSharpe(returns, { periodsPerYear, ddof: SD_DDOF });
 
   return {
     cumulative_return: Number.isFinite(cumulative_return) ? cumulative_return : null,
@@ -498,7 +499,7 @@ export function analyzePriceSeries(
  * NAV starts at 1 and compounds, `NAV_k = product of (1 + r_i)`. Cumulative return is
  * `NAV_last - 1` and max drawdown the most negative `(NAV - peak) / peak`, the peak
  * starting at NAV 1. Vol and Sharpe are over the same return list, exactly as
- * `analyzePriceSeries` computes them (population sd). An EMPTY list gives null cumulative
+ * `analyzePriceSeries` computes them (sample sd, F-5). An EMPTY list gives null cumulative
  * return and null drawdown: uncomputable is null, never a confident 0%. A long-only,
  * gap-free derivative gives the same cumulative return and drawdown as the spot level form.
  */
@@ -520,8 +521,8 @@ export function analyzeSignedReturns(
   const cumulative_return = nav - 1;
 
   const vol =
-    returns.length >= 2 ? dispersion(returns, 0).sd * Math.sqrt(periodsPerYear) : null;
-  const sharpe = returnStatsSharpe(returns, { periodsPerYear, ddof: 0 });
+    returns.length >= 2 ? dispersion(returns, SD_DDOF).sd * Math.sqrt(periodsPerYear) : null;
+  const sharpe = returnStatsSharpe(returns, { periodsPerYear, ddof: SD_DDOF });
 
   return {
     cumulative_return: Number.isFinite(cumulative_return) ? cumulative_return : null,

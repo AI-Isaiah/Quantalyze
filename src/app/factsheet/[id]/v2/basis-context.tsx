@@ -401,7 +401,8 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     const levered = base.strategyReturns.map((r, i) => ({ date: base.dates[i], value: L * r }));
     // Phase 169.1 (D-27): the argument object comes from the ONE builder the window
     // arm also calls, so the two re-derives cannot drift.
-    const lb = deriveSeriesBundle(levered, rederiveArgs(base));
+    // CR-01: the levered series is the whole record, so it carries the total-record CVaR floor.
+    const lb = deriveSeriesBundle(levered, { ...rederiveArgs(base), totalRecordSeries: true });
     // WR-02 (Phase 107 review): Sharpe and Sortino are LEVERAGE-INVARIANT at rf=0 —
     // r→L·r cancels in `mean·√P/sd` and `mean·P/ddDev` (compute.ts:41,45). At L=1 the
     // MTM strip shows the PERSISTED dense-Python scalars (the F3 overlay that makes the

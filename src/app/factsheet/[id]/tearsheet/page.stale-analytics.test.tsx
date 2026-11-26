@@ -118,6 +118,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 import TearSheetPage from "./page";
 import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
+import { FIGURE_DEFS_VERSION } from "@/lib/figure-gate";
 
 // --- Fixtures -------------------------------------------------------------
 
@@ -158,7 +159,7 @@ function analytics(status: string) {
     sparkline_returns: [1, 1.2, 1.45, 1.91],
     monthly_returns: { "2026": { Jan: 0.081, Feb: -0.014 } },
     metrics_json: {
-      figure_defs_version: 2,
+      figure_defs_version: FIGURE_DEFS_VERSION,
       var_1d_95: -0.0271,
       cvar: -0.0388,
       best_day: 0.0612,

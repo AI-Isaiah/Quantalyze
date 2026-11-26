@@ -10,8 +10,12 @@ import { WeightOptimizerSection } from "./WeightOptimizerSection";
  */
 
 type DP = { date: string; value: number };
-function strat(id: string, name: string): { id: string; name: string; dailyReturns: DP[] } {
-  return { id, name, dailyReturns: [{ date: "2024-01-01", value: 0.01 }] };
+function strat(
+  id: string,
+  name: string,
+  asset_class?: string | null,
+): { id: string; name: string; dailyReturns: DP[]; asset_class?: string | null } {
+  return { id, name, dailyReturns: [{ date: "2024-01-01", value: 0.01 }], asset_class };
 }
 
 /**
@@ -87,6 +91,39 @@ describe("WeightOptimizerSection", () => {
     expect(onApply).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: /Apply to draft/ }));
     expect(onApply).toHaveBeenCalledWith({ a: 0.7, b: 0.3 });
+  });
+
+  // Phase 236 plan 04 (FIG-01, CONTEXT A5): the optimizer annualizes on the BLEND's clock, taken
+  // from the one shared rule (`blendPeriodsPerYear`): 365 if any leg is crypto or has no class,
+  // 252 only when every leg is traditional. The panel owns no ternary of its own.
+  it.each([
+    ["every leg traditional", ["traditional", "traditional"], 252],
+    ["one crypto leg", ["traditional", "crypto"], 365],
+    ["every leg crypto", ["crypto", "crypto"], 365],
+    ["one leg with a null class", ["traditional", null], 365],
+    ["one leg with no class at all", ["traditional", undefined], 365],
+  ] as const)("sends the blend clock in the request body: %s", async (_label, classes, clock) => {
+    const f = mockFetchOnce({
+      ok: true,
+      objective: "min_vol",
+      n: 180,
+      k: 2,
+      weights: { a: 0.7, b: 0.3 },
+      in_sample: true,
+      reason: "ok",
+    });
+    render(
+      <WeightOptimizerSection
+        strategies={[strat("a", "Alpha", classes[0]), strat("b", "Beta", classes[1])]}
+        onApply={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Suggest weights/ }));
+    await waitFor(() => expect(f).toHaveBeenCalledTimes(1));
+    const sent = JSON.parse((f.mock.calls[0][1] as { body: string }).body);
+    expect(sent.periods_per_year).toBe(clock);
+    expect(sent.objective).toBe("min_vol");
+    expect(Object.keys(sent.series)).toEqual(["a", "b"]);
   });
 
   it("a weight row whose strategy has no name reads 'Unnamed strategy', never its id (D-01)", async () => {

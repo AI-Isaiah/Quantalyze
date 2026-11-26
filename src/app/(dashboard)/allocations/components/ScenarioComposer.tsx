@@ -6390,7 +6390,12 @@ export function ScenarioComposer({
         <WeightOptimizerSection
           strategies={engineSet.strategies
             .filter((s) => engineSet.state.selected[s.id])
-            .map((s) => ({ id: s.id, name: s.name, dailyReturns: s.daily_returns }))}
+            .map((s) => ({
+              id: s.id,
+              name: s.name,
+              dailyReturns: s.daily_returns,
+              asset_class: s.asset_class,
+            }))}
           onApply={(weights) => {
             // WR-01 (Phase 63 review) — renormalize the applied vector over the
             // ENGINE universe, NOT the draft's `holding:` toggle basis. In

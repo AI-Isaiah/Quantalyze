@@ -1,5 +1,6 @@
 import type { JointMetrics } from "./types";
 import { mean } from "@/lib/portfolio-math-utils";
+import { SD_DDOF } from "@/lib/figure-conventions";
 import { beta as betaOf, dispersion, pearson, sharpe } from "@/lib/return-stats";
 import { formatDay } from "@/lib/utils";
 
@@ -115,10 +116,10 @@ export function jointMetrics(rets: number[], bench: number[], rf = 0, periodsPer
   const r2 = Number.isFinite(corr) ? corr * corr : NaN;
 
   // Tracking error and information ratio are the dispersion and the Sharpe of
-  // the ACTIVE series (strategy minus benchmark), population sd.
+  // the ACTIVE series (strategy minus benchmark), sample sd (F-5).
   const active = rets.map((r, i) => r - bench[i]);
-  const trackingError = dispersion(active, 0).sd * Math.sqrt(periodsPerYear);
-  const infoRatio = sharpe(active, { periodsPerYear, ddof: 0 }) ?? NaN;
+  const trackingError = dispersion(active, SD_DDOF).sd * Math.sqrt(periodsPerYear);
+  const infoRatio = sharpe(active, { periodsPerYear, ddof: SD_DDOF }) ?? NaN;
   const treynor =
     Number.isFinite(beta) && beta !== 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / beta : NaN;
 

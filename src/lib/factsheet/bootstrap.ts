@@ -1,4 +1,5 @@
 import { arithmeticUnderwater, cumEq, drawdowns } from "./compute";
+import { SD_DDOF } from "@/lib/figure-conventions";
 import { sharpe as sharpeRatio } from "@/lib/return-stats";
 
 /** Pre-aggregated histogram of the resample distribution — small payload
@@ -155,10 +156,10 @@ function headlineStats(
       hasNeg = true;
     }
   }
-  // Population sd (divide by n), as the resamples always used. A residue sd
+  // Sample sd (F-5, ddof 1), the headline's own, so the band centres on the number it brackets. A residue sd
   // (a compounding constant yield) is no dispersion, exactly as for an all-zero
   // series (D-07), and the missing Sharpe stays NaN, an absence (D7).
-  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: 0 }) ?? NaN;
+  const sharpe = sharpeRatio(rets, { periodsPerYear, ddof: SD_DDOF }) ?? NaN;
   const downDev = hasNeg ? Math.sqrt(downSqSum / n) * Math.sqrt(periodsPerYear) : 0;
   // No losing day means no Sortino: NaN, an absence, as `compute` gives (D7,
   // review round 2 HI-02), never a fabricated 0.

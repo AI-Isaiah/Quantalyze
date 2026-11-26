@@ -249,10 +249,15 @@ describe("allocations RiskDecomposition — tooltip and bar fill", () => {
 describe("allocations VarExpectedShortfall — tone follows the printed sign (D-03)", () => {
   const base = { timeframe: "1YTD" as const, width: 0, height: 0 };
 
-  /** 20 composite returns that all equal `value`: VaR 95, VaR 99 and CVaR 95 all equal it. */
+  /**
+   * CVAR_MIN_OBS (60) composite returns that all equal `value`: VaR 95, VaR 99 and CVaR 95 all
+   * equal it. 236 FIG-03 moved this fixture from 20 to 60 returns: CVaR is the dash below 60
+   * observations of the total record, and this test's intent (all THREE figures follow the printed
+   * sign) needs all three printed. At n = 60 the 3 smallest of a constant series equal it.
+   */
   function renderConstant(value: number) {
-    const compositeReturns = Array.from({ length: 20 }, (_, i) => ({
-      date: `2026-02-${String(i + 1).padStart(2, "0")}`,
+    const compositeReturns = Array.from({ length: 60 }, (_, i) => ({
+      date: new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10),
       value,
     }));
     render(

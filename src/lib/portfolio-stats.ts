@@ -14,6 +14,7 @@
 
 import type { DailyPoint } from "./portfolio-math-utils";
 import { mean, compound } from "./portfolio-math-utils";
+import { SD_DDOF } from "@/lib/figure-conventions";
 import { beta as sharedBeta, dispersion, dispersionIsReal, historicalVarCvar } from "@/lib/return-stats";
 
 // ── Non-finite drop diagnostic ──────────────────────────────────────
@@ -440,7 +441,7 @@ export function computeTrackingError(
   // The shared sample sd (SFH-M7): bitwise `stdDev(diff, true)` except that a
   // float-residue excess (a constant outperformance) reads exactly 0, so the
   // tracking error beside a null information ratio is 0, not about 1e-15.
-  return dispersion(diff, 1).sd * Math.sqrt(periodsPerYear);
+  return dispersion(diff, SD_DDOF).sd * Math.sqrt(periodsPerYear);
 }
 
 // ── 11. computeRiskDecomposition ────────────────────────────────────

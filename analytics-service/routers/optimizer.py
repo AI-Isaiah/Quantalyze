@@ -54,7 +54,7 @@ async def optimize_weights_endpoint(
         sid: [(p.date, p.value) for p in points]
         for sid, points in req.series.items()
     }
-    result = optimize_weights(series, req.objective)
+    result = optimize_weights(series, req.objective, periods_per_year=req.periods_per_year)
     return OptimizeWeightsResponse(
         ok=result.ok,
         objective=result.objective,

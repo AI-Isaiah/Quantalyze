@@ -32,6 +32,7 @@ import {
   HOLDING_MARK_WITHHELD_REASONS,
 } from "./holding-compare-adapter";
 import { HoldingsUpdatedAtError } from "@/lib/holdings-account-day";
+import { compute } from "@/lib/factsheet/compute";
 import { CRYPTO_EXCHANGES, isCryptoExchange } from "@/lib/closed-sets";
 
 // ---------------------------------------------------------------------------
@@ -350,7 +351,9 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
   it("a multi-day gap is not a return: only the two adjacent-day moves feed vol and Sharpe", () => {
     // Hand-typed. Daily returns exist only Jan 1->2 (+10%) and Jan 2->3 (-10%);
     // Jan 3 -> Jan 8 spans four missing days and is NOT a return.
-    //   vol    = sd{+0.10, -0.10} * sqrt(365) = 0.1 * sqrt(365)
+    //   vol    = sample sd{+0.10, -0.10} * sqrt(365) = 0.1 * sqrt(2) * sqrt(365)
+    //            (236-05, F-5 ddof 1: the sum of squares 2 x 0.1^2 divided by n - 1 = 1; it was
+    //            0.1 * sqrt(365) = 1.9104973 on the population sd)
     //   sharpe = mean 0 / sd -> 0
     //   cumulative = 108.9 / 100 - 1 = 0.089 (price levels, no adjacency needed)
     //   max drawdown = (99 - 110) / 110 = -0.1
@@ -364,7 +367,8 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
       ],
       365,
     );
-    expect(a.vol!).toBeCloseTo(1.9104973, 6);
+    expect(a.vol!).toBeCloseTo(0.1 * Math.sqrt(2) * Math.sqrt(365), 12);
+    expect(a.vol!).toBeCloseTo(2.7018512, 6);
     expect(a.sharpe!).toBeCloseTo(0, 6);
     expect(a.cumulative_return!).toBeCloseTo(0.089, 12);
     expect(a.max_drawdown!).toBeCloseTo(-0.1, 12);
@@ -817,8 +821,10 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
       const item = await fetchHoldingCompareItem({
         allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase(rows),
       });
-      // Returns alternate +10% and 100/110 - 1 = -1/11; population sd = (0.1 + 1/11) / 2.
-      const sd = (0.1 + 1 / 11) / 2;
+      // Returns alternate +10% and 100/110 - 1 = -1/11: 30 returns, 15 of each, so every
+      // deviation is exactly (0.1 + 1/11) / 2 and the SAMPLE sd (n - 1, F-5; 236-05 moved this
+      // from the population sd) is that x sqrt(30 / 29).
+      const sd = ((0.1 + 1 / 11) / 2) * Math.sqrt(30 / 29);
       expect(item!.analytics!.vol).toBeCloseTo(sd * Math.sqrt(365), 10);
     });
   });
@@ -1394,5 +1400,46 @@ describe("signed derivative rule: invariants", () => {
     for (const s of ["BTC-PERPETUAL", "BTC-27MAR26", "1000PEPEUSDT"]) {
       expect(isOptionSymbol(s)).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 236 plan 05 (FIG-01, F-5 "ddof 1 everywhere"): a holding's vol and Sharpe on /compare are
+// the SAMPLE-sd figures the factsheet's compute() prints for the same series, not a second
+// convention beside it. THE ORACLE IS NOT THE IMPLEMENTATION: the closed forms are written out
+// from the sum of squares (every deviation is exactly +-0.015), nothing is read from the adapter.
+// ---------------------------------------------------------------------------
+describe("F-5: the compare adapter's vol and Sharpe are the sample-sd figures", () => {
+  // [+0.02, -0.01] x 20: n = 40 returns, mean 0.005, every deviation exactly +-0.015.
+  const rets = Array.from({ length: 40 }, (_, i) => (i % 2 === 0 ? 0.02 : -0.01));
+  const sampleSd = 0.015 * Math.sqrt(40 / 39);
+  const wantVol = sampleSd * Math.sqrt(365);
+  const wantSharpe = (0.005 / sampleSd) * Math.sqrt(365);
+
+  it("analyzeSignedReturns: vol = 0.015 x sqrt(40/39) x sqrt(365), Sharpe = 0.005 / (0.015 x sqrt(40/39)) x sqrt(365)", () => {
+    const m = analyzeSignedReturns(rets, 365);
+    expect(m.vol).toBeCloseTo(wantVol, 12);
+    expect(m.sharpe).toBeCloseTo(wantSharpe, 12);
+  });
+
+  it("analyzePriceSeries on the compounded price path gives the same vol and Sharpe", () => {
+    let price = 100;
+    const points = [{ asof: "2026-01-01", price }];
+    rets.forEach((r, i) => {
+      price *= 1 + r;
+      const d = new Date(Date.UTC(2026, 0, 2 + i)).toISOString().slice(0, 10);
+      points.push({ asof: d, price });
+    });
+    const m = analyzePriceSeries(points, 365);
+    expect(m.vol).toBeCloseTo(wantVol, 10);
+    expect(m.sharpe).toBeCloseTo(wantSharpe, 10);
+  });
+
+  it("matches compute() on the same series at 365 (one convention across surfaces)", () => {
+    const dates = rets.map((_, i) => new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10));
+    const headline = compute(rets, dates, 0, 365);
+    const m = analyzeSignedReturns(rets, 365);
+    expect(m.vol).toBeCloseTo(headline.ann_vol, 12);
+    expect(m.sharpe).toBeCloseTo(headline.sharpe, 12);
   });
 });
