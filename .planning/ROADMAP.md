@@ -309,32 +309,6 @@ Plans:
 
 **PR-3 merged 2026-11-26** (#1368, v0.133.92.0): migration B `20261126140500` applied to TEST and PROD, and the PROD index and `reconnect_allocator_api_key` body read back equal to the migration (`225-19-SUMMARY.md`). Phase 225 stays open: plan 18's post-deploy positive control is a founder item, and plan 225-21 (the poll-path refusal) is planned, not executed.
 
-**No MT5 key without a server, founder ruling 2026-11-25:** "Delete keys without Server, dont accept keys without Server". This replaces the CONTEXT Q6 agent decision for keys with no server. It applies to MT5 only: connect refuses an MT5 key with an empty server, and existing MT5 keys without a server are deleted through the product path, with the coordinator confirming the scope first. Recorded in `225-CONTEXT.md` Q6.
-
-**Plan 13 founder ruling, 2026-11-25:** "Owner-only read (Recommended)": SELECT on `api_keys.venue_server` is granted to `authenticated`, owner-only through the existing RLS, like `venue_account_id`. Recorded in `225-CONTEXT.md` Q6.
-
-**Gap closure for CR-01 (founder ruling 2026-11-25, `225-CONTEXT.md` Q6): plans 13-18 and 20 ship as PR-2b-1, PR-2b-2, PR-2c0 and PR-2c from origin/main before PR-3; plan 19 re-bases plan 10. Gap waves below are numbered within the gap set.**
-**Plan 20 added 2026-11-25:** plan 18's merge gate step 1 found 0 relogin server verdicts on PROD, and PR-2c review WR-01 found that the three MT5 poll reads prove only the login. Plan 20 (PR-2c0) logs a server verdict at those reads and measures it on PROD before PR-2c merges. Plan 18 now waits on that measurement. Plan 19 waits on the poll-path refusal being shipped, or booked with an owner by plan 20 Task 3.
-**Gap wave 1**
-- [ ] 225-13-PLAN.md — owners can read `venue_server` (column GRANT), after a founder decision checkpoint (PR-2b-1)
-- [ ] 225-14-PLAN.md — the Python twin: a server-aware `account_identity_tokens`, the derive reads `venue_server`, and the named `account_server_ambiguous` refusal (PR-2b-2)
-
-**Gap wave 2** *(blocked on gap wave 1 completion)*
-- [ ] 225-15-PLAN.md — the TS twin: a server-aware `accountIdentityTokens` and every reader and key-card state carries `venue_server` (PR-2b-2)
-- [ ] 225-20-PLAN.md — the MT5 poll reads log whether the session is on the requested broker server, measured on PROD before PR-2c merges, and the poll-path refusal gets an owner (PR-2c0)
-
-**Gap wave 3** *(blocked on gap wave 2 completion)*
-- [ ] 225-16-PLAN.md — the SQL twin: `commit_scenario_batch` identity edges become server-aware, with a gate arm per rule clause (PR-2b-2)
-- [ ] 225-18-PLAN.md — the MT5 connect check proves the broker server, not only the login, with founder measurements before and after deploy, after plan 20's measurement (PR-2c)
-
-**Gap wave 4** *(blocked on gap wave 3 completion)*
-- [ ] 225-17-PLAN.md — re-point the existing fingerprint twins, record the drift row, and a read-only PROD check before PR-2b-2 merges (PR-2b-2)
-
-**Gap wave 5** *(blocked on gap wave 4 completion)*
-- [ ] 225-19-PLAN.md — re-base plan 10: rename migration B to a current timestamp, re-measure the census, last read-only PROD check (PR-3)
-
-**Poll-path server refusal booked 2026-11-26 (plan 20 Task 3 PASS):** the enforcing server bracket at the three MT5 poll reads (review WR-01 of PR-2c) is owned by gap plan 225-21 (`225-21-PLAN.md`, gap wave 3), planned 2026-11-26. Record: `225-20-SUMMARY.md`, section `Poll-path server enforcement: owner`.
-
 ### Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks
 
 **Goal:** The MT5 derive soak (`analytics-service/scripts/mt5_soak.py`) becomes an oracle that cannot agree with the derive by construction (PITFALLS Pitfall 12). It judges a BTC-unit account on floors in its own unit. It rejects NaN and implausible timed-day returns, not only infinity. It checks each deal's day against its own per-day walk that imports no production helper. It is wave 0, so 229's `nav_twr.py` edits are judged by a soak built independently of them. One file; no migration; no published number moves.
