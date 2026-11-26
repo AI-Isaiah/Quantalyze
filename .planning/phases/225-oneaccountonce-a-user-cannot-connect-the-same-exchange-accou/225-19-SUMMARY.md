@@ -35,9 +35,9 @@ status: partial
 actuals:
   tokens: 25000
   tasks: 2
-  commits: 31
+  commits: 41
 plan_head_before: d14f82d71c766f4660bc0c797fb823974f3d782d
-plan_head_after: d0817adcf0418407a04ecb7902e846001089c092
+plan_head_after: 9bef055b0cf0185c7a15eeff9484c7d5424f0bb7
 ---
 
 # Phase 225 Plan 19: PR-3 re-base (migration B) Summary
@@ -172,12 +172,61 @@ None.
 
 None. B is SQL only and adds no endpoint or auth path.
 
+## Round 2 re-base (2026-11-26)
+
+origin/main moved again (`19ee154a6`): #1363 `20261126130000_strategy_analytics_computed_at_nullable.sql` and #1358 `20261126140000_mt5_terminal_lease.sql` (Phase 230 MT5NIGHTLY), which moved the census too. `commits: 41` in the frontmatter is re-measured by `git rev-list --count d14f82d71..HEAD` at the code head `9bef055b0` and counts the main commits the two merges brought in.
+
+**New name: `20261126140500_api_keys_venue_server_index.sql`** and `down/20261126140500-rollback.sql`. Main's tip `20261126140000` is a future-dated name, so no honest current UTC sorted after it; the name only has to sort after every migration on main and the PROD tip (never the allowlist). `grep -a -rn 20261126102346 --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.planning .` prints nothing. A second dated line is appended to `225-10-SUMMARY.md`. `npm run schema:functions:check`: `SQL function snapshot is current (145 functions).`
+
+**Merge `1f6842bba`; conflicts** (all four census files, resolved by taking main's side then re-measuring):
+`scripts/mutation-floors.mjs`, `src/__tests__/gate-family-meta.test.ts`, `src/__tests__/mutation-annotation-parser.test.ts`, `src/__tests__/mutation-runner-floors.test.ts`. The rename is commit `9bef055b0`. The gate files, migration and snapshot merged without conflict.
+
+**Census, main vs measured.** `node scripts/mutation-runner/run.mjs --parse-only` printed `coverage: files 95/122`, `arms: 0/1050/0   (executed/annotated/waived)`, `No static defects. Every prose marker has a twin and every needle still matches.`
+
+| Value | main | measured |
+|---|---|---|
+| `ARMS_FLOOR` (and the gate-family-meta registry entry) | 1041 | 1050 |
+| `FILES_FLOOR` | 95 | 95 |
+| `WAIVED_CEILING` | 0 | 0 |
+| `armsSeen` | 1041 | 1050 |
+| `stepsSeen` | 1195 | 1199 |
+| `needles.length` | 1195 | 1199 |
+| `totalAnchored` | 1041 | 1050 |
+| synthetic FULL log (arms, biting, lane-invocations, mean line); baseline/restore legs stay 95 | 1041 | 1050 |
+| offset literals | 1040 / 1042 | 1049 / 1051 |
+| per-file row, uniq gate | sections 13 / judged 15 / annotated 15 / biting 15 | 18 / 20 / 20 / 20 |
+| per-file row, account-identity gate | 41 / 41 / 41 / 41 | 45 / 45 / 45 / 45 |
+
+No FULL local lane run; CI `sql-mutation` FULL on the PR compares the floor with a real biting count.
+
+**Narrowed gate runs on the merged tree** (both exit 2, "No defects in the narrowed scope.", executed = annotated = biting = lane-invocations, waived 0):
+
+```
+test_api_keys_venue_identity_uniq: coverage files 95/122; arms: 20/20/0; biting: 20; lane-invocations: 20; sections 18 / judged 20 / annotated 20 / waived 0 / biting 20
+test_api_keys_account_identity:    coverage files 95/122; arms: 45/45/0; biting: 45; lane-invocations: 45; sections 45 / judged 45 / annotated 45 / waived 0 / biting 45
+```
+
+**Other checks:**
+
+```
+lint-migration-data-dependence: corpus 342 migration(s), 424 anonymous block(s); 83 refusal(s), 83 allowlisted, 0 NEW.
+lint-sql-gates: scanned 122 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).
+app-guc: findings 0
+npx tsc --noEmit -p .  -> exit 0, no output
+vitest (5 census files + critical-regressions + drift-check-scripts + 3 fingerprint-*-parity): Test Files  10 passed (10), Tests  1547 passed (1547)
+mypy --strict (CI command, from analytics-service/): Success: no issues found in 145 source files
+```
+
+**Ack still correct.** `node scripts/sql-body-normalize.mjs --extract-fn supabase/schema/baseline.sql reconnect_allocator_api_key > <scratchpad>/p225/<file>` then `--diff-bodies supabase/schema/functions/reconnect_allocator_api_key.sql <file>` prints `DRIFT reconnect_allocator_api_key 1 f2e69a2d7d582c25af13b2fe97fc333b999610bb9f5ef7b6dacc4408ee693340 8ebf230179b99d1f49cc8ed959ad2f7386aad92b592722c4825bc7aa1bd43c74 6`. The `live` hash equals B's pragma `8ebf230179b99d1f49cc8ed959ad2f7386aad92b592722c4825bc7aa1bd43c74`.
+
+**NOT RUN, loud:** pytest on the analytics-service tests touched by the merge (`test_mt5_xlease.py`, `test_job_worker.py`, `test_process_key.py` and eleven others). The local Python lacks `pandas` (`ModuleNotFoundError` in `tests/conftest.py`), and installing packages is out of scope for this plan. The merge had no analytics-service conflicts: those files are main's own, covered by its CI. mypy strict passed.
+
 ## Task 3: PENDING (blocking-human, run by the orchestrator)
 
 Not attempted by this executor. The orchestrator runs the read-only PROD pass per the plan's Task 3 instructions (marker query first, one query per call, counts and verdicts only), and records each step's result here:
 
 1. Marker names PRODUCTION: _pending_
-2. PROD ledger tip is earlier than `20261126102346`: _pending_
+2. PROD ledger tip is earlier than `20261126140500` (B's name after round 2): _pending_
 3. Gate A5, both censuses: _pending_
 4. Multi-server groups = 0; ambiguous keys = 0: _pending_
 5. PR-2b-2 bodies live (`login_servers` in `commit_scenario_batch`; venue_server grant authenticated true, anon false); analytics and Vercel deploys at or after PR-2b-2: _pending_
