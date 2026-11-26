@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.133.95.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE plan 21: an MT5 poll read refuses a terminal session on another broker server
+
+### Fixed
+- **The three MT5 poll reads now prove the broker server, not only the login** (Phase 225 gap plan 225-21, review WR-01 of PR-2c, CONTEXT Q6 items 1 and 2). Before this, each read logged in, checked only that `account_info()` reported the requested login, and then stamped what it read on the key. `login()` returning True does not say which server the terminal ended up on (MetaTrader5 Python docs, `mt5login_py`: the server is optional and "the last used server is applied automatically"). So a poll for login L at broker A could read login L at broker B and store B's numbers as A's. `assert_expected_server` (shipped with PR-2c, #1344) now runs after the login check at four places:
+  - `read_mt5_deal_ledger` PRE bracket in `services/mt5_read.py`, before the deal fetch.
+  - `read_mt5_deal_ledger` POST bracket, before `note_mt5_history_settled`, so a refusal never marks the key's history settled.
+  - The sync balance read, `_fetch_mt5_account_balance` in `services/job_worker.py`.
+  - The allocator holdings read, `_fetch_mt5_account_rows` in `services/allocator_positions.py`.
+- A session that names no server (absent, blank or non-string `server`) is refused too, as at connect. Plan 20 measured 28 of 28 PROD poll verdicts True and 0 not captured.
+- **What a refusal does is each site's existing login-mismatch path, unchanged.** `Mt5ServerMismatchError` is a subclass of `Mt5AccountMismatchError`:
+  - Derive: no persist, no failed-analytics stamp, a bounded terminal restart, FAILED transient.
+  - Balance: the sync completes with no balance snapshot, so the stored balance is kept.
+  - Holdings: no row, a restart, and `sync_status='error'` with the fixed "MT5 terminal unreachable" note.
+- Plan 20's verdict line (`session_server_matches_requested=`) stays and is written before the refusal, so a refused PRE poll is still tied to its key.
+
+### Changed
+- **A server refusal is logged at ERROR with its key** (review round 1, silent-failure MEDIUM-1 and MEDIUM-2). In the derive and holdings arms the line reads "mt5 server bracket refused the terminal session (Mt5ServerMismatchError, key=<api key id>)" instead of the login-mismatch WARNING. A broker that spelled its server differently would otherwise stop a key's data with only an unattributed WARNING. The balance read's "continuing without a balance snapshot" WARNING now also names the key (MEDIUM-3). No server value or login appears in any line; the site tests assert it.
+- Docstrings and comments that called plan 20's verdict "LOG-ONLY" now describe the bracket after it. A test-only helper used only by the replaced plan 20 pin is removed.
+
+### Tests
+- One test per site, through the real job entry point: a session on another server, and one naming no server, is refused, and nothing is stamped or persisted. Each was shown RED with its own bracket removed and GREEN after a byte restore. A parity test pins that the verdict line returns True exactly when `assert_expected_server` passes. A probe raising past every `except` arm at the four calls confirmed no test passes through the refusal for the wrong reason.
+- The shared MT5 test fakes now report the server `login()` was given, so the existing clock, derive and holdings tests exercise the real bracket. The plan 20 log-only pins are inverted to expect the refusal.
+
+### Notes
+- No migration, schema or package change.
+- **Plan 225-21 Task 3 is post-deploy.** The orchestrator reads one daily MT5 poll cycle on Railway after this deploys. The pass rule: verdict lines > 0, False 0, not captured 0, refusals 0, every live MT5 key True. A refusal for the same key on two consecutive cycles means revert this PR. Plan 20 saw no balance-site lines, so that site is unmeasured on PROD until then.
+- Phase 225 stays open: this plan's Task 3 and plan 18's founder positive control.
+- Held findings SF-M1 and SF-M4 from the PR-2c review (validation path, not touched here) still need an owner.
+- No `TODOS.md` entry is closed.
+
 ## [0.133.94.0] - 2026-11-26 — RESETSESSION: a signed-out password reset gets its session and saves the new password
 
 A signed-out user who requested a password reset could not set a new password. Submitting the form on `/reset-password` showed "Open the password-reset link from your email to continue.", the password stayed unchanged, and signing in with the new one failed with "Invalid login credentials". The founder hit it twice in PROD on 2026-11-26 (15:01Z and 15:03Z). Each time the PROD auth logs show the PKCE exchange succeeding server-side and no `PUT /auth/v1/user` afterwards.
