@@ -2618,6 +2618,10 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // CONDITIONALS for the same reason that entry's preselect pair is: the arm
   // covers a lost race (where pressing again wins) and a genuinely different
   // key (where it cannot), and a flat promise would be false on one of them.
+  // ⛔ CORRECTED 2026-11-26 (finish setup in place): the paragraph above is kept
+  // as lineage. The credential form's "Finish setup on …" button now sends the
+  // same reuse POST, so the code has a second surface. The first bullet names
+  // each surface's own button, through `fixRequires`.
   //
   // ⛔ THIS IS THE COPY HALF ONLY. The reader still cannot get past this screen
   // without abandoning the key they chose. Phase 164.2.1 SESSIONID-FENCE owns
@@ -2629,11 +2633,13 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "This browser is still carrying the wizard session that opened an earlier draft, and it is that draft — not the key you picked — that our records clash with. Nothing was created by this attempt and none of your stored keys changed.",
     fix: [
       "Press “Continue with this key” once more. If the clash was a race with your own first press, we hand that draft back and carry on from where it stopped — nothing is created twice.",
+      "Press “Finish setup” once more. If the clash was a race with your own first press, we hand that draft back and carry on from where it stopped — nothing is created twice.",
       "If it is refused a second time, the open draft belongs to a different key of yours and this screen cannot reach it. Send the correlation id below through the contact form. Nothing was created by this attempt.",
     ],
-    // 2026-11-26 (finish setup in place): the credential form's reuse button is
-    // not “Continue with this key”, so that bullet is the saved-key summary's only.
-    fixRequires: [REQUIRES_PRESELECT_SURFACE, null],
+    // 2026-11-26 (finish setup in place): each surface's first bullet names its
+    // own reuse button: “Continue with this key” on the saved-key summary,
+    // “Finish setup” on the credential form.
+    fixRequires: [REQUIRES_PRESELECT_SURFACE, REQUIRES_CONNECT_SURFACE, null],
     docsHref: "/security#draft-resume",
     // ⛔ NEITHER MEMBER OF `RECOVERABLE_ACTIONS`, for the reason the entry above
     // states in full: the action the first bullet names IS the step's painted

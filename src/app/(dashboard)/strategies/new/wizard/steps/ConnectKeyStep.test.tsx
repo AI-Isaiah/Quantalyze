@@ -2422,6 +2422,37 @@ describe("[154.1 / WIZCONT-02] ConnectKeyStep — an already-connected account r
     errSpy.mockRestore();
   });
 
+  // Review round 2: a lost race on the in-place reuse names the button that is there.
+  it("DRAFT_SESSION_COLLISION on the in-place Finish setup says to press Finish setup again, never Continue with this key", async () => {
+    const STORED = "55555555-5555-4555-8555-555555555555";
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            code: "KEY_ORPHANED",
+            error: "This key is already stored, but no strategy uses it.",
+            holder: { kind: "key", name: "Test", href: "/strategies", api_key_id: STORED },
+          },
+          409,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ code: "DRAFT_SESSION_COLLISION", error: "x" }, 409));
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const finish = await screen.findByTestId("wizard-orphan-finish-setup");
+    await act(async () => {
+      fireEvent.click(finish);
+    });
+
+    const envelope = await screen.findByTestId("error-envelope");
+    await vi.waitFor(() => expect(envelope).toHaveAttribute("data-error-code", "DRAFT_SESSION_COLLISION"));
+    expect(envelope).toHaveTextContent("Press “Finish setup” once more.");
+    expect(envelope).not.toHaveTextContent("Continue with this key");
+    expect(screen.getByTestId("wizard-orphan-finish-setup")).toBeEnabled();
+  });
+
   // Review round 1: the reuse refusal on the credential form names no control
   // that is not there, and a key that is gone takes its button with it.
   it("a stored key gone before the in-place Finish setup: no preselect-only bullet, and the button is withdrawn", async () => {
