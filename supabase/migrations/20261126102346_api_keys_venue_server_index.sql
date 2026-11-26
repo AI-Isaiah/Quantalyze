@@ -63,7 +63,7 @@
 -- reports that SAME hash for PROD. If it reports another, fold the difference into this
 -- migration and re-derive; never edit a pragma to match a gate log.
 --
--- prod-body-ack: d5ef374c79d00b10c303bdbde81030602b35da67798dc2b1eb63a624fb593159
+-- prod-body-ack: 8ebf230179b99d1f49cc8ed959ad2f7386aad92b592722c4825bc7aa1bd43c74
 --
 -- Rollback: supabase/migrations/down/20261126102346-rollback.sql (manual, never
 -- auto-applied; it restores the login-only index and the 20260925120000 body).
