@@ -6558,6 +6558,12 @@ BEGIN
         AND s.status IN ('published', 'pending_review', 'private')
         AND ak.is_active
         AND ak.disconnected_at IS NULL
+        -- Venue gate (20261126180000): only the venues run_poll_positions_job can serve. That
+        -- handler calls the ccxt-style fetch_positions on the client _make_exchange_client
+        -- builds, which is a ccxt exchange only for EXCHANGE_CLASSES in
+        -- analytics-service/services/exchange.py (mt5 and sfox get non-ccxt clients), and
+        -- writes position_snapshots, whose exchange CHECK admits no deribit row.
+        AND ak.exchange IN ('binance', 'bybit', 'okx')
         AND (
           EXISTS (
             SELECT 1 FROM compute_jobs cj
@@ -6604,7 +6610,7 @@ $$;
 ALTER FUNCTION "public"."enqueue_poll_positions_for_all_strategies"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."enqueue_poll_positions_for_all_strategies"() IS 'Daily fanout: enqueues a poll_positions job per qualifying strategy. Cohort (phase 227 HEAL-05): published, pending_review or private, through an active and connected key, with a done sync_trades job OR a strategy_sync_cursors row advanced in the last 30 days. Idempotent via enqueue_compute_job partial unique index. Returns count of newly-enqueued jobs. Called by worker daily loop under advisory lock to prevent multi-replica duplication. See migration 033 and 20261124120500.';
+COMMENT ON FUNCTION "public"."enqueue_poll_positions_for_all_strategies"() IS 'Daily fanout: enqueues a poll_positions job per qualifying strategy. Cohort (phase 227 HEAL-05): published, pending_review or private, through an active and connected key, with a done sync_trades job OR a strategy_sync_cursors row advanced in the last 30 days, on a venue the poll serves end to end (binance, bybit, okx; never deribit, mt5 or sfox). Idempotent via enqueue_compute_job partial unique index. Returns count of newly-enqueued jobs. Called by worker daily loop under advisory lock to prevent multi-replica duplication. See migration 033, 20261124120500 and 20261126180000.';
 
 
 
