@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.133.98.1] - 2026-11-26 — records: Phase 225 plan 21, Phase 228 KEYANSWERS and Phase 235 HOLDINGSTRUTH planning records; all three stay human_needed
+
+### Added
+- **Phase 225 ONEACCOUNTONCE plan 21 records** (code shipped in #1374, v0.133.95.0): `225-21-PLAN.md`, `225-21-SUMMARY.md` (partial: Task 3, the post-deploy MT5 poll-cycle read, is still open), `225-REVIEW-PR4.md` and `225-VERIFICATION.md` (`human_needed`). ROADMAP gets the 225-21 plan row (unticked) and Progress 19/21.
+- **Phase 228 KEYANSWERS phase directory** (code shipped in #1377, v0.133.98.0): context, research, UI spec, pattern map, validation, four plans and summaries, review, security audit and verification (`human_needed`). ROADMAP gets the founder's CONN-02 ruling line, the four plan rows (ticked) and a Progress row.
+- **Phase 235 HOLDINGSTRUTH phase directory** (code shipped in #1376, v0.133.97.0): context, discussion log, research, UI spec, pattern map, validation, six plans and summaries, review and its disposition, security audit, UAT and verification (`human_needed`). ROADMAP gets the six plan rows (ticked) and a Progress row.
+- `.planning/debug/reset-password-no-session.md`, the debug note behind the signed-out password reset fix that landed in #1373 and #1375.
+
+### Changed
+- `REQUIREMENTS.md`: HOLD-01, HOLD-02, HOLD-04 and HOLD-05 are ticked and their traceability rows read Complete.
+- Phase 235: the round-1 WR-01 fix changed when the book-level shared-account line prints (it also prints when any group is named only by the undated line). `235-UI-SPEC.md` (P4 and the zero-one-many coverage row) and row 5 of `235-VERIFICATION.md` still described the pre-fix rule. They now carry dated corrections, and the original text is kept as lineage. `235-REVIEW.md` frontmatter now carries round 2's counts: 0 warnings, 2 info, status clean.
+- Stale "225-21 not written" text: the 225 ROADMAP prose lines, the Progress row and the owner section of `225-20-SUMMARY.md` now say plan 21 shipped in #1374 with its Task 3 read open.
+- STATE: Deferred Verification gets rows for 225 (plan 21 Task 3 and the founder's plan 18 control), 228 (the live MT5 changed-password round trip and the 320px wizard check) and 235 (the 390px unpriced-check note UAT). `stopped_at`, Current Position and the `progress:` plan counts are updated (161 plans, 158 complete). `phase complete` was not run for any of the three.
+- Scratchpad paths in three 235 summaries are replaced with a `<scratchpad>` placeholder, so no home path is tracked.
+
+### Notes
+- No `TODOS.md` entry is closed here. The ship PRs #1374, #1376 and #1377 handled their own entries.
+- CONN-02 and CONN-04 in `REQUIREMENTS.md` are left unticked. This PR was scoped to the HOLD ticks, so ticking them is left as a follow-up.
+- No code or migration changes. Two commits: the records, then this release bump.
+
 ## [0.133.98.0] - 2026-11-26 — Phase 228 KEYANSWERS: a reconnect with a changed MT5 password and an orphaned key each get an answer that names the key
 
 Before this release, reconnecting an MT5 account after changing its investor password in the wizard said "already connected" and stored nothing. The key kept the old password and kept failing to sync, with no signal. A mistyped password got the same answer. An allocator-role owner who hit `KEY_ORPHANED` was not told which key to Disconnect. Phase 228 closes both (CONN-02, CONN-04).

@@ -90,11 +90,11 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Data integrity: one account counts once on read (HOLDINGSTRUTH)
 
-- [ ] **HOLD-01**: A Holdings row whose key is missing from the identity read fails loud. It never counts as an account of its own. (covers: 170.4-IDENTITY-READ-COMPLETENESS)
-- [ ] **HOLD-02**: Match scoring applies the native-unpriced marker per account, so for a multi-key account match AUM and unpriced days equal what Holdings reports. (covers: 170.4-MATCH-UNPRICED-PER-KEY)
+- [x] **HOLD-01**: A Holdings row whose key is missing from the identity read fails loud. It never counts as an account of its own. (covers: 170.4-IDENTITY-READ-COMPLETENESS)
+- [x] **HOLD-02**: Match scoring applies the native-unpriced marker per account, so for a multi-key account match AUM and unpriced days equal what Holdings reports. (covers: 170.4-MATCH-UNPRICED-PER-KEY)
 - [x] **HOLD-03**: The writer-basis gate compares per-day values as well as the calendar, and refuses a same-day re-derive pair whose P&L does not match. (covers: 167.1.2.2.1-WRITER-BASIS-VALUES) ⭐ NOTE 2026-11-24 (planning, recorded in 229-CONTEXT.md): the per-day comparison is a compose-side `returns_stamp` (each derive stores the per-day returns it wrote in its `key_inputs` row; the compose compares it per raw key before the stitch and refuses a differing pair as the blocking `key_inputs_mismatch`). `read_writer_basis` stays byte-unchanged, because editing it fires the open entry `167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY` and a post-stitch check reads the stitched series. Known limit: a correction confined to a day with no stored return that moves no other return leaves the pair content-consistent and is not refused; a row written before this change carries no stamp and is counted, not refused.
-- [ ] **HOLD-04**: When the dashboard's unpriced-marker read fails, the page shows a note and a Sentry event fires. Stale rows are never shown silently. (covers: 170.4-DASHBOARD-MARKER-READ-SILENT)
-- [ ] **HOLD-05**: Every failing key of a shared account is named in the missing-data message, even when another key with the same cause already prints a line. (covers: 198-SHARED-ACCOUNT-FALLBACK-UNNAMED)
+- [x] **HOLD-04**: When the dashboard's unpriced-marker read fails, the page shows a note and a Sentry event fires. Stale rows are never shown silently. (covers: 170.4-DASHBOARD-MARKER-READ-SILENT)
+- [x] **HOLD-05**: Every failing key of a shared account is named in the missing-data message, even when another key with the same cause already prints a line. (covers: 198-SHARED-ACCOUNT-FALLBACK-UNNAMED)
 
 ### Data integrity: no-capital keys (NOCAPITAL)
 
@@ -325,11 +325,11 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | DBOOK-02 | Phase 233 | Complete |
 | FRESH-01 | Phase 233 | Complete |
 | FRESH-02 | Phase 233 | Complete |
-| HOLD-01 | Phase 235 | Pending |
-| HOLD-02 | Phase 235 | Pending |
+| HOLD-01 | Phase 235 | Complete |
+| HOLD-02 | Phase 235 | Complete |
 | HOLD-03 | Phase 229 | Complete |
-| HOLD-04 | Phase 235 | Pending |
-| HOLD-05 | Phase 235 | Pending |
+| HOLD-04 | Phase 235 | Complete |
+| HOLD-05 | Phase 235 | Complete |
 | NOCAP-01 | Phase 234 | Complete |
 | NOCAP-02 | Phase 234 | Complete |
 | NOCAP-03 | Phase 234 | Complete |

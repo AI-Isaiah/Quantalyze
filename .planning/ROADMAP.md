@@ -253,7 +253,7 @@ Plans:
 4. Two keys that share a login always carry a share link, so a shared login with no link cannot recur; a test drives the stamping in `account_identity.py` for that case. MT5 account identity includes the broker server, so the same login on two servers never collides, and the backfill uses no data-reading `DO` guard. (ONCE-04, CONN-03)
 5. An MT5 key whose sign-in keeps failing cannot claim an account's holder slot. A test drives a failing key beside a working one for the same account, and the working key holds the slot. (MT5D-08)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration (the CONN-03 identity change and backfill, any per-owner refusal constraint) passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 20 plans
+**Plans:** 21 plans
 
 Plans:
 **Wave 1**
@@ -293,6 +293,7 @@ Plans:
 **Gap wave 2** *(blocked on gap wave 1 completion)*
 - [x] 225-15-PLAN.md — the TS twin: a server-aware `accountIdentityTokens` and every reader and key-card state carries `venue_server` (PR-2b-2)
 - [x] 225-20-PLAN.md — the MT5 poll reads log whether the session is on the requested broker server, measured on PROD before PR-2c merges, and the poll-path refusal gets an owner (PR-2c0)
+- [ ] 225-21-PLAN.md — the three MT5 poll reads refuse a terminal session that is not on the requested broker server (review WR-01 of PR-2c), with one post-deploy poll cycle read
 
 **Gap wave 3** *(blocked on gap wave 2 completion)*
 - [x] 225-16-PLAN.md — the SQL twin: `commit_scenario_batch` identity edges become server-aware, with a gate arm per rule clause (PR-2b-2)
@@ -304,9 +305,9 @@ Plans:
 **Gap wave 5** *(blocked on gap wave 4 completion)*
 - [x] 225-19-PLAN.md — re-base plan 10: rename migration B to a current timestamp, re-measure the census, last read-only PROD check (PR-3)
 
-**Poll-path server refusal booked 2026-11-26 (plan 20 Task 3 PASS):** the enforcing server bracket at the three MT5 poll reads (review WR-01 of PR-2c) is owned by follow-up gap plan 225-21, not yet written. Record: `225-20-SUMMARY.md`, section `Poll-path server enforcement: owner`.
+**Poll-path server refusal booked 2026-11-26 (plan 20 Task 3 PASS):** the enforcing server bracket at the three MT5 poll reads (review WR-01 of PR-2c) is owned by gap plan 225-21 (`225-21-PLAN.md`, gap wave 3), which shipped in #1374 (v0.133.95.0); its Task 3 post-deploy poll-cycle read is still open (`225-21-SUMMARY.md`). Record: `225-20-SUMMARY.md`, section `Poll-path server enforcement: owner`.
 
-**PR-3 merged 2026-11-26** (#1368, v0.133.92.0): migration B `20261126140500` applied to TEST and PROD, and the PROD index and `reconnect_allocator_api_key` body read back equal to the migration (`225-19-SUMMARY.md`). Phase 225 stays open: plan 18's post-deploy positive control is a founder item, and plan 225-21 (the poll-path refusal) is not written yet.
+**PR-3 merged 2026-11-26** (#1368, v0.133.92.0): migration B `20261126140500` applied to TEST and PROD, and the PROD index and `reconnect_allocator_api_key` body read back equal to the migration (`225-19-SUMMARY.md`). Phase 225 stays open: plan 18's post-deploy positive control is a founder item, and plan 225-21 (the poll-path refusal) shipped in #1374 with its Task 3 post-deploy poll read still open.
 
 ### Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks
 
@@ -387,15 +388,22 @@ Plans:
 This phase is 225's sibling on seam S4, ordered right after it. 225 kept the identity members that must ship with its refusal; nine requirements would not fit one phase's criteria (see 225).
 **Requirements**: CONN-02, CONN-04
 **Depends on:** Phase 225 merged. The same file and seam are involved: `resolveByVenueIdentity` and `keyOrphanedResponse`. Founder ruling at plan time on CONN-02.
+**Founder ruling (2026-11-26, CONN-02):** "Validate and update in place". On the MT5 same-account arms, a reconnect with a new password is validated, and on success the stored key's secret is rotated through the rotate-secret seam and the answer names the key. The founder accepted the trade-off: the up-to-120 s validation returns on those arms, which reverses 212-03 SC5 for MT5, and a connect request now changes an existing key. Recorded in `228-CONTEXT.md`.
 **Success Criteria** (what must be TRUE):
 1. Reconnecting an MT5 account with a rotated password gets a named answer, and what the answer says matches what `api_keys` holds afterwards. A mistyped password is never reported as success. (CONN-02)
 2. An allocator-role owner who hits `KEY_ORPHANED` is told, by name, which key to Disconnect; a test drives the allocator and manager roles. (CONN-04)
 3. PROOF-01: each test goes RED on a neutered copy of the route arm it guards, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 4 plans
 **UI hint**: yes
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [ ] 228-01-PLAN.md — The rotate seam reports `secret_changed` (probe-then-compare, UTF-8 constant-time), and its seam call (`rotateKeySecret`) and owner-scoped persist (`persistRotatedMt5Secret`) are shared, with rotate-secret byte-identical (CONN-02)
+- [ ] 228-02-PLAN.md — The connect step renders the password outcome notice from `key_secret`, the F6 fallback strip stops claiming the credentials are connected, and KEY_ORPHANED's Disconnect bullet names the key (CONN-02, CONN-04)
+- [ ] 228-04-PLAN.md — The seam-budget census declares the create-with-key `mt5-rotate` branch and pins that it fits the browser deadline (CONN-02)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 228-03-PLAN.md — An MT5 reconnect whose fence picks the caller's own working holder on the exact server is validated and rotated in place and named; failures write nothing; KEY_ORPHANED is the same named answer for every role (CONN-02, CONN-04)
 
 ### Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently
 
@@ -604,11 +612,16 @@ Plans:
 3. When the dashboard's unpriced-marker read fails, the page shows a note and a Sentry event fires; stale rows are never shown silently. (HOLD-04)
 4. Every failing key of a shared account is named in the missing-data message, including a second key whose cause another key already printed. (HOLD-05)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 6 plans
 **UI hint**: yes
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [ ] 235-01-PLAN.md — HOLD-01: a key missing from the identity read fails loud (strict `keyAccountOf`, `strictAccountOf`) (wave 1)
+- [ ] 235-02-PLAN.md — HOLD-02: the matcher applies the native-unpriced marker per account, shared case table replayed in pytest and vitest (wave 1)
+- [ ] 235-03-PLAN.md — HOLD-04 server: a failed marker read sets `holdingsUnpricedCheckFailed` and fires a throttled Sentry event (wave 2)
+- [ ] 235-04-PLAN.md — HOLD-04 UI: the unpriced-check note on the Overview and the Holdings tab (wave 3)
+- [ ] 235-05-PLAN.md — HOLD-05 producer: `sharedAccountFailingGroups` and its payload field (wave 3)
+- [ ] 235-06-PLAN.md — HOLD-05 message: every failing shared-account key named, undated line, ship obligations (wave 4)
 
 ### Phase 236: FIGUREMATH — every engine annualizes one way, CVaR is historical, and moved figures are re-derived and announced
 
@@ -930,7 +943,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 222. ALERTTRUTH | 4/4 | Complete (shipped v0.133.81.0, #1352; migration `20261125212222` applied to TEST and PROD) | 2026-11-25 |
 | 223. FLOWKINDS | 5/5 | Complete (shipped v0.133.68.0, #1327) | 2026-11-24 |
-| 225. ONEACCOUNTONCE | 19/20 | In progress (PR-1 #1315, PR-2 #1324, PR-2b-1, PR-2b-2, PR-2c0, PR-2c #1344 and PR-3 #1368 shipped; plan 18 open on its founder control; 225-21 booked, not written) | - |
+| 225. ONEACCOUNTONCE | 19/21 | In progress (PR-1 #1315, PR-2 #1324, PR-2b-1, PR-2b-2, PR-2c0, PR-2c #1344, PR-3 #1368 and plan 21 #1374 shipped; plan 18 open on its founder control; plan 21 Task 3 post-deploy poll read open; verification human_needed) | - |
 | 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
 | 227. JOBLEDGER | 11/11 | Complete (shipped v0.133.67.0, #1325; HEAL-01 sweep registered on PROD) | 2026-11-24 |
 | 228. KEYANSWERS | 0/? | Not started | - |
