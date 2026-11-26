@@ -92,7 +92,7 @@ No other deviations.
 
 ## Gate runs (Task 1, narrowed on the lane)
 
-Both exit 2 by design. Full logs in `/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/e2682edf-79f0-48b9-81f4-e4203a41969a/scratchpad/p225/`.
+Both exit 2 by design. Full logs in `<scratchpad>/p225/`.
 
 ```
 test_api_keys_venue_identity_uniq exit=2
