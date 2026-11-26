@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.133.99.1] - 2026-11-26 — records: Phase 235 HOLDINGSTRUTH Nyquist validation is recorded; the phase is Nyquist-compliant
+
+### Changed
+- **`235-VALIDATION.md` moves from `draft` to `validated`, with `nyquist_compliant: true` and `wave_0_complete: true`.**
+  - The Per-Task Verification Map, which was empty, now lists every task of plans 01 to 06 against its requirement (HOLD-01, HOLD-02, HOLD-04, HOLD-05), its automated command and a green status measured on 2026-11-26.
+  - The map also carries the review WR-02 matcher persistence arm and the audit's new HOLD-04 multi-key row.
+  - Wave 0 is ticked.
+  - The sign-off is complete, and a `## Validation Audit 2026-11-26` block records 1 gap found, 1 resolved and 0 escalated.
+- **The audit's one gap was filled by test PR #1380 (v0.133.98.3).** Every `markerReadError` test failed the whole marker table, so no test pinned that one key's failed marker read in a multi-key book still raises the dashboard flag.
+
+### Notes
+- The 390px wrap of the unpriced-check note stays manual-only. It is a UI-SPEC layout backstop, not a requirement behavior, and jsdom cannot evidence it. It is the same item as the `human_needed` row in `235-VERIFICATION.md` and STATE's Deferred Verification. Phase 235's verification status is unchanged (`human_needed`), and `phase complete` was not run.
+- No `TODOS.md` entry is closed here. No code changes.
+
 ## [0.133.99.0] - 2026-11-26 — FINISHSETUP: "Finish setup" on an orphaned key continues the wizard, and closing the wizard shows a new draft
 
 Founder report on PROD: "when hitting on finish strategy, I end up on the strategies overview page, but should end up in the wizard with the right strategy and the last step of the draft." PROD edge logs give the sequence (key "Test", MT5):
