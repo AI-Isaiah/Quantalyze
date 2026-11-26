@@ -86,15 +86,36 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 |---|---|
 | Taken | 2026-11-26 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
-| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `45807605366`) |
-| sha256 | `b4f15e84abd1098508c77bbee919f71b7e5c718a6924bac106a1b46343f6a125` |
-| Shape | 72 tables, 154 policies, 147 function statements (145 distinct names), **0 data statements** |
+| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `45824919779`) |
+| sha256 | `0e8145515642a6e382c4c2facac20f9df081d76e82d3ee712b3cdf5d373b3485` |
+| Shape | 73 tables, 155 policies, 148 function statements (146 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
 `scripts/local-stack/REPLAY-SPIKE.md`: no DSN, no `\connect`, no `ALTER DATABASE`, no JWT,
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-11-26 — automated re-dump after Supabase Migrate run 45824919779
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `45824919779`, after that run's `apply` job applied merge `734e51f5` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20261126140500_api_keys_venue_server_index.sql`
+- `20261126150000_strategy_fills_reread_bound.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-11-26 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 72 → 73, policies 154 → 155, function statements 147 → 148, distinct function names 145 → 146 |
+| Data statements | 0 → 0 |
+| sha256 | `b4f15e84…` → `0e814551…` |
+| Currency gate | `baseline-currency: carried=343 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 148 — MATCH 145, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
 
 ### Regenerated 2026-11-26 — automated re-dump after Supabase Migrate run 45807605366
 

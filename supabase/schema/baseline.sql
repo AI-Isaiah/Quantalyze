@@ -9703,6 +9703,7 @@ DECLARE
   v_already_disc TIMESTAMPTZ;
   v_exchange     TEXT;
   v_venue_acct   TEXT;
+  v_venue_server TEXT;
   v_uid          UUID := auth.uid();
 BEGIN
   IF v_uid IS NULL THEN
@@ -9710,8 +9711,8 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  SELECT user_id, disconnected_at, exchange, venue_account_id
-    INTO v_owner, v_already_disc, v_exchange, v_venue_acct
+  SELECT user_id, disconnected_at, exchange, venue_account_id, venue_server
+    INTO v_owner, v_already_disc, v_exchange, v_venue_acct, v_venue_server
     FROM api_keys WHERE id = p_api_key_id;
 
   IF v_owner IS NULL OR v_owner <> v_uid THEN
@@ -9727,7 +9728,14 @@ BEGIN
   -- Phase 167.1.2 Pitfall 5: a LIVE sibling already holds this account. Refuse
   -- by name before the UPDATE reaches api_keys_user_exchange_venue_account_uniq.
   -- A concurrent race past this check still hits the index and raises the SAME
-  -- SQLSTATE, so one client mapping covers both.
+  -- SQLSTATE, so one client mapping covers both, for the null-null and equal-server
+  -- pairs only. A concurrent race on a null-vs-set pair is NOT caught by the index.
+  -- PROD on 2026-11-26 held 0 MT5 keys with no server (live or disconnected), and the
+  -- connect writers refuse an MT5 key with no server (PR-2b-2, founder ruling CONTEXT
+  -- Q6), so that pair cannot arise from current writers.
+  -- Phase 225 / CONN-03: "the same account" now means the same login AND, when both
+  -- keys carry a server, the same server. A key whose server is not captured yet
+  -- (NULL) reads as a wildcard and still counts as the same account.
   IF v_venue_acct IS NOT NULL AND EXISTS (
     SELECT 1
       FROM api_keys s
@@ -9736,6 +9744,7 @@ BEGIN
        AND s.venue_account_id = v_venue_acct
        AND s.disconnected_at IS NULL
        AND s.id <> p_api_key_id
+       AND (s.venue_server IS NULL OR v_venue_server IS NULL OR s.venue_server = v_venue_server)
   ) THEN
     RAISE EXCEPTION 'KEY_VENUE_ALREADY_CONNECTED'
       USING ERRCODE = 'unique_violation',
@@ -9759,7 +9768,7 @@ $$;
 ALTER FUNCTION "public"."reconnect_allocator_api_key"("p_api_key_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."reconnect_allocator_api_key"("p_api_key_id" "uuid") IS 'Migration 075: reverse of disconnect_allocator_api_key. Clears disconnected_at + resets sync_error and sync_status=idle so the next cron tick picks the key up fresh. Returns false if the key was not disconnected. Phase 167.1.2: refuses with SQLSTATE 23505 and message KEY_VENUE_ALREADY_CONNECTED, leaving the key disconnected, when a LIVE key of the same user, exchange and venue_account_id exists; a race that reaches api_keys_user_exchange_venue_account_uniq raises the same SQLSTATE. A successful reconnect also resets history_inclusion to NULL, so an include/exclude choice made for a past departure never applies to a later one.';
+COMMENT ON FUNCTION "public"."reconnect_allocator_api_key"("p_api_key_id" "uuid") IS 'Migration 075: reverse of disconnect_allocator_api_key. Clears disconnected_at + resets sync_error and sync_status=idle so the next cron tick picks the key up fresh. Returns false if the key was not disconnected. Phase 167.1.2: refuses with SQLSTATE 23505 and message KEY_VENUE_ALREADY_CONNECTED, leaving the key disconnected, when a LIVE key of the same user, exchange and venue_account_id exists; a race that reaches api_keys_user_exchange_venue_account_uniq raises the same SQLSTATE (null-null and equal-server pairs only; the index admits a null server beside a set one, so a race on that pair is not caught there). Phase 225: a live sibling on a DIFFERENT server no longer blocks it; a sibling whose server or this key''s server is NULL (not captured yet) is a wildcard and still blocks it. A successful reconnect also resets history_inclusion to NULL, so an include/exclude choice made for a past departure never applies to a later one.';
 
 
 
@@ -11327,6 +11336,117 @@ ALTER FUNCTION "public"."set_departed_key_history_inclusion"("p_api_key_id" "uui
 
 
 COMMENT ON FUNCTION "public"."set_departed_key_history_inclusion"("p_api_key_id" "uuid", "p_inclusion" "text") IS 'Phase 167.1.2 D-05. The founder: "do not delete the data when a key is disconnected. Leave it in an overview of disconnected accounts that can be toggled on or off, to be included or excluded. They would be included only till the day that the key was deleted." Writes api_keys.history_inclusion for the CALLER''s departed key (D-18: disconnected, is_active false, or whose last sync was revoked, sign_in_failed or error) and enqueues derive_allocator_equity for the caller (the job id is RAISEd as a NOTICE). It never queues a pending twin of a failed_retry recompose: when a failed_retry row is the caller''s only recompose row it is reused, put back to status pending with next_attempt_at = now() and claimed_at, claimed_by and claim_token NULL (the claim state the stall watchdog reset_stalled_compute_jobs writes; attempts untouched; last_error and error_kind left as the failed attempt wrote them, where the watchdog writes worker_stalled, and cleared by the next claim), so a later enqueue folds onto it, and its id is the one RAISEd; a pending or done_pending_children row is reused through the enqueue''s own dedup. Clients map by SQLSTATE: 42501 when unauthenticated or not the owner; 22023 HISTORY_INCLUSION_INVALID on a value other than include / exclude / NULL (NULL resets to the default rule); 55000 KEY_NOT_DEPARTED on a WORKING key (D-18: active, not disconnected, and a last sync that is NULL or not revoked, sign_in_failed or error); 55006 HISTORY_RECOMPOSE_IN_PROGRESS when a recompose for the caller is already RUNNING, because it may have read the old value and no second job can queue behind it (retry once it ends; nothing is written; DETAIL says how long it has been running, HINT says a running worker reclaims one that has run for more than 10 minutes). 55006 HISTORY_RECOMPOSE_REQUEUED answers a recompose another request queued or started while the reused row was being put back to pending (retry now: the retry folds into it or reports it running). Within 55006 clients branch on MESSAGE_TEXT: IN_PROGRESS = wait for the running recompose to end; REQUEUED and RACED = retry now. The job is judged twice: before the write, and again on the job the reuse or the enqueue returns, which is locked FOR UPDATE and passes only while pending or done_pending_children. A job enqueued and claimed by another transaction in between is refused as running; a job that also FINISHED in between read the old value, so the reuse or the enqueue runs once more and the fresh job reads the new one; if that one has finished too, 55006 HISTORY_RECOMPOSE_RACED (retry now). The same 55006 HISTORY_RECOMPOSE_RACED, with a different DETAIL, replaces the serialization_failure (40001) enqueue_compute_job raises when it loses the insert race to a job that has already finished, so no raw 40001 reaches the client. A NULL job id raises XX000 HISTORY_RECOMPOSE_NOT_QUEUED, never success. Every pending, failed_retry, running or done_pending_children recompose row of the caller is locked until commit, so no worker can claim one before the new value is visible. Those two-backend orderings are reasoned from the claim functions (FOR UPDATE SKIP LOCKED), not measured. Returns true iff the stored value changed; the recompose is requested either way. EXECUTE: authenticated only.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."set_strategy_fills_reread_bound"("p_strategy_id" "uuid", "p_api_key_id" "uuid", "p_job_id" "uuid", "p_claim_token" "uuid" DEFAULT NULL::"uuid", "p_unread_from" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_covers_from" timestamp with time zone DEFAULT NULL::timestamp with time zone) RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  v_found         BOOLEAN;
+  v_existing_key  UUID;
+  v_existing_from TIMESTAMPTZ;
+  v_covers        BOOLEAN;
+BEGIN
+  IF p_strategy_id IS NULL OR p_api_key_id IS NULL THEN
+    RAISE EXCEPTION 'set_strategy_fills_reread_bound: p_strategy_id and p_api_key_id are required'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Ownership fence, the same shape the per key cursor RPC uses. Only active when a
+  -- token is supplied; a NULL token is the WORKER_FENCE_V2 kill-switch arm.
+  IF p_claim_token IS NOT NULL THEN
+    IF p_job_id IS NULL THEN
+      RAISE EXCEPTION 'set_strategy_fills_reread_bound: p_job_id is required when p_claim_token is supplied'
+        USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1
+        FROM public.compute_jobs
+       WHERE id = p_job_id
+         AND status = 'running'
+         AND claim_token = p_claim_token
+    ) THEN
+      -- Orphan: the watchdog reclaimed this job. Drop the write rather than race
+      -- the owner; the caller reads FALSE as "not mine" and writes nothing.
+      RETURN FALSE;
+    END IF;
+  END IF;
+
+  SELECT b.api_key_id, b.unread_from
+    INTO v_existing_key, v_existing_from
+    FROM public.strategy_fills_reread_bounds b
+   WHERE b.strategy_id = p_strategy_id
+     FOR UPDATE;
+  v_found := FOUND;
+
+  IF NOT v_found THEN
+    IF p_unread_from IS NOT NULL THEN
+      -- R1. The conflict arm is the race the one in flight index and the fence make
+      -- unreachable; LEAST is its safe direction (the bound only moves earlier).
+      INSERT INTO public.strategy_fills_reread_bounds (strategy_id, api_key_id, unread_from, updated_at)
+        VALUES (p_strategy_id, p_api_key_id, p_unread_from, now())
+      ON CONFLICT (strategy_id) DO UPDATE
+        SET api_key_id  = EXCLUDED.api_key_id,
+            unread_from = CASE
+              WHEN public.strategy_fills_reread_bounds.api_key_id = EXCLUDED.api_key_id
+                THEN LEAST(public.strategy_fills_reread_bounds.unread_from, EXCLUDED.unread_from)
+              ELSE EXCLUDED.unread_from
+            END,
+            updated_at  = now();
+    END IF;
+    -- R0 falls through here: no row and nothing pending.
+    RETURN TRUE;
+  END IF;
+
+  IF v_existing_key IS DISTINCT FROM p_api_key_id THEN
+    IF p_unread_from IS NULL THEN
+      -- R3: the stored bound names another key's history and this run is complete.
+      DELETE FROM public.strategy_fills_reread_bounds
+       WHERE strategy_id = p_strategy_id AND api_key_id = v_existing_key;
+    ELSE
+      -- R2: re-point. The new key's instant replaces the old key's, never LEAST of them.
+      UPDATE public.strategy_fills_reread_bounds
+         SET api_key_id = p_api_key_id, unread_from = p_unread_from, updated_at = now()
+       WHERE strategy_id = p_strategy_id;
+    END IF;
+    RETURN TRUE;
+  END IF;
+
+  v_covers := p_covers_from IS NOT NULL AND p_covers_from <= v_existing_from;
+
+  IF p_unread_from IS NOT NULL THEN
+    IF v_covers THEN
+      -- R4: the run read below the stored bound, so its own instant is the new bound.
+      UPDATE public.strategy_fills_reread_bounds
+         SET unread_from = p_unread_from, updated_at = now()
+       WHERE strategy_id = p_strategy_id;
+    ELSE
+      -- R5: the run did not reach the stored bound; the bound only moves earlier.
+      UPDATE public.strategy_fills_reread_bounds
+         SET unread_from = LEAST(v_existing_from, p_unread_from), updated_at = now()
+       WHERE strategy_id = p_strategy_id;
+    END IF;
+  ELSIF v_covers THEN
+    -- R6: a complete run read through the stored bound.
+    DELETE FROM public.strategy_fills_reread_bounds
+     WHERE strategy_id = p_strategy_id AND api_key_id = p_api_key_id;
+  ELSE
+    -- R7: a complete run that did not reach the bound proves nothing about it.
+    NULL;
+  END IF;
+
+  RETURN TRUE;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."set_strategy_fills_reread_bound"("p_strategy_id" "uuid", "p_api_key_id" "uuid", "p_job_id" "uuid", "p_claim_token" "uuid", "p_unread_from" timestamp with time zone, "p_covers_from" timestamp with time zone) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."set_strategy_fills_reread_bound"("p_strategy_id" "uuid", "p_api_key_id" "uuid", "p_job_id" "uuid", "p_claim_token" "uuid", "p_unread_from" timestamp with time zone, "p_covers_from" timestamp with time zone) IS 'Fenced writer of strategy_fills_reread_bounds (phase 253). With a claim token it returns FALSE and writes nothing unless the compute job is still running under that token; a NULL token skips the fence. Rules: a value with no row inserts; a value for another key replaces key and instant; NULL for another key deletes; same key with a value sets the instant when the run covered the stored bound and takes the earlier one when it did not; same key with NULL deletes when the run covered the bound and keeps it otherwise. covers means p_covers_from <= the stored bound, and -infinity means the walk started at the venue reach. The analytics worker sync_trades epilogue is the sole caller.';
 
 
 
@@ -15759,6 +15879,37 @@ CREATE TABLE IF NOT EXISTS "public"."scenarios" (
 ALTER TABLE "public"."scenarios" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."strategy_fills_reread_bounds" (
+    "strategy_id" "uuid" NOT NULL,
+    "api_key_id" "uuid" NOT NULL,
+    "unread_from" timestamp with time zone NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."strategy_fills_reread_bounds" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."strategy_fills_reread_bounds" IS 'Internal sync resume state: at most one row per strategy, the earliest instant a stopped Binance fills read is complete through, so the next run re reads from there. Sole writer is the analytics worker sync_trades epilogue, through set_strategy_fills_reread_bound. api_keys.last_fetched_trade_timestamp stays the per key resume point and this row only LOWERS one strategy seed. RLS is deny all with no owner tier. See phase 253.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_fills_reread_bounds"."strategy_id" IS 'The whole primary key. Cascades on strategy deletion. See phase 253.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_fills_reread_bounds"."api_key_id" IS 'The api key whose history this bound names. A bound for another key is replaced or deleted by the writer, never carried across a re point. Cascades on key deletion, which is how sanitize_user erases it. See phase 253.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_fills_reread_bounds"."unread_from" IS 'The earliest instant the stopped run was complete through: every symbol it stopped on is read up to here and nothing past it is promised. The next seed is the minimum of this and the key column. Never set past what the caller says the run is complete through. See phase 253.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_fills_reread_bounds"."updated_at" IS 'When the bound was last written. Set by the writer on every write. See phase 253.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."strategy_shares" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "strategy_id" "uuid" NOT NULL,
@@ -16509,6 +16660,11 @@ ALTER TABLE ONLY "public"."strategy_analytics"
 
 
 
+ALTER TABLE ONLY "public"."strategy_fills_reread_bounds"
+    ADD CONSTRAINT "strategy_fills_reread_bounds_pkey" PRIMARY KEY ("strategy_id");
+
+
+
 ALTER TABLE ONLY "public"."strategy_keys"
     ADD CONSTRAINT "strategy_keys_pkey" PRIMARY KEY ("id");
 
@@ -16625,11 +16781,11 @@ CREATE INDEX "api_keys_active_by_user_idx" ON "public"."api_keys" USING "btree" 
 
 
 
-CREATE UNIQUE INDEX "api_keys_user_exchange_venue_account_uniq" ON "public"."api_keys" USING "btree" ("user_id", "exchange", "venue_account_id") WHERE (("venue_account_id" IS NOT NULL) AND ("disconnected_at" IS NULL));
+CREATE UNIQUE INDEX "api_keys_user_exchange_venue_account_uniq" ON "public"."api_keys" USING "btree" ("user_id", "exchange", "venue_account_id", COALESCE("venue_server", ''::"text")) WHERE (("venue_account_id" IS NOT NULL) AND ("disconnected_at" IS NULL));
 
 
 
-COMMENT ON INDEX "public"."api_keys_user_exchange_venue_account_uniq" IS 'Phase 154 / WIZCONT-02: at most one LIVE api_keys row per (user, venue, account id). The DB half of "one fence, two keys" — the app fence in /api/strategies/create-with-key keys on wizard_session_id, this one keys on the credential identity, so a re-connect from a context that LOST the session token still dedups. CONTRACT: it FAILS TOWARD THE EXISTING ROW — the duplicate INSERT raises 23505 and the route resolves to the row already there. It must never be "resolved" by overwriting: the existing api_keys row carries strategy_keys membership and synced history other strategies depend on. ⭐ SCOPED TO LIVE ROWS (disconnected_at IS NULL): api_keys rows are RETAINED on soft-disconnect (20260422101911), so without that conjunct a DEAD row squats the slot forever and the contract above hands a re-connecting user a key every cron dispatcher skips — a strategy that silently never syncs, which is worse than the duplicate this index prevents. sync_status = ''revoked'' is deliberately NOT in the predicate (the worker rewrites sync_status on every tick, and revoked is recovered in place by reconnect_allocator_api_key); see the migration header. Since Phase 167.1.2, reconnect_allocator_api_key refuses a reconnect into an occupied slot BY NAME before reaching this index (KEY_VENUE_ALREADY_CONNECTED, SQLSTATE 23505), and a race that gets past that check is refused here with the same SQLSTATE. PARTIAL because NULL means no server-derived account id is recorded for the row: always for sFOX, whose identity is UNKNOWABLE (Phase 167.1.2 D-10), so this index cannot fence an sFOX duplicate; for OKX, Bybit, Binance and Deribit only until the connect validation or the poll-time identity stamper records one (Phase 167.1.2). api_keys_venue_account_id_nonblank keeps '''' out, since '''' is non-NULL and would otherwise let two DIFFERENT accounts collide onto one row. user_id LEADS deliberately — a non-tenant-leading unique index is the C-08 cross-tenant leak (see 20260726000225 and 20260728120000). ⛔ The uniqueness target is the PLAINTEXT identity, never api_key_encrypted: that column carries a per-row dek_encrypted + nonce, so two encryptions of one secret differ and an index over it would dedup nothing. Gate: supabase/tests/test_api_keys_venue_identity_uniq.sql.';
+COMMENT ON INDEX "public"."api_keys_user_exchange_venue_account_uniq" IS 'One LIVE key per (owner, exchange, account, server). Phase 225 / CONN-03 added the fourth member COALESCE(venue_server, ''''): the same MT5 login on two different broker servers is two accounts and both may be live. A NULL server is NOT a wildcard here (two null servers are equal, a null beside a set server is admitted); the wildcard that treats an unstamped server as matching any server lives in the application fences and in reconnect_allocator_api_key. Partial on venue_account_id IS NOT NULL AND disconnected_at IS NULL, so a retained disconnected key never squats the slot. CONTRACT (Phase 154 / WIZCONT-02, unchanged): it FAILS TOWARD THE EXISTING ROW, so a duplicate INSERT raises 23505 and the route resolves onto the row already there; it is never resolved by overwriting. user_id LEADS, so uniqueness is per tenant. api_keys_venue_account_id_nonblank keeps blank out of the key.';
 
 
 
@@ -17826,6 +17982,16 @@ ALTER TABLE ONLY "public"."strategy_analytics"
 
 
 
+ALTER TABLE ONLY "public"."strategy_fills_reread_bounds"
+    ADD CONSTRAINT "strategy_fills_reread_bounds_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."strategy_fills_reread_bounds"
+    ADD CONSTRAINT "strategy_fills_reread_bounds_strategy_id_fkey" FOREIGN KEY ("strategy_id") REFERENCES "public"."strategies"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."strategy_keys"
     ADD CONSTRAINT "strategy_keys_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE CASCADE;
 
@@ -18704,6 +18870,17 @@ CREATE POLICY "strategy_analytics_series_deny_all" ON "public"."strategy_analyti
 
 
 COMMENT ON POLICY "strategy_analytics_series_deny_all" ON "public"."strategy_analytics_series" IS 'Service-role-only at the policy layer. Non-service callers get zero rows on direct read. Allocator-side access goes through fetch_strategy_lazy_metrics SECURITY DEFINER RPC. See migration 087.';
+
+
+
+ALTER TABLE "public"."strategy_fills_reread_bounds" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "strategy_fills_reread_bounds_deny_all" ON "public"."strategy_fills_reread_bounds" USING (false) WITH CHECK (false);
+
+
+
+COMMENT ON POLICY "strategy_fills_reread_bounds_deny_all" ON "public"."strategy_fills_reread_bounds" IS 'Service role only. Non service callers get zero rows and can write none. No owner facing tier exists, so the narrower USING (false) form is used; service_role bypasses RLS by default per ADR 0003. See phase 253.';
 
 
 
@@ -19783,6 +19960,11 @@ GRANT ALL ON FUNCTION "public"."set_departed_key_history_inclusion"("p_api_key_i
 
 
 
+REVOKE ALL ON FUNCTION "public"."set_strategy_fills_reread_bound"("p_strategy_id" "uuid", "p_api_key_id" "uuid", "p_job_id" "uuid", "p_claim_token" "uuid", "p_unread_from" timestamp with time zone, "p_covers_from" timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."set_strategy_fills_reread_bound"("p_strategy_id" "uuid", "p_api_key_id" "uuid", "p_job_id" "uuid", "p_claim_token" "uuid", "p_unread_from" timestamp with time zone, "p_covers_from" timestamp with time zone) TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."set_wizard_composite_members"("p_user_id" "uuid", "p_strategy_id" "uuid", "p_members" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."set_wizard_composite_members"("p_user_id" "uuid", "p_strategy_id" "uuid", "p_members" "jsonb") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_wizard_composite_members"("p_user_id" "uuid", "p_strategy_id" "uuid", "p_members" "jsonb") TO "service_role";
@@ -20589,6 +20771,10 @@ GRANT ALL ON TABLE "public"."scenario_shares" TO "service_role";
 
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."scenarios" TO "authenticated";
 GRANT ALL ON TABLE "public"."scenarios" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."strategy_fills_reread_bounds" TO "service_role";
 
 
 
