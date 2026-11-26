@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.133.86.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE: a same-account refusal names the caller's own strategy or stored key and links to it
+
+Founder direction 2026-11-25 (`225-CONTEXT.md`, "names what the account already holds"): one exchange account may sit on many platform accounts. It only goes wrong when one person forgets they already added it and adds it again. So a same-account refusal now tells that person which of their OWN strategies or keys already holds the account, and links to it.
+
+### Added
+- **`src/lib/own-account-holder.ts`.** `readOwnAccountHolder` names the caller's own strategy built on the key (direct, then composite through `strategy_keys`), or else the key itself (its nickname and the date it was added). Every read filters on the session user id (`user_id` / `owner_id`), never on a body value. That filter is the tenant boundary, because `validate-and-encrypt` reads through the admin client. Another account's key or strategy on the same login is never read, so it can never be named. No login, server or key id is returned. The function never throws and never decides the refusal: a failed read answers `null`, and the refusal goes out without a holder, with copy that is complete and true on its own. `parseAccountHolder` shape-checks the holder in the browser and accepts only an in-app href.
+- **Both connect routes attach `holder` to `KEY_VENUE_ALREADY_CONNECTED`, `VENUE_ALREADY_CONNECTED` and `KEY_ORPHANED`.** This covers the pre-validation, post-validation, race and slot-swap refusal arms in `strategies/create-with-key` and `keys/validate-and-encrypt`. Status codes, refusal rules and the `code` / `error` literals are unchanged, and a refusal with no holder is byte-identical to before.
+- **The wizard (`ConnectKeyStep`) and the allocator Exchanges form (`AllocatorExchangeManager`) show it.** The refusal cause names the holder. `ErrorEnvelope` renders one link: "Open “<strategy>”" goes to its factsheet, and "Open Strategies to finish setup on “<key>”" (`KEY_ORPHANED`) or "Open Strategies to find “<key>”" goes to `/strategies`. Verified destinations: `/strategies` admits manager, allocator and both-roles accounts, and its "No strategy yet" rows have no role filter. The factsheet serves the owner a strategy of any status.
+
+### Changed
+- **`KEY_ORPHANED` copy leads with finishing the setup.** Its first remedy now points to the stored key's "No strategy yet" row on the Strategies page and its "Finish setup". The page note says the row sits below the strategies and, on a paged list, on the last page. "Use a different account" and "Disconnect" follow.
+
+### Fixed (review round 1)
+- **The named holder matches what `/strategies` lists (code review M-1).** An older draft no longer hides a newer real strategy on the same key, because drafts and archived rows are skipped in the query. A key covered only by a draft (direct or composite) is not named, because `/strategies` shows no row for it. A key whose only strategies are archived is named as the key, the row `/strategies` lists as "No strategy yet".
+- **A failed holder read is visible (silent-failure review M1).** The log names which read failed, and the error goes to Sentry under `step: own-account-holder:<step>`. Before this fix, a holder read that kept failing would have quietly turned every refusal back into the unnamed copy.
+
+### Notes
+- **Not done: the in-place "Finish setup with your stored key" switch** from the sharpened direction (founder 2026-11-25). The saved-key step is chosen by the host that mounts the wizard (`preselectKey`, the 162-05 / D-162-3 seam), and the credential form cannot reach it without new plumbing. The direction allows a fallback where the switch cannot happen in place: a link to the key's row. That fallback ships here, so `KEY_ORPHANED` links to `/strategies`, where "Finish setup" and "Disconnect" are.
+- **No `TODOS.md` entry is closed.** `[167.1.2-ORPHAN-COPY-FIX]` overlaps but stays open: its allocator email-security copy and its archived-composite case are not changed here.
+- LOW and INFO review findings are not fixed, per the review rule. One example: `rotate-secret`'s `KEY_VENUE_ALREADY_CONNECTED` still carries no holder.
+- This PR overlaps files with the sibling Phase 225 sign-in copy PR (`wizardErrors.ts` and the route tests). Whichever merges second rebases.
+
 ## [0.133.85.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE: a login-stage MT5 -6 says the broker refused the sign-in and names the three things to check
 
 MT5 `last_error` -6 is `RES_E_AUTH_FAILED`, "authorization failed" (MT5 Python docs, `last_error()` table). On 2026-11-25 the founder made two PROD add-key attempts with a wrong broker server and a real investor password. Both got -6 back from `login()` in 344 ms and 523 ms, so the broker answered and refused. The wizard still showed `KEY_SIGN_IN_FAILED`, which says the attempt "did not get far enough for the venue to tell us why". That is untrue for -6. The phase CONTEXT records the decision this implements: the copy must say the broker refused the sign-in and name a wrong login, investor password and server as the things to check, without claiming the server is the cause, because -6 cannot tell them apart. It changes no gate.
