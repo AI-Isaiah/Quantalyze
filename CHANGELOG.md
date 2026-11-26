@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.133.96.0] - 2026-11-26 — RESETFAILLOUD: a failed reset link, a dropped reset request and a skipped cookie write are no longer silent
+
+This follows v0.133.94.0 (#1373). That release fixed the signed-out password reset. Review then found four places where the reset flow failed without telling anyone. Each is fixed with the smallest change. Each fix has a test that was RED with the fix reverted, and every reverted file was restored byte-equal.
+
+### Fixed
+- **A failed password-reset link says so** (`src/app/auth/callback/route.ts`, `src/app/(auth)/reset-password/page.tsx`, `src/components/auth/ResetPasswordForm.tsx`). A recovery link that cannot be verified now lands on `/reset-password?link=expired` instead of `/login?error=...`, which `/login` never displayed. Three failures take this path: a failed PKCE exchange with `next=/reset-password`, a failed `token_hash` recovery, and GoTrue's own `/verify` error redirect. The form opens on "This password-reset link has expired, was already used, or was opened in a different browser." with its "Request a new link" link. The code and `token_hash` failure branches now `console.error` Auth's error code and status, never the code, hash or tokens, as the email-change branch already did. Signup and other non-recovery failures still land on `/login`.
+- **`/login` no longer exchanges `?code=`** (`src/app/(auth)/login/page.tsx`). Its Server Component could not set cookies, so it spent the one-time code and dropped the session. That was the second half of the v0.133.94.0 root cause. Email links are exchanged only by the `/auth/callback` route handler. The CD-13 open redirect lived in that branch and went with it.
+- **A cookie write a Server Component cannot make is logged** (`src/lib/supabase/server.ts`). `setAll`'s blanket `catch` now `console.error`s the error message, never a cookie value.
+- **The reset form's no-session card is chosen by error name or code only** (`ResetPasswordForm.tsx`): `AuthSessionMissingError`, Auth's `session_not_found` for a revoked session, or `session_expired`, `refresh_token_not_found` and `refresh_token_already_used` from the token refresh `updateUser` runs first, for a timed-out or spent one. It used to match `/session/i` on the message, which hid any real error that mentioned "session". Other errors now reach the form's error line.
+- **The forgot-password form no longer drops `resetPasswordForEmail`'s error** (`src/components/auth/ForgotPasswordForm.tsx`). Every failure is logged with code and status, never the email. Only a network failure (status 0) and Auth's per-IP `over_request_rate_limit` show "We could not send a reset link right now. Please try again in a few minutes.", because both happen before Auth looks the email up. Auth answers an unknown email with 200 at once. So its per-user and project email limit (429 `over_email_send_rate_limit`) and a send failure (5xx) only ever reach a real account, and a retry message there would reveal that the account exists. Those, and every other error, keep the neutral "if an account exists" copy. The header comment now says the link is a PKCE `?code=` link that works only in the requesting browser. It used to say `token_hash`.
+
+- **Second review round (silent-failure hunter, five MEDIUMs):**
+  - A recovery failure is called "expired" only for a 4xx (a dead link: `flow_state_expired`, `flow_state_not_found`, `otp_expired`, `bad_code_verifier`, `validation_failed`, ...). A 5xx, a 429 or no status lands on `/reset-password?link=error`, whose card says to try again in a moment.
+  - The callback's GoTrue error branch (logs `error_code` and `error`, never `error_description`), its invalid-type branch and its missing-parameter fallthrough now log. `/login` shows fixed copy, "That email link could not be used. It may have expired or already been used.", when `?error=` is present, and never reflects the text, so an expired signup link no longer lands on a bare form.
+  - `server.ts` `setAll` warns on Next's expected "Cookies can only be modified" throw and logs any other throw at error with name and stack, never a cookie value.
+  - `ForgotPasswordForm` keeps the neutral copy but sends a failure that reached Auth to Sentry as a warning (code and status tags, never the email), the same fire-and-forget capture `SignupForm` uses. A network failure is not sent.
+  - `ResetPasswordForm` logs every `updateUser` failure (code and status) before choosing the no-session card or the error line.
+
+### Tests
+- `src/app/auth/callback/route.test.ts` K-N: the three recovery failures land on the expired-link card. The logs carry code and status and never the code or hash. A signup failure still lands on `/login`. The old OTP-failure case now uses `type=signup`.
+- `src/components/auth/ResetPasswordForm.test.tsx`: a message that only mentions "session" reaches the form; `session_not_found` and `session_expired` show the card; `linkExpired` opens on the expired-link card. New `src/app/(auth)/reset-password/page.test.tsx` covers `?link=expired`.
+- `src/components/auth/ForgotPasswordForm.test.tsx`: status 0 and `over_request_rate_limit` show the retry message. `over_email_send_rate_limit` and a 500 keep the neutral copy. All are logged with code and status, never the email. The 404 enumeration case still shows the neutral copy.
+- `src/app/(auth)/login/page.test.tsx`: the code-branch tests now assert `?code=` is never exchanged and never redirects, and the deep link stays sanitised. New `src/lib/supabase/server.test.ts`: a skipped cookie write is logged without its value.
+
+### Notes
+- A recovery link opened in a different browser still cannot set a password. The links use PKCE, and changing that means editing the Supabase email templates to the `token_hash` link. The card now names that case.
+
 ## [0.133.95.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE plan 21: an MT5 poll read refuses a terminal session on another broker server
 
 ### Fixed

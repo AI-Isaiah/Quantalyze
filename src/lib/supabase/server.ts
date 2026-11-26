@@ -19,8 +19,25 @@ export async function createClient() {
             cookiesToSet.forEach(({ name, value, options }) =>
               cookieStore.set(name, value, options)
             );
-          } catch {
-            // Server component context - cookie setting will be handled by proxy
+          } catch (err) {
+            // Next's "Cookies can only be modified in a Server Action or Route
+            // Handler" is the expected Server Component case: the proxy
+            // refreshes the session instead, so it is only a warning. Anything
+            // else is a real failure: name and stack, never a cookie value.
+            if (
+              err instanceof Error &&
+              err.message.includes("Cookies can only be modified")
+            ) {
+              console.warn(
+                "[supabase/server] cookie write skipped (Server Component context)",
+              );
+            } else {
+              console.error(
+                "[supabase/server] cookie write failed:",
+                err instanceof Error ? err.name : typeof err,
+                err instanceof Error ? err.stack : undefined,
+              );
+            }
           }
         },
       },

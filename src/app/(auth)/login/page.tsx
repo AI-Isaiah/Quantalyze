@@ -1,7 +1,5 @@
 import type { Metadata } from "next";
 import { LoginForm } from "@/components/auth/LoginForm";
-import { createClient } from "@/lib/supabase/server";
-import { redirect } from "next/navigation";
 import Link from "next/link";
 import { safeRedirectPath } from "@/lib/routing/role-home";
 
@@ -13,9 +11,9 @@ export default async function LoginPage({
   searchParams,
 }: {
   searchParams: Promise<{
-    code?: string;
     redirect?: string | string[];
     next?: string | string[];
+    error?: string | string[];
   }>;
 }) {
   const params = await searchParams;
@@ -24,15 +22,10 @@ export default async function LoginPage({
   const redirectTo =
     safeRedirectPath(params.redirect) ?? safeRedirectPath(params.next);
 
-  // If Supabase sent a confirmation code, exchange it for a session
-  if (params.code) {
-    const supabase = await createClient();
-    const { error } = await supabase.auth.exchangeCodeForSession(params.code);
-    if (!error) {
-      redirect(redirectTo ?? "/onboarding");
-    }
-    // If exchange fails, fall through to show login form
-  }
+  // No ?code= exchange here (removed 2026-11-26): a Server Component cannot
+  // set cookies, so it spent the one-time code and dropped the session. That
+  // is how a signed-out password reset reached /reset-password with no
+  // session. Email links are exchanged by the /auth/callback route handler.
 
   return (
     <>
@@ -42,6 +35,17 @@ export default async function LoginPage({
           Sign in to your account
         </p>
       </div>
+      {params.error !== undefined && (
+        // Fixed copy, never the reflected ?error= text: /auth/callback sends a
+        // failed email link (an expired signup confirmation, say) here.
+        <p
+          role="alert"
+          className="mb-4 rounded-lg border border-border bg-surface p-3 text-sm text-text-primary"
+        >
+          That email link could not be used. It may have expired or already
+          been used.
+        </p>
+      )}
       <LoginForm redirectTo={redirectTo} />
       <p className="mt-6 text-center text-sm text-text-muted">
         Don&apos;t have an account?{" "}

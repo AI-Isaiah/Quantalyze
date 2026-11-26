@@ -105,6 +105,35 @@ function carriesEmailChangeConfirmed(
   );
 }
 
+/**
+ * A password-recovery link (`next` is /reset-password) that could not be
+ * verified lands on /reset-password?link=expired, whose form says the link
+ * expired, was already used or was opened in another browser, and offers a
+ * new one. /login would show a bare sign-in form: it does not read `error`.
+ */
+function isRecoveryNext(safeNext: string, req: NextRequest): boolean {
+  return new URL(safeNext, req.url).pathname === "/reset-password";
+}
+
+/**
+ * A 4xx (flow_state_expired, flow_state_not_found, otp_expired,
+ * bad_code_verifier, validation_failed, ...) means the link is dead:
+ * ?link=expired. A 5xx, a 429 or no status at all is Auth or the network
+ * failing, not the link: ?link=error, which says to try again in a moment.
+ */
+function recoveryFailureRedirect(
+  req: NextRequest,
+  status: number | undefined,
+): NextResponse {
+  const s = status ?? 0;
+  const url = new URL("/reset-password", req.url);
+  url.searchParams.set(
+    "link",
+    s >= 400 && s < 500 && s !== 429 ? "expired" : "error",
+  );
+  return NextResponse.redirect(url);
+}
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
@@ -128,6 +157,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         );
         return NextResponse.redirect(new URL(safeNext, req.url));
       }
+      // Code and status only: never the code, verifier or tokens.
+      console.error(
+        "[auth/callback] code exchange failed:",
+        error.code ?? "unknown",
+        error.status ?? "no-status",
+      );
+      if (isRecoveryNext(safeNext, req)) {
+        return recoveryFailureRedirect(req, error.status);
+      }
       return loginRedirect(req, error.message);
     }
     return NextResponse.redirect(new URL(safeNext, req.url));
@@ -135,6 +173,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   if (tokenHash && type) {
     if (!VALID_OTP_TYPES.has(type as OtpType)) {
+      console.error("[auth/callback] invalid verification type:", type.slice(0, 32));
       return loginRedirect(req, "Invalid verification type");
     }
     const { error } = await supabase.auth.verifyOtp({
@@ -142,6 +181,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       token_hash: tokenHash,
     });
     if (error) {
+      // Code and status only: never the token hash.
+      console.error(
+        "[auth/callback] token_hash verification failed:",
+        error.code ?? "unknown",
+        error.status ?? "no-status",
+      );
+      if (type === "recovery") return recoveryFailureRedirect(req, error.status);
       return loginRedirect(req, error.message);
     }
     return NextResponse.redirect(new URL(safeNext, req.url));
@@ -156,6 +202,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const dest = new URL(safeNext, req.url);
     dest.searchParams.set("email_change", "partial");
     return NextResponse.redirect(dest);
+  }
+
+  // GoTrue's /verify redirected here with an error. Log its error_code and
+  // error values only, never error_description or any code, hash or token.
+  const verifyError = url.searchParams.get("error");
+  const verifyErrorCode = url.searchParams.get("error_code");
+  if (verifyError || verifyErrorCode) {
+    console.error(
+      "[auth/callback] verify redirected with an error:",
+      (verifyErrorCode ?? "none").slice(0, 64),
+      (verifyError ?? "none").slice(0, 64),
+    );
   }
 
   // GR1-MD-01: when GoTrue's /verify itself fails (expired, already used or
@@ -173,5 +231,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.redirect(dest);
   }
 
+  // GoTrue's /verify refused a recovery link (expired, already used or
+  // scanner-consumed) and redirected here with `error` / `error_code` only.
+  if (
+    (url.searchParams.get("error") || url.searchParams.get("error_code")) &&
+    isRecoveryNext(safeNext, req)
+  ) {
+    return recoveryFailureRedirect(req, 400);
+  }
+
+  if (!verifyError && !verifyErrorCode) {
+    console.error("[auth/callback] no code, token_hash, message or error");
+  }
   return loginRedirect(req, "Missing verification parameters");
 }

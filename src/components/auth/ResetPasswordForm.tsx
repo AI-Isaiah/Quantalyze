@@ -40,12 +40,20 @@ const CODE_INVALID =
   "That code is not right or has expired. Send a new code and try again.";
 const CODE_SEND_FAILED = "Could not send a code. Please try again.";
 
-export function ResetPasswordForm() {
+export function ResetPasswordForm({
+  linkExpired = false,
+  linkError = false,
+}: {
+  /** The callback could not verify the email link (expired or already used). */
+  linkExpired?: boolean;
+  /** The callback failed for a reason that is not the link (Auth or network). */
+  linkError?: boolean;
+} = {}) {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [noSession, setNoSession] = useState(false);
+  const [noSession, setNoSession] = useState(linkExpired || linkError);
   const [step, setStep] = useState<"password" | "code">("password");
   const [code, setCode] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
@@ -87,12 +95,27 @@ export function ResetPasswordForm() {
         setLoading(false);
         return;
       }
-      const isReauthCode = updateError.code?.startsWith("reauth") ?? false;
-      // Supabase returns "Auth session missing!" when the user lands here
-      // without a recovery session (e.g. typed /reset-password directly,
-      // or the link expired). Show the recovery affordance instead of the
-      // raw error so they know what to do next.
-      if (!isReauthCode && /session/i.test(updateError.message)) {
+      // Code and status only, before either branch below.
+      console.error(
+        "[reset-password] updateUser failed:",
+        updateError.code ?? "unknown",
+        updateError.status ?? "no-status",
+      );
+      // supabase-js raises AuthSessionMissingError when the user lands here
+      // without a recovery session (e.g. typed /reset-password directly, or
+      // the link expired). Auth answers session_not_found for a revoked
+      // session, and the token refresh updateUser runs first fails with
+      // session_expired or refresh_token_* for a timed-out or spent one. Show
+      // the recovery affordance instead of the raw error. Matched on
+      // name and code only: a message that merely mentions "session" is a real
+      // error and falls through to setError below.
+      if (
+        updateError.name === "AuthSessionMissingError" ||
+        updateError.code === "session_not_found" ||
+        updateError.code === "session_expired" ||
+        updateError.code === "refresh_token_not_found" ||
+        updateError.code === "refresh_token_already_used"
+      ) {
         setNoSession(true);
         setLoading(false);
         return;
@@ -139,7 +162,13 @@ export function ResetPasswordForm() {
   if (noSession) {
     return (
       <div className="space-y-3 rounded-lg border border-border bg-surface p-4 text-sm text-text-primary">
-        <p>Open the password-reset link from your email to continue.</p>
+        <p>
+          {linkError
+            ? "We could not check your reset link just now. Try again in a moment by opening the link from your email again."
+            : linkExpired
+              ? "This password-reset link has expired, was already used, or was opened in a different browser."
+              : "Open the password-reset link from your email to continue."}
+        </p>
         <Link
           href="/forgot-password"
           className="font-medium text-accent hover:text-accent-hover"
