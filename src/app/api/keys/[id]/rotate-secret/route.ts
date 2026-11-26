@@ -11,15 +11,12 @@ import {
 } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
 import { rotateKeySecret } from "@/lib/analytics-client";
-import { RotateSecretResponseSchema } from "@/lib/analytics-schemas";
-import { pgConstraintName, VENUE_IDENTITY_CONSTRAINT } from "@/lib/api/pgConstraintName";
+import { persistRotatedMt5Secret } from "@/lib/api/rotate-key-secret";
+import type { RotateSecretResponseSchema } from "@/lib/analytics-schemas";
 import { getCorrelationId } from "@/lib/correlation-id";
-import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { captureToSentry } from "@/lib/sentry-capture";
-import { isLiveKey } from "@/lib/departed-history";
-import { pickSameAccountHolder, readLiveSameLoginKeys } from "@/lib/venue-identity";
 import type { z } from "zod";
 
 /**
@@ -356,194 +353,66 @@ export async function PATCH(
     );
   }
 
-  // CR-01 (164.5.3 review) — D-07's own precedent, `reconnect_allocator_api_key`
-  // (20260422101911), clears THREE fields on a validated success, not two:
-  // `disconnected_at`, `sync_error`, AND `sync_status = 'idle'` — "so the next
-  // tick picks the key up fresh". This route used to copy only the first two.
-  // The allocator worker's failure arm writes `sync_status` to `'revoked'` or
-  // `'error'` (`_map_exception_to_sync_status`) and NEVER writes it back; both
-  // ledger-refresh enqueuers carry `sync_status IS DISTINCT FROM 'revoked'` as
-  // an eligibility predicate, so a `'revoked'` key stayed excluded from the
-  // automated fan-out FOREVER even after its password was corrected — the
-  // card cleared `sync_error` and looked healthy while the key never synced
-  // again. `sync_status: "idle"` is written unconditionally alongside the
-  // clear below so the two facts ("the credential is right" / "the key is
-  // eligible again") cannot separate.
-  //
-  // ⛔ NOT restoring `is_active`, and NOT clearing `disconnected_at` (WR-03) —
-  // both DELIBERATE, decided from the code rather than assumed:
-  //
-  //   `is_active` — `cron.py`'s ONLY writer of `is_active: false` is
-  //   `cron_sync`'s credential-failure branch, reached through
-  //   `_sync_single_key`. That function takes the non-ccxt "deferred" branch —
-  //   its own comment: "the key STAYS active" — for `exchange='mt5'` BEFORE
-  //   ever calling `validate_key_permissions` (`EXCHANGE_CLASSES` =
-  //   {binance, okx, bybit, deribit}; mt5 is absent). `is_active` is therefore
-  //   never false for an MT5 row on any measured code path, so restoring it
-  //   here would be speculative code for a state that cannot occur.
-  //
-  //   `disconnected_at` — grepped `analytics-service/**`: the ONLY writer is
-  //   the `disconnect_allocator_api_key` RPC, called exclusively from
-  //   `AllocatorExchangeManager`'s user-initiated Disconnect button. No worker
-  //   or cron path ever sets it. D-05's "lift a SOFT disconnected_at" premise
-  //   — an auto-disconnect this route should undo — does not hold at HEAD:
-  //   every `disconnected_at` is a deliberate user action, so clearing it here
-  //   unconditionally would silently reconnect a key the founder parked on
-  //   purpose (WR-03). A founder who wants BOTH the password fixed and the key
-  //   reconnected uses the separate Reconnect affordance, which already clears
-  //   all three fields together.
-  //
-  // `history_inclusion` (167.1.2 C4 review CR-01) — reset to NULL ONLY when
-  // this write returns the key to live. The write sets `sync_status = 'idle'`
-  // and touches neither `disconnected_at` nor `is_active`, so the key is live
-  // afterwards exactly when `isLiveKey` (src/lib/departed-history.ts, the same
-  // predicate the key card and the derive job read) holds for the pre-read's
-  // `is_active` and `disconnected_at` with `sync_status` 'idle'. A DISCONNECTED
-  // key (the card offers "Update password" there too) or an inactive key stays
-  // departed, so the owner's include/exclude choice for it still applies and
-  // is kept; writing NULL there silently reverted it to the default rule.
-  //
-  // Known limits, recorded rather than fixed here: (1) no recompose is enqueued
-  // for a revoked key whose non-NULL choice this resets. The key is live again
-  // after the write, so its history now counts as a live key's, and the next
-  // derive for this owner composes it that way; this route does not take the
-  // recompose serialisation set_departed_key_history_inclusion takes. (2) The
-  // liveness fields are read BEFORE the broker probe, so a Disconnect that
-  // lands during the probe is not seen: the reset follows the pre-read state.
-  const returnsKeyToLive = isLiveKey({
-    is_active: keyRow.is_active,
-    sync_status: "idle",
-    disconnected_at: keyRow.disconnected_at,
+  // Phase 228: the owner-scoped UPDATE (filtered on `id` + `user_id` +
+  // `exchange = 'mt5'`), the venue_account_id backfill fence, the 23505 retry,
+  // the zero-row check and the audit moved into `persistRotatedMt5Secret`
+  // (src/lib/api/rotate-key-secret.ts), shared with create-with-key's MT5
+  // same-account arm. CR-01, WR-02, WR-03, 167.1.2 C4 and Phase 225 W4 are
+  // explained there, beside the code. Each typed result maps to the literal
+  // this route answered before the move.
+  // @audit-skip: the api_key.rotate_secret audit lands inside persistRotatedMt5Secret (src/lib/api/rotate-key-secret.ts), in the same function as its UPDATE.
+  const persisted = await persistRotatedMt5Secret({
+    admin,
+    supabase,
+    userId: user.id,
+    keyId: id,
+    keyRow,
+    parsed,
   });
-  const attemptPersist = (includeVenueAccountId: boolean) =>
-    admin
-      .from("api_keys")
-      .update({
-        api_key_encrypted: parsed.api_key_encrypted,
-        api_secret_encrypted: parsed.api_secret_encrypted,
-        passphrase_encrypted: parsed.passphrase_encrypted,
-        dek_encrypted: parsed.dek_encrypted,
-        nonce: parsed.nonce,
-        kek_version: parsed.kek_version,
-        sync_error: null,
-        sync_status: "idle",
-        // Phase 167.1.2 plan 09 (PR B review round 2, RLS audit MEDIUM): this
-        // update is how a REVOKED key returns to live, and it does not go
-        // through reconnect_allocator_api_key. COMMENT ON COLUMN
-        // api_keys.history_inclusion binds every such path: a departed-history
-        // choice made for one departure never carries over to the next, so the
-        // key starts again from the default rule. Only on that path: see
-        // `returnsKeyToLive` above (C4 review CR-01).
-        ...(returnsKeyToLive ? { history_inclusion: null } : {}),
-        // Backfill ONLY when the pre-read row had no identifier yet — never
-        // overwrite an existing value with whatever this request's login
-        // happens to be (it is, by construction, the same login: D-03 forbids
-        // changing it, and the Python seam validates against the row's OWN
-        // stored login).
-        ...(includeVenueAccountId ? { venue_account_id: parsed.venue_account_id } : {}),
-      })
-      .eq("id", id)
-      .eq("user_id", user.id)
-      .eq("exchange", "mt5")
-      .select("id");
 
-  let shouldBackfillVenueAccountId = keyRow.venue_account_id === null;
-  // Phase 225 (CONN-03, RESEARCH W4): the login backfill used to lean on the
-  // login-only unique index's 23505 to refuse a second slot holder. Once the
-  // server-aware index ships (plan 10) that index stops firing against a
-  // server-stamped holder, and this write carries no server (the rotate does
-  // not know it), so the index would admit a second holder beside it. The
-  // fence moves here: when another live key of the SAME owner already reads
-  // this login on any server (a null server is the wildcard, Q2), the login is
-  // not backfilled and the password is saved without it. A read error FAILS
-  // CLOSED (225 PR-2 review SF-M1 / IN-11): it answers a retryable 503 before the
-  // write, because once the server-aware index ships a read fault would admit a
-  // second holder. The 23505 retry below stays for the race.
-  if (shouldBackfillVenueAccountId) {
-    const { rows, error: holderReadError } = await readLiveSameLoginKeys(admin, {
-      userId: user.id,
-      exchange: "mt5",
-      venueAccountId: parsed.venue_account_id,
+  if (persisted.kind === "holder_read_failed") {
+    const holderReadSecrets = [newSecret, parsed.venue_account_id];
+    console.error(
+      "[api/keys/[id]/rotate-secret] same-account holder read failed; refusing the rotate (nothing was written):",
+      scrubSeamError(persisted.error, holderReadSecrets),
+    );
+    captureToSentry(persisted.error, {
+      tags: { route: "api/keys/[id]/rotate-secret", arm: "persist", step: "holder-read" },
+      secrets: holderReadSecrets,
     });
-    if (holderReadError) {
-      const holderReadSecrets = [newSecret, parsed.venue_account_id];
-      console.error(
-        "[api/keys/[id]/rotate-secret] same-account holder read failed; refusing the rotate (nothing was written):",
-        scrubSeamError(holderReadError, holderReadSecrets),
-      );
-      captureToSentry(holderReadError, {
-        tags: { route: "api/keys/[id]/rotate-secret", arm: "persist", step: "holder-read" },
-        secrets: holderReadSecrets,
-      });
-      return NextResponse.json(
-        {
-          code: "UNKNOWN",
-          error: "We could not check whether this account is already connected. Please try again.",
-        },
-        { status: 503, headers: NO_STORE_HEADERS },
-      );
-    } else if (pickSameAccountHolder(rows, null, "fence") !== null) {
-      shouldBackfillVenueAccountId = false;
-    }
+    return NextResponse.json(
+      {
+        code: "UNKNOWN",
+        error: "We could not check whether this account is already connected. Please try again.",
+      },
+      { status: 503, headers: NO_STORE_HEADERS },
+    );
   }
-  let { data: updatedRows, error: updateErr } = await attemptPersist(
-    shouldBackfillVenueAccountId,
-  );
-
-  // WR-02 (164.5.3 review) — a venue-identity 23505 used to discard the WHOLE
-  // correction: the broker probe had already succeeded and fresh ciphertext
-  // already existed, but the route threw it away (including the sync_error /
-  // sync_status clear) and told the founder to "use the key you already have
-  // connected" — advice that does not address "the key I am trying to repair
-  // IS the one that is broken." Two legacy MT5 rows sharing one account (both
-  // `venue_account_id IS NULL` today) reach this on the backfill alone, with
-  // no forged input required. Re-issue the SAME statement WITHOUT
-  // `venue_account_id` on that one condition — the password fix and the
-  // status clear still land; the identifier stays `—` for this row exactly as
-  // it already was, no worse than before this request. Only a SECOND
-  // collision (or any other error) reaches the 409/500 arms below.
-  if (
-    shouldBackfillVenueAccountId &&
-    updateErr &&
-    updateErr.code === "23505" &&
-    pgConstraintName(updateErr) === VENUE_IDENTITY_CONSTRAINT
-  ) {
-    ({ data: updatedRows, error: updateErr } = await attemptPersist(false));
+  if (persisted.kind === "venue_collision") {
+    // Pitfall 1 — same code and copy as the create path's identical arm: one
+    // vocabulary for one condition.
+    return NextResponse.json(
+      {
+        code: "KEY_VENUE_ALREADY_CONNECTED",
+        error: "You already have a connected key for this account.",
+      },
+      { status: 409, headers: NO_STORE_HEADERS },
+    );
   }
-
-  if (updateErr) {
-    // Pitfall 1 — the venue-identity backfill collides with a DIFFERENT live
-    // row for the same account, and the retry above either did not apply or
-    // collided again. Distinct, honest 409 — never the generic
-    // write-indeterminate 500. Same code and copy as Plan 02's identical arm
-    // on the create path: one vocabulary for one condition.
-    if (
-      updateErr.code === "23505" &&
-      pgConstraintName(updateErr) === VENUE_IDENTITY_CONSTRAINT
-    ) {
-      return NextResponse.json(
-        {
-          code: "KEY_VENUE_ALREADY_CONNECTED",
-          error: "You already have a connected key for this account.",
-        },
-        { status: 409, headers: NO_STORE_HEADERS },
-      );
-    }
+  if (persisted.kind === "write_failed") {
     console.error(
       "[api/keys/[id]/rotate-secret] persist UPDATE failed:",
-      scrubSeamError(updateErr),
+      scrubSeamError(persisted.error),
     );
     return NextResponse.json(
       { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
-  if (!updatedRows || updatedRows.length === 0) {
+  if (persisted.kind === "write_zero_rows") {
     // The row vanished (or changed venue) between the ownership read and the
-    // write — a genuine TOCTOU, not the ordinary "wrong owner / unknown id"
-    // fact a fresh read would answer. Reusing DASHBOARD_ROW_STALE here would
-    // misreport a row this request just proved it owns as "not found"; the
-    // honest answer is that the write's outcome cannot be verified.
+    // write — reusing DASHBOARD_ROW_STALE would misreport a row this request
+    // just proved it owns as "not found".
     console.error(
       "[api/keys/[id]/rotate-secret] persist UPDATE matched zero rows after a validated seam success",
     );
@@ -552,12 +421,6 @@ export async function PATCH(
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
-
-  logAuditEvent(supabase, {
-    action: "api_key.rotate_secret",
-    entity_type: "api_key",
-    entity_id: id,
-  });
 
   return NextResponse.json({ ok: true }, { headers: NO_STORE_HEADERS });
 }
