@@ -454,11 +454,15 @@ const EXPECTED_ROUTE_BUDGETS: Record<
       { key: "process-key-unified-dormant", calls: 1 },
     ],
   },
+  // Phase 228 CONN-02 — the create-with-key row also declares the MT5
+  // same-account rotate leg as its own EXCLUSIVE `mt5-rotate` branch (never
+  // summed with validate). Declaration order is part of the twin.
   "src/app/api/strategies/create-with-key/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
       { key: "validate-key", calls: 1, branch: "default-venue" },
       { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
+      { key: "keys-rotate-secret", calls: 1, branch: "mt5-rotate" },
       { key: "encrypt-key", calls: 1 },
     ],
   },
