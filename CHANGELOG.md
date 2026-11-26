@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.133.93.0] - 2026-11-26 — Phase 253 BINANCECURSOR: a stopped Binance fills read below a cursor that another strategy moved is re-read
+
+A Binance raw fills read that stops (deadline, page cap), loses a symbol or raises leaves an unread span below its stop. The per-key cursor `api_keys.last_fetched_trade_timestamp` is shared by every strategy on the key and only moves forward, so a clean run of a sibling strategy could carry it past that span, and no later run re-read it. That was `[250-BINANCE-STOP-BELOW-CURSOR]`, the gap Phase 250 shipped with. Phase 253 gives each strategy its own re-read bound, takes it before anything persists, and keeps the `binance_*` sync flags alive until a clean sync clears them. `USE_RAW_TRADE_INGESTION` stays off for Binance: no Phase 253 plan turns it on (SC-4, D-10).
+
+### Added
+- **`public.strategy_fills_reread_bounds` and `public.set_strategy_fills_reread_bound`**, in migration `20261126150000_strategy_fills_reread_bound.sql`.
+  - The table holds at most one row per strategy. `unread_from` is the earliest instant the run was complete through when it stopped. The next seed is the minimum of the key column and this bound, so the column stays the per-key resume point and the bound only lowers one strategy's seed.
+  - The function is the one writer. It is `SECURITY DEFINER` with `search_path = public, pg_catalog`, claim-token fenced exactly like `advance_sync_cursor` (an orphaned worker gets FALSE and writes nothing), and applies the R0..R7 state machine under a row lock: insert, re-point to another key, delete, move forward when the run covered the stored bound, LEAST toward earlier when it did not, clear only on a complete run that covered it.
+  - RLS is on with a deny-all policy. `anon`, `authenticated` and `PUBLIC` hold nothing on the table or the function; `service_role` holds both. The self-verify block reads catalogues only, so a TEST apply cannot refuse on data.
+  - `advance_sync_cursor`, its migration, its ACL and its snapshot are byte-unchanged, so the OKX, Bybit, Deribit and MT5 callers do not move (D-04). No cron job, no seed row.
+  - Manual rollback in `supabase/migrations/down/20261126150000-rollback.sql`, snapshot in `supabase/schema/functions/set_strategy_fills_reread_bound.sql`.
+- **SQL gate `supabase/tests/test_strategy_fills_reread_bound.sql`**: 24 arms, each with a `RED-UNDER` twin, for every state-machine case, the fence, the ACLs, the policy and the strategy-delete cascade.
+- **`analytics-service/services/binance_sync_flags.py`**: the `binance_*` sync-time data-quality key allowlist, pinned to its producers, with the carry and clear helpers the worker and the CSV runner share.
+
+### Changed
+- **`run_sync_trades_job` (`analytics-service/services/job_worker.py`) reads the strategy's bound into the Binance fills seed** and writes it back through the fenced RPC.
+  - **A provisional bound is written at the seed, before Phase 251's daily `sync_trades` store and before the fills read** (round 2, CR-02/CR-03). The epilogue then writes the run's real bound. A failed or orphaned provisional write skips the fills read.
+  - **When no bound can be recorded, the daily store is held too** (round 3, WR-03/IN-14/IN-15): a Binance run whose provisional write fails or is orphaned stores no daily row and writes no orphan flag, so the daily high-water cannot move the next seed past the unread span. While the bound RPC is down this costs that strategy its daily store; the founder-level read of that trade-off is a recorded human item.
+  - A bound write that fails keeps the NULL-column anchor (round 1, CR-01/SFH-2).
+- **`binance_stop_below_cursor` uses the round-3 WR-01 predicate.** It compares the earliest complete-through instant (for a failed symbol: the walk start, the seed minus the overlap, or the reach) with the next run's walk start, so it names a stop-plus-partial run, a partial-only run and a raised read, minus the overlap hour. Before, it took the stop bound as the unread start whenever one existed and missed a run where one symbol stopped and another failed.
+- **The sync-time `binance_*` flags survive the chained writes.** They are carried through the `derive_broker_dailies` prestamp (`_prestamp_flags`), through the CSV rebuild in `run_csv_strategy_analytics` (`analytics-service/services/analytics_runner.py`) and through every failure writer, so they last until the next clean Binance sync, which clears the keys it did not raise. A raised read, the switch off, an OKX key and a failed flag load clear nothing.
+- **The SC-3 comment at `_RAW_TRADE_INGESTION_ENABLED`** now says the gap is closed, names the table, the RPC and the migration, and says the switch stays off for Binance.
+- `analytics-service/services/trade_resume.py` gains `load_strategy_fills_reread_bound`, the seed's third term. It fails open like its sibling `load_strategy_fill_high_water`: a read error means no bound term for that run, and the stored bound is kept for the next run whose read succeeds. A row stored for another key is ignored.
+
+### Tests
+- `analytics-service/tests/test_binancefills_cursor.py`: the two-run arm (run 1's column set by another strategy, run 2 seeded from what run 1 wrote, RED before the fix), the D-02 interleave, D-03 ceilings, the stall, A2, D-04, the provisional-bound-before-the-read and held-daily-store classes, and a mirror of the SQL case table. Shared fixtures in `tests/_binance_fills.py`.
+- `tests/test_binance_sync_flags.py` (new), `tests/test_csv_analytics_runner.py` and `tests/test_derive_broker_dailies_dualmode.py`: a `binance_*` flag survives the derive and the CSV rebuild, and the next clean sync clears it.
+- `tests/test_stamp_io_exhaustive.py` holds the guarded `binance_*` flag read to its own disposition; `tests/test_okxtrades_cursor.py`'s shared harness gains the stateful bound store and a balance-read failure, so the same two-run harness drives Binance runs.
+- `tests/test_ana_recon_audit.py`: the NEW-C12-01 structural pin now finds the Phase-2 broad handler by its exact clause, `except Exception as e:`. Without the colon it also matched this phase's earlier `except Exception as exc:` around the bound RPC, a Supabase call that never sees ccxt, so it compared the wrong clause.
+
+### Infrastructure
+- Census moves for the new gate and function, merged on top of Phase 230 and Phase 225 PR-3: `FILES_FLOOR` 95 → 96 and `ARMS_FLOOR` 1050 → 1074 in `scripts/mutation-floors.mjs` (+24 arms on top of Phase 225 PR-3's 1050; `--parse-only` on the merged tree prints `arms: 0/1074/0`, and the FULL `sql-mutation` run on the earlier merge onto 1041 measured `biting: 1065`, the same +24), `COMPARED_FLOOR` 147 → 148 in `scripts/baseline-content-drift-check.mjs`, and the matching pins in `src/__tests__/mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`, `lint-sql-gates.test.ts` and `gate-family-meta.test.ts`.
+- One `snapshot-only` `NAME_SET_RATCHET` row for `set_strategy_fills_reread_bound` in `scripts/dump-sql-functions.ts`. Until the post-apply baseline re-dump, `baseline-content-drift` reports it `SNAPSHOT_MISSING` by construction. **After the PROD apply, the baseline re-dump deletes that row.**
+
+### Removed
+- `TODOS.md` `[250-BINANCE-STOP-BELOW-CURSOR]` is deleted: this phase closes it.
+
+### Notes
+- **The migration applies to TEST and then to PROD on merge** with no human stop between them. migration-reviewer and rls-policy-auditor were clean on it, including a re-review after the stamp moved to `20261126150000`. That stamp still sorts after every migration on `main`, the latest being Phase 225 PR-3's `20261126140500`.
+- **`USE_RAW_TRADE_INGESTION` stays off for Binance.** Every residual below is dormant while it is off. The Railway worker environment value was not read.
+- **Routed, recorded rather than fixed (`TODOS.md`):**
+  - `[253-BINANCE-SYMBOLS-ON-PUBLIC-FLAGS]`: the carried `binance_*` symbol lists sit on the anon-readable `strategy_analytics.data_quality_flags` until the next clean sync. SC-3 requires `binance_deadline_symbols` to survive, so moving them is the switch-flipping phase's job.
+  - `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`: OKX, Bybit and Deribit lose a span when the fills read raises, is rate limited or is cancelled after Phase 251's daily store, on a NULL column and on a set column with no stored fill. Binance is covered by the provisional bound. Owner: the phase that turns the switch on for a further venue.
+  - `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]`: while the bound RPC is unavailable, `cron_sync` and `/fetch-trades` still store daily rows, so the next run after the RPC recovers can seed past the unread span. The phase goal holds while `set_strategy_fills_reread_bound` is available. Owner: the phase that turns the switch on for Binance.
+- Known limits carried from the review fix record, all dormant with the switch off: a failing guarded flag read in a failure writer carries nothing, and the sync epilogue's own failed flag load replaces the column with new keys only.
+
 ## [0.133.92.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE PR-3: one MT5 login on two broker servers is two accounts at the database index
 
 PR-3, the last PR of Phase 225 (plans 10 and 19, CONN-03). It ships migration B, which plan 10 wrote and plan 19 re-based on a main that now carries PR-2b-1, PR-2b-2, PR-2c0 and PR-2c. Every same-owner reader and the MT5 connect validation already treat the broker server as part of the account. This PR lets the database index agree, so a user can connect one MT5 login on two different broker servers as two accounts.
