@@ -771,7 +771,7 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): totalAnchored 1021 -> 1033, +12 twinned arms in the NEW gate test_commit_scenario_batch_venue_server_identity.sql (+1 file: 93 -> 94 annotated, 120 -> 121 files). MEASURED by `--parse-only` (`arms: 0/1033/0`, `coverage: files 94/121`) and the exit-2-by-design --file run of that gate (`arms: 12/12/0`, `biting: 12`, every arm RED (identity ok)).
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): totalAnchored 1033 -> 1041, +8 twinned arms in the NEW gate test_mt5_terminal_lease.sql (+1 file, +8 arms: 1033 -> 1041, 94 -> 95 annotated, 121 -> 122 files). MEASURED: `--parse-only` printed `arms: 0/1041/0`.
     // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19 round 2, PR-3 re-base): totalAnchored 1041 -> 1050, plan 10's +9 twinned arms (+5 in test_api_keys_venue_identity_uniq.sql, +4 in test_api_keys_account_identity.sql, no file joined) on top of main. MEASURED: `--parse-only` printed `coverage: files 95/122`, `arms: 0/1050/0` and `No static defects`.
-    // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): totalAnchored 1074 -> 1079, +5 twinned arms (P8, P8/sfox, P9/binance, P9/bybit, P9/deribit) in test_enqueue_poll_positions_cohort.sql, a file already annotated.
+    // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): totalAnchored 1074 -> 1079, +5 twinned arms (P8, P8/sfox, P8/deribit, P9/binance, P9/bybit) in test_enqueue_poll_positions_cohort.sql, a file already annotated.
     expect(totalAnchored).toBe(1079);
   });
 });
@@ -2375,7 +2375,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): the per-file row of test_enqueue_dedup_record_retract.sql 16 -> 18, verbatim from the SUBSET run's own line, in sorted position so the rows still sum to the aggregate (864); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     "  file test_enqueue_dedup_record_retract.sql: sections 18 / judged 18 / annotated 18 / waived 0 / biting 18",
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): the NEW gate's per-file row, copied verbatim from ONE full lane run's own line (`coverage: files 92/119`, `arms: 979/979/0`, `biting: 979`).
-    // ⭐ CURRENCY 2026-11-25 (poll_positions venue gate, migration 20261126180000): 11 -> 16 (P8, P8/sfox, P9/binance, P9/bybit, P9/deribit), copied verbatim from the file's DIAGNOSTIC run (`arms: 16/16/0`, `biting: 16`).
+    // ⭐ CURRENCY 2026-11-25 (poll_positions venue gate, migration 20261126180000): 11 -> 16 (P8, P8/sfox, P8/deribit, P9/binance, P9/bybit), copied verbatim from the file's DIAGNOSTIC run (`arms: 16/16/0`, `biting: 16`).
     "  file test_enqueue_poll_positions_cohort.sql: sections 16 / judged 16 / annotated 16 / waived 0 / biting 16",
     "  file test_enqueue_race_loss_40001.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     // ⭐ ADDED 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): the contact-dedupe gate, copied from the full run's own per-file line.

@@ -34,19 +34,26 @@
 -- exchange.fetch_positions() (Bybit adds a raw ccxt endpoint fallback, Deribit has its own
 -- normaliser). ctx.exchange comes from _make_exchange_client: an SfoxClient for sfox, an
 -- Mt5Session for mt5, and create_exchange (a ccxt class from EXCHANGE_CLASSES in
--- services/exchange.py) for everything else. So the venues the poll serves are exactly
--- EXCHANGE_CLASSES: binance, bybit, deribit and okx. api_keys_exchange_check admits those four
--- plus sfox and mt5, which are the two this gate shuts out.
+-- services/exchange.py) for everything else. The handler then upserts the rows through
+-- persist_position_snapshots into position_snapshots, whose position_snapshots_exchange_check
+-- admits only binance, okx and bybit (read on PROD 2026-11-26). A Deribit row is stamped
+-- exchange 'deribit' by _normalize_deribit_position, so a Deribit account holding a position
+-- fails that CHECK (23514) and its job ends failed_final the same way the MT5 jobs did. So the
+-- venues the poll can serve END TO END are EXCHANGE_CLASSES intersected with that CHECK:
+-- binance, bybit and okx. api_keys_exchange_check admits those three plus deribit, sfox and
+-- mt5, which are the three this gate shuts out.
 --
--- Deribit stays in on purpose: the pre-227 cohort admitted a published Deribit strategy with a
--- done sync_trades job and fetch_positions serves it, so leaving it out would be a new
--- regression. (Plan 227-06 named okx, binance and bybit, which is the cursor writer's set,
--- DAILY_PNL_VENUES, not the set fetch_positions serves.)
+-- Deribit is left out on purpose, and it is not a lost feature: PROD has no Deribit strategy
+-- and has never run a Deribit poll_positions job (read 2026-11-26), and the position_snapshots
+-- CHECK is pinned at three venues by src/__tests__/contracts/check-zod-db-check-parity.test.ts
+-- until Deribit positions are supported. Admitting Deribit is a forward migration that widens
+-- that CHECK and this gate together. analytics-service/tests/test_poll_positions_cohort_venues.py
+-- pins this gate to EXCHANGE_CLASSES intersected with that CHECK, so a drift in either fails there.
 --
 -- ══════════════════════════════════════════════════════════════════════════
 -- THE DELTA against 20261124120500 (the whole of it)
 -- ══════════════════════════════════════════════════════════════════════════
---   1. One top-level cohort conjunct, `ak.exchange IN ('binance', 'bybit', 'deribit', 'okx')`,
+--   1. One top-level cohort conjunct, `ak.exchange IN ('binance', 'bybit', 'okx')`,
 --      beside the key-liveness conjuncts, with a comment above it. It sits at the top level and
 --      not inside the cursor side of the OR, because the PROD failures came through the job side.
 --   2. The function COMMENT names the venue gate.
@@ -117,8 +124,9 @@ BEGIN
         -- Venue gate (20261126180000): only the venues run_poll_positions_job can serve. That
         -- handler calls the ccxt-style fetch_positions on the client _make_exchange_client
         -- builds, which is a ccxt exchange only for EXCHANGE_CLASSES in
-        -- analytics-service/services/exchange.py. mt5 and sfox get non-ccxt clients.
-        AND ak.exchange IN ('binance', 'bybit', 'deribit', 'okx')
+        -- analytics-service/services/exchange.py (mt5 and sfox get non-ccxt clients), and
+        -- writes position_snapshots, whose exchange CHECK admits no deribit row.
+        AND ak.exchange IN ('binance', 'bybit', 'okx')
         AND (
           EXISTS (
             SELECT 1 FROM compute_jobs cj
@@ -162,7 +170,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION enqueue_poll_positions_for_all_strategies IS
-  'Daily fanout: enqueues a poll_positions job per qualifying strategy. Cohort (phase 227 HEAL-05): published, pending_review or private, through an active and connected key, with a done sync_trades job OR a strategy_sync_cursors row advanced in the last 30 days, on a venue fetch_positions serves (binance, bybit, deribit, okx; never mt5 or sfox). Idempotent via enqueue_compute_job partial unique index. Returns count of newly-enqueued jobs. Called by worker daily loop under advisory lock to prevent multi-replica duplication. See migration 033, 20261124120500 and 20261126180000.';
+  'Daily fanout: enqueues a poll_positions job per qualifying strategy. Cohort (phase 227 HEAL-05): published, pending_review or private, through an active and connected key, with a done sync_trades job OR a strategy_sync_cursors row advanced in the last 30 days, on a venue the poll serves end to end (binance, bybit, okx; never deribit, mt5 or sfox). Idempotent via enqueue_compute_job partial unique index. Returns count of newly-enqueued jobs. Called by worker daily loop under advisory lock to prevent multi-replica duplication. See migration 033, 20261124120500 and 20261126180000.';
 
 -- ==========================================================================
 -- STEP 2: ACL, restated
@@ -238,8 +246,8 @@ BEGIN
   IF v_body NOT LIKE '%ak.is_active%' THEN
     RAISE EXCEPTION 'Migration 20261126180000: the cohort lost the active key filter, so a deactivated key would still be read daily';
   END IF;
-  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN
-    RAISE EXCEPTION 'Migration 20261126180000: the cohort lost its venue gate, so an mt5 or sfox strategy is enqueued for a ccxt fetch_positions its client does not have';
+  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN
+    RAISE EXCEPTION 'Migration 20261126180000: the cohort lost its venue gate, so an mt5, sfox or deribit strategy is enqueued for a poll it cannot complete';
   END IF;
   v_needle := 'interval ''30 days''';
   IF (length(v_body) - length(replace(v_body, v_needle, ''))) / length(v_needle) <> 2 THEN

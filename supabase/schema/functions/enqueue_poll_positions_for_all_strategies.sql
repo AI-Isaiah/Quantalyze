@@ -34,8 +34,9 @@ BEGIN
         -- Venue gate (20261126180000): only the venues run_poll_positions_job can serve. That
         -- handler calls the ccxt-style fetch_positions on the client _make_exchange_client
         -- builds, which is a ccxt exchange only for EXCHANGE_CLASSES in
-        -- analytics-service/services/exchange.py. mt5 and sfox get non-ccxt clients.
-        AND ak.exchange IN ('binance', 'bybit', 'deribit', 'okx')
+        -- analytics-service/services/exchange.py (mt5 and sfox get non-ccxt clients), and
+        -- writes position_snapshots, whose exchange CHECK admits no deribit row.
+        AND ak.exchange IN ('binance', 'bybit', 'okx')
         AND (
           EXISTS (
             SELECT 1 FROM compute_jobs cj

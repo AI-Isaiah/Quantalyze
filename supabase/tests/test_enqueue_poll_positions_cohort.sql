@@ -31,10 +31,12 @@
 --   P8  a private MT5 strategy with an active, connected key and a done sync_trades job 1 day
 --       old (the shape of the three PROD failures of 2026-11-25) is NOT polled (P8), nor is an
 --       sFOX strategy of the same shape (P8/sfox). Neither client has the ccxt fetch_positions
---       run_poll_positions_job calls, so every such job fails 3/3.
---   P9  a binance (P9/binance), bybit (P9/bybit) and deribit (P9/deribit) strategy of the same
---       shape are each polled: the venue gate admits every venue fetch_positions serves
---       (EXCHANGE_CLASSES in analytics-service/services/exchange.py). okx is covered by P1.
+--       run_poll_positions_job calls, so every such job fails 3/3. Nor is a Deribit strategy
+--       (P8/deribit): position_snapshots_exchange_check admits no deribit row, so a Deribit
+--       account holding a position fails the snapshot upsert.
+--   P9  a binance (P9/binance) and bybit (P9/bybit) strategy of the same shape are each
+--       polled: the venue gate admits every venue the poll serves end to end
+--       (EXCHANGE_CLASSES intersected with position_snapshots_exchange_check). okx is covered by P1.
 --
 -- Every `TEST FAILED (...)` raise sits DIRECTLY in the DO body (the mutation runner reads an
 -- identity only from a single-frame inline_code_block raise). pg_temp helpers return values and
@@ -335,7 +337,7 @@ BEGIN
   v_cnt := pg_temp.pc_polls(v_p8);
   -- RED-UNDER: drop the venue gate (the 20261124120500 body), so a private MT5 strategy is
   --            enqueued and its job fails 3/3 on an Mt5Session that has no fetch_positions.
-  -- RED-UNDER-M: {"arm":"P8","apply":[{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"        AND ak.exchange IN ('binance', 'bybit', 'deribit', 'okx')\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN\n","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"P8","apply":[{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"        AND ak.exchange IN ('binance', 'bybit', 'okx')\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (P8): a private MT5 strategy with an active key and a done sync_trades job 1 day old has % poll_positions job(s), expected 0. run_poll_positions_job calls the ccxt fetch_positions, which an Mt5Session does not have, so every such job fails 3/3.', v_cnt;
   END IF;
@@ -343,36 +345,36 @@ BEGIN
   v_cnt := pg_temp.pc_polls(v_p8s);
   -- RED-UNDER: add sfox to the venue gate, so an sFOX strategy is enqueued for a poll its
   --            SfoxClient cannot run.
-  -- RED-UNDER-M: {"arm":"P8/sfox","apply":[{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"        AND ak.exchange IN ('binance', 'bybit', 'deribit', 'okx')\n","replace":"        AND ak.exchange IN ('binance', 'bybit', 'deribit', 'okx', 'sfox')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN\n","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"P8/sfox","apply":[{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"        AND ak.exchange IN ('binance', 'bybit', 'okx')\n","replace":"        AND ak.exchange IN ('binance', 'bybit', 'okx', 'sfox')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN\n","occurrences":1}]}
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (P8/sfox): a private sFOX strategy with an active key and a done sync_trades job 1 day old has % poll_positions job(s), expected 0. An SfoxClient has no ccxt fetch_positions either.', v_cnt;
   END IF;
 
-  -- ===== ARM P9 - every venue fetch_positions serves is still polled =================
+  -- ===== ARM P9 - every venue the poll serves is still polled =================
   v_cnt := pg_temp.pc_polls(v_p9b);
   -- RED-UNDER: drop binance from the venue gate, so binance strategies lose their position
-  --            snapshots although fetch_positions serves them.
-  -- RED-UNDER-M: {"arm":"P9/binance","apply":[{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"        AND ak.exchange IN ('binance', 'bybit', 'deribit', 'okx')\n","replace":"        AND ak.exchange IN ('bybit', 'deribit', 'okx')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN\n","occurrences":1}]}
+  --            snapshots although the poll serves them.
+  -- RED-UNDER-M: {"arm":"P9/binance","apply":[{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"        AND ak.exchange IN ('binance', 'bybit', 'okx')\n","replace":"        AND ak.exchange IN ('bybit', 'okx')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN\n","occurrences":1}]}
   IF v_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (P9/binance): a private binance strategy with an active key and a done sync_trades job 1 day old has % poll_positions job(s), expected exactly 1. fetch_positions serves binance.', v_cnt;
+    RAISE EXCEPTION 'TEST FAILED (P9/binance): a private binance strategy with an active key and a done sync_trades job 1 day old has % poll_positions job(s), expected exactly 1. The poll serves binance end to end.', v_cnt;
   END IF;
 
   v_cnt := pg_temp.pc_polls(v_p9y);
   -- RED-UNDER: drop bybit from the venue gate.
-  -- RED-UNDER-M: {"arm":"P9/bybit","apply":[{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"        AND ak.exchange IN ('binance', 'bybit', 'deribit', 'okx')\n","replace":"        AND ak.exchange IN ('binance', 'deribit', 'okx')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN\n","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"P9/bybit","apply":[{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"        AND ak.exchange IN ('binance', 'bybit', 'okx')\n","replace":"        AND ak.exchange IN ('binance', 'okx')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN\n","occurrences":1}]}
   IF v_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (P9/bybit): a private bybit strategy with an active key and a done sync_trades job 1 day old has % poll_positions job(s), expected exactly 1. fetch_positions serves bybit.', v_cnt;
+    RAISE EXCEPTION 'TEST FAILED (P9/bybit): a private bybit strategy with an active key and a done sync_trades job 1 day old has % poll_positions job(s), expected exactly 1. The poll serves bybit end to end.', v_cnt;
   END IF;
 
   v_cnt := pg_temp.pc_polls(v_p9d);
-  -- RED-UNDER: drop deribit from the venue gate, which the pre-227 cohort admitted, so deribit
-  --            strategies would lose their position snapshots.
-  -- RED-UNDER-M: {"arm":"P9/deribit","apply":[{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"        AND ak.exchange IN ('binance', 'bybit', 'deribit', 'okx')\n","replace":"        AND ak.exchange IN ('binance', 'bybit', 'okx')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''deribit'', ''okx'')%' THEN\n","occurrences":1}]}
-  IF v_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (P9/deribit): a private deribit strategy with an active key and a done sync_trades job 1 day old has % poll_positions job(s), expected exactly 1. fetch_positions serves deribit through its own normaliser.', v_cnt;
+  -- RED-UNDER: add deribit back to the venue gate, so a Deribit strategy is enqueued and a
+  --            held position fails position_snapshots_exchange_check on the upsert.
+  -- RED-UNDER-M: {"arm":"P8/deribit","apply":[{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"        AND ak.exchange IN ('binance', 'bybit', 'okx')\n","replace":"        AND ak.exchange IN ('binance', 'bybit', 'deribit', 'okx')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126180000_poll_positions_cohort_ccxt_venues.sql","find":"  IF v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN\n","replace":"  IF FALSE AND v_body NOT LIKE '%ak.exchange IN (''binance'', ''bybit'', ''okx'')%' THEN\n","occurrences":1}]}
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (P8/deribit): a private deribit strategy with an active key and a done sync_trades job 1 day old has % poll_positions job(s), expected 0. position_snapshots_exchange_check admits no deribit row, so a held Deribit position fails the snapshot upsert.', v_cnt;
   END IF;
 
-  RAISE NOTICE 'ALL 9 ARMS EXECUTED (P1, P2, P3, P4, P5, P6, P7, P8, P9): a private cron-synced strategy is polled (P1), today''s job-synced cohort is kept (P2), a disconnected or deactivated key is never polled (P3), draft and archived strategies are not polled (P4), a 40 day old sync history admits nothing (P5), a second call the same day enqueues nothing (P6), the call and its ACL are unchanged (P7), MT5 and sFOX strategies are never polled (P8), and binance, bybit and deribit strategies still are (P9)';
+  RAISE NOTICE 'ALL 9 ARMS EXECUTED (P1, P2, P3, P4, P5, P6, P7, P8, P9): a private cron-synced strategy is polled (P1), today''s job-synced cohort is kept (P2), a disconnected or deactivated key is never polled (P3), draft and archived strategies are not polled (P4), a 40 day old sync history admits nothing (P5), a second call the same day enqueues nothing (P6), the call and its ACL are unchanged (P7), MT5, sFOX and Deribit strategies are never polled (P8), and binance and bybit strategies still are (P9)';
 END
 $$;
 
