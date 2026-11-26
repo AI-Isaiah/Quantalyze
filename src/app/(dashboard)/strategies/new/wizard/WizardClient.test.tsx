@@ -920,7 +920,7 @@ describe("[94.1 F1] WizardClient — stale snapshot invalidation on re-connect",
 describe("[154-06 / WIZCONT-02] WizardClient — the dedup notice", () => {
   /** Hand-typed from 154-UI-SPEC.md's Copywriting table — never imported. */
   const DEDUP_COPY =
-    "These credentials are already connected. We continued with your existing strategy instead of creating a duplicate.";
+    "We continued with the strategy this setup already created, on the key it was first connected with. The details you just entered did not change that key. To connect different credentials, delete this draft first.";
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -935,6 +935,14 @@ describe("[154-06 / WIZCONT-02] WizardClient — the dedup notice", () => {
 
     const strip = screen.getByTestId("wizard-dedup-notice");
     expect(strip).toHaveTextContent(DEDUP_COPY);
+    // 228 / CONN-02: the fallback arm is reached WITHOUT this submission having
+    // validated or stored the typed credentials, so it must not claim they are
+    // connected, checked, or that nothing was saved (each is false on one of
+    // the two arms that reach it).
+    const text = strip.textContent ?? "";
+    expect(text).not.toContain("already connected");
+    expect(text).not.toContain("checked");
+    expect(text).not.toContain("not saved");
   });
 
   it("is NEUTRAL, not an error: no ErrorEnvelope, and none of the warning/negative tokens", async () => {
@@ -999,6 +1007,9 @@ describe("[154-06 / WIZCONT-02] WizardClient — the dedup notice", () => {
 describe("[213 CR-02] WizardClient — dedup onto the draft this session already held", () => {
   const OLD_COPY =
     "These credentials are already connected. We continued with your existing strategy instead of creating a duplicate.";
+  // 228 / CONN-02: the fallback arm's corrected sentence (hand-typed).
+  const FALLBACK_COPY =
+    "We continued with the strategy this setup already created, on the key it was first connected with. The details you just entered did not change that key. To connect different credentials, delete this draft first.";
   const KEPT_COPY =
     "We kept the strategy this setup already created, on its original key. To connect different credentials, delete this draft first.";
 
@@ -1068,7 +1079,7 @@ describe("[213 CR-02] WizardClient — dedup onto the draft this session already
     expect(screen.queryByText(KEPT_COPY)).toBeNull();
   });
 
-  it("a deduped result for a strategy this session did NOT hold keeps the old sentence", async () => {
+  it("a deduped result for a strategy this session did NOT hold renders the corrected fallback, never the retired sentence", async () => {
     render(<WizardClient initialDraft={null} />);
     await screen.findByTestId("mock-connect-step");
 
@@ -1080,7 +1091,9 @@ describe("[213 CR-02] WizardClient — dedup onto the draft this session already
     fireEvent.click(screen.getByTestId("connect-success-deduped"));
     await screen.findByTestId("mock-sync-preview");
 
-    expect(screen.getByTestId("wizard-dedup-notice")).toHaveTextContent(OLD_COPY);
+    const strip = screen.getByTestId("wizard-dedup-notice");
+    expect(strip).toHaveTextContent(FALLBACK_COPY);
+    expect(screen.queryByText(OLD_COPY)).toBeNull();
     expect(screen.queryByText(KEPT_COPY)).toBeNull();
   });
 });

@@ -2324,6 +2324,64 @@ describe("[140.5-02 / B-02] our own transport failures carry a machine marker, n
 });
 
 /**
+ * Phase 228 review WR-01 — `rotateKeySecret` maps a transport failure onto the
+ * same taxonomy `analyticsRequest` does.
+ *
+ * `resilientFetch` rethrows a transport failure UNWRAPPED. `rotateKeySecret`
+ * called it with no catch, so on the create-with-key MT5 rotate leg (and on
+ * PATCH rotate-secret) a 120 s deadline classified `KEY_NETWORK_TIMEOUT` ("We
+ * could not reach the exchange" — blames the exchange for OUR hop) and a refused
+ * connection classified `UNKNOWN` 500 plus a Sentry page, while the sibling
+ * `validateKey` arm answers `SERVICE_UNREACHABLE` for the same hop.
+ *
+ * Both throws are the REAL shapes the runtime produces (a `DOMException` named
+ * `TimeoutError`, a `TypeError("fetch failed")`), driven through the REAL core
+ * and the REAL classifier. The expected codes are LITERALS, not imports.
+ */
+describe("[228 / WR-01] rotateKeySecret answers a transport failure as OUR hop, not the exchange", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function classifiedFromRejectingFetch(rejection: unknown) {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(rejection);
+    const { rotateKeySecret } = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await rotateKeySecret({
+        keyId: "key-under-test",
+        userId: TENANT.userId,
+        newSecret: "new-secret-under-test",
+        correlationId: "corr-under-test",
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeDefined();
+    return classifyKeyValidationError(caught);
+  }
+
+  it("a 120 s deadline (real DOMException TimeoutError) is SERVICE_UNREACHABLE 502, not KEY_NETWORK_TIMEOUT", async () => {
+    const out = await classifiedFromRejectingFetch(
+      new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+    );
+    expect(out).toEqual({ code: "SERVICE_UNREACHABLE", status: 502 });
+  });
+
+  it("a refused connection (real TypeError fetch failed) is SERVICE_UNREACHABLE 502, not UNKNOWN 500", async () => {
+    const out = await classifiedFromRejectingFetch(new TypeError("fetch failed"));
+    expect(out).toEqual({ code: "SERVICE_UNREACHABLE", status: 502 });
+  });
+});
+
+/**
  * Phase 153.4-02 / WIZFORM-05 / D-01 — the venue-aware validate-key budget.
  *
  * Four properties, and the last two are the ones that catch the defects this

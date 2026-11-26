@@ -372,9 +372,11 @@ export function WizardClient({
    * landed on the strategy THIS wizard session already held — the F6 session
    * fence answering a resubmit (typically after "Try another key") with the
    * original draft and its original key, without validating the credentials
-   * just typed. "These credentials are already connected" would be false there,
-   * so the strip says what happened instead. Set and cleared with
-   * `dedupedExisting`, from the same result.
+   * just typed. A fallback sentence that told the person the credentials they
+   * just typed were already connected would be false there, so the strip says
+   * what happened instead. (Phase 228 / CONN-02: that fallback sentence is itself
+   * now narrowed to what this submission did to the key, for the same reason.)
+   * Set and cleared with `dedupedExisting`, from the same result.
    */
   const [dedupedKeptDraft, setDedupedKeptDraft] = useState(false);
   /**
@@ -1405,7 +1407,7 @@ export function WizardClient({
               ? "We kept the strategy this setup already created, on its original key. To connect different credentials, delete this draft first."
               : dedupedHeldOnly
                 ? "We continued with a strategy that already exists for these credentials or this setup instead of creating a duplicate. To connect different credentials, delete that draft first."
-                : "These credentials are already connected. We continued with your existing strategy instead of creating a duplicate."}
+                : "We continued with the strategy this setup already created, on the key it was first connected with. The details you just entered did not change that key. To connect different credentials, delete this draft first."}
           </div>
         )}
 

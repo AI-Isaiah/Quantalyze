@@ -630,8 +630,11 @@ async def rotate_key_secret(
          false — BEFORE the KEK load, any decrypt and any live probe (Phase 240
          plan 05, CONN-05). The same flat body ``/api/validate-key`` answers.
       6. Load the KEK; 500 ``KEK_UNAVAILABLE`` if unconfigured.
-      7. ``decrypt_credentials`` the row to recover ``(login, OLD password
-         [discarded], broker_server)``; 500 ``KEY_UNDECRYPTABLE`` on a genuine
+      7. ``decrypt_credentials`` the row to recover ``(login, OLD password,
+         broker_server)``. The OLD password is only ever compared, after the
+         probe in step 8 succeeded, in constant time over its UTF-8 bytes
+         (``secrets.compare_digest``), to report ``secret_changed`` (Phase 228,
+         CONN-02); it is never logged or returned; 500 ``KEY_UNDECRYPTABLE`` on a genuine
          decrypt failure (``InvalidToken`` / ``JSONDecodeError`` / ``KeyError``
          only — narrowed per review finding 3; an unrelated bug propagates as
          an unhandled 500 instead of being mislabeled as a broken key).
@@ -652,7 +655,9 @@ async def rotate_key_secret(
          across the module boundary.
       9. On success, ``encrypt_credentials`` the UNCHANGED login/server with
          the NEW password and return its six ciphertext fields plus
-         ``venue_account_id``. ``login`` is the ONLY plaintext value in the
+         ``venue_account_id`` and the boolean ``secret_changed`` (false when the
+         typed password equals the stored one byte for byte, so the caller can
+         skip the write). ``login`` is the ONLY plaintext value in the
          response — never the password, never the broker server
          (T-164.5.3-06).
 
@@ -728,7 +733,7 @@ async def rotate_key_secret(
         )
 
     try:
-        login, _old_password, broker_server = decrypt_credentials(key_data, kek)
+        login, old_password, broker_server = decrypt_credentials(key_data, kek)
     except (InvalidToken, json.JSONDecodeError, KeyError):
         # Finding 3: narrowed from a bare `except Exception:` to the exception
         # types `decrypt_credentials` actually raises for a genuine decrypt
@@ -778,6 +783,16 @@ async def rotate_key_secret(
             detail="Credential validation returned an unexpected result. Nothing was changed.",
         )
 
+    # Phase 228 (CONN-02): probe-then-compare. Computed only AFTER the broker
+    # accepted the typed password, so `secret_changed: False` means the stored
+    # password equals the typed one AND it signs in. Byte equality of the two
+    # UTF-8 encodings, verbatim (no trim, no case fold, no normalisation: D-08).
+    # Both sides are encoded because `compare_digest` raises TypeError on a
+    # non-ASCII `str` pair. Neither password nor this result is logged.
+    secret_changed = not secrets.compare_digest(
+        old_password.encode("utf-8"), req.new_secret.encode("utf-8")
+    )
+
     encrypted = encrypt_credentials(login, req.new_secret, broker_server, kek)
     # WR-04 (164.5.3 review) — normalise the identifier the caller may
     # BACKFILL from this response, matching every other writer of this
@@ -793,4 +808,8 @@ async def rotate_key_secret(
     # The normalisation is services.mt5_validation.mt5_venue_account_id, the
     # one helper the poll's MT5 stamp also uses, so rotate and poll write the
     # same bytes.
-    return {**encrypted, "venue_account_id": mt5_venue_account_id(login)}
+    return {
+        **encrypted,
+        "venue_account_id": mt5_venue_account_id(login),
+        "secret_changed": secret_changed,
+    }

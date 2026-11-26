@@ -664,9 +664,15 @@ function retryExprFor(code: string, callIndex: number): string {
  * chokepoint in either client would mean its bindings no longer share a retry
  * verdict, and the sentinel makes that a RED rather than a half-truth silently
  * attributed to every binding in the family.
+ *
+ * ⭐ 2026-11-26 (Phase 228): a call that passes its budget key as a STRING
+ * LITERAL is not the chokepoint. It is a family (iii) site, discovered and
+ * pinned on its own by `discoverLiteralCallSites` (B-15's `rotateKeySecret`
+ * now lives in analytics-client.ts). Only the variable-keyed calls count here,
+ * so a second variable-keyed chokepoint still reddens.
  */
 function chokepointRetry(code: string): string {
-  const calls = [...code.matchAll(/resilientFetch\s*\(/g)];
+  const calls = [...code.matchAll(/resilientFetch\s*\((?!\s*")/g)];
   if (calls.length !== 1) return "<NOT A SINGLE CHOKEPOINT>";
   return retryExprFor(code, calls[0].index);
 }
@@ -985,8 +991,13 @@ const EXPECTED_BINDINGS: ReadonlyArray<{
   // broker credential probe, so a silent retry would turn one user-initiated
   // password correction into several authentication attempts against the
   // broker — the same non-idempotency reason validate-key-serialized states.
+  // ⭐ 2026-11-26 (Phase 228, CONN-02): the call moved VERBATIM from the
+  // rotate-secret route into `rotateKeySecret` in src/lib/analytics-client.ts,
+  // shared with create-with-key's MT5 same-account arm. It still passes its key
+  // as a literal and calls the core directly (not through `analyticsRequest`),
+  // so it stays family (iii) with retry "0"; only the site moved.
   { id: "B-15", family: "iii", key: "keys-rotate-secret",
-    sites: [{ site: "src/app/api/keys/[id]/rotate-secret/route.ts", path: "/internal/keys/{}/rotate-secret", retry: "0" }] },
+    sites: [{ site: "src/lib/analytics-client.ts", path: "/internal/keys/{}/rotate-secret", retry: "0" }] },
   // Phase 169.2 / D-08 — `refreshBenchmark`, the daily BTC benchmark refresh.
   // Family (i): a client wrapper, so the retry is the chokepoint expression,
   // which resolves to 0 because the key has a NO verdict in the registry.
@@ -1005,7 +1016,8 @@ const EXPECTED_BINDINGS: ReadonlyArray<{
  */
 const EXPECTED_SEAM_CALL_FILES: string[] = [
   "src/app/api/keys/[id]/permissions/route.ts",
-  "src/app/api/keys/[id]/rotate-secret/route.ts",
+  // Phase 228 (2026-11-26): the rotate-secret route no longer calls the core;
+  // its call moved into src/lib/analytics-client.ts (B-15).
   "src/app/api/keys/validate-and-encrypt/route.ts",
   "src/app/api/strategies/finalize-wizard/route.ts",
   "src/lib/analytics-client.ts",

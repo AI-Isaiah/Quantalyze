@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  RotateSecretResponseSchema,
   ValidateKeyResponseSchema,
   EnqueueComputeJobResponseSchema,
   EncryptKeyResponseSchema,
@@ -146,6 +147,40 @@ describe("TickJobsResponseSchema", () => {
 // ALWAYS null, dek_encrypted, etc.). Add-key modal could never submit.
 // Found by /qa on 2026-04-20 in /exchanges add-key modal.
 // Report: .gstack/qa-reports/qa-report-quantalyze-phase-06-2026-04-20.md
+describe("RotateSecretResponseSchema secret_changed (Phase 228, CONN-02)", () => {
+  // WHY: Vercel deploys before Railway, so the old Python seam answers with no
+  // `secret_changed`. A required field would fail rotate-secret's own parse;
+  // a coerced default would turn "old seam, always write" into "unchanged".
+  const base = {
+    api_key_encrypted: "ct",
+    api_secret_encrypted: null,
+    passphrase_encrypted: null,
+    dek_encrypted: "ct-dek",
+    nonce: null,
+    kek_version: 1,
+    venue_account_id: "synthetic-login",
+  };
+  it("parses a body without secret_changed and leaves it absent", () => {
+    const r = RotateSecretResponseSchema.safeParse(base);
+    expect(r.success).toBe(true);
+    expect(r.success && "secret_changed" in r.data).toBe(false);
+  });
+  it("keeps secret_changed true and false as given", () => {
+    for (const v of [true, false]) {
+      const r = RotateSecretResponseSchema.safeParse({ ...base, secret_changed: v });
+      expect(r.success && r.data.secret_changed).toBe(v);
+    }
+  });
+  it("rejects a non-boolean secret_changed", () => {
+    for (const v of ["yes", 1]) {
+      expect(RotateSecretResponseSchema.safeParse({ ...base, secret_changed: v }).success).toBe(false);
+    }
+  });
+  it("EncryptKeyResponseSchema does not gain the field", () => {
+    expect(Object.keys(EncryptKeyResponseSchema.shape)).not.toContain("secret_changed");
+  });
+});
+
 describe("EncryptKeyResponseSchema (envelope-encryption contract)", () => {
   // Exact response shape produced by analytics-service/services/encryption.py
   // -> encrypt_credentials(). All credentials bundled into api_key_encrypted;

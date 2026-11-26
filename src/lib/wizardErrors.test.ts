@@ -7325,3 +7325,71 @@ describe("[212-04] recogniseValidateAndEncryptCode — status decides who thrott
     ).toEqual({ code: "RATE_LIMITED", recognised: true });
   });
 });
+
+/**
+ * [228-02 / CONN-04] `KEY_ORPHANED`'s Disconnect bullet names the key.
+ *
+ * An owner with several stored keys told to "choose Disconnect on that row" has
+ * to guess which row. When the holder is a key with a name the bullet says which;
+ * with no holder, a strategy holder or a blank name it is today's sentence, byte
+ * for byte (the table's own third `fix` entry).
+ */
+describe("[228-02 / CONN-04] KEY_ORPHANED: the Disconnect bullet names the key", () => {
+  const TODAY =
+    "To connect this account with new credentials instead, choose “Disconnect” on that row. The stored key is kept on record but no longer used, and connecting the account again then works.";
+  const named = (n: string) =>
+    `To connect this account with new credentials instead, choose “Disconnect” on the row for your key “${n}”. The stored key is kept on record but no longer used, and connecting the account again then works.`;
+  const keyHolder = (name: string) => ({
+    kind: "key" as const,
+    name,
+    added_at: "2026-11-19T10:00:00Z",
+    href: "/strategies",
+  });
+
+  it("today's table sentence is still the third bullet (the fixture below is the real one)", () => {
+    expect(WIZARD_ERROR_COPY.KEY_ORPHANED.fix[2]).toBe(TODAY);
+  });
+
+  it("a key holder with a name: the named bullet, in the SAME position, other bullets untouched", () => {
+    const got = formatKeyError("KEY_ORPHANED", { holder: keyHolder("Gold book") });
+    expect(got.fix[2]).toBe(named("Gold book"));
+    expect(got.fix).toHaveLength(WIZARD_ERROR_COPY.KEY_ORPHANED.fix.length);
+    expect(got.fix.filter((_, i) => i !== 2)).toEqual(
+      WIZARD_ERROR_COPY.KEY_ORPHANED.fix.filter((_, i) => i !== 2),
+    );
+    expect(got.title).toBe(WIZARD_ERROR_COPY.KEY_ORPHANED.title);
+    expect(got.docsHref).toBe(WIZARD_ERROR_COPY.KEY_ORPHANED.docsHref);
+    expect(got.actions).toEqual(WIZARD_ERROR_COPY.KEY_ORPHANED.actions);
+  });
+
+  it("no holder: the fix list is byte-identical to the table's", () => {
+    expect(formatKeyError("KEY_ORPHANED").fix).toEqual(WIZARD_ERROR_COPY.KEY_ORPHANED.fix);
+    expect(formatKeyError("KEY_ORPHANED", {}).fix).toEqual(WIZARD_ERROR_COPY.KEY_ORPHANED.fix);
+  });
+
+  it("a strategy holder: today's bullet", () => {
+    const got = formatKeyError("KEY_ORPHANED", {
+      holder: { kind: "strategy", name: "Helios Momentum", href: "/factsheet/s-1" },
+    });
+    expect(got.fix[2]).toBe(TODAY);
+    expect(got.fix).toEqual(WIZARD_ERROR_COPY.KEY_ORPHANED.fix);
+  });
+
+  it("a key holder whose name is blank: today's bullet, never empty curly quotes", () => {
+    const got = formatKeyError("KEY_ORPHANED", { holder: keyHolder("   ") });
+    expect(got.fix).toEqual(WIZARD_ERROR_COPY.KEY_ORPHANED.fix);
+    expect(got.fix.join(" ")).not.toContain("“”");
+  });
+
+  it("a non-ASCII nickname appears verbatim inside the curly quotes", () => {
+    expect(formatKeyError("KEY_ORPHANED", { holder: keyHolder("Konto Ü-7") }).fix[2]).toBe(
+      named("Konto Ü-7"),
+    );
+  });
+
+  it("is SCOPED to this code: KEY_VENUE_ALREADY_CONNECTED given a key holder keeps its fix list", () => {
+    expect(
+      formatKeyError("KEY_VENUE_ALREADY_CONNECTED", { holder: keyHolder("Gold book") }).fix,
+    ).toEqual(WIZARD_ERROR_COPY.KEY_VENUE_ALREADY_CONNECTED.fix);
+  });
+});
