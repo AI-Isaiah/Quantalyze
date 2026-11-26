@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.98.2] - 2026-11-26 — records: Phase 241 item 2 re-measurement and Phase 252 OG-card and charts decision; both stay human_needed
+
+### Added
+- **Phase 241 DEMOCREDS item 2 re-measurement** (`241-VERIFICATION.md`, new section before Gaps Summary). Measured 2026-11-26, read-only, marker query run first on each database. Pair B is absent on TEST (0) and PROD (0). Pair A is present on PROD (1) and absent on TEST (0; never seeded there, per the SUMMARY's silence). OKX keys sharing Pair A's venue account on PROD = 4, equal to `expect_sibling_keys` in `241-04-SUMMARY.md`. Limit recorded: Pair B's key is deleted, so this is a stand-in query keyed on Pair A's venue account and does not prove the same 4 rows. Counts only, no literals.
+
+### Changed
+- **Phase 252 DERIBITOPTIONS founder decision 2026-11-26**: the OG card does NOT get the withheld sentence, and the return and drawdown charts are NOT withheld; both stay as they are. Recorded in `252-VERIFICATION.md` against its open copy-and-tone item, in a new `252-CONTEXT.md` decisions entry, and in the ROADMAP 252 section (deviation policy: both places).
+
+### Notes
+- Phase 241 stays `human_needed`: item 1 (the founder resets Pair A's password) is still open.
+- Phase 252 stays `human_needed`: the founder still runs the PROD probe.
+- No `TODOS.md` entry is closed here. No code or migration changes. Two commits: the records, then this release bump.
+
 ## [0.133.98.1] - 2026-11-26 — records: Phase 225 plan 21, Phase 228 KEYANSWERS and Phase 235 HOLDINGSTRUTH planning records; all three stay human_needed
 
 ### Added
