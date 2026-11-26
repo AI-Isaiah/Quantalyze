@@ -1,7 +1,8 @@
 ---
 phase: 225-oneaccountonce-a-user-cannot-connect-the-same-exchange-accou
 reviewed: 2026-11-26T00:00:00Z
-round: 1
+round: 2
+# Round 2 (2026-11-26): fix round 1, `git diff 0bdd8212a ca6073ac4 -- analytics-service/`. Verdict clean.
 depth: deep
 # Scope: plan 225-21 (closes review WR-01 of PR-2c), `git diff 957827f07 HEAD -- analytics-service/`
 # at a851ebd6b on gsd/phase-225-oneaccountonce. Cross-file traces: every production `.login(` and
@@ -199,3 +200,50 @@ Silent-failure-hunter round 1, plan 225-21. All three MEDIUM findings fixed in c
 - **MEDIUM-3** (`_fetch_mt5_account_balance` swallow-all WARNING carried no key): `key=%s` added from `api_key_id`. Fixed in `ca6073ac4`.
 
 Tests: the derive and holdings site tests now assert the ERROR line (bracket, class, key, no login-bracket warning), and the balance site test asserts `key=`. Each assertion was proven RED by a byte-backed neuter (level back to warning, key arg replaced), restored and `cmp`-verified.
+
+## Round 2
+
+**Reviewed:** 2026-11-26
+**Scope:** `git diff 0bdd8212a ca6073ac4 -- analytics-service/`: `job_worker.py`, `allocator_positions.py`, `test_mt5_derive_branch.py`, `test_mt5_sync_path.py`. HEAD `0ecb148b2` carries no further `analytics-service/` change.
+**Verdict:** clean. No BLOCKER, HIGH or MEDIUM.
+
+### Does each fix close its finding
+
+- **MEDIUM-1, closed.** Both arms now log a distinct line for `Mt5ServerMismatchError`. It names the server bracket, the class and the key: `ctx.key_row.get("id")` in the derive (`key_row` is a `dict[str, Any]`, so `.get` cannot raise inside the arm) and `api_key_id` in `_fetch_mt5_account_rows`. The tests assert that no "login bracket rejected" text appears.
+- **MEDIUM-2, closed.** The line is `logger.error`. The worker process calls `init_sentry()` (`main_worker.py`), and `sentry_init.py` passes explicit integrations without disabling the defaults, so the default `LoggingIntegration` (event level ERROR) applies. Neither logger is passed to `ignore_logger`. The format string has a constant template, so the events group per arm.
+- **MEDIUM-3, closed.** `key=%s` is now in the swallow-all WARNING in `_fetch_mt5_account_balance`, and `api_key_id` is that function's own keyword.
+
+### Disposition is unchanged
+
+- **Derive.** Only the log call is inside the `if/else`. After it, the arm still runs `_mt5_bounded_restart(_mt5_session.client)` and returns `FAILED`, with `error_kind="transient"` and the same `error_message`. Nothing is persisted or stamped. User copy comes from `error_kind`, so it is unchanged.
+- **Holdings.** The early exit runs only after `_must_reach_handler_unwrapped`, the same as the login path. It then calls `_mt5_bounded_restart(session.client, log_prefix="poll_allocator_positions")` and raises `AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc`. Both calls are byte-identical to the login path's. The note and the cause chain are the same, and no row is emitted. The comment claims that an `else` would break the AUM-02 AST gate. That is correct: the gate skips only logger statements at the top level of the handler body, and a `str(exc)` nested in an `If` would count as an offender. The new `logger.error` uses `type(exc).__name__`, not `str(exc)`, so the gate stays green.
+- **Balance.** The change is to the log only. It still returns `None`, so COALESCE keeps the previous balance.
+
+### No leak
+
+The new lines carry the class name and the key UUID only, with no server value and no login. `type(exc).__name__` is a constant. The derive helper checks the login digits and both server names, casefolded, in every record. The holdings and balance site tests run `_assert_no_secret` over the new lines.
+
+### Tests bite (reproduced independently in a scratch copy; the worktree was untouched)
+
+Real tree: 465 passed over `test_mt5_derive_branch.py`, `test_mt5_sync_path.py`, `test_allocator_positions.py`, `test_allocator_positions_non_ccxt.py`, `test_mt5_read.py`, `test_key_mode_linked_strategy_recompute.py` and `test_mt5_handover.py`.
+
+Each neuter was run over the derive, sync-path and non-ccxt files (205 tests in total):
+
+| neuter | result |
+|---|---|
+| derive `logger.error` changed to `warning` | 4 failed |
+| derive key arg changed to `None` | 4 failed |
+| balance key arg changed to `None` | 2 failed |
+| holdings early exit disabled (falls through to the login WARNING) | 2 failed |
+| holdings early-exit restart removed | 2 failed |
+| holdings early-exit note changed | 4 failed |
+| baseline | 205 passed |
+
+### LOW (recorded only, not actioned)
+
+- **R2-L1.** A persistent false refusal at the balance site still logs only a WARNING. This costs one advisory snapshot (`None`), never a wrong write. The derive and holdings arms raise ERROR on the same session predicate, so Sentry still gets a signal for the key.
+- **R2-L2.** The derive arm's comment block above the new branch still ends "The message carries ONLY the two int logins". That is true only for the login parent class. The 225-21 note at the top of the arm covers the subclass. This is pre-existing.
+- The new ERROR line names the key, which partly answers round 1's IN-02: a derive POST refusal can now be attributed without the DB.
+
+_Reviewed: 2026-11-26_
+_Reviewer: Claude (gsd-code-reviewer), round 2_
