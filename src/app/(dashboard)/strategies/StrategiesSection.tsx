@@ -435,6 +435,11 @@ export function StrategiesSection({
           // from a different row — or from no row at all — and a preselect that
           // outlives its click is a claim about a key the user did not choose.
           setPreselectKey(null);
+          // Founder 2026-11-26: a close can follow a draft minted on a key
+          // ("Continue with this key"). Without a refresh the page kept the bare
+          // "No strategy yet" row and no Resume banner, and "Finish setup" then
+          // reopened step 01 instead of the draft.
+          router.refresh();
         }}
         onSuccess={() => {
           setWizardOpen(false);

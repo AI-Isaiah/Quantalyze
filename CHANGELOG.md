@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.133.99.0] - 2026-11-26 — FINISHSETUP: "Finish setup" on an orphaned key continues the wizard, and closing the wizard shows a new draft
+
+Founder report on PROD: "when hitting on finish strategy, I end up on the strategies overview page, but should end up in the wizard with the right strategy and the last step of the draft." PROD edge logs give the sequence (key "Test", MT5):
+- Re-entering the stored MT5 account in the wizard got `KEY_ORPHANED` at 17:53:39Z. No draft existed yet.
+- Its only remedy was a link, "Open Strategies to finish setup on “Test”", which leads to the `/strategies` overview.
+- On the overview, "Finish setup" then "Continue with this key" minted the draft "Crystal Ball" at 17:55:34Z.
+- A close after that left the page as it was rendered before the draft existed: the bare "No strategy yet" row, and no Resume banner.
+
+### Fixed
+- **`KEY_ORPHANED` finishes setup in place.** When the route names the stored key, the wizard's credential form shows a "Finish setup on “<key>”" button. It sends the reuse request that "Continue with this key" already sends (`{ wizard_session_id, reuse_api_key_id }`) and moves to the sync preview on that key's draft. A failed or unanswered reuse shows its own error and keeps the button, so it can be tried again. If the stored key is gone by then (`KEY_REUSE_UNAVAILABLE`), the button is withdrawn. The link to the overview is not offered beside the button, and the first fix bullet ("To finish setting up with your key “<key>”, choose “Finish setup” below.") points at the button instead of telling the person to find the row (`ConnectKeyStep.tsx`, `wizardErrors.ts` `holderLink` and `KEY_ORPHANED_FINISH_FIX`).
+- **The reuse refusals name only the controls each screen has.** `KEY_REUSE_UNAVAILABLE`'s "Use a different key" bullet and `DRAFT_SESSION_COLLISION`'s "Press “Continue with this key”" bullet were written for the saved-key summary, and the credential form now sends the reuse request too. Both bullets now carry `fixRequires: REQUIRES_PRESELECT_SURFACE`, and `DRAFT_SESSION_COLLISION` gains a credential-form first bullet, "Press “Finish setup” once more…" (`wizardErrors.ts` `KEY_REUSE_UNAVAILABLE` and `DRAFT_SESSION_COLLISION`).
+- **Closing the wizard overlay on `/strategies` refreshes the page** (`StrategiesSection.tsx`), as finishing it always did. A draft minted before the close now shows as a draft (the Resume banner) instead of the bare key row whose "Finish setup" reopened step 01.
+
+### Changed
+- **The `KEY_ORPHANED` body's key holder carries the caller's own stored key id** (`holder.api_key_id`, set in `resolveByVenueIdentity`'s orphaned branch of `create-with-key/route.ts`). It is set only on the orphan and only on a key holder, so `held` answers and a faulted holder read keep their bodies byte for byte. `parseAccountHolder` keeps the id only on a key holder and only when it is a uuid. This reverses the "no key id" sentence in `keyOrphanedResponse`'s docblock, which carries a dated correction. The id is the caller's own key uuid, which `/api/keys` and the placeholder rows already give them. It is not the venue identity: no login or server is added.
+
+### Tests
+- `ConnectKeyStep.test.tsx`: `KEY_ORPHANED` with the key id renders the button and no overview link. Clicking it POSTs the reuse contract and advances with the stored key's ids. A reuse that fails on our own hop leaves the button enabled beside its error. A `KEY_REUSE_UNAVAILABLE` answer withdraws the button and shows no preselect-only bullet. A `DRAFT_SESSION_COLLISION` answer says to press "Finish setup" again and never names "Continue with this key".
+- `StrategiesSection.test.tsx`: the overlay's close refreshes the page.
+- `route.test.ts` (1b and SC-2) pin the id on the `KEY_ORPHANED` key holder. `own-account-holder.test.ts` pins the parser rule.
+- Each new assertion was seen RED with its fix removed, and the source was restored from a byte backup.
+
+### Notes
+- Neither reader ignores wizard drafts. `deriveStrategyLinkedKeyIds` counts every non-archived strategy as coverage, and `resolveStrategiesForKey` reads the wizard draft first. The `KEY_ORPHANED` answer predates the draft, and no `create-with-key` call touched the key after 17:58Z. The error box in the founder's later screenshot was the 17:53Z answer still on screen. The error is component state, and a reload clears it.
+- No `TODOS.md` entry is closed. No migration.
+
 ## [0.133.98.3] - 2026-11-26 — Phase 235 Nyquist validation: one key's failed marker read in a multi-key book still raises the dashboard flag
 
 ### Tests

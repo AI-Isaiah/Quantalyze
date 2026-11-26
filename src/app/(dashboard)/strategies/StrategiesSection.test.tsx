@@ -8,18 +8,22 @@
  * the section forwards is pinned too (it is a required prop, never hard-coded).
  */
 import { describe, it, expect, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import React from "react";
-
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ refresh: () => {} }),
-}));
-vi.mock("@/app/(dashboard)/allocations/components/ContributionWizardOverlay", () => ({
-  ContributionWizardOverlay: () => null,
-}));
 
 const seen = vi.hoisted(() => ({
   props: null as Record<string, unknown> | null,
+  overlay: null as Record<string, unknown> | null,
+  refresh: vi.fn(),
+}));
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: seen.refresh }),
+}));
+vi.mock("@/app/(dashboard)/allocations/components/ContributionWizardOverlay", () => ({
+  ContributionWizardOverlay: (props: Record<string, unknown>) => {
+    seen.overlay = props;
+    return null;
+  },
 }));
 vi.mock("@/components/strategy/StrategyTable", () => ({
   StrategyTable: (props: Record<string, unknown>) => {
@@ -75,5 +79,24 @@ describe("StrategiesSection props to the table (199-09)", () => {
     expect(p.visibility).toBe("owner-all-statuses");
     expect(p.managerRows).toBe(managerRows);
     expect(p.initialSort).toEqual({ key: "created_at", dir: "desc" });
+  });
+});
+
+/**
+ * Founder 2026-11-26 (PROD, the "Test" MT5 key): "Continue with this key" mints a
+ * draft on the key, and closing the wizard used to leave the page as it was
+ * rendered BEFORE the draft existed: the bare "No strategy yet" row with
+ * "Finish setup", and no Resume banner. Clicking it again opened step 01 instead
+ * of the draft. Closing the overlay re-runs the server page, as a finished
+ * wizard always did, so the draft is shown as a draft.
+ */
+describe("StrategiesSection wizard overlay close", () => {
+  it("refreshes the page when the wizard overlay closes, not only when it finishes", () => {
+    mount();
+    seen.refresh.mockClear();
+    act(() => {
+      (seen.overlay!.onClose as () => void)();
+    });
+    expect(seen.refresh).toHaveBeenCalledTimes(1);
   });
 });
