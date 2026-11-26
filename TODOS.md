@@ -304,9 +304,6 @@ founder can take.
 
 - [ ] **[198-FD3-SIDEBAR-ADD-A-STRATEGY]** (logged 2026-11-09, Phase 198 MYBOOK, founder decision FD-3 2026-11-08; owner: unassigned, book a phase when taken up). On the allocator workspace, the sidebar and mobile-nav "Add a Strategy" still open the manager `WizardClient`. Phase 198 took the wizard off the My allocation header only; the header now opens the allocator's own add-allocation flow. The founder chose to leave the sidebar entry alone in that phase and book this follow-up. Decide what "Add a Strategy" means for an allocator (the add-allocation flow, a manager-only entry, or hidden), and update `e2e/wizard-resume.spec.ts`, which now reaches the wizard through the sidebar.
 
-- [ ] **[198-SHARED-ACCOUNT-FALLBACK-UNNAMED]** (logged 2026-11-09, Phase 198 MYBOOK review round 3 residual of R3-01, MEDIUM, user-facing; owner: unassigned). In `MissingDataMessage.tsx`, the `not_syncing` fallback now prints unless every attributed key is named. `shared_account_failing` still counts printed lines, not the keys the reason attributes, because its producer carries no attributed-key list. So a shared-account key whose history reaches yesterday can go unnamed when another key of the same cause prints a line. Fix: have the producer in `key-data-gaps.ts` / `queries.ts` (`deriveKeyDataGapsField`) emit the attributed key ids for that cause, then apply the R3-01 rule to it. Test: two keys, both shared-account failing, one with a gap and one with data through yesterday; both must be covered.
-      ⭐ **Owned by Phase 235 HOLDINGSTRUTH, v1.22; REQUIREMENTS.md HOLD-05; tagged 2026-11-23.**
-
 - [ ] **[DEPS-REACT-HOOKS-7.1-LINT]** (logged 2026-10-30, found landing PR #1157, which superseded Dependabot #1122-#1124; owner: unassigned, book a phase when taken up) `eslint-config-next` 16.3.8 to 16.4.2 was LEFT OUT of #1157 because it pulls `eslint-plugin-react-hooks` 7.1.1, which raises 64 new lint errors in `src/` across six rules: `set-state-in-effect`, `refs`, `purity`, `immutability`, `preserve-manual-memoization` and `error-boundaries`. ⛔ Do NOT land it by downgrading those rules to `warn`; fix the sites, then take the bump. Dependabot will re-propose it; that PR stays red until the sites are fixed. Done when `eslint-config-next` is at 16.4.2 or later, `eslint.config.mjs` is unchanged in rule severity, and `npm run lint` exits 0.
 
 - **[170.1.2-VERIFIER-RESIDUALS]** (logged 2026-10-20, Phase 170.1.2 LABELS verification W-1 to W-7, none a FAILED truth; owner: the next phase touching each surface). One line each:
@@ -2946,25 +2943,6 @@ before it is removed.
 **Trigger:** PR 2's PROD apply verified: the marker query names PROD, and `pg_indexes` on
 `allocator_holdings` shows the five-column unique index and not the four-column one.
 
-### 170.4-IDENTITY-READ-COMPLETENESS — a holdings row whose key is missing from the identity read counts as its own account (SFH, MEDIUM, booked 2026-10-11) (owned by Phase 235 HOLDINGSTRUTH, v1.22; REQUIREMENTS.md HOLD-01; tagged 2026-11-23)
-
-**Why it is open.** `keyAccountOf`'s `key:<id>` fallback gives a holdings row whose `api_key_id` is
-absent from the `api_keys` identity read its own account, so a same-account pair could double count.
-Reachable only if the foreign key is bypassed. Plan 14 noted that no test seeds the case.
-**Fix / done when.** `fetchHoldings` (`src/lib/portfolio-exposure.ts`) and the per-key reader
-(`fetchLatestHoldingsPerKey`) throw on a counted row whose key is absent from the identity read, with
-a test per reader.
-**Owner / Trigger:** the next /allocations data phase.
-
-### 170.4-DASHBOARD-MARKER-READ-SILENT — the dashboard drops `markerReadError` (SFH-3, MEDIUM, conf 6) (owned by Phase 235 HOLDINGSTRUTH, v1.22; REQUIREMENTS.md HOLD-04; tagged 2026-11-23)
-
-**Why it is open.** A failed `native_unpriced:` read keeps an unpriced key's older rows in Holdings,
-Exposure and the live total, with no note and no Sentry capture. The commit route does report the same
-condition.
-**Fix.** Report it to Sentry in `getMyAllocationDashboard`, and carry a degraded flag that renders a
-one-line disclosure.
-**Owner / Trigger:** the next /allocations data phase.
-
 ### 170.4-STRATEGIES-TABLE-CONNECT-COPY — the Holdings tab's Strategies table still says "Connect an exchange API key or upload a CSV" (verification warning 4, booked 2026-10-11)
 
 **Why it is open.** The Strategies table's empty state in `HoldingsTable.tsx` reads "No strategies yet.
@@ -2975,15 +2953,6 @@ allocator-book prompts, so this copy is outside them.
 **Fix.** Branch the copy on `hasConnectedKeys`: with a key, say no strategy is linked to the connected
 accounts yet; without one, keep the connect prompt.
 **Owner / Trigger:** the next /allocations copy pass (e.g. 170.6 DISPLAYPOLISH).
-
-### 170.4-MATCH-UNPRICED-PER-KEY — the scorer applies the native-unpriced marker per key, not per account (SFH-4, MEDIUM, conf 5) (owned by Phase 235 HOLDINGSTRUTH, v1.22; REQUIREMENTS.md HOLD-02; tagged 2026-11-23)
-
-**Why it is open.** When key A of an account carries a marker for day D and key B's newest rows are on
-D-1, the TS reader and the equity refresh drop B's rows, but `match.py` keeps them, so the match AUM
-disagrees with Holdings for that account.
-**Fix.** Use the group-level marker day (the maximum over the account's keys), as
-`equity_reconstruction.py` does. Add a shared case.
-**Owner / Trigger:** the next phase touching `routers/match.py`.
 
 ## Phase 164.6.8 (OUTAGEALERT) — routed review items (logged 2026-10-14)
 

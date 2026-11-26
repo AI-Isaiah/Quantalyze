@@ -654,6 +654,22 @@ export const DEGRADE_WARNINGS = [
       { action: "A-FIX-ONE-OF-THESE" },
     ],
   },
+  // Phase 235 HOLD-05 (CONTEXT correction 2026-11-26, UI-SPEC S1). An all-failing shared
+  // account whose history already reaches yesterday has no dated gap line, so this line
+  // names its keys and states no day: no invented date, and no "no complete history yet"
+  // claim for a key whose history is complete. The producer always sends two or more labels.
+  {
+    id: "allocation.key-gap.shared-account-failing-undated",
+    surface: "my-allocation",
+    class: "degrade",
+    scope: "key",
+    action: "A-FIX-ONE-OF-THESE",
+    text: (a: { labels: readonly string[] }): DegradeSegment[] => [
+      ...labelSegments(a.labels),
+      ": these keys read one exchange account and every one of them is failing to sync. ",
+      { action: "A-FIX-ONE-OF-THESE" },
+    ],
+  },
   {
     id: "allocation.key-gap.identity-pending",
     surface: "my-allocation",
@@ -937,6 +953,22 @@ export const DEGRADE_WARNINGS = [
     action: "A-RELOAD",
     text: (): DegradeSegment[] => [
       "Couldn't verify critical alerts. ",
+      { action: "A-RELOAD" },
+    ],
+  },
+  // Phase 235 HOLD-04 (REQUIREMENTS.md HOLD-04). A read_failure
+  // because the dashboard's marker read failed: the payload carries a bare boolean that names
+  // no account or day, so the line names none and has scope none. The rows are KEPT on
+  // purpose (hiding them would blank the book); this sentence is what stops an account's
+  // earlier-day positions being shown silently. A-RELOAD is true: the read re-runs on load.
+  {
+    id: "allocation.holdings-unpriced-check-failed",
+    surface: "my-allocation",
+    class: "read_failure",
+    scope: "none",
+    action: "A-RELOAD",
+    text: (): DegradeSegment[] => [
+      "We could not check whether each account's newest day could be priced in USD, so the holdings shown may include an account's positions from an earlier day. ",
       { action: "A-RELOAD" },
     ],
   },

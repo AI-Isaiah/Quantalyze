@@ -72,6 +72,8 @@ import { apiKeyLabelById } from "@/lib/api-key-label";
 import { holdingIsPriceGap } from "@/lib/holding-equity";
 import { keyNeedsAttention } from "@/lib/closed-sets";
 import { Button } from "@/components/ui/Button";
+import { DegradeLine } from "@/components/degrade/DegradeLine";
+import { degradeSegments } from "@/lib/degrade-warnings";
 import { LiveRegion } from "@/components/ui/LiveRegion";
 import {
   DUST_RULE_CAPTION,
@@ -734,6 +736,22 @@ export function HoldingsTabPanel(
             {readDay !== null ? ` · read ${formatCloseDay(readDay)}` : ""}
           </span>
         </div>
+        {/* Phase 235 HOLD-04: the dashboard's marker read failed, so the rows below
+            (and the Allocation equity header above) may include an account's
+            positions from an earlier day. The rows are kept; this sentence is what
+            stops them being shown silently. The section's gap-4 grid spaces it. */}
+        {props.holdingsUnpricedCheckFailed === true && holdingsSummary.length > 0 && (
+          <p
+            role="status"
+            data-testid="positions-holdings-unpriced-check-note"
+            className="text-sm text-text-secondary [overflow-wrap:anywhere]"
+          >
+            <DegradeLine
+              id="allocation.holdings-unpriced-check-failed"
+              segments={degradeSegments("allocation.holdings-unpriced-check-failed", undefined)}
+            />
+          </p>
+        )}
         {unreportedCaption !== null ? (
           <p
             data-testid="positions-unreported-caption"

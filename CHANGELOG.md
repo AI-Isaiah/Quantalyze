@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.133.97.0] - 2026-11-26 — Phase 235 HOLDINGSTRUTH: one account counts once on Holdings, match scoring and the missing-data message
+
+One exchange account read through several API keys is one account. Before this phase that held on the Holdings tab's main path but broke at four edges: a holdings row whose key was missing from the identity read counted as an account of its own (HOLD-01), the match scorer applied the native-unpriced marker per key instead of per account (HOLD-02), a failed marker read on the dashboard kept an account's older rows with no note and no Sentry event (HOLD-04), and the missing-data message's shared-account line named no key (HOLD-05). 48 branch commits (15 code, test and review-fix commits, 27 planning and records commits, 6 wave and plan merges) over five themes, all mapped below.
+
+### Fixed
+- **HOLD-01: a key absent from the identity read now throws instead of counting as its own account.** `keyAccountOf` throws `HoldingsIdentityError` for such a key (`src/lib/holdings-account-day.ts`), so `fetchHoldings` rejects both series reads rather than double counting a same-account pair. A key that is in the identity read but cannot be placed keeps its `key:<id>` account. The per-key dollar path (`derivePhase07Fields`, `src/lib/latest-holdings-per-key.ts`) and the scenario commit route's audit recompute (`src/app/api/allocator/scenario/commit/route.ts`) count a row only through a strict `accountByKey` lookup (`strictAccountOf`). Commits `debf69c9b`, `c99c0a43d`, `5f8c52e61`.
+- **HOLD-02: match AUM applies the native-unpriced marker per account, as Holdings does.** `_load_holding_portfolio_context` in `analytics-service/routers/match.py` reads markers for every key of the book, takes each account's reading day as the maximum over its keys, and drops a key's rows that are older than its account's marker day. Before, when key A carried a marker for day D and key B's newest rows were on D-1, the TS reader and the equity refresh dropped B's rows but the matcher kept them, so match AUM disagreed with Holdings for that account. Commit `001fff96c`.
+- **Review round 1 WR-02 (data-integrity): a failed marker read in the matcher is no longer hidden.** The rows are still kept (CONTEXT HOLD-02), and the persisted `match_batches.holding_flags` now carries a book-level `unpriced_check_failed` entry. Commit `4e4e7ad5f`.
+- **Review round 1 WR-01 (user-facing): the book-level shared-account line stays beside the new undated per-account line.** The TS groups are not the derive's groups, so a shared account named only by the undated line keeps the book-level line rather than losing it. Commit `4e4e7ad5f`.
+
+### Added
+- **HOLD-04: a failed native-unpriced marker read on the dashboard is flagged, captured and disclosed.** `getMyAllocationDashboard` (`src/lib/queries.ts`) sets `holdingsUnpricedCheckFailed` on the payload when the marker read fails and keeps the rows (hiding them would blank the book). It sends one Sentry warning per throttle window with tags `op`, `reason` and `area` and the Supabase message, never a key id. The window reuses the derived-row capture window (6 hours), so the 30 s Overview poll sends one event. Commits `25fa4f266`, `872d43bc2`.
+- The Overview (`AllocationDashboardV2.tsx`) and the Holdings tab (`HoldingsTabPanel.tsx`) render the new registry line `allocation.holdings-unpriced-check-failed` (`read_failure`, scope none, A-RELOAD): "We could not check whether each account's newest day could be priced in USD, so the holdings shown may include an account's positions from an earlier day." Commits `fb9cb2123`, `03c6e4ff7`.
+- **HOLD-05: the missing-data message names every failing key of a shared account.** The My-allocation payload carries `sharedAccountFailingGroups` (`sharedAccountFailingGroups` and `deriveSharedAccountFailingGroupsField` in `src/app/(dashboard)/allocations/lib/key-data-gaps.ts` and `src/lib/queries.ts`), one group per account whose keys are all failing. `MissingDataMessage.tsx` names a group by a printed dated gap carrying exactly its ids, otherwise by a new undated line (registry entry `allocation.key-gap.shared-account-failing-undated`, directly after `allocation.key-gap.shared-account-failing`): "<labels>: these keys read one exchange account and every one of them is failing to sync. Fix or reconnect one of these keys on the Exchanges page." The Overview passes the groups in. Absent, null or empty groups render byte-identical to before. Commits `6b072be15`, `14147765b`, `be7487cbf`.
+
+### Tests
+- HOLD-01 arms A1 to A3 in `src/lib/latest-holdings-per-key.test.ts`, `src/lib/portfolio-exposure.test.ts` and the new `src/app/api/allocator/scenario/commit/route.holdings-identity.test.ts`, proven RED under neuters. Fixtures that relied on the retired no-map default now carry an explicit identity map; the default fixture asserts the throw.
+- HOLD-02 shared case table `analytics-service/tests/fixtures/native_unpriced_account_day_cases.json` (seven cases, `a_marker_b_older` first), replayed by both runtimes: `analytics-service/tests/test_match_native_unpriced_account_day.py` and `src/lib/native-unpriced-account-day.parity.test.ts`. `test_match_book_join_e2e.py` pins the WR-02 `unpriced_check_failed` entry. Commit `7937cd824`.
+- HOLD-04 arms H1 to H3 and S1 to S4 (`src/lib/queries.my-allocation.test.ts`: flag, message, tags, throttle, healthy silence, no key id), render arms U1 to U6 (`AllocationDashboardV2.unpriced-check.test.tsx`) and V1 to V4 (`HoldingsTabPanel.unpriced-check.test.tsx`), the registry `SAMPLES` row and pin arm (`src/lib/degrade-warnings.test.tsx`), and the scan ledger (`src/__tests__/degrade-warning-scan.test.ts`: the dashboard row's `tripHits` 7 to 8, a new `HoldingsTabPanel.tsx` row).
+- HOLD-05 producer edges (`key-data-gaps.test.ts`, `src/lib/queries.test.ts`, `src/lib/queries.holdings-per-key.test.ts`; commit `a2c9aa931`), message arms M1 to M8 (`MissingDataMessage.test.tsx`), Overview arms O1 and O2 (new `AllocationDashboardV2.shared-account-named.test.tsx`; the fixture gap typed as `KeyDataGap`, commit `aab15d8fc`), and the `[MISSING_DATA]` scan-ledger id.
+
+### Removed
+- `TODOS.md` entries closed by this phase, deleted: `170.4-IDENTITY-READ-COMPLETENESS` (HOLD-01), `170.4-MATCH-UNPRICED-PER-KEY` (HOLD-02), `170.4-DASHBOARD-MARKER-READ-SILENT` (HOLD-04) and `[198-SHARED-ACCOUNT-FALLBACK-UNNAMED]` (HOLD-05). The one code pointer to a deleted id, the HOLD-04 registry comment in `src/lib/degrade-warnings.ts`, now cites REQUIREMENTS.md HOLD-04.
+
+### Notes
+- Review: round 1 (gsd-code-reviewer and silent-failure-hunter) found two MEDIUMs, WR-01 and WR-02, both fixed in `4e4e7ad5f`. Round 2 found no MEDIUM or above. IN-01 and IN-02 are Info and recorded in the phase's `REVIEW.md`, not fixed.
+- Known limits, recorded rather than fixed:
+  - The matcher mirrors only the marker reading day, not the clean-poll days Holdings also uses (review IN-01, Info).
+  - SC-2's "unpriced days" is met as the same counted rows and total, not as a per-day comparison.
+  - There is no HOLD-04 note on the Scenario tab.
+  - The `read_native_unpriced_days` docstring is stale.
+  - The new `unpriced_check_failed` `holding_flags` entry is stored but not surfaced in any UI, like the existing D-22 book-level entries.
+  - The undated line and the book-level shared-account fallback can now print together (the WR-01 rule), which is redundant copy.
+- Founder-overridable choices: the Sentry tags `{op, reason, area}`; the 6-hour capture throttle; the two new degrade sentences (the unpriced-check note and the undated shared-account line); the WR-01 rule that the fallback stays; the WR-02 book-level entry.
+- Human UAT open: at a 390px viewport the unpriced-check note is visible and wraps on the Overview and the Holdings tab, with no horizontal scroll.
+- Planning and records commits on the phase branch (context, UI-SPEC, research, plans, plan-checker revision, summaries, verification, UAT, review reports and disposition, and the six merges) are not shipped here; the ship branch carries no `.planning/` path.
+
 ## [0.133.96.0] - 2026-11-26 — RESETFAILLOUD: a failed reset link, a dropped reset request and a skipped cookie write are no longer silent
 
 This follows v0.133.94.0 (#1373). That release fixed the signed-out password reset. Review then found four places where the reset flow failed without telling anyone. Each is fixed with the smallest change. Each fix has a test that was RED with the fix reverted, and every reverted file was restored byte-equal.

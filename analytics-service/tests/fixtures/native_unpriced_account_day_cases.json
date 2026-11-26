@@ -1,0 +1,112 @@
+{
+  "_comment": "Phase 235 HOLD-02. The cross-runtime oracle for the native-unpriced reading-day rule. Read by analytics-service/tests/test_match_native_unpriced_account_day.py (the matcher, _load_holding_portfolio_context) and src/lib/native-unpriced-account-day.parity.test.ts (the TS reader, fetchLatestHoldingsPerKey then oneKeyPerAccountDay). HAND-TYPED: every expectation below was worked out by hand from fetchLatestHoldingsPerKey's rule, never produced by either implementation. The rule: a key's native-unpriced marker day is its reading day, with no rows, when it is strictly after the key's newest asof or the key has no rows; otherwise the key reads its newest asof with rows. An account's newest day is the latest of its keys' reading days; only rows on that day count, then one key per (account, holding_type). Parity is rows plus markers only (the matcher reads no audit log). Do not add a case here without adding its expectation in both runtimes' runs; the two suites consume this file whole.",
+  "allocator_id": "alloc-235",
+  "cases": [
+    {
+      "name": "a_marker_b_older",
+      "keys": [
+        {"id": "key-a", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null},
+        {"id": "key-b", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null}
+      ],
+      "rows": [
+        {"key": "key-a", "venue": "mt5", "symbol": "BTCUSD", "holding_type": "spot", "value_usd": 1000, "asof": "2026-10-08", "updated_at": "2026-10-08T04:00:00+00:00"},
+        {"key": "key-b", "venue": "mt5", "symbol": "ETHUSD", "holding_type": "spot", "value_usd": 700, "asof": "2026-10-09", "updated_at": "2026-10-09T04:00:00+00:00"}
+      ],
+      "markers": {"key-a": "2026-10-10"},
+      "marker_read_fails": false,
+      "expected_counted_keys": [],
+      "expected_total_usd": 0
+    },
+    {
+      "name": "marker_key_without_rows",
+      "keys": [
+        {"id": "key-a", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null},
+        {"id": "key-b", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null}
+      ],
+      "rows": [
+        {"key": "key-b", "venue": "mt5", "symbol": "ETHUSD", "holding_type": "spot", "value_usd": 700, "asof": "2026-10-09", "updated_at": "2026-10-09T04:00:00+00:00"}
+      ],
+      "markers": {"key-a": "2026-10-10"},
+      "marker_read_fails": false,
+      "expected_counted_keys": [],
+      "expected_total_usd": 0
+    },
+    {
+      "name": "marker_on_rows_own_day",
+      "keys": [
+        {"id": "key-a", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null},
+        {"id": "key-b", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null}
+      ],
+      "rows": [
+        {"key": "key-a", "venue": "mt5", "symbol": "BTCUSD", "holding_type": "spot", "value_usd": 1000, "asof": "2026-10-09", "updated_at": "2026-10-09T04:01:00+00:00"},
+        {"key": "key-b", "venue": "mt5", "symbol": "ETHUSD", "holding_type": "spot", "value_usd": 700, "asof": "2026-10-09", "updated_at": "2026-10-09T04:00:00+00:00"}
+      ],
+      "markers": {"key-a": "2026-10-09"},
+      "marker_read_fails": false,
+      "expected_counted_keys": ["key-a"],
+      "expected_total_usd": 1000
+    },
+    {
+      "name": "marker_older_than_rows",
+      "keys": [
+        {"id": "key-a", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null},
+        {"id": "key-b", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null}
+      ],
+      "rows": [
+        {"key": "key-a", "venue": "mt5", "symbol": "BTCUSD", "holding_type": "spot", "value_usd": 1000, "asof": "2026-10-10", "updated_at": "2026-10-10T04:00:00+00:00"},
+        {"key": "key-b", "venue": "mt5", "symbol": "ETHUSD", "holding_type": "spot", "value_usd": 700, "asof": "2026-10-09", "updated_at": "2026-10-09T04:00:00+00:00"}
+      ],
+      "markers": {"key-a": "2026-10-08"},
+      "marker_read_fails": false,
+      "expected_counted_keys": ["key-a"],
+      "expected_total_usd": 1000
+    },
+    {
+      "name": "two_accounts_marker_drops_only_its_own",
+      "keys": [
+        {"id": "key-a", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null},
+        {"id": "key-c", "exchange": "binance", "venue_account_id": "acct-9", "venue_server": null, "account_share_kind": null, "account_shared_with_api_key_id": null}
+      ],
+      "rows": [
+        {"key": "key-a", "venue": "mt5", "symbol": "BTCUSD", "holding_type": "spot", "value_usd": 1000, "asof": "2026-10-09", "updated_at": "2026-10-09T04:00:00+00:00"},
+        {"key": "key-c", "venue": "binance", "symbol": "USDT", "holding_type": "spot", "value_usd": 500, "asof": "2026-10-10", "updated_at": "2026-10-10T04:00:00+00:00"}
+      ],
+      "markers": {"key-a": "2026-10-10"},
+      "marker_read_fails": false,
+      "expected_counted_keys": ["key-c"],
+      "expected_total_usd": 500
+    },
+    {
+      "name": "duplicate_marker_pair",
+      "keys": [
+        {"id": "key-u", "exchange": "mt5", "venue_account_id": null, "venue_server": null, "account_share_kind": null, "account_shared_with_api_key_id": null},
+        {"id": "key-s", "exchange": "mt5", "venue_account_id": null, "venue_server": null, "account_share_kind": "duplicate", "account_shared_with_api_key_id": "key-u"},
+        {"id": "key-v", "exchange": "binance", "venue_account_id": null, "venue_server": null, "account_share_kind": null, "account_shared_with_api_key_id": null}
+      ],
+      "rows": [
+        {"key": "key-u", "venue": "mt5", "symbol": "ACCOUNT-U", "holding_type": "spot", "value_usd": 100, "asof": "2026-10-09", "updated_at": "2026-10-09T04:00:00+00:00"},
+        {"key": "key-s", "venue": "mt5", "symbol": "ACCOUNT-S", "holding_type": "spot", "value_usd": 100, "asof": "2026-10-09", "updated_at": "2026-10-09T04:01:00+00:00"},
+        {"key": "key-v", "venue": "binance", "symbol": "BTC", "holding_type": "spot", "value_usd": 100, "asof": "2026-10-10", "updated_at": "2026-10-10T04:00:00+00:00"}
+      ],
+      "markers": {"key-u": "2026-10-10"},
+      "marker_read_fails": false,
+      "expected_counted_keys": ["key-v"],
+      "expected_total_usd": 100
+    },
+    {
+      "name": "marker_read_failed",
+      "keys": [
+        {"id": "key-a", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null},
+        {"id": "key-b", "exchange": "mt5", "venue_account_id": "L1", "venue_server": "srv-1", "account_share_kind": null, "account_shared_with_api_key_id": null}
+      ],
+      "rows": [
+        {"key": "key-a", "venue": "mt5", "symbol": "BTCUSD", "holding_type": "spot", "value_usd": 1000, "asof": "2026-10-08", "updated_at": "2026-10-08T04:00:00+00:00"},
+        {"key": "key-b", "venue": "mt5", "symbol": "ETHUSD", "holding_type": "spot", "value_usd": 700, "asof": "2026-10-09", "updated_at": "2026-10-09T04:00:00+00:00"}
+      ],
+      "markers": {"key-a": "2026-10-10"},
+      "marker_read_fails": true,
+      "expected_counted_keys": ["key-b"],
+      "expected_total_usd": 700
+    }
+  ]
+}

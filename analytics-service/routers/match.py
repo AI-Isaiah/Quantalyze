@@ -729,7 +729,10 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
     takes its rows at its newest ``asof``, and ``one_key_per_account_day`` (plan 11)
     keeps, per account AND per holding type, the one key that wins that day (latest
     ``updated_at`` instant, ties by smallest lowercase ``api_key_id``). Rows of a key before its account's newest day
-    no longer count. Rows of different keys that share a (venue, symbol,
+    no longer count. An account's newest day is the latest of its keys' reading days
+    (Phase 235 HOLD-02): a key whose native-unpriced marker postdates its newest rows
+    reads at the marker's day with no rows, so it carries nothing and its account's
+    older rows stop counting. Rows of different keys that share a (venue, symbol,
     holding_type) are SUMMED into one pseudo-strategy, which carries their total
     once. The same rule runs in TypeScript for the dashboard and the scenario
     commit (``oneKeyPerAccountDay``); both are replayed against one case table.
@@ -836,6 +839,7 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             f"api_keys read reached the {_HOLDINGS_ROW_CAP}-row cap for allocator {allocator_id}"
         )
     holdings_rows: list[Row] = []
+    latest_by_key: dict[str, str] = {}
     for key_row in key_rows:
         key_id = str(key_row["id"])
         latest = rows(
@@ -849,6 +853,7 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
         )
         if not latest:
             continue
+        latest_by_key[key_id] = str(latest[0]["asof"])
         day_rows = rows(
             supabase.table("allocator_holdings")
             .select(
@@ -868,62 +873,85 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             )
         holdings_rows.extend(day_rows)
 
-    # --- Step 1b: drop a native-unpriced key's rows dated before its marker ---
-    # 164.6.6.2.1 R2-WR-01 (D-02, D-08, D-17): a BTC-denominated MT5 account whose latest
-    # completed day has no stored close polls to NO row, so its earlier row (priced at an
-    # older close) would win the collapse below and be summed into the AUM and the weights
-    # while the dashboard says the account is left out. The poll's service-written marker
-    # names that day; the same reader the daily refresh uses (strict comparison: rows on
-    # or after the marker's day stand). A failed marker read is logged at ERROR (which
-    # reaches Sentry) and the rows are kept as they were: this is a request-time scorer,
-    # and nothing it computes is persisted.
-    key_ids = sorted({str(h["api_key_id"]) for h in holdings_rows if h.get("api_key_id")})
+    # --- Step 1b: native-unpriced markers, one reading day per key ---
+    # 164.6.6.2.1 R2-WR-01 (D-02, D-08, D-17), per account since Phase 235 HOLD-02: a
+    # BTC-denominated MT5 account whose latest completed day has no stored close polls to NO
+    # row, so its earlier row (priced at an older close) would be summed into the AUM and the
+    # weights while the dashboard says the account is left out. The poll's service-written
+    # marker names that day. It is applied exactly as ``fetchLatestHoldingsPerKey``
+    # (src/lib/latest-holdings-per-key.ts, the reference) applies it: a key's marker day is its
+    # READING day, with no rows, when it is strictly after the key's newest ``asof`` (or the
+    # key has no rows), and Step 2 takes each account's newest day from its keys' reading days.
+    # So a marker on key A also stops key B's older rows of the SAME account from counting, as
+    # on Holdings. The read covers every owner key, including keys with no rows, because such
+    # a key with a marker still sets its account's day. With no rows at all nothing can count,
+    # so the read is skipped. A failed marker read is logged at ERROR (which reaches Sentry)
+    # and the markers are treated as absent, so rows count by their own newest days (CONTEXT
+    # [HOLD-02]: rows kept, as the dashboard keeps them). The batch this context feeds IS
+    # persisted (``_score_one_allocator`` writes ``holding_flags`` and the scores to
+    # ``match_batches``), so the failure is returned as ``unpriced_check_failed`` and the batch
+    # carries a book-level ``holding_flags`` entry naming it (review WR-02), as the dashboard
+    # shows its note (HOLD-04).
     unpriced_days: dict[str, str] = {}
-    if key_ids:
+    unpriced_check_failed = False
+    if holdings_rows:
         try:
-            unpriced_days = read_native_unpriced_days(supabase, allocator_id, key_ids)
+            unpriced_days = read_native_unpriced_days(
+                supabase, allocator_id, sorted(str(k["id"]) for k in key_rows)
+            )
         except Exception:  # noqa: BLE001 - see above: keep the rows, say so loudly
+            unpriced_check_failed = True
             logger.exception(
                 "match: native-unpriced marker read failed for allocator %s; the "
                 "holdings rows are kept as they were",
                 allocator_id,
             )
-    if unpriced_days:
-        kept_rows: list[Row] = []
-        for h in holdings_rows:
-            unpriced_day = unpriced_days.get(str(h.get("api_key_id")))
-            if unpriced_day is not None and str(h["asof"]) < unpriced_day:
-                continue
-            kept_rows.append(h)
-        if len(kept_rows) != len(holdings_rows):
-            logger.info(
-                "match: native-unpriced marker removed %d holdings row(s) for allocator %s",
-                len(holdings_rows) - len(kept_rows), allocator_id,
-            )
-        holdings_rows = kept_rows
+    marker_won = [
+        k for k, d in unpriced_days.items() if k not in latest_by_key or d > latest_by_key[k]
+    ]
+    if marker_won:
+        logger.info(
+            "match: native-unpriced marker gave %d key(s) a no-rows reading day for allocator %s",
+            len(marker_won), allocator_id,
+        )
 
     # --- Step 2: every key's position, each exchange account once per day ---
     # (170.4 D-08, D-10). The owner's keys (read in Step 1; owner-filtered, identity
     # columns only, no key material) name which keys read one account.
     group_of: dict[str, str] = {}
-    if holdings_rows:
-        # CR-01 (D-10): the SAME identity the dashboard, the commit AUM and the
-        # commit RPC's ``contributing`` CTE use: a shared non-blank
-        # (exchange, venue_account_id) OR a marker link. A key with neither is
-        # unknown and stays its own account (``key:<id>`` below).
-        for key_id, token in account_identity_tokens(key_rows).items():
-            if token is not None:
-                group_of[key_id] = token
+    # CR-01 (D-10): the SAME identity the dashboard, the commit AUM and the
+    # commit RPC's ``contributing`` CTE use: a shared non-blank
+    # (exchange, venue_account_id) OR a marker link. A key with neither is
+    # unknown and stays its own account (``key:<id>`` below). Placed without a rows
+    # guard: a rows-less key that carries a marker still sets its account's day.
+    for key_id, token in account_identity_tokens(key_rows).items():
+        if token is not None:
+            group_of[key_id] = token
 
-    def _account(holding: Row) -> str:
-        key_id = str(holding["api_key_id"])
+    def _account_of_key(key_id: str) -> str:
         return group_of.get(key_id, f"key:{key_id}")
 
+    def _account(holding: Row) -> str:
+        return _account_of_key(str(holding["api_key_id"]))
+
+    def _reading_day(key_id: str) -> str | None:
+        """The key's newest reading: its marker day when that is strictly after its newest
+        ``asof`` (or the key has no rows), else its newest ``asof``; None with neither."""
+        marker_day = unpriced_days.get(key_id)
+        rows_day = latest_by_key.get(key_id)
+        if marker_day is not None and (rows_day is None or marker_day > rows_day):
+            return marker_day
+        return rows_day
+
     newest_day: dict[str, str] = {}
-    for holding in holdings_rows:
-        account = _account(holding)
-        if account not in newest_day or str(holding["asof"]) > newest_day[account]:
-            newest_day[account] = str(holding["asof"])
+    for key_row in key_rows:
+        key_id = str(key_row["id"])
+        reading = _reading_day(key_id)
+        if reading is None:
+            continue
+        account = _account_of_key(key_id)
+        if account not in newest_day or reading > newest_day[account]:
+            newest_day[account] = reading
     day_rows_by_account: dict[str, list[Row]] = {}
     for holding in holdings_rows:
         account = _account(holding)
@@ -979,6 +1007,7 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             "holdings_rows_eligible": [],
             "holdings_rows_withheld": [],
             "holdings_rows_derivative": [],
+            "unpriced_check_failed": unpriced_check_failed,
         }
 
     # --- Step 3: the holdings' mark history, one tenant-filtered, capped read ---
@@ -1155,6 +1184,7 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
         "holdings_rows_eligible": holdings_rows_eligible,
         "holdings_rows_withheld": holdings_rows_withheld,
         "holdings_rows_derivative": holdings_rows_derivative,
+        "unpriced_check_failed": unpriced_check_failed,
     }
 
 
@@ -1429,6 +1459,9 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         # D-02, D-19: every derivative in the book, named in holding_flags by reason and
         # P&L contribution, never weighed, never max-weight tested, never in the returns.
         "_holdings_rows_derivative": holdings_rows_derivative,
+        # Review WR-02: the native-unpriced marker read failed and the rows were kept;
+        # _score_one_allocator names it in a book-level holding_flags entry.
+        "_unpriced_check_failed": bool(holdings_ctx.get("unpriced_check_failed")),
     }
 
 
@@ -1701,6 +1734,20 @@ def book_join_marker(
     }
 
 
+def unpriced_check_failed_entry() -> dict[str, Any]:
+    """Review WR-02. The book-level ``holding_flags`` entry for a batch scored from a book whose
+    native-unpriced marker read failed. The rows were kept (CONTEXT [HOLD-02]), so a
+    native-unpriced account's older rows may be in the AUM and the weights; this entry says so
+    in the persisted batch, as the dashboard's note does (HOLD-04). Same shape as the D-22
+    marker: ``kind`` "book", a null ``holding_ref``, ``flagged`` False."""
+    return {
+        "kind": "book",
+        "holding_ref": None,
+        "unpriced_check_failed": True,
+        "flagged": False,
+    }
+
+
 def _engine_ticket_is_positive(ctx: dict[str, Any]) -> bool:
     """True when the engine's effective ``target_ticket_size_usd`` is positive.
 
@@ -1961,6 +2008,8 @@ async def _score_one_allocator(
             holding_flags_list.append(book_marker)
         if add_weight_fallback is not None:
             holding_flags_list.append(add_weight_fallback)
+        if ctx.get("_unpriced_check_failed"):
+            holding_flags_list.append(unpriced_check_failed_entry())
 
         # Persist: one match_batches row, N match_candidates rows.
         supabase = get_supabase()

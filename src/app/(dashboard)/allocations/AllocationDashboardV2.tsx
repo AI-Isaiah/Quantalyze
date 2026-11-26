@@ -161,8 +161,10 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // Phase 198 plan 09 (D-01, ROUTE-07): the per-key missing-data lines, read
   // from the SSR payload's owner-only `keyDataGaps`. A legacy payload without
   // the field reads as no gaps, so the reason's shipped sentence still prints.
+  // Phase 235 HOLD-05: the attributed shared-account groups, so every failing key is named.
   const keyDataGaps = props.keyDataGaps;
   const apiKeys = props.apiKeys;
+  const sharedAccountFailingGroups = props.sharedAccountFailingGroups;
   const missingLines = useMemo(
     () =>
       missingDataLines({
@@ -171,8 +173,16 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         rebuilding: isRebuilding,
         reason: equityHistoryRebuildReason,
         notSyncingKeys,
+        sharedFailingGroups: sharedAccountFailingGroups,
       }),
-    [keyDataGaps, apiKeys, isRebuilding, equityHistoryRebuildReason, notSyncingKeys],
+    [
+      keyDataGaps,
+      apiKeys,
+      isRebuilding,
+      equityHistoryRebuildReason,
+      notSyncingKeys,
+      sharedAccountFailingGroups,
+    ],
   );
   // One fact, one sentence: an exit the message names for its range is not named
   // again by the exit note. An exit it does not name keeps its shipped sentence.
@@ -297,6 +307,25 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       {/* Phase 198 plan 09 (D-01): what is missing, per key, directly under the
           glance. Renders nothing when nothing is missing. */}
       <MissingDataMessage lines={missingLines} />
+      {/* Phase 235 HOLD-04: the dashboard's marker read failed, so the holdings the
+          glance prints may include an account's positions from an earlier day. The
+          rows are kept; this one sentence is what stops them being shown silently.
+          It sits below the missing-data message because the glance's "See the note
+          below" pointer names that message. It is NOT gated on rebuilding: the
+          glance's Holdings group prints in both states. mt-3 per UI-SPEC 1.3. */}
+      {props.holdingsUnpricedCheckFailed === true &&
+        (props.holdingsSummary ?? []).length > 0 && (
+          <p
+            role="status"
+            data-testid="dashboard-holdings-unpriced-check-note"
+            className="mt-3 mb-3 px-1 text-sm text-text-secondary"
+          >
+            <DegradeLine
+              id="allocation.holdings-unpriced-check-failed"
+              segments={degradeSegments("allocation.holdings-unpriced-check-failed", undefined)}
+            />
+          </p>
+        )}
       {/* Review C4 SFH-C4-04: the derive leaves such an account out under a
           benign flag and still marks the curve trustworthy, so without this
           line a ready book reads as the whole book. Ready only: nothing is

@@ -62,6 +62,8 @@ function lines(
     reason?: Reason;
     notSyncingKeys?: typeof API_KEYS | null;
     apiKeys?: typeof API_KEYS;
+    // Phase 235 HOLD-05: absent keeps today's five-key call exactly.
+    sharedFailingGroups?: readonly (readonly string[])[] | null;
   } = {},
 ) {
   return missingDataLines({
@@ -70,6 +72,9 @@ function lines(
     rebuilding: over.rebuilding ?? true,
     reason: over.reason ?? null,
     notSyncingKeys: over.notSyncingKeys ?? null,
+    ...(over.sharedFailingGroups !== undefined
+      ? { sharedFailingGroups: over.sharedFailingGroups }
+      : {}),
   });
 }
 
@@ -606,5 +611,162 @@ describe("EquityHistoryRebuilding.tsx after D-01: the class table and the link, 
       "isKnownRebuildReason",
       "isNeedsActionReason",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 235 HOLD-05 (SC-4, CONTEXT correction 2026-11-26, UI-SPEC S1): every
+// failing key of every all-failing shared account is NAMED by label.
+//
+// Why this exists: `missingDataLines` suppressed the shared-account fallback as
+// soon as every PRINTED `shared_account_failing` gap was named. An all-failing
+// account whose history already reaches yesterday has no dated gap, so a second
+// account beside a dated first one was named nowhere and no fallback printed
+// (RESEARCH S3 probe). The payload now attributes the groups
+// (`sharedFailingGroups`), and an un-gapped group gets its own undated labelled
+// line from `allocation.key-gap.shared-account-failing-undated`. That line states
+// no day: a key whose history is complete is never printed with "no complete
+// history yet" or an invented date (P1), and one account's keys are never merged
+// into another account's line (P2). A raw id never prints (P3, SFH-4).
+//
+// Planner decision 2: CONTEXT bullet 4's two-key literal passed at HEAD with the
+// book fallback; under the S1 correction its keys label, so it now prints the
+// undated labelled line and no fallback (arm M6). It is RED at HEAD too.
+// Planner decision 3 (CD-4): the RED fixture is two all-failing accounts (four
+// keys), not the literal two keys, which cannot be two accounts.
+// ---------------------------------------------------------------------------
+describe("Phase 235 HOLD-05: every failing shared-account key is named", () => {
+  const A1 = { id: "a1-0001", exchange: "binance", label: "a1" };
+  const A2 = { id: "a2-0002", exchange: "binance", label: "a2" };
+  const B1 = { id: "b1-0003", exchange: "binance", label: "b1" };
+  const B2 = { id: "b2-0004", exchange: "binance", label: "b2" };
+  const FOUR = [A1, A2, B1, B2];
+  const LA1 = "Binance — a1";
+  const LA2 = "Binance — a2";
+  const LB1 = "Binance — b1";
+  const LB2 = "Binance — b2";
+  const FIX = "Fix or reconnect one of these keys on the Exchanges page.";
+  const UNDATED_B = `${LB1} and ${LB2}: these keys read one exchange account and every one of them is failing to sync. ${FIX}`;
+  const A_RANGE_TEXT = "Oct\u00a05,\u00a02026 – Oct\u00a011,\u00a02026";
+  const A_DATED = `${LA1} and ${LA2}: no data for ${A_RANGE_TEXT}. ${FIX}`;
+  const aGap = gap("shared_account_failing", [A1.id, A2.id], {
+    firstMissingDay: "2026-10-05",
+    ranges: [{ from: "2026-10-05", to: "2026-10-11" }],
+  });
+  const REASON = "shared_account_no_working_key" as const;
+
+  // The shipped shared-account fallback, typed by hand from the it.each row above.
+  const FALLBACK_LITERAL = `${HISTORY_HIDDEN}The keys that read one of your exchange accounts are all failing to sync, so that account's history stops. Fix or reconnect one of them on the Exchanges page.`;
+
+  // Review WR-01: a group named only by its undated line keeps the book fallback, because
+  // the TS groups are not the derive's groups and cannot prove every flagged account is named.
+  it("M1: two all-failing accounts, A dated and B reaching yesterday: A's line, then B by label, and the fallback stays", () => {
+    const out = linesText([aGap], {
+      apiKeys: FOUR as never,
+      reason: REASON,
+      sharedFailingGroups: [[A1.id, A2.id], [B1.id, B2.id]],
+    });
+    expect(out).toEqual([A_DATED, UNDATED_B, FALLBACK_LITERAL]);
+  });
+
+  it("M2 (P1): B's line states no 'no complete history yet' and no date", () => {
+    const out = linesText([aGap], {
+      apiKeys: FOUR as never,
+      reason: REASON,
+      sharedFailingGroups: [[A1.id, A2.id], [B1.id, B2.id]],
+    });
+    const bLines = out.filter((l) => l.includes(LB1) || l.includes(LB2));
+    expect(bLines.length).toBeGreaterThan(0);
+    for (const l of bLines) {
+      expect(l).not.toContain("no complete history yet");
+      expect(l).not.toMatch(
+        /Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\b(19|20)\d{2}\b/,
+      );
+    }
+  });
+
+  it("M3 (P2): each account's line names only its own keys", () => {
+    const out = linesText([aGap], {
+      apiKeys: FOUR as never,
+      reason: REASON,
+      sharedFailingGroups: [[A1.id, A2.id], [B1.id, B2.id]],
+    });
+    const aLine = out.find((l) => l.includes(LA1)) as string;
+    const bLine = out.find((l) => l.includes(LB1)) as string;
+    expect(aLine).not.toContain(LB1);
+    expect(aLine).not.toContain(LB2);
+    expect(bLine).not.toContain(LA1);
+    expect(bLine).not.toContain(LA2);
+  });
+
+  it("M4 (P3, SFH-4): a group with a key the owner's list cannot label names nothing, no raw id prints, the book fallback stays", () => {
+    const out = linesText([aGap], {
+      apiKeys: [A1, A2, B1] as never,
+      reason: REASON,
+      sharedFailingGroups: [[A1.id, A2.id], [B1.id, B2.id]],
+    });
+    expect(out).toHaveLength(2);
+    expect(out[0]).toBe(A_DATED);
+    expect(out[1]).toBe(FALLBACK_LITERAL);
+    for (const l of out) {
+      expect(l).not.toContain("b1-0003");
+      expect(l).not.toContain("b2-0004");
+      expect(l).not.toContain(LB1);
+    }
+  });
+
+  it("M5 (P4): both groups carry a printed dated gap: two dated lines, no undated line, no fallback", () => {
+    const bGap = gap("shared_account_failing", [B1.id, B2.id], {
+      firstMissingDay: "2026-10-05",
+      ranges: [{ from: "2026-10-05", to: "2026-10-11" }],
+    });
+    const out = linesText([aGap, bGap], {
+      apiKeys: FOUR as never,
+      reason: REASON,
+      sharedFailingGroups: [[A1.id, A2.id], [B1.id, B2.id]],
+    });
+    expect(out).toEqual([A_DATED, `${LB1} and ${LB2}: no data for ${A_RANGE_TEXT}. ${FIX}`]);
+    for (const l of out) {
+      expect(l).not.toContain("these keys read one exchange account");
+      expect(l).not.toContain("The keys that read one of your exchange accounts");
+    }
+  });
+
+  it("M6: one all-failing account reaching yesterday (no gap) prints its undated labelled line and keeps the fallback (WR-01)", () => {
+    expect(
+      linesText([], {
+        apiKeys: FOUR as never,
+        reason: REASON,
+        sharedFailingGroups: [[B1.id, B2.id]],
+      }),
+    ).toEqual([UNDATED_B, FALLBACK_LITERAL]);
+  });
+
+  it("M7: with the argument absent or [], a rebuilding shared-account book prints exactly the shipped fallback", () => {
+    for (const over of [{}, { sharedFailingGroups: [] }] as const) {
+      expect(
+        linesText([], { apiKeys: FOUR as never, reason: REASON, ...over }),
+      ).toEqual([FALLBACK_LITERAL]);
+      cleanup();
+    }
+  });
+
+  it("M8: undated lines join the key lines before the sort, whatever the group input order", () => {
+    // The undated group's labels (a1/a2) sort before the dated group's (b1/b2).
+    const bGap = gap("shared_account_failing", [B1.id, B2.id], {
+      firstMissingDay: "2026-10-05",
+      ranges: [{ from: "2026-10-05", to: "2026-10-11" }],
+    });
+    const undatedA = `${LA1} and ${LA2}: these keys read one exchange account and every one of them is failing to sync. ${FIX}`;
+    const datedB = `${LB1} and ${LB2}: no data for ${A_RANGE_TEXT}. ${FIX}`;
+    for (const groups of [
+      [[A1.id, A2.id], [B1.id, B2.id]],
+      [[B1.id, B2.id], [A1.id, A2.id]],
+    ]) {
+      expect(
+        linesText([bGap], { apiKeys: FOUR as never, reason: REASON, sharedFailingGroups: groups }),
+      ).toEqual([undatedA, datedB, FALLBACK_LITERAL]);
+      cleanup();
+    }
   });
 });

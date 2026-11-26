@@ -880,6 +880,27 @@ describe("the account identity carries venue_server (225 CONN-03, CONTEXT Q6)", 
     expect(of("k-c")).toBe("key:k-c");
   });
 
+  it("keyAccountOf throws HoldingsIdentityError for a key absent from keys and keeps key:<id> for a key in keys it cannot place (HOLD-01)", () => {
+    const base = { exchange: "mt5", venue_account_id: "L1", account_share_kind: null, account_shared_with_api_key_id: null };
+    const of = keyAccountOf([
+      { id: "k-a", venue_server: "srv-a", ...base },
+      { id: "k-b", venue_server: "srv-b", ...base },
+      { id: "k-c", venue_server: null, ...base },
+    ]);
+    // In keys, identity cannot place it: legitimate own account.
+    expect(of("k-c")).toBe("key:k-c");
+    expect(of("k-a")).toBe("account:k-a");
+    // Absent from keys: the identity read is incomplete, so fail loud.
+    // Asserted by name, never by importing the class (a pre-fix run must fail on behaviour).
+    let thrown: unknown = null;
+    try {
+      of("absent");
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toMatchObject({ name: "HoldingsIdentityError" });
+  });
+
   it("fetchLatestHoldingsPerKey's api_keys select names venue_server", async () => {
     apiKeySelects.length = 0;
     await fetchLatestHoldingsPerKey(fakeClient([mt5("k-a", "srv-a")], []), "user-1", COLS);

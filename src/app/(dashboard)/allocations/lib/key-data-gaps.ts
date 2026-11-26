@@ -276,3 +276,30 @@ export function keyDataGaps(input: KeyDataGapsInput): KeyDataGap[] {
           : 0,
   );
 }
+
+/**
+ * Phase 235 HOLD-05. The keys the `shared_account_failing` cause is about: every
+ * group of two or more keys on one KNOWN account whose every key is failing,
+ * whether or not the group's tail has a range. `keyDataGaps` names such a group
+ * only when its history stops before yesterday, so an all-failing account whose
+ * history reaches yesterday left no trace and the message could not name its
+ * keys. This sibling lists them all so the message can.
+ *
+ * `[]` for any reason other than `shared_account_no_working_key`. Owner-only
+ * (T-186-18): ids are filtered to `ownKeyIds`, sorted within a group, a group
+ * left with fewer than two ids is dropped, and groups are ordered by their first
+ * id. A group never carries `accountId` or any account identifier.
+ */
+export function sharedAccountFailingGroups(input: KeyDataGapsInput): string[][] {
+  if (input.reason !== "shared_account_no_working_key") return [];
+  const own = new Set(input.ownKeyIds);
+  const failingById = new Map(input.keyAccounts.map((k) => [k.id, k.failing]));
+  const out: string[][] = [];
+  for (const group of accountGroups(input.keyAccounts, { countedOnly: false })) {
+    if (!group.every((id) => failingById.get(id) === true)) continue;
+    const owned = group.filter((id) => own.has(id)).sort();
+    if (owned.length < 2) continue;
+    out.push(owned);
+  }
+  return out.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+}
