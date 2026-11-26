@@ -14748,7 +14748,7 @@ ALTER TABLE "public"."key_permission_audit" OWNER TO "postgres";
 CREATE TABLE IF NOT EXISTS "public"."strategy_analytics" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "strategy_id" "uuid" NOT NULL,
-    "computed_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "computed_at" timestamp with time zone,
     "computation_status" "text" DEFAULT 'pending'::"text" NOT NULL,
     "computation_error" "text",
     "benchmark" "text",
