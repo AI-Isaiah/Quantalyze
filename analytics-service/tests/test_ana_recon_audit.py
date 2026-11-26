@@ -213,7 +213,10 @@ def test_c12_01_phase2_rate_limit_reaches_outer_handler():
     # that the RateLimitExceeded except clause appears before the broad except.
     src = inspect.getsource(job_worker.run_sync_trades_job)
     rl_pos = src.find("except ccxt.RateLimitExceeded")
-    broad_pos = src.find("except Exception as e")
+    # The colon is load-bearing: without it the needle also matches any earlier
+    # `except Exception as exc:` (Phase 253's re-read bound RPC handler, a Supabase
+    # call that never sees ccxt), and the pin compares the wrong clause.
+    broad_pos = src.find("except Exception as e:")
     assert rl_pos != -1, "except ccxt.RateLimitExceeded not found in run_sync_trades_job"
     assert broad_pos != -1, "except Exception as e not found in run_sync_trades_job"
     # The RateLimitExceeded handler must appear BEFORE the broad Exception handler

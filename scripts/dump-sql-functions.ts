@@ -397,6 +397,20 @@ export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
   // 2026-11-25) are DELETED: their clearing condition, a re-dump taken after
   // 20261126140000_mt5_terminal_lease.sql applied to PROD, landed as v0.133.91.1, and the
   // gate then reported each one `ratchet-stale`.
+  // ⭐ 2026-11-26 (Phase 253 BINANCECURSOR plan 03): one `snapshot-only` row for the function
+  // the phase's migration (20261126150000, stamped after Phase 230's 20261126140000 at the merge)
+  // adds before supabase/schema/baseline.sql knows it. Same clearing condition as the deleted rows above and below:
+  // the re-dump taken after the migration has applied to PROD turns the row into `ratchet-stale`
+  // and it is DELETED.
+  {
+    name: "set_strategy_fills_reread_bound",
+    side: "snapshot-only",
+    capturedAt: "2026-11-26",
+    clearedBy:
+      "a re-dump of supabase/schema/baseline.sql taken after its migration applied to PROD",
+    reason:
+      "Phase 253 BINANCECURSOR defines it in 20261126150000_strategy_fills_reread_bound.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
+  },
   // ⭐ 2026-11-24: the Phase 225 ONEACCOUNTONCE plan 04 row
   // (`swap_account_slot`, `snapshot-only`, captured 2026-11-23) is DELETED: its clearing
   // condition, a re-dump taken after 20261123180100_swap_account_slot.sql applied to PROD,

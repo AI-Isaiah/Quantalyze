@@ -139,8 +139,14 @@ from services.positions import (
     persist_position_snapshots,
 )
 from services.sfox_client import SfoxClient  # type annotations only
+from services.binance_sync_flags import (
+    carry_binance_sync_flags,
+    clear_absent_binance_sync_flags,
+    read_binance_sync_flags,
+)
 from services.trade_resume import (
     load_strategy_fill_high_water,
+    load_strategy_fills_reread_bound,
     load_strategy_high_waters,
 )
 from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
@@ -343,28 +349,40 @@ PARTITION_COLUMNS: Final[tuple[str, ...]] = (
 # quiet-prefix deadline known limit (founder ruling 2026-11-25 (UTC)): a sync
 # read stopped by its deadline over a prefix holding no stored fill leaves the
 # cursor where it was, named by `binance_deadline_symbols` on every such run
-# and bounded by the reach clamp. A second gap, to SC-3, is a RECORDED OPEN GAP and
-# not an accepted exception: no founder ruling covers it (round-1 review WR-01, round-2
-# review WR-01). The state is a column ahead of where the stopped read began: the stop's bound
-# (or, with none, the read's seed) is below the column. The likeliest entry is the first
-# sync of a second strategy on a key shared with another strategy: the column was set
-# by the other strategy, this strategy has no stored fill and no daily row, so the read
-# walks from the reach with no anchor. Pre-232 wall-clock stamps and deleted fills reach
-# it too. The bounded stop stamp is then below the column, `advance_sync_cursor` only
-# moves the column forward (migration 20260602173710) and drops it, the next seed is
-# again the column, and the stopped symbol's span between its bound and the column may
-# never be re-read. The run names it with the data-quality flag
-# `binance_stop_below_cursor` and a WARNING naming the strategy, the column and the
-# bound; it does not hold the cursor and does not close the gap. Closing it needs an RPC
-# change, outside this phase, booked as `[250-BINANCE-STOP-BELOW-CURSOR]` in TODOS.md. A third known gap is recorded the
+# and bounded by the reach clamp. A second gap, to SC-3, was a recorded open gap (round-1
+# review WR-01, round-2 review WR-01) and is CLOSED by Phase 253 BINANCECURSOR. The state
+# was a column ahead of where a stopped read began: the stop's bound (or, with none, the
+# read's seed) below the column. The likeliest entry was the first sync of a second
+# strategy on a key shared with another strategy: the column was set by the other
+# strategy, this strategy has no stored fill and no daily row, so the read walks from the
+# reach with no anchor. Pre-232 wall-clock stamps and deleted fills reach it too.
+# `advance_sync_cursor` only moves the column forward (migration 20260602173710) and
+# drops a stamp below it, so the column cannot carry the unread span. It is carried by a
+# per-strategy re-read bound instead: every Binance run writes a provisional row at its seed
+# into `strategy_fills_reread_bounds` BEFORE the read (and before Phase 251's daily store),
+# through the claim-token fenced `set_strategy_fills_reread_bound` (migration
+# 20261126150000), and the epilogue then advances it to the run's complete-through instant
+# (a stopped, partial or raised read) or clears it (a clean one). The next run's seed takes
+# the minimum of the column, the stored fills and that bound, so a sibling strategy
+# advancing the shared column, a 429 or a handler cancel anywhere after the provisional write
+# cannot make the span unreachable. A provisional write that fails skips the fills read of
+# that run (it counts as a failed Phase 2), and one that answers orphan skips it silently. `binance_stop_below_cursor`
+# follows the round-3 predicate (the earliest complete-through instant, minus the overlap
+# hour), and the `binance_*` sync flags (services/binance_sync_flags.py) are carried
+# through the derive prestamp and the CSV rebuild, on the failure writes as well, and
+# cleared by the next Binance sync that did not raise them, so the signal outlives the
+# derive. This switch stays off for Binance: turning it on is a separate act that no
+# Phase 253 plan takes (SC-4, D-10). A third known gap is recorded the
 # same way (round-1 review WR-03, T-250-19), the sync handler tail: a
 # fill-heavy read that also runs to its 840 s deadline can overrun the 900 s
 # handler while it persists (one amendment SELECT and one upsert per 100 fills,
 # duplicates included), and `wait_for` then cancels before the cursor RPC. The
-# cursor did not move, so the next run reads the same span to the same frontier,
-# persists the same fills and times out again: a loud stall that repeats on
-# every run, not one failed run, until the account's fills thin out. There is
-# no fill-count stop. This is one of several venue conditions for this switch
+# cursor did not move and the provisional re-read bound (above) still names the seed, so
+# the next run reads the same span to the same frontier, persists the same fills and times
+# out again: a loud stall that repeats on every run, not one failed run, until the
+# account's fills thin out, and on a column set ahead of the stored fills by another
+# strategy as well (round-2 CR-03: it was silent loss there before the provisional row).
+# There is no fill-count stop. This is one of several venue conditions for this switch
 # and certifies nothing about OKX, Bybit or Deribit.
 _RAW_TRADE_INGESTION_ENABLED: Final[bool] = (
     os.environ.get("USE_RAW_TRADE_INGESTION", "false").lower() == "true"
@@ -2227,6 +2245,26 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # epilogue's `binance_stop_below_cursor` check reads both.
     fills_since_ms: int | None = None
     _fills_cursor_ms: int | None = None
+    # Phase 253 BINANCECURSOR: the per-strategy re-read bound. `_binance_read` is true only for a
+    # Binance fills read that ran (the Phase-2 block below sets it); the epilogue reads these on
+    # every run, including every PROD sync while the switch is off, so each starts inert.
+    _binance_read = False
+    # Round-2: the provisional bound write failed or answered orphan, so the fills read is skipped.
+    _fills_read_skipped = False
+    # Round-3 (IN-14): the provisional write answered orphan. The strategy-flags write is skipped
+    # too (it is unfenced), as is the daily store (held through `phase1_read_refused`).
+    _bound_orphaned = False
+    _reach_anchor_ms: int | None = None
+    _reread_bound_ms: int | None = None
+    _unread_from_ms: int | None = None
+    _covers_from_iso: str | None = None
+
+    def _iso_of_ms(ms: int) -> str:
+        # Exact to the millisecond: the UTC epoch plus a timedelta, never a float division.
+        return (
+            datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=ms)
+        ).isoformat()
+
     # Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_all_trades`` /
     # ``fetch_daily_pnl`` can write DQ flags into the per-task buffer
     # (historically ``bybit_daily_pnl_includes_funding`` pre-C-0319;
@@ -2262,6 +2300,8 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # `phase1_failed` (a store that was attempted and raised): a refusal holds
         # `last_sync_at` and the fills cursor and reports 0 rows, but it is not a
         # persist failure and never stamps `phase1_daily_pnl_persist_failed`.
+        # Phase 253 round 3 (WR-03, IN-14): a Binance run whose provisional re-read bound could not
+        # be recorded (the write raised, or answered orphan) holds its daily store the same way.
         phase1_read_refused = False
         # Phase 251: the ccxt daily read ran (set only in the ccxt arm, directly
         # after its drain). MT5 fetches no daily P&L, so it never sets this.
@@ -2332,14 +2372,200 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 raise ccxt.RateLimitExceeded(
                     "sync_trades: daily P&L read was rate limited"
                 )
-            elif phase1_verdict.reasons:
+            if _RAW_TRADE_INGESTION_ENABLED:
+                # Phase-2 seed, derived here so the provisional bound below precedes the
+                # Phase-1 store (round-2 CR-02). The `Mt5Session` arm never reaches here.
+                # LASTSYNC-SEED decision 4: the fills read keeps the partial-success
+                # checkpoint `last_fetched_trade_timestamp` (migration 045) as its
+                # preferred cursor, so a prior run that persisted fills but failed
+                # downstream does not re-fetch them from scratch. When that cursor
+                # is NULL it falls back to the stored daily high-water, never to
+                # `last_sync_at` (the `None` first argument removes that fallback).
+                # A failed high-water read left `daily_since_ms` None, so a NULL
+                # cursor then means full reach (decision 3).
+                #
+                # Phase 232 VREAD-08 (ruling Q1): the cursor is NOT trusted alone.
+                # A cursor ahead of the newest stored fill means the days between
+                # were never fetched, so the seed is the EARLIER of the cursor and
+                # that fill's exact timestamp; with no stored fill (or a failed
+                # fills read) it is the earlier of the cursor and the daily seed.
+                # The over-fetch is absorbed by the (strategy_id, exchange,
+                # exchange_fill_id) unique index. A NULL or unparsable cursor keeps
+                # the daily seed, issues no fills read, and remembers that seed
+                # (`fills_anchor_iso`) so a refusal of this very read can anchor
+                # the cursor at the read start in the epilogue.
+                if ctx.key_row.get("exchange") == "binance":
+                    # Phase 253: the reach anchor is taken BEFORE the read (the CR-01 idiom: the
+                    # walk's own reach, taken after this, is never earlier).
+                    _reach_anchor_ms = (
+                        _exchange._now_ms() - BINANCE_FILLS_REACH_DAYS * 86_400_000
+                    )
+                    _binance_read = True
+                _fills_cursor_ms = parse_since_ms(
+                    None, preferred=ctx.key_row.get("last_fetched_trade_timestamp")
+                )
+                if _fills_cursor_ms is None:
+                    fills_since_ms = daily_since_ms
+                    if daily_since_ms is not None:
+                        fills_anchor_iso = datetime.fromtimestamp(
+                            daily_since_ms / 1000, tz=timezone.utc
+                        ).isoformat()
+                    elif ctx.key_row.get("exchange") == "binance":
+                        # Phase 250 BINANCEFILLS review CR-01: no seed at all, so the read walks
+                        # from the venue's reach and the walk's start IS the reach. Anchor there,
+                        # taken BEFORE the read so it is never past the walk's own start (the read
+                        # takes its clock after this). Without it a stopped or held read that
+                        # stamps nothing leaves the column NULL, and Phase 1 of this very run moves
+                        # the daily high-water the next run seeds from past the unread span.
+                        fills_anchor_iso = (
+                            datetime(1970, 1, 1, tzinfo=timezone.utc)
+                            + timedelta(
+                                milliseconds=_exchange._now_ms()
+                                - BINANCE_FILLS_REACH_DAYS * 86_400_000
+                            )
+                        ).isoformat()
+                else:
+                    _fill_hw_iso, _fill_hw_err = await db_execute(
+                        lambda: load_strategy_fill_high_water(ctx.supabase, strategy_id)
+                    )
+                    _fill_hw_ms = parse_since_ms(_fill_hw_iso)
+                    _seed_bound_ms = (
+                        _fill_hw_ms if _fill_hw_ms is not None else daily_since_ms
+                    )
+                    fills_since_ms = (
+                        None
+                        if _seed_bound_ms is None
+                        else min(_fills_cursor_ms, _seed_bound_ms)
+                    )
+                if _binance_read:
+                    # Phase 253 (D-01 design b): the third term of the seed. A stopped, failed or
+                    # raised read of an earlier run left this strategy's bound; the shared column
+                    # may have moved past it since (another strategy on the key advanced it), so
+                    # the column and the stored fills alone would skip the span. A `None` seed
+                    # (the walk starts at the reach) already covers every bound.
+                    _bound_iso, _bound_err = await db_execute(
+                        lambda: load_strategy_fills_reread_bound(
+                            ctx.supabase, strategy_id, ctx.key_row["id"]
+                        )
+                    )
+                    _reread_bound_ms = parse_since_ms(_bound_iso)
+                    if (
+                        _reread_bound_ms is not None
+                        and fills_since_ms is not None
+                        and _reread_bound_ms < fills_since_ms
+                    ):
+                        fills_since_ms = _reread_bound_ms
+                        if _fills_cursor_ms is None:
+                            # The NULL-column anchor follows the lowered seed (never past the
+                            # walk's own start).
+                            fills_anchor_iso = _iso_of_ms(_reread_bound_ms)
+
+                # Phase 253 BINANCECURSOR round-2 (CR-02, CR-03, SFH-R2-M1): the PROVISIONAL
+                # re-read bound, written HERE: after the seed is known and BEFORE anything this
+                # run can move. Phase 251 stores the daily rows next, then the balance read and
+                # the fills walk follow, so the daily high-water the next NULL-column run seeds
+                # from, the stored-fill high-water the next set-column run seeds from, and the
+                # fills persist all move after this line. The handler's `asyncio.wait_for` (a
+                # `CancelledError`, which no `except Exception` catches), an escaping 429 and a
+                # process death reach NEITHER the epilogue write nor its NULL-column anchor, so
+                # without this row they leave nothing that names the span. The value is the SEED
+                # (`fills_since_ms`, or the reach anchor when the walk starts at the reach): the
+                # read walks from the seed minus the overlap, so every unread or unstored instant
+                # is at or after it, and the next run's seed (minimum of column, stored fills and
+                # this bound) re-reads from the same walk start. It is NOT the walk start minus
+                # 1 ms: the epilogue's `covers` is the walk start, `walk_start <= walk_start - 1`
+                # is false, and the bound would then never advance or clear (RPC R5 and R7).
+                # `p_covers_from` is None, so this call can only INSERT, REPLACE or LOWER (R1, R2,
+                # R5) and never advance or clear a stored bound: it never reaches R4 or R6. The
+                # epilogue write below carries the real covers and the run's real complete-through
+                # instant; with the walk start at or before the seed it takes R4 (advance) or R6
+                # (clear) on every path that reaches it. Because the seed is at or below every
+                # instant a stop or a failed symbol can record, this row also covers the span a
+                # post-read write of the stop would name, so there is no second early write.
+                if _binance_read and _reach_anchor_ms is not None:
+
+                    def _set_bound(unread_ms: int | None, covers_iso: str | None) -> bool:
+                        res = ctx.supabase.rpc(
+                            "set_strategy_fills_reread_bound",
+                            {
+                                "p_strategy_id": strategy_id,
+                                "p_api_key_id": ctx.key_row["id"],
+                                "p_job_id": job["id"],
+                                # WORKER_FENCE_V2 kill-switch, exactly as `_advance_cursor` below.
+                                "p_claim_token": (
+                                    job.get("claim_token") if WORKER_FENCE_V2 else None
+                                ),
+                                "p_unread_from": None if unread_ms is None else _iso_of_ms(unread_ms),
+                                "p_covers_from": covers_iso,
+                            },
+                        ).execute()
+                        # Scalar BOOLEAN: True = owned, False = orphan claim token.
+                        return bool(res.data)
+
+                    _provisional_unread_ms = (
+                        fills_since_ms if fills_since_ms is not None else _reach_anchor_ms
+                    )
+                    try:
+                        _bound_owned = await db_execute(
+                            lambda: _set_bound(_provisional_unread_ms, None)
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Fail closed: with the bound unrecorded this run must not read or store
+                        # fills it could not account for. It counts as a failed Phase 2 (the
+                        # raised-read path), so a NULL column keeps its bootstrap anchor (the
+                        # epilogue stamps `fills_anchor_iso` on a failed Phase 2), the stored
+                        # fills do not move, and `phase2_failed` blocks the D-09 clear. Round-3
+                        # WR-03 / IN-15: the Phase-1 daily store is held as well (the way a
+                        # refused daily read holds it), because the daily high-water is the seed
+                        # of a NULL column and of a set column with no stored fill, so storing it
+                        # here would move the seed past a span no bound names. Names the strategy
+                        # and the exception class only, never fill content.
+                        logger.error(
+                            "sync_trades: could not record the Binance re-read bound for "
+                            "strategy %s (%s) before the read; skipping this run's fills read "
+                            "and its daily sync_trades store so the next run re-reads the span "
+                            "(phase2_fill_ingestion_failed)",
+                            strategy_id, type(exc).__name__,
+                        )
+                        _fills_read_skipped = True
+                        phase1_read_refused = True
+                        phase2_failed = True
+                        phase2_error_message = (
+                            f"re-read bound write failed ({type(exc).__name__})"
+                        )
+                    else:
+                        if not _bound_owned:
+                            # Orphan (round-2 SFH-R2-M2, IN-11): the watchdog reclaimed this job,
+                            # so the bound write was dropped. The unfenced `trades` upsert would
+                            # still move the stored high-water, so no fill is read or stored. The
+                            # re-claiming worker owns the strategy now: this is NOT a failed
+                            # Phase 2 (no `phase2_failed`), and the run is treated as one on which
+                            # no Binance read ran (no flag clear, no epilogue bound write). Round-3
+                            # IN-14: the unfenced daily store and the unfenced strategy-flags write
+                            # are skipped as well, so nothing this run does moves a seed term.
+                            logger.warning(
+                                "worker_orphan_write_blocked: set_strategy_fills_reread_bound "
+                                "dropped the provisional re-read bound write for strategy %s "
+                                "(job %s) — watchdog reclaim race; the re-claiming worker owns "
+                                "it now; no fills are read and no daily rows are stored by "
+                                "this run.",
+                                strategy_id, job.get("id"),
+                            )
+                            _fills_read_skipped = True
+                            _bound_orphaned = True
+                            phase1_read_refused = True
+                            _binance_read = False
+
+            if phase1_verdict.reasons:
                 phase1_read_refused = True
                 logger.warning(
                     "sync_trades: daily P&L read for strategy %s was refused (%s) "
                     "- nothing was stored and last_sync_at was held",
                     strategy_id, ",".join(phase1_verdict.reasons),
                 )
-            elif trades:
+            elif trades and not phase1_read_refused:
+                # (`phase1_read_refused` is already True here only when a Binance run held its
+                # store because its provisional bound was not recorded, round-3 WR-03.)
                 # Persist trades atomically via sync_trades RPC.
                 #
                 # PostgREST JSONB shape: pass `trades` (list[dict]) directly. The
@@ -2400,62 +2626,15 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         #
         # MT5SYNC-02: mt5 is excluded — fetch_raw_trades is ccxt-shaped and
         # there is no fill-based mt5 consumer (see the mt5 arm above).
-        if _RAW_TRADE_INGESTION_ENABLED and not isinstance(ctx.exchange, Mt5Session):
-            # LASTSYNC-SEED decision 4: the fills read keeps the partial-success
-            # checkpoint `last_fetched_trade_timestamp` (migration 045) as its
-            # preferred cursor, so a prior run that persisted fills but failed
-            # downstream does not re-fetch them from scratch. When that cursor
-            # is NULL it falls back to the stored daily high-water, never to
-            # `last_sync_at` (the `None` first argument removes that fallback).
-            # A failed high-water read left `daily_since_ms` None, so a NULL
-            # cursor then means full reach (decision 3).
-            #
-            # Phase 232 VREAD-08 (ruling Q1): the cursor is NOT trusted alone.
-            # A cursor ahead of the newest stored fill means the days between
-            # were never fetched, so the seed is the EARLIER of the cursor and
-            # that fill's exact timestamp; with no stored fill (or a failed
-            # fills read) it is the earlier of the cursor and the daily seed.
-            # The over-fetch is absorbed by the (strategy_id, exchange,
-            # exchange_fill_id) unique index. A NULL or unparsable cursor keeps
-            # the daily seed, issues no fills read, and remembers that seed
-            # (`fills_anchor_iso`) so a refusal of this very read can anchor
-            # the cursor at the read start in the epilogue.
-            _fills_cursor_ms = parse_since_ms(
-                None, preferred=ctx.key_row.get("last_fetched_trade_timestamp")
-            )
-            if _fills_cursor_ms is None:
-                fills_since_ms = daily_since_ms
-                if daily_since_ms is not None:
-                    fills_anchor_iso = datetime.fromtimestamp(
-                        daily_since_ms / 1000, tz=timezone.utc
-                    ).isoformat()
-                elif ctx.key_row.get("exchange") == "binance":
-                    # Phase 250 BINANCEFILLS review CR-01: no seed at all, so the read walks
-                    # from the venue's reach and the walk's start IS the reach. Anchor there,
-                    # taken BEFORE the read so it is never past the walk's own start (the read
-                    # takes its clock after this). Without it a stopped or held read that
-                    # stamps nothing leaves the column NULL, and Phase 1 of this very run moves
-                    # the daily high-water the next run seeds from past the unread span.
-                    fills_anchor_iso = (
-                        datetime(1970, 1, 1, tzinfo=timezone.utc)
-                        + timedelta(
-                            milliseconds=_exchange._now_ms()
-                            - BINANCE_FILLS_REACH_DAYS * 86_400_000
-                        )
-                    ).isoformat()
-            else:
-                _fill_hw_iso, _fill_hw_err = await db_execute(
-                    lambda: load_strategy_fill_high_water(ctx.supabase, strategy_id)
-                )
-                _fill_hw_ms = parse_since_ms(_fill_hw_iso)
-                _seed_bound_ms = (
-                    _fill_hw_ms if _fill_hw_ms is not None else daily_since_ms
-                )
-                fills_since_ms = (
-                    None
-                    if _seed_bound_ms is None
-                    else min(_fills_cursor_ms, _seed_bound_ms)
-                )
+        if (
+            _RAW_TRADE_INGESTION_ENABLED
+            and not isinstance(ctx.exchange, Mt5Session)
+            and not _fills_read_skipped
+        ):
+            # The seed (cursor, stored fills, the Phase 253 re-read bound) and the
+            # provisional bound write are derived above, in the ccxt arm, BEFORE the
+            # Phase-1 store (round-2 CR-02): `fills_since_ms`, `fills_anchor_iso`,
+            # `_fills_cursor_ms` and `_binance_read` are read here as the run's seed.
             try:
                 # 840 of the handler's 900 s (T-250-19): the persist after the read is
                 # unbounded by it, so a fill-heavy read that runs to its deadline times
@@ -2535,6 +2714,90 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
+
+    # Phase 250 BINANCEFILLS (SC-3): a Binance read that STOPPED early (a symbol
+    # hit the page cap, a full page had no timestamp to page past, the read
+    # deadline) records `binance_read_through_ms`, the instant every stopped
+    # symbol is complete through. The read still returns healthy symbols' fills
+    # newer than that instant, so the stamp is the newest PERSISTED fill at or
+    # before the bound, never a fill after it. The bound only selects among
+    # persisted fills (never a read-through instant, a window end or the clock
+    # is stamped) and it applies only when nothing above holds. A stop record
+    # whose bound is missing or malformed HOLDS the cursor: `_record_dq_flag`
+    # swallows its own exceptions, so a lost bound must never read as "no stop".
+    # `binance_unlisted_symbols` and `binance_fills_reach_clamped` never hold.
+    _fills_incomplete = any(
+        (key.startswith("sync_truncated_") or key == "binance_partial_symbols")
+        and value
+        for key, value in exchange_dq_flags.items()
+    )
+    _read_through_raw = exchange_dq_flags.get("binance_read_through_ms")
+    _read_through: datetime | None = None
+    # `type(...) is int` excludes bool. Exact to the millisecond: the UTC epoch
+    # plus a timedelta, never a float division.
+    if type(_read_through_raw) is int and _read_through_raw >= 0:
+        try:
+            _epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            _read_through = _epoch + timedelta(milliseconds=_read_through_raw)
+        except OverflowError:
+            _read_through = None
+    _fills_stopped = "binance_read_through_ms" in exchange_dq_flags or any(
+        exchange_dq_flags.get(key)
+        for key in (
+            "binance_page_cap_symbols",
+            "binance_untimed_page_symbols",
+            "binance_deadline_symbols",
+        )
+    )
+    if _fills_stopped and _read_through is None:
+        # A stop record whose bound is unusable (T-250-05): hold, exactly like
+        # any other incomplete read. Names the strategy and the bound's type
+        # only, never fill content.
+        if not _fills_incomplete:
+            logger.warning(
+                "sync_trades Phase 2: holding fetched-cursor for strategy %s — "
+                "a Binance stop record has no usable read-through bound (%s)",
+                strategy_id, type(_read_through_raw).__name__,
+            )
+        _fills_incomplete = True
+
+    # Phase 253 BINANCECURSOR: the epilogue's inputs for the per-strategy re-read bound. The bound
+    # itself was first written BEFORE the read, as a provisional row at the seed (round-2 CR-02,
+    # CR-03; see the ccxt arm above), so a cancel, a 429 or a death anywhere after that leaves a
+    # row that names the span. The epilogue write below carries the real covers and the run's real
+    # complete-through instant: it advances the row (RPC R4) or clears it (R6), because the walk
+    # start is at or before the seed the provisional row holds.
+    if _binance_read and _reach_anchor_ms is not None:
+        _walk_start_ms = (
+            fills_since_ms - _exchange.OVERLAP_WINDOW_MS
+            if fills_since_ms is not None
+            else _reach_anchor_ms
+        )
+        # The walk began at the reach when there was no seed or the seed minus the overlap
+        # reached back to it: every reachable instant was covered, so an older bound is
+        # unreachable and must not live for ever.
+        _covers_from_iso = (
+            "-infinity"
+            if fills_since_ms is None or _walk_start_ms <= _reach_anchor_ms
+            else _iso_of_ms(_walk_start_ms)
+        )
+
+        def _earliest_through() -> int | None:
+            """The run's EARLIEST complete-through instant: the stop bound
+            (`binance_read_through_ms`), or the walk start minus 1 ms for a failed symbol, a
+            raised or unpersisted read or a stop without a usable bound. None means the Binance
+            read was complete. Read once, in the epilogue, after the persist (`phase2_failed`
+            can turn true in it)."""
+            _throughs: list[int] = []
+            if _read_through is not None and type(_read_through_raw) is int:
+                _throughs.append(_read_through_raw)
+            if (
+                exchange_dq_flags.get("binance_partial_symbols")
+                or phase2_failed
+                or (_fills_stopped and _read_through is None)
+            ):
+                _throughs.append(_walk_start_ms - 1)
+            return min(_throughs) if _throughs else None
 
     # Persist raw fills (Phase 2, after exchange is closed).
     #
@@ -2708,51 +2971,8 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     #     fill of the symbols that succeeded; review 232 CR-02 / SFH-01);
     #   * every fill timestamp parses (a fill that cannot be dated holds the
     #     cursor; never a partial maximum).
-    # Phase 250 BINANCEFILLS (SC-3): a Binance read that STOPPED early (a symbol
-    # hit the page cap, a full page had no timestamp to page past, the read
-    # deadline) records `binance_read_through_ms`, the instant every stopped
-    # symbol is complete through. The read still returns healthy symbols' fills
-    # newer than that instant, so the stamp is the newest PERSISTED fill at or
-    # before the bound, never a fill after it. The bound only selects among
-    # persisted fills (never a read-through instant, a window end or the clock
-    # is stamped) and it applies only when nothing above holds. A stop record
-    # whose bound is missing or malformed HOLDS the cursor: `_record_dq_flag`
-    # swallows its own exceptions, so a lost bound must never read as "no stop".
-    # `binance_unlisted_symbols` and `binance_fills_reach_clamped` never hold.
-    _fills_incomplete = any(
-        (key.startswith("sync_truncated_") or key == "binance_partial_symbols")
-        and value
-        for key, value in exchange_dq_flags.items()
-    )
-    _read_through_raw = exchange_dq_flags.get("binance_read_through_ms")
-    _read_through: datetime | None = None
-    # `type(...) is int` excludes bool. Exact to the millisecond: the UTC epoch
-    # plus a timedelta, never a float division.
-    if type(_read_through_raw) is int and _read_through_raw >= 0:
-        try:
-            _epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-            _read_through = _epoch + timedelta(milliseconds=_read_through_raw)
-        except OverflowError:
-            _read_through = None
-    _fills_stopped = "binance_read_through_ms" in exchange_dq_flags or any(
-        exchange_dq_flags.get(key)
-        for key in (
-            "binance_page_cap_symbols",
-            "binance_untimed_page_symbols",
-            "binance_deadline_symbols",
-        )
-    )
-    if _fills_stopped and _read_through is None:
-        # A stop record whose bound is unusable (T-250-05): hold, exactly like
-        # any other incomplete read. Names the strategy and the bound's type
-        # only, never fill content.
-        if not _fills_incomplete:
-            logger.warning(
-                "sync_trades Phase 2: holding fetched-cursor for strategy %s — "
-                "a Binance stop record has no usable read-through bound (%s)",
-                strategy_id, type(_read_through_raw).__name__,
-            )
-        _fills_incomplete = True
+    # The stop record's derived state (`_fills_incomplete`, `_read_through`, `_fills_stopped`) is
+    # computed above, before the fills persist, from the fetch's own flags.
     advance_fetched_cursor = (
         bool(raw_fills)
         and phase2_complete
@@ -2805,30 +3025,73 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # (RESEARCH Pitfall 5, the 232 CR-01 class).
         _p_last_fetched = fills_anchor_iso
 
-    # Phase 250 BINANCEFILLS (round-2 review WR-01): the open SC-3 gap recorded at
-    # `_RAW_TRADE_INGESTION_ENABLED`, named at run time. A stopped or incomplete Binance read
-    # on a SET column whose unread span starts below the column (the stop's bound, or with no
-    # bound the read's seed; no seed means the walk began at the reach) and whose stamp is
-    # None or below the column leaves the column where it is, because `advance_sync_cursor`
-    # only moves it forward. The next seed is min(column, newest stored fill), so the span
-    # between the bound and the column may never be read again. Never holds the cursor.
-    if _fills_cursor_ms is not None and (
-        _fills_stopped or exchange_dq_flags.get("binance_partial_symbols")
-    ):
-        _unread_from_ms = _read_through_raw if _read_through is not None else fills_since_ms
-        _stamp_ms = None if _p_last_fetched is None else parse_since_ms(_p_last_fetched)
-        if (_unread_from_ms is None or _unread_from_ms < _fills_cursor_ms) and (
-            _stamp_ms is None or _stamp_ms < _fills_cursor_ms
+    # Phase 253 BINANCECURSOR (D-01 design b, D-03, D-05): the per-strategy re-read bound, written
+    # now with its real `covers_from` (the provisional write before the read only ever lowers it).
+    # `_unread_from_ms`
+    # is the run's EARLIEST complete-through instant again, this time counting a persist failure
+    # (`phase2_failed`). None means the Binance read was complete and persisted. It is written
+    # through the fenced RPC BEFORE the flag upsert and the cursor RPC, so a failed write can
+    # still set the flag.
+    if _binance_read and _reach_anchor_ms is not None:
+        _unread_from_ms = _earliest_through()
+
+        # Phase 250 BINANCEFILLS (round-2 review WR-01) as corrected by round-3 WR-01/WR-04 and
+        # Phase 253: name the span whose re-read depends on the per-strategy bound alone. The
+        # column is shared by every strategy on the key and `advance_sync_cursor` only moves it
+        # forward, so a run whose earliest complete-through instant is below the column MINUS
+        # THE OVERLAP is not re-read by the column-and-stored-fills seed (the overlap hour is,
+        # which is why the comparison subtracts it; `+ 1` because the instant itself is
+        # complete). That includes a stop-plus-partial run (the failed symbol's walk start
+        # bounds it, not the stop) and a raised read (D-07). The old stamp clause is dropped
+        # (round-3 WR-06: it never decided the outcome). Never holds the cursor. The flag no
+        # longer means "may never be re-read": it means only the bound keeps the span re-read.
+        if (
+            _fills_cursor_ms is not None
+            and _unread_from_ms is not None
+            and _unread_from_ms + 1 < _fills_cursor_ms - _exchange.OVERLAP_WINDOW_MS
         ):
             exchange_dq_flags["binance_stop_below_cursor"] = True
             logger.warning(
-                "sync_trades: Binance read stopped below the fills cursor for strategy %s: "
-                "column %s, unread from %s; advance_sync_cursor will not lower the column, "
-                "so the span may not be re-read (binance_stop_below_cursor)",
+                "sync_trades: Binance read incomplete below the fills cursor for strategy %s: "
+                "column %s, complete through %s; the span is recorded as this strategy's "
+                "re-read bound in strategy_fills_reread_bounds and the next run re-reads it "
+                "(binance_stop_below_cursor)",
                 strategy_id,
                 ctx.key_row.get("last_fetched_trade_timestamp"),
-                "the reach" if _unread_from_ms is None else _unread_from_ms,
+                _unread_from_ms,
             )
+
+        try:
+            if not await db_execute(lambda: _set_bound(_unread_from_ms, _covers_from_iso)):
+                logger.warning(
+                    "worker_orphan_write_blocked: set_strategy_fills_reread_bound dropped "
+                    "the re-read bound write for strategy %s (job %s) — watchdog reclaim "
+                    "race; the re-claiming worker owns it now.",
+                    strategy_id, job.get("id"),
+                )
+        except Exception as exc:  # noqa: BLE001
+            if _unread_from_ms is not None:
+                # A lost write of a real unread span: say so loudly and flag it (names the
+                # strategy and the exception class only, never fill content). The stamp is NOT
+                # touched: every value it holds here is at or before the unread start (a stamp
+                # at or before the read-through, or the NULL-column bootstrap anchor at the
+                # seed), and the anchor is the only thing that keeps a NULL column re-reading
+                # (round-1 CR-01). The provisional row written before the read stays and still names the
+                # span from the seed, so this loss is real only when that write failed too.
+                logger.error(
+                    "sync_trades: could not record the Binance re-read bound for strategy "
+                    "%s (%s); the unread span is re-read only if the provisional bound written before "
+                    "the read landed (binance_stop_below_cursor)",
+                    strategy_id, type(exc).__name__,
+                )
+                exchange_dq_flags["binance_stop_below_cursor"] = True
+            else:
+                # A failed CLEAR: the stored bound survives, which only over-fetches.
+                logger.warning(
+                    "sync_trades: could not clear the Binance re-read bound for strategy "
+                    "%s (%s); the stored bound survives and is re-read once more",
+                    strategy_id, type(exc).__name__,
+                )
 
     # H-0691: When Phase 2 fetch or persist fails, surface the lag into
     # strategy_analytics.data_quality_flags so the admin "Position Metrics
@@ -2864,11 +3127,18 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # daily read ran (an MT5 run with ingestion off): the ccxt daily read is a
     # second reason to read, because its refusal flags (Phase 251) are owned by
     # this block and a clean read clears the ones an earlier refusal wrote.
-    phase2_success = _RAW_TRADE_INGESTION_ENABLED and not phase2_failed
+    # A skipped read (an orphan bound write, round-2 IN-11) is neither a failed nor a clean Phase 2.
+    phase2_success = (
+        _RAW_TRADE_INGESTION_ENABLED and not phase2_failed and not _fills_read_skipped
+    )
     # NEW-C12-02: phase1_failed also requires a flag write to surface via
     # the admin health card (it has no pre-existing path for daily-PnL failures).
+    # An orphaned run (round-3 IN-14) writes none of the daily-read flags: the write is unfenced.
     needs_flag_write = (
-        phase2_failed or phase2_success or phase1_failed or phase1_read_ran
+        phase2_failed
+        or phase2_success
+        or phase1_failed
+        or (phase1_read_ran and not _bound_orphaned)
     )
     if needs_flag_write:
         def _load_existing_flags() -> dict[str, Any]:
@@ -2962,6 +3232,22 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             if owned_after != owned_before:
                 write_needed = True
 
+        # Phase 253 (SC-3, D-09): a Binance fills read that ran and did not raise is evidence about
+        # the span it covered, so every sync-time binance_* key it did not raise again is removed
+        # (the keys survive the derive and the CSV rebuild until exactly here). A raised read, a
+        # switched-off read (`_binance_read` is False), a non-Binance key and a failed flag load
+        # (the dict was never read, so there is nothing to pop) remove nothing.
+        binance_flags_cleared = False
+        if (
+            _binance_read
+            and not phase2_failed
+            and not _fills_read_skipped
+            and not flag_load_failed
+        ):
+            binance_flags_cleared = clear_absent_binance_sync_flags(
+                existing_flags, exchange_dq_flags
+            )
+
         # NEW-C12-02: emit DQ flag when Phase-1 (daily-PnL) RPC failed so
         # the admin health card lights up (pre-fix had no flag path for this).
         if phase1_failed:
@@ -3015,6 +3301,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 # Phase 2 clean but ``fetch_raw_trades`` surfaced a DQ
                 # signal (e.g. binance_partial_symbols, sync_truncated_*).
                 # Persist so the admin health card can see it.
+                write_needed = True
+            elif binance_flags_cleared:
+                # Phase 253 (D-09): the clear above removed keys and nothing else changed;
+                # the row must still be written or the stale keys stay on it.
                 write_needed = True
 
         # "Phase 2 ran" is `phase2_failed or phase2_success`, which equals
@@ -6355,6 +6645,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _failed_job_id = job.get("id") if scrubbed else None
 
             def _upsert() -> None:
+                # Phase 253 (SC-3, D-08): this failed stamp replaces data_quality_flags wholesale
+                # and runs before the prior-row read below, so the sync-time binance_* keys are
+                # read here by the guarded helper (never raises: the stamp must land).
+                _derive_failed_flags: dict[str, Any] = {
+                    "csv_source": True,
+                    **read_binance_sync_flags(ctx.supabase, strategy_id),
+                }
                 _derive_failed_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
@@ -6368,7 +6665,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         # and it renders VERBATIM on the account surface.
                         "computation_error_source": provenance_source(_failed_job_id),
                         "computation_error_job_id": _failed_job_id,
-                        "data_quality_flags": {"csv_source": True},
+                        "data_quality_flags": _derive_failed_flags,
                         # F-4 (Fable): authoritative-clear the by-basis column so a
                         # prior object can't render on a now-FAILED row.
                         "metrics_json_by_basis": None,
@@ -11749,6 +12046,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # a bug in a required read), any other failure through the queue's normal retry, so the
     # carried snapshot is never overwritten with a null it did not earn.
     _last_success: dict[str, Any] | None = None
+    # Phase 253 (SC-3, D-08): the raw row of that one read, kept so the sync-time binance_* keys
+    # can be carried across the prestamp below. Same read, same failure behaviour.
+    _prior_analytics_row: object = None
 
     def _read_last_success_row() -> object:
         res = (
@@ -11761,9 +12061,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         return getattr(res, "data", None)
 
     try:
-        _last_success = _last_success_snapshot(
-            await db_read_with_retry(_read_last_success_row)
-        )
+        _prior_analytics_row = await db_read_with_retry(_read_last_success_row)
+        _last_success = _last_success_snapshot(_prior_analytics_row)
     except Exception as _snapshot_exc:  # noqa: BLE001 — logged, captured, re-raised
         _log_snapshot_failure = (
             logger.error
@@ -11978,6 +12277,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # rest. ``_prestamp_payload["data_quality_flags"]`` is this same dict, so the upsert below
     # writes it.
     _prestamp_flags[LAST_SUCCESS_SNAPSHOT_KEY] = _last_success
+    # Phase 253 (SC-3, D-08): carry the sync-time binance_* keys (an explicit nine-key allowlist
+    # with shape validation) across this wholesale prestamp; the next clean Binance sync clears
+    # them (D-09). No prior row, or a prior row without the keys, carries nothing.
+    _prestamp_flags.update(
+        carry_binance_sync_flags(
+            _prior_analytics_row.get("data_quality_flags")
+            if isinstance(_prior_analytics_row, dict)
+            else None
+        )
+    )
 
     def _prestamp_dq_flags(payload: dict[str, Any] = _prestamp_payload) -> None:
         ctx.supabase.table("strategy_analytics").upsert(

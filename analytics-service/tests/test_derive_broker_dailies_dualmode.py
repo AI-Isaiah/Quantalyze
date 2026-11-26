@@ -1386,6 +1386,131 @@ class TestStrategyModeDroppedRowFlag:
         assert not [k for k in prestamp["data_quality_flags"] if k.startswith("daily_pnl_malformed_")]
 
 
+# Phase 253 BINANCECURSOR plan 04 (SC-3, D-08): the sync-time `binance_*` data-quality keys
+# (services/binance_sync_flags.py) survive the derive's wholesale prestamp AND its failed stamp.
+#
+# NEUTER (PROOF-01; recorded verbatim in the 253-04 SUMMARY):
+#   F1 delete the `_prestamp_flags.update(carry_binance_sync_flags(...))` statement:
+#      test_the_sync_time_keys_survive_the_prestamp goes RED.
+#   F6 drop the `read_binance_sync_flags` term from `_derive_failed_payload`:
+#      test_the_derive_failed_stamp_still_carries_the_sync_time_keys goes RED.
+_SYNC_KEYS: dict[str, object] = {
+    "binance_stop_below_cursor": True,
+    "binance_deadline_symbols": ["BTCUSDT"],
+}
+
+
+def _answer_the_prior_analytics_read(ctx: MagicMock, answer: object) -> None:
+    """Make every `strategy_analytics` `select().eq().maybe_single().execute()` of this ctx
+    answer `answer` (a row, None for no row, or an Exception to raise)."""
+    original = ctx.supabase.table.side_effect
+
+    def _table(name: str) -> MagicMock:
+        tbl = original(name)
+        if name == "strategy_analytics":
+            execute = tbl.select.return_value.eq.return_value.maybe_single.return_value.execute
+            if isinstance(answer, Exception):
+                execute.side_effect = answer
+            else:
+                execute.return_value = MagicMock(data=answer)
+        return tbl
+
+    ctx.supabase.table.side_effect = _table
+
+
+class TestStrategyModeBinanceSyncFlagCarry:
+    @staticmethod
+    async def _derive(prior_row: object) -> tuple[object, dict]:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-c", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-c", "user_id": "user-1"},
+        )
+        _answer_the_prior_analytics_read(ctx, prior_row)
+        patches = _patches(ctx, key_mode=False, returns=_two_day_returns())
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(
+                {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-c"}
+            )
+        return result, capture
+
+    @staticmethod
+    async def _derive_failed(
+        prior: object, caplog: pytest.LogCaptureFixture | None = None
+    ) -> tuple[object, dict]:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-f", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-f", "user_id": "user-1"},
+        )
+        _answer_the_prior_analytics_read(ctx, prior)
+        combine = MagicMock(side_effect=NavReconstructionError("nav_twr non-finite pnl=42.0"))
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(
+                {"id": "j-f", "kind": "derive_broker_dailies", "strategy_id": "strat-f"}
+            )
+        return result, capture
+
+    @pytest.mark.asyncio
+    async def test_the_sync_time_keys_survive_the_prestamp(self) -> None:
+        result, capture = await self._derive(
+            {"data_quality_flags": {"csv_source": True, **_SYNC_KEYS}, "computed_at": None}
+        )
+        assert result.outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        (prestamp,) = [u[1] for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        flags = prestamp["data_quality_flags"]
+        assert flags["binance_stop_below_cursor"] is True
+        assert flags["binance_deadline_symbols"] == ["BTCUSDT"]
+        # A flag, never a warning: neither is in the guard set that promotes the status.
+        from services.allocated_capital import ALLOCATED_CAPITAL_GUARD_KEYS
+        from services.binance_sync_flags import BINANCE_SYNC_FLAG_KEYS
+        from services.nav_twr import NAV_TWR_GUARD_KEYS
+
+        guards = set(NAV_TWR_GUARD_KEYS) | set(ALLOCATED_CAPITAL_GUARD_KEYS)
+        assert not guards & set(BINANCE_SYNC_FLAG_KEYS)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "prior_row",
+        [None, {"data_quality_flags": {"csv_source": True}, "computed_at": None}, {}],
+        ids=["no-prior-row", "no-binance-keys", "empty-row"],
+    )
+    async def test_a_first_derive_or_a_row_without_the_keys_writes_exactly_the_prestamp_flags(
+        self, prior_row: object
+    ) -> None:
+        result, capture = await self._derive(prior_row)
+        assert result.outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        (prestamp,) = [u[1] for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert not [k for k in prestamp["data_quality_flags"] if k.startswith("binance_")]
+
+    @pytest.mark.asyncio
+    async def test_the_derive_failed_stamp_still_carries_the_sync_time_keys(self) -> None:
+        result, capture = await self._derive_failed(
+            {"data_quality_flags": {"csv_source": True, **_SYNC_KEYS}, "computed_at": None}
+        )
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        (stamp,) = [u[1] for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert stamp["computation_status"] == "failed"
+        assert stamp["data_quality_flags"] == {"csv_source": True, **_SYNC_KEYS}
+
+    @pytest.mark.asyncio
+    async def test_a_failing_prior_flags_read_logs_and_the_failed_stamp_still_lands(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            result, capture = await self._derive_failed(RuntimeError("prior read refused"))
+        assert result.outcome == DispatchOutcome.FAILED  # type: ignore[attr-defined]
+        (stamp,) = [u[1] for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert stamp["computation_status"] == "failed"
+        assert stamp["data_quality_flags"] == {"csv_source": True}
+        named = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING" and "strat-f" in r.getMessage()
+            and "RuntimeError" in r.getMessage()
+        ]
+        assert len(named) == 1, f"expected one WARNING naming the strategy, got {named}"
+
+
 class TestKeyModeDeribitParity:
     """A deribit allocator key produces the IDENTICAL per-key upsert shape as a
     ccxt allocator key — the dogfooding-gap consumer for an all-deribit allocator."""

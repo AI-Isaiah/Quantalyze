@@ -135,3 +135,46 @@ def load_strategy_fill_high_water(
             strategy_id,
         )
         return None, f"{strategy_id}: {type(exc).__name__}: {exc}"
+
+
+def load_strategy_fills_reread_bound(
+    supabase: Any, strategy_id: str, api_key_id: str
+) -> tuple[str | None, str | None]:
+    """This strategy's Binance fills re-read bound, or `None`. Returns `(unread_from, error)`.
+
+    Phase 253 BINANCECURSOR. `strategy_fills_reread_bounds` holds, per strategy, the earliest
+    instant a stopped, failed or raised Binance fills read was complete through. The queued
+    `sync_trades` job lowers its fills-read seed to it, so the span is read again whatever a
+    sibling strategy on the same key did to the shared `api_keys.last_fetched_trade_timestamp`
+    column. The seed that survives is read by `load_strategy_fill_high_water` and the column;
+    this is the third term of it.
+
+    A row stored for ANOTHER key is ignored on read (the strategy was re-pointed at a different
+    key; the RPC replaces or deletes that row on this run's write).
+
+    ⚠️ FAIL OPEN, NEVER RAISES, like its sibling `load_strategy_fill_high_water`. A read error
+    (a blip, or a missing relation during a deploy) returns `(None, error)`, which the caller
+    treats as "no bound term". That is safe because the run's write then carries a `covers_from`
+    above the stored bound, so the RPC keeps the stored bound and the first run whose read
+    succeeds re-reads it. A full-reach fallback would add an 85-day walk under the 840 s read
+    deadline on every blip and buys no integrity.
+    """
+    try:
+        result = (
+            supabase.table("strategy_fills_reread_bounds")
+            .select("api_key_id, unread_from")
+            .eq("strategy_id", strategy_id)
+            .limit(1)
+            .execute()
+        )
+        found = rows(result)
+        if found and str(found[0]["api_key_id"]) == str(api_key_id):
+            return str(found[0]["unread_from"]), None
+        return None, None
+    except Exception as exc:
+        logger.exception(
+            "fills-reread-bound read failed for strategy %s — failing OPEN to no bound "
+            "term for this fills read",
+            strategy_id,
+        )
+        return None, f"{strategy_id}: {type(exc).__name__}: {exc}"
