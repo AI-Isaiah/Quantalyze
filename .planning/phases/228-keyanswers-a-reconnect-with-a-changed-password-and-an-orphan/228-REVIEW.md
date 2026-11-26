@@ -110,6 +110,8 @@ try {
 ```
 ⚠️ This also changes PATCH rotate-secret's answer from `KEY_NETWORK_TIMEOUT`/`UNKNOWN` to `SERVICE_UNREACHABLE`. Confirm first that `UpdateMt5SecretDialog`'s roster admits `SERVICE_UNREACHABLE`, or the dialog falls back to `UNKNOWN`. If it does not, either add the roster row in the same change, or apply the mapping only at the create-with-key call site so rotate-secret stays byte-identical. Pin it with a route test that rejects the seam with a real `DOMException("…", "TimeoutError")` and a `TypeError("fetch failed")`.
 
+**Fix status: FIXED in `77664a0b8`** (`src/lib/analytics-client.ts`, `src/lib/analytics-client.test.ts`). The mapping is applied INSIDE `rotateKeySecret`, not at the create-with-key call site, so one catch serves both callers. Checked before choosing: `UpdateMt5SecretDialog`'s roster (`DASHBOARD_DIALOG_ROUTE_CODES`, `keys/[id]/rotate-secret`) holds neither `SERVICE_UNREACHABLE` nor the `KEY_NETWORK_TIMEOUT` it replaces, so the dialog rendered `UNKNOWN` for both before and after. Its visible answer is unchanged; only the wire code moves, and the `UNKNOWN` Sentry page for a refused connection stops. No roster row was added (scope). The rotate-secret route test, the dialog tests and the wiring and seam censuses stay green. Pinned by `[228 / WR-01]` in `analytics-client.test.ts` (real `DOMException` `TimeoutError` and `TypeError("fetch failed")`, both through the real core and classifier, both `SERVICE_UNREACHABLE` 502). Neutering the catch turns both RED by name.
+
 ## Info
 
 ### IN-01 (LOW): The chokepoint lookahead and the literal-site regex are asymmetric, so three call shapes in the two client modules are invisible to the census
