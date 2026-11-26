@@ -632,3 +632,102 @@ def test_rotate_secret_mt5_off_keeps_the_422_for_a_non_mt5_key(client, monkeypat
     assert res.status_code == 422, res.text
     mock_decrypt.assert_not_called()
     mock_validate.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Phase 228 (CONN-02): `secret_changed`, probe-then-compare
+#
+# WHY: create-with-key's MT5 same-account arm skips the write and tells the
+# owner "the stored password already works" when the seam answers
+# `secret_changed: false`. That answer is only true if (a) the compare runs
+# AFTER the broker accepted the typed password, (b) it is byte equality over
+# UTF-8 with no trim, and (c) it never raises on a non-ASCII password. A wrong
+# flag either skips a real password change or reports a mistyped one as fine.
+# ---------------------------------------------------------------------------
+
+_ENCRYPTED_FIELDS = {
+    "api_key_encrypted": "ciphertext-blob",
+    "api_secret_encrypted": None,
+    "passphrase_encrypted": None,
+    "dek_encrypted": "ciphertext-dek",
+    "nonce": None,
+    "kek_version": 1,
+}
+
+
+def _rotate_with_stored_password(client, stored: str, typed: str, validate=None):
+    validate_mock = validate or AsyncMock(return_value={"valid": True, "read_only": True})
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(_mt5_row())), \
+         patch("routers.internal.get_kek", return_value=b"kek"), \
+         patch(
+             "routers.internal.decrypt_credentials",
+             return_value=(_SYNTH_LOGIN, stored, _SYNTH_BROKER_SERVER),
+         ), \
+         patch("routers.internal._validate_mt5_key", new=validate_mock), \
+         patch(
+             "routers.internal.encrypt_credentials", return_value=dict(_ENCRYPTED_FIELDS)
+         ) as mock_encrypt:
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": typed},
+        )
+    return res, mock_encrypt, validate_mock
+
+
+def test_rotate_secret_reports_secret_changed_true_for_a_different_password(client):
+    res, _, _ = _rotate_with_stored_password(client, _SYNTH_OLD_PASSWORD, _SYNTH_NEW_PASSWORD)
+    assert res.status_code == 200, res.text
+    assert res.json()["secret_changed"] is True
+    assert _SYNTH_OLD_PASSWORD not in res.text
+    assert _SYNTH_NEW_PASSWORD not in res.text
+
+
+def test_rotate_secret_reports_secret_changed_false_for_the_same_password(client):
+    res, _, validate_mock = _rotate_with_stored_password(
+        client, _SYNTH_NEW_PASSWORD, _SYNTH_NEW_PASSWORD
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["secret_changed"] is False
+    # Probe-then-compare: an unchanged password is still probed first.
+    validate_mock.assert_awaited_once()
+    assert _SYNTH_NEW_PASSWORD not in res.text
+
+
+def test_rotate_secret_compares_non_ascii_passwords_without_raising(client):
+    stored = "pässwörd-Ω"  # noqa: S105 (synthetic)
+    res_same, _, _ = _rotate_with_stored_password(client, stored, "pässwörd-Ω")
+    assert res_same.status_code == 200, res_same.text
+    assert res_same.json()["secret_changed"] is False
+
+    _reset_rate_limit()
+    res_diff, _, _ = _rotate_with_stored_password(client, stored, "passwörd-Ω")
+    assert res_diff.status_code == 200, res_diff.text
+    assert res_diff.json()["secret_changed"] is True
+
+
+def test_rotate_secret_compares_verbatim_so_surrounding_whitespace_is_a_change(client):
+    # D-08: the MT5 investor password is never trimmed, so " pw " != "pw".
+    res, _, _ = _rotate_with_stored_password(
+        client, _SYNTH_PADDED_NEW_PASSWORD.strip(), _SYNTH_PADDED_NEW_PASSWORD
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["secret_changed"] is True
+
+
+@pytest.mark.parametrize(
+    "detail", [AUTH_FAILED_DETAIL, MT5_MASTER_PASSWORD_DETAIL, MT5_WRONG_SERVER_DETAIL]
+)
+def test_rotate_secret_probe_refusal_wins_over_an_unchanged_password(client, detail):
+    # The typed password EQUALS the stored one, and the broker refuses it: the
+    # answer is the refusal, never "unchanged" (probe-then-compare).
+    res, mock_encrypt, _ = _rotate_with_stored_password(
+        client,
+        _SYNTH_NEW_PASSWORD,
+        _SYNTH_NEW_PASSWORD,
+        validate=AsyncMock(side_effect=HTTPException(status_code=400, detail=detail)),
+    )
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == detail
+    assert "secret_changed" not in res.text
+    mock_encrypt.assert_not_called()
