@@ -33,7 +33,7 @@ import services.job_worker as jw
 from services.allocator_positions import fetch_allocator_holdings
 from services.closed_sets import MT5_DISABLED_DETAIL
 from services.job_worker import DispatchOutcome
-from services.mt5_client import Mt5Client, Mt5Session
+from services.mt5_client import Mt5Client, Mt5ServerMismatchError, Mt5Session
 
 
 ALLOCATOR_ID = "00000000-0000-0000-0000-0000000000aa"
@@ -92,10 +92,17 @@ class _FakeRpycConn:
 class _FakeMt5Transport:
     """Records every call so 'zero terminal IPC' assertions are falsifiable."""
 
-    def __init__(self, *, account: dict) -> None:
+    def __init__(self, *, account: dict, report_server: bool = True) -> None:
         self._account = account
         self.calls: list[str] = []
         self._MetaTrader5__conn = _FakeRpycConn(self.calls)
+        # 225-21: a correct session reports the broker server it was logged in to.
+        # `login` records the server it is given and `account_info` echoes it ONLY when
+        # the configured dict names none; a configured "server" of any value is returned
+        # verbatim. `report_server=False` turns the echo off (a snapshot with no server
+        # key at all).
+        self._report_server = report_server
+        self._logged_in_server: object = None
 
     def initialize(self, **kwargs):
         # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
@@ -104,11 +111,15 @@ class _FakeMt5Transport:
 
     def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
         self.calls.append("login")
+        self._logged_in_server = server
         return True
 
     def account_info(self):
         self.calls.append("account_info")
-        return _NT(self._account)
+        reported = dict(self._account)
+        if self._report_server and "server" not in reported:
+            reported["server"] = self._logged_in_server
+        return _NT(reported)
 
     def history_deals_get(self, from_ts, to_ts):  # noqa: ANN001
         self.calls.append("history_deals_get")
@@ -435,17 +446,21 @@ async def test_fetch_mt5_account_balance_still_returns_equity_for_the_usd_family
 
 
 # ---------------------------------------------------------------------------
-# 225-20 (PR-2c0) — the balance read and the holdings read write the SAME one-line
-# server verdict the derive's read writes (`services.mt5_read.log_mt5_poll_server_verdict`).
-# LOG-ONLY: a False or not_captured poll returns exactly what a True one returns
-# (T-225-66), and a mismatched LOGIN writes no verdict because the login bracket
-# raises first. No line carries a login, a server or the password (T-225-65).
+# 225-20 (PR-2c0) + 225-21 — the balance read and the holdings read write the SAME
+# one-line server verdict the derive's read writes
+# (`services.mt5_read.log_mt5_poll_server_verdict`), and since 225-21 each then REFUSES a
+# session that is not on the requested broker server (CONTEXT Q6 items 1 and 2, review
+# WR-01 of PR-2c). The line stays BESIDE the bracket, written before it, so a refused poll
+# is still attributed to its key. A mismatched LOGIN writes no verdict because the login
+# bracket raises first. No line, note or message carries a login, a server or the
+# password (T-225-65, T-225-73).
 # ---------------------------------------------------------------------------
 _VERDICT_LOGGER = "quantalyze.analytics.mt5_read"
 _VERDICT_MSG = "mt5 poll server verdict"
-_VERDICT_CASES = [
-    pytest.param("Broker-Live", "True", id="matching"),
-    pytest.param("Broker-Demo-7", "False", id="other-server"),
+_OTHER_SERVER = "Broker-Demo"
+_MATCHING = pytest.param("Broker-Live", "True", id="matching")
+_REFUSED_CASES = [
+    pytest.param(_OTHER_SERVER, "False", id="other-server"),
     pytest.param(None, "not_captured", id="no-server"),
 ]
 
@@ -467,12 +482,19 @@ def _account_reporting(server: str | None, **overrides: object) -> dict:
     return account
 
 
+def _transport_reporting(server: str | None, **overrides: object) -> _FakeMt5Transport:
+    """A fake whose snapshot reports ``server``; ``None`` is the not-captured case, so the
+    echo is switched off and the snapshot carries no server key."""
+    return _FakeMt5Transport(
+        account=_account_reporting(server, **overrides), report_server=server is not None
+    )
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("server", "label"), _VERDICT_CASES)
-async def test_the_balance_read_logs_one_server_verdict_and_returns_the_same_equity(
-    caplog: pytest.LogCaptureFixture, server: str | None, label: str
+async def test_a_matching_server_balance_read_returns_the_equity_after_one_true_line(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    transport = _FakeMt5Transport(account=_account_reporting(server))
+    transport = _transport_reporting("Broker-Live")
 
     with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER):
         value = await jw._fetch_mt5_account_balance(
@@ -484,9 +506,43 @@ async def test_the_balance_read_logs_one_server_verdict_and_returns_the_same_equ
     assert len(lines) == 1, lines
     assert lines[0] == (
         f"{_VERDICT_MSG} site=sync_trades_balance holder={API_KEY_ID} "
-        f"session_server_matches_requested={label}"
+        "session_server_matches_requested=True"
     )
     _assert_no_secret(lines[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("server", "label"), _REFUSED_CASES)
+async def test_the_balance_read_refuses_another_server_after_one_verdict_line(
+    caplog: pytest.LogCaptureFixture, server: str | None, label: str
+) -> None:
+    """Function level. Another server, or none, returns None (the sync completes with no
+    balance snapshot); exactly ONE verdict record is written before the refusal; the
+    failure WARNING names ``exc_class=Mt5ServerMismatchError`` and carries no server or
+    login."""
+    transport = _transport_reporting(server)
+
+    with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER), caplog.at_level(
+        logging.INFO, logger="quantalyze.analytics.job_worker"
+    ):
+        value = await jw._fetch_mt5_account_balance(
+            _session(transport), api_key_id=API_KEY_ID
+        )
+
+    assert value is None
+    lines = _verdict_lines(caplog)
+    assert len(lines) == 1, lines
+    assert lines[0] == (
+        f"{_VERDICT_MSG} site=sync_trades_balance holder={API_KEY_ID} "
+        f"session_server_matches_requested={label}"
+    )
+    warnings = [
+        r.getMessage() for r in caplog.records if "mt5 balance read failed" in r.getMessage()
+    ]
+    assert len(warnings) == 1, warnings
+    assert "exc_class=Mt5ServerMismatchError" in warnings[0]
+    for blob in [lines[0], warnings[0]]:
+        _assert_no_secret(blob)
 
 
 @pytest.mark.asyncio
@@ -507,12 +563,11 @@ async def test_a_balance_read_on_a_mismatched_login_writes_no_verdict_and_still_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("server", "label"), _VERDICT_CASES)
-async def test_the_holdings_read_logs_one_server_verdict_and_returns_the_same_rows(
-    monkeypatch, caplog: pytest.LogCaptureFixture, server: str | None, label: str
+async def test_a_matching_server_holdings_read_returns_the_row_after_one_true_line(
+    monkeypatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setenv("MT5_ENABLED", "true")
-    transport = _FakeMt5Transport(account=_account_reporting(server))
+    transport = _transport_reporting("Broker-Live")
 
     with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER):
         rows, warning = await fetch_allocator_holdings(
@@ -526,9 +581,48 @@ async def test_the_holdings_read_logs_one_server_verdict_and_returns_the_same_ro
     assert len(lines) == 1, lines
     assert lines[0] == (
         f"{_VERDICT_MSG} site=allocator_holdings holder={API_KEY_ID} "
-        f"session_server_matches_requested={label}"
+        "session_server_matches_requested=True"
     )
     _assert_no_secret(lines[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("server", "label"), _REFUSED_CASES)
+async def test_the_holdings_read_refuses_another_server_into_the_transient_note(
+    monkeypatch, caplog: pytest.LogCaptureFixture, server: str | None, label: str
+) -> None:
+    """Function level. The read raises ``AllocatorHoldingsSyncTransientError`` whose text is
+    ``MT5_UNREACHABLE_NOTE`` and whose cause is the ``Mt5ServerMismatchError``; one verdict
+    record precedes it; the terminal restart ran; the arm's WARNING says the login was
+    presented "on another broker server" and carries no server value or login."""
+    from services.allocator_positions import (
+        MT5_UNREACHABLE_NOTE,
+        AllocatorHoldingsSyncTransientError,
+    )
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _transport_reporting(server)
+
+    with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER), caplog.at_level(
+        logging.INFO, logger="quantalyze.analytics.allocator_positions"
+    ), pytest.raises(AllocatorHoldingsSyncTransientError) as caught:
+        await fetch_allocator_holdings("mt5", _session(transport), API_KEY_ID)
+
+    assert str(caught.value) == MT5_UNREACHABLE_NOTE
+    assert isinstance(caught.value.__cause__, Mt5ServerMismatchError)
+    lines = _verdict_lines(caplog)
+    assert len(lines) == 1, lines
+    assert lines[0] == (
+        f"{_VERDICT_MSG} site=allocator_holdings holder={API_KEY_ID} "
+        f"session_server_matches_requested={label}"
+    )
+    assert "shutdown" in transport.calls, "the arm's bounded terminal restart did not run"
+    warnings = [
+        r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert any("on another broker server" in w for w in warnings), warnings
+    for blob in [*lines, *warnings, str(caught.value)]:
+        _assert_no_secret(blob)
 
 
 @pytest.mark.asyncio
@@ -548,3 +642,160 @@ async def test_a_holdings_read_on_a_mismatched_login_writes_no_verdict_and_keeps
         await fetch_allocator_holdings("mt5", _session(transport), API_KEY_ID)
 
     assert _verdict_lines(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# 225-21 — SITE TESTS, from the jobs. Each is shown RED with its own bracket neutered.
+# ---------------------------------------------------------------------------
+async def _run_sync_trades_for(monkeypatch, transport: _FakeMt5Transport):
+    """``test_run_sync_trades_job_mt5_routes_balance_and_skips_ccxt``'s setup, returning the
+    job result and the rpc calls so a case can read ``p_account_balance``."""
+    mock_supabase = MagicMock()
+    rpc_calls: list[tuple[str, dict]] = []
+
+    def _rpc(name: str, payload: dict) -> MagicMock:
+        rpc_calls.append((name, payload))
+        stub = MagicMock()
+        stub.execute.return_value = MagicMock(data=True)
+        return stub
+
+    mock_supabase.rpc.side_effect = _rpc
+    tbl = MagicMock()
+    tbl.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
+        data=None
+    )
+    tbl.upsert.return_value.execute.return_value = MagicMock(data=1)
+    mock_supabase.table.return_value = tbl
+    fake_ctx = jw._ExchangeContext(
+        supabase=mock_supabase,
+        strategy_row={"id": "strat-mt5", "user_id": "u1"},
+        key_row={
+            "id": "key-mt5",
+            "user_id": "u1",
+            "exchange": "mt5",
+            "last_sync_at": None,
+            "last_fetched_trade_timestamp": None,
+        },
+        exchange=_session(transport),
+    )
+
+    async def _fake_preflight(job, name):
+        return fake_ctx
+
+    monkeypatch.setattr(jw, "_exchange_preflight", _fake_preflight)
+    result = await jw.run_sync_trades_job(
+        {"id": "job-1", "kind": "sync_trades", "strategy_id": "strat-mt5"}
+    )
+    return result, {name: payload for (name, payload) in rpc_calls}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server", "stamped"),
+    [
+        pytest.param("Broker-Live", True, id="requested-server"),
+        pytest.param(_OTHER_SERVER, False, id="another-server"),
+        pytest.param(None, False, id="not-captured"),
+    ],
+)
+async def test_the_sync_stamps_no_balance_from_a_session_on_another_server(
+    monkeypatch, caplog: pytest.LogCaptureFixture, server: str | None, stamped: bool
+) -> None:
+    """BALANCE SITE TEST (225-21). Through ``run_sync_trades_job``: a terminal session
+    reporting another broker server (or none) reaches ``advance_sync_cursor`` with
+    ``p_account_balance`` None, so nothing of that session's equity is stamped on the key,
+    and the job itself does not fail on the balance. The requested server passes the
+    equity, as ``test_run_sync_trades_job_mt5_routes_balance_and_skips_ccxt`` pins."""
+    transport = _transport_reporting(server)
+
+    with caplog.at_level(logging.INFO):
+        result, by_name = await _run_sync_trades_for(monkeypatch, transport)
+
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    advance = by_name.get("advance_sync_cursor")
+    assert advance is not None, by_name
+    if stamped:
+        assert advance["p_account_balance"] == pytest.approx(ACCOUNT_EQUITY)
+    else:
+        assert advance["p_account_balance"] is None
+    assert by_name.get("enqueue_compute_job", {}).get("p_kind") == "derive_broker_dailies"
+    for record in caplog.records:
+        _assert_no_secret(record.getMessage())
+
+
+async def _run_holdings_poll_for(monkeypatch, api_key_row_factory, transport: _FakeMt5Transport):
+    from services import audit as audit_module
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    key_row = api_key_row_factory(id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5")
+    mock_supabase = MagicMock()
+    updates: list[tuple[str, dict]] = []
+    upserts: list[tuple[str, object]] = []
+
+    def _table(name: str) -> MagicMock:
+        tbl = MagicMock()
+
+        def _update(payload: dict) -> MagicMock:
+            updates.append((name, payload))
+            chain = MagicMock()
+            chain.eq.return_value = chain
+            chain.execute.return_value = MagicMock(data=[{"id": API_KEY_ID}])
+            return chain
+
+        def _upsert(payload: object, **kw: object) -> MagicMock:
+            upserts.append((name, payload))
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=1)
+            return stub
+
+        tbl.update.side_effect = _update
+        tbl.upsert.side_effect = _upsert
+        return tbl
+
+    mock_supabase.table.side_effect = _table
+    fake_ctx = jw._ExchangeContext(
+        supabase=mock_supabase,
+        strategy_row=None,
+        key_row=key_row,
+        exchange=_session(transport),
+    )
+
+    async def _fake_preflight(job, name):
+        return fake_ctx
+
+    monkeypatch.setattr(jw, "_allocator_key_preflight", _fake_preflight)
+    monkeypatch.setattr(audit_module, "log_audit_event", MagicMock())
+    result = await jw.run_poll_allocator_positions_job(
+        {"id": "job-1", "kind": "poll_allocator_positions", "api_key_id": API_KEY_ID}
+    )
+    return result, updates, upserts, mock_supabase
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server", [_OTHER_SERVER, None], ids=["another-server", "not-captured"])
+async def test_the_holdings_poll_emits_no_row_from_a_session_on_another_server(
+    monkeypatch, api_key_row_factory, caplog: pytest.LogCaptureFixture, server: str | None
+) -> None:
+    """HOLDINGS SITE TEST (225-21). Through ``run_poll_allocator_positions_job``: a session
+    on another broker server (or none) upserts no holdings row, writes ``sync_status='error'``
+    with ``sync_error`` equal to the fixed ``MT5_UNREACHABLE_NOTE``, and the job answers
+    transient. The matching case, ``test_run_poll_allocator_positions_job_mt5_reaches_complete``,
+    still reaches complete."""
+    from services.allocator_positions import MT5_UNREACHABLE_NOTE
+
+    transport = _transport_reporting(server)
+
+    with caplog.at_level(logging.INFO):
+        result, updates, upserts, supabase = await _run_holdings_poll_for(
+            monkeypatch, api_key_row_factory, transport
+        )
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert [u for u in upserts if u[0] == "allocator_holdings"] == []
+    supabase.rpc.assert_not_called()
+    final = [p for (name, p) in updates if name == "api_keys"][-1]
+    assert final["sync_status"] == "error"
+    assert final["sync_error"] == MT5_UNREACHABLE_NOTE
+    for blob in [final["sync_error"], result.error_message or "", *[r.getMessage() for r in caplog.records]]:
+        _assert_no_secret(blob)

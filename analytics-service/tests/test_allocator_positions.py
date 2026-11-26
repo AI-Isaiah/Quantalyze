@@ -2306,8 +2306,17 @@ async def test_mt5_equity_extraction_arm_follows_the_live_classifier_verdict(
     from services import allocator_positions as ap
     import services.job_worker as jw
 
+    # 225-21: the snapshot names the session's server ("Broker-Live", the
+    # `_Mt5SessionDouble`'s), so the server bracket admits it and the case reaches the
+    # equity arm. Without it the bracket refuses first and the `transient` and `unknown`
+    # cases stay green FOR THE WRONG REASON: the server refusal yields the same transient
+    # answer this test expects from the equity arm. The ValueError assertions below pin
+    # which arm the captured exception came through.
     client = _Mt5ClientDouble(
-        account_info={"login": 246813, "currency": "USD", "equity": "not-a-number"}
+        account_info={
+            "login": 246813, "currency": "USD", "equity": "not-a-number",
+            "server": "Broker-Live",
+        }
     )
     session = _Mt5SessionDouble(client)
     _mt5_verdict_case_setup(monkeypatch)
@@ -2329,6 +2338,9 @@ async def test_mt5_equity_extraction_arm_follows_the_live_classifier_verdict(
             await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
         assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
         assert captured and caught.value.__cause__ is captured[0]
+    assert isinstance(captured[0], ValueError), (
+        f"the equity arm was not the one consulted: {type(captured[0]).__name__}"
+    )
 
 
 @pytest.mark.asyncio

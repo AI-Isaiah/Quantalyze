@@ -207,6 +207,7 @@ from services.bybit_unified_flows import BybitUnifiedFlowReadError, fetch_bybit_
 # import back into this module.
 from services.mt5_probe import (
     Mt5GatewayMisconfigured,
+    assert_expected_server,
     curated_gateway_detail,
 )
 # 164.5.4 / D-01: the MT5 deal-ledger READ (login → PRE bracket →
@@ -887,9 +888,10 @@ async def _fetch_mt5_account_balance(
     completes without a balance snapshot instead of failing the job — the
     snapshot is advisory; the follow-on derive job owns the load-bearing
     equity read (and terminal restart recovery on a wedged pipe). The
-    MT5CONC-02 login bracket IS enforced: a mis-routed terminal presenting a
-    different account can never stamp the WRONG account's equity onto this
-    key.
+    MT5CONC-02 login bracket IS enforced, and since Phase 225 plan 21 so is the
+    broker-server bracket: a mis-routed terminal presenting a different account,
+    or the same login on another broker server (or on none it can name), can
+    never stamp the WRONG account's equity onto this key.
 
     ⭐ Phase 164.6.6 criterion 1 — ``api_key_id`` is the key this balance read
     is for; the lease is taken in its name so a login that switches the shared
@@ -909,12 +911,16 @@ async def _fetch_mt5_account_balance(
         # default-match (the derive branch's _assert_expected_login contract).
         if info.get("login") != session.login:
             raise Mt5AccountMismatchError(session.login, info.get("login"))
-        # 225-20 (PR-2c0) — LOG-ONLY server verdict, only once the login check has
-        # passed. It cannot raise, so it can never turn this read into a dropped
-        # balance snapshot (the swallow-all arm below).
+        # 225-20 (PR-2c0) — the server verdict LINE, only once the login check has
+        # passed. The line itself cannot raise. The server bracket after it (225-21,
+        # CONTEXT Q6 items 1 and 2, review WR-01 of PR-2c) raises by design and lands
+        # in the swallow-all arm below, exactly as a login mismatch does: the sync
+        # completes with no balance snapshot, and the verdict line is already
+        # written, so the refused read is still attributed to its key.
         log_mt5_poll_server_verdict(
             info, requested_server=session.server, site=SITE_BALANCE, holder=api_key_id
         )
+        assert_expected_server(info, login=session.login, server=session.server)
         return info
 
     try:
@@ -8686,6 +8692,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         error_kind="transient",
                     )
                 except Mt5AccountMismatchError as exc:
+                    # 225-21: this arm also takes the subclass Mt5ServerMismatchError
+                    # from read_mt5_deal_ledger's server brackets; its fixed message
+                    # carries no server value and no login.
                     # MT5CONC-02 — THE structural trust guarantee of the phase: the
                     # live terminal presented a DIFFERENT account (or omitted the
                     # login field) than the connected key. This is a mis-routed/
