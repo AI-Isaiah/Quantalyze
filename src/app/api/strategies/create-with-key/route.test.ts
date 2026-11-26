@@ -467,6 +467,18 @@ type KeyReadResult = {
   error: { code?: string; message?: string } | null;
 };
 
+/**
+ * Founder 2026-11-25 — answers the own-key read the refusal makes. Default: no
+ * row (so every pre-existing refusal pin keeps its exact body). A case that wants
+ * a key named installs an owner-aware implementation.
+ */
+const ownKeyLabelReadMock = vi.fn(
+  (_filters: CapturedFilters): { data: Record<string, unknown> | null; error: unknown } => ({
+    data: null,
+    error: null,
+  }),
+);
+
 const reuseKeyAdminReadFault = { value: null as { code: string } | null };
 const reuseKeyUserScopedReadFault = { value: null as { code: string } | null };
 
@@ -572,6 +584,12 @@ function makeSelectBuilder(
         if ("account_share_kind" in filters) {
           return compositeDependentReadMock(filters);
         }
+        // Founder 2026-11-25 — the refusal's read of the caller's OWN key
+        // (`own-account-holder.ts`): the only user-scoped `api_keys` read that
+        // selects `label, created_at`.
+        if (client === "user-scoped" && columns === "label, created_at") {
+          return ownKeyLabelReadMock(filters);
+        }
         if ("id" in filters) {
           return client === "admin"
             ? reuseKeyAdminLookupMock(filters)
@@ -617,7 +635,7 @@ vi.mock("@/lib/supabase/server", () => ({
     // the `rpcCallSites` docblock above for why the throw is armed per-case.
     rpc: (...args: unknown[]) => userScopedRpc(...args),
     from: (table: string) => ({
-      select: () => makeSelectBuilder(table, "user-scoped"),
+      select: (cols?: string) => makeSelectBuilder(table, "user-scoped", cols),
       update: (...args: unknown[]) => {
         recordWrite("user-scoped", table, "update");
         return assetClassUpdateMock(...args);
@@ -1792,6 +1810,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     venueStrategyLookupMock.mockReset();
     venueOwnerLookupMock.mockReset();
     keyMembershipLookupMock.mockReset();
+    ownKeyLabelReadMock.mockReset();
     compositeDependentReadMock.mockReset();
     compositeDependentReadMock.mockResolvedValue({ data: null, error: null });
     stampedKeyReadMock.mockReset();
@@ -2324,7 +2343,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       // body is what `ConnectKeyStep`'s reader and the copy table are pinned
       // against.
       expect(await res.text()).toBe(
-        '{"code":"VENUE_ALREADY_CONNECTED","error":"This account is already connected to an existing strategy.","strategy_name":"Helios Momentum"}',
+        '{"code":"VENUE_ALREADY_CONNECTED","error":"This account is already connected to an existing strategy.","strategy_name":"Helios Momentum","holder":{"kind":"strategy","name":"Helios Momentum","href":"/factsheet/dddddddd-dddd-4ddd-8ddd-dddddddddddd?from=strategies"}}',
       );
     });
 
@@ -4259,10 +4278,90 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
         code: "VENUE_ALREADY_CONNECTED",
         error: "This account is already connected to an existing strategy.",
         strategy_name: "Own OKX Strategy",
+        // Founder 2026-11-25: the caller's OWN strategy, named and linked.
+        holder: {
+          kind: "strategy",
+          name: "Own OKX Strategy",
+          href: `/factsheet/${EXISTING_STRATEGY_ID}?from=strategies`,
+        },
       });
       expect(text).not.toContain(OKX_UID);
       expect(text).not.toContain(EXISTING_KEY_ID);
       noWriteWasMade();
+    });
+
+    // ── Founder 2026-11-25: the refusal names the caller's OWN key or strategy ──
+    // "The same key can be used by many different accounts. It only becomes
+    // problematic if one account forgets that it already ingested a key and
+    // reingests it." So KEY_ORPHANED names the stored key (nickname and date) and
+    // links to the page that lists it, and every holder read is the caller's own.
+    it("1b. a same-owner key with NO strategy answers KEY_ORPHANED naming that key (nickname, date added, link) and never another owner's key on the same id", async () => {
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      // The other owner's row is FIRST and carries the same key id: a read that
+      // dropped its owner filter would name it.
+      const keyTable = [
+        { user_id: OTHER_OWNER_ID, id: EXISTING_KEY_ID, label: "Other Owner Desk", created_at: "2020-02-02T00:00:00Z" },
+        { user_id: MOCK_USER.id, id: EXISTING_KEY_ID, label: "Test", created_at: "2026-11-19T10:00:00Z" },
+      ];
+      ownKeyLabelReadMock.mockImplementation((filters) => ({
+        data:
+          keyTable.find(
+            (r) =>
+              (!("user_id" in filters) || r.user_id === filters.user_id) &&
+              (!("id" in filters) || r.id === filters.id),
+          ) ?? null,
+        error: null,
+      }));
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      const text = await res.text();
+
+      expect(res.status).toBe(409);
+      expect(JSON.parse(text)).toEqual({
+        code: "KEY_ORPHANED",
+        error: "This key is already stored, but no strategy uses it.",
+        holder: { kind: "key", name: "Test", added_at: "2026-11-19T10:00:00Z", href: "/strategies" },
+      });
+      expect(text).not.toContain("Other Owner Desk");
+      expect(text).not.toContain(OTHER_OWNER_ID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      noWriteWasMade();
+    });
+
+    it("1c. every read behind a same-owner refusal carries the CALLER's id, so no other owner's row can be named", async () => {
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      ownKeyLabelReadMock.mockImplementation(() => ({
+        data: { label: "Test", created_at: "2026-11-19T10:00:00Z" },
+        error: null,
+      }));
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(409);
+
+      const holderTables = new Set(["api_keys", "strategies", "strategy_keys"]);
+      const reads = capturedSelects.filter((c) => holderTables.has(c.table));
+      expect(reads.length).toBeGreaterThan(0);
+      for (const read of reads) {
+        expect(
+          read.filters.user_id ?? read.filters.owner_id,
+          `${read.table} read was not scoped to the caller`,
+        ).toBe(MOCK_USER.id);
+      }
+    });
+
+    it("1d. a faulted own-key read still refuses with the unchanged KEY_ORPHANED body", async () => {
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      ownKeyLabelReadMock.mockImplementation(() => ({
+        data: null,
+        error: { code: "XX000", message: "boom" },
+      }));
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"KEY_ORPHANED","error":"This key is already stored, but no strategy uses it."}',
+      );
     });
 
     it("2. an MT5 login matching a WORKING key of the SAME owner is refused the same way", async () => {
@@ -6116,6 +6215,11 @@ describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () =
       code: "VENUE_ALREADY_CONNECTED",
       error: "This account is already connected to an existing strategy.",
       strategy_name: "Delta Neutral",
+      holder: {
+        kind: "strategy",
+        name: "Delta Neutral",
+        href: "/factsheet/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa?from=strategies",
+      },
     });
     expect(rpcMock).not.toHaveBeenCalled();
     expect(writeAttempts).toEqual([]);
