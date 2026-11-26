@@ -1,9 +1,9 @@
 ---
 phase: 238-nevercomputed-a-strategy-that-never-computed-failed-or-stall
 verified: 2026-11-26T11:35:00Z
-status: human_needed
+status: passed
 score: 8/8 must-haves verified
-verified_at_sha: 350a288538d4af759a828f1f2edf8da9697d9f83
+verified_at_sha: f34c9cacd2cca4d6254d8a4b993ccee31ed31d22
 drift_subjects:
   - supabase/migrations/20261126130000_strategy_analytics_computed_at_nullable.sql
   - supabase/migrations/down/20261126130000-rollback.sql
@@ -27,29 +27,15 @@ drift_subjects:
   - src/__tests__/nevercomputed-backfill-sql-exec.test.ts
 behavior_unverified: 0
 overrides_applied: 0
-human_verification:
-  - test: "Merge, then read the TEST apply-test job log of supabase-migrate.yml for migration 20261126130000"
-    expected: "The migration role may ALTER TABLE ... DISABLE TRIGGER on strategy_analytics (it must own the table). The run ends with the NOTICE 'strategy_analytics.computed_at is nullable with no default, never-computed rows are NULL, the hold trigger is enabled'. A privilege refusal rolls back on TEST and blocks the PROD apply (safe, retryable)."
-    why_human: "DISABLE TRIGGER has no precedent in supabase/migrations/. The local exec test runs as a superuser on a throwaway cluster, so it cannot prove the managed migration role's privilege. Only apply-test can."
-  - test: "CI sql-tests (local-stack lane, Decision F replay) on the PR head"
-    expected: "The lane replays 20261126130000 over the committed dump without error, and every supabase/tests file that names computed_at passes against the migrated schema (test_strategy_analytics_computed_at_success_only F1-EDGE, test_sync_status_computed_at_runner_only, test_sync_status_analytics_scope, test_ledger_refresh_staleness and the others)."
-    why_human: "SQL gates run only in CI. 238-09 recorded the lane as NOT RUN (no Docker) and the code review marked it PR2-IN-04. Nothing here claims it ran locally. Static read: F1-EDGE branches on atthasdef and expects NULL when no default exists, which is the post-migration shape."
-  - test: "CI e2e-seeded lane on the PR head, in particular the factsheet freshness chip specs"
-    expected: "Seeded complete rows carry an explicit computed_at (e2e/helpers/seed-test-project.ts, three inserts), so the chip reads a real date and not 'not computed'."
-    why_human: "Playwright runs only in CI."
-  - test: "CI typecheck (frontend aggregator) on the PR head"
-    expected: "tsc --noEmit is green with StrategyAnalytics.computed_at: string | null and the generated Row/Insert/Update following, with no non-null assertion hiding a NULL."
-    why_human: "Not run in this verification (load limit; a full tsc is not a targeted test). The 238-06 SUMMARY claims it green and the census comment names tsc as the property half for TypeScript. Treat as a CI gate, not a verified fact."
-  - test: "After the PROD apply, a read-only count of never-completed, figure-less strategy_analytics rows that still carry a date (marker query first, counts only)"
-    expected: "0. The migration's own row guard raises NEVERCOMPUTED on a survivor, so a committed apply implies 0, but only the apply log shows it ran against PROD's rows."
-    why_human: "PROD data cannot be read here. The 11 never-computed and 7 with-figures counts are 238-04's PROD reading, not re-measured by this verifier."
+human_verification: []
+human_verification_resolved: 5
 ---
 
 # Phase 238: NEVERCOMPUTED Verification Report
 
 **Phase Goal:** A strategy that never computed, failed or stalled never claims a compute time or tells its owner to wait. Two halves: never-computed rows (nullable `computed_at`, founder ruling A) and the /strategies note (FACT-05).
 **Verified:** 2026-11-26
-**Status:** human_needed (no gaps; only CI-only and post-apply items remain)
+**Status:** passed (no gaps; all five human items resolved 2026-11-26, see Resolved human verification)
 **Re-verification:** No, initial verification
 **HEAD:** 350a288538d4af759a828f1f2edf8da9697d9f83 (branch gsd/phase-238-nevercomputed). PR-1 (plans 01-03) is already on main; this report also re-checked its code in the tree.
 
@@ -138,7 +124,17 @@ No TBD, FIXME or XXX markers in the migration, rollback, stamp module or census.
 
 ### Human Verification Required
 
-See the frontmatter list. In short: (1) TEST apply-test proving the migration role may DISABLE TRIGGER; (2) CI sql-tests Decision F replay and the `computed_at` SQL gate files on the migrated schema; (3) CI e2e-seeded freshness chip; (4) CI typecheck; (5) a post-apply PROD count showing 0 survivors. None of these ran in this verification and none is claimed as run.
+SUPERSEDED: all five items are resolved, see the next section. The original list, kept as lineage:  In short: (1) TEST apply-test proving the migration role may DISABLE TRIGGER; (2) CI sql-tests Decision F replay and the `computed_at` SQL gate files on the migrated schema; (3) CI e2e-seeded freshness chip; (4) CI typecheck; (5) a post-apply PROD count showing 0 survivors. None of these ran in this verification and none is claimed as run.
+
+## Resolved human verification (2026-11-26)
+
+All five items are satisfied. Each reading is bound to a run id or a sha.
+
+1. **TEST apply-test and the DISABLE TRIGGER privilege: RESOLVED.** `supabase-migrate.yml` run 45800983848 (merge `f34c9cacd`, #1363) concluded success. The `apply-test` log printed `NOTICE (00000): Migration 20261126130000: strategy_analytics.computed_at is nullable with no default, never-computed rows are NULL, the hold trigger is enabled.`, so the managed migration role may disable the trigger. The `apply` (PROD) job printed the same NOTICE and succeeded. Read with `gh run view 45800983848 --log | grep -a NOTICE`.
+2. **CI sql-tests, Decision F replay: RESOLVED.** PR #1363 head `32c4549bd` had 31 of 31 check-runs success, `sql-tests` among them. The lane printed `baseline-replay: 1 migration(s) newer than the dump: 20261126130000_strategy_analytics_computed_at_nullable.sql`.
+3. **CI e2e-seeded: RESOLVED.** `e2e-seeded` success on `32c4549bd`.
+4. **CI typecheck: RESOLVED.** `frontend-typecheck` and the `frontend` aggregator success on `32c4549bd`.
+5. **Post-apply PROD count: RESOLVED, 0 survivors.** A read-only PROD count on 2026-11-26 (marker query named PRODUCTION) of `strategy_analytics` by `computation_status` and figures-null: failed with no figures 11 rows, 0 of them dated; failed with figures 7, all dated; complete 16 and complete_with_warnings 8, all dated. Never-completed, figure-less rows carrying a date: 0.
 
 ### Gaps Summary
 
