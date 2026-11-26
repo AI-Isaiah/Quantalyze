@@ -15,6 +15,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
+import { checkLimit } from "@/lib/ratelimit";
+import { KNOWN_CREATE_WITH_KEY_CODES } from "@/lib/wizardKeyRosters";
 
 vi.mock("server-only", () => ({}));
 
@@ -3404,10 +3406,24 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       return rpcMock.mock.calls.filter((c) => c[0] === name);
     }
 
+    // Phase 228: the rotate seam and its owner-scoped re-read default to "no key
+    // found / nothing configured" for every case here, and are put back after, so
+    // the one case that seeds them cannot leak a row into a later describe.
+    const resetRotateDoubles = () => {
+      rotateKeySecretMock.mockReset();
+      rotateRereadMock.mockReset();
+      rotateRereadMock.mockImplementation(() => ({ data: null, error: null }));
+      rotateAuditMock.mockReset();
+      adminUpdates.length = 0;
+    };
+
     beforeEach(() => {
       auditMock.mockReset();
+      resetRotateDoubles();
       routeRpc();
     });
+
+    afterEach(resetRotateDoubles);
 
     it("TRACER: a connect beside the owner's FAILING key is validated, created without identity, and takes the slot through the swap", async () => {
       venueKeyLookupMock.mockResolvedValue({
@@ -3474,7 +3490,14 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(rpcCalls("swap_account_slot")).toHaveLength(1);
     });
 
-    it("a WORKING same-login same-server key whose strategy is past draft is refused by name BEFORE validateKey, exactly as before (D-01)", async () => {
+    // ⭐ PHASE 228 (CONN-02) REVERSES THIS TEST. It used to say "refused by name
+    // BEFORE validateKey, exactly as before (D-01)" and pinned a plain refusal.
+    // Under the founder ruling of 2026-11-26 an exact-server working holder now
+    // ROTATES in place: the typed password goes through the rotate seam instead of
+    // validateKey, and the SAME refusal body carries `key_secret`. validateKey is
+    // still never called (the seam's probe replaces it), so the "before validate"
+    // half of the old name still holds; the "refused, nothing happens" half does not.
+    it("a WORKING same-login same-server key whose strategy is past draft now ROTATES in place BEFORE validateKey: the D-01 refusal body plus key_secret (Phase 228 reverses 212-03 SC5)", async () => {
       venueKeyLookupMock.mockResolvedValue({
         data: [{ id: EXISTING_KEY_ID, venue_server: SERVER_NORMALISED }],
         error: null,
@@ -3483,18 +3506,42 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
         data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
         error: null,
       });
+      // Seed the rotate leg: the owner-scoped re-read finds the key and the seam accepts.
+      rotateRereadMock.mockImplementation(() => ({
+        data: {
+          id: EXISTING_KEY_ID,
+          label: "Gold MT5",
+          venue_account_id: MT5_LOGIN,
+          disconnected_at: null,
+          is_active: true,
+        },
+        error: null,
+      }));
+      rotateKeySecretMock.mockResolvedValue({
+        api_key_encrypted: "rotated-ciphertext-blob",
+        api_secret_encrypted: null,
+        passphrase_encrypted: null,
+        dek_encrypted: "rotated-dek",
+        nonce: "rotated-nonce",
+        kek_version: 7,
+        venue_account_id: MT5_LOGIN,
+        secret_changed: true,
+      });
       const POST = await importPost();
       const res = await POST(makeReq(MT5_RECONNECT_BODY));
       expect(res.status).toBe(409);
       const text = await res.text();
-      expect(JSON.parse(text).code).toBe("VENUE_ALREADY_CONNECTED");
+      const body = JSON.parse(text);
+      expect(body.code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(body.key_secret).toEqual({ outcome: "updated", name: "Gold MT5" });
+      expect(rotateKeySecretMock).toHaveBeenCalledTimes(1);
       expect(validateKeyMock).not.toHaveBeenCalled();
       expect(rpcMock).not.toHaveBeenCalled();
       expect(text).not.toContain(MT5_LOGIN);
       expect(text.toLowerCase()).not.toContain(SERVER_NORMALISED);
     });
 
-    it("a WORKING same-login key whose server is NULL matches at the fence for any server (the wildcard)", async () => {
+    it("a WORKING same-login key whose server is NULL matches at the fence for any server (the wildcard) and is the O1 NEGATIVE CONTROL: today's refusal, zero seam calls (Phase 228)", async () => {
       venueKeyLookupMock.mockResolvedValue({
         data: [{ id: EXISTING_KEY_ID, venue_server: null }],
         error: null,
@@ -3509,6 +3556,8 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(JSON.parse(await res.text()).code).toBe("VENUE_ALREADY_CONNECTED");
       expect(validateKeyMock).not.toHaveBeenCalled();
       expect(rpcMock).not.toHaveBeenCalled();
+      // Phase 228 O1: a null-server legacy holder never reaches the rotate seam.
+      expect(rotateKeySecretMock).not.toHaveBeenCalled();
     });
 
     it("a same-login owner key on a DIFFERENT server is not this account: the fence admits and BOTH identity parameters ride", async () => {
@@ -4742,6 +4791,440 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
         newSecret: MT5_RECONNECT_BODY.api_secret,
         correlationId: CORRELATION_ID_228,
       });
+    });
+
+    // ── Task 2: every same-account arm, every failure, the negative controls ──
+
+    /** An exact-server WORKING holder whose draft belongs to ANOTHER session. */
+    function seedDraftExactServer() {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, venue_server: SERVER_NORMALISED }],
+        error: null,
+      });
+      venueStrategyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+        error: null,
+      });
+    }
+
+    /** An exact-server WORKING holder with no strategy and no composite membership. */
+    function seedOrphanedExactServer() {
+      venueKeyLookupMock.mockResolvedValue({
+        data: [{ id: EXISTING_KEY_ID, venue_server: SERVER_NORMALISED }],
+        error: null,
+      });
+    }
+
+    /** An exact-server WORKING holder held only through a composite. */
+    function seedHeldExactServer() {
+      seedOrphanedExactServer();
+      keyMembershipLookupMock.mockResolvedValue({
+        data: { api_key_id: EXISTING_KEY_ID },
+        error: null,
+      });
+    }
+
+    const NO_ECHO = (text: string) => {
+      expect(text).not.toContain(MT5_LOGIN);
+      expect(text.toLowerCase()).not.toContain(SERVER_NORMALISED);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      expect(text).not.toContain(MT5_RECONNECT_BODY.api_secret);
+      expect(text).not.toContain(SEAM_CIPHERTEXT.api_key_encrypted);
+    };
+
+    describe("the other three rotating arms answer their own refusal body plus key_secret", () => {
+      it("an exact-server ORPHANED key rotates and answers KEY_ORPHANED naming the key, plus key_secret", async () => {
+        seedOrphanedExactServer();
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const text = await res.text();
+
+        expect(res.status).toBe(409);
+        expect(JSON.parse(text)).toMatchObject({
+          code: "KEY_ORPHANED",
+          key_secret: { outcome: "updated", name: KEY_LABEL },
+        });
+        expect(rotateKeySecretMock).toHaveBeenCalledTimes(1);
+        expect(validateKeyMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toHaveLength(1);
+        NO_ECHO(text);
+      });
+
+      it("a working HELD key (composite member) rotates and answers KEY_VENUE_ALREADY_CONNECTED plus key_secret", async () => {
+        seedHeldExactServer();
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const text = await res.text();
+
+        expect(res.status).toBe(409);
+        expect(JSON.parse(text)).toMatchObject({
+          code: "KEY_VENUE_ALREADY_CONNECTED",
+          key_secret: { outcome: "updated", name: KEY_LABEL },
+        });
+        expect(rotateKeySecretMock).toHaveBeenCalledTimes(1);
+        expect(validateKeyMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toHaveLength(1);
+        NO_ECHO(text);
+      });
+
+      it("another session's DRAFT on the exact server rotates and answers VENUE_DRAFT_IN_PROGRESS plus key_secret", async () => {
+        seedDraftExactServer();
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const text = await res.text();
+
+        expect(res.status).toBe(409);
+        expect(JSON.parse(text)).toEqual({
+          code: "VENUE_DRAFT_IN_PROGRESS",
+          error: "This account is already in one of your unfinished drafts.",
+          strategy_name: EXISTING_DRAFT_NAME,
+          key_secret: { outcome: "updated", name: KEY_LABEL },
+        });
+        expect(rotateKeySecretMock).toHaveBeenCalledTimes(1);
+        expect(validateKeyMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toHaveLength(1);
+        NO_ECHO(text);
+      });
+    });
+
+    describe("unchanged, absent secret_changed, labels", () => {
+      it("secret_changed false writes nothing and answers unchanged (zero UPDATEs, zero audits)", async () => {
+        seedConnectedExactServer();
+        rotateKeySecretMock.mockResolvedValue({ ...SEAM_CIPHERTEXT, secret_changed: false });
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const body = await res.json();
+
+        expect(res.status).toBe(409);
+        expect(body.key_secret).toEqual({ outcome: "unchanged", name: KEY_LABEL });
+        expect(adminUpdates).toEqual([]);
+        expect(rotateAuditMock).not.toHaveBeenCalled();
+      });
+
+      it("an ABSENT secret_changed (an older Python) still writes once and answers updated", async () => {
+        seedConnectedExactServer();
+        const legacy: Record<string, unknown> = { ...SEAM_CIPHERTEXT };
+        delete legacy.secret_changed;
+        rotateKeySecretMock.mockResolvedValue(legacy);
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect((await res.json()).key_secret).toEqual({ outcome: "updated", name: KEY_LABEL });
+        expect(adminUpdates).toHaveLength(1);
+      });
+
+      it.each([
+        ["blank", "", undefined],
+        ["whitespace-only", "   ", undefined],
+        ["padded", "  Gold  ", "Gold"],
+      ])("a %s key label: name is %s", async (_t, label, expected) => {
+        seedConnectedExactServer();
+        rotateRereadMock.mockImplementation(() => ({
+          data: {
+            id: EXISTING_KEY_ID,
+            label,
+            venue_account_id: MT5_LOGIN,
+            disconnected_at: null,
+            is_active: true,
+          },
+          error: null,
+        }));
+        const POST = await importPost();
+        const body = await (await POST(makeReq(MT5_RECONNECT_BODY))).json();
+
+        if (expected === undefined) {
+          expect(body.key_secret).toEqual({ outcome: "updated" });
+          expect("name" in body.key_secret).toBe(false);
+        } else {
+          expect(body.key_secret).toEqual({ outcome: "updated", name: expected });
+        }
+      });
+
+      it("O4: running the arm twice with the same new password writes once (updated, then unchanged)", async () => {
+        seedConnectedExactServer();
+        const POST = await importPost();
+        const first = await (await POST(makeReq(MT5_RECONNECT_BODY))).json();
+        rotateKeySecretMock.mockResolvedValue({ ...SEAM_CIPHERTEXT, secret_changed: false });
+        const second = await (await POST(makeReq(MT5_RECONNECT_BODY))).json();
+
+        expect(first.key_secret.outcome).toBe("updated");
+        expect(second.key_secret.outcome).toBe("unchanged");
+        expect(adminUpdates).toHaveLength(1);
+      });
+    });
+
+    describe("O3: a refused password is the classifier's code and writes nothing", () => {
+      // Hand-typed expectations (Rule 9), read from `classifyKeyValidationError`.
+      it.each([
+        ["auth failed", "Authentication failed. Check your API key and secret.", "KEY_AUTH_FAILED"],
+        ["master password", "MT5 master password detected. Use the investor password.", "KEY_MT5_MASTER_PASSWORD"],
+        ["wrong server", "Broker server not found. Check the server name.", "KEY_MT5_WRONG_SERVER"],
+      ])("%s", async (_t, detail, expectedCode) => {
+        seedConnectedExactServer();
+        rotateKeySecretMock.mockRejectedValue(new Error(detail));
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const body = await res.json();
+
+        expect(res.status).toBe(400);
+        expect(body.code).toBe(expectedCode);
+        expect(KNOWN_CREATE_WITH_KEY_CODES.has(body.code)).toBe(true);
+        expect("key_secret" in body).toBe(false);
+        expect(adminUpdates).toEqual([]);
+        expect(rotateAuditMock).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("faults never read as success", () => {
+      it.each([
+        ["an UPDATE error", { data: null, error: { code: "XX000", message: "boom" } }],
+        ["zero matched rows", { data: [], error: null }],
+      ])("%s answers UNKNOWN 500 with no key_secret", async (_t, answer) => {
+        seedConnectedExactServer();
+        updateAnswer.value = answer as typeof updateAnswer.value;
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const body = await res.json();
+
+        expect(res.status).toBe(500);
+        expect(body.code).toBe("UNKNOWN");
+        expect("key_secret" in body).toBe(false);
+      });
+
+      it("a missing service credential answers 503 SEAM_MISCONFIGURED and never calls the seam", async () => {
+        seedConnectedExactServer();
+        // The resolver reads the holder list through the admin client first; flip
+        // the credential off AFTER that read so only the rotate leg's own
+        // `createAdminClient()` throws.
+        venueKeyLookupMock.mockImplementation(async () => {
+          adminClientThrows.value = true;
+          return { data: [{ id: EXISTING_KEY_ID, venue_server: SERVER_NORMALISED }], error: null };
+        });
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(503);
+        expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+        expect(rotateKeySecretMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toEqual([]);
+        adminClientThrows.value = false;
+      });
+
+      it("a re-read ERROR answers the 503 holder-read body and never calls the seam", async () => {
+        seedConnectedExactServer();
+        rotateRereadMock.mockImplementation(() => ({
+          data: null,
+          error: { code: "42501", message: `denied for ${MT5_LOGIN}` },
+        }));
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const text = await res.text();
+
+        expect(res.status).toBe(503);
+        expect(JSON.parse(text).code).toBe("UNKNOWN");
+        expect(text).not.toContain(MT5_LOGIN);
+        expect(rotateKeySecretMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toEqual([]);
+      });
+
+      it("a re-read with NO row answers today's refusal byte-identically and never calls the seam", async () => {
+        seedConnectedExactServer();
+        rotateRereadMock.mockImplementation(() => ({ data: null, error: null }));
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const body = await res.json();
+
+        expect(res.status).toBe(409);
+        expect(body.code).toBe("VENUE_ALREADY_CONNECTED");
+        expect("key_secret" in body).toBe(false);
+        expect(rotateKeySecretMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toEqual([]);
+      });
+    });
+
+    describe("arms outside the ruling answer exactly as before and never call the seam", () => {
+      it("O1: a NULL-server holder answers today's refusal (no key_secret, zero seam calls)", async () => {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [{ id: EXISTING_KEY_ID, venue_server: null }],
+          error: null,
+        });
+        venueOwnerLookupMock.mockResolvedValue({
+          data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const body = await res.json();
+
+        expect(res.status).toBe(409);
+        expect(body.code).toBe("VENUE_ALREADY_CONNECTED");
+        expect("key_secret" in body).toBe(false);
+        expect(rotateKeySecretMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toEqual([]);
+      });
+
+      it("O1: a DIFFERENT-server holder is not this account: the connect is admitted, zero seam calls", async () => {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [{ id: EXISTING_KEY_ID, venue_server: "some-other-broker" }],
+          error: null,
+        });
+        rpcMock.mockResolvedValue({
+          data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+          error: null,
+        });
+        validateKeyMock.mockResolvedValue({ valid: true, read_only: true, permissions: ["read"] });
+        encryptKeyMock.mockResolvedValue({
+          api_key_encrypted: "e",
+          api_secret_encrypted: null,
+          passphrase_encrypted: null,
+          dek_encrypted: null,
+          nonce: null,
+          kek_version: 1,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(200);
+        expect(rotateKeySecretMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toEqual([]);
+      });
+
+      it("WR-06 (Pitfall 2): a failing holder with a composite dependent answers byte-identical KEY_VENUE_ALREADY_CONNECTED, zero seam calls", async () => {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [{ id: EXISTING_KEY_ID, venue_server: SERVER_NORMALISED, sync_status: "revoked" }],
+          error: null,
+        });
+        compositeDependentReadMock.mockResolvedValue({
+          data: { id: "00000000-0000-4000-8000-0000000000c1" },
+          error: null,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(409);
+        expect(await res.text()).toBe(
+          '{"code":"KEY_VENUE_ALREADY_CONNECTED","error":"This exchange account is already connected on your account. Use the key you already have, or disconnect it first."}',
+        );
+        expect(rotateKeySecretMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toEqual([]);
+      });
+
+      it("a failing holder with NO dependent still takes the 225-07 validate-and-swap path, zero seam calls", async () => {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [{ id: EXISTING_KEY_ID, venue_server: SERVER_NORMALISED, sync_status: "sign_in_failed" }],
+          error: null,
+        });
+        rpcMock.mockImplementation(async (name: string) => {
+          if (name === "create_wizard_strategy") {
+            return { data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }], error: null };
+          }
+          return { data: null, error: null };
+        });
+        validateKeyMock.mockResolvedValue({ valid: true, read_only: true, permissions: ["read"] });
+        encryptKeyMock.mockResolvedValue({
+          api_key_encrypted: "e",
+          api_secret_encrypted: null,
+          passphrase_encrypted: null,
+          dek_encrypted: null,
+          nonce: null,
+          kek_version: 1,
+        });
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(200);
+        expect(validateKeyMock).toHaveBeenCalledTimes(1);
+        expect(rpcMock.mock.calls.filter((c) => c[0] === "swap_account_slot")).toHaveLength(1);
+        expect(rotateKeySecretMock).not.toHaveBeenCalled();
+      });
+
+      it("a holder that appears only at the POST-validation resolve answers today's refusal with no key_secret, zero seam calls", async () => {
+        const exact = { id: EXISTING_KEY_ID, venue_server: SERVER_NORMALISED };
+        venueKeyLookupMock
+          .mockResolvedValueOnce({ data: null, error: null })
+          .mockResolvedValue({ data: [exact], error: null });
+        venueOwnerLookupMock.mockResolvedValue({
+          data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+          error: null,
+        });
+        validateKeyMock.mockResolvedValue({ valid: true, read_only: true, permissions: ["read"] });
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const body = await res.json();
+
+        expect(res.status).toBe(409);
+        expect(body.code).toBe("VENUE_ALREADY_CONNECTED");
+        expect("key_secret" in body).toBe(false);
+        expect(validateKeyMock).toHaveBeenCalledTimes(1);
+        expect(rotateKeySecretMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toEqual([]);
+      });
+
+      it("the 23505 race arm never calls the seam", async () => {
+        const exact = { id: EXISTING_KEY_ID, venue_server: SERVER_NORMALISED };
+        venueKeyLookupMock
+          .mockResolvedValueOnce({ data: null, error: null })
+          .mockResolvedValueOnce({ data: null, error: null })
+          .mockResolvedValue({ data: [exact], error: null });
+        venueOwnerLookupMock.mockResolvedValue({
+          data: { id: EXISTING_STRATEGY_ID, name: EXISTING_DRAFT_NAME },
+          error: null,
+        });
+        validateKeyMock.mockResolvedValue({ valid: true, read_only: true, permissions: ["read"] });
+        encryptKeyMock.mockResolvedValue({
+          api_key_encrypted: "e",
+          api_secret_encrypted: null,
+          passphrase_encrypted: null,
+          dek_encrypted: null,
+          nonce: null,
+          kek_version: 1,
+        });
+        rpcMock.mockResolvedValue({
+          data: null,
+          error: {
+            code: "23505",
+            message:
+              'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+            details: `Key (user_id, exchange, venue_account_id)=(x, mt5, ${MT5_LOGIN}) already exists.`,
+          },
+        });
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+        const body = await res.json();
+
+        expect(res.status).toBe(409);
+        expect("key_secret" in body).toBe(false);
+        expect(rpcMock).toHaveBeenCalled();
+        expect(rotateKeySecretMock).not.toHaveBeenCalled();
+        expect(adminUpdates).toEqual([]);
+      });
+    });
+
+    it("the rotate leg adds no rate-limit token: checkLimit is called once per request", async () => {
+      seedConnectedExactServer();
+      vi.mocked(checkLimit).mockClear();
+      const POST = await importPost();
+      await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(vi.mocked(checkLimit)).toHaveBeenCalledTimes(1);
+    });
+
+    it("⛔ NO ARM EVER ECHOES THE LOGIN BACK TO THE BROWSER: the updated and unchanged rotate responses carry no identity, password, ciphertext or key id", async () => {
+      seedConnectedExactServer();
+      const POST = await importPost();
+      const updated = await (await POST(makeReq(MT5_RECONNECT_BODY))).text();
+      rotateKeySecretMock.mockResolvedValue({ ...SEAM_CIPHERTEXT, secret_changed: false });
+      const unchanged = await (await POST(makeReq(MT5_RECONNECT_BODY))).text();
+
+      expect(JSON.parse(updated).key_secret.outcome).toBe("updated");
+      expect(JSON.parse(unchanged).key_secret.outcome).toBe("unchanged");
+      NO_ECHO(updated);
+      NO_ECHO(unchanged);
     });
   });
 });
