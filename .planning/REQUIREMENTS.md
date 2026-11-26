@@ -163,9 +163,9 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Carried phase 222 ALERTTRUTH
 
-- [ ] **ERRC-01**: No user-readable string in `analytics-service` or in the `computation_error_copy` arms says "contact support". Each names the contact form or a remedy that works, and csv-finalize's copy is in byte parity with the SQL arm, checked by reading the SQL arm. (covers: 212-CONTACT-SUPPORT-SURVIVORS)
-- [ ] **ERRC-02**: A total benchmark source failure shows wording distinct from a stale benchmark. (covers: 166.4.1-BENCHMARK-OUTAGE-LABEL)
-- [ ] **ERRC-03**: A failed follow-on analytics enqueue in `run_sync_trades_job` never leaves the strategy reading `complete` with no analytics. The exact behaviour is a founder ruling at plan time. (covers: SYNCTRADES-ENQUEUE-DONE)
+- [x] **ERRC-01**: No user-readable string in `analytics-service` or in the `computation_error_copy` arms says "contact support". Each names the contact form or a remedy that works, and csv-finalize's copy is in byte parity with the SQL arm, checked by reading the SQL arm. (covers: 212-CONTACT-SUPPORT-SURVIVORS)
+- [x] **ERRC-02**: A total benchmark source failure shows wording distinct from a stale benchmark. (covers: 166.4.1-BENCHMARK-OUTAGE-LABEL)
+- [x] **ERRC-03**: A failed follow-on analytics enqueue in `run_sync_trades_job` never leaves the strategy reading `complete` with no analytics. The exact behaviour is a founder ruling at plan time. (covers: SYNCTRADES-ENQUEUE-DONE)
 
 ### Carried phase 223 FLOWKINDS (flow-source half only, F-2)
 
@@ -290,9 +290,9 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | SCRB-01 | Phase 221 (v1.23) | Pending |
 | SCRB-02 | Phase 221 (v1.23) | Pending |
 | SCRB-03 | Phase 221 (v1.23) | Pending |
-| ERRC-01 | Phase 222 | Pending |
-| ERRC-02 | Phase 222 | Pending |
-| ERRC-03 | Phase 222 | Pending |
+| ERRC-01 | Phase 222 | Complete |
+| ERRC-02 | Phase 222 | Complete |
+| ERRC-03 | Phase 222 | Complete |
 | FLOWK-02 | Phase 223 | Complete |
 | FLOWK-03 | Phase 223 | Complete |
 | DEAD-01 | Phase 224 (v1.23) | Pending |
@@ -339,11 +339,11 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | HEAL-03 | Phase 227 | Complete |
 | HEAL-04 | Phase 227 | Complete |
 | HEAL-05 | Phase 227 | Complete |
-| FIG-01 | Phase 236 | Pending |
-| FIG-02 | Phase 236 | Pending |
-| FIG-03 | Phase 236 | Pending |
-| FIG-04 | Phase 236 | Pending |
-| FIG-05 | Phase 236 | Pending |
+| FIG-01 | Phase 236 | Shipped (#1354), human verification pending |
+| FIG-02 | Phase 236 | Shipped (#1354), human verification pending |
+| FIG-03 | Phase 236 | Shipped (#1354), human verification pending |
+| FIG-04 | Phase 236 | Shipped (#1354), human verification pending |
+| FIG-05 | Phase 236 | Shipped (#1354); PROD fleet re-derive pending |
 | FACT-01 | Phase 237 | Complete |
 | FACT-02 | Phase 237 | Complete |
 | FACT-03 | Phase 238 | Pending |
