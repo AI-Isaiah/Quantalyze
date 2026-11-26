@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { validateKey, encryptKey } from "@/lib/analytics-client";
+import { validateKey, encryptKey, rotateKeySecret } from "@/lib/analytics-client";
 import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
@@ -52,6 +52,13 @@ import { captureToSentry } from "@/lib/sentry-capture";
 // test files mock that module wholesale, where `instanceof` against an
 // undefined binding throws.
 import { keyRouteFailureHeaders } from "@/lib/api/seam-retry-after";
+// Phase 228 (CONN-02) — the MT5 same-account arm validates the typed password
+// through the rotate seam and writes the seam's ciphertext through the ONE
+// owner-scoped persist shared with `PATCH /api/keys/[id]/rotate-secret`; the
+// answer's `key_secret` field has one builder (`key-secret-outcome.ts`).
+import { persistRotatedMt5Secret } from "@/lib/api/rotate-key-secret";
+import { getCorrelationId } from "@/lib/correlation-id";
+import { keySecretField, type KeySecretOutcome } from "@/lib/key-secret-outcome";
 import type { User } from "@supabase/supabase-js";
 import { venueLabel } from "@/lib/display-labels";
 // 225-07 (CONN-03, MT5D-08): the server-aware same-account read, the D-18
@@ -233,6 +240,15 @@ function pickPlaceholderCodename(): string {
  * ⛔ `orphaned` CARRIES NOTHING. There is nothing to carry — no strategy, no
  * name — and the key id is deliberately not surfaced (T-154-06-C's rule applied
  * to a new member: non-secret is not the same as published).
+ *
+ * ⭐ PHASE 228 (CONN-02) — THE `rotate` MEMBER. Set ONLY by
+ * `resolveByVenueIdentity`, on the WORKING-holder path, when the picked key's
+ * stored server EQUALS the typed one (the exact tier). It names the one key the
+ * pre-validation rotate leg may re-validate and rewrite in place. It is NEVER
+ * inferred from the verdict kind, because `held` has two producers (a working
+ * holder held through a composite, and a failing holder with a composite
+ * dependent) and only the first may rotate. It is a server-side value that no
+ * response may carry (T-154-06-C): the builders never read it.
  */
 type VenueIdentityResolution =
   | { kind: "unresolved" }
@@ -249,15 +265,21 @@ type VenueIdentityResolution =
       // resubmit that raced past the session fence during a long validate) from
       // another session's. Null when not a string. Read by that one site only.
       wizardSessionId: string | null;
+      rotate?: { keyId: string };
     }
   // The three same-owner "this account is already yours" answers carry an
   // optional `holder` (the caller's OWN strategy or key, named for the refusal
   // body, `own-account-holder.ts`). It is added by `resolveByVenueIdentity` once
   // the verdict is established and never decides it; absent means the read
   // faulted or there was nothing to name.
-  | { kind: "connected"; strategyName: string | null; holder?: AccountHolder | null }
-  | { kind: "held"; holder?: AccountHolder | null }
-  | { kind: "orphaned"; holder?: AccountHolder | null }
+  | {
+      kind: "connected";
+      strategyName: string | null;
+      holder?: AccountHolder | null;
+      rotate?: { keyId: string };
+    }
+  | { kind: "held"; holder?: AccountHolder | null; rotate?: { keyId: string } }
+  | { kind: "orphaned"; holder?: AccountHolder | null; rotate?: { keyId: string } }
   // 225-07 (Q1, D-18, D-25 / MT5D-08) — the picked live key on this account is
   // NOT working (`isWorkingHolder` false: inactive, or sync_status revoked,
   // sign_in_failed or error). A failing key never keeps the account slot, so the
@@ -275,6 +297,12 @@ type VenueIdentityResolution =
   // fault could admit a second live same-owner key. The pre- and post-validation
   // fences answer a retryable 503 before any write. Carries nothing.
   | { kind: "read_failed" };
+
+/** Phase 228 — one of the four same-account verdicts, with `rotate` present. */
+type RotateVerdict = Extract<
+  VenueIdentityResolution,
+  { kind: "draft" | "connected" | "held" | "orphaned" }
+> & { rotate: { keyId: string } };
 
 const UNRESOLVED: VenueIdentityResolution = { kind: "unresolved" };
 
@@ -298,6 +326,9 @@ async function resolveByVenueIdentity(
   mode: PickMode,
 ): Promise<VenueIdentityResolution> {
   let liveKeyId: string | null = null;
+  // Phase 228 (CONN-02) — the key the rotate leg may rewrite: set only for a
+  // WORKING holder on the EXACT server tier (see `VenueIdentityResolution`).
+  let rotateTarget: { keyId: string } | undefined;
 
   try {
     const admin = createAdminClient();
@@ -378,6 +409,14 @@ async function resolveByVenueIdentity(
       return { kind: "failing_holder", holderId: picked.id };
     }
     liveKeyId = picked.id;
+    // Phase 228 (CONN-02 server rule, founder amendment 2026-11-26): rotate in
+    // place ONLY when the holder's stored server equals the typed, normalised
+    // one. The null-server legacy tier keeps today's refusal: the seam probes
+    // the server stored in the ciphertext, so a right password typed beside a
+    // different broker's server would be written and reported "updated".
+    if (picked.venue_server !== null && picked.venue_server === venueServer) {
+      rotateTarget = { keyId: picked.id };
+    }
   } catch (adminErr) {
     // `createAdminClient()` THROWS when SUPABASE_SERVICE_ROLE_KEY is absent.
     // A missing credential must not 500 a connect that would otherwise succeed:
@@ -407,12 +446,15 @@ async function resolveByVenueIdentity(
   // ships, a tier-2 holder no longer refuses it. `read_failed` answers 503
   // before any write. The race arm treats it like `unresolved`, as before.
   if (byStrategy.kind === "unresolved") return { kind: "read_failed" };
+  const rotateField = rotateTarget ? { rotate: rotateTarget } : {};
   if (byStrategy.kind === "connected") {
     return {
       ...byStrategy,
       holder: await readOwnAccountHolder(supabase, userId, liveKeyId, HOLDER_LOG_LABEL),
+      ...rotateField,
     };
   }
+  if (byStrategy.kind === "draft") return { ...byStrategy, ...rotateField };
   if (byStrategy.kind !== "orphaned") return byStrategy;
   const otherUse = await resolveOtherKeyUse(supabase, userId, liveKeyId, secrets);
   if (otherUse.kind === "unresolved") return { kind: "read_failed" };
@@ -420,6 +462,7 @@ async function resolveByVenueIdentity(
     return {
       ...otherUse,
       holder: await readOwnAccountHolder(supabase, userId, liveKeyId, HOLDER_LOG_LABEL),
+      ...rotateField,
     };
   }
   return otherUse;
@@ -651,14 +694,17 @@ async function resolveStrategiesForKey(
 function venueAlreadyConnectedResponse(
   strategyName: string | null,
   holder?: AccountHolder | null,
+  secretOutcome?: KeySecretOutcome | null,
 ): NextResponse {
   // Built above the literal so the emitter stays inside the invariant scanner's
   // `error:` window (`wizardErrors.invariant.test.ts`, EMITTER_BODY_MAX_CHARS).
   // `strategy_name` first, then the caller's OWN strategy named and linked
-  // (`own-account-holder.ts`).
+  // (`own-account-holder.ts`), then (Phase 228) the caller's OWN password
+  // outcome, last, and absent unless the rotate leg answered.
   const extra = {
     ...(strategyName === null ? {} : { strategy_name: strategyName }),
     ...holderField(holder),
+    ...keySecretField(secretOutcome),
   };
   return NextResponse.json(
     {
@@ -693,13 +739,22 @@ function venueAlreadyConnectedResponse(
  * sentence, never empty quotes. `code` FIRST, as a literal, the order the
  * invariant scanner and the route's byte-pin read.
  */
-function venueDraftInProgressResponse(draftName: string | null): NextResponse {
+function venueDraftInProgressResponse(
+  draftName: string | null,
+  secretOutcome?: KeySecretOutcome | null,
+): NextResponse {
   const name = typeof draftName === "string" ? draftName.trim() : "";
+  // Built above the literal (scanner window). Byte-identical to the pre-228
+  // body when no outcome is passed (`keySecretField(undefined)` is `{}`).
+  const extra = {
+    ...(name.length === 0 ? {} : { strategy_name: name }),
+    ...keySecretField(secretOutcome),
+  };
   return NextResponse.json(
     {
       code: "VENUE_DRAFT_IN_PROGRESS",
       error: "This account is already in one of your unfinished drafts.",
-      ...(name.length === 0 ? {} : { strategy_name: name }),
+      ...extra,
     },
     { status: 409, headers: NO_STORE_HEADERS },
   );
@@ -716,12 +771,16 @@ function venueDraftInProgressResponse(draftName: string | null): NextResponse {
  * LEAK INTO IT (T-154-06-C / T-212-04). `code` FIRST, as a literal: the order
  * the invariant scanner and the byte-pin in `route.test.ts` both read.
  */
-function keyOrphanedResponse(holder?: AccountHolder | null): NextResponse {
+function keyOrphanedResponse(
+  holder?: AccountHolder | null,
+  secretOutcome?: KeySecretOutcome | null,
+): NextResponse {
   // The caller's OWN stored key: nickname, date added, and the page where it is
   // listed (`own-account-holder.ts`). Not an identity: no login, server or key id
   // rides it. Built above the literal to keep the emitter inside the scanner's
-  // `error:` window.
-  const extra = holderField(holder);
+  // `error:` window. Phase 228: plus the caller's OWN password outcome, when the
+  // rotate leg answered.
+  const extra = { ...holderField(holder), ...keySecretField(secretOutcome) };
   return NextResponse.json(
     {
       code: "KEY_ORPHANED",
@@ -750,10 +809,15 @@ function keyOrphanedResponse(holder?: AccountHolder | null): NextResponse {
  * invariant scanner and the byte-pin in `route.test.ts` both read; the sentence
  * is the pre-existing one, verbatim.
  */
-function keyVenueAlreadyConnectedResponse(holder?: AccountHolder | null): NextResponse {
+function keyVenueAlreadyConnectedResponse(
+  holder?: AccountHolder | null,
+  secretOutcome?: KeySecretOutcome | null,
+): NextResponse {
   // The caller's OWN existing strategy or key (`own-account-holder.ts`), built
   // above the literal to keep the emitter inside the scanner's `error:` window.
-  const extra = holderField(holder);
+  // Phase 228: plus the caller's OWN password outcome, when the rotate leg
+  // answered.
+  const extra = { ...holderField(holder), ...keySecretField(secretOutcome) };
   return NextResponse.json(
     {
       code: "KEY_VENUE_ALREADY_CONNECTED",
@@ -780,6 +844,51 @@ function holderReadFailedResponse(): NextResponse {
     },
     { status: 503, headers: NO_STORE_HEADERS },
   );
+}
+
+/**
+ * Phase 228 (CONN-02) — THE ROTATE LEG'S ANSWER FOR A WRITE IT CANNOT CONFIRM.
+ *
+ * The seam accepted the new password but the owner-scoped UPDATE did not land
+ * (a write fault, zero matched rows, a venue-identity collision). The stored key
+ * may or may not hold the new password, so the one thing this route must never
+ * say is `updated` (P-228-03-01). `UNKNOWN` is the recoverable catch-all the
+ * wizard already maps, and 500 is its status; no new code is minted. It takes no
+ * parameters, so no login, server, id or password can leak into it. `code`
+ * FIRST, as a literal.
+ */
+function keySecretNotConfirmedResponse(): NextResponse {
+  return NextResponse.json(
+    {
+      code: "UNKNOWN",
+      error: "We could not confirm that the new password was saved. Please try again.",
+    },
+    { status: 500, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
+ * Phase 228 (CONN-02) — THE ROTATE LEG'S ONE REFUSAL SWITCH. The rotate leg
+ * answers with the SAME refusal the arm gave before this phase (same code, same
+ * body, same 409) plus `key_secret` when it has an outcome to report, so the
+ * four builders stay the only emitters (TWIN-8) and the switch lives here once
+ * instead of at each of the leg's exits. `outcome` is the caller's own
+ * password outcome (or absent: "today's answer, nothing written").
+ */
+function rotateArmRefusal(
+  verdict: RotateVerdict,
+  outcome?: KeySecretOutcome | null,
+): NextResponse {
+  switch (verdict.kind) {
+    case "draft":
+      return venueDraftInProgressResponse(verdict.strategyName, outcome);
+    case "connected":
+      return venueAlreadyConnectedResponse(verdict.strategyName, verdict.holder, outcome);
+    case "orphaned":
+      return keyOrphanedResponse(verdict.holder, outcome);
+    case "held":
+      return keyVenueAlreadyConnectedResponse(verdict.holder, outcome);
+  }
 }
 
 /**
@@ -1571,6 +1680,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // and then take the slot through `swapAccountSlot`.
   let failingHolderId: string | null = null;
 
+  // Phase 228 (CONN-02) — set when the pre-validation fence picked the caller's
+  // OWN WORKING holder on the EXACT stored server: the rotate leg below
+  // re-validates the typed password through the rotate seam and rewrites that
+  // key in place. Only the four same-account verdicts carry `rotate`, and only
+  // the pre-validation fence records it; the post-validation resolve and the
+  // 23505 race arm never do (the up-to-120 s validation is already spent).
+  let rotateVerdict: RotateVerdict | null = null;
+
   if (venueAccountId) {
     const venueMatch = await resolveByVenueIdentity(
       supabase,
@@ -1593,7 +1710,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // validation.
       failingHolderId = venueMatch.holderId;
     }
-    if (venueMatch.kind === "draft") {
+    if (
+      (venueMatch.kind === "draft" ||
+        venueMatch.kind === "connected" ||
+        venueMatch.kind === "held" ||
+        venueMatch.kind === "orphaned") &&
+      venueMatch.rotate
+    ) {
+      // Phase 228 (CONN-02) — NOT a refusal yet: the typed password is checked
+      // first by the rotate leg inside the `try` below, and only that leg
+      // answers (with this same refusal body plus the password outcome).
+      rotateVerdict = { ...venueMatch, rotate: venueMatch.rotate };
+    }
+    if (venueMatch.kind === "draft" && rotateVerdict === null) {
       // 225-05 / CONN-01 (D-23, "Say so") — REFUSE BY NAME. This account is in
       // one of the caller's OWN unfinished drafts from a DIFFERENT wizard
       // session (the same-session resume is answered by the fence above and is
@@ -1604,7 +1733,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // ⛔ The identity itself never crosses back (UI-SPEC / T-154-06-C).
       return venueDraftInProgressResponse(venueMatch.strategyName);
     }
-    if (venueMatch.kind === "connected") {
+    if (venueMatch.kind === "connected" && rotateVerdict === null) {
       // 154.1 REVIEW CR — REFUSE, AND SAY WHY TRUTHFULLY. This account is held
       // by a strategy that is no longer a draft, so there is nothing to resume
       // and nothing to continue: resuming onto it is what wedged the wizard
@@ -1621,7 +1750,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // must not first burn a Railway probe and the venue's validate quota.
       return venueAlreadyConnectedResponse(venueMatch.strategyName, venueMatch.holder);
     }
-    if (venueMatch.kind === "orphaned") {
+    if (venueMatch.kind === "orphaned" && rotateVerdict === null) {
       // 212-03 / SC5 — REFUSE BEFORE THE UP-TO-120 s `validateKey`. The identity
       // is known here (MT5 only), and the refusal is a fact about the caller's
       // OWN stored key that no credential check can change. The comment block
@@ -1634,7 +1763,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // failing holder with a composite dependent resolves to (the swap would
     // refuse it every time); a working holder held only through a composite
     // resolves to it too.
-    if (venueMatch.kind === "held") {
+    if (venueMatch.kind === "held" && rotateVerdict === null) {
       return keyVenueAlreadyConnectedResponse(venueMatch.holder);
     }
     // 167.1.2 REVIEW WR-04: `held` used to fall through here and be answered by
@@ -1678,6 +1807,149 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   // validate + encrypt are TOCTOU-safe back-to-back on the server side.
   try {
+    // ── ⭐ PHASE 228 (CONN-02) — THE ROTATE LEG, in place of `validateKey` ─────
+    // FOUNDER RULING 2026-11-26, "Validate and update in place" (228-CONTEXT.md
+    // `### CONN-02`, ROADMAP `### Phase 228`): when the pre-validation fence
+    // picked the caller's OWN WORKING holder on the EXACT stored server, a
+    // reconnect with a typed password no longer just refuses. The typed password
+    // goes through the rotate seam (`POST /internal/keys/{id}/rotate-secret`,
+    // the same seam `PATCH /api/keys/[id]/rotate-secret` uses), which probes the
+    // broker against the STORED login and server and raises the same three MT5
+    // refusals (auth failed, master password, wrong server) BEFORE it
+    // re-encrypts. A success is written in place by `persistRotatedMt5Secret`
+    // and the answer is the arm's existing refusal plus `key_secret`. This
+    // reverses 212-03 SC5 for MT5: the up-to-120 s validation comes back here,
+    // a cost the founder accepted.
+    //
+    // THE FINAL ARM SET: `connected`, `orphaned`, working `held` and another
+    // session's `draft`, exact server tier only. NOT rotated, and answering
+    // exactly as before: the null-server legacy tier and a different-server
+    // holder (`rotate` unset), a failing holder with or without a composite
+    // dependent, the post-validation resolve and the 23505 race arm (the
+    // validation is already spent), and the same-session draft (F6 answers it
+    // first). ONE seam probe, never validateKey as well.
+    //
+    // KNOWN LIMIT (recorded, not fixed; CONTEXT Deferred): a sync that started
+    // with the OLD password can still mark the key failed after the rotate's
+    // `sync_status: idle`; the next sync clears it. The poll writers are
+    // Phase 225-21's.
+    //
+    // The leg is the FIRST statement of this `try`, so a seam throw reaches the
+    // catch below (classifier, headers, this request's secrets scrubbed). No
+    // rate-limit token is added: the request already spent
+    // `strategies-create-with-key:<uid>` and the seam keeps its own per-key one.
+    if (rotateVerdict !== null) {
+      const rotate = rotateVerdict;
+      const rotateSecrets = [
+        api_key,
+        apiSecretNormalized,
+        passphraseOrNull,
+        venueAccountId,
+        venueServer,
+      ];
+      let rotateAdmin: ReturnType<typeof createAdminClient>;
+      try {
+        rotateAdmin = createAdminClient();
+      } catch (adminErr) {
+        // BEFORE the probe: a missing service credential must not spend a
+        // broker login and then fail to write the answer.
+        console.error(
+          "[strategies/create-with-key] rotate leg unavailable, no service credential; refusing (nothing was written):",
+          scrubSeamError(adminErr, rotateSecrets),
+        );
+        captureToSentry(adminErr, {
+          tags: { surface: "strategies-create-with-key", step: "rotate-admin" },
+          secrets: rotateSecrets,
+        });
+        return NextResponse.json(
+          { code: "SEAM_MISCONFIGURED", error: "Service credential unavailable" },
+          { status: 503, headers: NO_STORE_HEADERS },
+        );
+      }
+
+      // Ownership proven again through RLS (`id` + `user_id` + `exchange` +
+      // live). `venue_account_id` is on the column-SELECT allowlist
+      // (20260920120000_api_keys_venue_account_id_grant.sql), as rotate-secret's
+      // own pre-read relies on.
+      const { data: keyRow, error: keyRowErr } = await supabase
+        .from("api_keys")
+        .select("id, label, venue_account_id, disconnected_at, is_active")
+        .eq("id", rotate.rotate.keyId)
+        .eq("user_id", user.id)
+        .eq("exchange", "mt5")
+        .is("disconnected_at", null)
+        .maybeSingle();
+      if (keyRowErr) {
+        console.error(
+          "[strategies/create-with-key] rotate leg ownership re-read failed; refusing (nothing was written):",
+          scrubSeamError(keyRowErr, rotateSecrets),
+        );
+        captureToSentry(keyRowErr, {
+          tags: { surface: "strategies-create-with-key", step: "rotate-reread" },
+          secrets: rotateSecrets,
+        });
+        return holderReadFailedResponse();
+      }
+      // No row: fail toward today's answer. Nothing was probed, nothing written.
+      if (!keyRow) return rotateArmRefusal(rotate);
+      const keyName = typeof keyRow.label === "string" ? keyRow.label : undefined;
+
+      const parsed = await rotateKeySecret({
+        keyId: rotate.rotate.keyId,
+        userId: user.id,
+        newSecret: apiSecretNormalized,
+        correlationId: await getCorrelationId(),
+      });
+
+      // Explicit `false` only: an absent field (an older Python) writes, and
+      // the answer is `updated` (UI-SPEC O4).
+      if (parsed.secret_changed === false) {
+        return rotateArmRefusal(rotate, { outcome: "unchanged", name: keyName });
+      }
+
+      // @audit-skip: the api_key.rotate_secret audit lands inside persistRotatedMt5Secret (src/lib/api/rotate-key-secret.ts), in the same function as its UPDATE.
+      const persisted = await persistRotatedMt5Secret({
+        admin: rotateAdmin,
+        supabase,
+        userId: user.id,
+        keyId: rotate.rotate.keyId,
+        keyRow,
+        parsed,
+      });
+      if (persisted.kind === "ok") {
+        return rotateArmRefusal(rotate, { outcome: "updated", name: keyName });
+      }
+      const persistSecrets = [...rotateSecrets, parsed.venue_account_id];
+      if (persisted.kind === "holder_read_failed") {
+        console.error(
+          "[strategies/create-with-key] rotate leg same-account holder read failed; the password was not saved:",
+          scrubSeamError(persisted.error, persistSecrets),
+        );
+        captureToSentry(persisted.error, {
+          tags: { surface: "strategies-create-with-key", step: "rotate-holder-read" },
+          secrets: persistSecrets,
+        });
+        return holderReadFailedResponse();
+      }
+      if (persisted.kind === "write_failed") {
+        console.error(
+          "[strategies/create-with-key] rotate leg persist UPDATE failed:",
+          scrubSeamError(persisted.error, persistSecrets),
+        );
+        captureToSentry(persisted.error, {
+          tags: { surface: "strategies-create-with-key", step: "rotate-persist" },
+          secrets: persistSecrets,
+        });
+        return keySecretNotConfirmedResponse();
+      }
+      // `venue_collision` and `write_zero_rows`: the seam accepted the password
+      // but the stored key does not provably hold it. Never `updated`.
+      console.error(
+        `[strategies/create-with-key] rotate leg persist not confirmed (${persisted.kind}); the password may not have been saved`,
+      );
+      return keySecretNotConfirmedResponse();
+    }
+
     const validation = await validateKey(
       exchangeNormalized,
       api_key,
@@ -2465,7 +2737,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // SEAMCORE-06 / HI-02 — THROUGH THE LEAF, with this route's PER-REQUEST
     // secrets named.
     //
-    // This catch wraps `validateKey` / `encryptKey`, the two calls whose request
+    // This catch wraps `validateKey` / `encryptKey` (and, since Phase 228, the
+    // rotate seam call of the MT5 same-account arm), the calls whose request
     // bodies carry the raw exchange `api_key`, `api_secret` and `passphrase`,
     // and whose outgoing headers carry `X-Service-Key` and the minted
     // `X-Tenant-Claim`. undici embeds those headers in `err.message` and, in one
