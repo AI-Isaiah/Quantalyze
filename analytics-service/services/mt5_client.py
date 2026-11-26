@@ -1065,6 +1065,42 @@ class Mt5AccountMismatchError(Exception):
         )
 
 
+class Mt5ServerMismatchError(Mt5AccountMismatchError):
+    """Phase 225 plan 18 (CONTEXT Q6 item 2) — the terminal session presented the
+    REQUESTED login, but not on the REQUESTED broker server (or reported no server
+    at all).
+
+    ``login()`` returning success is not proof of the server: the MT5 Python docs
+    say the server is optional ("the last used server is applied automatically")
+    and do not say what happens when the terminal already holds that login on
+    another server. ``run_probe`` therefore checks ``account_info().server`` and
+    raises this, so a key is never stored with a server its validation session did
+    not prove.
+
+    It SUBCLASSES ``Mt5AccountMismatchError`` on purpose: every existing
+    ``except Mt5AccountMismatchError`` disposition applies unchanged — transient,
+    never ``valid``, never stamped on the user, no park (the shared terminal may
+    belong to someone else's session), and the relogin keepalive restores the
+    house session. Like its parent it is a plain ``Exception``, so no credential
+    classify arm can absorb it.
+
+    Secret hygiene: the message is FIXED and the only attributes are the login
+    (an ``int``, not a secret). No server value, requested or reported, is ever
+    carried, formatted or logged by this type.
+    """
+
+    def __init__(self, login: int) -> None:
+        # Deliberately NOT calling Mt5AccountMismatchError.__init__: its message
+        # formats the two logins, and this one must stay fixed.
+        self.expected = login
+        self.actual = login
+        Exception.__init__(
+            self,
+            "MT5 account mismatch: the terminal presented the expected login "
+            "on another broker server",
+        )
+
+
 # The refusal message is a FIXED string and MUST stay one — see
 # `Mt5SessionAbandoned` below for why interpolating the stage would be a defect.
 _MT5_SESSION_ABANDONED_MESSAGE: Final[str] = (

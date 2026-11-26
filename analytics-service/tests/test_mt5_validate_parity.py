@@ -312,7 +312,7 @@ class _FakeProbeClient:
 #: trade permission is off. On its own that proves nothing — under the terminal
 #: option a MASTER password produces the identical negative (D-31 / EVIDENCE
 #: §C12), which is why every case below turns on the TERMINAL signal.
-_INVESTOR_ACCOUNT = {"login": 123456, "trade_allowed": False}
+_INVESTOR_ACCOUNT = {"login": 123456, "trade_allowed": False, "server": "Broker-Demo"}
 
 #: Terminal attached but refusing automated trading — MetaQuotes' default-ON
 #: *"Disable automatic trading through the external Python API"*. This is the
@@ -438,7 +438,7 @@ def test_run_probe_short_circuits_order_check_on_an_undetermined_terminal():
     from services.mt5_probe import run_probe
 
     client = _FakeProbeClient(
-        account_info={"login": 42, "trade_allowed": False},
+        account_info={"login": 42, "trade_allowed": False, "server": "Broker-Demo"},
         terminal_info={"connected": True, "trade_allowed": False},
     )
 
@@ -486,11 +486,14 @@ def test_run_probe_writes_one_log_only_server_verdict_on_the_validation_terminal
     inside ``run_probe``, so the measurement that gates it must come from there too,
     not only from the poll terminal. One INFO line per probe (the POST bracket
     re-reads ``account_info`` and must not write a second), keyed by the validate
-    site and ``holder=validation``, and it never changes what ``run_probe`` returns
-    or refuses: a False and a not_captured probe return what a True one does.
+    site and ``holder=validation``. Since PR-2c (225-18) a False or not_captured
+    session is REFUSED by ``assert_expected_server`` right after that line, so the
+    line is written BEFORE the refusal: the measurement survives the refusal it
+    gates, and a refused probe still writes exactly one line.
     """
     import logging
 
+    from services.mt5_client import Mt5ServerMismatchError
     from services.mt5_probe import run_probe
 
     account = {"login": _ACCT_LOGIN, "trade_allowed": False}
@@ -501,8 +504,8 @@ def test_run_probe_writes_one_log_only_server_verdict_on_the_validation_terminal
         terminal_info={"connected": True, "trade_allowed": False},
     )
 
-    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.mt5_read"):
-        info, probe, _terminal = run_probe(
+    def _probe():
+        return run_probe(
             client,
             login=_ACCT_LOGIN,
             investor_pw="pw",
@@ -511,7 +514,16 @@ def test_run_probe_writes_one_log_only_server_verdict_on_the_validation_terminal
             site=site,
         )
 
-    assert info["login"] == _ACCT_LOGIN and probe == {}
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.mt5_read"):
+        if label == "True":
+            info, probe, _terminal = _probe()
+            assert info["login"] == _ACCT_LOGIN and probe == {}
+        else:
+            with pytest.raises(Mt5ServerMismatchError):
+                _probe()
+            # Refused at the PRE bracket: nothing after it ran.
+            assert "terminal_info" not in client.calls, client.calls
+
     lines = _verdict_lines(caplog)
     assert lines == [
         f"{_VERDICT_MSG} site={site} holder=validation "
@@ -898,6 +910,54 @@ def test_order_check_short_circuit_on_both_paths(exchange_module, monkeypatch):
     # Never the accusation the missing short-circuit produced.
     assert MT5_WRONG_SERVER_DETAIL not in repr(router_outcome)
     assert MT5_WRONG_SERVER_DETAIL not in repr(adapter_outcome)
+
+
+def test_a_session_on_another_server_is_refused_the_same_way_on_both_paths(
+    exchange_module, monkeypatch
+):
+    """Phase 225 plan 18 (CONTEXT Q6 item 2) — A4: the SERVER bracket, driven
+    through BOTH callers beside the login bracket it mirrors.
+
+    The terminal answers the requested login (123456) but on a DIFFERENT server.
+    Both paths call the one `run_probe`, so both must refuse before the probe:
+    ZERO `order_check` calls, never a `valid` result, and the same DISPOSITION
+    the login mismatch gets: the router answers its transient 424, the adapter
+    propagates the original `Mt5ServerMismatchError` untouched (a subclass of
+    `Mt5AccountMismatchError`, so no new `except` arm exists on either path).
+    Neither answer is the `wrong_server` or `auth` verdict that would blame the
+    user for what is a session fact.
+
+    Reds with `assert_expected_server` removed from `run_probe`: both paths then
+    validate the session and this file's whole subject is that they cannot
+    diverge on it."""
+    from services.mt5_client import Mt5AccountMismatchError, Mt5ServerMismatchError
+
+    def make_client():
+        return _FakeProbeClient(
+            account_info={**_INVESTOR_ACCOUNT, "server": "MyBroker-Live"},
+            terminal_info={"connected": True, "trade_allowed": True},
+        )
+
+    router_outcome, router_client, adapter_outcome, adapter_client = _drive_both_paths(
+        exchange_module, monkeypatch, make_client
+    )
+
+    assert "order_check" not in router_client.calls, router_client.calls
+    assert "order_check" not in adapter_client.calls, adapter_client.calls
+
+    # The router: its existing account-mismatch arm, a transient 424.
+    assert isinstance(router_outcome, HTTPException), router_outcome
+    assert router_outcome.status_code == 424
+    assert router_outcome.detail != MT5_WRONG_SERVER_DETAIL
+    assert router_outcome.detail != AUTH_FAILED_DETAIL
+
+    # The adapter: the original exception, type-identical, no ValidationResult.
+    assert type(adapter_outcome) is Mt5ServerMismatchError, adapter_outcome
+    assert isinstance(adapter_outcome, Mt5AccountMismatchError)
+
+    # Both paths released their session.
+    assert "release" in router_client.calls
+    assert "close" in adapter_client.calls
 
 
 def test_terminal_materialize_failure_yields_no_signal_on_both_paths(

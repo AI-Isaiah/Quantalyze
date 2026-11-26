@@ -100,11 +100,14 @@ _HOUSE_LOGIN = 700001
 _HOUSE_PASSWORD = "house-pw-FABRICATED-7x"
 _HOUSE_SERVER = "House-Fabricated-Demo"
 
+# Phase 225 plan 18: the session's server equals `_make_req`'s default passphrase,
+# so `run_probe`'s server bracket passes on every case that is not about it.
+_CLIENT_SERVER = "Broker-Demo"
 _MASTER_ACCOUNT = _FakeNamedTuple(
-    trade_allowed=True, balance=1000.0, login=_CLIENT_LOGIN
+    trade_allowed=True, balance=1000.0, login=_CLIENT_LOGIN, server=_CLIENT_SERVER
 )
 _INVESTOR_ACCOUNT = _FakeNamedTuple(
-    trade_allowed=False, balance=1000.0, login=_CLIENT_LOGIN
+    trade_allowed=False, balance=1000.0, login=_CLIENT_LOGIN, server=_CLIENT_SERVER
 )
 
 
@@ -567,6 +570,70 @@ async def test_no_park_after_a_probe_account_mismatch(
     assert ei.value.status_code == 424
     assert transport.house_logins() == []
     _assert_one_alert(park_sentry, caplog, "probe_account_mismatch", _WIZARD)
+
+
+_OTHER_SERVER = "Other-Broker-Live"
+
+
+def _warning_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+async def test_a_server_mismatch_is_its_own_cause_on_the_wizard_path(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """WR-02 (225 PR-2c). The session answered the requested login on ANOTHER
+    broker server, so the server bracket refused. That is not a concurrent
+    validate: the log line, the trace outcome and the park cause must all say so,
+    or Task 3's revert gate cannot tell it from a real concurrency race, and a
+    page for one would mask (and be masked by) a page for the other.
+
+    Reds with the `isinstance(exc, Mt5ServerMismatchError)` split removed from the
+    router's account-mismatch arm."""
+    router = exchange_router
+    wrong_server = _FakeNamedTuple(
+        trade_allowed=False, balance=1.0, login=_CLIENT_LOGIN, server=_OTHER_SERVER
+    )
+    transport = _RecordingMt5(_scenario(wrong_server))
+    _install_real_mt5_client(router, transport)
+    outcomes = _capture_outcomes(monkeypatch, router)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 424
+    assert transport.house_logins() == []
+    _assert_one_alert(park_sentry, caplog, "probe_server_mismatch", _WIZARD)
+    assert not any(
+        "cause=probe_account_mismatch" in r.getMessage() for r in _park_error_records(caplog)
+    )
+    warnings = _warning_lines(caplog)
+    assert any("not on the requested broker server" in w for w in warnings), warnings
+    assert not any("concurrent validate" in w for w in warnings), warnings
+    assert outcomes == ["transient_server_mismatch"], outcomes
+    _assert_no_credential_leak(park_sentry, caplog)
+    assert _OTHER_SERVER not in " ".join(r.getMessage() for r in caplog.records)
+
+
+async def test_a_login_mismatch_keeps_the_concurrent_validate_cause_on_the_wizard_path(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """WR-02 (225 PR-2c), the other side: a LOGIN mismatch is unchanged. Same
+    log line, same `transient` outcome, same `probe_account_mismatch` cause, and
+    never the server wording."""
+    router = exchange_router
+    other = _FakeNamedTuple(trade_allowed=False, balance=1.0, login=999999)
+    transport = _RecordingMt5(_scenario(other))
+    _install_real_mt5_client(router, transport)
+    outcomes = _capture_outcomes(monkeypatch, router)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 424
+    _assert_one_alert(park_sentry, caplog, "probe_account_mismatch", _WIZARD)
+    warnings = _warning_lines(caplog)
+    assert any("concurrent validate" in w for w in warnings), warnings
+    assert not any("not on the requested broker server" in w for w in warnings), warnings
+    assert outcomes == ["transient"], outcomes
 
 
 class _ParkClock:
@@ -1256,6 +1323,26 @@ async def test_the_worker_does_not_park_after_a_probe_account_mismatch(
             await _worker_validate()
     assert transport.house_logins() == []
     _assert_one_alert(park_sentry, caplog, "probe_account_mismatch", _WORKER)
+
+
+async def test_the_worker_reports_a_server_mismatch_as_its_own_park_cause(
+    monkeypatch, park_sentry, caplog
+):
+    """WR-02 (225 PR-2c), worker path: a server-bracket refusal still propagates
+    as `Mt5ServerMismatchError` but is reported as `probe_server_mismatch`, not
+    `probe_account_mismatch`."""
+    from services.mt5_client import Mt5ServerMismatchError
+
+    wrong_server = _FakeNamedTuple(
+        trade_allowed=False, balance=1.0, login=_CLIENT_LOGIN, server=_OTHER_SERVER
+    )
+    transport = _RecordingMt5(_scenario(wrong_server))
+    _install_worker_transport(monkeypatch, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(Mt5ServerMismatchError):
+            await _worker_validate()
+    assert transport.house_logins() == []
+    _assert_one_alert(park_sentry, caplog, "probe_server_mismatch", _WORKER)
 
 
 # --- the worker validate and the founder's park alert level.
