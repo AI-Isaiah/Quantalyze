@@ -151,6 +151,7 @@ function PanelSkeleton({ h }: { h: number }) {
 }
 import { venueLabel as venueDisplayName } from "@/lib/display-labels";
 import { formatDay } from "@/lib/utils";
+import { isNeverComputedStamp } from "@/lib/factsheet/never-computed-stamp";
 import { resolvePalette, paletteToCssVars } from "./palette";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { CHART_CONFIGS, applyChartUnit } from "./chart-configs";
@@ -1719,11 +1720,6 @@ function formatUsdCompact(v: number): string {
   return `$${v.toFixed(0)}`;
 }
 
-// Epoch sentinel value used by the server when analytics.computed_at is null.
-// Render "not computed" UI instead of the alarming "Jan 1, 1970" date.
-// (RED-TEAM-M4, FINDING-5)
-const EPOCH_SENTINEL = "1970-01-01T00:00:00Z";
-
 /**
  * The resolved return series' END — the ONE derivation of "how far does the
  * track record run", shared by `FreshnessChip` and `SeriesRecencyLine` below.
@@ -1839,17 +1835,17 @@ const TONE_RANK: Record<Exclude<FreshnessTone, "neutral">, number> = {
  */
 function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; seriesDates: string[] }) {
   // Hooks must run unconditionally and in the same order every render, so this
-  // useState is hoisted ABOVE the EPOCH_SENTINEL early-return below
+  // useState is hoisted ABOVE the never-computed early-return below
   // (react-hooks/rules-of-hooks). The initializer runs once per mount so render
   // stays pure — Date.now() inline would be flagged impure-in-render. Hour
   // resolution is fine for the "fresh / stale / old" bucketing; nowMs is only
   // consumed on the non-sentinel path.
   const [nowMs] = React.useState(() => Date.now());
-  // Epoch sentinel means analytics.computed_at was null server-side — the
-  // strategy hasn't been computed yet. Render a graceful "not computed" chip
-  // rather than surfacing "Jan 1, 1970 (~20000d)" which looks like a data
+  // The never-computed stamp (`NEVER_COMPUTED_STAMP`, the server's stand-in for a NULL
+  // analytics.computed_at, Phase 238 FACT-03) means the strategy has no compute date. Render a
+  // graceful "not computed" chip rather than "Jan 1, 1970 (~20000d)", which looks like a data
   // bug to institutional viewers. (RED-TEAM-M4)
-  if (computedAt === EPOCH_SENTINEL) {
+  if (isNeverComputedStamp(computedAt)) {
     return (
       <div>
         <div className="flex items-center justify-end gap-1.5 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
@@ -3456,7 +3452,8 @@ function FactsheetFooter({
   // GUARD-02 (43-02) pins the default-false equality permanently.
   scenarioMode?: boolean;
 }) {
-  const stamp = `QSF · ${payload.strategyId.slice(0, 8).toUpperCase()} · ${formatDay(payload.computedAt)}`; // F-11: the one date helper
+  // F-11: the one date helper. A never-computed row has no date, so the stamp ends in the null dash.
+  const stamp = `QSF · ${payload.strategyId.slice(0, 8).toUpperCase()} · ${formatDay(isNeverComputedStamp(payload.computedAt) ? null : payload.computedAt)}`;
   return (
     <footer className="mt-16 border-t border-text pt-6 flex flex-wrap items-start justify-between gap-6">
       <p className="max-w-3xl text-micro italic leading-relaxed text-text-muted">

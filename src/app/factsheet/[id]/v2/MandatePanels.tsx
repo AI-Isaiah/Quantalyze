@@ -2,6 +2,7 @@
 
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { formatDay } from "@/lib/utils";
+import { isNeverComputedStamp } from "@/lib/factsheet/never-computed-stamp";
 import { usePayload } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
 import { useUnitView } from "./unit-view";
@@ -90,7 +91,8 @@ export function TermsPanel({ variant = "full" }: { variant?: "full" | "document"
   // F-11 (the one date helper): every Terms day prints through `formatDay` at its print
   // position. `recordStart`, `declaredStart` and `obsStart` below stay ISO values because the
   // backtest-gap comparison reads them.
-  const computed = formatDay(payload.computedAt);
+  // A never-computed row has no compute date: the null dash, not the epoch sentinel's day (238 FACT-03).
+  const computed = formatDay(isNeverComputedStamp(payload.computedAt) ? null : payload.computedAt);
   const start = formatDay(m.start);
   const end = formatDay(m.end);
 

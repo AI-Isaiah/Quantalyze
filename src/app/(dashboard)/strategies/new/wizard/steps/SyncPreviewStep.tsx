@@ -1855,7 +1855,8 @@ export function SyncPreviewStep({
               exchange: null,
               metrics: compositeMetrics,
               sparkline: compositeSparkline,
-              computedAt: (analyticsRow?.computed_at as string) ?? null,
+              // 238 FACT-03: the row is a loose Record, so narrow by type; a NULL (never computed) stays null.
+              computedAt: typeof analyticsRow?.computed_at === "string" ? analyticsRow.computed_at : null,
               figureNote: compositeVerdict.note,
               composite: {
                 members,

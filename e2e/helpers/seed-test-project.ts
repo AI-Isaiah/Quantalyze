@@ -772,6 +772,7 @@ export async function seedStrategyWithHistory(opts: {
   const { error: aErr } = await admin.from("strategy_analytics").insert({
     strategy_id: strategy.id,
     computation_status: "complete",
+    computed_at: new Date().toISOString(),
     benchmark: "BTC",
     returns_series: series,
     ...(dailyReturns ? { daily_returns: dailyReturns } : {}),
@@ -1640,6 +1641,7 @@ export async function seedSfoxVerifiedStrategy(opts?: {
   const { error: aErr } = await admin.from("strategy_analytics").insert({
     strategy_id: strategyId,
     computation_status: "complete",
+    computed_at: new Date().toISOString(),
     benchmark: "BTC",
     returns_series: series,
     cumulative_return: series[series.length - 1].value - 1,
@@ -1837,6 +1839,7 @@ export async function seedMt5VerifiedStrategy(opts?: {
   const { error: aErr } = await admin.from("strategy_analytics").insert({
     strategy_id: strategyId,
     computation_status: "complete",
+    computed_at: new Date().toISOString(),
     benchmark: "BTC",
     returns_series: series,
     cumulative_return: series[series.length - 1].value - 1,

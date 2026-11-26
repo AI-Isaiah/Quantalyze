@@ -210,6 +210,7 @@ describe("anon strategies live probe - the real public readers as a signed-out v
     const analyticsRows = [seeded.strategyId, ...seeded.peerIds].map((strategy_id, i) => ({
       strategy_id,
       computation_status: "complete",
+      computed_at: new Date().toISOString(),
       cagr: 0.1 + i * 0.02,
       sharpe: 1 + i * 0.1,
       sortino: 1.2 + i * 0.1,

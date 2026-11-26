@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.133.90.0] - 2026-11-26 — Phase 238 NEVERCOMPUTED PR-2: a strategy that never computed carries no compute date
+
+`strategy_analytics.computed_at` was `NOT NULL DEFAULT now()`, so a strategy whose computation never completed still carried a compute time: the insert stamped one, and the factsheet fell back to a 1970 sentinel where no date existed. This PR-2 of Phase 238 (FACT-03) makes the column nullable, backfills the rows that never computed to NULL, and moves every reader to the null dash. PR-1 (FACT-05, #1331) shipped the remedy notes. Founder ruling 2026-11-24: "A: allow an empty date".
+
+### Changed
+- **Migration `20261126130000_strategy_analytics_computed_at_nullable.sql`.** Drops the `NOT NULL` and the `now()` default on `strategy_analytics.computed_at`, then sets it to NULL on rows that never completed and carry no figures. The analytics hold trigger is disabled and re-enabled inside the one transaction so the backfill is not refused by it, and a catalogue check proves the trigger is enabled again and the column is nullable with no default. Its guards use the shape `scripts/lint-migration-data-dependence.mjs` accepts (0 NEW). PROD scope measured on 2026-11-26 through read-only counts: 11 failed rows with no figures are backfilled; 7 failed rows with figures, 16 `complete` and 8 `complete_with_warnings` rows keep their date; 0 rows were pending or computing.
+- **`StrategyAnalytics.computed_at` is `string | null`**, and the generated `strategy_analytics` Row, Insert and Update types follow.
+- **The factsheet never shows 1970.** A never-computed factsheet reads the null dash in the Terms row and the footer stamp. The 1970 sentinel now lives in one file, `src/lib/factsheet/never-computed-stamp.ts`, and `isNeverComputedStamp` matches any instant-0 value, including the `+00:00` spelling PostgREST returns after a rollback.
+- **Seeders stamp `computed_at` on `complete` rows**, now that the column has no default: the e2e seed helper, `scripts/seed-demo-data.ts`, `scripts/seed-full-app-demo.ts` and two test seeders. Without this the e2e freshness chip and re-seeded demo strategies would show no compute date.
+- Comments that said `computed_at` is always a date now say a never-computed row carries NULL (`queries.ts`, `StrategyTable.tsx`, `stored-analytics-result.ts`).
+
+### Added
+- **Manual rollback** `supabase/migrations/down/20261126130000-rollback.sql`, proven on a throwaway cluster.
+
+### Tests
+- `src/__tests__/nevercomputed-backfill-sql-exec.test.ts` (17 cases) runs the migration and its rollback on a throwaway PostgreSQL cluster. Its fixture restores the pre-migration column shape itself, so it keeps passing after the baseline is re-dumped.
+- NULL-arm pins on the sync badge (all six title branches), the admin card, the wizard preview, the health score and the `computed_at` sort. Each pin was neutered, seen RED, and restored byte-equal.
+- `src/__tests__/computed-at-reader-census.test.ts` classifies every `computed_at` reader across TypeScript, Python and SQL, pins each reader's NULL arm, and fails on an unclassified or stale read.
+
+### Removed
+- `TODOS.md` entry `[166.5-COMPUTED-AT-NEVER-COMPUTED-DEFAULT]`, closed by this PR.
+
+### Notes
+- Reviews: gsd-code-reviewer and silent-failure-hunter, two rounds, no open MEDIUM or above (round 1 fixed three MEDIUMs: the seeders, the `+00:00` stamp spelling and the exec-test fixture). migration-reviewer and rls-policy-auditor: 0 MEDIUM or above. Verification 8/8 (human_needed for CI-only proofs); security 21/21 threats closed.
+- Lane order: Phase 233 DERIBITTRUTH (FRESH-02) merged first as #1360. The migration sits behind Phase 230's #1358 (`20261126120000`) in the serial migration lane.
+- **Known limits.** No earlier migration runs `DISABLE TRIGGER`, so the migration role's permission for it is proven only by the TEST `apply-test` after merge; a refusal rolls back on TEST and blocks the PROD apply. The local Docker lane was not run; CI's `sql-tests` lane is the replay. The status bridge can now create a first-ever `complete` row with a NULL `computed_at`; readers render it as never computed. The factsheet `FreshnessChip` still reads "Computed · not yet" for a never-computed row, which belongs to Phase 237.
+
 ## [0.133.89.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE PR-2c: MT5 validation proves the broker server, not only the login
 
 This is a gap-closure PR for review finding CR-01 on PR-3 (migration B). It covers the founder's ruling of 2026-11-25 that a same-broker connect with the wrong server must be refused at validation. It has no migration and no UI change.
