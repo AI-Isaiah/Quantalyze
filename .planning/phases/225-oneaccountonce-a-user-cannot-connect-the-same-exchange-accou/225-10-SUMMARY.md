@@ -88,3 +88,7 @@ PR-3 is held on review finding CR-01 (`225-REVIEW-PR3.md`). After the index admi
 ## Rename (2026-11-26, plan 225-19)
 
 Migration B and its rollback were renamed from `20261125083433` to `20261126102346` (UTC at the rename, later than every migration on origin/main at v0.133.89.0) so the migration-policy backdated-addition gate passes once plans 13 and 16 apply to PROD. The old name stays above as lineage; every non-planning reference moved in the same merge.
+
+## Second rename (2026-11-26, plan 225-19 round 2)
+
+Migration B and its rollback were renamed again, from `20261126102346` to `20261126140500`. origin/main then carried `20261126140000_mt5_terminal_lease.sql`, a future-dated name, so no honest current UTC sorted after it before 14:00Z. The name only has to sort after every migration on main and the PROD ledger tip (the allowlist is never used). Every non-planning reference moved in the same commit.

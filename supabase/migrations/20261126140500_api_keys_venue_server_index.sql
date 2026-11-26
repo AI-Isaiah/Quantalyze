@@ -66,7 +66,7 @@
 --
 -- prod-body-ack: 8ebf230179b99d1f49cc8ed959ad2f7386aad92b592722c4825bc7aa1bd43c74
 --
--- Rollback: supabase/migrations/down/20261126102346-rollback.sql (manual, never
+-- Rollback: supabase/migrations/down/20261126140500-rollback.sql (manual, never
 -- auto-applied; it restores the login-only index and the 20260925120000 body).
 -- ============================================================================
 
@@ -192,56 +192,56 @@ BEGIN
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = 'public' AND c.relname = 'api_keys_user_exchange_venue_account_uniq' AND c.relkind = 'i';
   IF v_idx_oid IS NULL THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: api_keys_user_exchange_venue_account_uniq does not exist';
+    RAISE EXCEPTION 'Migration 20261126140500 failed: api_keys_user_exchange_venue_account_uniq does not exist';
   END IF;
 
   SELECT i.indisunique, i.indnkeyatts, pg_get_expr(i.indexprs, i.indrelid), pg_get_expr(i.indpred, i.indrelid)
     INTO v_unique, v_natts, v_exprs, v_pred
     FROM pg_index i WHERE i.indexrelid = v_idx_oid;
   IF NOT v_unique THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: api_keys_user_exchange_venue_account_uniq is not UNIQUE';
+    RAISE EXCEPTION 'Migration 20261126140500 failed: api_keys_user_exchange_venue_account_uniq is not UNIQUE';
   END IF;
   IF v_natts <> 4 THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: api_keys_user_exchange_venue_account_uniq keys on % attributes, expected 4', v_natts;
+    RAISE EXCEPTION 'Migration 20261126140500 failed: api_keys_user_exchange_venue_account_uniq keys on % attributes, expected 4', v_natts;
   END IF;
   IF v_exprs IS NULL OR v_exprs NOT ILIKE '%venue_server%' THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: the index has no expression member over venue_server (got %)', v_exprs;
+    RAISE EXCEPTION 'Migration 20261126140500 failed: the index has no expression member over venue_server (got %)', v_exprs;
   END IF;
   IF v_pred IS NULL OR v_pred NOT ILIKE '%venue_account_id IS NOT NULL%' OR v_pred NOT ILIKE '%disconnected_at IS NULL%' THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: the index predicate lost a live-key conjunct (got %)', v_pred;
+    RAISE EXCEPTION 'Migration 20261126140500 failed: the index predicate lost a live-key conjunct (got %)', v_pred;
   END IF;
 
   SELECT count(*) INTO v_count
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public' AND p.proname = 'reconnect_allocator_api_key';
   IF v_count <> 1 THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: expected exactly 1 reconnect_allocator_api_key overload in public, found %', v_count;
+    RAISE EXCEPTION 'Migration 20261126140500 failed: expected exactly 1 reconnect_allocator_api_key overload in public, found %', v_count;
   END IF;
 
   v_fn_oid := to_regprocedure('public.reconnect_allocator_api_key(uuid)');
   IF v_fn_oid IS NULL THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: reconnect_allocator_api_key(uuid) does not resolve';
+    RAISE EXCEPTION 'Migration 20261126140500 failed: reconnect_allocator_api_key(uuid) does not resolve';
   END IF;
 
   IF NOT COALESCE((SELECT p.prosecdef FROM pg_proc p WHERE p.oid = v_fn_oid), false) THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: reconnect_allocator_api_key is not SECURITY DEFINER';
+    RAISE EXCEPTION 'Migration 20261126140500 failed: reconnect_allocator_api_key is not SECURITY DEFINER';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_proc p, unnest(COALESCE(p.proconfig, ARRAY[]::text[])) AS cfg
                   WHERE p.oid = v_fn_oid AND cfg LIKE 'search_path=%') THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: reconnect_allocator_api_key has no pinned search_path';
+    RAISE EXCEPTION 'Migration 20261126140500 failed: reconnect_allocator_api_key has no pinned search_path';
   END IF;
 
   IF NOT has_function_privilege('authenticated', v_fn_oid, 'EXECUTE') THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: authenticated holds no EXECUTE on reconnect_allocator_api_key, so every reconnect would answer 42501';
+    RAISE EXCEPTION 'Migration 20261126140500 failed: authenticated holds no EXECUTE on reconnect_allocator_api_key, so every reconnect would answer 42501';
   END IF;
   IF has_function_privilege('anon', v_fn_oid, 'EXECUTE') THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: anon holds EXECUTE on reconnect_allocator_api_key';
+    RAISE EXCEPTION 'Migration 20261126140500 failed: anon holds EXECUTE on reconnect_allocator_api_key';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_proc p, aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
               WHERE p.oid = v_fn_oid AND a.grantee = 0 AND a.privilege_type = 'EXECUTE') THEN
-    RAISE EXCEPTION 'Migration 20261126102346 failed: PUBLIC holds EXECUTE on reconnect_allocator_api_key';
+    RAISE EXCEPTION 'Migration 20261126140500 failed: PUBLIC holds EXECUTE on reconnect_allocator_api_key';
   END IF;
 
-  RAISE NOTICE 'Migration 20261126102346: api_keys_user_exchange_venue_account_uniq is UNIQUE on 4 attributes with the venue_server member; reconnect_allocator_api_key has one SECURITY DEFINER overload with the re-issued ACL.';
+  RAISE NOTICE 'Migration 20261126140500: api_keys_user_exchange_venue_account_uniq is UNIQUE on 4 attributes with the venue_server member; reconnect_allocator_api_key has one SECURITY DEFINER overload with the re-issued ACL.';
 END
 $verify$;

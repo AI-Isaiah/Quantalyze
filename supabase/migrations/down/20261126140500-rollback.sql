@@ -1,5 +1,5 @@
 -- ============================================================================
--- ROLLBACK for 20261126102346_api_keys_venue_server_index.sql
+-- ROLLBACK for 20261126140500_api_keys_venue_server_index.sql
 -- Phase 225 ONEACCOUNTONCE, plan 10 (CONN-03, founder ruling Q2, decision D-01).
 -- ============================================================================
 -- Manual, off the auto-apply path. This file is ONE transaction of its own (BEGIN ... COMMIT
@@ -29,9 +29,9 @@
 --
 -- ⚠️ THE MIGRATION LEDGER ROW IS LEFT IN PLACE. This file does not touch
 -- supabase_migrations.schema_migrations, so after it runs the ledger still records
--- version 20261126102346 as applied and `supabase db push` will not re-apply the
+-- version 20261126140500 as applied and `supabase db push` will not re-apply the
 -- migration. To re-apply it, mark it reverted with
--- `supabase migration repair --status reverted 20261126102346` against the intended
+-- `supabase migration repair --status reverted 20261126140500` against the intended
 -- database, after the marker query above names that database.
 --
 -- The DO block before the change is a catalogue-only PRECONDITION and the DO block after
@@ -53,10 +53,10 @@ BEGIN
     JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = 'public' AND c.relname = 'api_keys_user_exchange_venue_account_uniq';
   IF v_natts IS NULL THEN
-    RAISE EXCEPTION 'Rollback 20261126102346 refused: api_keys_user_exchange_venue_account_uniq does not exist. Nothing was changed. Run the marker query in CLAUDE.md to see which database this is.';
+    RAISE EXCEPTION 'Rollback 20261126140500 refused: api_keys_user_exchange_venue_account_uniq does not exist. Nothing was changed. Run the marker query in CLAUDE.md to see which database this is.';
   END IF;
   IF v_natts <> 4 THEN
-    RAISE EXCEPTION 'Rollback 20261126102346 refused: the index keys on % attributes, not the 4 this migration created, so this rollback already ran or the database is in another state. Nothing was changed.', v_natts;
+    RAISE EXCEPTION 'Rollback 20261126140500 refused: the index keys on % attributes, not the 4 this migration created, so this rollback already ran or the database is in another state. Nothing was changed.', v_natts;
   END IF;
 END
 $precondition$;
@@ -69,7 +69,7 @@ CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq
   WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL;
 
 COMMENT ON INDEX public.api_keys_user_exchange_venue_account_uniq IS
-  'One LIVE key per (owner, exchange, account). Login-only, as before Phase 225 / CONN-03 (restored by the rollback of 20261126102346). Partial on venue_account_id IS NOT NULL AND disconnected_at IS NULL, so a retained disconnected key never squats the slot. CONTRACT (Phase 154 / WIZCONT-02): it FAILS TOWARD THE EXISTING ROW, so a duplicate INSERT raises 23505 and the route resolves onto the row already there; it is never resolved by overwriting. user_id LEADS, so uniqueness is per tenant.';
+  'One LIVE key per (owner, exchange, account). Login-only, as before Phase 225 / CONN-03 (restored by the rollback of 20261126140500). Partial on venue_account_id IS NOT NULL AND disconnected_at IS NULL, so a retained disconnected key never squats the slot. CONTRACT (Phase 154 / WIZCONT-02): it FAILS TOWARD THE EXISTING ROW, so a duplicate INSERT raises 23505 and the route resolves onto the row already there; it is never resolved by overwriting. user_id LEADS, so uniqueness is per tenant.';
 
 -- 2. reconnect_allocator_api_key, body as of 20260925120000.
 CREATE OR REPLACE FUNCTION public.reconnect_allocator_api_key(
@@ -158,32 +158,32 @@ BEGIN
     JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = 'public' AND c.relname = 'api_keys_user_exchange_venue_account_uniq' AND i.indisunique;
   IF v_natts IS DISTINCT FROM 3 THEN
-    RAISE EXCEPTION 'Rollback 20261126102346 failed: expected a UNIQUE index on 3 attributes, found %', v_natts;
+    RAISE EXCEPTION 'Rollback 20261126140500 failed: expected a UNIQUE index on 3 attributes, found %', v_natts;
   END IF;
 
   SELECT count(*) INTO v_count
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public' AND p.proname = 'reconnect_allocator_api_key';
   IF v_count <> 1 THEN
-    RAISE EXCEPTION 'Rollback 20261126102346 failed: expected exactly 1 reconnect_allocator_api_key overload in public, found %', v_count;
+    RAISE EXCEPTION 'Rollback 20261126140500 failed: expected exactly 1 reconnect_allocator_api_key overload in public, found %', v_count;
   END IF;
 
   v_fn_oid := to_regprocedure('public.reconnect_allocator_api_key(uuid)');
   IF v_fn_oid IS NULL THEN
-    RAISE EXCEPTION 'Rollback 20261126102346 failed: reconnect_allocator_api_key(uuid) does not resolve';
+    RAISE EXCEPTION 'Rollback 20261126140500 failed: reconnect_allocator_api_key(uuid) does not resolve';
   END IF;
   IF NOT has_function_privilege('authenticated', v_fn_oid, 'EXECUTE') THEN
-    RAISE EXCEPTION 'Rollback 20261126102346 failed: authenticated holds no EXECUTE on reconnect_allocator_api_key';
+    RAISE EXCEPTION 'Rollback 20261126140500 failed: authenticated holds no EXECUTE on reconnect_allocator_api_key';
   END IF;
   IF has_function_privilege('anon', v_fn_oid, 'EXECUTE') THEN
-    RAISE EXCEPTION 'Rollback 20261126102346 failed: anon holds EXECUTE on reconnect_allocator_api_key';
+    RAISE EXCEPTION 'Rollback 20261126140500 failed: anon holds EXECUTE on reconnect_allocator_api_key';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_proc p, aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
               WHERE p.oid = v_fn_oid AND a.grantee = 0 AND a.privilege_type = 'EXECUTE') THEN
-    RAISE EXCEPTION 'Rollback 20261126102346 failed: PUBLIC holds EXECUTE on reconnect_allocator_api_key';
+    RAISE EXCEPTION 'Rollback 20261126140500 failed: PUBLIC holds EXECUTE on reconnect_allocator_api_key';
   END IF;
 
-  RAISE NOTICE 'Rollback 20261126102346: the login-only api_keys_user_exchange_venue_account_uniq and the 20260925120000 reconnect_allocator_api_key are restored. The migration ledger row is left in place (see the header).';
+  RAISE NOTICE 'Rollback 20261126140500: the login-only api_keys_user_exchange_venue_account_uniq and the 20260925120000 reconnect_allocator_api_key are restored. The migration ledger row is left in place (see the header).';
 END
 $verify$;
 
