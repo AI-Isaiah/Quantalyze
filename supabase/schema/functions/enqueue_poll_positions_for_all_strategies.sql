@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261124120500_poll_positions_cohort.sql
+-- source migration: 20261126180000_poll_positions_cohort_ccxt_venues.sql
 -- ==========================================================================
 -- STEP 1: the function
 -- ==========================================================================
@@ -31,6 +31,11 @@ BEGIN
         AND s.status IN ('published', 'pending_review', 'private')
         AND ak.is_active
         AND ak.disconnected_at IS NULL
+        -- Venue gate (20261126180000): only the venues run_poll_positions_job can serve. That
+        -- handler calls the ccxt-style fetch_positions on the client _make_exchange_client
+        -- builds, which is a ccxt exchange only for EXCHANGE_CLASSES in
+        -- analytics-service/services/exchange.py. mt5 and sfox get non-ccxt clients.
+        AND ak.exchange IN ('binance', 'bybit', 'deribit', 'okx')
         AND (
           EXISTS (
             SELECT 1 FROM compute_jobs cj

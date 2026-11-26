@@ -1128,7 +1128,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `armsSeen` 1021 -> 1033, the 12 twinned arms of the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: this file's run read `expected 1033 to be 1021`, `--parse-only` printed `arms: 0/1033/0` and `coverage: files 94/121`, and the `--file` diagnostic run printed `arms: 12/12/0`, `biting: 12`.
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `armsSeen` 1033 -> 1041, the 8 twinned arms of the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `arms: 0/1041/0`.
     // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19 round 2, PR-3 re-base): `armsSeen` 1041 -> 1050, plan 10's +9 twinned arms (5 in test_api_keys_venue_identity_uniq.sql, 4 in test_api_keys_account_identity.sql) on top of main. MEASURED: this file's run read `expected 1050 to be 1041`, `--parse-only` printed `arms: 0/1050/0` and `coverage: files 95/122`.
-    expect(armsSeen).toBe(1074);
+    // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): `armsSeen` 1074 -> 1079, +5 twinned arms in test_enqueue_poll_positions_cohort.sql.
+    expect(armsSeen).toBe(1079);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1191,7 +1192,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `stepsSeen` 1171 -> 1186, +15 file steps in the NEW gate test_commit_scenario_batch_venue_server_identity.sql (one `edit` per arm, three for exchange-partitions-server-count, two for marker-links-ambiguous-key). MEASURED: this file's run read `expected 1186 to be 1171`.
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `stepsSeen` 1186 -> 1195, +9 file steps in the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: this file's run read `expected 1195 to be 1186`.
     // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19 round 2, PR-3 re-base): `stepsSeen` 1195 -> 1199, +4 file steps from plan 10's arms and rewritten twins, read off the run, never summed. MEASURED: this file's run read `expected 1199 to be 1195`.
-    expect(stepsSeen).toBe(1220);
+    // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): `stepsSeen` 1220 -> 1232, +12 file steps in test_enqueue_poll_positions_cohort.sql (five new twins of two edits each, and P7's twin edits both migrations, +2).
+    expect(stepsSeen).toBe(1232);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2170,7 +2172,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `needles.length` 1171 -> 1186, the same +15 `edit` needles. MEASURED: this file's run read `expected 1186 to be 1171`.
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `needles.length` 1186 -> 1195, the same +9 file steps as `stepsSeen`. MEASURED: this file's run read `expected 1195 to be 1186`.
     // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19 round 2, PR-3 re-base): `needles.length` 1195 -> 1199, the same +4 file steps as `stepsSeen`. MEASURED: this file's run read `expected 1199 to be 1195`.
-    expect(needles.length).toBe(1220);
+    // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): `needles.length` 1220 -> 1232, the same +12 `edit` needles.
+    expect(needles.length).toBe(1232);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
