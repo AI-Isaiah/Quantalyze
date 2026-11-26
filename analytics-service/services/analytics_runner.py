@@ -32,6 +32,10 @@ from postgrest.exceptions import APIError
 from supabase import Client
 
 from services.benchmark import get_benchmark_returns
+from services.binance_sync_flags import (
+    carry_binance_sync_flags,
+    read_binance_sync_flags,
+)
 from services.db import (
     PaginatedSelectTruncated,
     db_execute,
@@ -295,6 +299,22 @@ class DataQualityFlags(TypedDict, total=False):
     daily_pnl_malformed_okx: bool
     daily_pnl_malformed_binance: bool
     daily_pnl_malformed_bybit: bool
+    # --- Phase 253 BINANCECURSOR (SC-3, D-08): the nine sync-time keys run_sync_trades_job writes
+    # for a Binance fills read (services/binance_sync_flags.py BINANCE_SYNC_FLAG_KEYS, the
+    # explicit allowlist and the shape of each). Carried by run_csv_strategy_analytics from the
+    # pre-stamped row (the derive carries them across its prestamp) and by the failure writers,
+    # and cleared by the next Binance sync that does not raise them. FLAGS, never warnings: none is
+    # in NAV_TWR_GUARD_KEYS or ALLOCATED_CAPITAL_GUARD_KEYS, so none can promote computation_status
+    # or set computation_warned. ---
+    binance_fills_reach_clamped: bool
+    binance_fill_cursor_advance_plus1: bool
+    binance_stop_below_cursor: bool
+    binance_partial_symbols: list[str]
+    binance_unlisted_symbols: list[str]
+    binance_page_cap_symbols: list[str]
+    binance_untimed_page_symbols: list[str]
+    binance_deadline_symbols: list[str]
+    binance_read_through_ms: int
     # --- Phase 164.6.6.2.2 (D-05): the cumulative method this row's returns_series
     # was built with, RAW ('geometric' | 'simple'). Stamped by
     # run_csv_strategy_analytics beside the curve (the composite stitch already wrote
@@ -1950,6 +1970,13 @@ async def run_csv_strategy_analytics(
                 # data" copy. Downstream consumers gate the chip on
                 # data_quality_flags?.csv_source (src/lib/types.ts:335).
                 def _mark_failed() -> None:
+                    # Phase 253 (SC-3): this stamp replaces data_quality_flags wholesale and has
+                    # no prior row in scope; the sync-time binance_* keys come from the guarded
+                    # read (never raises: the stamp must land).
+                    _insufficient_flags: dict[str, Any] = {
+                        "csv_source": True,
+                        **read_binance_sync_flags(supabase, strategy_id),
+                    }
                     _insufficient_payload: dict[str, Any] = {
                             "strategy_id": strategy_id,
                             "computation_status": "failed",
@@ -1963,7 +1990,7 @@ async def run_csv_strategy_analytics(
                             # replace with "CSV analytics computation failed."
                             "computation_error_source": provenance_source(job_id),
                             "computation_error_job_id": job_id,
-                            "data_quality_flags": {"csv_source": True},
+                            "data_quality_flags": _insufficient_flags,
                     }
                     _guard_failure_payload_inplace(_insufficient_payload)
 
@@ -2362,6 +2389,12 @@ async def run_csv_strategy_analytics(
                 ):
                     data_quality_flags[_flag] = True  # type: ignore[literal-required]
 
+            # Phase 253 (SC-3, D-08): carry the sync-time binance_* keys (explicit allowlist, shape
+            # validated) from the pre-stamped row, OUTSIDE both `_warned` loops: they are flags,
+            # never warnings, so a flagged strategy stays exact-string "complete".
+            for _binance_key, _binance_value in carry_binance_sync_flags(existing_flags).items():
+                data_quality_flags[_binance_key] = _binance_value  # type: ignore[literal-required]
+
             csv_status = "complete_with_warnings" if _warned else "complete"
 
             # HARD-04 (#67): lift the CAGR-site insufficient_window annotation.
@@ -2582,6 +2615,11 @@ async def run_csv_strategy_analytics(
             )
 
             def _mark_truncated() -> None:
+                # Phase 253 (SC-3): see _mark_failed; the guarded read, never raises.
+                _truncated_flags: dict[str, Any] = {
+                    "csv_source": True,
+                    **read_binance_sync_flags(supabase, strategy_id),
+                }
                 _truncated_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
@@ -2610,7 +2648,7 @@ async def run_csv_strategy_analytics(
                         # whole diagnosis.
                         "computation_error_source": provenance_source(job_id),
                         "computation_error_job_id": job_id,
-                        "data_quality_flags": {"csv_source": True},
+                        "data_quality_flags": _truncated_flags,
                 }
                 _guard_failure_payload_inplace(_truncated_payload)
 
@@ -2650,6 +2688,11 @@ async def run_csv_strategy_analytics(
             )
 
             def _mark_config_failed() -> None:
+                # Phase 253 (SC-3): see _mark_failed; the guarded read, never raises.
+                _config_failed_flags: dict[str, Any] = {
+                    "csv_source": True,
+                    **read_binance_sync_flags(supabase, strategy_id),
+                }
                 _config_failed_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
@@ -2665,7 +2708,7 @@ async def run_csv_strategy_analytics(
                         # looking at the CSV instead of at the config.
                         "computation_error_source": provenance_source(job_id),
                         "computation_error_job_id": job_id,
-                        "data_quality_flags": {"csv_source": True},
+                        "data_quality_flags": _config_failed_flags,
                 }
                 _guard_failure_payload_inplace(_config_failed_payload)
 

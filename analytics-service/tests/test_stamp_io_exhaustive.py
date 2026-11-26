@@ -60,6 +60,16 @@ Neuter to redden: make ``_stamp_io`` return ``await call()`` with no ``try``.
 Every failing-call case goes RED on (a) (``unknown``). Measured 2026-09-26,
 recorded in 164.6.7-REVIEW-FIX-R4.md.
 
+⚠️ Phase 253 plan 04 (SC-3): ONE more call has a different asserted disposition, the guarded
+prior-flags read ``services.binance_sync_flags.read_binance_sync_flags`` that the single-key
+derive-failed stamp (``_upsert``) makes so the terminal ``failed`` row carries the sync-time
+``binance_*`` keys. It is identified by its own property too: closure I/O issued from inside that
+function. It NEVER raises, by design (a failure stamp must land): its failure is logged at WARNING
+naming the strategy and the stamp lands carrying nothing, so it is NOT held to the transient
+assertions above. ``test_a_failing_guarded_flag_read_never_blocks_the_failed_stamp`` pins that
+opposite disposition for every such call. Neuter to redden: delete the ``try`` in
+``read_binance_sync_flags`` (the failure then escapes, and the stamp no longer lands).
+
 Discovery needs every database call on ONE thread, so ``services.db.db_execute``
 is patched inline too: ``db_read_with_retry`` calls it, and the real one hops to
 a thread pool, where the closure's frame is not on the stack.
@@ -114,10 +124,24 @@ def _in_a_stamp_closure() -> bool:
     return False
 
 
+def _in_the_guarded_flag_read() -> bool:
+    frame = sys._getframe(1)
+    while frame is not None:
+        code = frame.f_code
+        if code.co_name == "read_binance_sync_flags" and code.co_filename.endswith(
+            "binance_sync_flags.py"
+        ):
+            return True
+        frame = frame.f_back  # type: ignore[assignment]
+    return False
+
+
 @dataclass
 class _Call:
     target: str
     ops: tuple[str, ...]
+    # True when the call is issued from inside ``read_binance_sync_flags`` (Phase 253 plan 04).
+    guarded: bool = False
 
     @property
     def is_analytics_write(self) -> bool:
@@ -146,6 +170,7 @@ class _Recorder:
     def on_execute(self, call: _Call) -> bool:
         if not _in_a_stamp_closure():
             return False
+        call.guarded = _in_the_guarded_flag_read()
         index = len(self.closure_calls)
         self.closure_calls.append(call)
         if index == self.fail_at and self.failure is not None:
@@ -404,6 +429,8 @@ def _cases(post_stamp: bool) -> list[Any]:
         calls = _discovered(scenario)
         stamp_at = _stamp_index(calls)
         for index, call in enumerate(calls):
+            if call.guarded:
+                continue  # its own disposition, pinned by the guarded-read test below
             if (index > stamp_at) != post_stamp:
                 continue
             cases.append(
@@ -416,8 +443,23 @@ def _cases(post_stamp: bool) -> list[Any]:
     return cases
 
 
+def _guarded_cases() -> list[Any]:
+    return [
+        pytest.param(
+            scenario,
+            index,
+            id=f"{scenario.closure}-{scenario.name}-call{index}-{call.label()}",
+        )
+        for scenario in _SCENARIOS
+        for index, call in enumerate(_discovered(scenario))
+        if call.guarded
+    ]
+
+
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    if "pre_stamp_case" in metafunc.fixturenames:
+    if "guarded_case" in metafunc.fixturenames:
+        metafunc.parametrize(("scenario", "guarded_case"), _guarded_cases())
+    elif "pre_stamp_case" in metafunc.fixturenames:
         metafunc.parametrize(("scenario", "pre_stamp_case"), _cases(post_stamp=False))
     elif "post_stamp_case" in metafunc.fixturenames:
         metafunc.parametrize(("scenario", "post_stamp_case"), _cases(post_stamp=True))
@@ -592,6 +634,56 @@ async def test_a_stamp_call_cut_off_by_the_handler_deadline_logs_the_cause() -> 
     assert log.error.call_count == 1, log.error.call_args_list
     assert sentry.capture_exception.call_count == 0
     assert not fake.upserts, fake.upserts
+
+
+# ---------------------------------------------------------------------------
+# The guarded prior-flags read (Phase 253 plan 04): its failure NEVER blocks the stamp.
+# ---------------------------------------------------------------------------
+def test_discovery_sees_the_guarded_flag_read_on_the_single_key_unprotected_paths() -> None:
+    """Anti-vacuity for the test below: if the guarded read stopped being discovered (renamed,
+    moved out of the closure) its parametrisation would vanish and it would pass with no case."""
+    seen = {
+        f"{scenario.closure}-{scenario.name}"
+        for scenario in _SCENARIOS
+        if any(c.guarded for c in _discovered(scenario))
+    }
+    assert seen == {
+        "single-key-loud-over-retracted-row",
+        "single-key-loud-over-missing-row",
+        "single-key-unmarked",
+        "single-key-loud-over-other-source",
+        "single-key-marked-over-unpublished-row",
+    }, seen
+
+
+@pytest.mark.asyncio
+async def test_a_failing_guarded_flag_read_never_blocks_the_failed_stamp(
+    scenario: _Scenario, guarded_case: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """SC-3 / T-253-16: the derive-failed stamp reads the stored ``binance_*`` sync keys through
+    ``read_binance_sync_flags`` so the terminal row keeps them. That read never raises: a failed
+    stamp must land. So, unlike every other stamp call above, its failure leaves the outcome
+    exactly the clean run's (same filing, same write, same ERROR and capture counts) and adds ONE
+    WARNING naming the strategy and the exception class. The only loss is the carry, logged."""
+    clean = await _drive(scenario, _Recorder())
+    recorder = _Recorder(fail_at=guarded_case, failure=RuntimeError)
+    with caplog.at_level("WARNING", logger="quantalyze.analytics.binance_sync_flags"):
+        outcome = await _drive(scenario, recorder)
+    assert recorder.closure_calls[guarded_case].guarded
+    assert outcome.result.error_kind == clean.result.error_kind
+    assert outcome.analytics_writes == clean.analytics_writes
+    assert len(outcome.analytics_writes) == 1
+    assert _cause_of(scenario) in (outcome.analytics_writes[0].get("computation_error") or "")
+    assert outcome.log.error.call_count == clean.log.error.call_count
+    assert outcome.sentry.capture_exception.call_count == clean.sentry.capture_exception.call_count
+    named = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING"
+        and _SINGLE_KEY_STRATEGY_ID in r.getMessage()
+        and "RuntimeError" in r.getMessage()
+    ]
+    assert len(named) == 1, caplog.records
 
 
 # ---------------------------------------------------------------------------

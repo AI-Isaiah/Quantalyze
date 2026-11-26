@@ -387,8 +387,14 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * DRIFT finding, `commit_scenario_batch/5`, is not this phase's: it is the Phase 225 re-base
  * already on origin/main. Raising this floor records the functions joining the corpus; it does NOT
  * suppress any finding.
+ *
+ * MOVED 2026-11-26 (Phase 253 BINANCECURSOR, merge with Phase 230 on origin/main), 147 -> 148: one ADDITION,
+ * `public.set_strategy_fills_reread_bound(uuid, uuid, uuid, uuid, timestamptz, timestamptz)`, via forward
+ * migration 20261126150000_strategy_fills_reread_bound.sql (a SNAPSHOT_MISSING finding until the post-apply
+ * re-dump, recorded as a `snapshot-only` row in NAME_SET_RATCHET). 147 is Phase 230's three lease functions
+ * on top of 144; this phase adds the one more. Raising this floor does NOT suppress any finding.
  */
-export const COMPARED_FLOOR = 147;
+export const COMPARED_FLOOR = 148;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

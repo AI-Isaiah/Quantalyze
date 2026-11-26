@@ -53,6 +53,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from services.job_worker import DispatchOutcome, run_sync_trades_job
+from tests._binance_fills import RereadBounds
 
 STRATEGY_ID = "strat-232-cursor"
 
@@ -121,11 +122,18 @@ def _make_supabase(
     upsert_fails_on_call: int | None = None,
     sync_trades_error: Exception | None = None,
     flags: dict[str, Any] | None = None,
+    bounds: RereadBounds | None = None,
 ) -> tuple[MagicMock, _Recorder]:
     """`flags` is the strategy's `data_quality_flags`; the fake reads it on the
     flag read and REPLACES it from the upserted payload, so passing the same dict
-    to two runs lets the second read what the first wrote."""
+    to two runs lets the second read what the first wrote.
+
+    `bounds` (Phase 253) is the stateful `strategy_fills_reread_bounds` table and its RPC
+    `set_strategy_fills_reread_bound`; passing one store to two runs lets the second read
+    what the first wrote. None gives a fresh store, so a Binance run that is not about the
+    bound (the e2e suite) still meets a real branch rather than MagicMock defaults."""
     rec = _Recorder()
+    bound_store = bounds if bounds is not None else RereadBounds()
     table_rows = list(trades_rows)
     stored_flags: dict[str, Any] = flags if flags is not None else {}
 
@@ -215,6 +223,8 @@ def _make_supabase(
     def _rpc(name: str, payload: dict[str, Any]) -> MagicMock:
         if name == "advance_sync_cursor":
             rec.advance_params.append(dict(payload))
+        if name == "set_strategy_fills_reread_bound":
+            return bound_store.rpc(payload)
         stub = MagicMock()
         if name == "sync_trades" and sync_trades_error is not None:
             stub.execute.side_effect = sync_trades_error
@@ -231,6 +241,8 @@ def _make_supabase(
             return _FakeTradesQuery()
         if name == "strategy_analytics":
             return _FakeAnalytics()
+        if name == "strategy_fills_reread_bounds":
+            return bound_store.table()
         return MagicMock()
 
     supabase.table.side_effect = _table
@@ -252,22 +264,27 @@ async def _run_job(
     daily_trades: list[dict[str, Any]] | None = None,
     fills_flags: dict[str, Any] | None = None,
     fills_drain_error: Exception | None = None,
+    balance_error: BaseException | None = None,
+    exchange: str = "okx",
+    strategy_id: str = STRATEGY_ID,
 ) -> _Outcome:
     """Drive the REAL `run_sync_trades_job`. `fills_flags` is what the fills
     read's DQ drain returns (the daily drain returns nothing);
     `fills_drain_error` makes that drain raise AFTER `fetch_raw_trades` has
     returned its fills, the one path where fills are in hand and Phase 2 is
-    nonetheless marked failed."""
+    nonetheless marked failed. `balance_error` (Phase 253 round 4) makes the
+    balance read raise: the one exchange call after the Phase-1 daily store and
+    before the fills walk."""
     mock_exchange = AsyncMock()
     mock_exchange.close = AsyncMock()
 
     mock_ctx = MagicMock()
     mock_ctx.exchange = mock_exchange  # ccxt shape, NOT Mt5Session
     mock_ctx.supabase = supabase
-    mock_ctx.strategy_row = {"id": STRATEGY_ID, "user_id": "user-1"}
+    mock_ctx.strategy_row = {"id": strategy_id, "user_id": "user-1"}
     mock_ctx.key_row = {
         "id": "key-1",
-        "exchange": "okx",
+        "exchange": exchange,
         "user_id": "user-1",
         "last_sync_at": "2026-11-13T06:00:00+00:00",
         "last_fetched_trade_timestamp": column,
@@ -278,7 +295,7 @@ async def _run_job(
         fetch_raw = AsyncMock(side_effect=raw_error)
     else:
         fetch_raw = AsyncMock(return_value=raw_fills if raw_fills else [])
-    job = {"id": "job-232", "kind": "sync_trades", "strategy_id": STRATEGY_ID}
+    job = {"id": "job-232", "kind": "sync_trades", "strategy_id": strategy_id}
 
     patches = [
         patch(
@@ -288,7 +305,11 @@ async def _run_job(
         patch("services.job_worker.fetch_all_trades", new=fetch_all),
         patch(
             "services.job_worker.fetch_usdt_balance",
-            new=AsyncMock(return_value=10000.0),
+            new=(
+                AsyncMock(side_effect=balance_error)
+                if balance_error is not None
+                else AsyncMock(return_value=10000.0)
+            ),
         ),
         patch("services.job_worker.fetch_raw_trades", new=fetch_raw),
         patch(

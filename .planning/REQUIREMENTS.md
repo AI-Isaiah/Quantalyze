@@ -83,10 +83,10 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Data integrity: Deribit book and freshness (DERIBITBOOK, Deribit stale returns)
 
-- [ ] **DBOOK-01**: Every day of the founder's Deribit book cumulative return is either explained by booked P&L and flows, or withheld by name. No plausibility bound is applied. (covers: 185-BOOK-CUMULATIVE-UNEXPLAINED)
-- [ ] **DBOOK-02**: A Deribit correction row carrying a capital reason never classifies as trading P&L, including one that carries a trading token and no capital word. Each correction shape has its own fixture. (covers: L2219)
-- [ ] **FRESH-01**: The Deribit account whose stored returns end 2026-10-26, while its inputs carry a 2026-11-09 flow and its derives report `done`, is diagnosed read-only and fixed at its root. Its return series then reaches its newest flow and anchor day, or the gap carries a stored, named reason. Missing days are never backfilled. (covers: debug-sweep observation 2026-11-23; no `TODOS.md` id)
-- [ ] **FRESH-02**: For every venue, a check that runs outside the derive job compares each daily-derived key's newest stored return day with its newest flow day and anchor day. It reports any key behind by more than a stated bound without a named reason. The check reports and pages; it never blocks CI. (covers: debug-sweep observation 2026-11-23; no `TODOS.md` id)
+- [x] **DBOOK-01**: Every day of the founder's Deribit book cumulative return is either explained by booked P&L and flows, or withheld by name. No plausibility bound is applied. (covers: 185-BOOK-CUMULATIVE-UNEXPLAINED)
+- [x] **DBOOK-02**: A Deribit correction row carrying a capital reason never classifies as trading P&L, including one that carries a trading token and no capital word. Each correction shape has its own fixture. (covers: L2219)
+- [x] **FRESH-01**: The Deribit account whose stored returns end 2026-10-26, while its inputs carry a 2026-11-09 flow and its derives report `done`, is diagnosed read-only and fixed at its root. Its return series then reaches its newest flow and anchor day, or the gap carries a stored, named reason. Missing days are never backfilled. (covers: debug-sweep observation 2026-11-23; no `TODOS.md` id)
+- [x] **FRESH-02**: For every venue, a check that runs outside the derive job compares each daily-derived key's newest stored return day with its newest flow day and anchor day. It reports any key behind by more than a stated bound without a named reason. The check reports and pages; it never blocks CI. (covers: debug-sweep observation 2026-11-23; no `TODOS.md` id)
 
 ### Data integrity: one account counts once on read (HOLDINGSTRUTH)
 
@@ -306,8 +306,8 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | ONCE-04 | Phase 225 | Pending |
 | PROOF-01 | Every v1.22 phase, and every v1.23 phase by F-10 (closed at each milestone audit) | Pending |
 | MT5D-01 | Phase 227 | Complete |
-| MT5D-02 | Phase 230 | Pending |
-| MT5D-03 | Phase 230 | Pending |
+| MT5D-02 | Phase 230 | Shipped (#1358); seven clean nights pending |
+| MT5D-03 | Phase 230 | Shipped (#1358, replay tooling); coordinator capture and replay pending |
 | MT5D-04 | Phase 229 | Complete |
 | MT5D-05 | Phase 229 | Complete |
 | MT5D-06 | Phase 229 | Complete |
@@ -321,10 +321,10 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | VREAD-06 | Phase 232 | Complete |
 | VREAD-07 | Phase 232 | Complete |
 | VREAD-08 | Phase 232 | Complete |
-| DBOOK-01 | Phase 233 | Pending |
-| DBOOK-02 | Phase 233 | Pending |
-| FRESH-01 | Phase 233 | Pending |
-| FRESH-02 | Phase 233 | Pending |
+| DBOOK-01 | Phase 233 | Complete |
+| DBOOK-02 | Phase 233 | Complete |
+| FRESH-01 | Phase 233 | Complete |
+| FRESH-02 | Phase 233 | Complete |
 | HOLD-01 | Phase 235 | Pending |
 | HOLD-02 | Phase 235 | Pending |
 | HOLD-03 | Phase 229 | Complete |
@@ -346,9 +346,9 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | FIG-05 | Phase 236 | Shipped (#1354); PROD fleet re-derive pending |
 | FACT-01 | Phase 237 | Complete |
 | FACT-02 | Phase 237 | Complete |
-| FACT-03 | Phase 238 | Pending |
+| FACT-03 | Phase 238 | Shipped (#1363), human verification pending |
 | FACT-04 | Phase 237 | Complete |
-| FACT-05 | Phase 238 | Pending |
+| FACT-05 | Phase 238 | Shipped (#1331), phase verification pending |
 | CACHE-01 | Phase 237 | Complete |
 | CACHE-02 | Phase 239 | Complete |
 | CACHE-03 | Phase 237 | Complete |

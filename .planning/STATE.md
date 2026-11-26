@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
-current_phase: 222
-current_phase_name: ALERTTRUTH
+current_phase: 233
+current_phase_name: DERIBITTRUTH
 status: executing
-stopped_at: Phase 222 closed; 252 and 236 records landed (human verification pending); follow-up phase for [250-BINANCE-STOP-BELOW-CURSOR] booked
-last_updated: "2026-11-25T23:20:00.261Z"
+stopped_at: Phase 225 PR-3 merged and applied to PROD (records PR); 225 stays open for plan 18's founder control and plan 225-21
+last_updated: "2026-11-26T11:52:29.989Z"
 last_activity: 2026-11-26
-last_activity_desc: "Phase 222 ALERTTRUTH complete (shipped #1352); 252 DERIBITOPTIONS shipped #1351, human verification pending; BINANCECURSOR follow-up booked"
-state_head: 7b31cdc4bf7f3d4923b4c8de26ddab026e58f062
+last_activity_desc: "Phase 225 ONEACCOUNTONCE PR-3 (#1368, v0.133.92.0) merged, migration 20261126140500 applied to TEST and PROD and read back equal; Phase 254 OPENINGDEPOSIT booked in v1.23"
+state_head: 734e51f53b3590834b7f5539fec08bd39a95690d
 progress:
   total_phases: 23
-  completed_phases: 11
-  total_plans: 91
-  completed_plans: 83
-  percent: 48
+  completed_phases: 14
+  total_plans: 146
+  completed_plans: 143
+  percent: 61
 ---
 
 ## ⭐ STATE lineage
@@ -147,6 +147,8 @@ silently absorbed by a later phase.
 | ~~160~~ | 🟡 **PARTIAL 2026-08-25 21:38Z — arm PROVEN, 1 of 3 surfaces smoked** | **PROD persist smoke (Part A) PASSED.** Founder connected a real OKX read-only key through `ApiKeyManager` at `/strategies/<id>/edit` on production. BOTH confirmations hold: `api_keys` census 32 → 33 with the new row's `attested_venue` EQUAL to its `exchange` (`okx`/`okx` — the 160-02/RANK-03 invariant), and prod request logs show `/api/keys/validate-and-encrypt`, so the write went through the persist arm and not the Phase-156 RPC path. ⚠️ The gate was not merely untested — the arm was DEAD: Vercel's `ANALYTICS_SERVICE_KEY` did not match Railway's `SERVICE_KEY`, so every guarded analytics route refused and key-connect was impossible in production (TODOS 0.05, resolved; detection gap 0.04 → Phase 164.1). Evidence in `160-UAT.md`. ⚠️ NOT 32/32: the prescribed test names THREE converted surfaces; only `ApiKeyManager` was smoked. `StrategyForm` is un-smoked (own fetch at `StrategyForm.tsx:161`) and `AllocatorExchangeManager` is un-smoked. ⚠️ CORRECTED 2026-08-26: an earlier note here said it is UNREACHABLE and that no page mounts it. That is FALSE — `profile/page.tsx` populates `exchanges` for allocators, `ProfileTabs` renders `ExchangesTabContent`, and that renders `AllocatorExchangeManager`. The whole branch is `isAllocator`-gated and the 160 QA ran on a MANAGER account, which is almost certainly why it looked unmounted. It is a live surface and 160 can be closed by smoking it with an ALLOCATOR login — it does NOT need mounting, and the component must NOT be deleted. The shared arm is proven, which retires the large risk; per-surface payload risk remains unmeasured. NO LONGER SKIPPED on autonomous re-entry. | `/gsd-verify-work 160` for the remaining surfaces |
 | 252 | 🟡 **SHIPPED v0.133.80.0 (#1351), verification `human_needed`** — code verified 6/6 for the scope of this run (wave 1 named withhold, wave 2 read-only probe tooling); none of the open items is a gap | Four human items from `252-VERIFICATION.md`: (1) on the deployed build, the Quantum Drift owner factsheet, share card and OG image show the withheld headline with its named reason, never the cash-wallet cumulative, CAGR or Calmar (PROD); (2) the founder's copy and tone check on the factsheet, share card, Compare, Discovery, Holdings and the Compare overlay note (a draft owned by this check), plus whether the Monthly Returns heatmap (IN-06) needs a follow-up; (3) the founder-gated run of the wave-2 probe `scripts.deribit_options_smoothed_probe` in the worker against the evidence composite, whose pass is the only input to a later MTM promotion plan; (4) the ship-time PROD census re-take (marker first) pasted into the CHANGELOG. For (4), a PROD reading taken by the orchestrator on 2026-11-25 is recorded in `252-05-SUMMARY.md` (commit `ee599e6c3`, the commit the verifier ran at, which still listed this item open) and quoted in the v0.133.80.0 CHANGELOG entry; whether that counts as the ship-time re-take is left to the coordinator. | `/gsd-verify-work 252` |
 | 236 | 🟡 **SHIPPED v0.133.82.0 (#1354), verification `human_needed`** — 6/7 must-haves verified in code (conventions, pins, censuses, parity oracle, CVaR floor, span rule, quantstats 0.0.86 decision record, runbook, figures-moved list); no code gap | FIG-05 / SC-4: the coordinator's PROD fleet re-derive from `docs/runbooks/figuremath-fleet-rederive.md`, run after 233 DERIBITTRUTH merges and 236 is deployed (the runbook's precondition is 229, 233 and 234 merged), recorded with its section 5 closing read and a clean section 6 number-to-null report, and the 155.2 freeze side confirmed in writing. The second human item, the ship CHANGELOG naming the moved figures, is met by the v0.133.82.0 entry. | `/gsd-verify-work 236` |
+| 230 | 🟡 **SHIPPED v0.133.91.0 (#1358), verification `human_needed`**. Code verified 7/10. The cross-process MT5 terminal lease is deployed 2026-11-26, and migration `20261126140000` was applied to TEST and PROD in `supabase-migrate.yml` run 45807605366 | Items from `230-VERIFICATION.md`: (1) SC-2 / MT5D-02, seven consecutive clean nights, counted from the first 00:40Z derive after BOTH the backfill worker and the API service carry the lease (plan 09, runbook `docs/runbooks/mt5-terminal-lease.md` section 6); (2) plan 09's lane proof of the nightly query; (3) SC-3 / MT5D-03, the coordinator's read-only capture and the clock replay (plan 10, `docs/runbooks/mt5-clock-replay.md` section 10); (4) the post-deploy checks (a) to (d) of the lease runbook section 5. The CI readings at the PR head (run 45804955452) are recorded in the ship record of `230-VERIFICATION.md`; the items stay open for the verifier. | `/gsd-verify-work 230` |
+| 238 | 🟡 **SHIPPED PR-1 v0.133.71.0 (#1331) and PR-2 v0.133.90.0 (#1363), verification `human_needed`**. Code verified 8/8; migration `20261126130000` applied to TEST and PROD in `supabase-migrate.yml` run 45800983848 | The post-apply PROD count of never-completed, figure-less `strategy_analytics` rows that still carry a date (expected 0; marker query first), and the founder's verification item. The apply-test NOTICE and the CI job conclusions (sql-tests replay, e2e-seeded, typecheck) are recorded as readings in the ship record of `238-VERIFICATION.md`; those items stay open for the verifier. | `/gsd-verify-work 238` |
 
 Part B of that phase (the PROD `STALE_CLIENT` refusal) is ✅ CLOSED — measured on PROD 2026-08-23
 after #705 deployed. See `160-VERIFICATION.md` § PROD smoke record.
@@ -178,11 +180,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 222 (ALERTTRUTH) — COMPLETE (shipped v0.133.81.0, #1352; migration 20261125212222 applied to TEST and PROD); v1.22 phases run in parallel
-Plan: 4 of 4
-Status: Phase complete; 252 (DERIBITOPTIONS, shipped v0.133.80.0, #1351) and 236 (FIGUREMATH, shipped v0.133.82.0, #1354) records landed in the same records PR, both with human verification pending (see Deferred Verification)
-Last activity: 2026-11-26 — Phase 222 closed; 252 records landed; the follow-up phase for [250-BINANCE-STOP-BELOW-CURSOR] booked by founder ruling 2026-11-26
-Progress: [█████░░░░░] 48%
+Phase: 233 (DERIBITTRUTH) — COMPLETE (shipped v0.133.83.0, #1360); 250 (BINANCEFILLS, v0.133.84.0, #1355) and 251 (SYNCSTORE, v0.133.87.0, #1359) closed in the same records PR; v1.22 phases run in parallel
+Plan: 7 of 7
+Status: Phases complete; 230 (MT5NIGHTLY, shipped v0.133.91.0, #1358) and 238 (NEVERCOMPUTED, shipped #1331 and #1363) records landed in the same records PR, both with human verification pending (see Deferred Verification); 225 (PR-3 merged #1368, still open) and 253 in flight
+Last activity: 2026-11-26 — records PR for 225 PR-3 (#1368, plans 05-17, 19 and 20 ticked; 18 open on its founder control; 225-21 booked, not written) and the v1.23 booking of 254 OPENINGDEPOSIT
+Progress: [██████░░░░] 61%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -739,6 +741,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 252 added (2026-11-25, /gsd-phase add, founder decision 2026-11-25, AskUserQuestion, "Book it in v1.22 (Recommended)"): DERIBITOPTIONS, a Deribit options strategy's published figures are mark-to-market or withheld, never a cash-wallet artefact. It books the fix the diagnosed debug session `deribit-implausible-returns` (mechanism B) named as its next action, now tracked so the phase can cite it. The handler appended the section below the v1.22 Progress table with `Depends on: Phase 250` and a TBD stub; all three were corrected by hand. Number 252 because 251 (SYNCSTORE) was already booked in the 222 worktrees; 251 is carried onto main in the same records PR.
 - Phase 155.2 and Phase 157 moved out of v1.22 TRUTH into v1.23 HARDEN: 2026-11-25, hand-edit of ROADMAP.md because /gsd-phase --edit preserves a phase's milestone; founder ruling in chat, "We will Move 157 and 155.2 into the next milestone". Their sections, Progress rows and 10 requirements (MT5-07..10, MT5-15, MT5-GOAL-01, FCONF-01..04) move to v1.23; v1.22 holds 22 phases (10 complete) and 71 requirements, v1.23 12 phases and 45. The 155.2 freeze window still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs.
 - Phase 253 added (2026-11-26, /gsd-phase add, founder ruling 2026-11-26 "ship Phase 250 now ... The Binance switch stays off until that phase closes"): BINANCECURSOR, the [250-BINANCE-STOP-BELOW-CURSOR] re-read gap, its predicate and its short-lived signal; an RPC change, so a migration; depends on 250. The handler appended the section below the v1.22 Progress table with `Depends on: Phase 252`, a placeholder goal and a TBD stub; all were corrected by hand, and `TODOS.md` `[250-BINANCE-STOP-BELOW-CURSOR]` now names Phase 253 as owner.
+- Phase 254 added (2026-11-26, /gsd-phase add, founder ruling 2026-11-26 "Exempt it, book for v1.23"): OPENINGDEPOSIT, a deposit dated exactly the day before a key's first return is that key's opening deposit on every venue, by a narrow opening-run exemption in `replay_key_equity`, not by widening `FULL_HISTORY_VENUES` (shared with the D-13 zero-start checks). Source: an allocator book's `out_of_window_flow` is a Bybit key's opening deposit dated one day before its first return. The handler appended it to v1.22 with `Depends on: Phase 253`, a placeholder goal and a TBD stub, and churned `state.json` statuses; the section, bullet and Progress row were moved to v1.23 HARDEN by hand, the goal written, and `state.json` reverted.
 
 ### Decisions
 
@@ -1842,7 +1845,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-23T18:28:35.274Z
-**Stopped At:** Phase 222 closed, 252 records landed (records PR)
+**Stopped At:** Phases 233, 250 and 251 closed; 230 and 238 records landed (records PR)
 **Resume File:** None
 
 **Last Date:** 2026-11-14T07:30:26.000Z

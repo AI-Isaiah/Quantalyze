@@ -31,7 +31,7 @@ key-files:
 key-decisions:
   - "Migration B renamed 20261125083433 -> 20261126102346 (UTC at the rename). Later than every file on the merged tree (previous newest 20261125212222). The PROD ledger tip comparison is Task 3 step 2 and is NOT done here."
   - "B's prod-body-ack corrected from d5ef374c... to 8ebf2301... (see Deviations); the orchestrator decided this."
-status: partial
+status: complete
 actuals:
   tokens: 25000
   tasks: 2
@@ -44,6 +44,8 @@ plan_head_after: 9bef055b0cf0185c7a15eeff9484c7d5424f0bb7
 
 Migration B is merged onto origin/main (v0.133.89.0, `2aa1a0cbb`), renamed to an honest UTC name, and passes both of its gates narrowed on the lane with every arm biting. Every mutation census now reads main's values plus plan 10's arms as measured. **Status: partial. Task 3 (the read-only PROD pass) is PENDING and is run by the orchestrator.**
 
+**Update 2026-11-26: complete.** Task 3 was run by the orchestrator (section at the end), PR-3 merged as #1368 (`73a6014e`, v0.133.92.0), and both applies succeeded. The post-merge PROD readings match migration B. The paragraph above is kept as lineage.
+
 `commits: 31` is MEASURED by `git rev-list --count d14f82d71..HEAD` at the code head `d0817adcf`. It counts the 28 origin/main commits the merge brought in. Authored by this plan: the merge commit `67278b5db`, the ack fix `578bb0341`, the census commit `d0817adcf`, and this SUMMARY's own commit (after the measurement). Nothing was pushed.
 
 ## Tasks
@@ -51,6 +53,7 @@ Migration B is merged onto origin/main (v0.133.89.0, `2aa1a0cbb`), renamed to an
 - **Task 1 (tracer):** merged origin/main, resolved conflicts, renamed B, re-checked the reconnect re-base and the ack. Commits `67278b5db` (merge + rename) and `578bb0341` (ack).
 - **Task 2:** re-based every census by measurement. Commit `d0817adcf`.
 - **Task 3 (blocking-human): PENDING, not attempted.** See the section at the end.
+- **Task 3, update 2026-11-26: DONE** by the orchestrator. Every step PASS; see the section at the end.
 
 ## New migration name
 
@@ -233,11 +236,18 @@ Read through the PROD Supabase MCP, one query per call, never chained, marker qu
 6. **PR-2c live.** Analytics `/health` `git_sha` = `2aa1a0cbb` (PR-2c's merge); Vercel production deployment at `2aa1a0cbb` (10:08Z); Railway's analytics deployment of that SHA went live after main CI turned green (~10:22Z). 225-18-SUMMARY.md records every measured wrong-server attempt as refused before storage (two at the broker's sign-in on 2026-11-25, one on 2026-11-26 most likely before the analytics deploy, two pre-broker for unknown names). The post-deploy positive control (the correct server answering the already-connected code) is still not recorded. PASS on the refusal half.
 6b. **Poll-path server refusal (WR-01).** Not shipped: `git grep -c "assert_expected_server(" origin/main` over `services/mt5_read.py`, `services/job_worker.py` and `services/allocator_positions.py` prints nothing. BOOKED: plan 20 Task 3 read PASS (28 verdict lines, all True, 11/11 keys, 4/4 servers), and 225-20-SUMMARY.md's `## Poll-path server enforcement: owner` names follow-up gap plan 225-21. PASS (booked).
 7. **155.2 freeze.** Neither `155.2-12-SUMMARY.md` nor `155.2-14-SUMMARY.md` exists on origin/main. Open. PASS.
-8. **Open PRs touching `supabase/migrations/`:** _filled at READY below_.
+8. **Open PRs touching `supabase/migrations/`:** at READY, #1367 (Phase 253) was the only other open migration PR. It was not merged concurrently with #1368. It merged later as v0.133.93.0 (`734e51f5`), after 225's PROD apply had succeeded. PASS.
 
-**VAC-04** on #1368 must report the live `reconnect_allocator_api_key` hash as `8ebf2301…`: _filled at READY below_.
+**VAC-04** on #1368 must report the live `reconnect_allocator_api_key` hash as `8ebf2301…`: run `45819240245` reported that hash and acknowledged the drift through the `prod-body-ack` pragma (`8ebf230179b99d1f49cc8ed959ad2f7386aad92b592722c4825bc7aa1bd43c74`). The ack is EARNED. PASS.
+
+**#1368's final CI tally:** 29 success and 2 failure. The failures were `sql-gate-lint`, carrying the expected stale-baseline `DRIFT` row for `reconnect_allocator_api_key`/1 (the baseline is re-dumped only after the PROD apply), and the `frontend` aggregator that reads it.
 
 **After merge (main's step, not done here):** read the index definition from `pg_indexes` and the reconnect body from `pg_proc` on PROD, and record both.
+
+**After merge, recorded 2026-11-26.** `supabase-migrate.yml` on `73a6014e`: `apply-test` success, `apply-test-verdict` success, `apply` (PROD) success, then `redump-dump` and `redump-pr` success. PROD read through the Supabase MCP, one query per call, marker query first (it named PRODUCTION).
+- **Index.** `pg_indexes.indexdef` for `api_keys_user_exchange_venue_account_uniq`: `CREATE UNIQUE INDEX ... ON public.api_keys USING btree (user_id, exchange, venue_account_id, COALESCE(venue_server, ''::text)) WHERE ((venue_account_id IS NOT NULL) AND (disconnected_at IS NULL))`. It matches B's `CREATE UNIQUE INDEX`: same name, four key members, same predicate. PASS.
+- **reconnect_allocator_api_key.** 1 overload, `reconnect_allocator_api_key(uuid)`, SECURITY DEFINER, `proconfig` `search_path=public, pg_temp`. `proacl` grants EXECUTE to `postgres`, `authenticated` and `service_role`; no `anon`, no PUBLIC. `md5(prosrc)` = `c5d17c0e7be07bcc6126df37285562d8`, length 2500, and the body between `AS $$` and `$$;` in `20261126140500_api_keys_venue_server_index.sql` hashes to the same md5 and length. The live body is byte-identical to B's. PASS.
+- **Plan 18's post-deploy positive control** (the correct server must answer the already-connected code): NOT measured. It needs a founder submission of the PROD add-key form with a real account's credentials, which no read can stand in for. It stays a founder item in `225-18-SUMMARY.md`.
 
 ## Self-Check: PASSED
 

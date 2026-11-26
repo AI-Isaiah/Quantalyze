@@ -1936,6 +1936,217 @@ async def test_a_non_true_daily_pnl_malformed_is_not_carried(bad) -> None:  # ty
 
 
 # ===========================================================================
+# Phase 253 BINANCECURSOR plan 04 (SC-3, D-08) — the nine sync-time `binance_*` keys the Binance
+# sync writes (services/binance_sync_flags.py BINANCE_SYNC_FLAG_KEYS) outlive the derive prestamp
+# AND this wholesale rebuild AND every wholesale FAILURE writer of the chain. They are flags, never
+# warnings: none is in NAV_TWR_GUARD_KEYS or ALLOCATED_CAPITAL_GUARD_KEYS, so a flagged strategy
+# stays exact-string "complete".
+#
+# NEUTER (PROOF-01; recorded verbatim in the 253-04 SUMMARY):
+#   F2 delete the carry after the `daily_pnl_malformed_` loop:
+#      test_binance_sync_flags_are_carried_through_the_rebuild_and_never_promote goes RED.
+#   F7 drop the `read_binance_sync_flags` term from `_mark_truncated`:
+#      test_the_truncated_failure_writer_still_carries_the_binance_sync_flags goes RED.
+# ===========================================================================
+
+_BINANCE_SYNC_FLAGS = {
+    "binance_stop_below_cursor": True,
+    "binance_deadline_symbols": ["BTCUSDT"],
+}
+_BINANCE_FAILED_FLAGS = {"csv_source": True, **_BINANCE_SYNC_FLAGS}
+
+
+@pytest.mark.asyncio
+async def test_binance_sync_flags_are_carried_through_the_rebuild_and_never_promote() -> None:
+    payload, _spy, _bench = await _run_with_flags({"csv_source": True, **_BINANCE_SYNC_FLAGS})
+    dq = payload["data_quality_flags"]
+    assert dq.get("binance_stop_below_cursor") is True, (
+        "the sync-time key must survive the wholesale rebuild, or the run-time signal that "
+        f"names an unread span is wiped one hop after the sync wrote it; got {dq!r}"
+    )
+    assert dq.get("binance_deadline_symbols") == ["BTCUSDT"]
+    assert payload["computation_status"] == "complete"
+    assert payload["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key, bad",
+    [
+        ("binance_stop_below_cursor", False),
+        ("binance_stop_below_cursor", 1),
+        ("binance_deadline_symbols", []),
+        ("binance_deadline_symbols", [1]),
+        ("binance_deadline_symbols", "BTCUSDT"),
+        ("binance_read_through_ms", True),
+        ("binance_read_through_ms", -1),
+    ],
+)
+async def test_a_malformed_binance_sync_flag_is_not_carried(key: str, bad: object) -> None:
+    payload, _spy, _bench = await _run_with_flags({"csv_source": True, key: bad})
+    assert key not in payload["data_quality_flags"]
+
+
+async def _failed_upsert_flags(sb: MagicMock) -> dict[str, object]:
+    sa = sb.table("strategy_analytics")
+    failed = [
+        c.args[0]
+        for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict) and c.args[0].get("computation_status") == "failed"
+    ]
+    assert failed, "expected a failed-status upsert"
+    return failed[-1]["data_quality_flags"]
+
+
+def _prior_flags_answer(sb: MagicMock, answer: object) -> None:
+    """Make the `select(...).eq(...).maybe_single().execute()` probe of the shared
+    `_make_supabase_mock` (one table for every name) answer `answer`."""
+    execute = MagicMock()
+    if isinstance(answer, Exception):
+        execute.side_effect = answer
+    else:
+        execute.return_value = MagicMock(data=answer)
+    sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value = MagicMock(
+        execute=execute
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_insufficient_history_failure_writer_still_carries_the_binance_sync_flags() -> None:
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_supabase_mock([{"date": "2024-01-01", "daily_return": 0.005}])
+    _prior_flags_answer(sb, {"data_quality_flags": dict(_BINANCE_FAILED_FLAGS)})
+    with patch("services.analytics_runner.get_supabase", return_value=sb):
+        with pytest.raises(CsvInsufficientHistory):
+            await run_csv_strategy_analytics("test-strategy-uuid")
+    failed = [
+        c.args[0]
+        for c in sb.table.return_value.upsert.call_args_list
+        if c.args[0].get("computation_status") == "failed"
+    ]
+    assert failed[0]["data_quality_flags"] == _BINANCE_FAILED_FLAGS
+
+
+@pytest.mark.asyncio
+async def test_a_failing_prior_flags_read_never_blocks_the_failure_stamp(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_supabase_mock([{"date": "2024-01-01", "daily_return": 0.005}])
+    _prior_flags_answer(sb, RuntimeError("prior-flags read refused"))
+    with caplog.at_level(logging.WARNING), patch(
+        "services.analytics_runner.get_supabase", return_value=sb
+    ):
+        with pytest.raises(CsvInsufficientHistory):
+            await run_csv_strategy_analytics("flag-read-fails-uuid")
+    failed = [
+        c.args[0]
+        for c in sb.table.return_value.upsert.call_args_list
+        if c.args[0].get("computation_status") == "failed"
+    ]
+    assert failed[0]["data_quality_flags"] == {"csv_source": True}
+    warned = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "flag-read-fails-uuid" in r.getMessage()
+        and "RuntimeError" in r.getMessage()
+    ]
+    assert len(warned) == 1, f"expected one WARNING naming the strategy and the class, got {warned}"
+
+
+@pytest.mark.asyncio
+async def test_the_truncated_failure_writer_still_carries_the_binance_sync_flags() -> None:
+    from services.analytics_runner import (
+        PaginatedSelectTruncated,
+        run_csv_strategy_analytics,
+    )
+
+    sb = MagicMock()
+    table = MagicMock()
+    sb.table.return_value = table
+    table.upsert.return_value = MagicMock(execute=MagicMock())
+    eq_chain = MagicMock()
+    eq_chain.single.return_value.execute.return_value = MagicMock(
+        data={"id": "trunc-253-uuid", "user_id": "u"}
+    )
+    eq_chain.maybe_single.return_value.execute.return_value = MagicMock(
+        data={"data_quality_flags": dict(_BINANCE_FAILED_FLAGS)}
+    )
+    table.select.return_value.eq.return_value = eq_chain
+    trunc = PaginatedSelectTruncated(page_count=1000, page_size=1000, hint="csv_daily_returns")
+
+    async def _side_effect_db_execute(fn):  # type: ignore[no-untyped-def]
+        if getattr(fn, "__name__", "") == "_load_series":
+            raise trunc
+        return fn()
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), patch(
+        "services.analytics_runner.db_execute", side_effect=_side_effect_db_execute
+    ):
+        with pytest.raises(PaginatedSelectTruncated):
+            await run_csv_strategy_analytics("trunc-253-uuid")
+    failed = [
+        c.args[0]
+        for c in table.upsert.call_args_list
+        if c.args[0].get("computation_status") == "failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0]["data_quality_flags"] == _BINANCE_FAILED_FLAGS
+
+
+@pytest.mark.asyncio
+async def test_the_config_failure_writer_still_carries_the_binance_sync_flags() -> None:
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    bad_cfg = {**_ALLOC_CFG_SIMPLE_ACTIVE, "metrics_basis": "not_a_basis"}
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(),
+        api_key_id="key-1",
+        returns_denominator_config=bad_cfg,
+        existing_flags=dict(_BINANCE_FAILED_FLAGS),
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), patch(
+        "services.analytics_runner.get_benchmark_returns",
+        new=AsyncMock(return_value=(None, True)),
+    ):
+        with pytest.raises(CsvMalformedDenominatorConfig):
+            await run_csv_strategy_analytics("s")
+    assert await _failed_upsert_flags(sb) == _BINANCE_FAILED_FLAGS
+
+
+@pytest.mark.asyncio
+async def test_the_unrecoverable_failure_writer_keeps_the_binance_sync_flags() -> None:
+    """`_mark_unrecoverable` already read-modify-writes the prior flags and is NOT changed by
+    plan 04; this arm pins that it keeps carrying the sync-time keys."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_supabase_mock(
+        [
+            {"date": "2024-01-01", "daily_return": 0.005},
+            {"date": "2024-01-02", "daily_return": -0.003},
+        ]
+        * 5
+    )
+    _prior_flags_answer(sb, {"data_quality_flags": dict(_BINANCE_FAILED_FLAGS)})
+    with patch("services.analytics_runner.get_supabase", return_value=sb), patch(
+        "services.analytics_runner.get_benchmark_returns",
+        new=AsyncMock(return_value=(pd.Series([0.001] * 10), False)),
+    ), patch(
+        "services.basis_series.compute_all_metrics", side_effect=RuntimeError("blip")
+    ):
+        with pytest.raises(CsvComputationFailed):
+            await run_csv_strategy_analytics("test-strategy-uuid")
+    failed = [
+        c.args[0]
+        for c in sb.table.return_value.upsert.call_args_list
+        if c.args[0].get("computation_status") == "failed"
+    ]
+    assert failed[-1]["data_quality_flags"] == _BINANCE_FAILED_FLAGS
+
+
+# ===========================================================================
 # Phase 164.6.6.2.2 (D-05) — the single-key row names the cumulative method its
 # curve was built with, as composites already do. Readers default to geometric
 # when the key is absent, so a simple (allocated-capital) curve WITHOUT the stamp
