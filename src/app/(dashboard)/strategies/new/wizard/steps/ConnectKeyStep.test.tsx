@@ -1038,6 +1038,30 @@ describe("[140.4-15 / SEAMRIM-08] ConnectKeyStep — a seam WIRE code is transla
     expect(payload.step).toBe("connect_key");
   });
 
+  it("[225] a login-stage MT5 -6 (KEY_MT5_SIGN_IN_REFUSED) renders its own broker-refused card and offers NO retry", async () => {
+    // Phase 225 (SIGNINREFUSED). The body create-with-key puts on the wire for wire
+    // `MT5_SIGN_IN_REFUSED`, hand-typed. Never the UNKNOWN card, whose copy IS recoverable.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_MT5_SIGN_IN_REFUSED", error: "x" }, 424),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_MT5_SIGN_IN_REFUSED");
+    expect(screen.getByText("Your broker refused this sign-in.")).toBeInTheDocument();
+    expect(envelope.textContent).toContain(
+      "a wrong account number, a wrong investor password and a wrong server",
+    );
+    expect(screen.queryByText("Try the last action again.")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+      "a Retry control was offered for a refused sign-in: it re-sends the same " +
+        "credential to the one shared terminal",
+    ).toBeNull();
+  });
+
   it("POSITIVE COUNTERPART: an unrecognised code still falls to UNKNOWN, which DOES render Retry", async () => {
     // Without this the absence assertion above is satisfiable by a component
     // that renders no controls at all.

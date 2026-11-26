@@ -840,6 +840,14 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   // the ARRIVAL gate: a new Python error_code with no TypeScript disposition falls
   // through the substring cascade, which is what this file exists to prevent.
   "MT5_SERVER_UNKNOWN",
+  // 225 (SIGNINREFUSED) - minted by `_validate_mt5_key_probe`'s login-stage refusal arm
+  // (routers/exchange.py) for a `last_error` of exactly -6, `RES_E_AUTH_FAILED`: a
+  // `VenueTransientHTTPException` 424 with `recoverable=False`, beside the arm's
+  // `SIGN_IN_FAILED` raise for every other login-stage code. Takes a
+  // KEY_MT5_SIGN_IN_REFUSED verdict row at 424. Added here because this roster is the
+  // ARRIVAL gate: a new Python error_code with no TypeScript disposition falls through
+  // the substring cascade, which is what this file exists to prevent.
+  "MT5_SIGN_IN_REFUSED",
   // 164.6.6.3.2 / item 10 (D-02) - minted by `_validate_mt5_key_probe`'s two
   // terminal-busy refusals (routers/exchange.py: the owed-scrub gate and
   // `except Mt5TerminalBusyError`), each a `VenueTransientHTTPException` 424 with
@@ -991,8 +999,14 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * below agrees with the derived emitter set at 50 (read off that assertion's own failure,
  * which listed 50 derived against 48 typed, not a hand tally). 0.6 x 50 = 30.0, floored
  * to 30 - the rule MOVES the floor this time.
+ *
+ * 30 -> 31 (2026-11-25, Phase 225 SIGNINREFUSED): `MT5_SIGN_IN_REFUSED` arrives, the code the
+ * validate arm answers for a login-stage -6. The hand-typed roster holds 52 codes with it,
+ * and the set-equality assertion below agrees with the derived emitter set at 52 (read off
+ * that assertion's own failure, which listed 52 derived against 51 typed, not a hand tally).
+ * 0.6 x 52 = 31.2, floored to 31 - the rule MOVES the floor this time.
  */
-const DERIVED_FLOOR = 30;
+const DERIVED_FLOOR = 31;
 
 /**
  * ⭐ THE REACH PIN — hand-typed, because today nothing else asserts WHERE the

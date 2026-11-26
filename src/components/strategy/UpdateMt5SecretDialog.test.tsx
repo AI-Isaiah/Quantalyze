@@ -312,6 +312,19 @@ describe("UpdateMt5SecretDialog", () => {
     );
   });
 
+  // Phase 225 (SIGNINREFUSED). `rotate_key_secret` runs the same `_validate_mt5_key_probe`,
+  // which answers wire `MT5_SIGN_IN_REFUSED` for a login-stage -6. Without its roster row
+  // the recogniser answers `UNKNOWN`, whose copy is recoverable. Expected text is typed
+  // here, not read from the table.
+  it("KEY_MT5_SIGN_IN_REFUSED is recognised, not UNKNOWN, and names the broker's refusal", async () => {
+    const envelope = await submitAndFailWith("KEY_MT5_SIGN_IN_REFUSED");
+    expect(envelope.textContent).toContain("Your broker refused this sign-in.");
+    expect(envelope.textContent).toContain(
+      "a wrong account number, a wrong investor password and a wrong server",
+    );
+    expect(envelope.textContent).not.toContain("Try the last action again.");
+  });
+
   // 164.6.6.3.2 (D-01, D-02). `rotate_key_secret` runs the same `_validate_mt5_key_probe`,
   // so an unset validation gateway reaches this dialog as wire `MT5_VALIDATION_UNCONFIGURED`
   // and a held terminal as `MT5_TERMINAL_BUSY`. Without a roster row each would answer

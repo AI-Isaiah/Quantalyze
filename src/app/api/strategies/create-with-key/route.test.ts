@@ -5258,6 +5258,38 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/create-with-key — Sentr
    * The copy must also never claim an alert, since this key is not in
    * `OUR_DEFECT_KEY_ERROR_CODES`.
    */
+  /**
+   * Phase 225 (SIGNINREFUSED) - a login-stage MT5 `last_error` -6 answers wire
+   * `MT5_SIGN_IN_REFUSED` (424, `recoverable=False`). The code must reach the wizard as
+   * `KEY_MT5_SIGN_IN_REFUSED`, never UNKNOWN, and it is not an operator fault, so it is
+   * not captured. Nothing is encrypted or written.
+   */
+  it("[225] a login-stage MT5 -6 renders KEY_MT5_SIGN_IN_REFUSED/424, not UNKNOWN, and is NOT captured", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("Your broker answered and refused this sign-in."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 424,
+          seamCode: "MT5_SIGN_IN_REFUSED",
+          recoverable: false,
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(424);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_MT5_SIGN_IN_REFUSED");
+    expect(json.code).not.toBe("UNKNOWN");
+    expect(json.code).not.toBe("KEY_SIGN_IN_FAILED");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await expectNoCapture();
+  });
+
   it("[218] a not-ready MT5 terminal renders KEY_MT5_TERMINAL_NOT_READY/424 and is NOT captured", async () => {
     validateKeyMock.mockRejectedValue(
       Object.assign(
