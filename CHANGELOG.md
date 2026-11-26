@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.133.93.1] - 2026-11-26 — BASELINE: automated re-dump after the PROD apply of 734e51f5
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `45824919779`, after the PROD apply of merge `734e51f5`: sha256 `b4f15e84…` → `0e814551…`.
+- Shape, old → new: tables 72 → 73, policies 154 → 155, function statements 147 → 148, distinct function names 145 → 146, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261126140500_api_keys_venue_server_index.sql`, `20261126150000_strategy_fills_reread_bound.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-26` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.93.0 → 0.133.93.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=343 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 148 — MATCH 145, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45824919779` succeeded, and this entry was composed by the `redump-pr` job. Run `45824919779` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+- **`NAME_SET_RATCHET`: the Phase 253 row is deleted** (hand commit on the bot branch, as on #1365). The `snapshot-only` row for `set_strategy_fills_reread_bound` had one clearing condition: a re-dump taken after `20261126150000_strategy_fills_reread_bound.sql` applied to PROD. This re-dump meets it, so `npm run schema:functions:check` reported the row `ratchet-stale` and failed until the row was deleted. A dated comment in `scripts/dump-sql-functions.ts` records the deletion.
+
 ## [0.133.93.0] - 2026-11-26 — Phase 253 BINANCECURSOR: a stopped Binance fills read below a cursor that another strategy moved is re-read
 
 A Binance raw fills read that stops (deadline, page cap), loses a symbol or raises leaves an unread span below its stop. The per-key cursor `api_keys.last_fetched_trade_timestamp` is shared by every strategy on the key and only moves forward, so a clean run of a sibling strategy could carry it past that span, and no later run re-read it. That was `[250-BINANCE-STOP-BELOW-CURSOR]`, the gap Phase 250 shipped with. Phase 253 gives each strategy its own re-read bound, takes it before anything persists, and keeps the `binance_*` sync flags alive until a clean sync clears them. `USE_RAW_TRADE_INGESTION` stays off for Binance: no Phase 253 plan turns it on (SC-4, D-10).
