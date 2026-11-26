@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.133.81.2] - 2026-11-26 — fix: the Deribit options probe's main() test gives logging back, so the redact-bridge tests stop reading an empty log
+
+`tests/test_stdlib_redact_bridge.py` failed in the `python` job on PR #1352 (head `8c0453b8f`, worker gw2: the dict-args and format-placeholder tests) and on PR #1354 (head `f615d8ec4`: the signature-in-arg and signature-in-format-string tests). Each failure read an EMPTY capture buffer, passed on rerun, and passed when the file ran alone. Neither PR touches logging. This fixes the test that leaks the state, not the tests that read it.
+
+### Root cause
+- `tests/test_deribit_options_smoothed_probe.py::test_main_prints_only_the_exception_type_on_failure`, added in #1351 (Phase 252 DERIBITOPTIONS), calls `scripts/deribit_options_smoothed_probe.main()`. That `main()` runs `logging.disable(logging.CRITICAL)` for the whole process, which is right for a CLI, and the test never gave it back.
+- From then on, every test on the same xdist worker drops each WARNING and ERROR record at `Logger.isEnabledFor`, before `makeRecord` and before any handler. `setLevel(DEBUG)` on the logger does not help, because the global disable is checked first. So the redact-bridge tests' capture handler on `quantalyze.analytics` received nothing.
+- It needs two things at once: the polluter, and a redact-bridge test scheduled after it on the same worker with no sibling `_logging_restored` teardown in between. That is why CI lost two tests per run while the serial repro below loses eleven. The worker ordering in CI is inferred: the job runs pytest without `-v`, so its log does not show which tests a worker ran before the failure.
+- Not #1338 (`8507564ef`). That fix was about structlog's frozen processor list. This one is stdlib's global `logging.disable` level.
+
+### Fixed
+- The test now requests a `_logging_restored` fixture that calls `logging.disable(logging.NOTSET)` on teardown. It is the same shape `test_derivegaps_probe.py`, `test_bybit_upnl_probe.py` and `test_walletoffset_probe.py` already use for their probes' `main()`, and `test_bybitreads_probe.py` does the same inline with `try/finally`.
+
+### Tests
+- Repro, from `analytics-service/`: `pytest -p no:xdist "tests/test_deribit_options_smoothed_probe.py::test_main_prints_only_the_exception_type_on_failure" tests/test_stdlib_redact_bridge.py`. Before the fix: 11 failed, 7 passed, with the CI failure text exactly. After: 18 passed. Reverting the test file from a byte backup brings back 11 failed, and restoring it gives 18 passed. Controls: the redact-bridge file alone, 17 passed; the reverse order, 18 passed.
+- A per-test audit over the six probe test files whose scripts call `logging.disable` (bybit_upnl, bybitreads, deribit_options_smoothed, derivegaps, navbreach_anchor, walletoffset) checked `logging.root.manager.disable` after every test. Before the fix it flagged only this test. After the fix it flagged none (560 passed).
+
+### Notes
+- Known limit: `scripts/navbreach_anchor_probe.main()` has the same process-wide disable. Its only test calls `main([])`, which exits in argparse before the disable, so it leaks nothing today. A future test that drives that `main()` past argparse needs the same fixture.
+
 ## [0.133.81.1] - 2026-11-25 — BASELINE: automated re-dump after the PROD apply of 7b31cdc4
 
 ### Changed

@@ -775,7 +775,18 @@ async def test_a_composite_with_no_members_is_refused(monkeypatch: Any, capsys: 
     assert decrypted == [] and capsys.readouterr().out == ""
 
 
-def test_main_prints_only_the_exception_type_on_failure(monkeypatch: Any, capsys: Any) -> None:
+@pytest.fixture
+def _logging_restored() -> Any:
+    """main() switches logging off for the whole process; give it back."""
+    import logging
+
+    yield
+    logging.disable(logging.NOTSET)
+
+
+def test_main_prints_only_the_exception_type_on_failure(
+    monkeypatch: Any, capsys: Any, _logging_restored: Any
+) -> None:
     async def _boom(_strategy_id: str) -> int:
         raise ValueError(_LEAKY_MESSAGE)
 
