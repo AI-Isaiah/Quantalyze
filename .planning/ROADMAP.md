@@ -171,13 +171,13 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [x] **Phase 232: OKXTRADES — an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades** - Mixed-currency daily bills, page-cap truncation, the trade cursor (completed 2026-11-24)
 - [x] **Phase 233: DERIBITTRUTH — a Deribit key's returns reach its newest flow, every book day is explained or withheld, and stale series page on every venue** - From the wave-0 diagnosis: stale-returns root fix, per-venue freshness check, correction classifier, book cumulative (completed 2026-11-26)
 - [x] **Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key** - Seam S2 owner: transient-zero MT5 keys, any exception reverts, counted fallback flag, no residue reason (completed 2026-11-25)
-- [ ] **Phase 235: HOLDINGSTRUTH — one account counts once on Holdings, match scoring and the dashboard, and every failing key is named** - Reads the identity value 225 settles: identity misses fail loud, per-account unpriced marker, dashboard marker read, shared-account keys named
+- [x] **Phase 235: HOLDINGSTRUTH — one account counts once on Holdings, match scoring and the dashboard, and every failing key is named** - Reads the identity value 225 settles: identity misses fail loud, per-account unpriced marker, dashboard marker read, shared-account keys named (completed 2026-11-26)
 - [ ] **Phase 236: FIGUREMATH — every engine annualizes one way, CVaR is historical, and moved figures are re-derived and announced** - F-5 "365, ddof 1 everywhere", F-6 historical CVaR, quantstats 0.0.86, one CAGR span rule, fleet re-derive; moves published figures
 - [x] **Phase 237: FACTSHEETHONEST — every surface shows a strategy's true state, and no cache re-serves a stale or failed one** - Owner of the OG route and payload builder: withheld residue, re-run holding on every surface, OG not-found cache, BTC price failure cache, owner data source (completed 2026-11-25)
 - [x] **Phase 238: NEVERCOMPUTED — a strategy that never computed, failed or stalled never claims a compute time or tells its owner to wait** - computed_at on never-computed rows (founder ruling) and the /strategies note wording (completed 2026-11-26)
 - [x] **Phase 239: SURFACECACHE — the composer range and the Discovery ranking reflect the current truth** - Composer range stored as dates; BTC-unit and USD returns ranked together as pure performance (founder ruling 2026-11-24) (completed 2026-11-24)
 - [x] **Phase 240: CONNECTTRUTH — validating a key or a CSV gets a true answer, and anonymous limits are fair** - One error code on every venue, CSV month-name cells, anonymous bucket fairness, edge and upstream CSV limits agree (completed 2026-11-25)
-- [ ] **Phase 241: DEMOCREDS — the two demo accounts are gone, and their passwords are out of the tree behind a guard that still bites** - The only HIGH item (158-OPS-03), kept in v1.22 by founder exception: accounts deleted on TEST and PROD, digest absence guard
+- [x] **Phase 241: DEMOCREDS — the two demo accounts are gone, and their passwords are out of the tree behind a guard that still bites** - The only HIGH item (158-OPS-03), kept in v1.22 by founder exception: accounts deleted on TEST and PROD, digest absence guard (completed 2026-11-26)
 - [x] **Phase 250: BINANCEFILLS — a Binance fills read walks every window and never stalls its cursor** - Routed from 232 review (R2-01, R2-02, the BINANCE_PAGE_CAP stop); lands before `USE_RAW_TRADE_INGESTION` is turned on for Binance (completed 2026-11-26)
 - [x] **Phase 251: SYNCSTORE — run_sync_trades_job stores every run's daily P&L and refusal flags truthfully** - The four 232 OKXTRADES leftovers in `run_sync_trades_job`; after 222 (completed 2026-11-26)
 - [ ] **Phase 252: DERIBITOPTIONS — a Deribit options strategy's published figures are mark-to-market or withheld, never a cash-wallet artefact** - From the diagnosed `deribit-implausible-returns` debug session (mechanism B, cash-basis options): Quantum Drift's owner factsheet shows +1636172.7% cumulative, unwithheld; re-measures DEF-142.2-07
@@ -612,16 +612,16 @@ Plans:
 3. When the dashboard's unpriced-marker read fails, the page shows a note and a Sentry event fires; stale rows are never shown silently. (HOLD-04)
 4. Every failing key of a shared account is named in the missing-data message, including a second key whose cause another key already printed. (HOLD-05)
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 6 plans
+**Plans:** 6/6 plans complete
 **UI hint**: yes
 
 Plans:
-- [ ] 235-01-PLAN.md — HOLD-01: a key missing from the identity read fails loud (strict `keyAccountOf`, `strictAccountOf`) (wave 1)
-- [ ] 235-02-PLAN.md — HOLD-02: the matcher applies the native-unpriced marker per account, shared case table replayed in pytest and vitest (wave 1)
-- [ ] 235-03-PLAN.md — HOLD-04 server: a failed marker read sets `holdingsUnpricedCheckFailed` and fires a throttled Sentry event (wave 2)
-- [ ] 235-04-PLAN.md — HOLD-04 UI: the unpriced-check note on the Overview and the Holdings tab (wave 3)
-- [ ] 235-05-PLAN.md — HOLD-05 producer: `sharedAccountFailingGroups` and its payload field (wave 3)
-- [ ] 235-06-PLAN.md — HOLD-05 message: every failing shared-account key named, undated line, ship obligations (wave 4)
+- [x] 235-01-PLAN.md — HOLD-01: a key missing from the identity read fails loud (strict `keyAccountOf`, `strictAccountOf`) (wave 1)
+- [x] 235-02-PLAN.md — HOLD-02: the matcher applies the native-unpriced marker per account, shared case table replayed in pytest and vitest (wave 1)
+- [x] 235-03-PLAN.md — HOLD-04 server: a failed marker read sets `holdingsUnpricedCheckFailed` and fires a throttled Sentry event (wave 2)
+- [x] 235-04-PLAN.md — HOLD-04 UI: the unpriced-check note on the Overview and the Holdings tab (wave 3)
+- [x] 235-05-PLAN.md — HOLD-05 producer: `sharedAccountFailingGroups` and its payload field (wave 3)
+- [x] 235-06-PLAN.md — HOLD-05 message: every failing shared-account key named, undated line, ship obligations (wave 4)
 
 ### Phase 236: FIGUREMATH — every engine annualizes one way, CVaR is historical, and moved figures are re-derived and announced
 
@@ -809,7 +809,7 @@ Removing the text alone does not close the item, and history is not rewritten. T
 2. No tracked file contains either demo password literal. The absence guard checks a digest, not the literal, and goes RED when a matching literal is planted in a byte copy. (SECR-02)
 3. The seed and drain paths that used the accounts are retired or redirected as the plan decides, and the suites that read them run green without the accounts.
 4. PROOF-01: the absence guard and any changed seed pin go RED on a neutered copy with the named arm first. Each is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY without quoting a literal.
-**Plans:** 4 plans
+**Plans:** 4/4 plans complete
 
 Plans:
 **Wave 1**
@@ -955,13 +955,13 @@ Plans:
 | 232. OKXTRADES | 4/4 | Complete (shipped v0.133.70.0, #1330) | 2026-11-24 |
 | 233. DERIBITTRUTH | 7/7 | Complete (shipped v0.133.83.0, #1360; verification passed 5/5; book B's out_of_window_flow handed to Phase 234) | 2026-11-26 |
 | 234. NOCAPITAL | 4/4 | Complete (shipped v0.133.76.0, #1339; verification passed, SECURITY 15/15 closed) | 2026-11-25 |
-| 235. HOLDINGSTRUTH | 0/? | Not started | - |
+| 235. HOLDINGSTRUTH | 6/6 | Complete    | 2026-11-26 |
 | 236. FIGUREMATH | 11/11 | Shipped v0.133.82.0 (#1354); human verification pending (FIG-05, the coordinator's PROD fleet re-derive from `docs/runbooks/figuremath-fleet-rederive.md`, after 233 DERIBITTRUTH merges and 236 is deployed) | - |
 | 237. FACTSHEETHONEST | 13/13 | Complete (shipped v0.133.63.0, #1316; both visual checks passed 2026-11-25) | 2026-11-25 |
 | 238. NEVERCOMPUTED | 9/9 | Complete (shipped PR-1 v0.133.71.0 #1331, FACT-05, and PR-2 v0.133.90.0 #1363, FACT-03; migration 20261126130000 applied to TEST and PROD; verification passed, all five human items resolved 2026-11-26) | 2026-11-26 |
 | 239. SURFACECACHE | 3/3 | Complete (shipped v0.133.72.0, #1332) | 2026-11-24 |
 | 240. CONNECTTRUTH | 8/8 | Complete (shipped v0.133.74.0, #1334) | 2026-11-25 |
-| 241. DEMOCREDS | 4/4 | Verified human_needed (Pair A reset is the founder's); code PR pending | - |
+| 241. DEMOCREDS | 4/4 | Complete    | 2026-11-26 |
 | 250. BINANCEFILLS | 8/8 | Complete (shipped v0.133.84.0, #1355; verification passed, UAT 4/4; ⛔ corrected 2026-11-26: the switch is on in PROD and stays on by founder ruling, see 250-VERIFICATION) | 2026-11-26 |
 | 251. SYNCSTORE | 2/2 | Complete (shipped v0.133.87.0, #1359; verification passed 6/6, SECURITY 13/13 closed) | 2026-11-26 |
 | 252. DERIBITOPTIONS | 6/6 | Shipped v0.133.80.0 (#1351); human verification pending (post-deploy PROD factsheet check, founder copy check, the founder-gated wave-2 probe run, the ship-time PROD census re-take; a 2026-11-25 PROD reading is recorded in 252-05-SUMMARY and the v0.133.80.0 CHANGELOG) | - |
