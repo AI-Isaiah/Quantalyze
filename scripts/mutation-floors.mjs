@@ -3573,7 +3573,10 @@ export const FILES_FLOOR = 96;
 // MEASURED on the merged tree: `node scripts/mutation-runner/run.mjs --parse-only` printed `arms: 0/1050/0   (executed/annotated/waived)`, `coverage: files 95/122` and `No static defects`; the exit-2-by-design DIAGNOSTIC runs of the two files printed `arms: 20/20/0`, `biting: 20`, `lane-invocations: 20` and `arms: 45/45/0`, `biting: 45`, `lane-invocations: 45`, every arm `RED (identity ok)`, `No defects in the narrowed scope`. 1050 is the static annotated-unwaived count, an upper bound on biting; CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the run that compares it with a real biting count.
 // WAIVED_CEILING stays 0 - no waiver was added.
 // MERGED 2026-11-26: Phase 253 BINANCECURSOR (+24 arms in its new file test_strategy_fills_reread_bound.sql) onto origin/main at 1050 (Phase 225 PR-3 above): 1050 + 24 = 1074. On the earlier merge onto 1041, CI `sql-mutation` FULL measured `arms: 1065/1065/0`, `biting: 1065`, `lane-invocations: 1065` (run 45817258211). 1074 is the merged tree's `--parse-only` static count; CI `sql-mutation` FULL on the PR head measures biting. WAIVED_CEILING stays 0.
-export const ARMS_FLOOR = 1074;
+// RAISED 1074 -> 1079 2026-11-26 (poll_positions venue gate, migration 20261126180000): +5 twinned arms, P8, P8/sfox, P8/deribit, P9/binance and P9/bybit, in test_enqueue_poll_positions_cohort.sql, a file that already counted toward FILES_FLOOR (11 -> 16; the eleven older twins were repointed at the new migration, the newest definition, and P7 now edits both migrations' REVOKE).
+// MEASURED: the exit-2-by-design DIAGNOSTIC run of that file printed `arms: 16/16/0   (executed/annotated/waived)`, `biting: 16`, `lane-invocations: 16` with every arm `RED (identity ok)` and `No defects in the narrowed scope`. CI `sql-mutation` FULL on the PR (a floors edit forces FULL) is the run that compares it again.
+// WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 1079;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

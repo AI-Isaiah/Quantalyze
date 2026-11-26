@@ -329,7 +329,11 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     // gained arm X8 and now declares `ALL 8 ARMS EXECUTED`, so it no longer shares the "ALL 7" text; the
     // sharers are test_sync_status_curated_sentence_survives.sql and test_enqueue_poll_positions_cohort.sql.
     // MEASURED: this arm read `expected 2 to be 3` once the detector gate gained its eighth arm.
-    expect(okCount).toBe(2);
+    // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000):
+    // test_enqueue_poll_positions_cohort.sql gained arms P8 and P9 and now declares `ALL 9 ARMS
+    // EXECUTED`, so only test_sync_status_curated_sentence_survives.sql still prints the "ALL 7"
+    // text. MEASURED: this arm read `expected 1 to be 2` once the cohort gate gained its arms.
+    expect(okCount).toBe(1);
     expect(out).toContain(
       "completion sentinel DECLARED but not checked against a run — LANE-ONLY",
     );
