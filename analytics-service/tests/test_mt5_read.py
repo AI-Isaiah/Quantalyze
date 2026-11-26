@@ -34,6 +34,7 @@ from services.mt5_client import (
     HOLDER_UNKNOWN,
     Mt5AccountMismatchError,
     Mt5ClientError,
+    Mt5ServerMismatchError,
     _note_terminal_holder,
     begin_mt5_lease_holder,
     begin_mt5_lease_occupancy,
@@ -56,6 +57,7 @@ from services.mt5_read import (
     log_mt5_poll_server_verdict,
     read_mt5_deal_ledger,
 )
+from services.mt5_probe import assert_expected_server
 # The ONE offline transport double (tests/test_mt5_derive_branch.py). Imported
 # from the module that OWNS it — the same discipline test_mt5_abandon_fence.py
 # follows for `_FakeMt5` and test_mt5_concurrency.py for the relogin doubles.
@@ -946,14 +948,14 @@ def test_an_unclassifiable_currency_skips_the_wait_like_an_absent_equity(
 
 
 # ---------------------------------------------------------------------------
-# 225-20 (PR-2c0) — the poll's SERVER verdict: LOG-ONLY, measured before PR-2c's
-# bracket may refuse a session on it (CONTEXT Q6 item 2: confirm by measurement).
+# 225-20 (PR-2c0) — the poll's SERVER verdict line, and (225-21) the server bracket
+# that follows it (CONTEXT Q6 item 2, review WR-01 of PR-2c).
 #
 # What these pin, and why each can fail:
-#   * the verdict is the predicate PR-2c's `assert_expected_server` applies, so the
-#     measurement says what that refusal WOULD do (a spelling the terminal reports
-#     differently, or no server at all, is exactly what would be refused);
-#   * the verdict never changes what a poll returns (it is a measurement, not a gate);
+#   * the verdict is the predicate PR-2c's `assert_expected_server` applies, and the
+#     parity test pins that the line says True exactly when that bracket passes;
+#   * the line is written BEFORE the bracket refuses, once per poll, so a refused poll
+#     is still attributed to its key;
 #   * the line carries a closed-set site and an attributed holder and NO login, server
 #     or password value (T-225-65).
 # ---------------------------------------------------------------------------
@@ -1052,48 +1054,117 @@ def test_a_holder_that_is_not_a_uuid_or_literal_is_written_as_unattributed(
 
 def _read_with_server(
     caplog: pytest.LogCaptureFixture, reported: Any, *, holder: str | None = None
-) -> tuple[Any, dict[str, Any], list[logging.LogRecord]]:
+) -> tuple[Any, dict[str, Any], list[logging.LogRecord], _FakeMt5Transport]:
+    """One read whose terminal reports ``reported`` as its server. ``_NO_SERVER`` means
+    the snapshot carries NO "server" key, so the fake's echo is switched off (the echo
+    would otherwise supply the requested server and the case would not be "absent")."""
     account = _account(_EXPECTED_LOGIN, server=reported)
-    transport = _FakeMt5Transport(account=account, deals=_DEALS)
+    transport = _FakeMt5Transport(
+        account=account, deals=_DEALS, report_server=reported is not _NO_SERVER
+    )
     caplog.clear()
     with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER):
         got = read_mt5_deal_ledger(_session(transport), now=_NOW, holder=holder)
-    return got, account, _verdict_records(caplog)
+    return got, account, _verdict_records(caplog), transport
 
 
-def test_the_read_returns_the_same_data_whatever_the_verdict_and_logs_one_line(
+def test_a_matching_server_returns_the_read_and_writes_one_true_line(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A False and a not_captured poll return exactly what a True one returns: the
-    verdict is a measurement. Exactly ONE record per read even though the POST
-    bracket also reads `account_info()`: a second line per poll would double every
-    count Task 3 reports."""
-    runs = {
-        "True": _read_with_server(caplog, _REQUESTED_SERVER, holder=_HOLDER_UUID_UPPER),
-        "False": _read_with_server(caplog, _OTHER_SERVER, holder=_HOLDER_UUID_UPPER),
-        "not_captured": _read_with_server(caplog, _NO_SERVER, holder=_HOLDER_UUID_UPPER),
-    }
+    """225-21 (inverts plan 20's log-only pin). The session reports the requested server:
+    the read returns its data exactly as before and writes ONE ``=True`` record, even though
+    the POST bracket also reads ``account_info()``: a second line per poll would double every
+    count the post-deploy reading reports."""
+    got, account, records, _transport = _read_with_server(
+        caplog, _REQUESTED_SERVER, holder=_HOLDER_UUID_UPPER
+    )
 
-    for label, (got, account, records) in runs.items():
-        assert got.info == account, label
-        assert [d["ticket"] for d in got.deals] == [1], label
-        assert got.tick_read_failed is False, label
-        assert len(records) == 1, (label, [r.getMessage() for r in records])
-        message = records[0].getMessage()
-        assert f"session_server_matches_requested={label}" in message
-        assert "site=derive_broker_dailies" in message
-        assert f"holder={_HOLDER_UUID}" in message
-        _assert_no_secret(message)
-    ref = runs["True"][0]
-    for label in ("False", "not_captured"):
-        assert runs[label][0].deals == ref.deals
-        assert runs[label][0].tick == ref.tick
+    assert got.info == account
+    assert [d["ticket"] for d in got.deals] == [1]
+    assert got.tick_read_failed is False
+    assert len(records) == 1, [r.getMessage() for r in records]
+    message = records[0].getMessage()
+    assert "session_server_matches_requested=True" in message
+    assert "site=derive_broker_dailies" in message
+    assert f"holder={_HOLDER_UUID}" in message
+    _assert_no_secret(message)
+
+
+@pytest.mark.parametrize(
+    ("reported", "label"),
+    [
+        pytest.param(_OTHER_SERVER, "False", id="another-server"),
+        pytest.param(_NO_SERVER, "not_captured", id="not-captured"),
+    ],
+)
+def test_another_server_or_none_is_refused_after_one_verdict_line_and_before_the_deals(
+    caplog: pytest.LogCaptureFixture, reported: Any, label: str
+) -> None:
+    """225-21. The login bracket passes (the login IS the requested one) and the server
+    bracket refuses: ``Mt5ServerMismatchError`` after exactly ONE verdict record naming the
+    verdict, and ``history_deals_get`` is never called. The line stays BESIDE the bracket,
+    written before it, so a refused poll is still attributed to its key."""
+    account = _account(_EXPECTED_LOGIN, server=reported)
+    transport = _FakeMt5Transport(
+        account=account, deals=_DEALS, report_server=reported is not _NO_SERVER
+    )
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER):
+        with pytest.raises(Mt5ServerMismatchError) as caught:
+            read_mt5_deal_ledger(
+                _session(transport), now=_NOW, holder=_HOLDER_UUID_UPPER
+            )
+
+    records = _verdict_records(caplog)
+    assert len(records) == 1, [r.getMessage() for r in records]
+    assert f"session_server_matches_requested={label}" in records[0].getMessage()
+    assert f"holder={_HOLDER_UUID}" in records[0].getMessage()
+    assert "history_deals_get" not in transport.calls
+    _assert_no_secret(records[0].getMessage())
+    _assert_no_secret(str(caught.value))
+
+
+@pytest.mark.parametrize(
+    ("reported", "passes"),
+    [
+        pytest.param(_REQUESTED_SERVER, True, id="matching"),
+        pytest.param("  broker-LIVE  ", True, id="case-and-spaces-only"),
+        pytest.param(_OTHER_SERVER, False, id="another-server"),
+        pytest.param(_NO_SERVER, False, id="absent"),
+        pytest.param(None, False, id="none"),
+        pytest.param("", False, id="empty"),
+        pytest.param("   ", False, id="blank"),
+        pytest.param(123, False, id="non-string"),
+    ],
+)
+def test_the_logged_verdict_is_true_exactly_when_the_bracket_passes(
+    reported: Any, passes: bool
+) -> None:
+    """PARITY (plan 20 Task 3 step 7, and the invariant behind this plan): the line an
+    operator reads and the refusal a poll takes are ONE predicate. ``log_mt5_poll_server_verdict``
+    returns True exactly when ``assert_expected_server`` returns without raising, and the
+    raise is ``Mt5ServerMismatchError`` otherwise. A fork of either goes red here, so a
+    poll can no longer be logged as matching and refused, or logged as not matching and
+    admitted."""
+    info = _account(_EXPECTED_LOGIN, server=reported)
+
+    verdict = log_mt5_poll_server_verdict(
+        info, requested_server=_REQUESTED_SERVER, site="derive_broker_dailies", holder=None
+    )
+
+    if passes:
+        assert verdict is True
+        assert_expected_server(info, login=_EXPECTED_LOGIN, server=_REQUESTED_SERVER)
+    else:
+        assert verdict is not True
+        with pytest.raises(Mt5ServerMismatchError):
+            assert_expected_server(info, login=_EXPECTED_LOGIN, server=_REQUESTED_SERVER)
 
 
 def test_a_read_without_a_holder_attributes_nothing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    _got, _account_snap, records = _read_with_server(caplog, _REQUESTED_SERVER)
+    _got, _account_snap, records, _transport = _read_with_server(caplog, _REQUESTED_SERVER)
 
     assert len(records) == 1
     assert "holder=unattributed" in records[0].getMessage()

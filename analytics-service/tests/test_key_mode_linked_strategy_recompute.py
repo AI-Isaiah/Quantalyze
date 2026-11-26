@@ -86,15 +86,22 @@ class _FakeMt5Transport:
         self._deals = deals
         self._MetaTrader5__conn = _FakeRpycConn()
         self._lock = threading.Lock()
+        # 225-21: a correct session reports the server it was logged in to; the
+        # snapshot echoes it only when the configured dict names none.
+        self._logged_in_server: Any = None
 
     def initialize(self, **kwargs: Any) -> bool:
         return True
 
     def login(self, login: Any, password: Any = None, server: Any = None, timeout: Any = None) -> bool:
+        self._logged_in_server = server
         return True
 
     def account_info(self) -> _NT:
-        return _NT(self._account)
+        reported = dict(self._account)
+        if "server" not in reported:
+            reported["server"] = self._logged_in_server
+        return _NT(reported)
 
     def history_deals_get(self, from_ts: Any, to_ts: Any) -> tuple[_NT, ...]:
         return tuple(_NT(d) for d in self._deals)

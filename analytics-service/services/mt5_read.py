@@ -13,7 +13,9 @@ the repo already carries THREE hand-written copies of the login bracket alone
 lets its exceptions out UNCHANGED in type. Six are reachable through a call:
 
   * ``Mt5AccountMismatchError`` — either login bracket rejected the terminal's
-    account. Deliberately NOT an ``Mt5ClientError``, so no classify/stamp arm can
+    account, or (its subclass ``Mt5ServerMismatchError``, Phase 225 plan 21) either
+    server bracket found the session on another broker server or on none it can
+    name. Deliberately NOT an ``Mt5ClientError``, so no classify/stamp arm can
     absorb a mis-routed terminal into a credential verdict.
   * ``_Mt5PostReadVerificationError`` — a transport blip on the ASSERTION-ONLY POST
     re-read, after the correct account's deals were already fetched. Also
@@ -80,7 +82,11 @@ from services.mt5_concurrency import (
     _Mt5PostReadVerificationError,
 )
 from services.mt5_handover import SITE_DERIVE, normalize_mt5_holder
-from services.mt5_probe import assert_expected_login, mt5_session_server_verdict
+from services.mt5_probe import (
+    assert_expected_login,
+    assert_expected_server,
+    mt5_session_server_verdict,
+)
 
 logger = logging.getLogger("quantalyze.analytics.mt5_read")
 
@@ -254,17 +260,16 @@ def log_mt5_poll_server_verdict(
     """Write ONE INFO line saying whether the terminal's session is on the broker
     server the poll asked for, and return that verdict.
 
-    LOG-ONLY BY DESIGN (Phase 225 plan 20 / PR-2c0). CONTEXT Q6 item 2 (founder
-    ruling 2026-11-25): a connect on the same broker with the wrong server must be
-    refused at connect or validation time, and the gap plans "confirm by
-    measurement" that the existing validation already refuses it. Review WR-01
-    found the three poll reads check the login only and then stamp what they read.
-    PR-2c's ``assert_expected_server`` fails CLOSED on a mismatch AND on a missing
-    server, and it has never been measured whether ``account_info().server`` is
-    spelled the way the session requested it, for any broker. This line is that
-    measurement. The REFUSAL belongs to the follow-up plan that 225-20 Task 3
-    books, because it needs PR-2c's error type; nothing here refuses a poll,
-    raises, or changes what a poll returns or stamps.
+    The helper ITSELF never raises, never refuses a poll and never changes what a
+    poll returns (Phase 225 plan 20 / PR-2c0). It was written to MEASURE whether
+    ``account_info().server`` is spelled the way the session requested it (PROD:
+    28 of 28 polls True, plan 20). Since Phase 225 plan 21 (CONTEXT Q6 item 2,
+    review WR-01 of PR-2c) every caller follows this line with
+    ``assert_expected_server``, which refuses anything but True, so the line records
+    the verdict of a poll that is then admitted or refused. It is kept, and written
+    BEFORE the refusal, so a refused poll is still attributed to its key by holder:
+    that is the only per-key evidence an operator has of a false refusal, because no
+    server value is ever logged.
 
     The MT5 docs say ``account_info()`` returns a named tuple with ``login`` and
     ``server`` fields (https://www.mql5.com/en/docs/python_metatrader5/mt5accountinfo_py)
@@ -276,7 +281,8 @@ def log_mt5_poll_server_verdict(
     ``assert_expected_server`` refuses on. A reported server that is a ``str`` with a
     non-blank ``strip()`` is compared with the requested one through
     ``normalise_mt5_server`` (True or False). An absent, non-string or blank server
-    is ``not_captured`` (None), which that bracket refuses.
+    is ``not_captured`` (None), which that bracket refuses. A parity test pins that
+    this returns True exactly when ``assert_expected_server`` passes.
 
     The line is a static message plus ``site``, the lease ``holder`` (through
     ``normalize_mt5_holder``: a UUID key id or a literal, never a number) and the
@@ -303,7 +309,10 @@ def read_mt5_deal_ledger(
     holder: str | None = None,
 ) -> Mt5DealLedgerRead:
     """Log in and read the FULL deal history, bracketed by the MT5CONC-02 login
-    assertions. Returns ``Mt5DealLedgerRead(info, deals, tick, tick_read_failed,
+    assertions and, since Phase 225 plan 21, the broker-server assertion: both the PRE
+    and the POST bracket prove the login AND the broker server, so a terminal still on
+    the same login at another broker never has its numbers stamped as this key's.
+    Returns ``Mt5DealLedgerRead(info, deals, tick, tick_read_failed,
     tick_read_at)``: the PRE ``account_info``, the deals, and (155.1) one
     server-clock tick read taken inside the PRE/POST bracket.
 
@@ -348,9 +357,9 @@ def read_mt5_deal_ledger(
     # ``Mt5AccountMismatchError`` (NOT an ``Mt5ClientError``, so the classify/stamp
     # arm can never absorb it) → the caller's dedicated no-stamp/no-persist branch.
     assert_expected_login(info, login=session.login)
-    # ⭐ 225-20 (PR-2c0) — LOG-ONLY server verdict on the snapshot whose login the
+    # ⭐ 225-20 (PR-2c0) — the server verdict LINE on the snapshot whose login the
     # bracket above just accepted. PRE only, so one line means one poll; the POST
-    # bracket below is unchanged (it belongs to the follow-up enforcement plan).
+    # bracket below adds the server assert and no second line.
     # The derive branch in job_worker is the only production caller
     # (``git grep -n read_mt5_deal_ledger -- analytics-service/services`` at planning
     # time: outside this module the code references are job_worker's import and the
@@ -359,6 +368,17 @@ def read_mt5_deal_ledger(
     log_mt5_poll_server_verdict(
         info, requested_server=session.server, site=SITE_DERIVE, holder=holder
     )
+    # ⭐ 225-21 (CONTEXT Q6 items 1 and 2, review WR-01 of PR-2c) — the server BRACKET,
+    # on the same snapshot the login check judged, written AFTER the line so a refused
+    # poll is still attributed. ``login()`` returning True does not say which server
+    # the terminal ended up on (https://www.mql5.com/en/docs/python_metatrader5/mt5login_py:
+    # ``server`` is optional, "the last used server is applied automatically"), and
+    # ``account_info()`` carries a ``server`` field
+    # (https://www.mql5.com/en/docs/python_metatrader5/mt5accountinfo_py), so that is
+    # the proof. A session on another server, or one that names none, raises
+    # ``Mt5ServerMismatchError`` (a subclass of ``Mt5AccountMismatchError``) BEFORE the
+    # deal fetch: the caller's no-stamp, no-persist, transient disposition applies.
+    assert_expected_server(info, login=session.login, server=session.server)
     deals = session.client.history_deals_get(
         0, int(now.timestamp()) + _MT5_DEAL_FETCH_MARGIN_S
     )
@@ -414,6 +434,9 @@ def read_mt5_deal_ledger(
     except Mt5ClientError as exc:
         raise _Mt5PostReadVerificationError(str(exc)) from exc
     assert_expected_login(post_info, login=session.login)
+    # ⭐ 225-21 — the POST server bracket, before ``note_mt5_history_settled`` so a
+    # refusal never marks the key's history settled. No second verdict line.
+    assert_expected_server(post_info, login=session.login, server=session.server)
     if settled:
         # D-15: ONLY a history that was stable AND whose POST bracket passed makes
         # this key cached on this terminal. Never on a single read, the equity
