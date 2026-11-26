@@ -227,6 +227,7 @@ import {
   notSyncingIdentityPendingKeyIds,
   identityPendingKeyIds,
   deriveKeyDataGapsField,
+  deriveSharedAccountFailingGroupsField,
   marksIncludedKeys,
 } from "./queries";
 import type { SupportedExchange } from "./utils";
@@ -1702,8 +1703,19 @@ describe("derivePhase07Fields: holdingsSummary is each key's own latest asof (D-
     unrealized_pnl_usd: null,
     ...over,
   });
+  // HOLD-01 (Phase 235): a counted row's key must be in the account map. Each
+  // fixture key is its own exchange account, spelled out (the retired default).
+  const ownAccounts = (...keyIds: string[]): Record<string, string> =>
+    Object.fromEntries(keyIds.map((id) => [id, `account:${id}`]));
+  // All four arms read through `summarize`, so the explicit identity is passed here.
   const summarize = (rows: HoldingRow[]) =>
-    derivePhase07Fields([], rows, null).holdingsSummary;
+    derivePhase07Fields(
+      [],
+      rows,
+      null,
+      [],
+      ownAccounts(...new Set(rows.map((r) => r.api_key_id))),
+    ).holdingsSummary;
   const symbolsOf = (rows: HoldingRow[]) =>
     summarize(rows)
       .map((h) => `${h.api_key_id}:${h.symbol}`)
@@ -2545,6 +2557,51 @@ describe("keyDataGaps: the server derives which key is missing which days (198 D
         derivedRow({ degrade_reasons: ["shared_account_no_working_key"] }, false),
       );
       expect(deriveKeyDataGapsField(keys, phase07, {}, "2026-10-12")).toEqual([]);
+    });
+
+    // Phase 235 HOLD-05. `keyDataGaps` names an account only while its history
+    // stops before yesterday, so an all-failing account whose history reaches
+    // yesterday was named nowhere. The sibling lists every all-failing account.
+    describe("deriveSharedAccountFailingGroupsField (Phase 235 HOLD-05)", () => {
+      const twoFailingAccounts = () => {
+        const keys = [
+          key("K1", { venue_account_id: "va-A", sync_status: "error" }),
+          key("K2", { venue_account_id: "va-A", sync_status: "error" }),
+          key("K3", { venue_account_id: "va-B", sync_status: "error" }),
+          key("K4", { venue_account_id: "va-B", sync_status: "error" }),
+        ];
+        const phase07 = derivePhase07Fields(
+          keys,
+          [],
+          derivedRow({ degrade_reasons: ["shared_account_no_working_key"] }, false),
+        );
+        const perKey = {
+          K1: series("2026-10-01"),
+          K2: series("2026-10-04"),
+          K3: series("2026-10-11"),
+          K4: series("2026-10-11"),
+        };
+        return { keys, phase07, perKey };
+      };
+
+      it("G-two: two all-failing accounts, one reaching yesterday, are both listed (keyDataGaps names only the other)", () => {
+        const { keys, phase07, perKey } = twoFailingAccounts();
+        expect(phase07.equityHistoryRebuildReason).toBe("shared_account_no_working_key");
+        expect(deriveSharedAccountFailingGroupsField(keys, phase07, perKey, "2026-10-12")).toEqual([
+          ["K1", "K2"],
+          ["K3", "K4"],
+        ]);
+        expect(
+          deriveKeyDataGapsField(keys, phase07, perKey, "2026-10-12").map((g) => g.apiKeyIds),
+        ).toEqual([["K1", "K2"]]);
+      });
+
+      it("G-noacct: no account id appears in the groups", () => {
+        const { keys, phase07, perKey } = twoFailingAccounts();
+        const out = deriveSharedAccountFailingGroupsField(keys, phase07, perKey, "2026-10-12");
+        expect(out.length).toBeGreaterThan(0);
+        expect(JSON.stringify(out)).not.toContain("va-");
+      });
     });
   });
 

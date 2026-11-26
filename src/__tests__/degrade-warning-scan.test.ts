@@ -78,6 +78,7 @@ interface LedgerRow {
 }
 
 const DASHBOARD = "src/app/(dashboard)/allocations/AllocationDashboardV2.tsx";
+const HOLDINGS_PANEL = "src/app/(dashboard)/allocations/HoldingsTabPanel.tsx";
 const DEGRADE_LINE = "src/components/degrade/DegradeLine.tsx";
 const MISSING_DATA = "src/app/(dashboard)/allocations/components/MissingDataMessage.tsx";
 const A = "src/app/(dashboard)/allocations";
@@ -92,12 +93,13 @@ const FS_SHARE = "src/app/factsheet-share/[token]";
 /** One row per scanned file. A count moves only with its reason. */
 const SCAN_LEDGER: Record<string, LedgerRow> = {
   [DASHBOARD]: {
-    tripHits: 7,
+    tripHits: 8,
     ids: [
       "allocation.departed-history",
       "allocation.failing-key-read-incomplete",
       "allocation.failing-key-sync-failing",
       "allocation.failing-key-undated",
+      "allocation.holdings-unpriced-check-failed",
       "allocation.staleness",
       "allocation.staleness-never",
       "allocation.unpriced-dated",
@@ -105,7 +107,13 @@ const SCAN_LEDGER: Record<string, LedgerRow> = {
       "allocation.unpriced-whole",
     ],
     reason:
-      "My allocation notes: the four key/day notes render registry text through DegradeLine; the hit count also covers the Risk loading line and the factsheet warm-up note, which are in_progress and empty states, not degrade warnings",
+      "My allocation notes: the four key/day notes render registry text through DegradeLine, and the unpriced-check note (read_failure) renders through DegradeLine inside its role=status paragraph (Phase 235 HOLD-04); the hit count also covers the Risk loading line and the factsheet warm-up note, which are in_progress and empty states, not degrade warnings",
+  },
+  [HOLDINGS_PANEL]: {
+    tripHits: 1,
+    ids: ["allocation.holdings-unpriced-check-failed"],
+    reason:
+      "read_failure: the unpriced-check note renders registry text through DegradeLine inside its role=status paragraph (Phase 235 HOLD-04)",
   },
   [DEGRADE_LINE]: {
     tripHits: 0,
@@ -131,6 +139,7 @@ const SCAN_LEDGER: Record<string, LedgerRow> = {
       "allocation.key-gap.not-syncing-one-key",
       "allocation.key-gap.read-incomplete",
       "allocation.key-gap.shared-account-failing",
+      "allocation.key-gap.shared-account-failing-undated",
       "allocation.key-gap.sync-failing",
     ],
     reason:

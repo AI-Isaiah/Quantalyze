@@ -462,6 +462,18 @@ describe("D-11: one exchange account counts once per (day, holding_type) in both
       name: "HoldingsUpdatedAtError",
     });
   });
+
+  it("a holdings row whose key is absent from the api_keys identity read rejects with HoldingsIdentityError (HOLD-01)", async () => {
+    // keysResolver holds only K1; the row names K2. Counting K2 alone would
+    // double-count its exchange account if the identity read were incomplete.
+    holdingsResolver.rows = [row({ api_key_id: K2 })];
+    await expect(getNetExposureSeries(USER_ID)).rejects.toMatchObject({
+      name: "HoldingsIdentityError",
+    });
+    await expect(getAllocationSeries(USER_ID)).rejects.toMatchObject({
+      name: "HoldingsIdentityError",
+    });
+  });
 });
 
 describe("getNetExposureSeries", () => {

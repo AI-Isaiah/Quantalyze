@@ -66,8 +66,10 @@ import { computeMtd } from "@/app/(dashboard)/allocations/lib/strategies-row-ada
 import type { FlaggedHolding } from "@/app/(dashboard)/allocations/lib/holding-outcome-adapter";
 import {
   keyDataGaps as computeKeyDataGaps,
+  sharedAccountFailingGroups as computeSharedAccountFailingGroups,
   previousUtcDay,
   type KeyDataGap,
+  type KeyDataGapsInput,
 } from "@/app/(dashboard)/allocations/lib/key-data-gaps";
 import type {
   Strategy,
@@ -89,6 +91,7 @@ import { oneKeyPerAccountDay } from "./holdings-account-day";
 import {
   fetchLatestHoldingsPerKey,
   latestHoldingsPerKey,
+  strictAccountOf,
 } from "./latest-holdings-per-key";
 import { getOwnPreferences, type AllocatorOwnPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
@@ -3032,6 +3035,15 @@ export interface MyAllocationDashboardPayload {
    */
   departedHistoryUnavailable?: boolean;
   /**
+   * Phase 235 HOLD-04. True when a native-unpriced marker read
+   * (`native_unpriced:<key>`) failed on this load. The Holdings rows are KEPT
+   * (a failed marker read must not blank the tab), so the latest figures may
+   * include an account's earlier-day positions that the newest poll left
+   * unpriced; the Overview says so in one note. Always set by
+   * `getMyAllocationDashboard`, optional only so legacy fixtures compile.
+   */
+  holdingsUnpricedCheckFailed?: boolean;
+  /**
    * Phase 167.1.2.1 (D-09, D-14). True when at least one of the owner's keys
    * has no history marker and has used every reconstruct attempt the daily
    * fan-out gets (`HISTORY_RECONSTRUCT_ATTEMPT_CAP`): its history could not be
@@ -3092,6 +3104,15 @@ export interface MyAllocationDashboardPayload {
    * the dashboard read always sets it.
    */
   keyDataGaps?: KeyDataGap[];
+  /**
+   * Phase 235 HOLD-05. Owner key ids only, grouped per all-failing shared
+   * account (every group of two or more keys on one account whose every key is
+   * failing), so the message can name each account's keys even when its history
+   * reaches yesterday and `keyDataGaps` holds no entry for it. Never carries an
+   * account identifier (T-186-18). Always set by the server; optional only for
+   * legacy fixtures, as `keyDataGaps` is.
+   */
+  sharedAccountFailingGroups?: string[][];
   /**
    * Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 and the UI-SPEC planner check. The
    * first day recorded (marked-to-market) equity begins for the keys the DRAWN
@@ -4334,13 +4355,18 @@ export const DERIVED_ROW_CAPTURE_WINDOW_MS = 6 * 60 * 60 * 1000;
 // never evicted; the map holds at most one per allocator per rejection token.
 const derivedRowCaptureLastAt = new Map<string, number>();
 
-/** Whether this (allocator, rejection) may be reported now; records it if so. */
+/**
+ * Whether this (allocator, rejection) may be reported now; records it if so.
+ * The same window damps the Phase 235 HOLD-04 marker-read capture, which the
+ * Overview poll would otherwise repeat every 30 s.
+ */
 export function shouldCaptureDerivedRowRejection(
   allocatorId: string,
   rejection:
     | DerivedPayloadRejection
     | "tiny_base_days_key_malformed"
-    | "tiny_base_days_strategy_malformed",
+    | "tiny_base_days_strategy_malformed"
+    | "holdings_marker_read_failed",
 ): boolean {
   const key = `${allocatorId}:${rejection}`;
   const now = Date.now();
@@ -4618,6 +4644,68 @@ function latestSeriesDay(points: readonly { date: string }[] | undefined): strin
 }
 
 /**
+ * The producer input shared by `deriveKeyDataGapsField` and
+ * `deriveSharedAccountFailingGroupsField` (Phase 235 HOLD-05): one construction,
+ * so both read the same identity, owner ids and reason.
+ */
+function keyDataGapsInput(
+  apiKeys: readonly EquityHistoryKey[],
+  phase07: Pick<
+    MyAllocationDashboardPayload,
+    | "equityHistoryState"
+    | "equityHistoryRebuildReason"
+    | "equityHistoryNotSyncingKeyIds"
+    | "failingKeyExits"
+    | "equityDailyPoints"
+  >,
+  perKeyReturnsByApiKeyId: Readonly<Record<string, readonly { date: string }[]>>,
+  todayIso: string,
+): KeyDataGapsInput {
+  const lastSeriesDayByKey: Record<string, string> = {};
+  for (const key of apiKeys) {
+    const last = latestSeriesDay(perKeyReturnsByApiKeyId[key.id]);
+    if (last !== null) lastSeriesDayByKey[key.id] = last;
+  }
+  // 225 CONN-03 (CONTEXT Q6): group by the same server-aware identity the derive
+  // and the key card use (exchange case-blind, login, canonical server), so a gap
+  // line never names a key on another server of the same login. It also carries
+  // the exchange, so two exchanges with an equal account id no longer group,
+  // which is correct.
+  const loginIdentity = accountLoginIdentity(
+    apiKeys.map((key) => ({
+      id: key.id,
+      exchange: key.exchange,
+      venue_account_id: key.venue_account_id,
+      venue_server: key.venue_server ?? null,
+      disconnected_at: key.disconnected_at,
+      sync_status: key.sync_status,
+      history_inclusion: null,
+      first_returns_day: null,
+      last_returns_day: null,
+    })),
+  );
+  return {
+    ownKeyIds: apiKeys.map((key) => key.id),
+    reason: phase07.equityHistoryRebuildReason,
+    notSyncingKeyIds: phase07.equityHistoryNotSyncingKeyIds ?? [],
+    identityPendingKeyIds: identityPendingKeyIds(apiKeys),
+    keyAccounts: apiKeys.map((key) => ({
+      id: key.id,
+      accountId: loginIdentity.get(key.id) ?? null,
+      shareKind: key.account_share_kind,
+      failing: failingToSync(key),
+    })),
+    failingKeyExits: phase07.failingKeyExits ?? [], // gitleaks:allow (identifier, not a secret)
+    lastSeriesDayByKey,
+    curveLastDay:
+      phase07.equityHistoryState === "ready"
+        ? latestSeriesDay(phase07.equityDailyPoints)
+        : null,
+    yesterdayUtc: previousUtcDay(todayIso),
+  };
+}
+
+/**
  * Phase 198 plan 03 (D-01, ROUTE-07). The `keyDataGaps` payload field: which
  * of the owner's keys is missing which days, derived from data the dashboard
  * read already holds (no new query). Pure, so `getMyAllocationDashboard` computes
@@ -4645,48 +4733,32 @@ export function deriveKeyDataGapsField(
   perKeyReturnsByApiKeyId: Readonly<Record<string, readonly { date: string }[]>>,
   todayIso: string,
 ): KeyDataGap[] {
-  const lastSeriesDayByKey: Record<string, string> = {};
-  for (const key of apiKeys) {
-    const last = latestSeriesDay(perKeyReturnsByApiKeyId[key.id]);
-    if (last !== null) lastSeriesDayByKey[key.id] = last;
-  }
-  // 225 CONN-03 (CONTEXT Q6): group by the same server-aware identity the derive
-  // and the key card use (exchange case-blind, login, canonical server), so a gap
-  // line never names a key on another server of the same login. It also carries
-  // the exchange, so two exchanges with an equal account id no longer group,
-  // which is correct.
-  const loginIdentity = accountLoginIdentity(
-    apiKeys.map((key) => ({
-      id: key.id,
-      exchange: key.exchange,
-      venue_account_id: key.venue_account_id,
-      venue_server: key.venue_server ?? null,
-      disconnected_at: key.disconnected_at,
-      sync_status: key.sync_status,
-      history_inclusion: null,
-      first_returns_day: null,
-      last_returns_day: null,
-    })),
+  return computeKeyDataGaps(keyDataGapsInput(apiKeys, phase07, perKeyReturnsByApiKeyId, todayIso));
+}
+
+/**
+ * Phase 235 HOLD-05 and T-186-18. The `sharedAccountFailingGroups` payload
+ * field: owner key ids grouped per all-failing shared account, built from the
+ * SAME input as `deriveKeyDataGapsField` (one private builder), so the two can
+ * never disagree about identity, owner ids or the reason. The account identity
+ * stays inside the builder and never reaches the result.
+ */
+export function deriveSharedAccountFailingGroupsField(
+  apiKeys: readonly EquityHistoryKey[],
+  phase07: Pick<
+    MyAllocationDashboardPayload,
+    | "equityHistoryState"
+    | "equityHistoryRebuildReason"
+    | "equityHistoryNotSyncingKeyIds"
+    | "failingKeyExits"
+    | "equityDailyPoints"
+  >,
+  perKeyReturnsByApiKeyId: Readonly<Record<string, readonly { date: string }[]>>,
+  todayIso: string,
+): string[][] {
+  return computeSharedAccountFailingGroups(
+    keyDataGapsInput(apiKeys, phase07, perKeyReturnsByApiKeyId, todayIso),
   );
-  return computeKeyDataGaps({
-    ownKeyIds: apiKeys.map((key) => key.id),
-    reason: phase07.equityHistoryRebuildReason,
-    notSyncingKeyIds: phase07.equityHistoryNotSyncingKeyIds ?? [],
-    identityPendingKeyIds: identityPendingKeyIds(apiKeys),
-    keyAccounts: apiKeys.map((key) => ({
-      id: key.id,
-      accountId: loginIdentity.get(key.id) ?? null,
-      shareKind: key.account_share_kind,
-      failing: failingToSync(key),
-    })),
-    failingKeyExits: phase07.failingKeyExits ?? [], // gitleaks:allow (identifier, not a secret)
-    lastSeriesDayByKey,
-    curveLastDay:
-      phase07.equityHistoryState === "ready"
-        ? latestSeriesDay(phase07.equityDailyPoints)
-        : null,
-    yesterdayUtc: previousUtcDay(todayIso),
-  });
 }
 
 /**
@@ -4901,8 +4973,9 @@ export function derivePhase07Fields(
   // callers that pass no holdings read (fixtures) name no key.
   partialReads: ReadonlyArray<{ api_key_id: string; asof: string }> = [],
   // Phase 170.4 plan 07 (D-10): each contributing key's exchange-account token
-  // (`fetchLatestHoldingsPerKey`'s `accountByKey`). A key it does not name is its
-  // own account, so a caller that passes none counts every key.
+  // (`fetchLatestHoldingsPerKey`'s `accountByKey`). The `{}` default serves callers
+  // that pass no holdings rows; a counted row whose key it lacks throws
+  // `HoldingsIdentityError` (Phase 235 HOLD-01).
   accountByKey: Readonly<Record<string, string>> = {},
   // Phase 167.1.2.1 review 09 (WR-02, SFH F4): the owner's OWN strategies and
   // `strategy_keys` links, UNFILTERED by capital mark, the two halves the
@@ -5129,7 +5202,7 @@ export function derivePhase07Fields(
   // winner's rows only; keys on different accounts all stay (D-08).
   const dollarRows = oneKeyPerAccountDay(
     perKeyRows,
-    (keyId) => accountByKey[keyId] ?? keyId,
+    strictAccountOf(accountByKey),
   );
   const holdingsSummary = dollarRows.map((r) => ({
     symbol: r.symbol,
@@ -5684,6 +5757,38 @@ export const getMyAllocationDashboard = cache(
     assertOk(heldOutcomesRes, "bridge_outcomes");
     assertOk(phase36PerKeyDailiesRes, "csv_daily_returns");
 
+    // Phase 235 HOLD-04: `fetchLatestHoldingsPerKey` never throws on a failed
+    // marker read; it keeps the rows and reports the message. Carry that as a flag.
+    const holdingsUnpricedCheckFailed = phase07HoldingsRes.markerReadError !== null;
+    // Phase 235 HOLD-04 (CONTEXT: warning, an area tag, the supabase message in
+    // `extra`, the user id, no key id). Tags: `op` + `reason` follow this file's
+    // other captures and `area` is CONTEXT's tag (planner decision 1; the area value
+    // is undotted so a registry-id scan can never read it as an id). Throttled by
+    // the derived-row window (planner decision 2): the console line and the flag
+    // stay on every load, only the Sentry event is once per window per instance.
+    if (holdingsUnpricedCheckFailed) {
+      console.error(
+        "[queries.getMyAllocationDashboard] native-unpriced marker read failed (holdings rows kept, note shown):",
+        phase07HoldingsRes.markerReadError,
+      );
+      if (shouldCaptureDerivedRowRejection(userId, "holdings_marker_read_failed")) {
+        scheduleDerivedRowCapture(
+          captureToSentry(
+            new Error("getMyAllocationDashboard: native-unpriced marker read failed"),
+            {
+              tags: {
+                op: "getMyAllocationDashboard",
+                reason: "holdings_marker_read_failed",
+                area: "my-allocation-dashboard",
+              },
+              extra: { userId, supabase_err: phase07HoldingsRes.markerReadError },
+              level: "warning",
+            },
+          ),
+        );
+      }
+    }
+
     // Phase 11 / D-02 — derive apiKeysCount from the already-fetched,
     // already-error-checked `apiKeys` array (getUserApiKeys throws on error).
     // NEW-C03-04: the previous separate head-only COUNT probe used
@@ -6079,11 +6184,20 @@ export const getMyAllocationDashboard = cache(
     // Phase 198 plan 03 (D-01): which key is missing which days, for the
     // Overview message. Computed once here and spread into BOTH literals below;
     // the day is the server's UTC day, never a client clock.
+    const serverTodayIso = new Date().toISOString().slice(0, 10);
     const keyDataGaps = deriveKeyDataGapsField(
       apiKeys,
       phase07,
       perKeyReturnsByApiKeyId,
-      new Date().toISOString().slice(0, 10),
+      serverTodayIso,
+    );
+    // Phase 235 HOLD-05: the keys of every all-failing shared account, from the
+    // same input and the same server day, so the message can name them all.
+    const sharedAccountFailingGroups = deriveSharedAccountFailingGroupsField(
+      apiKeys,
+      phase07,
+      perKeyReturnsByApiKeyId,
+      serverTodayIso,
     );
 
     // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
@@ -6139,6 +6253,8 @@ export const getMyAllocationDashboard = cache(
         mandateIsSet,
         ...phase07,
         keyDataGaps,
+        sharedAccountFailingGroups,
+        holdingsUnpricedCheckFailed,
         btcBenchmarkPrices,
         marksStart,
         marksTrailingSince,
@@ -6709,6 +6825,8 @@ export const getMyAllocationDashboard = cache(
       mandateIsSet,
       ...phase07,
       keyDataGaps,
+      sharedAccountFailingGroups,
+      holdingsUnpricedCheckFailed,
       btcBenchmarkPrices,
       marksStart,
       marksTrailingSince,

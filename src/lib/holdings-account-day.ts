@@ -115,8 +115,9 @@ export function writtenAtMicros(ts: string): number {
 /**
  * Keep, for each (account, holding_type), only the rows of the one key that
  * wins the type on the account's newest day (see the module docblock). `accountOf` is the identity the reader
- * grouped by (`fetchLatestHoldingsPerKey`'s `accountByKey`); a key it does not
- * know should map to its own token. Input order is preserved and never relied
+ * grouped by (`fetchLatestHoldingsPerKey`'s `accountByKey`); it is strict for a
+ * key absent from the identity read (it throws `HoldingsIdentityError`, Phase
+ * 235 HOLD-01) and maps a key the identity cannot place to its own token. Input order is preserved and never relied
  * on. Only rows on an account's newest day are parsed, so a stale row's
  * `updated_at` cannot change a total it does not feed.
  */

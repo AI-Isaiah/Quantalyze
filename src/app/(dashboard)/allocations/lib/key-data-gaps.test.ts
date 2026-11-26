@@ -21,6 +21,7 @@ import {
   keyDataGaps,
   nextUtcDay,
   previousUtcDay,
+  sharedAccountFailingGroups,
   tailRange,
   type KeyDataGapsInput,
 } from "./key-data-gaps";
@@ -416,6 +417,113 @@ describe("keyDataGaps: stable order", () => {
       "read_incomplete:K4",
       "sync_failing:K2",
       "sync_failing:K3",
+    ]);
+  });
+});
+
+// Phase 235 HOLD-05. `keyDataGaps` names a shared-account gap only when the
+// group's tail has a range, so an all-failing account whose history reaches
+// yesterday left no trace and its keys could never be named. The sibling below
+// lists every all-failing group, range or not, owner ids only.
+describe("sharedAccountFailingGroups (Phase 235 HOLD-05)", () => {
+  it("sharedAccountFailingGroups lists every all-failing shared account, also one whose history reaches yesterday (Phase 235 HOLD-05)", () => {
+    const failing = (id: string, accountId: string) => ({
+      id,
+      accountId,
+      shareKind: null,
+      failing: true,
+    });
+    const shared = input({
+      reason: "shared_account_no_working_key",
+      keyAccounts: [
+        failing("K1", "va-1"),
+        failing("K2", "va-1"),
+        failing("K3", "va-2"),
+        failing("K4", "va-2"),
+      ],
+      lastSeriesDayByKey: { K1: "2026-10-01", K2: "2026-10-04", K3: YESTERDAY, K4: YESTERDAY },
+    });
+    expect(sharedAccountFailingGroups(shared)).toEqual([
+      ["K1", "K2"],
+      ["K3", "K4"],
+    ]);
+    // The existing producer is untouched: it still names only the account with a tail.
+    expect(keyDataGaps(shared).map((g) => g.apiKeyIds)).toEqual([["K1", "K2"]]);
+  });
+
+  const failing = (id: string, accountId: string, isFailing = true) => ({
+    id,
+    accountId,
+    shareKind: null,
+    failing: isFailing,
+  });
+
+  it("G-working: an account with one working key is absent", () => {
+    expect(
+      sharedAccountFailingGroups(
+        input({
+          reason: "shared_account_no_working_key",
+          keyAccounts: [failing("K1", "va-1"), failing("K2", "va-1", false)],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("G-own: a foreign id never enters a group", () => {
+    expect(
+      sharedAccountFailingGroups(
+        input({
+          reason: "shared_account_no_working_key",
+          ownKeyIds: ["K1", "K2"],
+          keyAccounts: [failing("K1", "va-1"), failing("K2", "va-1"), failing("K3", "va-1")],
+        }),
+      ),
+    ).toEqual([["K1", "K2"]]);
+  });
+
+  it("G-one: a group left with one owned id is dropped", () => {
+    expect(
+      sharedAccountFailingGroups(
+        input({
+          reason: "shared_account_no_working_key",
+          ownKeyIds: ["K1"],
+          keyAccounts: [failing("K1", "va-1"), failing("K2", "va-1")],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it.each(["key_not_syncing", "duplicate_account", "awaiting_derivation", null] as const)(
+    "G-reason: reason %s gives no groups even with an all-failing account",
+    (reason) => {
+      expect(
+        sharedAccountFailingGroups(
+          input({
+            reason,
+            keyAccounts: [failing("K1", "va-1"), failing("K2", "va-1")],
+          }),
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it("G-order: ids sort within a group and groups by first id, whatever the input order", () => {
+    expect(
+      sharedAccountFailingGroups(
+        input({
+          reason: "shared_account_no_working_key",
+          ownKeyIds: ["K4", "K5", "K8", "K9"],
+          keyAccounts: [
+            failing("K5", "va-2"),
+            failing("K4", "va-2"),
+            failing("K9", "va-1"),
+            failing("K8", "va-1"),
+          ],
+        }),
+      ),
+    ).toEqual([
+      ["K4", "K5"],
+      ["K8", "K9"],
     ]);
   });
 });

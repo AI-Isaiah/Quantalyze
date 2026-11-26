@@ -56,7 +56,7 @@ import { emit, type AuditEvent } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 import { holdingScopeKey } from "@/lib/keys";
 import { holdingEquityContribution, holdingEquityIsReported } from "@/lib/holding-equity";
-import { fetchLatestHoldingsPerKey } from "@/lib/latest-holdings-per-key";
+import { fetchLatestHoldingsPerKey, strictAccountOf } from "@/lib/latest-holdings-per-key";
 import { oneKeyPerAccountDay } from "@/lib/holdings-account-day";
 // Phase 151 AUM-01 — the shared dollar ceiling for the client-asserted
 // manual_aum_usd bound (distinct from MAX_TICKET_SIZE_USD).
@@ -876,10 +876,13 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
         // An account read through several keys counts once per day. A row
         // without a parseable `updated_at` throws `HoldingsUpdatedAtError`
         // (the column is NOT NULL, so that is a contract violation): it is a
-        // failed lookup, never a failed commit, like any other read error.
+        // failed lookup, never a failed commit, like any other read error. A
+        // counted row whose key `read.accountByKey` lacks throws
+        // `HoldingsIdentityError` (Phase 235 HOLD-01) and is the same: a failed
+        // lookup, never a failed commit.
         countedRows = oneKeyPerAccountDay(
           (read.data ?? []) as CommitHoldingRow[],
-          (keyId) => read.accountByKey[keyId] ?? keyId,
+          strictAccountOf(read.accountByKey),
         ).filter((r) => r.holding_type === "spot" || r.holding_type === "derivative");
       } catch (e) {
         holdingsLookupErr = { message: e instanceof Error ? e.message : String(e) };

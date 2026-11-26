@@ -60,6 +60,10 @@ const derive = (
 ) =>
   derivePhase07Fields([], rows, null, partialReads, accountByKey);
 
+// Each key its own exchange account, spelled out (the retired default, now explicit).
+const ownAccounts = (...keyIds: string[]): Accounts =>
+  Object.fromEntries(keyIds.map((id) => [id, `account:${id}`]));
+
 const total = (rows: ReadonlyArray<{ value_usd: number }>) =>
   rows.reduce((s, r) => s + r.value_usd, 0);
 
@@ -79,20 +83,35 @@ describe("derivePhase07Fields: one row per key (D-08)", () => {
     expect(total(out.holdingsSummary)).toBe(65000);
   });
 
-  it("with no account map every key is its own account (the default)", () => {
-    const out = derive([
-      row("key-a", "2026-10-02", "2026-10-02T04:00:00+00:00", "BTC", 40000),
-      row("key-b", "2026-10-03", "2026-10-03T04:00:00+00:00", "BTC", 25000),
-    ]);
-    expect(out.holdingsSummary).toHaveLength(2);
-    expect(total(out.holdingsSummary)).toBe(65000);
+  it("a counted row whose key the account map lacks throws HoldingsIdentityError (HOLD-01; the retired default)", () => {
+    // Pre-235 an absent key was its own account, so an incomplete identity read
+    // double-counted an exchange account silently. It now fails the read.
+    let thrown: unknown = null;
+    try {
+      derive([
+        row("key-x", "2026-10-02", "2026-10-02T04:00:00+00:00", "BTC", 40000),
+      ]);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toMatchObject({ name: "HoldingsIdentityError" });
+    // The same row with its key in the map is one counted row.
+    const ok = derive(
+      [row("key-x", "2026-10-02", "2026-10-02T04:00:00+00:00", "BTC", 40000)],
+      ownAccounts("key-x"),
+    );
+    expect(ok.holdingsSummary).toHaveLength(1);
+    expect(total(ok.holdingsSummary)).toBe(40000);
   });
 
   it("within one key two rows of one venue:symbol:type still yield one row", () => {
-    const out = derive([
-      row("key-a", "2026-10-03", "2026-10-03T04:00:00+00:00", "BTC", 30000),
-      row("key-a", "2026-10-03", "2026-10-03T04:00:00+00:00", "BTC", 30000),
-    ]);
+    const out = derive(
+      [
+        row("key-a", "2026-10-03", "2026-10-03T04:00:00+00:00", "BTC", 30000),
+        row("key-a", "2026-10-03", "2026-10-03T04:00:00+00:00", "BTC", 30000),
+      ],
+      ownAccounts("key-a"),
+    );
     expect(out.holdingsSummary).toHaveLength(1);
     expect(total(out.holdingsSummary)).toBe(30000);
   });
@@ -197,6 +216,6 @@ describe("derivePhase07Fields: one key per account-day in dollars (D-10)", () =>
     const bad = [
       row("key-a", "2026-10-11", "not-a-timestamp", "BTC", 1),
     ];
-    expect(() => derive(bad)).toThrow(/updated_at/);
+    expect(() => derive(bad, ownAccounts("key-a"))).toThrow(/updated_at/);
   });
 });

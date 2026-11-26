@@ -213,6 +213,23 @@ async def test_a_mixed_strategies_and_holdings_book_joins_the_candidate_universe
     assert _book_markers(batch) == [], "the calendars overlap fully, so no marker"
 
 
+async def test_a_failed_unpriced_marker_read_is_named_in_the_persisted_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 235 review WR-02. When the native-unpriced marker read fails, the rows are kept
+    (CONTEXT [HOLD-02]) and the batch persisted to ``match_batches`` carries a book-level
+    entry naming the failure, so the stored scores never silently rest on an unchecked book.
+    Without the entry the batch was indistinguishable from one whose markers were read."""
+    db = _db(with_book_strategy=False)
+    db.errors["allocator_equity_derived"] = RuntimeError("marker table unavailable (test)")
+    batch, candidate = await _score_through_the_real_path(monkeypatch, db)
+
+    _assert_the_fit_axis_computed(candidate)
+    assert _book_markers(batch) == [
+        {"kind": "book", "holding_ref": None, "unpriced_check_failed": True, "flagged": False}
+    ]
+
+
 def test_the_holding_series_carries_the_index_type_the_universe_carries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -94,6 +94,14 @@ export type KeyIdentityRow = {
   account_shared_with_api_key_id: string | null;
 };
 
+/** A holdings row names a key the owner's api_keys identity read does not carry. */
+export class HoldingsIdentityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HoldingsIdentityError";
+  }
+}
+
 /**
  * Phase 170.4 plan 14 (D-11): the ONE mapping from a key to the exchange
  * account it reads (the D-09 identity, `accountIdentityTokens`). The per-key
@@ -104,8 +112,10 @@ export type KeyIdentityRow = {
  * `keys` are the owner's `api_keys` rows read with `KEY_IDENTITY_COLUMNS`; the
  * five liveness and returns fields `accountIdentityTokens` also takes are not
  * identity and are null. `venue_server` IS identity: it is passed through.
- * A key the identity does not group, or that is absent from `keys`, is its own
- * account (`key:<id>`).
+ * A key in `keys` that the identity does not group is its own account
+ * (`key:<id>`). A key absent from `keys` throws `HoldingsIdentityError` (Phase
+ * 235 HOLD-01), because the identity read is incomplete and counting the key
+ * alone would double-count its account.
  */
 export function keyAccountOf(
   keys: readonly KeyIdentityRow[],
@@ -125,7 +135,38 @@ export function keyAccountOf(
       last_returns_day: null,
     })),
   );
-  return (keyId: string): string => identity.get(keyId) ?? `key:${keyId}`;
+  return (keyId: string): string => {
+    // Map MEMBERSHIP, never a null check: a key in `keys` the identity cannot
+    // place has a null value and is legitimately its own account.
+    if (!identity.has(keyId)) {
+      throw new HoldingsIdentityError(
+        `holdings row names key ${keyId}, which is absent from the owner's api_keys identity read`,
+      );
+    }
+    return identity.get(keyId) ?? `key:${keyId}`;
+  };
+}
+
+/**
+ * Phase 235 HOLD-01: the strict lookup for the two dollar callers that read
+ * `fetchLatestHoldingsPerKey`'s `accountByKey` (`derivePhase07Fields` in
+ * queries.ts and the scenario commit route's audit recompute). A counted row
+ * whose key the map does not carry throws `HoldingsIdentityError`, the same
+ * error `keyAccountOf` throws, instead of counting the key as an account of
+ * its own (which would double-count an account an incomplete read left out).
+ */
+export function strictAccountOf(
+  accountByKey: Readonly<Record<string, string>>,
+): (keyId: string) => string {
+  return (keyId: string): string => {
+    const account = accountByKey[keyId];
+    if (account === undefined) {
+      throw new HoldingsIdentityError(
+        `counted holdings row names key ${keyId}, which accountByKey does not carry`,
+      );
+    }
+    return account;
+  };
 }
 
 /**

@@ -137,6 +137,11 @@ const SAMPLES = {
     labels: [KEY_A, KEY_B],
     days: [FIXTURE_DAY],
   },
+  "allocation.key-gap.shared-account-failing-undated": {
+    args: { labels: [KEY_A, KEY_B] },
+    labels: [KEY_A, KEY_B],
+    days: [],
+  },
   "allocation.key-gap.identity-pending": {
     args: { labels: [KEY_A] },
     labels: [KEY_A],
@@ -164,6 +169,7 @@ const SAMPLES = {
   "allocation.first-sync": { args: undefined, labels: [], days: [] },
   "allocation.onboarding": { args: undefined, labels: [], days: [] },
   "allocation.alerts-unverified": { args: undefined, labels: [], days: [] },
+  "allocation.holdings-unpriced-check-failed": { args: undefined, labels: [], days: [] },
   "scenario.provenance": { args: undefined, labels: [], days: [] },
   "scenario.default-change": { args: undefined, labels: [], days: [] },
   "scenario.blend-header": { args: undefined, labels: [], days: [] },
@@ -486,6 +492,23 @@ describe("the Phase 198 per-key lines read word for word what shipped (199-05 Ta
     );
   });
 
+  it("shared-account-failing-undated (Phase 235 HOLD-05) names its keys, states no day and no 'no complete history yet'", () => {
+    const entry = DEGRADE_WARNINGS.find(
+      (e) => e.id === "allocation.key-gap.shared-account-failing-undated",
+    );
+    expect(entry).toBeDefined();
+    expect(entry?.class).toBe("degrade");
+    expect(entry?.scope).toBe("key");
+    expect(entry?.action).toBe("A-FIX-ONE-OF-THESE");
+    const sentence = text("allocation.key-gap.shared-account-failing-undated", {
+      labels: [KEY_A, KEY_B],
+    });
+    expect(sentence).toBe(
+      `${KEY_A} and ${KEY_B}: these keys read one exchange account and every one of them is failing to sync. Fix or reconnect one of these keys on the Exchanges page.`,
+    );
+    expect(sentence).not.toContain("no complete history yet");
+  });
+
   it("the one-named-key not-syncing line keeps its shipped sentence and its key scope", () => {
     expect(text("allocation.key-gap.not-syncing-one-key", { label: KEY_A })).toBe(
       `One of your keys, ${KEY_A}, is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.`,
@@ -696,6 +719,19 @@ describe("the inventory entries (199-05 Task 3): class, surface and the alerts l
     expect(degradePlainText(degradeSegments("allocation.alerts-unverified", undefined))).toBe(
       "Couldn't verify critical alerts. Reload this page to try again.",
     );
+  });
+
+  it("allocation.holdings-unpriced-check-failed is a read_failure that ends on A-RELOAD and never says the total (Phase 235 HOLD-04)", () => {
+    const e = entry("allocation.holdings-unpriced-check-failed");
+    expect(e.class).toBe("read_failure");
+    expect(e.scope).toBe("none");
+    expect(e.action).toBe("A-RELOAD");
+    const text = degradePlainText(degradeSegments("allocation.holdings-unpriced-check-failed", undefined));
+    expect(text).toBe(
+      "We could not check whether each account's newest day could be priced in USD, so the holdings shown may include an account's positions from an earlier day. Reload this page to try again.",
+    );
+    // The derived-total notes own "the total"; this note is about the rows.
+    expect(text).not.toContain("the total");
   });
 });
 

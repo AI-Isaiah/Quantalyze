@@ -293,6 +293,15 @@ function NeedsActionLine({
  * reason's shipped fallback is added only while the history is rebuilding and
  * only when not every gap of the reason's own cause printed a named line, so a
  * rebuilding book always gets at least one line and no affected key is dropped.
+ *
+ * Phase 235 HOLD-05 (the R3-01 analogue for `shared_account_failing`, UI-SPEC S1):
+ * when the payload attributes the all-failing accounts (`sharedFailingGroups`), the
+ * shared-account fallback stays unless EVERY group is named. A group is named by a
+ * printed dated gap that carries exactly its ids, or, when no gap of that cause
+ * carries them, by its own undated labelled line; a group with a key the owner's
+ * list cannot label names nothing and keeps the fallback (review SFH-4). A group
+ * named only by the undated line also keeps the fallback (review WR-01): its
+ * grouping is not the derive's, so it cannot prove every flagged account is named.
  */
 export function missingDataLines({
   gaps,
@@ -300,12 +309,18 @@ export function missingDataLines({
   rebuilding,
   reason,
   notSyncingKeys,
+  sharedFailingGroups,
 }: {
   gaps: readonly KeyDataGap[];
   apiKeys: ReadonlyArray<{ id: string; exchange: string; label: string }>;
   rebuilding: boolean;
   reason: EquityHistoryRebuildReason | null | undefined;
   notSyncingKeys: readonly NotSyncingKey[] | null;
+  /**
+   * The owner key ids of each all-failing shared account, one list per account
+   * (plan 05's payload field). Absent, null or empty: today's behaviour, unchanged.
+   */
+  sharedFailingGroups?: readonly (readonly string[])[] | null;
 }): MissingLine[] {
   const keyLines: MissingLine[] = [];
   const resolvedGaps = resolveGaps(gaps, apiKeys);
@@ -331,6 +346,53 @@ export function missingDataLines({
     if (!notSyncingKeys.every((k) => printed.has(k.id))) {
       causesPrinted.delete("not_syncing");
     }
+  }
+  if (sharedFailingGroups !== null && sharedFailingGroups !== undefined && sharedFailingGroups.length > 0) {
+    const labelById = apiKeyLabelById(apiKeys);
+    const idsKey = (ids: readonly string[]) => [...ids].sort().join(",");
+    const printedSets = new Set(
+      resolvedGaps
+        .filter((r) => r.gap.cause === "shared_account_failing")
+        .map((r) => idsKey(r.gap.apiKeyIds)),
+    );
+    const anySets = new Set(
+      gaps.filter((g) => g.cause === "shared_account_failing").map((g) => idsKey(g.apiKeyIds)),
+    );
+    let everyGroupNamed = true;
+    // Review WR-01: these groups are the TS side's (login identity, every owner key,
+    // sync_status), not the derive's (marker links, eligible keys, the working-holder
+    // predicate). A group named only by the undated line therefore cannot prove the
+    // derive's flagged accounts are all named, so the book line stays beside it.
+    let anyUndated = false;
+    for (const ids of sharedFailingGroups) {
+      const key = idsKey(ids);
+      if (printedSets.has(key)) continue;
+      const labels = ids.map((id) => labelById.get(id));
+      if (
+        ids.length === 0 ||
+        anySets.has(key) ||
+        labels.some((l) => l === undefined)
+      ) {
+        everyGroupNamed = false;
+        continue;
+      }
+      const named = labels as string[];
+      anyUndated = true;
+      keyLines.push({
+        id: `gap:shared_account_failing_undated:${ids.join(",")}`,
+        sortLabel: named.join(" and "),
+        content: (
+          <DegradeLine
+            id="allocation.key-gap.shared-account-failing-undated"
+            segments={degradeSegments("allocation.key-gap.shared-account-failing-undated", {
+              labels: named,
+            })}
+          />
+        ),
+      });
+    }
+    if (everyGroupNamed && !anyUndated) causesPrinted.add("shared_account_failing");
+    else causesPrinted.delete("shared_account_failing");
   }
   for (const resolved of resolvedGaps) {
     keyLines.push({

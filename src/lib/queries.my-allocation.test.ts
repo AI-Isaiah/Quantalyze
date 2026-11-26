@@ -456,7 +456,18 @@ function buildChain(table: string) {
     maybeSingle: async () => {
       // Review C2 SFH-06: honour an injected read failure here too, the same
       // shape `then` resolves, so a `.maybeSingle()` read can be failed.
-      const injected = state.tableErrors[table];
+      const injected =
+        state.tableErrors[table] ??
+        (table === "allocator_equity_derived" &&
+        filters.some(
+          (f) =>
+            f.op === "eq" &&
+            f.column === "kind" &&
+            typeof f.value === "string" &&
+            f.value.startsWith("native_unpriced:"),
+        )
+          ? state.tableErrors["allocator_equity_derived:native_unpriced"]
+          : null);
       if (injected) return { data: null, error: injected };
       const row = servedRows()[0];
       return { data: row ?? null, error: null };
@@ -483,11 +494,23 @@ function buildChain(table: string) {
       // Injected read failure for THIS table (state.tableErrors) — the shape
       // PostgREST returns: null data alongside a non-null error.
       // The key_inputs list read (`.in("kind", ...)`) is failable on its own, so the
-      // equity_curve read beside it can stay healthy.
+      // equity_curve read beside it can stay healthy. The native-unpriced marker read
+      // (`.eq("kind", "native_unpriced:<key>")`) is failable on its own too, so the
+      // equity-curve read beside it stays healthy (Phase 235 HOLD-04).
       const injected =
         state.tableErrors[table] ??
         (table === "allocator_equity_derived" && filters.some((f) => f.op === "in" && f.column === "kind")
           ? state.tableErrors["allocator_equity_derived:key_inputs"]
+          : null) ??
+        (table === "allocator_equity_derived" &&
+        filters.some(
+          (f) =>
+            f.op === "eq" &&
+            f.column === "kind" &&
+            typeof f.value === "string" &&
+            f.value.startsWith("native_unpriced:"),
+        )
+          ? state.tableErrors["allocator_equity_derived:native_unpriced"]
           : null);
       if (injected) {
         resolve({ data: null, error: injected });
@@ -3979,6 +4002,116 @@ describe("167.1.2 D-02 — the allocator equity curve is withheld while it is re
   });
 });
 
+// ---------------------------------------------------------------------------
+// Phase 235 HOLD-05 (producer half). `keyDataGaps` names a shared-account gap
+// only when the group's tail has a range. `sharedAccountFailingGroups` is the
+// sibling the message reads to name EVERY all-failing shared account, so both
+// payload literals must carry it, as owner key ids only (T-186-18).
+// ---------------------------------------------------------------------------
+describe("Phase 235 HOLD-05: the payload attributes every all-failing shared account", () => {
+  // The untrustworthy derived row fires the throttled derived-row capture.
+  beforeEach(async () => {
+    resetState();
+    (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
+  });
+
+  const sharedKey = (id: string, accountId: string) => ({
+    id,
+    user_id: "user-1",
+    exchange: "binance",
+    label: `Binance ${id}`,
+    is_active: true,
+    sync_status: "error",
+    last_sync_at: new Date().toISOString(),
+    disconnected_at: null,
+    account_balance_usdt: 1000,
+    created_at: "2026-04-01T00:00:00Z",
+    venue_account_id: accountId,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+  });
+
+  function untrustworthySharedRow() {
+    const row = derivedRow(true);
+    row.payload.version = 2;
+    row.payload.returns = [
+      { date: "2026-03-11", r: 0.0038 },
+      { date: "2026-03-12", r: 0.0011 },
+      { date: "2026-03-13", r: 0.0039 },
+    ];
+    row.payload.is_trustworthy = false;
+    row.payload.degrade_reasons = ["shared_account_no_working_key"];
+    return row;
+  }
+
+  function seedTwoFailingAccounts() {
+    state.apiKeys = [
+      sharedKey("k-b2", "acct-B"),
+      sharedKey("k-a2", "acct-A"),
+      sharedKey("k-b1", "acct-B"),
+      sharedKey("k-a1", "acct-A"),
+    ];
+    state.allocatorEquityDerived = [untrustworthySharedRow()];
+  }
+
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  let captureSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(async () => {
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    captureSpy = vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+    captureSpy.mockRestore();
+  });
+
+  const BOTH_GROUPS = [
+    ["k-a1", "k-a2"],
+    ["k-b1", "k-b2"],
+  ];
+
+  it("the main branch carries both all-failing accounts as sorted owner key id groups", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    seedTwoFailingAccounts();
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.portfolio).not.toBeNull();
+    expect(result.equityHistoryRebuildReason).toBe("shared_account_no_working_key");
+    expect(result.sharedAccountFailingGroups).toEqual(BOTH_GROUPS);
+  });
+
+  it("the no-portfolio branch carries the same groups", async () => {
+    state.portfolios = [];
+    seedTwoFailingAccounts();
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.portfolio).toBeNull();
+    expect(result.sharedAccountFailingGroups).toEqual(BOTH_GROUPS);
+  });
+
+  it("a healthy book carries an explicit empty array, not an absent field", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [P7_IDENTIFIED_KEY];
+    state.allocatorEquityDerived = [p7DerivedV2Row(2)];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result).toHaveProperty("sharedAccountFailingGroups");
+    expect(result.sharedAccountFailingGroups).toEqual([]);
+  });
+
+  it("no account identifier crosses into the payload groups (T-186-18)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    seedTwoFailingAccounts();
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.sharedAccountFailingGroups).toEqual(BOTH_GROUPS);
+    const wire = JSON.stringify(result.sharedAccountFailingGroups);
+    expect(wire).not.toContain("acct-A");
+    expect(wire).not.toContain("acct-B");
+  });
+});
+
 describe("115.1 equity display-repoint", () => {
   beforeEach(resetState);
   // Guard against the CI Node-gap leaked-stub class (reference_ci_node22_vs_local_node25):
@@ -7180,5 +7313,201 @@ describe("getMyAllocationDashboard — Phase 237 FACT-02 analytics_updating (S8b
     expect(wire).not.toContain("cumulative_return");
     expect(wire).not.toContain("computed_at");
     expect(wire).not.toContain("computation_status");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 235 HOLD-04: the dashboard's native-unpriced marker read can fail on its
+// own. `fetchLatestHoldingsPerKey` keeps the rows and returns `markerReadError`;
+// the dashboard now carries it as `holdingsUnpricedCheckFailed` and reports it.
+// The failure is injected for the marker read ONLY ("allocator_equity_derived:
+// native_unpriced"), because the whole-table key would also fail the equity-curve
+// read and hide whether the rows survive.
+// ---------------------------------------------------------------------------
+describe("Phase 235 HOLD-04: a failed native-unpriced marker read is flagged and never hides the rows", () => {
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(async () => {
+    resetState();
+    (await import("./queries")).__resetDerivedRowCaptureThrottleForTests();
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+  });
+
+  const key = (id: string, exchange: string) => ({
+    id,
+    user_id: "user-1",
+    exchange,
+    label: `Key ${id}`,
+    is_active: true,
+    sync_status: "ok",
+    last_sync_at: "2026-09-27T00:00:00Z",
+    disconnected_at: null,
+    account_balance_usdt: 1000,
+    created_at: "2026-04-01T00:00:00Z",
+  });
+  const holding = (
+    api_key_id: string,
+    venue: string,
+    asof: string,
+    symbol: string,
+    value_usd: number,
+  ) => ({
+    allocator_id: "user-1",
+    api_key_id,
+    symbol,
+    quantity: 1,
+    mark_price: value_usd,
+    value_usd,
+    venue,
+    holding_type: "spot" as const,
+    updated_at: `${asof}T04:00:00+00:00`,
+    asof,
+  });
+  const nativeRow = (asof: string, quantity: number, value_usd: number) => ({
+    ...holding("key-btc", "mt5", asof, "ACCOUNT-0123abcd", value_usd),
+    quantity,
+    quantity_unit: "BTC",
+  });
+  const seed = (withPortfolio = true) => {
+    state.portfolios = withPortfolio ? [P7_PORTFOLIO] : [];
+    state.apiKeys = [key("key-btc", "mt5"), key("key-usd", "binance")];
+    state.allocatorHoldings = [
+      nativeRow("2026-10-09", 0.4213, 26099.535),
+      holding("key-usd", "binance", "2026-10-10", "USDT", 500),
+    ];
+  };
+  const failMarker = () => {
+    state.tableErrors["allocator_equity_derived:native_unpriced"] = {
+      message: "marker read reset (test)",
+    };
+  };
+
+  it("H1: a marker-only failure sets holdingsUnpricedCheckFailed true on the main branch", async () => {
+    seed();
+    failMarker();
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.portfolio).not.toBeNull();
+    expect(result.holdingsUnpricedCheckFailed).toBe(true);
+  });
+
+  it("H2: a marker-only failure sets holdingsUnpricedCheckFailed true on the no-portfolio branch", async () => {
+    seed(false);
+    failMarker();
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.portfolio).toBeNull();
+    expect(result.holdingsUnpricedCheckFailed).toBe(true);
+  });
+
+  it.each([
+    ["main branch", true],
+    ["no-portfolio branch", false],
+  ] as const)("H3: a healthy read sets the flag to an explicit false (%s)", async (_label, withPortfolio) => {
+    seed(withPortfolio);
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.holdingsUnpricedCheckFailed).toBe(false);
+  });
+
+  it("H4: the marker failure keeps the rows and the AUM of the healthy book, and the equity-curve read stays healthy", async () => {
+    seed();
+    const { getMyAllocationDashboard } = await import("./queries");
+    const control = await getMyAllocationDashboard("user-1");
+    const rowsOf = (r: typeof control) =>
+      r.holdingsSummary.map((h) => `${h.api_key_id}:${h.symbol}:${h.value_usd}`);
+    // The control is only a control if it counts both keys.
+    expect(control.liveBaselineMetrics.aum).toBe(26599.535);
+
+    failMarker();
+    const failed = await getMyAllocationDashboard("user-1");
+
+    expect(rowsOf(failed)).toEqual(rowsOf(control));
+    expect(failed.liveBaselineMetrics.aum).toBe(26599.535);
+    expect(failed.equityHistoryRebuildReason).not.toBe("history_read_failed");
+  });
+
+  const REASON = "holdings_marker_read_failed";
+  const markerCaptures = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls.filter(
+      (c) => (c[1] as { tags?: Record<string, string> } | undefined)?.tags?.reason === REASON,
+    );
+  const spyCapture = async () => {
+    const sentry = await import("./sentry-capture");
+    return vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+  };
+
+  it("S1: a failed marker read fires one warning capture with the exact message, tags and extra", async () => {
+    seed();
+    failMarker();
+    const captureSpy = await spyCapture();
+    const { getMyAllocationDashboard } = await import("./queries");
+    await getMyAllocationDashboard("user-1");
+
+    const calls = markerCaptures(captureSpy);
+    expect(calls).toHaveLength(1);
+    const [err, ctx] = calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe(
+      "getMyAllocationDashboard: native-unpriced marker read failed",
+    );
+    expect(ctx).toEqual({
+      tags: { op: "getMyAllocationDashboard", reason: REASON, area: "my-allocation-dashboard" },
+      extra: { userId: "user-1", supabase_err: "marker read reset (test)" },
+      level: "warning",
+    });
+    captureSpy.mockRestore();
+  });
+
+  it("S2: a second failed load in the window sends no second capture, keeps the flag, and logs both loads", async () => {
+    seed();
+    failMarker();
+    const captureSpy = await spyCapture();
+    const { getMyAllocationDashboard } = await import("./queries");
+    const first = await getMyAllocationDashboard("user-1");
+    const second = await getMyAllocationDashboard("user-1");
+
+    expect(markerCaptures(captureSpy)).toHaveLength(1);
+    expect(first.holdingsUnpricedCheckFailed).toBe(true);
+    expect(second.holdingsUnpricedCheckFailed).toBe(true);
+    const lines = errSpy.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("native-unpriced marker read failed"),
+    );
+    // One line is the reader's own (fetchLatestHoldingsPerKey) and one the
+    // dashboard's, per load, so count the dashboard's by its prefix.
+    expect(
+      lines.filter((c: unknown[]) => String(c[0]).startsWith("[queries.getMyAllocationDashboard]")),
+    ).toHaveLength(2);
+    captureSpy.mockRestore();
+  });
+
+  it("S3: a healthy read sends no marker-read capture", async () => {
+    seed();
+    const captureSpy = await spyCapture();
+    const { getMyAllocationDashboard } = await import("./queries");
+    await getMyAllocationDashboard("user-1");
+
+    expect(markerCaptures(captureSpy)).toHaveLength(0);
+    captureSpy.mockRestore();
+  });
+
+  it("S4: the capture's extra holds no key id", async () => {
+    seed();
+    failMarker();
+    const captureSpy = await spyCapture();
+    const { getMyAllocationDashboard } = await import("./queries");
+    await getMyAllocationDashboard("user-1");
+
+    const calls = markerCaptures(captureSpy);
+    expect(calls).toHaveLength(1);
+    const extra = JSON.stringify((calls[0][1] as { extra: unknown }).extra);
+    expect(extra).not.toContain("key-btc");
+    expect(extra).not.toContain("key-usd");
+    captureSpy.mockRestore();
   });
 });
